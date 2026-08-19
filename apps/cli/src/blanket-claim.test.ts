@@ -278,3 +278,125 @@ test("a claim already carrying a contract is never widened into a blanket one", 
     undefined,
   );
 });
+
+test("a holder that has written nothing keeps the whole repository", async () => {
+  const { store, worker } = await seed();
+  const first = await leaseFor(store, worker, "rewrite the renderer");
+  const holder = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[first.task.id, first.leaseId]]),
+  });
+  const claim = await holder.claimRepository({
+    task: first.task,
+    repository: REPOSITORY,
+    baseVersion: BASE,
+  });
+  assert.notEqual(claim, undefined);
+  const second = await leaseFor(store, worker, "fix the audio mixer");
+
+  // The arrival is what drives the freeze, and it can land in the window
+  // between the agent being handed its claim and the agent's first write —
+  // which is most of a real run's opening seconds.
+  const frozen = await holder.freezeBlanketClaim({
+    task: first.task,
+    plan: claim!,
+    planRevision: 1,
+    repository: REPOSITORY,
+    baseVersion: BASE,
+    observe: async () => [],
+  });
+
+  // "Narrow to what you have touched" has no answer yet. Answering it anyway
+  // does not narrow the claim, it erases it: the holder would be left owning
+  // no files at all while it is still about to write them.
+  assert.equal(
+    frozen,
+    undefined,
+    "a holder with nothing to freeze to must keep the claim it has",
+  );
+  const lease = await store.getWorkLease(first.leaseId);
+  assert.ok(
+    lease?.plan !== undefined && isBlanketClaim(lease.plan.plan),
+    "the durable claim is still repository-wide",
+  );
+
+  // And the point of all of it: the arriving task is still refused, because
+  // the files it wants are the files the holder has not written yet.
+  const arriving = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+  });
+  const answer = await arriving.admit({
+    task: second.task,
+    plan: {
+      taskId: second.task.id,
+      objective: second.task.objective,
+      expectedFiles: ["src/audio/mixer.ts"],
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low",
+    },
+    planRevision: 1,
+    baseVersion: BASE,
+    repository: REPOSITORY,
+  });
+  assert.equal(answer.outcome, "deferred");
+});
+
+test("a repository-wide hold is announced, and announced once", async () => {
+  const { store, worker } = await seed();
+  const first = await leaseFor(store, worker, "rewrite the renderer");
+  const holder = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[first.task.id, first.leaseId]]),
+  });
+  await holder.claimRepository({
+    task: first.task,
+    repository: REPOSITORY,
+    baseVersion: BASE,
+  });
+  const second = await leaseFor(store, worker, "fix the audio mixer");
+  const arriving = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+  });
+  const request = {
+    task: second.task,
+    plan: {
+      taskId: second.task.id,
+      objective: second.task.objective,
+      expectedFiles: ["src/audio/mixer.ts"],
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low" as const,
+    },
+    planRevision: 1,
+    baseVersion: BASE,
+    repository: REPOSITORY,
+  };
+
+  // Deferred on a timer for as long as the holder runs, which in production
+  // is minutes of re-deciding the same thing.
+  await arriving.admit(request);
+  await arriving.admit(request);
+  await arriving.admit(request);
+
+  const holds = await store.listAuditEvents({
+    taskId: second.task.id,
+    types: ["plan_admitted"],
+  });
+  // Every other refusal in the system leaves a record; this one returned
+  // before reaching it, so a repository-wide hold was the single decision
+  // that happened silently — the arbitration was working and looked asleep.
+  assert.equal(
+    holds.length,
+    1,
+    `the hold is recorded once per decision, not once per retry (got ${holds.length})`,
+  );
+  assert.equal(holds[0]?.event.data["status"], "sequenced");
+  assert.deepEqual(holds[0]?.event.data["blockedBy"], [first.task.id]);
+});
