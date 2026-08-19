@@ -529,6 +529,19 @@ function resolveImport(
 
 export class CodeIntelligenceService {
   private readonly cache = new Map<string, RepositoryIndex>();
+  /**
+   * Builds already running, keyed exactly like the cache.
+   *
+   * The cache only helps a second caller who arrives after the first has
+   * finished. Once one service is shared for a process's lifetime, tasks plan
+   * in parallel and the interesting case is the other one: two callers ask for
+   * the same uncached index at the same time, and without this they would both
+   * walk the whole repository to produce two identical indexes. Sharing the
+   * in-flight build is safe because indexing is a read of one fixed revision —
+   * there is nothing for the two to disagree about — and each caller still
+   * receives its own copy below.
+   */
+  private readonly inFlight = new Map<string, Promise<RepositoryIndex>>();
 
   public constructor(
     private readonly repositories = new RepositoryService(),
@@ -553,7 +566,40 @@ export class CodeIntelligenceService {
     if (cached !== undefined) {
       return structuredClone(cached);
     }
+    const running = this.inFlight.get(key);
+    if (running !== undefined) {
+      return structuredClone(await running);
+    }
+    // Cached inside the build's own continuation, so the entry is in place
+    // before the in-flight record is dropped and a caller arriving between the
+    // two finds the finished index rather than starting a second build.
+    const build = this.build(repository, revision).then((index) => {
+      // The cache keeps the canonical copy and every caller gets a clone of
+      // it, so no caller can mutate what a later one is handed.
+      this.cache.set(key, index);
+      while (this.cache.size > (this.options.maxCacheEntries ?? 100)) {
+        const oldest = this.cache.keys().next().value as string | undefined;
+        if (oldest === undefined) {
+          break;
+        }
+        this.cache.delete(oldest);
+      }
+      return index;
+    });
+    this.inFlight.set(key, build);
+    try {
+      return structuredClone(await build);
+    } finally {
+      if (this.inFlight.get(key) === build) {
+        this.inFlight.delete(key);
+      }
+    }
+  }
 
+  private async build(
+    repository: CanonicalRepository,
+    revision: string,
+  ): Promise<RepositoryIndex> {
     const maxFiles = this.options.maxFiles ?? 5_000;
     const maxFileBytes = this.options.maxFileBytes ?? 2 * 1024 * 1024;
     const maxTotalBytes = this.options.maxTotalBytes ?? 50 * 1024 * 1024;
@@ -646,14 +692,6 @@ export class CodeIntelligenceService {
       truncated: skippedFiles > 0,
       skippedFiles,
     };
-    this.cache.set(key, structuredClone(index));
-    while (this.cache.size > (this.options.maxCacheEntries ?? 100)) {
-      const oldest = this.cache.keys().next().value as string | undefined;
-      if (oldest === undefined) {
-        break;
-      }
-      this.cache.delete(oldest);
-    }
     return index;
   }
 

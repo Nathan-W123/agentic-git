@@ -2963,12 +2963,25 @@ export async function acceptWorkResult(
   }
 }
 
-/** Convenience binding for a project-hosted control plane. */
+/**
+ * Convenience binding for a project-hosted control plane.
+ *
+ * The optional `shared` argument is how a hosting process hands in services
+ * that are worth keeping for its lifetime — above all the code intelligence
+ * one, whose index cache is keyed on `(repository path, revision)` and so is
+ * useless on an instance that is rebuilt per call. Omitted, this constructs
+ * its own exactly as it always did, which is what the bare CLI and the tests
+ * rely on.
+ */
 export function workerOperations(
   project: CoordinatorProject,
   store: CoordinationStore,
+  shared: {
+    repositories?: RepositoryService;
+    intelligence?: CodeIntelligenceService;
+  } = {},
 ) {
-  const repositories = new RepositoryService();
+  const repositories = shared.repositories ?? new RepositoryService();
   const worktrees = new GitWorktreeWorkspaceManager(
     repositories.getGitClient(),
   );
@@ -2977,7 +2990,8 @@ export function workerOperations(
     sandboxOptions === undefined
       ? worktrees
       : new DockerWorkspaceManager(sandboxOptions, worktrees);
-  const intelligence = new CodeIntelligenceService(repositories);
+  const intelligence =
+    shared.intelligence ?? new CodeIntelligenceService(repositories);
   const services: WorkResultServices = {
     repositories,
     integrations: new IntegrationService(repositories, workspaces),

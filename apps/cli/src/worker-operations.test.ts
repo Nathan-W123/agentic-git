@@ -15,6 +15,7 @@ import {
   createScratchDatabase,
   startPostgresTestServer,
 } from "@coord/persistence/testing";
+import { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
   BLOCKED_ADMISSION_LIFETIME_CAP,
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
@@ -44,8 +45,10 @@ import {
   blockedAdmissionHistory,
   readsAsReportRequest,
   leaseWork,
+  workerOperations,
   type WorkAssignment,
 } from "./worker-operations.js";
+import { CoordinatorProject } from "./project.js";
 
 /**
  * The control-plane half of the worker protocol, tested against a real Git
@@ -4221,5 +4224,86 @@ test("the report-intent helper distinguishes questions from edit requests", () =
     "why not just delete that file?",
   ]) {
     assert.equal(readsAsReportRequest(objective), false, objective);
+  }
+});
+
+test("a hosting process shares one repository index across admissions", async () => {
+  // The cache lives on the service instance, so it is worth something only to
+  // whoever holds that instance. This binding used to construct its own, which
+  // no other part of the hosting process could reach; this is the seam a
+  // long-lived control plane hands one shared service through, so an index
+  // built for an admission is the same one its runs, overlays and rollbacks
+  // read.
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "src/other.js": "export const other = 1;\n",
+  });
+  try {
+    const project = await CoordinatorProject.init(
+      path.join(harness.root, "project"),
+    );
+    project.config.validationCommands = [];
+    // The submitted tasks name this agent; nothing here spawns it, but leasing
+    // resolves the task's adapter through the project's configuration.
+    project.config.agents = { "generic-cli": { command: process.execPath } };
+    project.config.defaultAgent = "generic-cli";
+    await project.save();
+
+    let builds = 0;
+    const listFiles = harness.repositories.listFiles.bind(
+      harness.repositories,
+    );
+    (
+      harness.repositories as unknown as { listFiles: typeof listFiles }
+    ).listFiles = async (...args: Parameters<typeof listFiles>) => {
+      builds += 1;
+      return await listFiles(...args);
+    };
+
+    const intelligence = new CodeIntelligenceService(harness.repositories);
+    const operations = workerOperations(project, harness.store, {
+      repositories: harness.repositories,
+      intelligence,
+    });
+
+    await submit(harness);
+    await submit(harness);
+    // Disjoint files, so both are admitted on their own merits and the test is
+    // about how often the index is built rather than about arbitration.
+    const scopes = [
+      { expectedFiles: ["src/value.js"], expectedSymbols: ["value"] },
+      { expectedFiles: ["src/other.js"], expectedSymbols: ["other"] },
+    ];
+    let admitted = 0;
+    for (const scope of scopes) {
+      const assignment = await operations.leaseWork({
+        workerId: harness.workerId,
+        projectId: DEFAULT_PROJECT_ID,
+      });
+      assert.ok(assignment);
+      const outcome = await operations.admitWorkPlan({
+        leaseId: assignment.lease.id,
+        actorId: "user",
+        plan: plan(assignment.task.id, scope),
+      });
+      assert.equal(outcome.outcome, "admitted");
+      admitted += 1;
+    }
+
+    assert.equal(admitted, 2);
+    // One build for the revision, however many admissions ask about it.
+    assert.equal(builds, 1);
+
+    // And it is the *injected* service that holds it: asking the instance the
+    // host kept costs nothing, which it could not do if the binding had built
+    // its own.
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    await intelligence.index(
+      { id: stored.id, path: stored.path, branch: stored.branch },
+      harness.revision,
+    );
+    assert.equal(builds, 1);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
   }
 });

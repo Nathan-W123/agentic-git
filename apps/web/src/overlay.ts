@@ -222,6 +222,7 @@ function looksBinary(buffer: Buffer): boolean {
 
 export class OverlayWorkspaceService {
   private readonly repositories: RepositoryService;
+  private readonly intelligence: CodeIntelligenceService;
   private readonly worktrees: GitWorktreeWorkspaceManager;
   private readonly overlayLocks = new Map<string, Promise<void>>();
   private dockerProbe:
@@ -232,8 +233,14 @@ export class OverlayWorkspaceService {
     private readonly project: CoordinatorProject,
     private readonly store: CoordinationStore,
     repositories?: RepositoryService,
+    // Handed in by a long-lived host so an overlay submission grounds against
+    // the index that host already built for this revision, instead of walking
+    // the repository again for a copy of it.
+    intelligence?: CodeIntelligenceService,
   ) {
     this.repositories = repositories ?? new RepositoryService();
+    this.intelligence =
+      intelligence ?? new CodeIntelligenceService(this.repositories);
     this.worktrees = new GitWorktreeWorkspaceManager(
       this.repositories.getGitClient(),
     );
@@ -923,7 +930,7 @@ export class OverlayWorkspaceService {
   ): Promise<OverlaySubmitResult> {
     const repository = await this.repository(scope);
     const { meta, directory } = await this.requireOverlay(scope);
-    const intelligence = new CodeIntelligenceService(this.repositories);
+    const intelligence = this.intelligence;
     const integrations = new IntegrationService(
       this.repositories,
       this.worktrees,

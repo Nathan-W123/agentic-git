@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
+import { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
   ConversationRegistry,
   TaskCancellationRegistry,
@@ -144,7 +145,28 @@ async function serve(
   const bootstrapToken = process.env["COORD_BOOTSTRAP_TOKEN"]?.trim();
 
   const repositories = new RepositoryService();
-  const overlays = new OverlayWorkspaceService(project, store, repositories);
+  // One index for the whole process, like the credential store below.
+  //
+  // The service caches a built index on `(repository path, revision)`, and
+  // building one is the expensive part of grounding and admitting a plan —
+  // full arbitration measured around ten seconds against a fast path of a
+  // couple of hundred milliseconds, nearly all of it the walk. Every caller
+  // used to construct its own service, so every caller started from an empty
+  // cache and paid for that walk again at a revision the last one had just
+  // indexed. Shared here, the first admission after canonical moves pays for
+  // the build and the rest of that revision's work reads it.
+  //
+  // Nothing about what is built changes: the key still carries the revision,
+  // so a canonical that moves misses and rebuilds, and the entry bound still
+  // evicts the oldest — now for the first time actually reached, since the
+  // instance outlives the call.
+  const intelligence = new CodeIntelligenceService(repositories);
+  const overlays = new OverlayWorkspaceService(
+    project,
+    store,
+    repositories,
+    intelligence,
+  );
   // Loopback only, and stopped with the process: see PreviewService.
   const previews = new PreviewService(project, store, repositories);
   // Beside the database rather than inside it, so the volume that persists one
@@ -476,6 +498,7 @@ async function serve(
           credentialPolicy,
           conversations,
           cancellations,
+          intelligence,
           // What an agent may ask this deployment to do. A fixed list, not a
           // command channel: an agent may only ask for what its submitter could
           // do themselves on this repository, and an open channel would let it
@@ -667,16 +690,21 @@ async function serve(
       );
     },
     async rollbackRepository(input) {
-      return await rollbackCanonical(project, store, {
-        repositoryId: input.repositoryId,
-        targetRevision: input.targetRevision,
-        actorId: input.actorId,
-        projectId: input.projectId,
-        ...(input.reason === undefined ? {} : { reason: input.reason }),
-        ...(input.files === undefined ? {} : { files: input.files }),
-      });
+      return await rollbackCanonical(
+        project,
+        store,
+        {
+          repositoryId: input.repositoryId,
+          targetRevision: input.targetRevision,
+          actorId: input.actorId,
+          projectId: input.projectId,
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
+          ...(input.files === undefined ? {} : { files: input.files }),
+        },
+        { repositories, intelligence },
+      );
     },
-    ...workerOperations(project, store),
+    ...workerOperations(project, store, { repositories, intelligence }),
     async dockerStatus() {
       try {
         const result = await runProcess(
