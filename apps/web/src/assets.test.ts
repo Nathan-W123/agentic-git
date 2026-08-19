@@ -3630,6 +3630,55 @@ test("agent details use the reference profile without dropping existing controls
   assert.match(spec, /const readOnly =/u);
 });
 
+test("the role field offers the two reserved roles without stopping anyone typing one", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+  const spec = chats.slice(
+    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function agentPanel()"),
+  );
+  const menu = chats.slice(
+    chats.indexOf("const RESERVED_ROLES = ["),
+    chats.indexOf("const AGENT_STATUS_TITLE"),
+  );
+
+  // The field is still a field: free text, same commit contract as before.
+  assert.match(spec, /class="aspec-role" data-act="agent-role-input"/u);
+  // With a picker beside it, drawn only where the server would accept one.
+  assert.match(spec, /canManageRepository\(repository\.id\)/u);
+  assert.match(spec, /data-act="agent-role-menu"/u);
+  assert.match(css, /\.agent-spec \.aspec-role-field\s*\{/u);
+  assert.match(css, /\.agent-spec \.aspec-role-pick\s*\{/u);
+
+  // Both reserved names, spelled the way the server compares them.
+  assert.match(chats, /const INVESTIGATOR_ROLE = "investigator"/u);
+  assert.match(menu, /value: AUDITOR_ROLE/u);
+  assert.match(menu, /value: INVESTIGATOR_ROLE/u);
+  // A personal agent cannot hold either, so the entry says so rather than
+  // waiting for the server to refuse it.
+  assert.match(menu, /agent\.visibility !== "org"/u);
+  assert.match(menu, /disabled: personal \|\| current === role\.value/u);
+  // And the menu always leaves a way back to plain typing.
+  assert.match(menu, /act: "agent-role-custom"/u);
+  assert.match(menu, /export function roleMenuItems\(agentId, repositoryId\)/u);
+
+  // Picking one writes through the same setting path a typed role does.
+  assert.match(app, /case "agent-role-menu":/u);
+  assert.match(app, /roleMenuItems\(value, node\.dataset\.repo\)/u);
+  assert.match(app, /showMenu\(node, items\)/u);
+  assert.match(
+    app,
+    /setChannelAgentSetting\(target\.repositoryId, target\.agentId, "role", role, render\)/u,
+  );
+  // Opening the picker must not commit-and-redraw the field out from under
+  // the click that opens it.
+  assert.match(
+    app,
+    /event\.relatedTarget\?\.dataset\?\.act === "agent-role-menu"/u,
+  );
+});
+
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");
