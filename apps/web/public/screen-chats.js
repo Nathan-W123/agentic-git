@@ -1706,6 +1706,7 @@ function messageRow(
     hideChanges = false,
     actions = "",
     compact = false,
+    threadPath = undefined,
   } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
@@ -1723,10 +1724,8 @@ function messageRow(
   // agent has substantive narration too, that same request becomes the root
   // of the task thread. Legacy agent-authored roots keep their old shape.
   const inlineReply = inlineReplyTo !== undefined;
-  const hasTaskThread =
-    replies.length > 0 &&
-    (entry.kind !== "user" ||
-      (entry.taskId !== undefined && replies.length > 1));
+  const hasTaskThread = channelMessageHasTaskThread(entry);
+  const channelThread = hasTaskThread && !isReply;
   // Agent answers and acknowledgements remain ordinary roots in the room's
   // chronological transcript. Their stored reference is the address back to
   // the request that prompted them; it does not replace the task thread the
@@ -1752,10 +1751,29 @@ function messageRow(
   // somebody and the name beside it does nothing is a worse answer than
   // neither being pressable.
   const identity = authorIdentity(repositoryId, entry, author);
+  // The path is assigned by `messageThreadPaths`, which can start it on an
+  // earlier compact-group message than the one that owns the task. A direct
+  // channel render still gets a complete standalone path as a safe fallback.
+  const path =
+    threadPath ??
+    (channelThread ? { start: true, through: false, end: true } : undefined);
+  const changedBlock = hideChanges
+    ? ""
+    : changedFilesBlock(entry, repositoryId);
+  const progress = channelThread ? threadProgress(entry) : undefined;
+  const progressBlock =
+    progress === undefined
+      ? ""
+      : `<div class="thread-progress" title="${progress}% by phase">
+           <i style="width:${progress}%"></i>
+         </div>`;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
-  }${hasTaskThread && !isReply ? " cmsg-threaded" : ""
+  }${channelThread ? " cmsg-threaded" : ""}${
+    path?.start === true ? " cmsg-thread-path-start" : ""
+  }${path?.through === true ? " cmsg-thread-path-through" : ""}${
+    path?.end === true ? " cmsg-thread-path-end" : ""
   }${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
@@ -1801,6 +1819,7 @@ function messageRow(
           )}</span>`
     }
     <div class="cmsg-body">
+      ${channelThread ? `<div class="cmsg-thread-route">` : ""}
       ${
         compact
           ? ""
@@ -1842,34 +1861,14 @@ function messageRow(
                     title="Add a reaction" aria-label="Add a reaction">${icon("smile")}</button></div>`
       }
       ${
-        // The file list belongs to the thread, so it renders under the
-        // thread's own link — the work is the thread's story, and a summary of
-        // it sitting directly under the opening message read as a property of
-        // that one message, beside a second copy wherever else the task was
-        // mentioned. A message with no thread keeps the block on itself
-        // because there is nothing else for it to hang from; the root inside
-        // the open thread keeps it because that is the thread. Crucially, the
-        // root does not repeat the channel's "N replies" link inside the panel
-        // those replies are already open in.
-        !hasTaskThread || isReply
-          ? hideChanges
-            ? ""
-            : changedFilesBlock(entry, repositoryId)
-          : threadSummaryLink(entry, replies, repositoryId) +
-            (() => {
-              // A few pixels of accent under the thread: how far its run has
-              // got, present only while there is a run to speak of. Quiet by
-              // design — the thread's own words carry the detail, this just
-              // spares opening it to learn "roughly where".
-              const progress = threadProgress(entry);
-              return progress === undefined
-                ? ""
-                : `<div class="thread-progress" title="${progress}% by phase">
-                     <i style="width:${progress}%"></i>
-                   </div>`;
-            })() +
-            changedFilesBlock(entry, repositoryId)
+        // The route ends at the thread link. Progress and changed files are
+        // deliberately outside it, so opening either can never pull the grey
+        // connector down past the thing it identifies.
+        channelThread
+          ? threadSummaryLink(entry, replies, repositoryId)
+          : changedBlock
       }
+      ${channelThread ? `</div>${progressBlock}${changedBlock}` : ""}
     </div>
     <span class="cmsg-actions">
       ${
@@ -2013,6 +2012,67 @@ function continuesUserMessageGroup(previous, current, startsNewDay) {
   );
 }
 
+/** Whether a channel root owns the compact thread summary drawn under it. */
+function channelMessageHasTaskThread(entry) {
+  const replies = entry.replies ?? [];
+  return (
+    replies.length > 0 &&
+    (entry.kind !== "user" ||
+      (entry.taskId !== undefined && replies.length > 1))
+  );
+}
+
+/**
+ * Assigns one connector path to every visible run of consecutive prompts.
+ *
+ * The path begins on the run's one visible avatar, crosses otherwise ordinary
+ * compact messages when necessary, branches at every task, and ends at the
+ * final task. Search results opt out because they are independent hits rather
+ * than a trustworthy uninterrupted run.
+ */
+function messageThreadPaths(timeline, groupConsecutive) {
+  const paths = timeline.map(() => undefined);
+  let groupStart = 0;
+  while (groupStart < timeline.length) {
+    let groupEnd = groupStart + 1;
+    if (groupConsecutive) {
+      while (groupEnd < timeline.length) {
+        const previous = timeline[groupEnd - 1];
+        const current = timeline[groupEnd];
+        const startsNewDay =
+          new Date(previous.at ?? 0).toDateString() !==
+          new Date(current.at ?? 0).toDateString();
+        if (!continuesUserMessageGroup(previous, current, startsNewDay)) {
+          break;
+        }
+        groupEnd += 1;
+      }
+    }
+
+    const branches = [];
+    for (let index = groupStart; index < groupEnd; index += 1) {
+      if (
+        timeline[index].inlineReplyTo === undefined &&
+        channelMessageHasTaskThread(timeline[index].entry)
+      ) {
+        branches.push(index);
+      }
+    }
+    if (branches.length > 0) {
+      const lastBranch = branches[branches.length - 1];
+      for (let index = groupStart; index <= lastBranch; index += 1) {
+        paths[index] = {
+          start: index === groupStart,
+          through: index < lastBranch,
+          end: index === lastBranch,
+        };
+      }
+    }
+    groupStart = groupEnd;
+  }
+  return paths;
+}
+
 /**
  * The three dots, for one surface.
  *
@@ -2081,8 +2141,7 @@ function messageList(repositoryId) {
       .filter(
         (entry) =>
           entry.taskId !== undefined &&
-          (entry.replies ?? []).length > 0 &&
-          (entry.kind !== "user" || (entry.replies ?? []).length > 1),
+          channelMessageHasTaskThread(entry),
       )
       .map((entry) => entry.taskId),
   );
@@ -2137,6 +2196,7 @@ function messageList(repositoryId) {
     timeline.push({ entry, inlineReplyTo: undefined, at: entry.at });
   }
   timeline.push(...pending.slice(next));
+  const threadPaths = messageThreadPaths(timeline, query === "");
   let lastDay = "";
   // Where this visit found the room, as a timestamp — see `snapshotChannelRead`.
   // Suppressed while searching: the results are hits scattered through history,
@@ -2184,7 +2244,12 @@ function messageList(repositoryId) {
       query === "" &&
       continuesUserMessageGroup(timeline[index - 1], item, startsNewDay);
     return (
-      separator + messageRow(entry, repositoryId, { hideChanges, compact })
+      separator +
+      messageRow(entry, repositoryId, {
+        hideChanges,
+        compact,
+        threadPath: threadPaths[index],
+      })
     );
   });
   return `<div class="chan-messages" id="chan-messages" role="log"
