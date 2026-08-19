@@ -892,9 +892,14 @@ export function rosterMenuItems(agentId) {
  * to — which costs no row of its own, holds still while the list under it
  * grows, and puts the control where somebody counting the list is already
  * looking.
+ *
+ * `cls` names the section so the stylesheet can move it: the people and agent
+ * headings fold up into the channel list when the sidebar collapses, one just
+ * behind the other, and a rule cannot stagger two elements it cannot tell
+ * apart.
  */
-function section(label, act, value, title) {
-  return `<div class="chan-sec">
+function section(label, act, value, title, cls) {
+  return `<div class="chan-sec ${cls}">
     <span class="chan-sec-label">${esc(label)}</span>
     <button type="button" class="chan-sec-add" data-act="${act}"
       data-value="${value}" title="${esc(title)}" aria-label="${esc(title)}">
@@ -968,26 +973,36 @@ function chanSidebar(activeRepositoryId) {
             : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
         }
       </div>
-      ${section("People", "invite-repo", channel, "Invite someone")}
-      <div class="chan-roster">
-        ${
-          // People first, then agents. The channel header already names the
-          // repository, so repeating it in the label said nothing the eye had
-          // not just read — and it grew with the name, which is why a long
-          // repository pushed the word "Agents" out of sight entirely.
-          people.length === 0
-            ? `<div class="util-empty">Nobody else yet.</div>`
-            : people.map((person) => personRow(person)).join("")
-        }
+      <!-- People and agents fold up under the channel list rather than
+           vanishing with it. Each list is a clipping box around one inner
+           block, which is the whole of what lets the stylesheet animate a
+           height nobody has measured: the row of the grid goes to zero, the
+           block inside it keeps its own height, and the box crops the
+           difference. -->
+      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people")}
+      <div class="chan-roster chan-roster-people">
+        <div class="chan-roster-inner">
+          ${
+            // People first, then agents. The channel header already names the
+            // repository, so repeating it in the label said nothing the eye had
+            // not just read — and it grew with the name, which is why a long
+            // repository pushed the word "Agents" out of sight entirely.
+            people.length === 0
+              ? `<div class="util-empty">Nobody else yet.</div>`
+              : people.map((person) => personRow(person)).join("")
+          }
+        </div>
       </div>
-      ${section("Agents", "channel-agent-menu", channel, "Add an agent")}
-      <div class="chan-roster">
-        ${
-          // No empty state. The "+" on the heading directly above is both the
-          // explanation and the thing to press; a sentence between them is a
-          // line to read on the way past.
-          roster.map((agent) => rosterRow(agent)).join("")
-        }
+      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents")}
+      <div class="chan-roster chan-roster-agents">
+        <div class="chan-roster-inner">
+          ${
+            // No empty state. The "+" on the heading directly above is both the
+            // explanation and the thing to press; a sentence between them is a
+            // line to read on the way past.
+            roster.map((agent) => rosterRow(agent)).join("")
+          }
+        </div>
       </div>
     </div>
     <!-- The profile is the one account control at the foot. Its menu already

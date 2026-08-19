@@ -3066,6 +3066,32 @@ let drawerDrag;
  * or not; it is always in the markup now (see `renderChats`), so nothing else
  * in the chats screen reads `chanSidebarOpen`.
  */
+/* How long the sidebar's people and agents take to fold away or unroll, in
+   milliseconds: the last pair's delay plus its own travel, rounded up. */
+const CHAN_FOLD_MS = 380;
+let chanFoldTimer;
+
+/**
+ * Say that the sidebar is mid-fold, for as long as it is.
+ *
+ * The two rosters have to clip their contents while their height is moving —
+ * that clipping is the fold — but an expanded roster must not clip, because an
+ * agent's usage card opens below its row and the last row's card reaches past
+ * the bottom of the list. Clipping only while the fold runs gives the
+ * animation the crop it needs and hands the card its overhang back the moment
+ * the sidebar has settled.
+ */
+function markChanFolding(shell) {
+  if (shell === null || shell === undefined) {
+    return;
+  }
+  shell.classList.add("chan-folding");
+  clearTimeout(chanFoldTimer);
+  chanFoldTimer = setTimeout(() => {
+    shell.classList.remove("chan-folding");
+  }, CHAN_FOLD_MS);
+}
+
 function setChanDrawer(open) {
   const next = open === true;
   state.chanSidebarOpen = next;
@@ -4488,10 +4514,9 @@ document.addEventListener("click", (event) => {
       // Keep this DOM in place while its width changes. A whole-screen render
       // replaces the sidebar outright, which gives a newly inserted element
       // its final width and leaves CSS with nothing to animate between.
-      node.closest(".chats-shell")?.classList.toggle(
-        "chan-collapsed",
-        state.chanCollapsed,
-      );
+      const shell = node.closest(".chats-shell");
+      shell?.classList.toggle("chan-collapsed", state.chanCollapsed);
+      markChanFolding(shell);
       const label = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
       node.setAttribute("aria-pressed", String(state.chanCollapsed));
       node.setAttribute("aria-label", label);

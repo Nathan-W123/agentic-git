@@ -4057,6 +4057,28 @@ button.chip.lg:hover {
   color: var(--text);
 }
 
+/* The two headings below the channel list travel with the lists they name.
+   Their own `overflow: hidden` is what lets their height go to nothing
+   without costing them their stickiness: only a clipping *ancestor* breaks
+   `position: sticky`, and this is the sticky element itself. A max-height
+   rather than a grid row because a heading is one line of small caps beside a
+   20px button — a ceiling the content cannot reach is near enough to the real
+   height that the fold reads as immediate at either end. */
+.chan-sec-people,
+.chan-sec-agents {
+  max-height: 60px;
+  overflow: hidden;
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition:
+    max-height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    padding 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear;
+}
+
 .chan-sec-label {
   flex: 1;
   min-width: 0;
@@ -4327,7 +4349,43 @@ button.chip.lg:hover {
 /* No scrollbar and no rule above it: `.chan-scroll` carries the scrolling for
    the whole column now, and the sticky heading is what separates one list
    from the next. */
+/* A clipping box around one block, so the desktop collapse can fold it away
+   instead of switching it off. `1fr` -> `0fr` on the row animates a height
+   that nothing had to measure — the inner block keeps whatever height its
+   rows add up to, and this box crops what no longer fits. Expanded it is the
+   plain container it always was; the row is the full height and the padding
+   has simply moved one level in. */
 .chan-roster {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition:
+    grid-template-rows 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear;
+}
+
+/* Out top-down on the way back: the heading appears, then its list under it,
+   then the next pair — which is what "unrolling from the channel list" looks
+   like. The collapsed rules below reverse the order, so the same four things
+   roll back up in the order they would have to. */
+.chan-roster-people {
+  transition-delay: 0.03s;
+}
+
+.chan-sec-agents {
+  transition-delay: 0.06s;
+}
+
+.chan-roster-agents {
+  transition-delay: 0.09s;
+}
+
+.chan-roster-inner {
+  min-height: 0;
   padding: 0 8px;
 }
 
@@ -8018,16 +8076,87 @@ dialog.modal[open]::backdrop {
     border-radius: 9px;
   }
 
+  /* The channels heading keeps its "+" and loses its word; the people and
+     agents headings keep both, because they are folding away as a whole and a
+     label that blinks out on the first frame of a fold is a cut inside an
+     animation. */
   .chats-shell.chan-collapsed :is(
       .chan-sidebar-head,
-      .chan-sec:not(.chan-sec-channels),
-      .chan-roster,
-      .chan-sec-label,
+      .chan-sec-channels .chan-sec-label,
       .cr-name,
       .cr-more,
       .chan-account-copy
     ) {
     display: none;
+  }
+
+  /* People and agents roll up into the channel list rather than being
+     switched off with it. `display: none` is a cut: on the way in the two
+     lists were simply gone before the panel had finished narrowing, and on
+     the way out they were already standing in the rail's 64px, wrapped, while
+     it widened around them. Folding the heading and the list to nothing keeps
+     the panel one moving thing — everything below the channels rises into
+     them, bottom pair first, and comes back down the same way.
+
+     Bottom-up here, top-down in the expanded rules above: whichever way the
+     sidebar is going, the list nearest the channels is the last to leave and
+     the first to return. */
+  /* Clipped while the fold is running, and only then. An agent's usage card
+     opens below its row and the last row's card reaches past the bottom of
+     the list, so a list that clipped at rest would swallow it (see
+     `.rr-usage`). The rail clips as well, where the lists are folded away and
+     nothing in them can be reached anyway. */
+  .chats-shell.chan-folding .chan-roster,
+  .chats-shell.chan-collapsed .chan-roster {
+    overflow: hidden;
+  }
+
+  /* And the rows are held at the panel's width while the column narrows
+     around them. Left to reflow, every name rewraps itself into 64px on the
+     way out — a second animation, playing over the fold, of text nobody is
+     going to read because it is leaving. Safe only inside the clipping box
+     above: a block wider than the rail that nothing crops is a rail that
+     scrolls sideways. */
+  .chats-shell.chan-folding .chan-roster-inner,
+  .chats-shell.chan-collapsed .chan-roster-inner {
+    width: 256px;
+  }
+
+  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents),
+  .chats-shell.chan-collapsed .chan-roster {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-10px);
+  }
+
+  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents) {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  .chats-shell.chan-collapsed .chan-roster {
+    grid-template-rows: 0fr;
+  }
+
+  /* Hidden only once it has finished shrinking — a container that goes
+     invisible at the start of the fold takes its rows with it and leaves an
+     empty box closing on nothing. */
+  .chats-shell.chan-collapsed .chan-roster-agents {
+    transition-delay: 0s, 0s, 0s, 0.22s;
+  }
+
+  .chats-shell.chan-collapsed .chan-sec-agents {
+    transition-delay: 0.03s, 0.03s, 0.03s, 0.03s, 0.25s;
+  }
+
+  .chats-shell.chan-collapsed .chan-roster-people {
+    transition-delay: 0.06s, 0.06s, 0.06s, 0.28s;
+  }
+
+  .chats-shell.chan-collapsed .chan-sec-people {
+    transition-delay: 0.09s, 0.09s, 0.09s, 0.09s, 0.31s;
   }
 
   /* No scrollbar gutter in the rail. A 40px control centred inside a scroller
@@ -8051,7 +8180,7 @@ dialog.modal[open]::backdrop {
     padding: 4px 0 6px;
   }
 
-  .chats-shell.chan-collapsed .chan-sec-add {
+  .chats-shell.chan-collapsed .chan-sec-channels .chan-sec-add {
     width: 40px;
     height: 40px;
     border-radius: 9px;
@@ -8060,7 +8189,8 @@ dialog.modal[open]::backdrop {
   /* One glyph size down the rail. Collapsed, these four controls are read as a
      single column of marks, and a 14px "+" between an 18px chat bubble and a
      16px collapse icon reads as three sizes of the same thing. */
-  .chats-shell.chan-collapsed :is(.chan-sec-add, .chan-collapse-btn) svg {
+  .chats-shell.chan-collapsed
+    :is(.chan-sec-channels .chan-sec-add, .chan-collapse-btn) svg {
     width: 18px;
     height: 18px;
   }
@@ -8127,6 +8257,22 @@ dialog.modal[open]::backdrop {
     padding: 5px 0;
     gap: 0;
     font-size: 0;
+  }
+
+  /* Only the travel goes. Both states are still exactly what is declared
+     above — the two lists are still there expanded and still gone in the
+     rail — they simply change in one frame, with no drop, no rise and no
+     stagger between them. */
+  @media (prefers-reduced-motion: reduce) {
+    .chan-sidebar :is(.chan-sec-people, .chan-sec-agents, .chan-roster),
+    .chats-shell.chan-collapsed :is(
+        .chan-sec-people,
+        .chan-sec-agents,
+        .chan-roster
+      ) {
+      transition: none;
+      transform: none;
+    }
   }
 }
 

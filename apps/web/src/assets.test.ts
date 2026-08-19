@@ -483,6 +483,61 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   );
 });
 
+test("people and agents fold up into the channel list as the sidebar collapses", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  // Each list is a clipping box around one block. Without the inner block
+  // there is no height for the row to shrink away from, and the fold becomes
+  // the cut it used to be.
+  assert.match(chats, /class="chan-roster chan-roster-people"/u);
+  assert.match(chats, /class="chan-roster chan-roster-agents"/u);
+  assert.match(chats, /class="chan-roster-inner"/u);
+  assert.match(chats, /section\("People",[^)]*"chan-sec-people"\)/u);
+  assert.match(chats, /section\("Agents",[^)]*"chan-sec-agents"\)/u);
+
+  // Folded, not switched off: the collapsed rail must no longer name the two
+  // lists in its `display: none` set, and must give them somewhere to travel.
+  const railRules = css.slice(css.indexOf(".chats-shell.chan-collapsed :is("));
+  assert.doesNotMatch(
+    railRules.slice(0, railRules.indexOf("display: none;")),
+    /\.chan-roster,/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed \.chan-roster \{\s*grid-template-rows: 0fr;/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed :is\(\.chan-sec-people, \.chan-sec-agents\),[\s\S]{0,120}transform: translateY\(-10px\);/u,
+  );
+  assert.match(css, /\.chan-roster \{[\s\S]{0,320}grid-template-rows 0\.22s/u);
+
+  // The lists stagger, one behind the other, in opposite orders at the two
+  // ends — otherwise the four of them move as one block and nothing reads as
+  // coming out from under the channels.
+  assert.match(css, /\.chan-roster-agents \{\s*transition-delay: 0\.09s;/u);
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed \.chan-sec-people \{\s*transition-delay: 0\.09s/u,
+  );
+
+  // Clipping only while the fold runs. An agent's usage card hangs below its
+  // row, so a list that clipped at rest would swallow it.
+  assert.match(
+    css,
+    /\.chats-shell\.chan-folding \.chan-roster,[\s\S]{0,80}overflow: hidden;/u,
+  );
+  const collapseAction = app.slice(
+    app.indexOf('case "chan-collapse-toggle"'),
+    app.indexOf('case "chan-sidebar-close"'),
+  );
+  assert.match(collapseAction, /markChanFolding\(shell\)/u);
+  assert.match(app, /function markChanFolding\(/u);
+  assert.match(app, /classList\.remove\("chan-folding"\)/u);
+});
+
 test("the pink tools toggle animates without replacing its node", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
