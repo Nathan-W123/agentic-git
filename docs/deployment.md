@@ -61,7 +61,7 @@ the web UI.
 | `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. Read once at boot and then removed from the process environment, so nothing the control plane spawns can see it. | generated |
 | `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
 | `COORD_ALLOW_REGISTRATION` | Set to `0` to close self-service sign-up at `/api/v1/auth/register`. A new account owns its own organization and can run tasks, so close registration on a deployment strangers can reach unless that is intentional. Invitations are unaffected. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | open |
-| `COORD_MAIL_API_URL` | HTTPS endpoint of a mail provider used to send registration confirmation codes and "forgotten password" links, e.g. `https://api.resend.com/emails`. Takes precedence over `COORD_SMTP_URL`. Prefer it on any platform that blocks outbound SMTP ports (Railway, Fly, most serverless hosts), where a relay cannot be reached and the code silently never arrives. The request body is `{from, to, subject, text}`, which every hosted provider of this shape accepts. | unset |
+| `COORD_MAIL_API_URL` | HTTPS endpoint of a mail provider used to send registration confirmation codes and "forgotten password" links, e.g. `https://api.resend.com/emails`. Takes precedence over `COORD_SMTP_URL`. Prefer it on any platform that blocks outbound SMTP ports (Railway, Fly, most serverless hosts), where a relay cannot be reached and the code silently never arrives. The request body is `{from, to, subject, text}`, which every hosted provider of this shape accepts. Step by step: [setting up email](email-setup.md). | unset |
 | `COORD_MAIL_API_KEY` | Bearer token for that endpoint. | unset |
 | `COORD_SMTP_URL` | Relay used to send registration confirmation codes and "forgotten password" links: `smtp://user:password@host:587` (STARTTLS when the relay offers it) or `smtps://host:465` (TLS from the first byte). Percent-encode an `@` in the password. Unset means messages are written to the control plane's log instead, which is a usable path for a single-operator deployment and no answer at all for a shared one. | unset |
 | `COORD_MAIL_FROM` | `From` address on those messages, display name allowed (`Lattice <no-reply@example.com>`). Unset means `no-reply@<SMTP host>`, which most relays refuse to send as — set the address the relay has authorised. | `no-reply@<SMTP host>` |
@@ -89,6 +89,10 @@ the same shape for the other two) beside the ones already there. Empty is each
 one's own default, so an unset variable changes nothing.
 
 ## Account email confirmation
+
+**Setting this up for the first time?** [Setting up email](email-setup.md) is
+the checklist: pick a transport, verify a sender address, set the variables,
+confirm a code arrives.
 
 Self-service sign-up first validates the submitted fields, hashes the password,
 and mails a six-digit code to the address. No user, organization, membership,
@@ -128,7 +132,7 @@ account out.
 With neither `COORD_MAIL_API_URL` nor `COORD_SMTP_URL` set the request still
 succeeds and the message is written to the log, prefixed `[mail]`. That is the whole recovery path for a
 deployment with no relay: read the log, copy the link. Configure a relay for
-anything other people use.
+anything other people use — see [setting up email](email-setup.md).
 
 The request endpoint answers the same way whether or not the address has an
 account, so it cannot be used to find out who is registered here. It shares
