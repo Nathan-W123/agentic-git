@@ -3982,6 +3982,12 @@ button.chip.lg:hover {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  /* The ground a closing side panel is pinned against while it leaves — see
+     `.thread-panel.panel-leaving`. Everything else positioned in here already
+     has a nearer relative ancestor of its own (`.chan-main` for the jump
+     pill, the panel itself for its drag grip), so this claims nothing that
+     was not already claimed. */
+  position: relative;
 }
 
 .chan-sidebar {
@@ -6825,6 +6831,29 @@ button.chip.lg:hover {
 .thread-panel.panel-leaving {
   animation: panel-out var(--motion-panel) var(--ease-motion) forwards;
   pointer-events: none;
+}
+
+/* And out of the layout for the whole of that exit.
+
+   In the flex row it went on holding its column while it faded, so what the
+   reader actually saw on closing was the panel emptying to a bare grey slab
+   the width of itself — the shell showing through a transparent node — and
+   the conversation only widening a fifth of a second later when the node was
+   finally dropped. The panel appeared to close twice, and the second half of
+   it looked like something left behind.
+
+   Taken out of flow it is a ghost over a layout that has already settled: the
+   transcript takes the full width on the first frame and the panel leaves on
+   top of it. Only above the phone tier — below 600px `.thread-panel` is
+   already `fixed` over the whole screen, which is out of flow for the same
+   reason and must stay measured against the viewport rather than the shell. */
+@media (min-width: 601px) {
+  .thread-panel.panel-leaving {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+  }
 }
 
 @keyframes panel-in {
