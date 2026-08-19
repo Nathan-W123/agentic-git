@@ -168,13 +168,16 @@ running; what survives is context.
 - Import records the upstream tip as `refs/coord/imported/<branch>` inside the
   canonical mirror, so the mirror itself knows what it diverged from.
 - Export publishes canonical state with `coord repo push`. It targets a
-  dedicated `coord/export-*` branch rather than the imported branch, never
-  force-pushes, and refuses outright when the remote has moved since import.
-  On the CLI, credentials come from `GITHUB_TOKEN` in the operator's own
-  shell; a push asked of an agent on the dashboard instead uses the task
-  submitter's own connected GitHub account (Settings → GitHub) and is refused
-  when they have not connected one. Either way the token is passed only as a
-  request header in the child environment.
+  short `coord/<change-name>` branch derived from meaningful canonical commit
+  subjects rather than the imported branch. The result also carries a longer
+  readable summary, while coordinator task IDs and synthetic sync or merge
+  subjects are left out of both descriptions. Export never force-pushes and
+  refuses outright when the remote has moved since import. On the CLI,
+  credentials come from `GITHUB_TOKEN` in the operator's own shell; a push
+  asked of an agent on the dashboard instead uses the task submitter's own
+  connected GitHub account (Settings → GitHub) and is refused when they have
+  not connected one. Either way the token is passed only as a request header
+  in the child environment.
 - Sync brings canonical back up to date with the imported remote after work
   merges on GitHub — the state the moved-since-import refusal points at.
   Fast-forward when only GitHub moved, a true merge commit when both sides

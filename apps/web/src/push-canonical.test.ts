@@ -102,7 +102,8 @@ function recordingRepositories(
       }
       return {
         remoteUrl: "https://push.invalid/origin.git",
-        targetBranch: "coord/export-x",
+        targetBranch: "coord/readable-push-names",
+        summary: "Use readable push branch names and include a fuller summary",
         revision: "abcdef1234".padEnd(40, "0"),
         upstreamBranch: "main",
         upstreamRevision: undefined,
@@ -146,8 +147,14 @@ test("a push runs as the task's submitter, with their stored token", async (t) =
     ),
   );
   // The explanation names the identity the push carried, so the person
-  // reading the thread knows which account to look for on GitHub.
+  // reading the thread knows which account to look for on GitHub, and carries
+  // both levels of description instead of making them inspect the remote.
   assert.match(result.explanation, /as octocat/u);
+  assert.match(result.explanation, /coord\/readable-push-names/u);
+  assert.match(
+    result.explanation,
+    /Use readable push branch names and include a fuller summary/u,
+  );
 });
 
 test("a direct push runs as the authenticated actor without creating a task", async (t) => {

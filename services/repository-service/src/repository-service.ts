@@ -232,7 +232,7 @@ export interface SyncFromRemoteResult {
 
 export interface PushToRemoteOptions {
   remoteUrl: string;
-  /** Branch to create on the remote. Defaults to a dated export branch. */
+  /** Branch to create on the remote. Defaults to a short change-derived name. */
   targetBranch?: string;
   /** Revision to publish. Defaults to the canonical branch tip. */
   revision?: string;
@@ -250,6 +250,8 @@ export interface PushToRemoteOptions {
 export interface PushToRemoteResult {
   remoteUrl: string;
   targetBranch: string;
+  /** Human-readable description of the changes represented by the branch. */
+  summary: string;
   revision: string;
   upstreamBranch: string;
   upstreamRevision: string | undefined;
@@ -260,6 +262,85 @@ const DEFAULT_IDENTITY: CommitIdentity = {
   name: "AI Development Coordinator",
   email: "coordinator@localhost",
 };
+
+const PUSH_BRANCH_PREFIX = "coord/";
+const PUSH_BRANCH_WORDS = 4;
+const PUSH_BRANCH_SLUG_LENGTH = 26;
+const PUSH_SUMMARY_LENGTH = 500;
+const PUSH_SUBJECT_LIMIT = 12;
+const PUSH_BRANCH_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "as",
+  "at",
+  "be",
+  "by",
+  "for",
+  "from",
+  "i",
+  "in",
+  "into",
+  "is",
+  "it",
+  "of",
+  "on",
+  "or",
+  "should",
+  "that",
+  "the",
+  "then",
+  "this",
+  "to",
+  "was",
+  "when",
+  "with",
+  "you",
+  "your",
+]);
+
+/** Removes coordinator plumbing from a commit subject before people see it. */
+function pushSubject(value: string): string | undefined {
+  const subject = value
+    .replaceAll(/\s+/gu, " ")
+    .trim()
+    .replace(/^coord\([^)]*\):\s*/iu, "")
+    .replaceAll(/\btask_[a-z0-9-]{8,}\b/giu, "")
+    .replaceAll(
+      /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/giu,
+      "",
+    )
+    .replaceAll(/\s+/gu, " ")
+    .trim();
+  if (
+    subject.length === 0 ||
+    /^(?:initial commit|merge\s+(?:branch|commit|remote-tracking branch)\b|sync\s+.+\s+from\s+origin:)/iu.test(
+      subject,
+    )
+  ) {
+    return undefined;
+  }
+  return subject;
+}
+
+/** Turns the longer description into the deliberately small branch label. */
+function pushBranchSlug(summary: string): string {
+  const words = summary
+    .replaceAll(/https?:\/\/\S+/giu, " ")
+    .normalize("NFKD")
+    .replaceAll(/\p{Mark}/gu, "")
+    .toLowerCase()
+    .match(/[a-z0-9]+/gu) ?? [];
+  const meaningful = words.filter(
+    (word) => /[a-z]/u.test(word) && !PUSH_BRANCH_STOP_WORDS.has(word),
+  );
+  const chosen = meaningful.slice(0, PUSH_BRANCH_WORDS);
+  const slug = chosen
+    .join("-")
+    .slice(0, PUSH_BRANCH_SLUG_LENGTH)
+    .replace(/-+$/u, "");
+  return slug.length === 0 ? "canonical-update" : slug;
+}
 
 function isErrorCode(error: unknown, code: string): boolean {
   return (
@@ -562,10 +643,100 @@ export class RepositoryService {
   }
 
   /**
+   * Describes what this push adds beyond its upstream baseline.
+   *
+   * Canonical commit subjects carry the task objective, which is the durable
+   * human description available even when the coordination database is not
+   * beside a copied mirror. Merge commits are excluded so a sync immediately
+   * before push does not turn "Sync ... <sha>" into the public name of the
+   * work. The longer text is kept for the result while only a few useful words
+   * become the branch name.
+   */
+  private async describePush(
+    repository: CanonicalRepository,
+    commit: string,
+    baseline: string | undefined,
+  ): Promise<{ summary: string; defaultBranch: string }> {
+    const revision = baseline === undefined ? commit : `${baseline}..${commit}`;
+    const log = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "log",
+        "--no-merges",
+        `--max-count=${baseline === undefined ? 1 : PUSH_SUBJECT_LIMIT}`,
+        "--format=%s",
+        "--end-of-options",
+        revision,
+      ],
+      {
+        allowFailure: true,
+        maxOutputBytes: 128 * 1024,
+      },
+    );
+    const subjects: string[] = [];
+    if (log.exitCode === 0) {
+      for (const line of log.stdout.split(/\r?\n/gu)) {
+        const subject = pushSubject(line);
+        if (subject !== undefined && !subjects.includes(subject)) {
+          subjects.push(subject);
+        }
+      }
+    }
+
+    let summary = subjects.join("; ");
+    if (summary.length === 0) {
+      const diffArgs =
+        baseline === undefined
+          ? [
+              `--git-dir=${repository.path}`,
+              "diff-tree",
+              "--root",
+              "--no-commit-id",
+              "--name-only",
+              "-r",
+              "--end-of-options",
+              commit,
+            ]
+          : [
+              `--git-dir=${repository.path}`,
+              "diff",
+              "--name-only",
+              "--end-of-options",
+              baseline,
+              commit,
+            ];
+      const diff = await this.git.run(diffArgs, {
+        allowFailure: true,
+        maxOutputBytes: 128 * 1024,
+      });
+      const files =
+        diff.exitCode === 0
+          ? diff.stdout
+              .split(/\r?\n/gu)
+              .map((entry) => entry.trim())
+              .filter((entry) => entry.length > 0)
+          : [];
+      summary =
+        files.length === 0
+          ? "Update canonical repository"
+          : `Update ${files.slice(0, 3).join(", ")}${
+              files.length > 3 ? ` and ${files.length - 3} more files` : ""
+            }`;
+    }
+    if (summary.length > PUSH_SUMMARY_LENGTH) {
+      summary = `${summary.slice(0, PUSH_SUMMARY_LENGTH - 1).trimEnd()}…`;
+    }
+    return {
+      summary,
+      defaultBranch: `${PUSH_BRANCH_PREFIX}${pushBranchSlug(summary)}`,
+    };
+  }
+
+  /**
    * Publishes canonical state to a remote branch.
    *
-   * Two defaults keep this from destroying work. It pushes to a dedicated
-   * export branch rather than the branch it imported from, and it never
+   * Two defaults keep this from destroying work. It pushes to a dedicated,
+   * change-named branch rather than the branch it imported from, and it never
    * force-pushes, so the remote decides whether the update is a fast-forward.
    * Before pushing it compares the remote's current tip against the revision
    * recorded at import; if someone else has committed in the meantime the push
@@ -578,14 +749,6 @@ export class RepositoryService {
     const remoteUrl = normalizeRemoteUrl(options.remoteUrl);
     const upstreamBranch = options.upstreamBranch ?? repository.branch;
     await this.assertBranchName(upstreamBranch);
-
-    const targetBranch =
-      options.targetBranch ??
-      `coord/export-${new Date()
-        .toISOString()
-        .replaceAll(/[:.]/gu, "-")
-        .slice(0, 19)}`;
-    await this.assertBranchName(targetBranch);
 
     const revision =
       options.revision ?? (await this.getCanonicalVersion(repository)).revision;
@@ -619,6 +782,10 @@ export class RepositoryService {
       throw new UpstreamChangedError(upstreamBranch, baseline, currentUpstream);
     }
 
+    const description = await this.describePush(repository, commit, baseline);
+    const targetBranch = options.targetBranch ?? description.defaultBranch;
+    await this.assertBranchName(targetBranch);
+
     const existingTarget = await this.remoteTip(
       remoteUrl,
       targetBranch,
@@ -649,6 +816,7 @@ export class RepositoryService {
     return {
       remoteUrl,
       targetBranch,
+      summary: description.summary,
       revision: commit,
       upstreamBranch,
       upstreamRevision: currentUpstream,

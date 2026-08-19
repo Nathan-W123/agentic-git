@@ -19,7 +19,7 @@ import { resolveRepository } from "./commands.js";
 
 export interface RepoPushOptions {
   repositoryId?: string;
-  /** Branch created on the remote. Defaults to a dated export branch. */
+  /** Branch created on the remote. Defaults to a short change-derived name. */
   targetBranch?: string;
   /** Overrides the remote recorded at import. */
   remoteUrl?: string;
@@ -53,6 +53,17 @@ export function pushCredentials(
 ): { token: string } | undefined {
   const token = env["GITHUB_TOKEN"]?.trim() ?? "";
   return token.length === 0 ? undefined : { token };
+}
+
+/** Formats the two levels of push description for the interactive CLI. */
+export function formatRepoPushResult(result: PushToRemoteResult): string {
+  return (
+    `Pushed ${result.revision.slice(0, 12)} to ${result.targetBranch}\n` +
+    `Summary: ${result.summary}\n` +
+    `Remote: ${result.remoteUrl}\n` +
+    `${result.createdBranch ? "Created" : "Updated"} the target branch; ` +
+    `${result.upstreamBranch} was not modified.`
+  );
 }
 
 export async function repoPush(
