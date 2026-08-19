@@ -1546,6 +1546,157 @@ function threadProgress(entry) {
   return sawRunMarker ? progress : undefined;
 }
 
+/* ------------------------------------------------- message identity ---- */
+
+/* The kinds `channelAuthor` resolves against the agent roster rather than the
+   member list. Named here because an agent it *cannot* resolve still has to
+   be recognised as an agent: the author id it falls back to is the server's
+   `<userId>:<provider>` composite, and reading that as a person is how a face
+   would come to offer a direct message to an id nobody has. */
+const AGENT_AUTHORED_KINDS = new Set(["agent", "progress", "outcome"]);
+
+/**
+ * The face and the name at the top of a message, as something you can press.
+ *
+ * The roster already answers "who is this" for everybody in the room, but the
+ * transcript is where a name is actually *read* — and the only route from a
+ * line to the person who wrote it used to be finding them again in the
+ * sidebar. Same two destinations the sidebar uses, so a face means the same
+ * thing wherever it is pressed: a person opens the conversation with them, an
+ * agent opens its panel.
+ *
+ * `undefined` for the reader's own lines and for authors the room cannot name
+ * at all. There is no conversation with yourself to open, and a card headed by
+ * an empty id is worse than no card — the same reasoning that makes your own
+ * `personRow` a label rather than a button.
+ */
+function authorIdentity(repositoryId, entry, author) {
+  if (author.agent !== undefined) {
+    const status = agentStatus(author.agent, repositoryId);
+    return {
+      kind: "agent",
+      act: "agent-panel-open",
+      value: String(author.agent.id ?? ""),
+      name: author.name,
+      face: agentFace(author.agent, 38),
+      // What the agent is here for, which is the line its roster row leads
+      // with too. "Your agent" is worth saying on a shared transcript: whose
+      // an agent is decides who may task it.
+      detail: [
+        String(author.agent.role ?? "").trim(),
+        author.agent.mine === true ? "Your agent" : "",
+      ]
+        .filter((part) => part !== "")
+        .join(" · "),
+      status,
+      statusText: AGENT_STATUS_TITLE[status] ?? "",
+      label: `Open details for ${author.name}`,
+      hint: "Open agent details",
+    };
+  }
+  const userId = String(entry.authorId ?? "");
+  if (
+    userId === "" ||
+    userId === "you" ||
+    userId === currentUserId() ||
+    AGENT_AUTHORED_KINDS.has(entry.kind)
+  ) {
+    return undefined;
+  }
+  // Both roster shapes, exactly as `personRow` reads them: the organization
+  // list nests the account under `user`, the room's own people list flattens
+  // it. Reading only one is what used to leave a name as "Someone".
+  const person = channelPeopleFor(repositoryId).find(
+    (candidate) =>
+      (candidate.user?.id ?? candidate.userId ?? candidate.id ?? "") === userId,
+  );
+  const online = personOnline(userId);
+  const unread = dmUnreadFrom(userId);
+  return {
+    kind: "person",
+    act: "dm-open",
+    value: userId,
+    name: author.name,
+    face: avatar(author.name, 38, author.name),
+    detail: String(person?.role ?? "").trim(),
+    status: online ? "working" : "away",
+    statusText: online ? "Here now" : "Away",
+    label: `Open your conversation with ${author.name}`,
+    hint: unread > 0 ? `Open messages · ${unread} unread` : "Send a message",
+  };
+}
+
+/**
+ * A face or a name, wrapped in the button that opens whoever it belongs to.
+ *
+ * A wrapper inside the existing avatar and name rather than those elements
+ * themselves: the picture keeps its place in the row's layout and the name
+ * keeps its weight in the header line, while the thing that answers a press
+ * is exactly the thing somebody aimed at. Content back untouched when there
+ * is nobody to open — a tab stop that does nothing is worse than no tab stop.
+ *
+ * A span with `role=button` rather than a `<button>`, because a real button
+ * inside the message's own controls is markup a browser will not keep. The
+ * keyboard is served by `role=button` plus `data-act` and the delegated
+ * handler in `app.js` that exists for exactly that pair.
+ */
+function identityWrap(identity, content) {
+  if (identity === undefined) {
+    return content;
+  }
+  return `<span class="cmsg-identity" role="button" tabindex="0"
+    data-act="${esc(identity.act)}" data-value="${esc(identity.value)}"
+    aria-label="${esc(identity.label)}">${content}${profileCard(identity)}</span>`;
+}
+
+/**
+ * Who somebody is, without leaving the conversation to find out.
+ *
+ * CSS-driven exactly like the roster's `.rr-usage`: rendered with the message
+ * and revealed by `:hover`/`:focus-within`, so no pointer tracking and no
+ * request is involved in reading one. Everything on it is already in state
+ * for the roster's sake, so a hover costs nothing a render did not cost
+ * anyway.
+ */
+function profileCard(identity) {
+  if (identity === undefined) {
+    return "";
+  }
+  return `<span class="profile-card" role="tooltip">
+    <span class="profile-card-head">
+      <span class="profile-card-face">${identity.face}${statusDot(
+        identity.status,
+        // No tooltip on the dot: the line under it already says this in
+        // words, and a native tooltip opening on top of a card that is
+        // itself a tooltip is one hover producing two answers.
+        "",
+      )}</span>
+      <span class="profile-card-id">
+        <span class="profile-card-name">${esc(identity.name)}</span>
+        ${
+          identity.detail === ""
+            ? ""
+            : `<span class="profile-card-detail">${esc(identity.detail)}</span>`
+        }
+      </span>
+    </span>
+    <span class="profile-card-status">${esc(identity.statusText)}</span>
+    <span class="profile-card-hint">${esc(identity.hint)}</span>
+  </span>`;
+}
+
+/** The face a message is drawn with, at whatever size is asked for. */
+function authorFace(author, size) {
+  return author.agent !== undefined
+    ? agentFace(author.agent, size)
+    : avatar(
+        author.name,
+        size,
+        author.name,
+        author.name === currentUserName() ? myAvatar() : undefined,
+      );
+}
+
 function messageRow(
   entry,
   repositoryId,
@@ -1592,6 +1743,11 @@ function messageRow(
   // row could still *do* goes with the words. React, pin, revert and delete
   // all act on a line that is no longer there.
   const deleted = entry.deletedAt !== undefined;
+  // Who the face and the name belong to, and so whether they are pressable at
+  // all. Resolved once and used by both: a transcript where the picture opens
+  // somebody and the name beside it does nothing is a worse answer than
+  // neither being pressable.
+  const identity = authorIdentity(repositoryId, entry, author);
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
@@ -1635,24 +1791,19 @@ function messageRow(
     ${
       compact
         ? ""
-        : `<span class="cmsg-avatar">${
-            author.agent !== undefined
-              ? agentFace(author.agent, 32)
-              : avatar(
-                  author.name,
-                  32,
-                  author.name,
-                  author.name === currentUserName() ? myAvatar() : undefined,
-                )
-          }</span>`
+        : `<span class="cmsg-avatar">${identityWrap(
+            identity,
+            authorFace(author, 32),
+          )}</span>`
     }
     <div class="cmsg-body">
       ${
         compact
           ? ""
           : `<div class="cmsg-top">
-              <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
-                author.name,
+              <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${identityWrap(
+                identity,
+                esc(author.name),
               )}</span>
               <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
             </div>`

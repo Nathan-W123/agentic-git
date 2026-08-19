@@ -5000,6 +5000,135 @@ button.chip.lg:hover {
   color: var(--accent-bright);
 }
 
+/* The face and the name at the top of a message, once they lead somewhere.
+   Deliberately quiet at rest: a transcript where every name is painted like a
+   link reads as a page of links rather than a conversation. The affordance
+   arrives under the pointer, which is where it is needed. */
+.cmsg-row .cmsg-identity {
+  position: relative;
+  cursor: pointer;
+}
+
+/* The wrapper sits inside the avatar, so it takes the face's shape rather
+   than a line box around it — otherwise the descender space under the
+   picture became part of what a press aimed at. */
+.cmsg-row .cmsg-avatar .cmsg-identity {
+  display: inline-flex;
+  border-radius: 50%;
+}
+
+.cmsg-row .cmsg-name .cmsg-identity:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cmsg-row .cmsg-avatar .cmsg-identity:hover .avatar,
+.cmsg-row .cmsg-avatar .cmsg-identity:hover .agent-face {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 1px;
+}
+
+.cmsg-row .cmsg-identity:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Who somebody is, on the way past. Same mechanism as the roster's
+   `.rr-usage` — rendered with the row, revealed by CSS — with one addition:
+   a delay before it opens. The roster is a short list somebody points at
+   deliberately; a transcript is a column of names a pointer crosses on its
+   way to the scrollbar, and a card that appeared instantly would flash open
+   and shut the whole way down. Closing stays immediate. */
+.profile-card {
+  position: absolute;
+  left: 0;
+  /* Upward, unlike the roster's card, because a transcript is pinned to its
+     newest line: the message most likely to be pointed at is the last one,
+     and a card opening below it would open past the bottom of the scroller
+     into the composer. Above it there is always the conversation. */
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 216px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 38%);
+  font-weight: 400;
+  text-decoration: none;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s ease;
+  pointer-events: none;
+}
+
+.cmsg-identity:hover .profile-card,
+.cmsg-identity:focus-within .profile-card {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0.28s;
+}
+
+.profile-card-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+/* The dot inside is absolutely positioned against the face, the way it is
+   everywhere else a face carries one. */
+.profile-card-face {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.profile-card-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.profile-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-card-detail,
+.profile-card-status {
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-card-hint {
+  font-size: 11px;
+  color: var(--accent-bright);
+  border-top: 1px solid var(--border-soft);
+  padding-top: 6px;
+}
+
+/* No pointer, no hover: on a touch screen the tap *is* the action, and a card
+   that opens under the finger it was opened by only hides what it describes.
+   The button underneath keeps working — this removes the card, not the tap. */
+@media (hover: none) {
+  .profile-card {
+    display: none;
+  }
+}
+
 .cmsg-row .cmsg-time {
   font-size: 11px;
   color: var(--text-4);
