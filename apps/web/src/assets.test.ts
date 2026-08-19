@@ -1112,6 +1112,177 @@ test("the working dot reads the task list for teammates too", async () => {
   );
 });
 
+type LivenessTask = {
+  id: string;
+  repositoryId: string;
+  status: string;
+  agentId: string;
+  submittedBy: string;
+  submittedAt: string;
+};
+
+type LivenessModule = {
+  state: {
+    tasks: LivenessTask[];
+    agentBusy: Record<string, { expiresAt: number; at: number }>;
+  };
+  agentStatus: (
+    agent: { id: string; provider: string; userId: string; visibility: string },
+    repositoryId: string,
+  ) => string;
+  noteAgentBusy: (frame: {
+    repositoryId: string;
+    userId: string;
+    provider: string;
+    taskId: string;
+  }) => void;
+  agentsThinkingIn: (repositoryId: string) => string[];
+  threadIsWorking: (entry: { taskId: string }) => boolean;
+};
+
+/**
+ * The liveness selectors, run rather than read.
+ *
+ * Whether an agent is working is arithmetic over the task list and the busy
+ * table, and every way of asserting it by pattern has let the arithmetic be
+ * wrong while the shape stayed right. `data.js` reads `window.localStorage`
+ * as it loads, which is the whole of what it needs from a browser.
+ */
+async function liveness(): Promise<LivenessModule> {
+  const scope = globalThis as unknown as { window?: unknown };
+  scope.window ??= {
+    localStorage: {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    },
+  };
+  return (await import(
+    pathToFileURL(path.join(packageRoot, "public", "data.js")).href
+  )) as LivenessModule;
+}
+
+const LIVENESS_AGENT = {
+  id: "u1:openai",
+  provider: "openai",
+  userId: "u1",
+  visibility: "org",
+};
+
+/** A task of `LIVENESS_AGENT`'s, as the tasks route actually reports one. */
+function livenessTask(over: Partial<LivenessTask> = {}): LivenessTask {
+  return {
+    id: "task-1",
+    repositoryId: "repo",
+    status: "submitted",
+    agentId: "codex",
+    submittedBy: "u1",
+    submittedAt: new Date().toISOString(),
+    ...over,
+  };
+}
+
+test("a task nobody has picked up stops reading as an agent working", async () => {
+  const data = await liveness();
+  data.state.agentBusy = {};
+
+  // `submitted` is "queued, not started yet" in the server's own words. It
+  // counts for the seconds before a worker claims it, because that is when
+  // somebody is watching for the dots.
+  data.state.tasks = [livenessTask()];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+
+  // And stops counting once the queue plainly is not moving. This is the
+  // state a run whose worker died lands in — lease expiry puts the task back
+  // to `submitted` — so before this it was an agent shown as thinking, with
+  // nothing behind it, for as long as the tab stayed open.
+  data.state.tasks = [
+    livenessTask({ submittedAt: new Date(Date.now() - 10 * 60_000).toISOString() }),
+  ];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+
+  // A claimed task is a worker holding a heartbeat; nothing about it expires
+  // on the clock here.
+  data.state.tasks = [livenessTask({ status: "claimed" })];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+  data.state.tasks = [livenessTask({ status: "integrated" })];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+});
+
+test("a busy frame whose task never arrives is not ten minutes of dots", async () => {
+  const data = await liveness();
+  data.state.tasks = [];
+  data.state.agentBusy = {};
+  data.noteAgentBusy({
+    repositoryId: "repo",
+    userId: "u1",
+    provider: "openai",
+    taskId: "task-nobody-lists",
+  });
+
+  // The frame is the fastest signal there is, and until the task list has
+  // caught up with it, it is the only one.
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+  assert.equal(data.agentsThinkingIn("repo").length, 1);
+  assert.equal(data.threadIsWorking({ taskId: "task-nobody-lists" }), true);
+
+  // The list is re-read within a second of any frame and every thirty seconds
+  // besides, so an id it still does not know is not work in progress. It used
+  // to hold every indicator up for the ten-minute backstop instead — the
+  // longest an agent could claim to be busy having never started.
+  const entry = data.state.agentBusy["task-nobody-lists"];
+  assert.notEqual(entry, undefined, "the frame should have been recorded");
+  if (entry !== undefined) {
+    entry.at = Date.now() - 90_000;
+  }
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+  assert.equal(data.threadIsWorking({ taskId: "task-nobody-lists" }), false);
+  assert.equal(data.agentsThinkingIn("repo").length, 0);
+  assert.equal(
+    Object.keys(data.state.agentBusy).length,
+    0,
+    "a lapsed frame should be swept, not merely ignored",
+  );
+});
+
+test("a connected agent is not painted as a working one", async () => {
+  const data = await publicFile("data.js");
+  const chat = await publicFile("chat.js");
+  const agents = await publicFile("screen-agents.js");
+
+  // The roster route reports connections, not presence, so the browser used
+  // to call every teammate's agent online — and online is what the face
+  // breathes on. Connected is idle until something says otherwise.
+  const roster = data.slice(data.indexOf("const others = roster"));
+  assert.match(roster.slice(0, roster.indexOf("\n  });")), /presence: "idle",/u);
+  assert.equal(
+    /presence: "online",/u.test(roster.slice(0, roster.indexOf("\n  });"))),
+    false,
+    "presence must be derived, not asserted",
+  );
+
+  // Both places that write the word beside a dot must agree with it: green is
+  // working, amber is connected and doing nothing.
+  for (const [name, source] of [
+    ["chat.js", chat],
+    ["screen-agents.js", agents],
+  ] as const) {
+    assert.match(
+      source,
+      /agent\.presence === "idle"\s*\?\s*"orange"/u,
+      `${name} should mark an idle agent amber, not green`,
+    );
+  }
+
+  // And the count that opens the agents screen says what it counts.
+  assert.match(agents, /label: "Connected agents",/u);
+  assert.equal(
+    /label: "Active agents",/u.test(agents),
+    false,
+    "a stored credential is not an active agent",
+  );
+});
+
 test("an account's own agent is seen running at all", async () => {
   const data = await publicFile("data.js");
   const start = data.indexOf("export function myAgents()");
@@ -2014,6 +2185,70 @@ test("thread composer paints pings and commands and opens their suggestion lists
   assert.match(
     css,
     /\.composer-mirror \.slash-ping \{[\s\S]{0,160}color: var\(--accent-2-bright\);[\s\S]{0,160}background: var\(--accent-2-wash\)/u,
+  );
+});
+
+test("the thread slash picker surfaces its thread commands before the six-row limit", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function channelSlashCandidates");
+  const end = chats.indexOf("\nfunction slashPopover", start);
+  assert.notEqual(start, -1, "the slash candidate filter should exist");
+  assert.notEqual(end, -1, "the slash candidate filter should have a boundary");
+
+  const state = {
+    slashQuery: "",
+    channelSlashCommands: {
+      repo: [
+        "plan",
+        "queue",
+        "ask",
+        "dnc",
+        "simple",
+        "push",
+        "retry",
+        "cancel",
+        "stop",
+        "help",
+      ].map((name) => ({ name })),
+    },
+  };
+  const candidates = new Function(
+    "state",
+    `${chats.slice(start, end)}\nreturn channelSlashCandidates;`,
+  )(state) as (repositoryId: string, target?: string) => Array<{ name: string }>;
+
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["plan", "queue", "ask", "dnc", "simple", "push"],
+    "the channel keeps the server's general command order",
+  );
+  assert.deepEqual(
+    candidates("repo", "thread").map((entry) => entry.name),
+    ["retry", "cancel", "push", "ask", "dnc", "simple"],
+    "thread actions remain visible instead of being truncated",
+  );
+
+  state.slashQuery = "pl";
+  assert.deepEqual(
+    candidates("repo", "thread").map((entry) => entry.name),
+    ["plan"],
+    "typing a specific command still finds commands outside the first six",
+  );
+
+  const suggestions = chats.slice(
+    chats.indexOf("function composerSuggestions"),
+    chats.indexOf("\nfunction mentionActiveFor"),
+  );
+  assert.match(
+    suggestions,
+    /channelSlashCandidates\(repositoryId, target\)/u,
+    "the rendered picker asks for the order of its own composer",
+  );
+  const keys = chats.slice(chats.indexOf("export function handleComposerKeydown"));
+  assert.match(
+    keys,
+    /channelSlashCandidates\(activeChannelId\(\), target\)/u,
+    "keyboard selection uses the same contextual order as the visible list",
   );
 });
 

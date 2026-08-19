@@ -5883,6 +5883,17 @@ export class ApiGateway {
             `Task status must be one of ${TASK_STATUSES.join(", ")}`,
           );
         }
+        // A worker that dies mid-task leaves its lease behind it, and the
+        // task it was holding stays `claimed` — read everywhere as an agent
+        // working — until somebody expires that lease. Every other caller of
+        // this is a worker route, so the one case it matters in is the one
+        // case nothing ran: the worker is gone. Reading the task list is what
+        // always happens while somebody is looking at that dot, so the sweep
+        // happens here too. It is the same idempotent call the worker routes
+        // make, and it must never be able to fail a read.
+        await this.options.store
+          .expireWorkLeases(new Date().toISOString())
+          .catch(() => undefined);
         const tasks = await this.options.store.listSubmittedTasks({
           projectId,
           ...(status === undefined ? {} : { status }),

@@ -2455,11 +2455,30 @@ function channelMentionCandidates(repositoryId) {
  * `/el` is guessing. The list comes from the server with the messages, so the
  * picker cannot offer something the channel would not recognise.
  */
-function channelSlashCandidates(repositoryId) {
+function channelSlashCandidates(repositoryId, target = "channel") {
   const query = state.slashQuery.trim().toLowerCase();
-  return (state.channelSlashCommands[repositoryId] ?? [])
-    .filter((entry) => String(entry.name ?? "").startsWith(query))
-    .slice(0, 6);
+  const matching = (state.channelSlashCommands[repositoryId] ?? []).filter(
+    (entry) => String(entry.name ?? "").startsWith(query),
+  );
+  if (target === "thread") {
+    // The server sends one channel-wide command list, with the general task
+    // commands first. Reusing its first six entries in a thread pushed
+    // `/retry` and `/cancel` below the picker's hard limit, even though those
+    // are the two commands whose meaning is specifically tied to a thread.
+    // Put every command the thread handles directly first. A more specific
+    // query still finds any other command because ordering happens after the
+    // prefix filter.
+    const threadFirst = ["retry", "cancel", "push", "ask", "dnc", "simple"];
+    matching.sort((left, right) => {
+      const leftAt = threadFirst.indexOf(String(left.name ?? ""));
+      const rightAt = threadFirst.indexOf(String(right.name ?? ""));
+      return (
+        (leftAt === -1 ? threadFirst.length : leftAt) -
+        (rightAt === -1 ? threadFirst.length : rightAt)
+      );
+    });
+  }
+  return matching.slice(0, 6);
 }
 
 function slashPopover(candidates, target) {
@@ -2517,7 +2536,7 @@ function composerSuggestions(repositoryId, target = "channel") {
   }
   return `${
     state.slashActive
-      ? slashPopover(channelSlashCandidates(repositoryId), target)
+      ? slashPopover(channelSlashCandidates(repositoryId, target), target)
       : ""
   }${
     state.mentionActive
@@ -4772,7 +4791,7 @@ export function submitComposerMessage(rerender) {
     }
     state.chatDraft = "";
     saveChannelDraft(repositoryId, "");
-    state.mentionActive = false;
+    closeComposerAutocomplete("channel");
     // A direct reply is one message, not a mode the composer stays trapped
     // in. Continuing an agent task remains sticky as before.
     const directReply =
@@ -4798,7 +4817,7 @@ export function submitComposerMessage(rerender) {
   }
   state.chatDraft = "";
   saveChannelDraft(repositoryId, "");
-  state.mentionActive = false;
+  closeComposerAutocomplete("channel");
   markChannelRead(repositoryId);
   rerender();
   scrollChannel();
@@ -4902,13 +4921,34 @@ export function submitThreadReply(rerender) {
   // same way a channel message does, and `messageBody` reads them back out.
   postChannelReply(activeChannelId(), state.activeChannelThread, state.threadDraft);
   state.threadDraft = "";
-  if (state.composerAutocompleteTarget === "thread") {
-    state.mentionActive = false;
-    state.mentionQuery = "";
-    state.slashActive = false;
-    state.slashQuery = "";
-  }
+  closeComposerAutocomplete("thread");
   rerender();
+}
+
+/**
+ * Closes whichever picker a composer was showing, because it just sent.
+ *
+ * Both pickers are a suggestion about the word under the cursor, and sending
+ * takes that word — the whole draft — away. Leaving either one open left a
+ * list of commands hanging over an emptied composer with nothing left to
+ * complete: the popup outlives the message it was helping to write, and,
+ * since only typing reopens the question, it stays there through a channel
+ * switch and everything after it.
+ *
+ * The query and the highlighted row go with it. A stale `/dep` left behind
+ * would decide what the next `/` offers before a single character of it has
+ * been typed.
+ */
+function closeComposerAutocomplete(target) {
+  if (state.composerAutocompleteTarget !== target) {
+    return;
+  }
+  state.mentionActive = false;
+  state.mentionQuery = "";
+  state.mentionIndex = 0;
+  state.slashActive = false;
+  state.slashQuery = "";
+  state.slashIndex = 0;
 }
 
 function autocompleteSnapshot() {
@@ -5105,7 +5145,7 @@ export function handleComposerKeydown(event, rerender) {
   // open at a time (see `updateMentionState`), so the two cannot both claim
   // an Enter.
   if (ownsSuggestions && state.slashActive) {
-    const list = channelSlashCandidates(activeChannelId());
+    const list = channelSlashCandidates(activeChannelId(), target);
     if (event.key === "ArrowDown") {
       event.preventDefault();
       state.slashIndex = list.length === 0 ? 0 : (state.slashIndex + 1) % list.length;

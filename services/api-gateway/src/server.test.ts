@@ -1749,6 +1749,66 @@ test("releasing a lease returns the task to the queue", async (t) => {
   assert.equal(stale.data.error.code, "lease_lost");
 });
 
+test("a task whose worker died stops being served as one still running", async (t) => {
+  const { runtime, client, token } = await workerRuntime(t);
+  const workerId = (
+    await bearer(runtime.origin, "/api/v1/workers/register", token, {
+      method: "POST",
+      body: {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "w",
+        adapters: [],
+        version: "1",
+      },
+    })
+  ).data.id as string;
+
+  await client.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+    method: "POST",
+    body: { id: "repo_sweep", branch: "main" },
+  });
+  await client.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`, {
+    method: "POST",
+    body: { repositoryId: "repo_sweep", objective: "work on it" },
+  });
+
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
+  });
+  assert.equal(leased.status, 200, JSON.stringify(leased.data));
+  const leaseId = leased.data.lease.id as string;
+
+  // A live lease is untouched: reading the list must not reclaim work from a
+  // worker that is still holding it.
+  const held = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  assert.equal(held.data.tasks[0].status, "claimed");
+
+  // The worker dies. Its lease lapses where it lies, and every other caller
+  // that would expire one is itself a worker route — so with the worker gone,
+  // nothing ran, and the task stayed `claimed` forever. Everything that reads
+  // it, from the browser's working dot to a status report, then said an agent
+  // was running work that had stopped.
+  await runtime.store.heartbeatWorkLease(
+    leaseId,
+    "2000-01-01T00:00:00.000Z",
+    "2000-01-01T00:01:00.000Z",
+  );
+
+  const after = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  assert.equal(after.status, 200);
+  assert.equal(
+    after.data.tasks[0].status,
+    "submitted",
+    "a lapsed lease should return its task to the queue before it is listed",
+  );
+  assert.equal((await runtime.store.getWorkLease(leaseId))?.status, "expired");
+});
+
 test("worker endpoints require the run_task scope", async (t) => {
   const { runtime, client } = await workerRuntime(t);
   const readOnly = await client.request("/api/v1/auth/tokens", {

@@ -74,6 +74,16 @@ export function chatHeader(agent, { showClose = true } = {}) {
       : agent.presence === "idle"
         ? "Idle"
         : "Offline";
+  // Green is reserved for an agent that is actually working. Painting it for
+  // an idle connection too meant the word said one thing and the dot beside
+  // it said another, and the dot is what a reader takes in first — so a
+  // connected agent doing nothing read as one mid-task.
+  const tone =
+    agent.presence === "online"
+      ? "green"
+      : agent.presence === "idle"
+        ? "orange"
+        : "";
   return `<header class="chat-head">
     ${agentFace(agent, 34)}
     <div style="min-width:0">
@@ -81,9 +91,7 @@ export function chatHeader(agent, { showClose = true } = {}) {
       <div class="ch-status" style="${
         agent.presence === "offline" ? "color:var(--text-3)" : ""
       }">${
-        agent.presence === "offline"
-          ? ""
-          : '<span class="dot green"></span>'
+        tone === "" ? "" : `<span class="dot ${tone}"></span>`
       }${esc(presence)}</div>
     </div>
     <span class="spacer"></span>
