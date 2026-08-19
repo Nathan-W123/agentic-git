@@ -19,6 +19,7 @@ import {
   explainAnswerFailure,
   looksLikeTaskRequest,
   narrateTaskEvent,
+  readsAsDirectRequest,
   readsAsEchoOfRequest,
   summariseObjective,
   type ApiOperations,
@@ -10977,6 +10978,32 @@ test("asking about work is not asking for it", () => {
   }
 });
 
+test("open-room work requests do not need agent vocabulary or an @mention", () => {
+  // These all hand a task to the room. The old task-verb-only gate missed
+  // them because "own", "takers" and "a hand" describe delegation rather
+  // than the repository operation itself.
+  for (const request of [
+    "any takers for the flaky auth ticket?",
+    "who can own the release checklist?",
+    "could someone take a look at the checkout failure?",
+    "we could use a hand with the database migration",
+    "can one of the agents own the release checklist?",
+    "looking for someone to pick up the accessibility pass",
+  ]) {
+    assert.equal(readsAsDirectRequest(request), true, request);
+  }
+
+  // A problem being discussed is not, by itself, an invitation for an agent
+  // to enter the conversation.
+  for (const remark of [
+    "the flaky auth ticket is annoying",
+    "the release checklist is almost ready",
+    "we should probably revisit accessibility later",
+  ]) {
+    assert.equal(readsAsDirectRequest(remark), false, remark);
+  }
+});
+
 test("/stop names one agent even with words after the name", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -11071,6 +11098,40 @@ test("an unnamed request is offered before it is started, and yes starts it", as
   );
 });
 
+test("an explicit invitation to the room draws an offer without a task verb", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-open-room");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const request = "any takers for the flaky auth ticket?";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: request },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
+  const offer = messages.find((message) =>
+    String(message.content).startsWith("Want me to take this"),
+  );
+  assert.ok(offer !== undefined, JSON.stringify(messages));
+  assert.equal(offer.referencedMessageId, posted.data.message.id);
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(runtime.submittedTasks.length, 1);
+  assert.equal(runtime.submittedTasks[0]?.objective, request);
+});
+
 test("a proactive offer reads lean channel context and carries it into accepted work", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -11106,6 +11167,8 @@ test("a proactive offer reads lean channel context and carries it into accepted 
 
   const classification = runtime.chatPrompts.slice(before).at(-1)?.prompt ?? "";
   assert.match(classification, /Recent channel context before this request/u);
+  assert.match(classification, /Human 1: context marker 2:/u);
+  assert.match(classification, /do not interrupt their conversation/u);
   assert.doesNotMatch(classification, /context marker 1:/u);
   assert.match(classification, /context marker 2:/u);
   assert.match(classification, /context marker 9:/u);
@@ -11203,7 +11266,7 @@ test("a generic proactive follow-up uses recent context to choose its agent", as
   assert.equal(runtime.submittedTasks[1]?.vendor, "codex");
 });
 
-test("only the person who asked can accept the offer", async (t) => {
+test("only a prompt acceptance from the asker can start an offer", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11237,7 +11300,8 @@ test("only the person who asked can accept the offer", async (t) => {
 
   // "yes" is a common word in a busy channel, and the pick was made on the
   // question of whose account pays. Somebody else agreeing is not that person
-  // agreeing.
+  // agreeing, and once they have spoken the original offer is stale: a later
+  // bare "yes" from the asker could be agreeing with the new conversation.
   const theirs = await colleague.request(`${base}/messages`, {
     method: "POST",
     body: { content: "yes" },
@@ -11250,6 +11314,18 @@ test("only the person who asked can accept the offer", async (t) => {
     body: { content: "yes" },
   });
   assert.equal(mine.status, 201);
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+
+  // Asking again creates a fresh, unambiguous handshake, which the original
+  // asker can still accept normally.
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please update the settings page layout" },
+  });
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
 });
 
