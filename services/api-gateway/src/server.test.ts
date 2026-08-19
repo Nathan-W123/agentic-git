@@ -144,6 +144,14 @@ interface TestRuntime {
   }>;
   /** What the agent answers when asked whether a message is work. */
   setTaskClassification: (answer: string) => void;
+  /**
+   * What the local pass says about a message, before any agent is asked.
+   *
+   * Defaults to "not sure about anything", which is the answer that changes
+   * nothing: every message goes on to the agent, exactly as it did before
+   * there was a local pass. A test about the filter says otherwise.
+   */
+  setLocalChatter: (reads: (text: string) => boolean) => void;
   /** Makes the next revert answer with this instead of succeeding. */
   setRollbackOutcome: (
     outcome: { status: string; explanation: string } | undefined,
@@ -323,6 +331,10 @@ async function startRuntime(
   // test was written against, and the proposal is worded the way the fixed
   // sentence used to be so those assertions still describe what is posted.
   let taskClassification = "OFFER: Want me to take this on?";
+  // The real filter loads a 22 MB model. Every test that is not about the
+  // filter gets one that decides nothing, which is also the honest default:
+  // "unsure" is what it answers for anything it is not certain about.
+  let localChatter: (text: string) => boolean = () => false;
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
   // What `rollbackRepository` answers. Undefined is the ordinary success; a
@@ -781,6 +793,10 @@ async function startRuntime(
     store,
     operations,
     bootstrapToken: BOOTSTRAP_TOKEN,
+    chatterFilter: {
+      readsAsChatter: async (text: string) => localChatter(text),
+      available: async () => true,
+    },
     mailer: async (message) => {
       mail.push(message);
     },
@@ -841,6 +857,9 @@ async function startRuntime(
     },
     setTaskClassification: (answer) => {
       taskClassification = answer;
+    },
+    setLocalChatter: (reads) => {
+      localChatter = reads;
     },
     runCalls,
     cancelCalls,
@@ -13197,4 +13216,66 @@ test("declining the prompt starts nothing, and says nothing about it", async (t)
     before,
   );
   assert.deepEqual((await owner.request(`${base}/questions`)).data.questions, []);
+});
+
+/**
+ * The local pass, and the one thing it is allowed to do.
+ *
+ * Reading every unaddressed message is what replaced the word list, and it
+ * is right — but it runs on somebody's subscription, and most of a working
+ * channel is people talking to each other. This keeps that half off the
+ * agents entirely, and is allowed to answer only when it is sure.
+ */
+test("conversation the local pass is sure about never reaches an agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-triage");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setLocalChatter((text) => text.startsWith("hi "));
+  runtime.setTaskClassification("ACT");
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "hi Ethan, how was the weekend" },
+    })).status,
+    201,
+  );
+  assert.deepEqual(
+    runtime.chatPrompts.slice(before),
+    [],
+    "no agent was asked, and nobody's usage was spent",
+  );
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  // And the filter decides nothing else. A message it is not sure about goes
+  // on to the agent exactly as before — that is what makes it safe to put in
+  // front of the decision rather than in place of it.
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "change the background on settings to blue" },
+    })).status,
+    201,
+  );
+  // Counted by the decision prompt itself: dispatching also asks the agent
+  // to compose what it says when it picks work up, and that is not this.
+  const decisions = runtime.chatPrompts
+    .slice(before)
+    .filter((entry) =>
+      /Reply with exactly one of these three lines/u.test(entry.prompt),
+    );
+  assert.equal(decisions.length, 1, JSON.stringify(decisions.map((d) => d.prompt.slice(-40))));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
 });

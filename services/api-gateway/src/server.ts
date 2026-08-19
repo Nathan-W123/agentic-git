@@ -74,6 +74,10 @@ import {
 } from "./auth.js";
 import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
+  createChatterFilter,
+  type ChatterFilter,
+} from "@coord/local-triage";
+import {
   authorizeOrganization,
   authorizeProject,
   authorizeRepository,
@@ -1843,6 +1847,25 @@ const AUTO_CLAIM_QUESTION_PREFIX = "offer:";
 const AUTO_CLAIM_QUESTION_YES = "Yes, go ahead";
 const AUTO_CLAIM_QUESTION_NO = "No thanks";
 
+/**
+ * The local filter this deployment runs, or one that decides nothing.
+ *
+ * On by default. `COORD_LOCAL_TRIAGE=0` turns it off, which puts every
+ * unaddressed message back in front of an agent — the behaviour before the
+ * filter existed, and the setting to reach for if a room is ever quiet about
+ * something it should have answered.
+ */
+function defaultChatterFilter(): ChatterFilter {
+  const raw = process.env["COORD_LOCAL_TRIAGE"]?.trim().toLowerCase() ?? "";
+  if (["0", "false", "off", "no"].includes(raw)) {
+    return {
+      readsAsChatter: async () => false,
+      available: async () => false,
+    };
+  }
+  return createChatterFilter();
+}
+
 /** The proposal out of an offer message, or nothing if this is not one. */
 export function autoClaimProposal(content: string): string | undefined {
   const at = content.indexOf(AUTO_CLAIM_OFFER_TAIL);
@@ -2758,6 +2781,14 @@ export interface ApiGatewayOptions {
    */
   mailer?: Mailer;
   /**
+   * The local first pass over unaddressed channel messages.
+   *
+   * Defaults to the embedding filter, or to one that passes everything on
+   * when `COORD_LOCAL_TRIAGE` switches it off. Injected by tests, which must
+   * not load a model to prove what the gateway does with its answer.
+   */
+  chatterFilter?: ChatterFilter;
+  /**
    * Absolute origin this deployment is reached at, used to build links that
    * travel outside the browser. Defaults to `COORD_PUBLIC_URL`, and failing
    * that to the `Host` of the request that asked for the link.
@@ -3351,6 +3382,8 @@ export class ApiGateway {
   private readonly bootstrapToken: string | undefined;
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
+  /** The local pass that keeps ordinary conversation off the agents. */
+  private readonly chatterFilter: ChatterFilter;
   /** Configured origin for links that leave the browser, or "" to infer one. */
   private readonly publicUrl: string;
 
@@ -3362,6 +3395,7 @@ export class ApiGateway {
     if (this.bootstrapToken !== undefined && this.bootstrapToken.length < 24) {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
+    this.chatterFilter = options.chatterFilter ?? defaultChatterFilter();
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
     if (!Number.isSafeInteger(this.bodyLimit) || this.bodyLimit < 1) {
       throw new RangeError("Request body limit must be a positive integer");
@@ -15869,11 +15903,17 @@ export class ApiGateway {
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
     // One structural guard, and no vocabulary. A message with no letters in
-    // it is an emoji or punctuation and there is nothing to read; everything
-    // else goes to the agent, because a word list cannot tell "update the
-    // readme" from "the update went out" and never could. See
-    // `readAutoClaimVerdict` for what replaced it.
+    // it is an emoji or punctuation and there is nothing to read.
     if (!/\p{L}/u.test(content)) {
+      return;
+    }
+    // Then the local pass, before anything is read from the store and long
+    // before anything is spent. It answers one question — is this
+    // confidently just people talking — and only that; anything it is unsure
+    // about goes on to the agent, which is what decides. Most of a working
+    // channel is conversation, and paying a vendor to be told so was the
+    // cost of reading every message rather than matching it.
+    if (await this.chatterFilter.readsAsChatter(content)) {
       return;
     }
     const context = await this.autoClaimContext({

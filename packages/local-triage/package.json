@@ -1,5 +1,5 @@
 {
-  "name": "@coord/api-gateway",
+  "name": "@coord/local-triage",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -17,9 +17,6 @@
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
-    "@coord/collab": "*",
-    "@coord/local-triage": "*",
-    "@coord/persistence": "*",
-    "@coord/shared-types": "*"
+    "@huggingface/transformers": "^3.7.6"
   }
 }
