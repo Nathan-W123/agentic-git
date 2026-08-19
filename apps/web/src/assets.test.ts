@@ -1806,7 +1806,13 @@ test("channel @mentions include repository guests and surface directed unread pi
     data.indexOf("\n}\n", data.indexOf("export function channelUnreadCount")) + 2,
   );
   assert.match(unread, /mentionsOnly/u);
-  assert.match(unread, /mention\.kind === "user" && mention\.id === mine/u);
+  // The count delegates; the mention matching itself lives in the helper it
+  // calls, so that is where the "only pings addressed to me" rule is pinned.
+  const counting = data.slice(
+    data.indexOf("function countChannelSince"),
+    data.indexOf("\n}\n", data.indexOf("function countChannelSince")) + 2,
+  );
+  assert.match(counting, /mention\.kind === "user" && mention\.id === mine/u);
   assert.match(chats, /mentions > 0 \? "@"/u);
 });
 
@@ -3028,7 +3034,7 @@ test("a message's face and name open the person and describe them on hover", asy
   const css = await publicFile("styles.css");
 
   const identityStart = chats.indexOf("function authorIdentity(");
-  const identityEnd = chats.indexOf("\nfunction identityAttrs(", identityStart);
+  const identityEnd = chats.indexOf("\nfunction identityWrap(", identityStart);
   const identity = chats.slice(identityStart, identityEnd);
   assert.notEqual(identityStart, -1, "a message author resolves to an identity");
   assert.notEqual(identityEnd, -1, "the identity resolver has a boundary");

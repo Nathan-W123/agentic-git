@@ -171,14 +171,50 @@ export class LeasePlanAuthority implements PlanAuthority {
     // plan it is waiting for.
     const blanket = active.find((entry) => isBlanketClaim(entry.plan));
     if (blanket !== undefined) {
+      const explanation =
+        `Task ${blanket.taskId} holds a repository-wide claim; it is ` +
+        "narrowed to what it has touched as soon as it notices this task, " +
+        "and this plan is decided against that";
+      // The same bound the deciding path applies, for the same reason. A
+      // holder that writes nothing never freezes, so without this a task
+      // behind a blanket claim would be the one refusal in the system with no
+      // way out of it — and exact-base integration is a better answer than
+      // waiting on a holder that is never going to narrow.
+      const waited = this.waitedMs(request.task.id, false);
+      const forced = waited >= this.maxWaitMs;
+      // Recorded like every other refusal. A hold nobody can see is what made
+      // this path look asleep, and returning early from here was how a
+      // repository-wide hold came to be the only decision that left no trace.
+      // `record` compares against the durable trail, so a task re-decided
+      // every retry interval is still announced once per decision.
+      await this.record(request, {
+        type: "plan_admitted",
+        taskId: request.task.id,
+        data: {
+          ...(request.projectId === undefined
+            ? {}
+            : { projectId: request.projectId }),
+          repositoryId: request.repository.id,
+          leaseId: lease.id,
+          status: "sequenced",
+          blockedBy: [blanket.taskId],
+          constraints: [
+            "Resubmit once the repository-wide claim is narrowed or released",
+          ],
+          explanation,
+          planRevision: request.planRevision,
+          ...(forced ? { admittedAfterWait: true, waitedMs: waited } : {}),
+        },
+      });
+      if (forced) {
+        this.waitingSince.delete(request.task.id);
+        return { outcome: "admitted", plan: request.plan };
+      }
       return {
         outcome: "deferred",
         retryAfterMs: DEFAULT_PLAN_RETRY_MS,
         blockedBy: [blanket.taskId],
-        explanation:
-          `Task ${blanket.taskId} holds a repository-wide claim; it is ` +
-          "narrowed to what it has touched as soon as it notices this task, " +
-          "and this plan is decided against that",
+        explanation,
       };
     }
 
@@ -480,10 +516,19 @@ export class LeasePlanAuthority implements PlanAuthority {
       )
       .map((candidate) => candidate.id)
       .sort();
-    const frozen = freezePlanFromWorkingChanges(
-      request.plan,
-      await request.observe(),
-    );
+    const changes = await request.observe();
+    if (changes.length === 0) {
+      // Nothing has been written yet, so there is nothing to narrow *to*. A
+      // freeze here would not narrow the claim, it would erase it: the holder
+      // would be left claiming no files at all at the exact moment somebody
+      // else needs the repository, and the arriving task would be admitted
+      // straight into the files the holder is about to write. Keeping the
+      // claim whole refuses that arrival — which is what a repository-wide
+      // claim means — and the next tick freezes it properly, as soon as there
+      // is behaviour to freeze.
+      return undefined;
+    }
+    const frozen = freezePlanFromWorkingChanges(request.plan, changes);
     const admission: PlanAdmission = this.admissions.admit({
       plan: frozen,
       agentId: request.task.agentId,

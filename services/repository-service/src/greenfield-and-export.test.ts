@@ -202,7 +202,12 @@ async function advanceCanonical(
   const git = new GitClient();
   const work = path.join(fixture.root, `work-${Math.random().toString(36).slice(2, 8)}`);
   await git.run(["clone", "--branch", "main", fixture.remotePath, work]);
-  await writeFile(path.join(work, file), content, "utf8");
+  // The clone only has what the fixture seeded, so a nested path needs its
+  // directory made before the write — otherwise the helper ENOENTs on any
+  // test that names a file outside the repository root.
+  const target = path.join(work, file);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, content, "utf8");
   await fixture.repositories.commitAll(work, message);
   await git.run([
     `--git-dir=${fixture.canonical.path}`,
@@ -227,7 +232,12 @@ async function advanceRemote(
     `remote-${Math.random().toString(36).slice(2, 8)}`,
   );
   await git.run(["clone", "--branch", "main", fixture.remotePath, work]);
-  await writeFile(path.join(work, file), content, "utf8");
+  // The clone only has what the fixture seeded, so a nested path needs its
+  // directory made before the write — otherwise the helper ENOENTs on any
+  // test that names a file outside the repository root.
+  const target = path.join(work, file);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, content, "utf8");
   await fixture.repositories.commitAll(work, "github work");
   await git.run(["-C", work, "push", "origin", "main"]);
   const head = await git.run(["-C", work, "rev-parse", "HEAD"]);
