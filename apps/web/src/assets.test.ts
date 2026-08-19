@@ -672,7 +672,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   }
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
-  assert.match(channelEnd ?? "", /bottom: 11px;/u);
+  assert.match(channelEnd ?? "", /bottom: 25px;/u);
   assert.match(channelElbow ?? "", /right: calc\(100% \+ 13px\);/u);
   // The elbow turns out of the stem, so its own upright has to stand in the
   // stem's column. It is placed from its right edge, which means the gap plus
@@ -689,6 +689,27 @@ test("a reply carries a quiet visual path back to its root", async () => {
     elbowGap + elbowWidth,
     -stemLeft,
     "the elbow's upright should sit in the stem's own column",
+  );
+  // And it has to stop *inside* that upright. The route's foot sits fourteen
+  // pixels below the middle of the link, so `bottom` minus fourteen is how far
+  // above that middle the stem ends; the elbow's upright runs straight from
+  // its own top down to where the corner's arc begins, and an end below the
+  // arc leaves a tail poking past the swoosh while an end above the upright
+  // breaks the line in two.
+  const stemEnd = Number(/bottom: (\d+)px;/u.exec(channelEnd ?? "")?.[1]) - 14;
+  const elbowTop = Number(
+    /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
+  );
+  const elbowHeight = Number(/height: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  const arcStart = 11 - (elbowHeight - elbowTop);
+  assert.ok(
+    stemEnd >= arcStart && stemEnd <= elbowTop,
+    `the stem should end within the elbow's straight upright (${arcStart}..${elbowTop}), not at ${stemEnd}`,
+  );
+  assert.equal(
+    elbowHeight - elbowTop,
+    3,
+    "the elbow's horizontal run should stay three pixels below the link's middle",
   );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
