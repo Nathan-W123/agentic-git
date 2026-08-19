@@ -629,7 +629,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(
     chats,
-    /channelThread\s*\? threadSummaryLink\(entry, replies, repositoryId\)\s*: changedBlock/u,
+    /channelThread\s*\? threadSummaryLink\(entry, replies, repositoryId, progress\)\s*: changedBlock/u,
     "the open thread root should not repeat the channel's reply link",
   );
   assert.match(
@@ -639,8 +639,8 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(
     chats,
-    /channelThread \? `<\/div>\$\{progressBlock\}\$\{changedBlock\}` : ""/u,
-    "progress and changed files should sit after the route endpoint",
+    /channelThread \? `<\/div>\$\{changedBlock\}` : ""/u,
+    "the changed files should sit after the route endpoint",
   );
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
@@ -2844,6 +2844,105 @@ test("the progress bar restarts for each task turn in a thread", async () => {
     progress(thread),
     undefined,
     "the bar should still disappear when the current turn ends",
+  );
+});
+
+test("the run is a ring on the agent working, at the front of the stack", async () => {
+  const source = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The bar under the thread is gone: it said something was moving without
+  // ever saying who, which is the whole reason it moved onto a face.
+  assert.doesNotMatch(css, /\.thread-progress\b/u);
+  assert.doesNotMatch(source, /class="thread-progress"/u);
+
+  const slice = (from: string, to: string) => {
+    const start = source.indexOf(from);
+    assert.notEqual(start, -1, `${from} should still exist`);
+    const end = source.indexOf(to, start + from.length);
+    assert.notEqual(end, -1, `${from} should have a boundary`);
+    return source.slice(start, end);
+  };
+  const summary = Function(
+    "threadTitleReply",
+    "isThreadThinking",
+    "threadSaidCount",
+    "threadAwaitsGoAhead",
+    "threadReplyTurns",
+    "channelAuthor",
+    "agentFace",
+    "avatar",
+    "currentUserName",
+    "myAvatar",
+    "esc",
+    `"use strict";\n${slice("function threadParticipants(replies", "\n/**")}\n${slice(
+      "function threadWorkingAuthor(entry",
+      "\n/*",
+    )}\n${slice("function threadSummaryLink(entry", "\n/**")}\nreturn threadSummaryLink;`,
+  )(
+    () => undefined,
+    () => false,
+    (said: number) => `${said} replies`,
+    () => false,
+    (replies: unknown[]) => [{ replies }],
+    (_repositoryId: string, reply: { author: string; agent?: boolean }) => ({
+      name: reply.author,
+      agent: reply.agent === true ? { id: reply.author } : undefined,
+    }),
+    (agent: { id: string }) => `<face>${agent.id}</face>`,
+    (name: string) => `<avatar>${name}</avatar>`,
+    () => "Ada",
+    () => undefined,
+    (value: string) => String(value),
+  ) as (
+    entry: unknown,
+    replies: unknown[],
+    repositoryId: string,
+    progress: number | undefined,
+  ) => string;
+
+  const replies = [
+    { author: "Ada" },
+    { author: "codex", agent: true },
+    { author: "Bo" },
+    { author: "claude", agent: true },
+  ];
+  const running = summary({ id: "m1", replies }, replies, "repo-1", 45);
+  assert.match(
+    running,
+    /<span class="ctl-working" style="--run:45"/u,
+    "the ring should carry the run's position",
+  );
+  assert.match(
+    running.slice(running.indexOf("ctl-faces")),
+    /ctl-working[\s\S]*?<face>claude<\/face>[\s\S]*?<avatar>Ada<\/avatar>/u,
+    "the agent still working should be ringed and first in the stack",
+  );
+  assert.equal(
+    running.match(/<face>claude<\/face>/gu)?.length,
+    1,
+    "moving a participant to the front must not duplicate them",
+  );
+
+  // Nothing running, nothing drawn: the stack goes back to being the order
+  // people spoke in.
+  const idle = summary({ id: "m1", replies }, replies, "repo-1", undefined);
+  assert.doesNotMatch(idle, /ctl-working/u);
+  assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
+
+  // One pixel of accent, and a full circle so the part still to come is there
+  // to be read against.
+  const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
+    .exec(css)?.[1];
+  assert.notEqual(ring, undefined, "the ring should be drawn on the face");
+  assert.match(ring ?? "", /border-radius: 50%;/u);
+  assert.match(
+    ring ?? "",
+    /conic-gradient\(\s*var\(--accent\) calc\(var\(--run, 0\) \* 1%\)/u,
+  );
+  assert.match(
+    ring ?? "",
+    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 1px\)/u,
   );
 });
 

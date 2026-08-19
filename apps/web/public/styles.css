@@ -5560,27 +5560,6 @@ button.chip.lg:hover {
   color: var(--danger, #f85149);
 }
 
-/* The run's position, as quietly as it can be said: three pixels of the
-   chosen accent under the thread it belongs to. The track is the accent's own
-   wash so it reads as one element in any theme, and the fill moves only when
-   the narration above it says something moved. */
-.thread-progress {
-  height: 2px;
-  margin: 6px 0;
-  max-width: 420px;
-  border-radius: 2px;
-  background: var(--accent-wash);
-  overflow: hidden;
-}
-
-.thread-progress i {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  transition: width 0.4s ease;
-}
-
 /* The way into a thread from the channel: faces, then a tinted count.
    No surface, no border, no chevron — the card treatment belongs to the
    threads pullout, where a row has to identify a thread with nothing above it.
@@ -5669,6 +5648,53 @@ button.chip.lg:hover {
    answering a question nobody asked of a thread summary. */
 .cmsg-thread-link .ctl-faces .presence {
   display: none;
+}
+
+/* The run's position, drawn around the face running it: one pixel of the
+   reader's accent closing clockwise as the narration below it advances. It
+   was a bar on its own line under the thread, which spent a line of the room
+   on a fact nobody could attribute — in a thread with two agents and a person
+   in it, a bar in the margin says something is moving but never who.
+
+   `z-index` and the two margins are what keep the circle closed. The ring
+   stands three pixels outside a 20px face, so the stack's overlap is traded
+   back on this one face for exactly that much room on each side, and the
+   raised layer keeps the next face along from cutting the arc. */
+.cmsg-thread-link .ctl-faces .ctl-working {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 3px;
+  margin-right: 3px;
+}
+
+.cmsg-thread-link .ctl-faces .ctl-working::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  /* The travelled arc in the accent, the rest of the circle in the accent's
+     own wash — a gauge reads as a gauge only when the part still to come is
+     visibly there. */
+  background: conic-gradient(
+    var(--accent) calc(var(--run, 0) * 1%),
+    var(--accent-wash) 0
+  );
+  /* One pixel of that circle, and the disc cut out of the middle. A border
+     cannot carry a conic gradient, so the ring has to be a masked disc: keep
+     the outermost pixel, drop everything inside it. */
+  -webkit-mask: radial-gradient(
+    closest-side,
+    transparent calc(100% - 1px),
+    #000 calc(100% - 1px)
+  );
+  mask: radial-gradient(
+    closest-side,
+    transparent calc(100% - 1px),
+    #000 calc(100% - 1px)
+  );
+  pointer-events: none;
 }
 
 /* ------------------------------------------------------------ mention ---- */

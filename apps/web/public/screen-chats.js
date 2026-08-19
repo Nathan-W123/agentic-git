@@ -1262,24 +1262,51 @@ function threadSaidCount(said) {
  * link for one fact. The dot keeps the fact and drops the repetition; the
  * words survive for screen readers, and the sentence itself is still in the
  * room, one message down, now pointing back here.
+ *
+ * A run still going draws its position as a one-pixel ring around the face of
+ * the agent running it, which is also lifted to the front of the stack. The
+ * bar this replaces sat on its own line under the thread and could only ever
+ * say that something was moving, never who was moving it.
  */
-function threadSummaryLink(entry, replies, repositoryId) {
+function threadSummaryLink(entry, replies, repositoryId, progress) {
   const titled = threadTitleReply(entry);
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
-  const faces = threadParticipants(replies, repositoryId)
+  const participants = threadParticipants(replies, repositoryId);
+  // Whoever the ring belongs to goes first. A stack of faces is in the order
+  // people happened to speak, which is no help at all when the question the
+  // reader has is "who is on this right now" — so the one being measured is
+  // lifted to the front of the stack, where the ring is unobstructed and the
+  // answer is the first thing in the row.
+  const working =
+    progress === undefined
+      ? undefined
+      : (threadWorkingAuthor(entry, repositoryId) ?? participants[0]);
+  const ordered =
+    working === undefined
+      ? participants
+      : [
+          working,
+          ...participants.filter((author) => author.name !== working.name),
+        ];
+  const faces = ordered
     .slice(0, 3)
-    .map((author) =>
-      author.agent !== undefined
-        ? agentFace(author.agent, 20)
-        : avatar(
-            author.name,
-            20,
-            author.name,
-            author.name === currentUserName() ? myAvatar() : undefined,
-          ),
-    )
+    .map((author, index) => {
+      const face =
+        author.agent !== undefined
+          ? agentFace(author.agent, 20)
+          : avatar(
+              author.name,
+              20,
+              author.name,
+              author.name === currentUserName() ? myAvatar() : undefined,
+            );
+      return working !== undefined && index === 0
+        ? `<span class="ctl-working" style="--run:${progress}"
+            title="${progress}% by phase">${face}<span class="sr-only">Working, ${progress}% done</span></span>`
+        : face;
+    })
     .join("");
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
@@ -1552,6 +1579,28 @@ function threadProgress(entry) {
   return sawRunMarker ? progress : undefined;
 }
 
+/**
+ * Who the current run belongs to, so the ring can be drawn on them.
+ *
+ * Read from the narration for the same reason the progress is: the agent that
+ * spoke last in the current turn is the one still speaking, and no assignment
+ * record has to be fetched or kept in step for that to be true. Threads carry
+ * whoever has replied — a person asking a follow-up, a second agent handed the
+ * next task — so "the last agent-authored line" is the only reading that
+ * survives a room with more than one participant in it.
+ */
+function threadWorkingAuthor(entry, repositoryId) {
+  const turns = threadReplyTurns(entry.replies ?? []);
+  const replies = turns[turns.length - 1]?.replies ?? [];
+  for (let index = replies.length - 1; index >= 0; index -= 1) {
+    const author = channelAuthor(repositoryId, replies[index]);
+    if (author?.agent !== undefined) {
+      return author;
+    }
+  }
+  return undefined;
+}
+
 /* ------------------------------------------------- message identity ---- */
 
 /* The kinds `channelAuthor` resolves against the agent roster rather than the
@@ -1766,13 +1815,11 @@ function messageRow(
   const changedBlock = hideChanges
     ? ""
     : changedFilesBlock(entry, repositoryId);
+  // The run is drawn around the face running it, inside the thread link — see
+  // `threadSummaryLink`. It used to be a bar on its own line under the route,
+  // which spent a full line of the room saying something no reader could
+  // attribute to anybody in a thread with more than one participant.
   const progress = channelThread ? threadProgress(entry) : undefined;
-  const progressBlock =
-    progress === undefined
-      ? ""
-      : `<div class="thread-progress" title="${progress}% by phase">
-           <i style="width:${progress}%"></i>
-         </div>`;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
@@ -1867,14 +1914,14 @@ function messageRow(
                     title="Add a reaction" aria-label="Add a reaction">${icon("smile")}</button></div>`
       }
       ${
-        // The route ends at the thread link. Progress and changed files are
-        // deliberately outside it, so opening either can never pull the grey
-        // connector down past the thing it identifies.
+        // The route ends at the thread link. The changed files are deliberately
+        // outside it, so opening them can never pull the grey connector down
+        // past the thing it identifies.
         channelThread
-          ? threadSummaryLink(entry, replies, repositoryId)
+          ? threadSummaryLink(entry, replies, repositoryId, progress)
           : changedBlock
       }
-      ${channelThread ? `</div>${progressBlock}${changedBlock}` : ""}
+      ${channelThread ? `</div>${changedBlock}` : ""}
     </div>
     <span class="cmsg-actions">
       ${
