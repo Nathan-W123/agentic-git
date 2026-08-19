@@ -5,12 +5,35 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json turbo.json tsconfig.base.json ./
+# Manifests before source, and only the manifests. `npm ci` reads every
+# workspace's package.json and none of its code, so copying the tree first —
+# which is what this did — put the whole source under the install layer and
+# made every commit reinstall a dependency tree that had not changed. One
+# line per workspace because a multi-source COPY flattens its sources into
+# the destination directory, losing the paths npm resolves the workspaces by.
+COPY adapters/codex/package.json ./adapters/codex/
+COPY adapters/generic-cli/package.json ./adapters/generic-cli/
+COPY adapters/prompt-cli/package.json ./adapters/prompt-cli/
+COPY apps/cli/package.json ./apps/cli/
+COPY apps/web/package.json ./apps/web/
+COPY apps/worker/package.json ./apps/worker/
+COPY packages/agent-protocol/package.json ./packages/agent-protocol/
+COPY packages/collab/package.json ./packages/collab/
+COPY packages/intent-analysis/package.json ./packages/intent-analysis/
+COPY packages/shared-types/package.json ./packages/shared-types/
+COPY services/api-gateway/package.json ./services/api-gateway/
+COPY services/code-intelligence/package.json ./services/code-intelligence/
+COPY services/coordinator/package.json ./services/coordinator/
+COPY services/integration-service/package.json ./services/integration-service/
+COPY services/persistence/package.json ./services/persistence/
+COPY services/repository-service/package.json ./services/repository-service/
+COPY services/workspace-manager/package.json ./services/workspace-manager/
+RUN npm ci
 COPY apps ./apps
 COPY services ./services
 COPY packages ./packages
 COPY adapters ./adapters
 COPY scripts ./scripts
-RUN npm ci
 # Concurrency capped deliberately. Turbo defaults to ten parallel tasks, and
 # seventeen packages compiling at once peaked at 1061 MB here against 605 MB at
 # two — while taking the same wall-clock time (26s vs 25s), because this build
