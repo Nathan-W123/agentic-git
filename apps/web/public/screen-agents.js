@@ -173,12 +173,21 @@ function agentHero(agent) {
       : agent.presence === "idle"
         ? "Idle"
         : "Online";
+  // The dot has to agree with the word beside it: green is working, amber is
+  // connected and doing nothing. One green dot for both is how an idle agent
+  // came to read as a busy one.
+  const tone =
+    agent.presence === "offline"
+      ? ""
+      : agent.presence === "idle"
+        ? "orange"
+        : "green";
   return `<header class="agent-hero">
     <span class="ah-face">${agentFace(agent, 52)}</span>
     <div class="ah-id">
       <div class="ah-name">${esc(agent.name)}${badge(agent.status)}</div>
       <div class="ah-meta">${
-        agent.presence === "offline" ? "" : '<span class="dot green"></span>'
+        tone === "" ? "" : `<span class="dot ${tone}"></span>`
       }<span>${esc(presence)}</span><span>·</span><span>${esc(
         agent.visibility === "org" ? "Shared with the project" : "Yours only",
       )}</span></div>
@@ -396,15 +405,22 @@ export function renderAgents() {
     </div>
 
     <div class="stat-row">
-      ${statTile({
-        value: agents.filter((agent) => agent.connected).length,
-        label: "Active agents",
-        foot: `<span class="dot green"></span> ${
-          offline === 0 ? "All systems go" : `${offline} offline`
-        }`,
-        iconName: "robot",
-        tone: "green",
-      })}
+      ${
+        // Counted on `connected`, so this is how many agents this account has
+        // a working sign-in for — not how many are doing anything, which is
+        // the Working tile beside it. It was labelled "Active agents", and a
+        // row that opens by calling four idle connections active is the first
+        // thing a reader believes about the screen.
+        statTile({
+          value: agents.filter((agent) => agent.connected).length,
+          label: "Connected agents",
+          foot: `<span class="dot green"></span> ${
+            offline === 0 ? "All systems go" : `${offline} offline`
+          }`,
+          iconName: "robot",
+          tone: "green",
+        })
+      }
       ${statTile({
         value: working,
         label: "Working",
