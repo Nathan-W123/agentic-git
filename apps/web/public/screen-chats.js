@@ -3707,7 +3707,9 @@ function agentSpec(agent, repositoryId) {
         <h3 class="aspec-label">Capabilities</h3>
         <div class="aspec-capabilities">
           ${roleField(currentRepository, currentAssignment, true)}
-          <div class="aspec-capability aspec-current-task">
+          <div class="aspec-capability aspec-current-task${
+            task === undefined ? "" : " aspec-current-task-active"
+          }">
             <span class="aspec-capability-mark">${icon("check")}</span>
             <span class="aspec-capability-copy">
               <span class="aspec-capability-title">${

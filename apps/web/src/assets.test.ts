@@ -3603,11 +3603,42 @@ test("agent details use the reference profile without dropping existing controls
   assert.match(spec, /<h3 class="aspec-label">Works with<\/h3>/u);
   assert.match(spec, /<h3 class="aspec-label">Capabilities<\/h3>/u);
   assert.match(spec, /class="aspec-chip"/u);
-  assert.match(spec, /class="aspec-capability aspec-current-task"/u);
+  assert.match(
+    spec,
+    /class="aspec-capability aspec-current-task\$\{\s*task === undefined \? "" : " aspec-current-task-active"\s*\}"/u,
+  );
   assert.match(panel, /<aside class="thread-panel agent-detail-panel">/u);
   assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(680px, 64vw\)/su);
   assert.match(css, /\.agent-spec \.aspec-chip\s*\{/u);
   assert.match(css, /\.agent-spec \.aspec-capability\s*\{/u);
+
+  // Only a real assignment becomes the primary-colour bubble. Its own copy,
+  // state line, mark, and history control remain legible on that solid surface.
+  const activeTask = /\n\.agent-spec \.aspec-current-task-active \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(activeTask, undefined, "an active task has a shape rule");
+  assert.match(activeTask ?? "", /background: var\(--accent\);/u);
+  assert.match(activeTask ?? "", /border-radius: 14px;/u);
+  for (const child of [
+    "aspec-capability-mark",
+    "aspec-capability-title",
+    "aspec-capability-meta",
+    "aspec-nav",
+  ]) {
+    assert.match(
+      css,
+      new RegExp(`\\.aspec-current-task-active \\.${child}`, "u"),
+    );
+  }
+  assert.match(
+    css,
+    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-nav \{\s*color: #fff;/u,
+  );
+  assert.match(
+    css,
+    /\.aspec-current-task-active \.aspec-nav \{[\s\S]*?background: rgba\(0, 0, 0, 0\.14\);/u,
+  );
 
   // Every interactive or informative part of the former details page remains
   // on the single scrolling surface, including owner-only and read-only paths.

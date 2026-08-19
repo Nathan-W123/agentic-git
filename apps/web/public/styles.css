@@ -6980,6 +6980,39 @@ button.chip.lg:hover {
   border-color: var(--border-soft);
 }
 
+/* A task that exists is the live assignment this profile is about, so it
+   becomes one accent surface instead of another grey capability row. The
+   available-for-work fallback keeps the unmodified row above. */
+.agent-spec .aspec-current-task-active {
+  margin-top: 10px;
+  padding: 13px 14px;
+  border-bottom: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.agent-spec .aspec-current-task-active .aspec-capability-mark,
+.agent-spec .aspec-current-task-active .aspec-capability-title,
+.agent-spec .aspec-current-task-active .aspec-capability-meta,
+.agent-spec .aspec-current-task-active .aspec-nav {
+  color: #fff;
+}
+
+.agent-spec .aspec-current-task-active .aspec-capability-meta {
+  opacity: 0.78;
+}
+
+.agent-spec .aspec-current-task-active .aspec-nav {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.agent-spec .aspec-current-task-active .aspec-nav:hover {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(0, 0, 0, 0.22);
+}
+
 .agent-spec .aspec-note {
   margin-top: 10px;
   color: var(--text-3);
