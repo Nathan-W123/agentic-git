@@ -11,7 +11,13 @@ COPY packages ./packages
 COPY adapters ./adapters
 COPY scripts ./scripts
 RUN npm ci
-RUN npx turbo run build
+# Concurrency capped deliberately. Turbo defaults to ten parallel tasks, and
+# seventeen packages compiling at once peaked at 1061 MB here against 605 MB at
+# two — while taking the same wall-clock time (26s vs 25s), because this build
+# is bound by the dependency graph rather than by CPU. On a build container
+# with a memory ceiling the wide version is the one that dies, and it buys
+# nothing to be wide.
+RUN npx turbo run build --concurrency=2
 # Drop devDependencies (turbo, typescript) from the runtime tree.
 RUN npm prune --omit=dev
 
