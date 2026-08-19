@@ -1696,6 +1696,28 @@ function threadWorkingAuthor(entry, repositoryId) {
   return undefined;
 }
 
+/**
+ * The last agent to have said anything in a thread, whenever it said it.
+ *
+ * `threadWorkingAuthor` answers a narrower question — who is speaking in the
+ * turn happening right now — and goes quiet the moment a run ends, which is
+ * exactly when a log of finished work still needs a name against the row. This
+ * one reads the whole reply history backwards instead, so a thread names the
+ * agent currently on it while it runs and the one that last worked on it once
+ * it has stopped. Replies rather than the root: the root is the request, and
+ * the person who made it is not who did the work.
+ */
+function threadLastAgentAuthor(entry, repositoryId) {
+  const replies = entry.replies ?? [];
+  for (let index = replies.length - 1; index >= 0; index -= 1) {
+    const author = channelAuthor(repositoryId, replies[index]);
+    if (author?.agent !== undefined) {
+      return author;
+    }
+  }
+  return undefined;
+}
+
 /* ------------------------------------------------- message identity ---- */
 
 /* The kinds `channelAuthor` resolves against the agent roster rather than the
@@ -3180,7 +3202,16 @@ function threadListPanel(repositoryId) {
                 const count = replies.filter(
                   (reply) => reply.kind !== "progress" && reply !== titled,
                 ).length;
-                const author = channelAuthor(repositoryId, entry);
+                // The agent that worked the thread, not the person whose
+                // message it hangs under. Every row in a channel one person
+                // asks in carried that same person's name, which answered a
+                // question nobody scanning a work log has; the useful name is
+                // the colleague who did — or is doing — the work. Falls back
+                // to the root author only for a thread no agent has spoken in
+                // yet, where there is no better answer.
+                const author =
+                  threadLastAgentAuthor(entry, repositoryId) ??
+                  channelAuthor(repositoryId, entry);
                 // The one thing a log of finished work cannot say for itself:
                 // which of these is still moving. Marked from the task's own
                 // status, the same signal that keeps the agent's typing dots
