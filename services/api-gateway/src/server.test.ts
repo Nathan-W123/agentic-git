@@ -5118,11 +5118,10 @@ test("a reply whose agent has left the channel says that, not that it is disconn
   assert.doesNotMatch(String(said?.content), /My Agents/u);
 });
 
-test("work asked for inside a thread travels with the thread, beside the objective", async (t) => {
+test("animation work asked for inside a thread is dispatched with its context", async (t) => {
   // Threads have had shared context for talking since agents began answering
-  // follow-ups. Working was the gap: "now update the other file the same way"
-  // reached the agent as an objective and nothing else, with no record of
-  // what "the same way" referred to.
+  // follow-ups. Working was the gap, and desired animation phrased as how the
+  // UI "should be" behaved like a question instead of entering the task path.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -5137,27 +5136,30 @@ test("work asked for inside a thread travels with the thread, beside the objecti
     projectId: DEFAULT_PROJECT_ID,
     kind: "agent",
     authorId: `${ownerId}:anthropic`,
-    content: "On it — renaming the config loader.",
+    content: "The pullout toggle and icon row are ready.",
   });
   await runtime.store.addChannelReply({
     repositoryId,
     messageId: root.id,
     kind: "progress",
     authorId: `${ownerId}:anthropic`,
-    content: "Editing src/config.ts",
+    content: "Inspecting the pullout styles.",
   });
   await runtime.store.addChannelReply({
     repositoryId,
     messageId: root.id,
     kind: "agent",
     authorId: `${ownerId}:anthropic`,
-    content: "Renamed loadConfig to readConfig in src/config.ts.",
+    content: "The icons currently appear and disappear without a transition.",
   });
 
-  runtime.chatAnswer.text = "On it — the endpoint file next.";
+  runtime.chatAnswer.text = "On it — animating the pullout icons.";
+  const request =
+    "when toggling this pullout the icons should be animated pulling out " +
+    "from the arrow and vice versa when coming back in";
   const replied = await owner.request(
     `${base}/messages/${encodeURIComponent(root.id)}/replies`,
-    { method: "POST", body: { content: "now update the endpoint file the same way" } },
+    { method: "POST", body: { content: request } },
   );
   assert.equal(replied.status, 201);
 
@@ -5168,20 +5170,20 @@ test("work asked for inside a thread travels with the thread, beside the objecti
   const [task] = runtime.submittedTasks;
   assert.ok(task !== undefined);
   const context = task.context ?? "";
-  assert.match(context, /renaming the config loader/u);
-  assert.match(context, /Renamed loadConfig to readConfig/u);
+  assert.match(context, /pullout toggle and icon row/u);
+  assert.match(context, /appear and disappear without a transition/u);
   // Progress replies are the run narrating itself. Feeding an agent its own
   // commentary back is noise somebody has already paid for once.
-  assert.doesNotMatch(context, /Editing src\/config\.ts/u);
+  assert.doesNotMatch(context, /Inspecting the pullout styles/u);
   // The request itself is already the objective; sending it twice only tells
   // the model the same thing twice.
-  assert.doesNotMatch(context, /now update the endpoint file the same way/u);
+  assert.doesNotMatch(context, /icons should be animated/u);
 
   // The whole reason this is a field of its own: the objective is rendered in
   // the channel, in task lists and in thread titles, and a transcript folded
   // into it would make every request unreadable in all three.
-  assert.match(task.objective, /update the endpoint file/u);
-  assert.doesNotMatch(task.objective, /config loader/u);
+  assert.match(task.objective, /icons should be animated/u);
+  assert.doesNotMatch(task.objective, /currently appear and disappear/u);
 });
 
 test("a request that merely opens a thread carries nothing; the follow-up in it does", async (t) => {
@@ -11013,6 +11015,7 @@ test("asking about work is not asking for it", () => {
     "which files were updated?",
     "why was the retry loop removed?",
     "has anyone updated the readme?",
+    "how are the pullout icons animated?",
     "what is its default?",
   ]) {
     assert.equal(looksLikeTaskRequest(question), false, question);
@@ -11031,6 +11034,7 @@ test("asking about work is not asking for it", () => {
     "why not just delete that file?",
     "did you see the bug? fix it",
     "which key changed, and can you revert it?",
+    "when toggling this pullout the icons should be animated from the arrow",
   ]) {
     assert.equal(looksLikeTaskRequest(request), true, request);
   }
