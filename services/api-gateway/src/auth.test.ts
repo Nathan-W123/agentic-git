@@ -643,7 +643,7 @@ test("starting registration says whether the code was mailed or only logged", as
   const unmailed = await logOnly.startRegistration({
     email: "nobody@example.com",
     displayName: "Nobody",
-    password: "a-long-enough-password",
+    password: "MailDelivery123!",
   });
 
   // The challenge is still usable — the code is in the log — but the caller is
@@ -657,7 +657,7 @@ test("starting registration says whether the code was mailed or only logged", as
   const mailed = await delivering.startRegistration({
     email: "somebody@example.com",
     displayName: "Somebody",
-    password: "a-long-enough-password",
+    password: "MailDelivery123!",
   });
   assert.equal(mailed.delivery, "mailbox");
 });
