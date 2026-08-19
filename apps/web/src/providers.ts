@@ -2414,10 +2414,10 @@ export class ProviderChatService {
     secret: string;
     label?: string;
     /**
-     * "Personal" (the default) or "org-wide" — see {@link CredentialVisibility}.
-     * Chosen once, at connect time, in the connect modal; a caller that omits
-     * it gets the same personal-only behavior every connection had before
-     * this existed.
+     * "Personal" or "org-wide" — see {@link CredentialVisibility}. Chosen in
+     * the connect modal; a caller that omits it keeps whatever this agent was
+     * already configured as, and gets personal only when there is nothing
+     * stored to keep.
      */
     visibility?: CredentialVisibility;
   }): Promise<ProviderStatus[]> {
@@ -2468,6 +2468,11 @@ export class ProviderChatService {
       );
     }
 
+    const store = await this.credentialStore();
+    // Re-pasting a secret into an agent that already exists repairs it rather
+    // than replaces it, so an unstated choice means the one already stored,
+    // and only a first connection falls back to personal.
+    const previous = await store.summary(input.userId, vendor);
     const account = await this.verifyCredential(input.provider, {
       vendor,
       kind: input.kind,
@@ -2477,10 +2482,9 @@ export class ProviderChatService {
       createdAt: new Date().toISOString(),
       lastVerifiedAt: undefined,
       hint: credentialHint(input.kind, secret),
-      visibility: input.visibility ?? "personal",
+      visibility: input.visibility ?? previous?.visibility ?? "personal",
     });
 
-    const store = await this.credentialStore();
     await store.put(input.userId, vendor, {
       kind: input.kind,
       secret,
@@ -2756,6 +2760,13 @@ export class ProviderChatService {
       const secret = await readFile(authPath, "utf8");
       assertSessionFile("codex", secret);
 
+      const store = await this.credentialStore();
+      // Signing in again is how an expired session is repaired, and the agent
+      // that comes back is the one that was there before — so whoever was
+      // allowed to task it stays allowed to. Device authorization still has no
+      // connect-modal step to offer the personal/org-wide choice in, so a
+      // genuinely first sign-in keeps the safe default.
+      const previous = await store.summary(flow.userId, "codex");
       const account = await this.verifyCredential(flow.provider, {
         vendor: "codex",
         kind: "session_file",
@@ -2765,11 +2776,7 @@ export class ProviderChatService {
         createdAt: new Date().toISOString(),
         lastVerifiedAt: undefined,
         hint: credentialHint("session_file", secret),
-        // Device authorization has no connect-modal step to offer the
-        // personal/org-wide choice in, so it keeps the safe default; a user
-        // who wants this agent org-wide can reconnect it that way once that
-        // UI exists for this flow too.
-        visibility: "personal",
+        visibility: previous?.visibility ?? "personal",
       });
 
       // The one moment a real CODEX_HOME exists on this host. Sign-in runs
@@ -2784,12 +2791,17 @@ export class ProviderChatService {
       // one at login, in which case nothing changes and the suggestions still
       // apply.
       await this.captureCodexModelCache(flow.home);
-      const store = await this.credentialStore();
       await store.put(flow.userId, "codex", {
         kind: "session_file",
         secret,
         origin: "device_auth",
         label: account ?? "ChatGPT sign-in",
+        // Stating it rather than leaning on the store's carry-forward, so the
+        // record this flow writes says the same thing the probe above ran
+        // under.
+        ...(previous?.visibility === undefined
+          ? {}
+          : { visibility: previous.visibility }),
       });
       await store.markVerified(flow.userId, "codex", account);
       await this.ensureConnectionRecord(flow.userId, flow.provider);
@@ -2893,6 +2905,9 @@ export class ProviderChatService {
         typeof report.authMethod === "string" && report.authMethod.length > 0
           ? `Claude sign-in (${report.authMethod})`
           : "Claude sign-in";
+      // No visibility stated, which the store reads as "whatever this agent
+      // already was": signing in again after a session expired must not turn
+      // an org-wide agent back into a personal one.
       await store.put(flow.userId, "claude", {
         kind: "session_file",
         secret,

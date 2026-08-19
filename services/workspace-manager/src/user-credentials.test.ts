@@ -858,3 +858,55 @@ test("the credential key leaves the process environment and still resolves", asy
   // Nothing was written beside the ciphertext, because nothing had to be.
   await assert.rejects(readFile(keyFilePath, "utf8"));
 });
+
+test("reconnecting an org-wide agent keeps it org-wide", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+
+  await vault.put("user-1", "claude", {
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-original",
+    visibility: "org",
+  });
+  // What an expired sign-in looks like in the vault: still stored, no longer
+  // usable, and about to be replaced by the same person signing in again.
+  await vault.markUnusable("user-1", "claude", "The sign-in has expired.");
+
+  // The reconnect states no visibility — neither the sign-in flow nor an
+  // older client sends one — and that must not read as "make it personal".
+  const reconnected = await vault.put("user-1", "claude", {
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-replacement",
+  });
+  assert.equal(reconnected.visibility, "org");
+  assert.equal((await vault.summary("user-1", "claude"))?.visibility, "org");
+
+  // Saying so explicitly is still how the owner changes their mind.
+  const narrowed = await vault.put("user-1", "claude", {
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-replacement",
+    visibility: "personal",
+  });
+  assert.equal(narrowed.visibility, "personal");
+});
+
+test("a first connection is personal until its owner says otherwise", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+
+  const summary = await vault.put("user-1", "codex", {
+    kind: "api_key",
+    secret: "sk-first-connection",
+  });
+  assert.equal(summary.visibility, "personal");
+
+  // And a credential deleted outright takes its choice with it: reconnecting
+  // after a disconnect is a new agent, not a returning one.
+  await vault.setVisibility("user-1", "codex", "org");
+  await vault.delete("user-1", "codex");
+  const fresh = await vault.put("user-1", "codex", {
+    kind: "api_key",
+    secret: "sk-second-connection",
+  });
+  assert.equal(fresh.visibility, "personal");
+});

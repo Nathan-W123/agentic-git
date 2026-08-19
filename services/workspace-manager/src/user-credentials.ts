@@ -143,7 +143,10 @@ export interface UserCredentialInput {
   /** Free text the user supplies to tell their own connections apart. */
   label?: string;
   origin?: CredentialOrigin;
-  /** Defaults to `"personal"` when omitted — see {@link CredentialVisibility}. */
+  /**
+   * Omitted keeps whatever the stored credential already says, and means
+   * `"personal"` when nothing is stored — see {@link CredentialVisibility}.
+   */
   visibility?: CredentialVisibility;
 }
 
@@ -640,13 +643,23 @@ export class UserCredentialStore {
       assertSessionFile(vendor, secret);
     }
     const file = await this.read();
+    // Replacing a secret is not a decision about who may spend it. A sign-in
+    // that expired and was made again is the same agent coming back, and the
+    // reconnect carries no visibility of its own — so rebuilding the record
+    // from the input alone quietly sent every org-wide agent back to personal,
+    // dropping it out of the channels that had learned to @mention it. The
+    // stored choice therefore survives a put that does not state one; a caller
+    // that does state one still wins, and {@link setVisibility} is how a
+    // change of mind is expressed.
+    const previous = file.users[userId]?.[vendor];
+    const visibility = input.visibility ?? previous?.visibility;
     const record: StoredRecord = {
       kind: input.kind,
       ...(input.label === undefined || input.label.length === 0
         ? {}
         : { label: input.label }),
       ...(input.origin === undefined ? {} : { origin: input.origin }),
-      ...(input.visibility === undefined ? {} : { visibility: input.visibility }),
+      ...(visibility === undefined ? {} : { visibility }),
       createdAt: new Date().toISOString(),
       hint: credentialHint(input.kind, secret),
       ...this.encrypt(secret),

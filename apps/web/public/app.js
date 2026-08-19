@@ -847,6 +847,10 @@ async function submitLogin(form) {
         password: String(data.get("password") ?? ""),
       },
     });
+    // The URL still names the form that was just submitted, and boot now
+    // honours that name by signing out again. Naming the landing screen
+    // instead is what lets the session survive its own creation.
+    window.location.hash = "#chats";
     await boot();
   } catch (error) {
     $("#auth-msg").textContent = error.message;
@@ -881,6 +885,7 @@ async function submitBootstrap(form) {
       },
     });
     authMode = "login";
+    window.location.hash = "#chats";
     await boot();
   } catch (error) {
     $("#auth-msg").textContent = error.message;
@@ -3794,6 +3799,14 @@ function applyHash() {
     }
     return;
   }
+  // Signed in, and the URL just changed to name a signed-out form: the same
+  // request as arriving on the link, so it gets the same answer rather than
+  // being dropped for not being a route.
+  const linked = authModeFromHash();
+  if (linked !== undefined && state.principal !== undefined) {
+    void signOutForAuthLink(linked);
+    return;
+  }
   const route = window.location.hash.replace(/^#/u, "") || "chats";
   if (ROUTES.has(route) && route !== state.route) {
     state.route = route;
@@ -5866,6 +5879,24 @@ function showAuth() {
   }
 }
 
+/**
+ * Ends the session an auth link landed on top of, and draws the form it named.
+ *
+ * The sign-out is the point: a sign-in form drawn over a live session is a
+ * dead end, because everything behind it — a reload, another tab, the socket —
+ * still belongs to the previous account. Failure is swallowed rather than
+ * retried; the form still appears, and signing in from it replaces whatever
+ * session is left.
+ */
+async function signOutForAuthLink(mode) {
+  await api("/auth/logout", { method: "POST", body: {} }).catch(
+    () => undefined,
+  );
+  state.principal = undefined;
+  authMode = mode;
+  showAuth();
+}
+
 function showApp() {
   $("#auth-root").hidden = true;
   $("#app-root").hidden = false;
@@ -6084,12 +6115,18 @@ async function boot() {
     }
     state.loadError = error.message;
   }
-  showApp();
-  // Already signed in and following a sign-in link: the form is not what that
-  // person needs, and the hash has to move before the router reads it.
-  if (authModeFromHash() !== undefined) {
-    window.location.hash = "#chats";
+  // A link that names a signed-out form is a request for that form. This used
+  // to be answered by rewriting the hash to "#chats" whenever a session was
+  // already in place, which made `/#signin` open the app of whoever last used
+  // the browser — the one thing somebody following a sign-in link is not
+  // asking for. The link wins instead, and the session it arrived on top of
+  // is ended so the form it opens is one that can actually be used.
+  const linked = authModeFromHash();
+  if (linked !== undefined && state.principal !== undefined) {
+    await signOutForAuthLink(linked);
+    return;
   }
+  showApp();
   applyHash();
   render();
 

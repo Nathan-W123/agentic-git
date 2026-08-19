@@ -2931,3 +2931,85 @@ test("the room's hold line carries a way back to the thread it is about", async 
   assert.match(elbow ?? "", /border-left: 2px solid/u);
   assert.match(elbow ?? "", /border-top: 2px solid/u);
 });
+
+test("a message's face and name open the person and describe them on hover", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  const identityStart = chats.indexOf("function authorIdentity(");
+  const identityEnd = chats.indexOf("\nfunction identityAttrs(", identityStart);
+  const identity = chats.slice(identityStart, identityEnd);
+  assert.notEqual(identityStart, -1, "a message author resolves to an identity");
+  assert.notEqual(identityEnd, -1, "the identity resolver has a boundary");
+
+  // The two destinations the roster already uses, so a face means the same
+  // thing in the transcript as it does in the sidebar.
+  assert.match(identity, /act: "agent-panel-open"/u);
+  assert.match(identity, /act: "dm-open"/u);
+  const browser = await browserSource();
+  assert.match(browser, /case "dm-open":/u);
+  assert.match(browser, /case "agent-panel-open":/u);
+
+  // Nobody presses their own name into a conversation with themselves, and an
+  // agent the roster could not resolve is left alone rather than read as a
+  // person — its author id is `<userId>:<provider>`, which is a direct message
+  // to an id nobody has.
+  assert.match(
+    identity,
+    /userId === "you" \|\|\s*userId === currentUserId\(\) \|\|\s*AGENT_AUTHORED_KINDS\.has\(entry\.kind\)/u,
+  );
+  assert.match(
+    chats,
+    /const AGENT_AUTHORED_KINDS = new Set\(\["agent", "progress", "outcome"\]\)/u,
+  );
+
+  // Both the picture and the name carry the button, and both carry the card.
+  // Wrapped from inside, so the avatar and the header line keep the markup
+  // the rest of the transcript's layout is written against.
+  const rowStart = chats.indexOf("function messageRow(");
+  const row = chats.slice(rowStart, chats.indexOf("\nfunction typingIndicator", rowStart));
+  assert.match(row, /const identity = authorIdentity\(repositoryId, entry, author\)/u);
+  assert.match(
+    row,
+    /<span class="cmsg-avatar">\$\{identityWrap\(\s*identity,\s*authorFace\(author, 32\),/u,
+  );
+  assert.match(
+    row,
+    /class="cmsg-name\$\{[^}]*\}">\$\{identityWrap\(\s*identity,\s*esc\(author\.name\),/u,
+  );
+  // Nobody to open means the face and the name are handed back as they were:
+  // a tab stop that does nothing is worse than no tab stop.
+  assert.match(
+    chats,
+    /function identityWrap\(identity, content\) \{\s*if \(identity === undefined\) \{\s*return content;/u,
+  );
+  assert.match(chats, /\$\{content\}\$\{profileCard\(identity\)\}/u);
+
+  // A span answers the keyboard only because `role=button` plus `data-act` is
+  // the pair app.js's delegated handler looks for.
+  assert.match(chats, /class="cmsg-identity" role="button" tabindex="0"/u);
+  assert.match(chats, /data-act="\$\{esc\(identity\.act\)\}" data-value="\$\{esc\(identity\.value\)\}"/u);
+  assert.match(chats, /aria-label="\$\{esc\(identity\.label\)\}"/u);
+  assert.match(
+    await browserSource(),
+    /const row = event\.target\.closest\?\.\('\[role="button"\]\[data-act\]'\)/u,
+  );
+
+  // Revealed by CSS the way the roster's usage card is, so reading one costs
+  // no request — but delayed, because a pointer crosses many names on its way
+  // down a transcript and an instant card would flash open the whole way.
+  const card = /\n\.profile-card \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(card, undefined, "the hover card has a shape rule");
+  assert.match(card ?? "", /visibility: hidden/u);
+  assert.match(card ?? "", /pointer-events: none/u);
+  assert.match(
+    css,
+    /\.cmsg-identity:hover \.profile-card,\n\.cmsg-identity:focus-within \.profile-card \{[\s\S]*?visibility: visible;[\s\S]*?transition-delay/u,
+  );
+  // On a touch screen the tap is the action; a card under the finger only
+  // covers what it describes.
+  assert.match(
+    css,
+    /@media \(hover: none\) \{\n {2}\.profile-card \{\n {4}display: none;/u,
+  );
+});
