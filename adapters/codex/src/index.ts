@@ -18,6 +18,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  isBlanketClaim,
   readsAsReportRequest,
   scopeChangeGranted,
   substituteGroundedNames,
@@ -975,6 +976,19 @@ export class CodexAdapter implements AgentAdapter {
       }
       throw error;
     }
+  }
+
+  /**
+   * Takes the coordinator's word for what this session may touch, in place of
+   * the planning round trip a task alone in its repository does not need.
+   */
+  public async acceptBlanketClaim(
+    sessionId: string,
+    plan: AgentPlan,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    record.plan = structuredClone(plan);
+    await this.destroyPlanningWorkspace(record);
   }
 
   public async requestReplan(
@@ -1961,6 +1975,17 @@ export class CodexAdapter implements AgentAdapter {
         "saying exactly what is missing.",
       `Task: ${taskObjective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
+      ...(approvedPlan !== undefined && isBlanketClaim(approvedPlan)
+        ? [
+            "You hold the whole repository: nobody asked you for a file " +
+              "list because nothing else is running here, so edit whatever " +
+              "the objective genuinely requires. If another task starts " +
+              "while you work, your claim is narrowed to the directories " +
+              "you have already touched, and reaching outside them from " +
+              "then on can be refused — so if you are told a file is " +
+              "taken, report that honestly instead of editing it anyway.",
+          ]
+        : []),
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
       // Answers already given, so a later round does not ask the same thing

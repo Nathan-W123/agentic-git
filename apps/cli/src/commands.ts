@@ -50,6 +50,7 @@ import {
 import { LeasePlanAuthority } from "./lease-admission.js";
 import type { AgentConfig, CoordinatorProject } from "./project.js";
 import {
+  configuredBlanketClaims,
   configuredRepositoryParallelism,
   WORK_LEASE_TTL_MS,
 } from "./worker-operations.js";
@@ -1319,6 +1320,7 @@ export async function runPendingTasks(
               [...leases].map(([taskId, lease]) => [taskId, lease.id]),
             ),
             repositories,
+            blanketClaims: configuredBlanketClaims(),
             ...(options.intelligence === undefined
               ? {}
               : { intelligence: options.intelligence }),

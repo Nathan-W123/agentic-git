@@ -110,6 +110,32 @@ publishing its plan; `apps/cli/src/lease-admission.ts` is that bridge, and
 `docs/handoff/lease-referee.md` records what the arbitration looked like during
 the period when the local runner skipped it.
 
+### The plan a solo task never writes
+
+A plan exists so somebody else can arbitrate against it. A task alone in its
+repository has nobody, so it is granted a *blanket claim* — the whole
+repository, recorded on its lease, with no agent call at all — and starts
+editing immediately. Nothing can conflict with it, because nothing else can be
+admitted while it is held.
+
+When a second task is leased in that repository, the holder's coordinator
+notices (`Coordinator.watchBlanketClaim`) and *freezes* its claim to the files
+it has actually touched, read synchronously from its worktree at that moment —
+never from the periodic working-change poll, which is allowed to lag by design.
+The narrowed claim is written under the same compare-and-swap every admission
+uses. From then on the holder is an ordinary claimed task: reaching outside its
+claim goes through the existing widening path, which grants if free and refuses
+immediately if taken, and a refusal at collection ends in a report naming the
+file and the holder rather than a silent escape.
+
+Both shapes are ordinary `AgentPlan`s carrying a `claim` marker, which is what
+lets scope enforcement, ownership, conflict assessment and partial admission
+keep working on a task that was never planned. The claim is frozen to whole
+directories rather than individual files, so a wide refactor caught mid-sweep
+keeps moving; `docs/benchmarks/blanket-claim.md` measures how often a task is
+alone at all and records the window this leaves. `COORD_BLANKET_CLAIM=0` puts
+every task back through planning.
+
 The answer is all-or-nothing first, because that answer needs no qualification.
 Only a wholly refused plan is asked the finer question — is *some* of it free? —
 and it is answered by re-deciding a reduced plan rather than waving the

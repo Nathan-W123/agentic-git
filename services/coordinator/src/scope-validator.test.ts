@@ -49,3 +49,37 @@ test("rejects unapproved scope expansion", () => {
   );
 });
 
+
+test("a repository-wide claim approves what it never declared", () => {
+  // The task that was never asked for a file list still has to settle, and
+  // its changeset is validated against a plan naming nothing.
+  const claimed = {
+    ...plan,
+    expectedFiles: [],
+    claim: { kind: "blanket" as const, grantedAt: "2026-01-01T00:00:00.000Z" },
+  };
+
+  assert.doesNotThrow(() =>
+    assertChangeSetWithinPlan(claimed, changeSet("src/anything.ts")),
+  );
+});
+
+test("a frozen claim approves its directories and refuses the rest", () => {
+  const frozen = {
+    ...plan,
+    expectedFiles: ["src/render/canvas.ts"],
+    claim: {
+      kind: "frozen" as const,
+      directories: ["src/render/"],
+      frozenAt: "2026-01-01T00:00:00.000Z",
+    },
+  };
+
+  assert.doesNotThrow(() =>
+    assertChangeSetWithinPlan(frozen, changeSet("src/render/mesh.ts")),
+  );
+  assert.throws(
+    () => assertChangeSetWithinPlan(frozen, changeSet("src/audio/mixer.ts")),
+    ScopeExpansionError,
+  );
+});

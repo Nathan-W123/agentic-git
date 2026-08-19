@@ -124,6 +124,27 @@ export function configuredRepositoryParallelism(explicit?: number): number {
 }
 
 /**
+ * Whether a task alone in its repository is handed the whole of it instead of
+ * being asked to plan.
+ *
+ * On unless a deployment says otherwise. The claim costs nothing to give —
+ * nothing else can be admitted while it is held — and it removes the single
+ * largest fixed delay before a solo task's first edit. `COORD_BLANKET_CLAIM=0`
+ * puts every task back through planning, which is the state the system was in
+ * before this existed.
+ */
+export function configuredBlanketClaims(explicit?: boolean): boolean {
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  const raw = process.env["COORD_BLANKET_CLAIM"]?.trim().toLowerCase() ?? "";
+  if (raw.length === 0) {
+    return true;
+  }
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
+/**
  * Wire version of the remote worker protocol.
  *
  * 1 planned and executed in one shot and posted a result.

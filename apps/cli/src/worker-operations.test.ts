@@ -4,6 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+// The blanket-claim tests live in a file of their own, and this package names
+// the test files it runs one by one rather than globbing them. Importing them
+// here is what puts them in the run; without it the file would be compiled,
+// type-checked, and never executed.
+import "./blanket-claim.test.js";
+
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,

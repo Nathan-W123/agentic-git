@@ -405,6 +405,20 @@ export interface AgentAdapter {
 
   requestPlan(sessionId: string): Promise<AgentPlan>;
 
+  /**
+   * Tells the session what it may touch, instead of asking it.
+   *
+   * Used for the one plan an agent never writes: a task alone in its
+   * repository is granted all of it, and the planning round trip that would
+   * otherwise produce something for a second task to arbitrate against is
+   * skipped entirely. The session is left exactly as `requestPlan` would have
+   * left it — a plan is on the record, so execution proceeds unchanged.
+   *
+   * Optional: an adapter without it simply keeps planning, and the
+   * coordinator never offers it a blanket claim.
+   */
+  acceptBlanketClaim?(sessionId: string, plan: AgentPlan): Promise<void>;
+
   requestReplan(
     sessionId: string,
     request: ReplanRequest,
