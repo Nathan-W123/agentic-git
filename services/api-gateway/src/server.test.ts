@@ -12604,3 +12604,58 @@ test("registration says so when the deployment has no relay and only logged the 
   assert.equal(logged.length, 1);
   assert.match(logged[0] ?? "", /confirmation code/iu);
 });
+
+/**
+ * Reported as data loss, and it was not: the records were untouched. A second
+ * account had been created on the deployment, and signing back in as the
+ * first showed an empty workspace — because the owner administers every
+ * organization on the deployment and the list came back ordered by name, so
+ * the newcomer's took the head of it.
+ */
+test("a newer account's workspace never displaces the owner's own", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  // Registration hands a self-signed-up account its own organization, named
+  // after them — and "Aria's team" sorts ahead of the owner's "Relay Test".
+  const newcomer = new TestClient(runtime.origin);
+  const registered = await registerAccount(newcomer, runtime.mail, {
+    email: "aria@example.com",
+    displayName: "Aria",
+    password: PASSWORD,
+  });
+  assert.equal(registered.status, 201, JSON.stringify(registered.data));
+
+  const listed = await owner.request("/api/v1/organizations");
+  assert.equal(listed.status, 200);
+  const organizations = listed.data.organizations as {
+    id: string;
+    name: string;
+  }[];
+
+  // A system administrator really can reach it, and it stays listed: hiding
+  // it would break the administration the role exists for.
+  assert.ok(
+    organizations.some((entry) => entry.name === "Aria's team"),
+    "the administrator can still reach every organization",
+  );
+  // But it is not what they are shown. The control room opens whatever comes
+  // first, so ordering by name alone handed the owner somebody else's empty
+  // workspace and read as having lost their own.
+  assert.equal(
+    organizations[0]?.name,
+    "Relay Test",
+    "the owner's own organization leads their list",
+  );
+
+  // And the boundary still holds in the other direction: the newcomer sees
+  // one organization, theirs.
+  const theirs = await newcomer.request("/api/v1/organizations");
+  assert.deepEqual(
+    (theirs.data.organizations as { name: string }[]).map(
+      (entry) => entry.name,
+    ),
+    ["Aria's team"],
+  );
+});

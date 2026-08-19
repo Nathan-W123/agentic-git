@@ -3110,3 +3110,125 @@ test("a message's face and name open the person and describe them on hover", asy
     /@media \(hover: none\) \{\n {2}\.profile-card \{\n {4}display: none;/u,
   );
 });
+
+/* --------------------------------------------------- account boundary ---- */
+
+/**
+ * What the browser remembers has to belong to whoever is signed in.
+ *
+ * Signing out cleared the session and reloaded, and left every stored pointer
+ * behind: the selected organization, project and room, the drafts, the read
+ * markers. Signing in as somebody else then inherited all of it — and because
+ * the deployment's first account administers every organization on it, the
+ * inherited selection was perfectly reachable and nothing reset it. The owner
+ * signed back in and was shown a newer account's empty workspace, which is
+ * indistinguishable from having lost everything.
+ */
+type Forget = (
+  storage: {
+    getItem: (key: string) => string | null;
+    setItem: (key: string, value: string) => void;
+    removeItem: (key: string) => void;
+  },
+  userId: string,
+) => boolean;
+
+function fakeStorage(seed: Record<string, string>) {
+  const map = new Map(Object.entries(seed));
+  return {
+    map,
+    getItem: (key: string) => map.get(key) ?? null,
+    setItem: (key: string, value: string) => void map.set(key, value),
+    removeItem: (key: string) => void map.delete(key),
+  };
+}
+
+async function forgetOtherAccount(): Promise<Forget> {
+  return extract<Forget>(
+    await publicFile("data.js"),
+    "forgetOtherAccount",
+    "csrfToken",
+  );
+}
+
+test("a different account does not inherit the last one's workspace", async () => {
+  const forget = await forgetOtherAccount();
+  const storage = fakeStorage({
+    "ag.user": "user_owner",
+    "ag.org": "org_someone_else",
+    "ag.project": "proj_someone_else",
+    "ag.repo": "repo_someone_else",
+    "ag.chandrafts": '{"chan_1":"half-written message"}',
+    "ag.chanread": '{"chan_1":42}',
+    "ag.favourites": '["repo_a"]',
+  });
+
+  assert.equal(forget(storage, "user_newcomer"), true);
+
+  // The selection is what produced the report. A room pointer that survives a
+  // change of account sends the arriving one to a tenant it has no business
+  // opening — or, for an administrator, to an empty one that is not theirs.
+  assert.equal(storage.getItem("ag.org"), null);
+  assert.equal(storage.getItem("ag.project"), null);
+  assert.equal(storage.getItem("ag.repo"), null);
+  // And a draft is somebody's unsent words. Leaving it is a leak, not a
+  // convenience.
+  assert.equal(storage.getItem("ag.chandrafts"), null);
+  assert.equal(storage.getItem("ag.chanread"), null);
+  assert.equal(storage.getItem("ag.favourites"), null);
+  assert.equal(storage.getItem("ag.user"), "user_newcomer");
+});
+
+test("signing back in as the same account keeps where you were", async () => {
+  const forget = await forgetOtherAccount();
+  const storage = fakeStorage({
+    "ag.user": "user_owner",
+    "ag.org": "org_local",
+    "ag.repo": "repo_greeter",
+    "ag.chandrafts": '{"chan_1":"half-written message"}',
+  });
+
+  // No reload, and nothing dropped: reopening the tab is not a change of
+  // account, and losing an unsent draft to a page refresh would be its own
+  // small betrayal.
+  assert.equal(forget(storage, "user_owner"), false);
+  assert.equal(storage.getItem("ag.org"), "org_local");
+  assert.equal(storage.getItem("ag.repo"), "repo_greeter");
+  assert.equal(
+    storage.getItem("ag.chandrafts"),
+    '{"chan_1":"half-written message"}',
+  );
+});
+
+test("this browser's own preferences survive a change of account", async () => {
+  const forget = await forgetOtherAccount();
+  const storage = fakeStorage({
+    "ag.user": "user_owner",
+    "ag.org": "org_local",
+    "ag.theme": "dark",
+    "ag.accent": "#7c5cff",
+    "ag.navCollapsed": "true",
+    "ag.panelWidth": "420",
+    "ag.diffMode": "split",
+  });
+
+  assert.equal(forget(storage, "user_newcomer"), true);
+
+  // These describe the machine, not the person. A shared laptop changing
+  // colour scheme because a colleague signed in would be a bug of its own.
+  assert.equal(storage.getItem("ag.theme"), "dark");
+  assert.equal(storage.getItem("ag.accent"), "#7c5cff");
+  assert.equal(storage.getItem("ag.navCollapsed"), "true");
+  assert.equal(storage.getItem("ag.panelWidth"), "420");
+  assert.equal(storage.getItem("ag.diffMode"), "split");
+});
+
+test("a browser that has never been signed in is not reloaded", async () => {
+  const forget = await forgetOtherAccount();
+  const storage = fakeStorage({});
+
+  // Nothing was inherited, so there is nothing to start clean from — a reload
+  // here would be a visible stutter on every first sign-in for no reason.
+  assert.equal(forget(storage, "user_owner"), false);
+  assert.equal(storage.getItem("ag.user"), "user_owner");
+});

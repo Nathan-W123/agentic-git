@@ -9090,32 +9090,47 @@ export class ApiGateway {
   }
 
   /**
-   * Organizations the caller can reach at all.
+   * Organizations the caller can reach at all, their own first.
    *
    * Membership is no longer the only route in: somebody invited to a single
    * repository holds a grant and no organization role, and listing only their
    * memberships would leave them signed in and staring at nothing. The
    * organizations behind their grants are added so the interface can find the
    * project the repository lives in.
+   *
+   * Order is part of the answer, not a detail. A system administrator reaches
+   * every organization on the deployment, and the store returns them by name,
+   * so a second person signing up could land at the head of the owner's list
+   * — and an interface that opens whatever comes first would show the owner
+   * somebody else's empty workspace instead of their own. The caller's own
+   * memberships lead; everything they can only reach by administration or by
+   * grant follows.
    */
   private async reachableOrganizations(
     principal: AuthenticatedPrincipal,
   ): Promise<Organization[]> {
     const byMembership = await this.options.store.listOrganizations(
-      principal.user.systemAdmin ? undefined : principal.user.id,
+      principal.user.id,
     );
+    const seen = new Set(byMembership.map((entry) => entry.id));
+    const found = [...byMembership];
     if (principal.user.systemAdmin) {
-      return byMembership;
+      for (const organization of await this.options.store.listOrganizations()) {
+        if (seen.has(organization.id)) {
+          continue;
+        }
+        found.push(organization);
+        seen.add(organization.id);
+      }
+      return found;
     }
     const grants = await this.options.store.listGrantsForUser(
       principal.user.id,
     );
     if (grants.length === 0) {
-      return byMembership;
+      return found;
     }
     const granted = new Set(grants.map((grant) => grant.repositoryId));
-    const seen = new Set(byMembership.map((entry) => entry.id));
-    const found = [...byMembership];
     for (const organization of await this.options.store.listOrganizations()) {
       if (seen.has(organization.id)) {
         continue;
