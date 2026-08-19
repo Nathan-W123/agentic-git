@@ -3672,6 +3672,27 @@ const MOTION_SURFACES = [
     enter: "scrim-entering",
     leave: "scrim-leaving",
   },
+  // The channel header's tool tray, which comes out of the arrow beside it
+  // and folds back into it. The arrow is what a reader clicked, so the icons
+  // travel to and from that one point rather than fading where they stand.
+  //
+  // Where it goes back matters here in a way it does not for a panel:
+  // appended, a tray on its way out would reappear on the far side of the
+  // arrow it is supposed to be retreating into, which is why `place` exists.
+  {
+    selector: ".chan-tools",
+    parent: ".chan-head",
+    enter: "tools-entering",
+    leave: "tools-leaving",
+    place: (parent, node) => {
+      const toggle = parent.querySelector(".chan-tools-toggle");
+      if (toggle === null) {
+        parent.append(node);
+        return;
+      }
+      toggle.before(node);
+    },
+  },
 ];
 
 /** Whether each surface was on screen, and the element it was, before the swap. */
@@ -3727,7 +3748,11 @@ function playSurfaceMotion(root) {
     // Back in the document, but not back in the interface: it answers to
     // nothing, takes no focus, and is gone before the animation is cold.
     closed.inert = true;
-    parent.append(closed);
+    if (surface.place === undefined) {
+      parent.append(closed);
+    } else {
+      surface.place(parent, closed);
+    }
     animateOnce(closed, surface.leave, true);
   }
 }

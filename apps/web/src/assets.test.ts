@@ -528,6 +528,69 @@ test("the pink tools toggle animates without replacing its node", async () => {
   );
 });
 
+test("the header tools come out of the arrow and fold back into it", async () => {
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  // A screen is one `innerHTML` assignment, so the tray is a new element on
+  // every render and a bare CSS animation would replay the reveal whenever
+  // anything redrew. It joins the surfaces the render loop decides for.
+  const surfaces = app.slice(
+    app.indexOf("const MOTION_SURFACES = ["),
+    app.indexOf("/** Whether each surface was on screen"),
+  );
+  assert.match(
+    surfaces,
+    /selector: "\.chan-tools",\s*parent: "\.chan-head",\s*enter: "tools-entering",\s*leave: "tools-leaving",/u,
+  );
+
+  // A tray on its way out has to go back beside the arrow it is retreating
+  // into, not appended past it on the far side.
+  assert.match(surfaces, /place: \(parent, node\) => \{[\s\S]{0,200}toggle\.before\(node\);/u);
+  const play = app.slice(
+    app.indexOf("function playSurfaceMotion"),
+    app.indexOf("function animateOnce"),
+  );
+  assert.match(
+    play,
+    /if \(surface\.place === undefined\) \{\s*parent\.append\(closed\);\s*\} else \{\s*surface\.place\(parent, closed\);/u,
+  );
+
+  // Out of the arrow rather than in place: each icon starts the distance it
+  // sits from the arrow away from itself, and the row is staggered so it
+  // unfolds from that one point.
+  assert.match(
+    css,
+    /\.chan-tools\.tools-entering > \* \{\s*--tool-shift: 42px;\s*animation: chan-tool-out/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools\.tools-entering > \*:nth-last-child\(2\) \{\s*--tool-shift: 74px;\s*animation-delay: 0\.03s;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools\.tools-leaving > \*:nth-child\(2\) \{\s*animation-delay: 0\.03s;/u,
+  );
+  assert.match(
+    css,
+    /@keyframes chan-tool-out \{\s*from \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
+  );
+  assert.match(
+    css,
+    /@keyframes chan-tool-in \{\s*to \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
+  );
+
+  // The stagger has to finish inside the fallback timer that drops a closing
+  // surface, or the tray outlives its own exit.
+  assert.match(css, /animation: chan-tool-in 0\.18s/u);
+  assert.match(css, /\.chan-tools\.tools-leaving > \*:nth-child\(n \+ 5\) \{\s*animation-delay: 0\.12s;/u);
+
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.chan-tools\.tools-entering > \* \{\s*animation: none;\s*\}[\s\S]{0,320}\.chan-tools\.tools-leaving \{\s*display: none;/u,
+  );
+});
+
 test("the phone drawer is dragged out under the finger, not toggled", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
