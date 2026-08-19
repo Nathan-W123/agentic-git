@@ -4972,6 +4972,16 @@ button.chip.lg:hover {
 }
 
 .cmsg-row {
+  /* One column for the whole connector, named once. `--cmsg-body-x` is the
+     distance from the row's left edge to the body's text — 8px of row
+     padding, the 32px face, the 12px column gap — and `--cmsg-stem-x` is
+     where the stem stands inside that gutter. The stem crossing a grouped
+     row is placed from the row, while the final segment and its elbow are
+     placed from the body, so the three only read as one line while they
+     agree about this column. Spelling it out is what stops them drifting
+     apart when any of those three numbers moves. */
+  --cmsg-body-x: 52px;
+  --cmsg-stem-x: 23px;
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -5013,8 +5023,10 @@ button.chip.lg:hover {
   padding-bottom: 1px;
 }
 
+/* No face on this line, so the body pays for the gutter itself — the same
+   gutter, minus the row padding it already sits inside. */
 .cmsg-row.cmsg-compact .cmsg-body {
-  margin-left: 44px;
+  margin-left: calc(var(--cmsg-body-x) - 8px);
 }
 
 .cmsg-row.cmsg-compact .cmsg-text {
@@ -5028,7 +5040,7 @@ button.chip.lg:hover {
 .cmsg-row.cmsg-thread-path-through::before {
   content: "";
   position: absolute;
-  left: 23px;
+  left: var(--cmsg-stem-x);
   top: -1px;
   bottom: -1px;
   border-left: 3px solid var(--border-strong);
@@ -5050,25 +5062,30 @@ button.chip.lg:hover {
 }
 
 /* Where the stem stops is the whole of whether the turn reads as one line.
-   The route's foot sits fourteen pixels below the middle of the thread link
-   — half the link, plus the descent of the line box the inline-flex link
-   stands on — so `bottom: 25px` ends the stroke eleven pixels above that
-   middle, which is where the elbow's own upright stands. It used to stop at
-   `bottom: 11px`, level with the *outer bottom* of the elbow — but by that
-   point the elbow has curved away to the right, so the last pixels of the
-   stem stood alone beside the corner as a tail poking past the swoosh.
-   The stem now finishes inside the straight part of that upright, four
-   pixels below its top and three above where the curve begins, so the two
-   strokes overlap in the same column and no join is visible. Any change here
-   has to keep the end within that upright (see the height and top of
-   `.cmsg-row.cmsg-threaded .cmsg-thread-link::before`) — too low and the
-   tail comes back, too high and the line breaks in two. */
+   The route's foot is the foot of the thread link itself — see the
+   `vertical-align` on `.cmsg-thread-link`, which is what takes the line
+   box's descent out of this sum — so `bottom: 23px` ends the stroke eleven
+   pixels above the middle of that 24px link, which is where the elbow's own
+   upright stands. It used to stop at `bottom: 11px`, level with the *outer
+   bottom* of the elbow — but by that point the elbow has curved away to the
+   right, so the last pixels of the stem stood alone beside the corner as a
+   tail poking past the swoosh. The stem now finishes inside the straight
+   part of that upright, four pixels below its top and three above where the
+   curve begins, so the two strokes overlap in the same column and no join is
+   visible. Any change here has to keep the end within that upright (see the
+   height and top of `.cmsg-row.cmsg-threaded .cmsg-thread-link::before`) —
+   too low and the tail comes back, too high and the line breaks in two.
+
+   The stroke is dropped two pixels above the wrapper so it overlaps the stem
+   of the row above rather than meeting it exactly: a group whose prompts each
+   carry a task is one path drawn in several pieces, and a hairline of rounding
+   between two of those pieces is a broken line. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before {
   content: "";
   position: absolute;
-  left: -29px;
+  left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
-  bottom: 25px;
+  bottom: 23px;
   border-left: 3px solid var(--border-strong);
   pointer-events: none;
 }
@@ -5633,6 +5650,15 @@ button.chip.lg:hover {
   margin-top: 6px;
   padding: 2px 0;
   text-align: left;
+  /* Sat on the baseline, the link left the descent of its line box below it,
+     and the wrapper the stem is measured from ended that far past the link.
+     The descent is whatever the inherited font metrics say — which is not the
+     same number on a phone, where the browser is free to inflate transcript
+     text — so the stem's foot moved while the elbow it has to meet did not,
+     and past four pixels of drift the two came apart. Aligned to the bottom
+     of the line box, the wrapper ends where the link ends, and the join is
+     the same on every screen. */
+  vertical-align: bottom;
 }
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
@@ -5644,9 +5670,10 @@ button.chip.lg:hover {
    own three-pixel left stroke hung *outside* the declared width and pushed
    the whole corner three pixels further left than the stem it turns out of —
    a visible step where the two should be one line. Sized by the border box,
-   13px of gap plus 16px of elbow put that stroke at -29px, exactly where the
-   stem above it stands. Any change to the gap or the width has to keep that
-   sum at 29 (see `.cmsg-thread-route::before`), or the step comes back.
+   the gap plus the 16px of elbow put that stroke in the connector's own
+   column, exactly where the stem above it stands: the gap is read from
+   `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
+   fall out of step with the stems either side of it.
 
    Top and height are read together: the difference between them (18 - 15) is
    what puts the horizontal run three pixels below the link's middle, where it
@@ -5658,7 +5685,7 @@ button.chip.lg:hover {
   position: absolute;
   box-sizing: border-box;
   top: calc(50% - 15px);
-  right: calc(100% + 13px);
+  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 16px);
   width: 16px;
   height: 18px;
   border-left: 3px solid var(--border-strong);
