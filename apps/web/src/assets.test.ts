@@ -2785,6 +2785,68 @@ test("each task turn puts its own thinking below its prompt and starts closed", 
   );
 });
 
+test("the progress bar restarts for each task turn in a thread", async () => {
+  const source = await publicFile("screen-chats.js");
+  const progressStart = source.indexOf("function threadProgress(entry)");
+  const progressEnd = source.indexOf("\n/*", progressStart);
+  const turnsStart = source.indexOf("function threadReplyTurns(replies)");
+  const turnsEnd = source.indexOf(
+    "\n/** One turn's narration",
+    turnsStart,
+  );
+  assert.notEqual(progressStart, -1, "thread progress should still be derived");
+  assert.notEqual(progressEnd, -1, "thread progress should have a boundary");
+  assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
+  assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
+
+  const progress = Function(
+    "state",
+    "THREAD_FINISHED_RE",
+    `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
+      progressStart,
+      progressEnd,
+    )}\nreturn threadProgress;`,
+  )(
+    { tasks: [{ id: "task-1", status: "claimed" }] },
+    /^(Done —|I could not|This was cancelled)/u,
+  ) as (entry: {
+    taskId: string;
+    replies: Array<{ kind: string; content: string }>;
+  }) => number | undefined;
+
+  const thread = {
+    taskId: "task-1",
+    replies: [
+      { kind: "progress", content: "Planning workspace prepared" },
+      { kind: "progress", content: "Done — the first task landed" },
+      { kind: "outcome", content: "The first task is complete" },
+      { kind: "user", content: "Please do one more task in this thread" },
+      { kind: "progress", content: "Planning workspace prepared" },
+      { kind: "progress", content: "Execution started" },
+    ],
+  };
+
+  assert.equal(
+    progress(thread),
+    20,
+    "an earlier ending must not hide the active turn's progress",
+  );
+  assert.equal(
+    progress({
+      ...thread,
+      replies: thread.replies.filter((reply) => reply.kind !== "user"),
+    }),
+    20,
+    "a task added without a copied prompt must restart progress too",
+  );
+  thread.replies.push({ kind: "outcome", content: "The follow-up is complete" });
+  assert.equal(
+    progress(thread),
+    undefined,
+    "the bar should still disappear when the current turn ends",
+  );
+});
+
 test("the working dots come back for the next turn in a finished thread", async () => {
   // The same turn, silent twice: a thread whose earlier turn ended is exactly
   // where the next request is made, and asking whether the thread had *ever*

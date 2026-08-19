@@ -1483,7 +1483,13 @@ function changedFilesBlock(entry, repositoryId) {
  * a fixed milestone, which is all a phase deserves.
  */
 function threadProgress(entry) {
-  const replies = entry.replies ?? [];
+  // Only the newest turn can be moving. A completed turn leaves its outcome
+  // and fixed ending in the thread forever; reading the whole reply history
+  // meant either one hid the bar when somebody added more work to the same
+  // thread. `threadReplyTurns` already owns both kinds of turn boundary, so
+  // the bar and the transcript now agree about which run is current.
+  const turns = threadReplyTurns(entry.replies ?? []);
+  const replies = turns[turns.length - 1]?.replies ?? [];
   if (replies.length === 0) {
     return undefined;
   }
