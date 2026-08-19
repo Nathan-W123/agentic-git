@@ -454,3 +454,64 @@ test("Google has no sign-in flow to drive, and says so", async () => {
     /no sign-in flow that can be driven from a server/u,
   );
 });
+
+test("signing in again after an expired session keeps an org-wide agent org-wide", async () => {
+  const harness = await createHarness();
+  const device = scriptedDeviceAuth({ writesAuthJson: CODEX_SESSION });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "login"
+          ? output(JSON.stringify({ loggedIn: true }))
+          : output(
+              JSON.stringify({
+                type: "item.completed",
+                item: { type: "agent_message", text: "pong" },
+              }),
+            ),
+    }),
+    longRunningSpawner: device.spawner,
+  });
+
+  const first = await service.startDeviceAuth({
+    userId: "u1",
+    provider: "openai",
+  });
+  device.finish();
+  assert.equal(await settledStatus(service, "u1", first.flowId), "completed");
+
+  // The owner opens this agent up to the whole organization, which is what
+  // makes it @mentionable in the channels it works in.
+  await service.setSettings({
+    userId: "u1",
+    provider: "openai",
+    visibility: "org",
+  });
+
+  // Then the session expires, which is exactly why they sign in again. This
+  // flow never asks about visibility, and answering "personal" on its behalf
+  // quietly took the agent away from everyone who had been tasking it.
+  await service.noteAuthFailure({
+    userId: "u1",
+    provider: "openai",
+    reason: "The sign-in has expired. Reconnect this agent.",
+  });
+
+  const again = await service.startDeviceAuth({
+    userId: "u1",
+    provider: "openai",
+  });
+  device.finish();
+  assert.equal(await settledStatus(service, "u1", again.flowId), "completed");
+
+  const statuses = await service.list({ userId: "u1", systemAdmin: false });
+  const openai = statuses.find((entry) => entry.id === "openai");
+  assert.equal(openai?.ownCredential?.visibility, "org");
+  assert.equal(openai?.ownCredential?.unusableReason, undefined);
+  const roster = await service.listConnectionsFor(["u1"]);
+  assert.deepEqual(
+    roster["u1"]?.map((entry) => [entry.provider, entry.visibility]),
+    [["openai", "org"]],
+  );
+});

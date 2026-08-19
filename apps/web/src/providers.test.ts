@@ -2492,3 +2492,74 @@ test("an answer already written survives a non-zero exit", async () => {
   );
   assert.equal(empty.text, "");
 });
+
+test("an expired org-wide agent comes back org-wide, not private", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) =>
+        args[0] === "auth"
+          ? output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+          : output(
+              [
+                JSON.stringify({
+                  type: "assistant",
+                  message: { content: [{ type: "text", text: "pong" }] },
+                }),
+                JSON.stringify({
+                  type: "result",
+                  is_error: false,
+                  result: "pong",
+                  session_id: "sess-reconnect",
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                }),
+              ].join("\n"),
+            ),
+    }),
+  });
+
+  const connected = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-org-wide-token",
+    visibility: "org",
+  });
+  assert.equal(
+    connected.find((entry) => entry.id === "anthropic")?.ownCredential
+      ?.visibility,
+    "org",
+  );
+
+  // What expiry does to a stored agent: it is still there, and still the
+  // agent the channel knows, but nothing it is asked to do authenticates.
+  await service.noteAuthFailure({
+    userId: "u1",
+    provider: "anthropic",
+    reason: "The sign-in has expired. Reconnect this agent.",
+  });
+
+  // The reconnect says nothing about who may task it — the dashboard's
+  // connect box sends a visibility only to ask for something other than the
+  // default — and that used to hand the agent back as personal, so every
+  // teammate who could @mention it silently lost it.
+  const reconnected = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-fresh-token",
+  });
+  assert.equal(
+    reconnected.find((entry) => entry.id === "anthropic")?.ownCredential
+      ?.visibility,
+    "org",
+  );
+
+  // And the roster every other member reads agrees.
+  const roster = await service.listConnectionsFor(["u1"]);
+  assert.deepEqual(
+    roster["u1"]?.map((entry) => [entry.provider, entry.visibility]),
+    [["anthropic", "org"]],
+  );
+});
