@@ -1595,11 +1595,15 @@ function textMentionsName(content: string, name: string): boolean {
 /* ------------------------------------------------- no-mention auto-claim --
  *
  * When a channel message carries no "@" at all, `maybeAutoClaimTask` (near
- * `dispatchChannelMentions`) decides whether it reads as a task and, if so,
- * whether exactly one connected agent is a clear enough fit to dispatch to
- * without being asked by name. Everything below is that decision's two
- * halves — "is this a task" and "who fits" — kept as free functions so each
- * is independently readable and testable.
+ * `dispatchChannelMentions`) decides whether exactly one connected agent is
+ * a clear enough fit to hand it to, and then asks that agent what to do
+ * about it: take it, propose something and wait for a yes, or say nothing.
+ *
+ * "Is this a task" used to be answered here, by a word list. It no longer
+ * is — the agent reads the sentence, because the difference between "update
+ * the readme" and "the update went out" is not in the words. What is left
+ * below is the half a list can answer: who fits, scored deterministically
+ * and kept as free functions so it stays independently testable.
  */
 
 /**
@@ -1801,73 +1805,86 @@ const THREAD_MERGE_MIN_OVERLAP = 0.42;
 const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /**
- * Phrasings that address a request to somebody, rather than merely mentioning
- * work. Broad on the "someone" forms on purpose: "can someone start building
- * the chess engine" is a request to the room, and the room is who is reading.
- */
-const REQUEST_OPENER_RE =
-  /\b(please|can you|could you|would you|will you|can we|could we|shall we|can (?:someone|somebody|anyone|anybody)|could (?:someone|somebody|anyone|anybody)|(?:someone|somebody|anyone|anybody) (?:should|able to|want to)|we need to|i need (?:you|someone|somebody)|let'?s|go ahead and)\b/iu;
-
-/** A sentence that opens with the work verb itself — an instruction. */
-const IMPERATIVE_OPENER_RE = new RegExp(`^(?:${TASK_VERB_RE.source})`, "iu");
-
-/**
- * Words that, following the opening one, prove it was the subject.
- *
- * Half the work vocabulary is also ordinary nouns — changes, updates, a
- * build, a review, a patch, a fix — so "Changes look good" opens with a word
- * from the verb list and is not an instruction, it is somebody saying the
- * changes look good. It was offered an agent, which is the complaint.
- *
- * English separates the two by what comes next: an imperative takes an object
- * or a preposition ("fix the login bug", "deploy to staging"), while a
- * finite verb after the opening word means that word was the thing doing it.
- * A closed list, because guessing is what got this wrong in the first place.
- */
-const SUBJECT_TAIL_RE =
-  /^(is|are|was|were|look|looks|looked|seem|seems|seemed|have|has|had|went|work|works|worked|came|come|comes|will|would|should|can|could|do|does|did|and|but|so)\b/iu;
-
-/**
- * Whether this is a request *addressed to somebody*, not just a sentence with
- * work vocabulary in it.
- *
- * {@link looksLikeTaskRequest} asks whether a message is about work at all,
- * which is the right question when an agent has been named — the sender chose
- * it, so the only doubt is what they want. It is too loose for the unnamed
- * path, where the same evidence has to answer a different question: is this
- * addressed to anyone? "The retry loop was rewritten last week" is about work
- * and asks for none, and an agent that opens a run on it has spent somebody's
- * account on a remark.
- *
- * So the unnamed path additionally wants either an instruction — a sentence
- * that opens with the verb — or a phrase that hands the work to somebody.
- * Both are things a person does deliberately; neither happens by accident in
- * conversation about a repository.
- */
-export function readsAsDirectRequest(content: string): boolean {
-  const text = withoutMentions(content).trim();
-  if (text.length === 0) {
-    return false;
-  }
-  if (REQUEST_OPENER_RE.test(text)) {
-    return true;
-  }
-  const opening = IMPERATIVE_OPENER_RE.exec(text);
-  if (opening === null) {
-    return false;
-  }
-  // Only an instruction if the opening word is doing the instructing rather
-  // than being talked about — see SUBJECT_TAIL_RE.
-  return !SUBJECT_TAIL_RE.test(text.slice(opening[0].length).trimStart());
-}
-
-/**
  * How an unnamed request is offered, and how the acceptance below finds it
  * again. A prefix rather than a stored flag: a channel message carries no
  * metadata of its own, and the offer has to be recognisable in the transcript
  * by the same reading a person gives it.
  */
 const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
+
+/**
+ * The last line of every offer the reader is asked to answer.
+ *
+ * The sentence above it is the agent's own — it names the specific thing it
+ * would do, which is the whole point of asking rather than guessing — so
+ * there is no fixed opening to recognise the offer by any more. The tail is
+ * fixed instead, and acceptance finds the offer by it and reads the proposal
+ * back off the message. Still no stored state: a channel message carries no
+ * metadata, and the transcript has to be readable by the same reading a
+ * person gives it.
+ */
+const AUTO_CLAIM_OFFER_TAIL =
+  'Say "yes" and I\'ll ask you what I need before I start — or @mention ' +
+  "someone else.";
+
+/** The proposal out of an offer message, or nothing if this is not one. */
+export function autoClaimProposal(content: string): string | undefined {
+  const at = content.indexOf(AUTO_CLAIM_OFFER_TAIL);
+  if (at < 0) {
+    return undefined;
+  }
+  const proposal = content.slice(0, at).trim();
+  return proposal.length === 0 ? undefined : proposal;
+}
+
+/**
+ * What an agent decided to do about a message nobody addressed to it.
+ *
+ * Three outcomes rather than two, because the middle one is most of real
+ * conversation. "The gray background looks rough" is neither a request nor
+ * chatter: it is a person noticing something, and the useful answer is to
+ * name what would be done about it and ask. Offering costs one line; acting
+ * on it uncalled costs somebody's usage, and ignoring it wastes the remark.
+ */
+export type AutoClaimVerdict =
+  | { verdict: "act" }
+  | { verdict: "offer"; proposal: string }
+  | { verdict: "ignore" };
+
+/**
+ * Reads the classifier's reply.
+ *
+ * Deliberately forgiving about shape and unforgiving about meaning: a model
+ * that answers with a paragraph, an empty string, a refusal, or a word that
+ * is none of the three lands on `ignore`. That is the direction that costs
+ * nothing — silence, and the sender can still @mention anybody by hand,
+ * which always works. An `OFFER` with no question after it is not an offer
+ * either; there would be nothing to show the reader.
+ */
+export function parseAutoClaimVerdict(text: string | undefined): AutoClaimVerdict {
+  const first =
+    (text ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "";
+  if (/^act\b/iu.test(first)) {
+    return { verdict: "act" };
+  }
+  const offer = /^offer\b\s*:?\s*(.*)$/iu.exec(first);
+  if (offer !== null) {
+    // Quotes and leading bullets are what a model reaches for when asked for
+    // a sentence; none of them belong in the room.
+    const proposal = (offer[1] ?? "")
+      .trim()
+      .replace(/^["'\u201c\u2018\-\u2022\s]+/u, "")
+      .replace(/["'\u201d\u2019\s]+$/u, "")
+      .trim();
+    return proposal.length === 0
+      ? { verdict: "ignore" }
+      : { verdict: "offer", proposal };
+  }
+  return { verdict: "ignore" };
+}
 
 /**
  * How long the "is this a request" check may take.
@@ -15670,19 +15687,26 @@ export class ApiGateway {
   }
 
   /**
-   * The no-@mention path: guesses whether a channel message is a task for
-   * one of the agents actually present, and — only when exactly one stands
-   * out clearly — dispatches to it through `dispatchOneMention`, the same
-   * method and the same `submitTask` call an explicit @mention uses.
+   * The no-@mention path: decides what one of the agents actually present
+   * should do about a channel message, and when that is work, dispatches
+   * through `dispatchOneMention` — the same method and the same `submitTask`
+   * call an explicit @mention uses.
    *
-   * Silence is the expected common case, by design: `looksLikeTaskRequest`
-   * must first agree the message reads as a request for work at all, and
-   * then the best-scoring candidate must clear both a minimum score and a
-   * confidence margin over the runner-up. Both gates are deliberately
-   * conservative (see their own doc comments) because firing wrongly spends
-   * a real person's API/subscription usage on unwanted work — a strictly
-   * worse outcome than staying silent and letting the sender @mention
-   * explicitly, which always still works.
+   * Three outcomes, decided by the agent rather than by a vocabulary:
+   *
+   * - Plainly a request, plainly clear: it is taken, and nothing is asked.
+   *   The round trip buys nothing when there is no doubt to resolve.
+   * - Work is implied but the request is not made, or is too vague to start
+   *   on: the agent proposes the specific thing it would do and waits for a
+   *   yes. Saying yes starts the work in its question round — the agent asks
+   *   what it would otherwise have guessed at, exactly as `/ask` does.
+   * - Anything else: silence.
+   *
+   * Silence is still the expected common case. The best-scoring candidate
+   * must also clear both a minimum score and a confidence margin over the
+   * runner-up before anything is decided at all, because firing wrongly
+   * spends a real person's API/subscription usage — worse than staying quiet
+   * and letting the sender @mention explicitly, which always still works.
    *
    * A personal agent belonging to someone other than the sender is removed
    * from the candidate pool *before* scoring, not scored and then vetoed —
@@ -15704,10 +15728,12 @@ export class ApiGateway {
     referencedMessageId: string;
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
-    // Two gates now, not one. `looksLikeTaskRequest` asks whether this is
-    // about work; on the unnamed path the question is whether it is addressed
-    // to anybody, and a remark about work is not.
-    if (!looksLikeTaskRequest(content) || !readsAsDirectRequest(content)) {
+    // One structural guard, and no vocabulary. A message with no letters in
+    // it is an emoji or punctuation and there is nothing to read; everything
+    // else goes to the agent, because a word list cannot tell "update the
+    // readme" from "the update went out" and never could. See
+    // `readAutoClaimVerdict` for what replaced it.
+    if (!/\p{L}/u.test(content)) {
       return;
     }
     const context = await this.autoClaimContext({
@@ -15725,79 +15751,102 @@ export class ApiGateway {
     if (chosen === undefined) {
       return;
     }
-    // Offered, not started. Picking the agent is a guess — the scoring below
-    // breaks ties rather than refusing them, deliberately — and a guess that
-    // is wrong costs a checkout, a run and somebody's usage. A guess that is
-    // merely slow costs one line and a "yes". The sender can also ignore it
-    // and @mention whoever should have it, which was always the escape and is
-    // now the faster path when the pick is wrong.
-    // The word list gets the easy half right and cannot get the rest right:
-    // most of the work vocabulary is also ordinary nouns, and no list of
-    // words distinguishes "update the readme" from "the update went out".
-    // So the agent that would take it reads the message first, on the cheap
-    // model — see CEREMONIAL_MODELS. It is a sentence in, a word out, and it
-    // only runs for messages the free checks already think are requests, so
-    // an ordinary conversation costs nothing.
-    if (!(await this.readsAsWorkToAgent(chosen, content, context))) {
+    // The agent that would take it reads the message, on the cheap model —
+    // see CEREMONIAL_MODELS — and says which of three things to do about it.
+    const decision = await this.readAutoClaimVerdict(chosen, content, context);
+    if (decision.verdict === "ignore") {
       return;
     }
-    // In the agent's own voice, not the channel's. It is the one being asked
-    // to do it, the reader can see whose usage is about to be spent, and a
-    // system aside saying an agent "looks like the closest fit" was the
-    // system talking about an agent standing right there.
-    const sender = await this.options.store.getUser(senderId).catch(() => undefined);
-    const addressed =
-      sender === undefined || sender.displayName.trim() === ""
-        ? ""
-        : `, ${firstWord(sender.displayName)}`;
+    if (decision.verdict === "act") {
+      // Straight to work, with nothing asked. Reserved for a message that
+      // says plainly what it wants: the round trip buys nothing when there is
+      // no doubt to resolve, and a person who wrote "change the background to
+      // blue" and got "would you like me to change the background?" has been
+      // asked to say it twice.
+      await this.dispatchOneMention({
+        projectId,
+        repositoryId,
+        content,
+        senderId,
+        candidate: chosen,
+        trigger: "auto_claim",
+        ...(input.referencedMessageId === undefined
+          ? {}
+          : { referencedMessageId: input.referencedMessageId }),
+        ...(context === undefined ? {} : { context }),
+      });
+      return;
+    }
+    // Offered, not started, and offered as something specific. The agent
+    // names the thing it would do — that sentence is the model's, not this
+    // file's, which is what keeps it about the message rather than about a
+    // category the message was sorted into. In the agent's own voice, too:
+    // it is the one being asked, and the reader can see whose usage is about
+    // to be spent.
     await this.appendChannelEntry({
       projectId,
       repositoryId,
       kind: "agent",
       authorId: `${chosen.userId}:${chosen.provider}`,
-      content:
-        `${AUTO_CLAIM_OFFER_OPENING}${addressed}? Say "yes" and I'll get ` +
-        `started — or @mention someone else.`,
+      content: `${decision.proposal}\n\n${AUTO_CLAIM_OFFER_TAIL}`,
       referencedMessageId: input.referencedMessageId,
     });
   }
 
   /**
-   * Whether the agent that would take this reads it as work.
+   * What the agent that would take this decides to do about it.
    *
-   * The last gate, and the only one that reads the sentence rather than
-   * matching against it. Everything before it is free and stays first: this
-   * runs on the account whose agent would do the work, so an ordinary remark
-   * must never reach it, and the word list is what keeps the bill at zero for
-   * a channel that is just talking.
+   * The only gate on this path, and the only one that reads the sentence
+   * rather than matching against it. It replaced a word list that got the
+   * easy half right and could not get the rest right: most work vocabulary
+   * is also ordinary English, so "the update went out" read as a request and
+   * "the gray looks rough" read as nothing at all. A list cannot tell those
+   * apart, because the difference is not in the words.
    *
-   * Anything other than a plain yes is a no — a timeout, an unreachable CLI,
-   * an expired sign-in, a model that answered with a paragraph. Not offering
-   * costs a re-ask; offering wrongly is the noise this exists to remove.
+   * The cost of dropping the list is that this now runs for every message in
+   * a channel that has an agent in it, rather than only for messages a list
+   * already liked. It runs on the cheap model, asks for one line, and the
+   * account it runs on is the one whose agent would do the work.
+   *
+   * Any failure is `ignore` — a timeout, an unreachable CLI, an expired
+   * sign-in, a paragraph where a word was asked for. Staying quiet costs a
+   * re-ask, which the sender can always make by @mentioning somebody.
    */
-  private async readsAsWorkToAgent(
+  private async readAutoClaimVerdict(
     candidate: ChannelMentionCandidate,
     content: string,
     context?: string,
-  ): Promise<boolean> {
+  ): Promise<AutoClaimVerdict> {
     const answer = await this.askAgent(
       candidate,
-      "Someone wrote the current message below in a team chat for a " +
-        "software project.\n\n" +
-        "Is the current message asking for work to be done on the " +
-        "repository — a change, a " +
-        "fix, an investigation, something built? A remark, an opinion, a " +
-        "greeting, a status question, or a comment about work already " +
-        "finished is not.\n\n" +
+      "You are an agent in a team chat for a software project. Someone " +
+        "wrote the current message below. Nobody named you in it. Decide " +
+        "what to do about it.\n\n" +
+        "Reply with exactly one of these three lines, and nothing else:\n\n" +
+        "ACT\n" +
+        "  Use this when the message plainly asks for work on the " +
+        "repository and says clearly enough what it wants that you could " +
+        "start now. Acting spends the account's usage, so use it only when " +
+        "there is no real doubt about what was asked for.\n\n" +
+        "OFFER: <one short yes/no question>\n" +
+        "  Use this when the message points at work without asking for it, " +
+        "or asks for something too vague to start on. Your question must " +
+        "name the specific thing you would do, so it can be answered with " +
+        "yes. Do not ask for the details you would need to do it — you get " +
+        "to ask those afterwards, once somebody says yes.\n\n" +
+        "IGNORE\n" +
+        "  Use this for everything else: greetings, people talking to each " +
+        "other, opinions with nothing to do, questions about the status of " +
+        "work, remarks about work already finished.\n\n" +
         "Use recent context only to resolve references such as \"that\"; " +
-        "classify the current message, never the background itself.\n\n" +
+        "decide about the current message, never about the background.\n\n" +
         (context === undefined ? "" : `${context}\n\n`) +
-        "Answer with one word: yes or no.\n\nCurrent message: " +
+        "Current message: " +
         content,
       CLASSIFY_TIMEOUT_MS,
       true,
     ).catch(() => ({ text: undefined }));
-    return /^\s*yes\b/iu.test(answer.text ?? "");
+    return parseAutoClaimVerdict(answer.text);
   }
 
   /**
@@ -15833,11 +15882,16 @@ export class ApiGateway {
     // Oldest first, so the offer is the last one of ours in the window, and
     // the request is the last thing a person said before it.
     let offerAt = -1;
+    // The tail first, because it is what every offer written now ends with;
+    // the two openings are offers already sitting in channels from before
+    // the agent started naming what it would do, and they still deserve an
+    // answer.
     for (let index = recent.length - 1; index >= 0; index -= 1) {
       const message = recent[index];
       if (
         message?.kind === "agent" &&
-        (message.content.startsWith(AUTO_CLAIM_OFFER_OPENING) ||
+        (autoClaimProposal(message.content) !== undefined ||
+          message.content.startsWith(AUTO_CLAIM_OFFER_OPENING) ||
           message.content.startsWith("Want me to take care of this?"))
       ) {
         offerAt = index;
@@ -15874,10 +15928,32 @@ export class ApiGateway {
     if (chosen === undefined) {
       return false;
     }
+    // Two things were said and the worker needs both. "The gray looks rough"
+    // is what the person wrote; "shall I change the background colour?" is
+    // what they said yes to. The remark alone is an observation, not an
+    // objective; the proposal alone throws away the words somebody actually
+    // chose. So the request leads and the agreement follows it — and the
+    // message stays the visible content, so the thread still reads as an
+    // answer to what was asked.
+    //
+    // And it goes in asking. An offer was made precisely because something
+    // was unclear — which colour, which page, how far — so the first round
+    // is the question round, exactly as `/ask` does it. What the agent would
+    // otherwise have guessed at is asked once, by the agent, instead of
+    // guessed at now and corrected later.
+    const proposal = autoClaimProposal(recent[offerAt]?.content ?? "");
     await this.dispatchOneMention({
       projectId,
       repositoryId,
       content: request.content,
+      ...(proposal === undefined
+        ? {}
+        : {
+            objective:
+              `${request.content}\n\nAgreed in the channel — this is the ` +
+              `specific thing that was said yes to:\n${proposal}`,
+            forceQuestion: true,
+          }),
       senderId,
       candidate: chosen,
       trigger: "auto_claim",

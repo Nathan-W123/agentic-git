@@ -15,10 +15,12 @@ import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
 import {
   agentIdentity,
   ApiGateway,
+  autoClaimProposal,
   describeTaskState,
   explainAnswerFailure,
   looksLikeTaskRequest,
   narrateTaskEvent,
+  parseAutoClaimVerdict,
   readsAsEchoOfRequest,
   summariseObjective,
   type ApiOperations,
@@ -316,7 +318,11 @@ async function startRuntime(
   const usageCalls: TestRuntime["usageCalls"] = [];
   const mail: TestRuntime["mail"] = [];
   /** How the agent answers "is this work?" — "yes" unless a test says else. */
-  let taskClassification = "yes";
+  // The unnamed path now asks for a decision, not a yes/no: ACT, OFFER with
+  // a proposal, or IGNORE. The default keeps the offer flow every dispatch
+  // test was written against, and the proposal is worded the way the fixed
+  // sentence used to be so those assertions still describe what is posted.
+  let taskClassification = "OFFER: Want me to take this on?";
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
   // What `rollbackRepository` answers. Undefined is the ordinary success; a
@@ -354,11 +360,23 @@ async function startRuntime(
         ? {}
         : { repositoryId: String(input.repositoryId) }),
     });
-    // The unnamed path asks the agent whether a message is work before it
-    // offers to take it. Answered here rather than through `chatAnswer` so a
-    // test about dispatch does not have to know the question exists; a test
-    // about the check itself sets `taskClassification` to "no".
-    if (/Answer with one word: yes or no/u.test(asked)) {
+    // The unnamed path asks the agent what to do about a message before it
+    // does anything. Answered here rather than through `chatAnswer` so a test
+    // about dispatch does not have to know the question exists; a test about
+    // the decision itself sets `taskClassification`.
+    if (/Reply with exactly one of these three lines/u.test(asked)) {
+      // An acknowledgement is never work, and a fake that answered otherwise
+      // would be unfaithful in the one way that matters: with no word list in
+      // front of it, every "yes", "ok" and "thanks" in a channel now reaches
+      // the model, and a model reads those for what they are.
+      const current = /Current message: ([\s\S]*)$/u.exec(asked)?.[1] ?? "";
+      if (
+        /^\s*(yes|yeah|yep|ok|okay|sure|thanks|thx|no|nope)\b[\s!.,?]*$/iu.test(
+          current,
+        )
+      ) {
+        return { text: "IGNORE" };
+      }
       return { text: taskClassification };
     }
     for (const event of chatAnswer.streamEvents ?? []) {
@@ -11053,7 +11071,7 @@ test("an unnamed request is offered before it is started, and yes starts it", as
     (message) => message.kind === "agent",
   );
   assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
-  assert.match(offer.content, /Want me to take this, Owner\?/u);
+  assert.match(offer.content, /Want me to take this on\?/u);
   assert.match(offer.content, /Say "yes"/u);
   assert.match(offer.content, /@mention someone else/u);
 
@@ -11124,7 +11142,7 @@ test("a proactive offer reads lean channel context and carries it into accepted 
     /^Want me to take this/u.test(String(message.content)),
   );
   assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
-  assert.match(String(offer.content), /Want me to take this, Owner\?/u);
+  assert.match(String(offer.content), /Want me to take this on\?/u);
 
   const agreed = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -11252,7 +11270,7 @@ test("only the person who asked can accept the offer", async (t) => {
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
 });
 
-test("a remark about work is not a request, and is offered nothing", async (t) => {
+test("a message the agent reads as chatter is answered with silence", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11263,9 +11281,11 @@ test("a remark about work is not a request, and is offered nothing", async (t) =
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
-  // Every one of these is about work and asks for none. The verb list alone
-  // could not tell them from an instruction, which is why the unnamed path
-  // wants an imperative or a phrase handing the work over.
+  // Every one of these is about work and asks for none. They are read — that
+  // is the point of reading rather than matching — and the agent's answer is
+  // to say nothing, which has to mean nothing: no offer, no task, no line in
+  // the room.
+  runtime.setTaskClassification("IGNORE");
   for (const remark of [
     "the retry loop was rewritten last week",
     "I updated the readme this morning",
@@ -11280,12 +11300,7 @@ test("a remark about work is not a request, and is offered nothing", async (t) =
   }
   assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
   const after = await owner.request(`${base}/messages`);
-  const offers = (after.data.messages as any[]).filter(
-    (message) =>
-      message.kind === "agent" &&
-      /Want me to take this/u.test(message.content),
-  );
-  assert.deepEqual(offers, [], JSON.stringify(offers));
+  assert.deepEqual(agentSpeech(after.data.messages), []);
 });
 
 test("a revert reports that it worked, and takes the thread's file list back with it", async (t) => {
@@ -11479,7 +11494,10 @@ test("the agent reads the message before offering, and a remark gets no offer", 
   // It was read — one prompt, and it asked the question this gate asks.
   const asked = runtime.chatPrompts.slice(before);
   assert.equal(asked.length, 1, JSON.stringify(asked));
-  assert.match(String(asked[0]?.prompt), /Answer with one word: yes or no/u);
+  assert.match(
+    String(asked[0]?.prompt),
+    /Reply with exactly one of these three lines/u,
+  );
   assert.match(String(asked[0]?.prompt), /settings page layout/u);
 
   // And nothing was offered or started.
@@ -11494,7 +11512,7 @@ test("the agent reads the message before offering, and a remark gets no offer", 
   );
 });
 
-test("a remark that opens with a noun from the verb list is never read at all", async (t) => {
+test("every unaddressed message is read, whatever words it uses", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11505,30 +11523,46 @@ test("a remark that opens with a noun from the verb list is never read at all", 
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
-  // The reason the word list stays in front of the model: these cost nothing
-  // to refuse, and a channel that is only talking must not spend an account
-  // per sentence to find that out. "Changes look good" opens with a word from
-  // the verb list and is a person saying the changes look good.
-  const before = runtime.chatPrompts.length;
-  for (const remark of [
+  // A word list used to answer for these without asking anybody, and it had
+  // to: "Changes look good" opens with a word from the verb list and is a
+  // person saying the changes look good. But the same list also answered for
+  // "the gray background looks rough" — silence — and for "the update went
+  // out" — a request. It cannot do better, because the difference is not in
+  // the words. So every message is read now, and the agent decides.
+  const remarks = [
     "Changes have been made and look good",
     "Changes look good",
     "Yo what's up",
     "the update went out this morning",
     "the build is fixed now",
-  ]) {
+  ];
+  runtime.setTaskClassification("IGNORE");
+  const before = runtime.chatPrompts.length;
+  for (const remark of remarks) {
     const posted = await owner.request(`${base}/messages`, {
       method: "POST",
       body: { content: remark },
     });
     assert.equal(posted.status, 201, remark);
   }
-  assert.deepEqual(
-    runtime.chatPrompts.slice(before),
-    [],
-    "no agent was asked about any of these",
+
+  const asked = runtime.chatPrompts.slice(before);
+  assert.equal(
+    asked.length,
+    remarks.length,
+    `each message reaches the agent: ${JSON.stringify(asked.map((entry) => entry.prompt.slice(-60)))}`,
   );
+  for (const remark of remarks) {
+    assert.ok(
+      asked.some((entry) => entry.prompt.endsWith(remark)),
+      `"${remark}" was read`,
+    );
+  }
+  // And read is not the same as acted on. Every one of them was answered
+  // with silence.
   assert.equal(runtime.submittedTasks.length, 0);
+  const after = await owner.request(`${base}/messages`);
+  assert.deepEqual(agentSpeech(after.data.messages), []);
 });
 
 test("a thread opens on the request that caused it, in the words it was asked in", async (t) => {
@@ -12658,4 +12692,177 @@ test("a newer account's workspace never displaces the owner's own", async (t) =>
     ),
     ["Aria's team"],
   );
+});
+
+/* ------------------------------------------- unaddressed message verdict --- */
+
+/**
+ * What an agent decides about a message nobody addressed to it.
+ *
+ * The reply is a line of text from a model, so the parser is the boundary
+ * between "a model said something" and "somebody's account is about to be
+ * spent". Everything it cannot read is silence.
+ */
+test("a decision is read out of the agent's reply, and only a clear one", () => {
+  assert.deepEqual(parseAutoClaimVerdict("ACT"), { verdict: "act" });
+  assert.deepEqual(parseAutoClaimVerdict("act\n"), { verdict: "act" });
+  assert.deepEqual(parseAutoClaimVerdict("OFFER: Shall I change the background colour?"), {
+    verdict: "offer",
+    proposal: "Shall I change the background colour?",
+  });
+  // Models reach for quotes and bullets when asked for a sentence; none of
+  // that belongs in the room.
+  assert.deepEqual(parseAutoClaimVerdict('OFFER "Shall I retire the old flag?"'), {
+    verdict: "offer",
+    proposal: "Shall I retire the old flag?",
+  });
+  assert.deepEqual(parseAutoClaimVerdict("IGNORE"), { verdict: "ignore" });
+
+  // Everything unreadable lands on silence, which is the direction that costs
+  // nothing: a paragraph where a word was asked for, a refusal, an empty
+  // answer, a timeout that produced nothing at all.
+  for (const unreadable of [
+    undefined,
+    "",
+    "   ",
+    "I'm not sure what you mean.",
+    "MAYBE",
+    "OFFER:",
+    "OFFER:    ",
+  ]) {
+    assert.deepEqual(
+      parseAutoClaimVerdict(unreadable),
+      { verdict: "ignore" },
+      JSON.stringify(unreadable),
+    );
+  }
+});
+
+test("an offer is recognised by its tail, and gives up its proposal", () => {
+  const posted =
+    'Shall I change the background colour?\n\nSay "yes" and I\'ll ask you ' +
+    "what I need before I start — or @mention someone else.";
+  assert.equal(
+    autoClaimProposal(posted),
+    "Shall I change the background colour?",
+  );
+  // Anything else in the transcript is not an offer, and acceptance must not
+  // find one where none was made.
+  assert.equal(autoClaimProposal("Shall I change the background colour?"), undefined);
+  assert.equal(autoClaimProposal("yes"), undefined);
+});
+
+/**
+ * The clear half of the three-way decision: a message that says what it wants
+ * is taken, and nothing is asked.
+ *
+ * The offer exists to resolve doubt. Where there is none it is a round trip
+ * that buys nothing, and a person who wrote "change the background to blue"
+ * and was answered "would you like me to change the background?" has been
+ * asked to say the same thing twice.
+ */
+test("a message that plainly asks for work is taken without an offer", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "acts-at-once");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("ACT");
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "change the background on the settings page to blue" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  assert.match(
+    String(runtime.submittedTasks[0]?.objective),
+    /background on the settings page to blue/u,
+  );
+  // Not asked first, and not asked afterwards either: there was nothing
+  // unclear, so the question round is not forced.
+  assert.doesNotMatch(
+    String(runtime.submittedTasks[0]?.objective),
+    /force a question round/u,
+  );
+  const after = await owner.request(`${base}/messages`);
+  assert.deepEqual(
+    (after.data.messages as any[]).filter((message) =>
+      /Say "yes" and I'll ask you what I need/u.test(String(message.content)),
+    ),
+    [],
+    "nothing was offered — it was simply taken",
+  );
+});
+
+/**
+ * The unsure half: work is implied but not asked for, so the agent names the
+ * specific thing it would do and waits. Saying yes starts it *asking*.
+ */
+test("an implied request is proposed on, and yes starts it in its question round", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "proposes-first");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification(
+    "OFFER: Shall I change the background colour on the settings page?",
+  );
+  const remark = "it looks like the background doesn't look great with gray";
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: remark },
+    })).status,
+    201,
+  );
+
+  // Offered in the agent's own words, about this message. A fixed sentence
+  // could only have said "want me to take this?", which is not a question
+  // about anything and cannot be answered without re-reading the room.
+  const offered = await owner.request(`${base}/messages`);
+  const offer = (offered.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.match(
+    String(offer?.content),
+    /Shall I change the background colour on the settings page\?/u,
+  );
+  assert.equal(runtime.submittedTasks.length, 0, "an offer is not a start");
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "yes" },
+    })).status,
+    201,
+  );
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  const objective = String(runtime.submittedTasks[0]?.objective);
+  // Both halves travel. The remark is the words a person chose; the proposal
+  // is what they said yes to, and neither alone is the job.
+  assert.match(objective, /doesn't look great with gray/u);
+  assert.match(objective, /Shall I change the background colour/u);
+  // And it goes in asking — which colour was never said, and guessing at it
+  // is the whole reason an offer was made instead of an edit.
+  assert.match(objective, /force a question round/u);
 });
