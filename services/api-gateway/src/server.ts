@@ -1878,19 +1878,12 @@ export function readsAsDirectRequest(content: string): boolean {
 }
 
 /**
- * How an unnamed request is offered, and how the acceptance below recognises
- * it. The request and agent are stored on the offer itself, but the prefix is
- * still the durable marker that distinguishes this invitation from ordinary
- * agent speech and preserves compatibility with older offers.
+ * The marker used by auto-claim offers written by older deployments.
+ *
+ * Auto-claim now dispatches silently, but old offers remain in channel
+ * history and must not be mistaken for useful conversation context.
  */
 const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
-
-/**
- * A casual "yes" should not revive an old offer after the room has moved on.
- * Ten minutes is ample for the deliberate two-line handshake and short
- * enough that an offer left above a later conversation becomes inert.
- */
-const AUTO_CLAIM_OFFER_TTL_MS = 10 * 60 * 1000;
 
 /**
  * How long the "is this a request" check may take.
@@ -10139,7 +10132,7 @@ export class ApiGateway {
     }
     // Both commands require an explicit agent: `/ask` needs one task owner
     // for its forced question round, while `/dnc` needs one direct answerer.
-    // Neither should fall through to the auto-claim offer.
+    // Neither should fall through to the auto-claim path.
     if (parsed?.command.name === "ask" || parsed?.command.name === "dnc") {
       await this.postChannelSystemMessage(
         projectId,
@@ -10149,20 +10142,6 @@ export class ApiGateway {
               `it would have to guess at, then does the work. \`${parsed.command.usage}\`.`
           : `\`/dnc\` answers without starting work — mention the agent you are asking: \`${parsed.command.usage}\`.`,
       );
-      return;
-    }
-    // "Yes" answers the offer below before it is read as anything else — an
-    // approval is a short sentence with no work verb in it, so nothing would
-    // claim it, and the offer would sit there agreed to and unstarted.
-    if (
-      await this.maybeAcceptAutoClaim({
-        projectId,
-        repositoryId,
-        content,
-        senderId,
-        candidates,
-      })
-    ) {
       return;
     }
     await this.maybeAutoClaimTask({
@@ -10327,11 +10306,11 @@ export class ApiGateway {
      * Distinguishes an explicit @mention from an auto-claim in the audit
      * trail. Both paths submit through this exact method and the exact same
      * `submitTask` call below — see `maybeAutoClaimTask` — differing only in
-     * how the candidate was chosen and how the claim is announced.
+     * how the candidate was chosen.
      */
     trigger?: "mention" | "auto_claim" | "audit_fix" | "conversation";
     /**
-     * Lean room context for a proactive offer the sender accepted.
+     * Lean room context for a proactive dispatch.
      *
      * Explicit mentions need no ambient inference and leave this absent.
      * Kept beside the objective so a request such as "fix that" stays short
@@ -15615,12 +15594,6 @@ export class ApiGateway {
     if (chosen === undefined) {
       return;
     }
-    // Offered, not started. Picking the agent is a guess — the scoring below
-    // breaks ties rather than refusing them, deliberately — and a guess that
-    // is wrong costs a checkout, a run and somebody's usage. A guess that is
-    // merely slow costs one line and a "yes". The sender can also ignore it
-    // and @mention whoever should have it, which was always the escape and is
-    // now the faster path when the pick is wrong.
     // The word list gets the easy half right and cannot get the rest right:
     // most of the work vocabulary is also ordinary nouns, and no list of
     // words distinguishes "update the readme" from "the update went out".
@@ -15631,24 +15604,20 @@ export class ApiGateway {
     if (!(await this.readsAsWorkToAgent(chosen, content, context))) {
       return;
     }
-    // In the agent's own voice, not the channel's. It is the one being asked
-    // to do it, the reader can see whose usage is about to be spent, and a
-    // system aside saying an agent "looks like the closest fit" was the
-    // system talking about an agent standing right there.
-    const sender = await this.options.store.getUser(senderId).catch(() => undefined);
-    const addressed =
-      sender === undefined || sender.displayName.trim() === ""
-        ? ""
-        : `, ${firstWord(sender.displayName)}`;
-    await this.appendChannelEntry({
+    // The classifier already decided this is a direct request to the room.
+    // Dispatch through the same path as an explicit mention and let the
+    // existing task/question surfaces show what needs attention; adding a
+    // second assistant line asking for "yes" duplicates that prompt in the
+    // transcript.
+    await this.dispatchOneMention({
       projectId,
       repositoryId,
-      kind: "agent",
-      authorId: `${chosen.userId}:${chosen.provider}`,
-      content:
-        `${AUTO_CLAIM_OFFER_OPENING}${addressed}? Say "yes" and I'll get ` +
-        `started — or @mention someone else.`,
+      content,
+      senderId,
+      candidate: chosen,
+      trigger: "auto_claim",
       referencedMessageId: input.referencedMessageId,
+      ...(context === undefined ? {} : { context }),
     });
   }
 
@@ -15662,8 +15631,9 @@ export class ApiGateway {
    * a channel that is just talking.
    *
    * Anything other than a plain yes is a no — a timeout, an unreachable CLI,
-   * an expired sign-in, a model that answered with a paragraph. Not offering
-   * costs a re-ask; offering wrongly is the noise this exists to remove.
+   * an expired sign-in, a model that answered with a paragraph. Not
+   * dispatching costs a re-ask; dispatching wrongly is the noise this exists
+   * to remove.
    */
   private async readsAsWorkToAgent(
     candidate: ChannelMentionCandidate,
@@ -15674,7 +15644,7 @@ export class ApiGateway {
       candidate,
       "Someone wrote the current message below in a team chat for a " +
         "software project.\n\n" +
-        "Should you briefly offer to take repository work from this " +
+        "Should you take repository work from this " +
         "message? Answer yes only when the current message is a standalone " +
         "request or clearly opens work to the room — a change, fix, " +
         "investigation, or something built. A remark, opinion, greeting, " +
@@ -15692,142 +15662,6 @@ export class ApiGateway {
       true,
     ).catch(() => ({ text: undefined }));
     return /^\s*yes\b/iu.test(answer.text ?? "");
-  }
-
-  /**
-   * Dispatches an offer the sender has just agreed to. True when it did.
-   *
-   * The offer already records both facts acceptance needs: its author is the
-   * agent that volunteered and `referencedMessageId` is the request it read.
-   * Binding to those is safer than choosing again after roles or activity may
-   * have changed, and safer than assuming the nearest user line is still the
-   * request after a busy room has carried on talking.
-   *
-   * Only the person who asked may accept, and only as the next human turn
-   * within a short window. Anyone could type "yes" later in a busy channel
-   * and mean something else entirely, and the pick was made on the question
-   * of whose account pays.
-   */
-  private async maybeAcceptAutoClaim(input: {
-    projectId: string;
-    repositoryId: string;
-    content: string;
-    senderId: string;
-    candidates: ChannelMentionCandidate[];
-  }): Promise<boolean> {
-    const { projectId, repositoryId, senderId, candidates } = input;
-    if (!readsAsApproval(input.content)) {
-      return false;
-    }
-    const recent = await this.options.store.listChannelMessages(
-      repositoryId,
-      senderId,
-      { limit: AUTO_CLAIM_CONTEXT_LOOKBACK + 3 },
-    );
-    // Oldest first, so the offer is the last one of ours in the window.
-    let offerAt = -1;
-    for (let index = recent.length - 1; index >= 0; index -= 1) {
-      const message = recent[index];
-      if (
-        message?.kind === "agent" &&
-        (message.content.startsWith(AUTO_CLAIM_OFFER_OPENING) ||
-          message.content.startsWith("Want me to take care of this?"))
-      ) {
-        offerAt = index;
-        break;
-      }
-    }
-    if (offerAt < 0) {
-      return false;
-    }
-    const offer = recent[offerAt];
-    if (offer === undefined) {
-      return false;
-    }
-    const offeredAt = new Date(offer.createdAt).getTime();
-    if (
-      !Number.isFinite(offeredAt) ||
-      Date.now() - offeredAt > AUTO_CLAIM_OFFER_TTL_MS
-    ) {
-      return false;
-    }
-    // The approval being handled is already stored. If any other person has
-    // spoken since the offer, the room has moved on and a bare "yes" is no
-    // longer specific enough to spend an account.
-    let approvalAt = -1;
-    for (let index = recent.length - 1; index > offerAt; index -= 1) {
-      const message = recent[index];
-      if (
-        message?.kind === "user" &&
-        message.authorId === senderId &&
-        collapseWhitespace(message.content) === collapseWhitespace(input.content)
-      ) {
-        approvalAt = index;
-        break;
-      }
-    }
-    if (
-      approvalAt < 0 ||
-      recent
-        .slice(offerAt + 1, approvalAt)
-        .some((message) => message.kind === "user")
-    ) {
-      return false;
-    }
-    let request =
-      offer.referencedMessageId === undefined
-        ? undefined
-        : await this.options.store
-            .getChannelMessage(
-              repositoryId,
-              offer.referencedMessageId,
-              senderId,
-            )
-            .catch(() => undefined);
-    // Compatibility for offers written before references were attached.
-    if (request === undefined) {
-      for (let index = offerAt - 1; index >= 0; index -= 1) {
-        const message = recent[index];
-        if (message?.kind === "user") {
-          request = message;
-          break;
-        }
-      }
-    }
-    if (request === undefined || request.authorId !== senderId) {
-      return false;
-    }
-    const context = await this.autoClaimContext({
-      repositoryId,
-      viewerId: senderId,
-      request,
-      messages: recent,
-    });
-    const chosen = candidates.find(
-      (candidate) =>
-        `${candidate.userId}:${candidate.provider}` === offer.authorId &&
-        (candidate.visibility === "org" || candidate.userId === senderId),
-    );
-    if (chosen === undefined) {
-      await this.postChannelSystemMessage(
-        projectId,
-        repositoryId,
-        "That agent is no longer available here — mention another one if " +
-          "you still want this picked up.",
-      );
-      return true;
-    }
-    await this.dispatchOneMention({
-      projectId,
-      repositoryId,
-      content: request.content,
-      senderId,
-      candidate: chosen,
-      trigger: "auto_claim",
-      referencedMessageId: request.id,
-      ...(context === undefined ? {} : { context }),
-    });
-    return true;
   }
 
   /** Which agent an unnamed request would go to, or none. */
