@@ -2999,9 +2999,16 @@ function panelGrip() {
  * of. So the panel arriving read as the conversation changing rather than as a
  * second surface over it. The word is the smallest thing that says "you
  * stepped aside into this, and it closes".
+ *
+ * A kind can also be the way back to its collection. The open thread uses
+ * that form as a breadcrumb into the thread library; every other panel keeps
+ * the plain label because it has no corresponding collection to navigate to.
  */
-function panelKind(label) {
-  return `<span class="panel-kind">${esc(label)}</span>`;
+function panelKind(label, act) {
+  return act === undefined
+    ? `<span class="panel-kind">${esc(label)}</span>`
+    : `<button type="button" class="panel-kind" data-act="${esc(act)}"
+        title="Open ${esc(label.toLowerCase())} library">${esc(label)}</button>`;
 }
 
 /**
@@ -4033,7 +4040,7 @@ function threadPanel(repositoryId) {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
-      ${panelKind("Thread")}
+      ${panelKind("Thread", "channel-threads-toggle")}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
       ${iconButton("pin", {

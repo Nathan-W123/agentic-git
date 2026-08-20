@@ -210,6 +210,55 @@ test("the transcript announces itself to a screen reader", async () => {
   assert.doesNotMatch(chats, /id="chan-messages"[\s\S]{0,120}aria-live="assertive"/u);
 });
 
+test("the Thread label opens the thread library as the visible side panel", async () => {
+  const [app, chats] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+  ]);
+  const kind = slice(chats, "function panelKind(", "\n/**\n * The control every");
+  const panel = slice(chats, "function threadPanel(", "\nfunction planPanel(");
+  const action = app.slice(
+    app.indexOf('case "channel-threads-toggle":'),
+    app.indexOf('case "channel-thread-delete":'),
+  );
+
+  // The category in the screenshot is a real control, not inert header text.
+  assert.match(kind, /<button type="button" class="panel-kind" data-act=/u);
+  assert.match(
+    panel,
+    /panelKind\("Thread", "channel-threads-toggle"\)/u,
+  );
+
+  // A list left open behind one of its threads is not visibly open. Pressing
+  // Thread there navigates back to the list instead of toggling hidden state.
+  assert.match(action, /const listVisible =/u);
+  assert.match(action, /state\.activeChannelThread === undefined/u);
+  assert.match(
+    action,
+    /if \(listVisible\) \{\s*state\.chanThreadList = false;\s*render\(\);\s*return;/u,
+  );
+
+  // Switching panels remains lossless: the discard question happens before
+  // any state is cleared, then every higher-priority panel is put away before
+  // the library is rendered.
+  const guard = action.indexOf("if (!confirmDiscardEdit())");
+  const firstClear = action.indexOf("state.activePlan = undefined");
+  const open = action.indexOf("state.chanThreadList = true");
+  assert.notEqual(guard, -1);
+  assert.equal(guard < firstClear, true);
+  assert.equal(firstClear < open, true);
+  for (const field of [
+    "activePlan",
+    "activeAgentPanel",
+    "activeDm",
+    "activeChannelThread",
+  ]) {
+    assert.match(action, new RegExp(`state\\.${field} = undefined`, "u"));
+  }
+  assert.match(action, /closeChannelFile\(\);/u);
+  assert.match(action, /state\.chanTree = false;/u);
+});
+
 test("mobile message actions surface only for the selected message", async () => {
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");

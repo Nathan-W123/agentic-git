@@ -4723,10 +4723,39 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
-    case "channel-threads-toggle":
-      state.chanThreadList = state.chanThreadList !== true;
+    case "channel-threads-toggle": {
+      // The list can still be marked open behind the thread selected from it.
+      // Toggle only when it is the panel actually on screen; from any other
+      // panel this control is navigation back to the library.
+      const listVisible =
+        state.chanThreadList === true &&
+        state.activePlan === undefined &&
+        state.activeAgentPanel === undefined &&
+        state.activeDm === undefined &&
+        state.chanFileView === undefined &&
+        state.chanTree !== true &&
+        state.activeChannelThread === undefined;
+      if (listVisible) {
+        state.chanThreadList = false;
+        render();
+        return;
+      }
+      // Opening the library replaces the current panel. An edited file gets
+      // the same chance to refuse that switch as every other panel action.
+      if (!confirmDiscardEdit()) {
+        return;
+      }
+      state.activePlan = undefined;
+      state.activeAgentPanel = undefined;
+      state.activeDm = undefined;
+      state.activeChannelThread = undefined;
+      state.autoOpenedThread = undefined;
+      closeChannelFile();
+      state.chanTree = false;
+      state.chanThreadList = true;
       render();
       return;
+    }
     case "channel-thread-delete":
       void deleteThreadAction(activeChannelId(), value);
       return;
