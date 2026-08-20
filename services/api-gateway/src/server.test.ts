@@ -5687,6 +5687,27 @@ test("a command and a mention work together, and /plan holds the run", async (t)
     (root?.replies ?? []).map((reply) => reply.content).join("\n"),
     /nothing is running yet/u,
   );
+  // The plan itself is a reply of its own kind, not another agent remark:
+  // that mark is what lets the browser keep the document out of the thread
+  // and open it in its own panel beside the room.
+  const plan = (root?.replies ?? []).filter((reply) => reply.kind === "plan");
+  assert.equal(plan.length, 1, JSON.stringify(root?.replies));
+  assert.ok((plan[0]?.content ?? "").trim().length > 0);
+  // And the thread still names itself, so every surface that reads a title
+  // off the "Task:" line keeps working.
+  assert.ok(
+    (root?.replies ?? []).some((reply) => /^Task: /u.test(reply.content)),
+    JSON.stringify(root?.replies),
+  );
+  // The plan was thought about with the code open. `/plan` used to be
+  // answered by the same cheap ceremonial call that writes a thread's opening
+  // caption — no repository, low effort — so it could only restate the
+  // request back. This is the check that it asks with the checkout in hand.
+  const planning = runtime.chatPrompts.find((entry) =>
+    /read-only checkout of this repository/u.test(entry.prompt),
+  );
+  assert.notEqual(planning, undefined, JSON.stringify(runtime.chatPrompts));
+  assert.equal(planning?.repositoryId, repositoryId);
 
   // The browser retires the typing dots by looking this task up in the list
   // it polls and finding a status outside its working set. That only works if

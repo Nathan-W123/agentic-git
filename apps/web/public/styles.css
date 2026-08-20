@@ -6061,6 +6061,156 @@ button.chip.lg:hover {
   margin-bottom: 8px;
 }
 
+/* The plan, in the thread, as the card that opens it.
+
+   A row rather than a block quote: what it has to say is "there is a plan and
+   it opens over there", and a surface any taller than one row starts
+   competing with the plan itself. Tinted with the accent because pressing it
+   is navigation, not reading. */
+.plan-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 4px 0 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-wash);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.plan-card:hover,
+.plan-card.active {
+  background: var(--accent-wash-strong);
+}
+
+.plan-card > svg {
+  flex: none;
+  color: var(--accent-bright);
+}
+
+.plan-card .pc-text {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.plan-card .pc-title,
+.plan-card .pc-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-card .pc-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.plan-card .pc-sub {
+  color: var(--text-3);
+  font-size: 0.76rem;
+}
+
+.plan-card .pc-open {
+  margin-left: auto;
+  flex: none;
+  color: var(--accent-bright);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+/* The plan's own window. It borrows the thread panel wholesale — the column,
+   the drag handle, the three-row grid — and changes only what is inside: a
+   document instead of a conversation, and a decision instead of a composer. */
+.plan-body {
+  padding: 14px 16px 18px;
+  line-height: 1.55;
+}
+
+.plan-body .plan-h {
+  margin: 16px 0 6px;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.plan-body .plan-h:first-child {
+  margin-top: 0;
+}
+
+.plan-body h4.plan-h {
+  color: var(--text-2);
+  font-size: 0.8rem;
+}
+
+.plan-body .plan-p {
+  margin: 0 0 8px;
+  color: var(--text-2);
+  font-size: 0.85rem;
+}
+
+.plan-body .plan-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  color: var(--text-2);
+  font-size: 0.85rem;
+}
+
+.plan-body .plan-list li {
+  margin-bottom: 4px;
+}
+
+.plan-body code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.8em;
+}
+
+.plan-body .plan-pre {
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-active);
+  color: var(--text);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.78rem;
+  white-space: pre;
+}
+
+/* The decision, pinned to the floor of the panel where the reply box would be
+   in a thread. It is the whole reason the plan is on screen, so it does not
+   scroll away with the document it is about. */
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.plan-actions .plan-held {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 0.78rem;
+}
+
 /* The agent's account of what it did, foldable because it is often the longest
    thing in the thread. Deliberately identical to `.thread-thinking` — they sit
    inches apart in the same thread, and two disclosures that behave the same

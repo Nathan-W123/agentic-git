@@ -4229,3 +4229,53 @@ test("every dashboard module parses before it is served", async () => {
     assert.equal(checked.status, 0, `${name} does not parse:\n${checked.stderr}`);
   }
 });
+
+test("a held plan opens in its own panel rather than inside the thread", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const app = await browserSource();
+  const css = await publicFile("styles.css");
+
+  // The gateway marks the plan as its own kind of reply. The thread renders
+  // that mark as a card, never as the document — a page of headings pasted
+  // into the reply column buries everything said after it.
+  assert.match(chats, /reply\.kind === "plan"\s*\?\s*planCard\(root, reply\)/u);
+  assert.match(chats, /function planCard\(/u);
+  assert.match(chats, /data-act="plan-open"/u);
+
+  // The panel itself is the thread panel's column, so it inherits the grip,
+  // the width the reader dragged and the phone behaviour.
+  assert.match(chats, /function planPanel\(/u);
+  assert.match(chats, /<aside class="thread-panel plan-panel">/u);
+  assert.match(chats, /\$\{panelKind\("Plan"\)\}/u);
+  // Nothing in the plan is markdown-rendered: it is escaped first and only
+  // then given structure.
+  assert.match(chats, /function planDocument\(/u);
+  assert.match(chats, /const inline = \(line\) =>\s*esc\(line\)/u);
+
+  // Approving from the panel is the same event as typing it, so a plan let go
+  // from here leaves the same record in the thread.
+  assert.match(chats, /export function startPlannedWork\(/u);
+  assert.match(chats, /postChannelReply\(repositoryId, messageId, "go ahead"\)/u);
+  assert.match(app, /case "plan-approve":/u);
+  assert.match(app, /case "plan-open":/u);
+  assert.match(app, /case "plan-close":/u);
+
+  // And it pops open by itself when the plan lands, on the same terms a
+  // prompted thread does: desktop only, and never over something the reader
+  // deliberately put in the panel.
+  assert.match(data, /export function takeReadyPlan\(/u);
+  assert.match(data, /export function planReplyOf\(/u);
+  assert.match(app, /function openReadyPlan\(repositoryId\)/u);
+  assert.match(app, /openReadyPlan\(channelRepositoryId\);/u);
+  assert.match(app, /state\.activePlan = messageId;/u);
+  // Escape and the swipe close it first, because it is the panel's occupant.
+  assert.match(
+    app,
+    /function closeSidePanel\(\) \{\s*if \(state\.activePlan !== undefined\)/u,
+  );
+
+  assert.match(css, /\n\.plan-card \{/u);
+  assert.match(css, /\n\.plan-actions \{/u);
+});
+

@@ -715,6 +715,37 @@ const PENDING_BUSY_PREFIX = "pending:";
 const QUESTION_TIMEOUT_MS = 180000;
 /** The thread title and opening reasoning, asked for together. */
 const OPENING_TIMEOUT_MS = 120000;
+/**
+ * How long `/plan` is allowed to think before it has to answer.
+ *
+ * Longer than anything else the channel asks a model for, because it is the
+ * only call whose whole purpose is to read the repository first: the plan is
+ * written against files the agent has actually opened, and a deadline shorter
+ * than that reading turns `/plan` back into the guess it used to be. The
+ * command already promises that nothing runs until a person says so, so the
+ * wait costs a workspace and a lease exactly nothing.
+ *
+ * Sits above the CLI's own 240s ceiling (`CLI_TIMEOUT_MS` in the provider
+ * service) on purpose: whichever limit fires, the reader should be told the
+ * model gave up rather than that this control plane stopped listening.
+ */
+const DEEP_PLAN_TIMEOUT_MS = 300_000;
+/**
+ * How much of a plan is worth keeping.
+ *
+ * A plan is a document and is displayed as one, so it is not held to the
+ * sentence-length caps the channel's other model calls use. This is only the
+ * backstop against a model that never stops: past this, the reader is
+ * scrolling rather than reading, and the plan still has to fit in the context
+ * of the run it is about to authorise.
+ */
+const PLAN_MAX_CHARS = 12_000;
+/**
+ * The headings `/plan` asks for, so a plan that opens on one is not mistaken
+ * for a plan whose first line is its title.
+ */
+const PLAN_SECTION_HEADING =
+  /^(what this means|approach|files to change|steps|risks|how it gets checked)\b/iu;
 
 /**
  * What `/dnc` — "do not code" — adds to the answer prompt.
@@ -11035,15 +11066,20 @@ export class ApiGateway {
       // picked up. The opening is a caption on the run, so the run comes
       // first and the caption catches up.
       //
-      // `planOnly` is the exception and has to stay one: there the whole
-      // point is that nothing runs, so its plan really is worth waiting for.
+      // `planOnly` skips the caption entirely, and is the one path that
+      // waits. Nothing runs there until a person says so, so there is no work
+      // for a caption to catch up with — and what that person needs is not
+      // three lines of first impressions from the cheap ceremonial model with
+      // no sight of the repository, it is {@link deepPlan}: the same agent,
+      // its own model, the code open in front of it, and a document at the
+      // end worth deciding from.
       const openingPromise =
-        task.afterTaskId === undefined
-          ? this.planOpening(candidate, task.objective)
-          : Promise.resolve({
+        input.planOnly === true || task.afterTaskId !== undefined
+          ? Promise.resolve({
               title: summariseObjective(task.objective),
               thoughts: [],
-            });
+            })
+          : this.planOpening(candidate, task.objective);
       if (input.planOnly === true) {
         // Planned, and stopped there.
         //
@@ -11062,16 +11098,42 @@ export class ApiGateway {
         // resumes everything queued — spending the plan author's credential on
         // work nobody had approved, and leaving the thread still saying nothing
         // was running.
-        const planned = await openingPromise;
+        const planned = await this.deepPlan({
+          candidate,
+          objective: task.objective,
+          repositoryId,
+          ...(taskContext === undefined ? {} : { context: taskContext }),
+        });
+        // The thread's name, which is all the thread itself gets of the plan.
+        // `Task: …` is the line every surface reads a thread's title off, so
+        // it stays exactly where it was.
+        await this.appendChannelThreadReply({
+          projectId,
+          repositoryId,
+          messageId: threadRootId,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content: `Task: ${planned.title}`,
+        }).catch(() => undefined);
+        // The plan itself, marked as what it is so the browser opens it in
+        // its own panel beside the room rather than pouring several hundred
+        // words into a conversation.
+        await this.appendChannelThreadReply({
+          projectId,
+          repositoryId,
+          messageId: threadRootId,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          kind: "plan",
+          content: planned.plan,
+        }).catch(() => undefined);
         await this.appendChannelThreadReply({
           projectId,
           repositoryId,
           messageId: threadRootId,
           authorId: `${candidate.userId}:${candidate.provider}`,
           content:
-            `${[`Task: ${planned.title}`, ...planned.thoughts].join("\n")}` +
-            `\n\nThat's the plan — nothing is running yet. Reply "go ahead" ` +
-            `and I'll start; say what to change and I'll take it from there.`,
+            `That's the plan — it's open beside this thread, and nothing is ` +
+            `running yet. Reply "go ahead" and I'll start; say what to ` +
+            `change and I'll take it from there.`,
         }).catch(() => undefined);
         // …and said in the room as well, because the sentence above is inside
         // a thread nobody has been given a reason to open. A held plan looks
@@ -11296,6 +11358,108 @@ export class ApiGateway {
       // Bounded: a model that ignores "two or three lines" must not turn the
       // thread into an essay before the work has even started.
       thoughts: thoughts.slice(0, 4).map((line) => line.slice(0, 300)),
+    };
+  }
+
+  /**
+   * The plan `/plan` was asked for: thought about properly, and written down.
+   *
+   * `planOpening` is a caption — a title and three lines of first impressions,
+   * run on the cheap ceremonial model at low effort with no sight of the
+   * repository. It is the right shape for a run that is already underway and
+   * the wrong one for the only gate in this system that comes *before* the
+   * work is paid for: somebody deciding whether to spend an agent on this
+   * deserves more than a restatement of their own request.
+   *
+   * So this call is the opposite of ceremonial in both senses that matter.
+   * `ceremonial` is left off, so it runs on the account's own model at the
+   * effort that account chose, and the repository is passed, so the agent
+   * gets the same read-only checkout `/dnc` answers from and can open the
+   * files before it commits anybody to changing them.
+   *
+   * The answer is a title line and a document, in that order, because the
+   * title is what names the thread and the document is what opens beside it.
+   * A model that cannot be reached still returns both — the request itself as
+   * a title, and a plain sentence saying why there is nothing under it —
+   * since a `/plan` that answers with silence is indistinguishable from an
+   * agent that hung.
+   */
+  private async deepPlan(input: {
+    candidate: ChannelMentionCandidate;
+    objective: string;
+    repositoryId: string;
+    /** The thread this was asked in, when it was asked inside one. */
+    context?: string;
+  }): Promise<{ title: string; plan: string }> {
+    const answer = await this.askAgent(
+      input.candidate,
+      `${agentIdentity(input.candidate)}\n\n` +
+        "You have been asked to plan a piece of work in this software " +
+        "project. Nothing you write will be executed yet: a person reads " +
+        "this plan and decides whether to start the work, so it has to be " +
+        "good enough to decide from.\n\n" +
+        "You have a read-only checkout of this repository. Use it before " +
+        "you write a word: open the files this would touch, follow how the " +
+        "code actually works today, and run shell commands that only read. " +
+        "Think the problem through — the approach you would take, what you " +
+        "considered and rejected, and where this could go wrong — rather " +
+        "than restating the request back.\n\n" +
+        "Reply with a short title on the first line — under eight words, no " +
+        "punctuation at the end — then the plan itself under these " +
+        "headings, each on its own line and written in plain sentences:\n" +
+        "## What this means\n" +
+        "## Approach\n" +
+        "## Files to change\n" +
+        "## Steps\n" +
+        "## Risks and open questions\n" +
+        "## How it gets checked\n\n" +
+        "Name real files and real functions from the checkout under Files " +
+        "to change, and say plainly when something could not be found " +
+        "rather than inventing it. Do not claim to have changed anything: " +
+        "nothing has been changed.\n\n" +
+        (input.context === undefined ? "" : `${input.context}\n\n`) +
+        `The request: ${input.objective}`,
+      DEEP_PLAN_TIMEOUT_MS,
+      false,
+      input.repositoryId,
+    );
+    const fallbackTitle = summariseObjective(input.objective);
+    if (answer.text === undefined) {
+      return {
+        title: fallbackTitle,
+        plan:
+          `I could not work out a plan for this: ${
+            answer.error ?? "the model answered with nothing"
+          }.\n\nNothing has been started. Ask me again and I'll retry, or ` +
+          `say "go ahead" and I'll work it out as I go.`,
+      };
+    }
+    const lines = answer.text.split("\n");
+    // The title is only the first line when the model wrote one there. A
+    // model that opened with a heading has given the plan its own first line,
+    // and taking it away would leave the document starting mid-thought.
+    const first = (lines[0] ?? "").replace(/^#+\s*/u, "").trim();
+    const titled =
+      first.length > 0 &&
+      first.length <= 80 &&
+      !first.endsWith(".") &&
+      // A plan that opens straight on its first section wrote no title at
+      // all, and lifting that heading out would both misname the thread and
+      // leave the document starting halfway through its own first point.
+      !PLAN_SECTION_HEADING.test(first);
+    return {
+      title: titled ? first : fallbackTitle,
+      plan:
+        (titled ? lines.slice(1).join("\n") : answer.text)
+          .trim()
+          .slice(0, PLAN_MAX_CHARS) ||
+        // A title and nothing under it. Rare, and it must not be stored as an
+        // empty reply — the channel refuses those, so the plan would vanish
+        // and the thread would say it was open beside a panel holding
+        // nothing.
+        "I have a title for this and nothing worked out under it yet. Ask " +
+          "me to plan it again, or say \"go ahead\" and I'll work it out as " +
+          "I go.",
     };
   }
 
@@ -15713,8 +15877,9 @@ export class ApiGateway {
       authorId: input.authorId,
       content:
         input.kind === "plan"
-          ? `${CHANNEL_HOLD_PREFIX} — the plan is in the thread and nothing ` +
-            `is running. Reply "go ahead" there and I'll start.`
+          ? `${CHANNEL_HOLD_PREFIX} — the plan is written and nothing is ` +
+            `running. Open it from the thread to read it, then reply "go ` +
+            `ahead" there and I'll start.`
           : `${CHANNEL_HOLD_PREFIX} — this needs a review before it can ` +
             `land. Reply "go ahead" in the thread to approve it.`,
     }).catch(() => undefined);
@@ -15817,10 +15982,10 @@ export class ApiGateway {
     /**
      * `progress` for a run narrating itself, `outcome` for the reply that ends
      * the thread, `system` for the coordinator speaking in its own name rather
-     * than an agent's. Each reads differently and counts differently — see
-     * `ChannelEntryKind`.
+     * than an agent's, `plan` for the document a held `/plan` produced. Each
+     * reads differently and counts differently — see `ChannelEntryKind`.
      */
-    kind?: "agent" | "progress" | "system" | "outcome" | "user";
+    kind?: "agent" | "progress" | "system" | "outcome" | "user" | "plan";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
