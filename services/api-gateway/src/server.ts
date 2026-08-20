@@ -337,7 +337,7 @@ interface WatchedChannelTask {
    * in there already or was posted outright.
    */
   opener?: { authorId: string; content: string };
-  /** Whether a thread has been opened, after which everything goes into it. */
+  /** Whether substantive run narration has begun, after which all of it stays here. */
   threaded: boolean;
 }
 
@@ -723,14 +723,25 @@ const OPENING_TIMEOUT_MS = 120000;
  * which never submits a task, so nothing can be written. The prompt reinforces
  * that guarantee silently: the reply should read like an answer, not explain
  * the command or announce that the agent is obeying it.
+ *
+ * "Do not code" is not "do not look". It used to say "do not run anything",
+ * which cost the command the thing it exists for: asked for a line count, the
+ * agent answered that it had no permission to run a shell command, which is
+ * not an answer about the code and not something the reader could grant.
+ * Commands that only read — `git`, `wc`, `ls`, in bash or in PowerShell — are
+ * how a question about a repository gets a true answer, so they are asked for
+ * by name here and granted by the tools the answer runs with.
  */
 const DO_NOT_CODE_DIRECTIVE =
   "Silently treat this as read-only. Answer the message itself without " +
   "mentioning `/dnc`, calling it a do-not-code request, narrating that you " +
-  "are only looking, or pointing out that no changes are being made. Do not " +
-  "write, change, or run anything, and do not start — or offer to start — " +
-  "any work. If the answer would need code changes, say what you would " +
-  "change, in words, and stop there.";
+  "are only looking, or pointing out that no changes are being made. Read " +
+  "the files and run whatever shell commands you need — bash or PowerShell, " +
+  "`git`, `wc`, `ls`, and the like — as long as they only read: nothing that " +
+  "writes, deletes, moves, installs, or commits. Do not write or change " +
+  "code, and do not start — or offer to start — any work. If the answer " +
+  "would need code changes, say what you would change, in words, and stop " +
+  "there.";
 
 /**
  * Internal objective marker for an explicit `/ask` task.
@@ -10989,6 +11000,34 @@ export class ApiGateway {
       await this.options.store
         .setChannelMessageTask(repositoryId, threadRootId, task.id)
         .catch(() => undefined);
+      // Confirm the handoff in the task's thread as soon as the task exists.
+      // This is deliberately a fixed sentence rather than another provider
+      // call: the acknowledgement is useful only when it arrives immediately,
+      // and composing it must not sit in front of the work itself. It remains
+      // an ordinary agent reply (rather than folded progress) because it is
+      // addressed to the person who assigned the task.
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId: threadRootId,
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content:
+          input.planOnly === true
+            ? "I've taken this task and I'm working on the plan."
+            : task.afterTaskId === undefined
+              ? "I've taken this task and I'm working on it."
+              : "I've taken this task and queued it behind my current work.",
+        kind: "agent",
+      }).catch((error: unknown) => {
+        // A channel write must not strand a task that was already accepted.
+        // The run can still report its progress and outcome through the
+        // watcher below, while the failure remains diagnosable in the log.
+        process.stderr.write(
+          `[channel] task acknowledgement failed for ${task.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      });
       // Started against the queued task, not after the opening line is
       // written. `planOpening` is a model call allowed two whole minutes, and
       // awaiting it here meant the work did not begin until it returned: the
@@ -11128,14 +11167,9 @@ export class ApiGateway {
         ...(opener === undefined || continuing !== undefined
           ? {}
           : { opener }),
-        // Whether a room already exists, not whether one is deserved. The
-        // held-narration rule is about sparing the channel a thread nobody
-        // needs — but when this dispatch joined an existing thread the room is
-        // already there and the person who asked is reading it. Hardcoding
-        // `false` there sent the turn's ending to `appendChannelEntry` as a
-        // loose message at the foot of the channel, leaving the thread stopped
-        // dead with its held title and reasoning discarded.
-        // `startPlannedTaskFor` has always passed `true` for exactly this reason.
+        // Whether substantive narration has opened the room yet. The
+        // acknowledgement is visible immediately, but it does not by itself
+        // turn a one-line outcome into a full progress transcript.
         threaded: continuing !== undefined,
       });
       // Filled in when the model gets round to it. `pending` is read at flush
@@ -11294,7 +11328,8 @@ export class ApiGateway {
         "at most, no markdown headings, no preamble.\n\n" +
         (directive === undefined ? "" : `${directive}\n\n`) +
         "You have a read-only checkout of this channel's canonical repository. " +
-        "Inspect it whenever the answer depends on the code, and say plainly " +
+        "Inspect it whenever the answer depends on the code — read files and " +
+        "run shell commands that only read — and say plainly " +
         "when a file is absent or unreadable rather than guessing. Do not " +
         "claim to have changed or started anything: coding requests use the " +
         "separate task path. Describe existing work from the list below. Each " +
@@ -12000,7 +12035,8 @@ export class ApiGateway {
       `${agentIdentity(candidate)}\n\n` +
       "You are answering a follow-up question inside the thread for a task " +
       "you worked on. You have a read-only checkout of the channel's current " +
-      "canonical repository, so inspect it when the answer depends on code. " +
+      "canonical repository, so inspect it when the answer depends on code — " +
+      "reading files and running shell commands that only read. " +
       "The thread below records what the task itself did. Below is that " +
       "thread so far, oldest first. Answer the question directly and " +
       "briefly — three sentences at most, no markdown headings, no " +

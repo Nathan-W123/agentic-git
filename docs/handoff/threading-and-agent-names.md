@@ -27,8 +27,9 @@ line per request rather than a running commentary."*
 1. `@mention` in a channel message → `dispatchChannelMentions`, called from
    the channel messages POST route. Thread replies reach the same dispatch
    path through `answerThreadReply` when they ask for work.
-2. The person's request is the task root. Dispatch posts no agent
-   acknowledgement; a transient working indicator shows that the agent took it.
+2. The person's request is the task root. As soon as dispatch accepts the task,
+   the agent replies there that it took the task and is working on it; the
+   transient working indicator mirrors the same live state in the channel.
 3. `Task: <title>` plus the opening reasoning go in as replies, then
    `watchChannelTask` streams the run's narration into the same request-rooted
    thread.
@@ -54,16 +55,16 @@ with the same context the thread's own agent already receives.
   Keep the current behaviour as the fallback when no mention is present —
   that is what makes "reply without @mentioning" work today.
 - If a reply asks for *work* rather than an answer, the dispatch path reuses
-  the existing thread and adds no acknowledgement of its own.
+  the existing thread and acknowledges the new task there.
 - Visibility still applies: a personal agent must refuse a stranger the same
   way it does in the channel (`candidate.visibility === "personal"` guard).
 
-## Item 3 — no thread for small tasks
+## Item 3 — compact transcripts for small tasks
 
 **Do not classify "small" up front.** Judging size before the work means
-guessing before anything is known. Threads are lazy instead: the request stays
-flat until substantive narration arrives. A one-line change produces an
-outcome beside the request and no thread, with no heuristic to get wrong.
+guessing before anything is known. Every accepted task now gets an immediate
+acknowledgement in its thread, while a one-line change can still keep its
+outcome beside the request instead of adding a full progress transcript.
 
 If a decision up front is wanted anyway, `planOpening` already returns a title
 and thoughts — a plan with no thoughts is the natural "no thread" signal.

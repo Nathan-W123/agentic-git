@@ -1892,9 +1892,8 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  // A person's task becomes a thread when substantive narration arrives.
-  // Until then its request stays visually flat. Legacy agent-authored roots
-  // keep their old shape.
+  // A person's task becomes a thread as soon as the agent acknowledges the
+  // handoff. Legacy agent-authored roots keep their old shape.
   const inlineReply = inlineReplyTo !== undefined;
   const hasTaskThread = channelMessageHasTaskThread(entry);
   const channelThread = hasTaskThread && !isReply;
@@ -2625,10 +2624,8 @@ function isThreadEnding(reply) {
  * swallowed every sentence an agent addresses to a person inside a thread.
  *
  * This used to swallow task acknowledgements posted as ordinary `agent`
- * replies, along with every answer an agent addressed to a person. Those
- * acknowledgements are no longer posted, but historical replies and real
- * conversational answers still need to remain visible rather than being
- * hoisted into a closed "Thinking" fold.
+ * replies, along with every answer an agent addressed to a person. Both need
+ * to remain visible rather than being hoisted into a closed "Thinking" fold.
  *
  * The cost is threads older than the `progress` mark, whose narration is
  * stored as `agent` and now renders inline instead of folded. That is a couple

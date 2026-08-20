@@ -2568,3 +2568,88 @@ test("an expired org-wide agent comes back org-wide, not private", async () => {
     [["anthropic", "org"]],
   );
 });
+
+test("claude chat args carry --allowedTools including Bash and --disallowedTools for Edit/Write", async () => {
+  // The permission boundary is the flags, not the prompt. Headless Claude Code
+  // denies every tool it was not granted, and there is nobody at a chat window
+  // to approve one — so "how many lines is this repository?" used to come back
+  // as a refusal to run `git ls-files` rather than as a number.
+  const harness = await createHarness();
+  const completions: string[][] = [];
+  const streams: string[][] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) => {
+        if (args.includes("--output-format")) completions.push([...args]);
+        return CLAUDE_OK.claude(args);
+      },
+    }),
+    streamRunner: async (_command, args, _options, onLine) => {
+      streams.push([...args]);
+      const lines = [
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "hi" }] },
+        }),
+        JSON.stringify({
+          type: "result",
+          is_error: false,
+          result: "hi",
+          session_id: "sess-1234",
+          usage: { input_tokens: 1, output_tokens: 2 },
+        }),
+      ];
+      for (const line of lines) onLine(line);
+      return output(lines.join("\n"));
+    },
+  });
+  await service.connect({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+  });
+  assert.equal(
+    (
+      await service.complete({
+        userId: "u",
+        systemAdmin: true,
+        provider: "anthropic",
+        messages: [{ role: "user", content: "how many lines is this?" }],
+      })
+    ).text,
+    "hi",
+  );
+  assert.equal(
+    (
+      await service.completeStream(
+        {
+          userId: "u",
+          systemAdmin: true,
+          provider: "anthropic",
+          messages: [{ role: "user", content: "how many lines is this?" }],
+        },
+        () => {},
+      )
+    ).text,
+    "hi",
+  );
+
+  const permitted = (args: string[]) => ({
+    granted: (args[args.indexOf("--allowedTools") + 1] ?? "").split(","),
+    refused: (args[args.indexOf("--disallowedTools") + 1] ?? "").split(","),
+  });
+  // Both halves of the answer path: a thread reply streams and a channel
+  // answer does not, and a question must not be answered under different
+  // rules depending on where it was typed.
+  for (const args of [...completions, ...streams]) {
+    const { granted, refused } = permitted(args);
+    assert.ok(granted.includes("Bash"), `no shell in ${granted.join(",")}`);
+    assert.ok(granted.includes("Read"));
+    for (const tool of ["Edit", "Write", "NotebookEdit"]) {
+      assert.ok(!granted.includes(tool), `${tool} was granted`);
+      assert.ok(refused.includes(tool), `${tool} was not refused`);
+    }
+  }
+  assert.ok(completions.length >= 1 && streams.length >= 1);
+});

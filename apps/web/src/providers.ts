@@ -899,6 +899,45 @@ const CEREMONIAL_EFFORTS: Partial<Record<ProviderId, string>> = {
 };
 const DEFAULT_CLAUDE_EFFORT = "high";
 
+/**
+ * What a chat answer is allowed to do inside its checkout: look, and run
+ * commands that only look.
+ *
+ * Claude Code denies every tool it was not granted when there is nobody to
+ * ask, so an answer that needed `git ls-files` refused itself — "I don't have
+ * permission to run shell commands" is not an answer to a question about the
+ * code, and the person who asked cannot approve anything from a chat window.
+ * `Bash` is granted for that reason, and it reaches whichever shell the host
+ * runs: bash here, PowerShell on Windows.
+ *
+ * Granting the tool is not granting the intent. The prompt asks for commands
+ * that only read, and the checkout it runs in is a throwaway copy destroyed
+ * after the turn, so the worst a command can reach is a directory nobody will
+ * look at again.
+ */
+const CLAUDE_CHAT_ALLOWED_TOOLS = [
+  "Bash",
+  "Read",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "TodoWrite",
+];
+/**
+ * What a chat answer may never do, whatever the prompt says.
+ *
+ * "Answer, do not code" is the promise, and a promise a flag can keep should
+ * not be left to a sentence in a prompt. Named rather than left to the CLI's
+ * default deny, so a future default that grants more cannot grant these.
+ */
+const CLAUDE_CHAT_DISALLOWED_TOOLS = [
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+];
+
 const MAX_MESSAGES = 40;
 const MAX_MESSAGE_CHARS = 32_000;
 const CLI_TIMEOUT_MS = 240_000;
@@ -3683,10 +3722,11 @@ export class ProviderChatService {
   /**
    * Gives one answer a detached checkout of the exact canonical revision.
    *
-   * Provider chat remains read-only: Codex still runs in its read-only
-   * sandbox, Claude keeps its non-interactive permission boundary, and the
-   * checkout is destroyed after the turn even when the CLI fails. Chat that
-   * is not attached to a repository keeps using the empty scratch directory.
+   * Provider chat answers rather than edits: Codex still runs in its
+   * read-only sandbox, Claude may read and run commands but is refused every
+   * editing tool ({@link CLAUDE_CHAT_DISALLOWED_TOOLS}), and the checkout is
+   * destroyed after the turn even when the CLI fails. Chat that is not
+   * attached to a repository keeps using the empty scratch directory.
    */
   private async withCompletionDirectory<T>(
     context: RepositoryChatContext | undefined,
@@ -3988,6 +4028,10 @@ export class ProviderChatService {
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      "--allowedTools",
+      CLAUDE_CHAT_ALLOWED_TOOLS.join(","),
+      "--disallowedTools",
+      CLAUDE_CHAT_DISALLOWED_TOOLS.join(","),
       "--model",
       model,
       "--effort",
@@ -4211,7 +4255,9 @@ export class ProviderChatService {
    * Headless Claude Code completion. The prompt is a positional argument —
    * verified live that a piped stdin prompt makes the CLI skip thinking —
    * and the process runs in either an empty scratch directory or a temporary
-   * canonical checkout under default deny-by-request permissions.
+   * canonical checkout, granted the tools that look
+   * ({@link CLAUDE_CHAT_ALLOWED_TOOLS}, shell included) and refused the ones
+   * that write.
    */
   private async completeViaClaudeCli(
     prompt: string,
@@ -4231,6 +4277,10 @@ export class ProviderChatService {
       "--output-format",
       "stream-json",
       "--verbose",
+      "--allowedTools",
+      CLAUDE_CHAT_ALLOWED_TOOLS.join(","),
+      "--disallowedTools",
+      CLAUDE_CHAT_DISALLOWED_TOOLS.join(","),
       "--model",
       model,
       "--effort",
