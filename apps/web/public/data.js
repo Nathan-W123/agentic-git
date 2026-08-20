@@ -513,6 +513,7 @@ export function forgetOtherAccount(storage, userId) {
     "ag.eventCursor",
     "ag.favourites",
     "ag.newsThrough",
+    "ag.notificationReadThrough",
     "ag.read",
   ];
   if (storage.getItem("ag.user") === userId) {
@@ -2092,6 +2093,9 @@ const AGENT_LABEL = {
   anthropic: "Claude",
   openai: "Codex",
   google: "Gemini",
+  cursor: "Cursor",
+  copilot: "Copilot",
+  kiro: "Kiro",
 };
 
 /**
@@ -2286,6 +2290,26 @@ function notificationId(event) {
   return event.id ?? `${event.type}-${event.occurredAt}-${event.taskId ?? ""}`;
 }
 
+/** The newest audit event marked read in the current project. */
+function notificationReadThrough() {
+  try {
+    const byProject = JSON.parse(stored("ag.notificationReadThrough", "{}"));
+    const sequence = byProject?.[state.projectId];
+    return Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Whether a notification row has been read, individually or as part of a batch. */
+export function notificationIsRead(row) {
+  return (
+    state.readNotifications.has(row.id) ||
+    (Number.isSafeInteger(row.sequence) &&
+      row.sequence <= notificationReadThrough())
+  );
+}
+
 /** Whether this event has already been read on the notifications screen. */
 export function notificationSeen(event) {
   return state.readNotifications.has(notificationId(event));
@@ -2337,6 +2361,7 @@ export function notifications() {
     const task = state.tasks.find((candidate) => candidate.id === event.taskId);
     rows.push({
       id: notificationId(event),
+      sequence: entry.sequence,
       ...meta,
       at: event.occurredAt,
       body: notificationBody(event, task),
@@ -2395,8 +2420,38 @@ function notificationBody(event, task) {
 }
 
 export function unreadCount() {
-  return notifications().filter((row) => !state.readNotifications.has(row.id))
-    .length;
+  return notifications().filter((row) => !notificationIsRead(row)).length;
+}
+
+/**
+ * Marks the whole visible notification timeline read.
+ *
+ * The sequence watermark matters as much as the individual ids. The list is
+ * a moving, capped view over the audit log; remembering only the sixty ids on
+ * screen lets older events become unread again when that view is rebuilt on
+ * reload. A project-scoped high-water mark says what "all" meant at the time
+ * without hiding genuinely newer events.
+ */
+export function markAllNotificationsRead(rows = notifications()) {
+  markRead(rows.map((row) => row.id));
+  const newest = rows.reduce(
+    (sequence, row) =>
+      Number.isSafeInteger(row.sequence)
+        ? Math.max(sequence, row.sequence)
+        : sequence,
+    notificationReadThrough(),
+  );
+  let byProject = {};
+  try {
+    const parsed = JSON.parse(stored("ag.notificationReadThrough", "{}"));
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      byProject = parsed;
+    }
+  } catch {
+    /* Replace a malformed preference with the valid watermark below. */
+  }
+  byProject[state.projectId] = newest;
+  persist("ag.notificationReadThrough", JSON.stringify(byProject));
 }
 
 export function markRead(ids) {
@@ -3221,6 +3276,9 @@ export const VENDOR_FOR_PROVIDER = {
   anthropic: "claude",
   openai: "codex",
   google: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
 };
 
 /** The vendor CLI one agent drives, however that agent was resolved. */

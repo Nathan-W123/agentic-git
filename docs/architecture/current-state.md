@@ -15,7 +15,7 @@ storage remain later phases.
 | Requirement | Status | Evidence |
 | --- | --- | --- |
 | GitHub repository import | Implemented | HTTPS/SSH normalization, optional token injection through Git environment, rollback on failed imports |
-| At least two coding-agent adapters | Implemented and exceeded | Generic JSONL, Codex, Claude, and Gemini adapters |
+| At least two coding-agent adapters | Implemented and exceeded | Generic JSONL, Codex, Claude, Gemini, Cursor, Copilot, and Kiro adapters |
 | Task submission | Implemented | Durable project queue through CLI and API/web |
 | Agent plan submission | Implemented | Validated plans are required before workspace execution |
 | File-level ownership | Implemented | Expiring resource leases and scheduling decisions |
@@ -120,7 +120,7 @@ Dynamic replanning is implemented end to end:
 5. During execution, a structured scope request is checked against active
    work. Conflict-free resources receive new leases; protected scope waits for
    human approval; conflicting scope is rejected with evidence.
-6. Generic, Codex, Claude, and Gemini adapters support replanning. The generic
+6. Generic, Codex, Claude, Gemini, Cursor, Copilot, and Kiro adapters support replanning. The generic
    protocol also carries pause, resume, cancel, and scope-decision messages.
 
 Plan revisions, scope requests, decisions, approvals, and canonical-change

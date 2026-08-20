@@ -1664,7 +1664,16 @@ function appearanceCard() {
        vendor; the colour says whose.`,
       agentColor,
       `<div class="doodle-preview" style="color:${esc(agentColor)}">
-        ${["anthropic", "cursor", "openai", "google", "xai", "deepseek"]
+        ${[
+          "anthropic",
+          "cursor",
+          "copilot",
+          "kiro",
+          "openai",
+          "google",
+          "xai",
+          "deepseek",
+        ]
           .map(
             (kind) => `<span class="doodle-chip">
               <span class="doodle">${vendorMark(kind)}</span>

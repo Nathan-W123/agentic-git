@@ -595,6 +595,8 @@ export function avatarStack(names, max = 4, size = 26) {
 export const AGENTS = {
   anthropic: { label: "Claude", doodle: "claude" },
   cursor: { label: "Cursor", doodle: "cursor" },
+  copilot: { label: "Copilot", doodle: "generic" },
+  kiro: { label: "Kiro", doodle: "generic" },
   openai: { label: "Codex", doodle: "codex" },
   google: { label: "Gemini", doodle: "gemini" },
   xai: { label: "Grok", doodle: "grok" },
@@ -606,6 +608,8 @@ export const AGENTS = {
 const AGENT_ALIASES = {
   claude: "anthropic",
   cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
   codex: "openai",
   gpt: "openai",
   gemini: "google",
@@ -1396,7 +1400,22 @@ export function showPopover(anchor, html, { width = 400 } = {}) {
   let left = box.right - width;
   left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
   pop.style.left = `${left}px`;
-  pop.style.top = `${Math.min(box.bottom + 8, window.innerHeight - 80)}px`;
+  const gap = 8;
+  const popHeight = pop.getBoundingClientRect().height;
+  const below = box.bottom + gap;
+  const above = box.top - popHeight - gap;
+  const maxTop = Math.max(margin, window.innerHeight - popHeight - margin);
+  // Prefer the usual position below the control, but flip the popover above
+  // controls near the bottom of the viewport. Clamping only the top edge left
+  // most of a bottom-anchored menu outside the screen because its own height
+  // was never part of the calculation.
+  const top =
+    below + popHeight <= window.innerHeight - margin
+      ? below
+      : above >= margin
+        ? above
+        : Math.max(margin, Math.min(below, maxTop));
+  pop.style.top = `${top}px`;
 
   layer.addEventListener("click", (event) => {
     if (event.target.closest("[data-act='pop-close']")) {

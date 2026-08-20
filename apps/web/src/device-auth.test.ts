@@ -261,7 +261,7 @@ test("a login that never writes auth.json fails instead of looking connected", a
   );
 });
 
-test("providers without a sign-in flow say so rather than pretending", async () => {
+test("a browser sign-in is refused when its CLI is not installed", async () => {
   const harness = await createHarness();
   const service = new ProviderChatService(harness.project, {
     homeDirectory: harness.home,
@@ -269,15 +269,61 @@ test("providers without a sign-in flow say so rather than pretending", async () 
       claude: () => output(JSON.stringify({ loggedIn: true })),
     }),
   });
-  // Anthropic used to be on this list. It is not any more: `claude auth login`
-  // can be driven from a server, and the test for that is below. Google stays,
-  // because its CLI has no login subcommand at all — authentication is a menu
-  // inside the interactive UI, so there is nothing here to drive.
   await assert.rejects(
     service.startDeviceAuth({ userId: "u1", provider: "google" }),
     (error: unknown) =>
-      error instanceof ProviderChatError && error.code === "unsupported_flow",
+      error instanceof ProviderChatError && error.code === "cli_unavailable",
   );
+});
+
+test("Cursor browser sign-in stores only the session written in its isolated home", async () => {
+  const harness = await createHarness();
+  let finish: (() => void) | undefined;
+  const spawner = (
+    _command: string,
+    _args: readonly string[],
+    options: { env: NodeJS.ProcessEnv },
+    onLine: (line: string) => void,
+  ) => {
+    onLine("Continue in your browser: https://cursor.com/auth/cli");
+    const done = new Promise<ReturnType<typeof output>>((resolve) => {
+      finish = () => {
+        void (async () => {
+          const session = path.join(String(options.env["HOME"]), ".cursor");
+          await mkdir(session, { recursive: true });
+          await writeFile(
+            path.join(session, "cli-config.json"),
+            JSON.stringify({ accessToken: "cursor-session" }),
+            "utf8",
+          );
+          resolve(output("signed in"));
+        })();
+      };
+    });
+    return { done, kill: () => finish?.(), write: () => undefined };
+  };
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      agent: (args) =>
+        args[0] === "--version" ? output("1.0.0") : output('{"result":"pong"}'),
+    }),
+    longRunningSpawner: spawner,
+  });
+
+  const started = await service.startDeviceAuth({
+    userId: "u1",
+    provider: "cursor",
+  });
+  assert.equal(started.mode, "browser");
+  assert.equal(started.verificationUrl, "https://cursor.com/auth/cli");
+  finish?.();
+  assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
+  const cursor = (await service.list({ userId: "u1", systemAdmin: false }))
+    .find((entry) => entry.id === "cursor");
+  assert.equal(cursor?.connected, true);
+  assert.equal(cursor?.ownCredential?.origin, "device_auth");
+  assert.deepEqual(cursor?.acceptedCredentialKinds, []);
 });
 
 /**
@@ -442,7 +488,7 @@ test("one user cannot hand a code to another user's sign-in", async () => {
   assert.deepEqual(login.submitted, []);
 });
 
-test("Google has no sign-in flow to drive, and says so", async () => {
+test("Google browser sign-in reports a missing Gemini CLI", async () => {
   const harness = await createHarness();
   const service = new ProviderChatService(harness.project, {
     homeDirectory: harness.home,
@@ -451,7 +497,7 @@ test("Google has no sign-in flow to drive, and says so", async () => {
   });
   await assert.rejects(
     service.startDeviceAuth({ userId: "u1", provider: "google" }),
-    /no sign-in flow that can be driven from a server/u,
+    /No usable Google CLI was found/u,
   );
 });
 

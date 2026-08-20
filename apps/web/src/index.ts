@@ -79,7 +79,7 @@ function configuredOrigins(): string[] {
  */
 function resolveAgentIdForVendor(
   project: CoordinatorProject,
-  vendor: "claude" | "codex" | "gemini",
+  vendor: "claude" | "codex" | "gemini" | "cursor" | "copilot" | "kiro",
 ): string | undefined {
   for (const [id, agent] of Object.entries(project.config.agents)) {
     if (agent.adapter === vendor) {

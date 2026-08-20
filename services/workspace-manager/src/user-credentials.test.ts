@@ -424,10 +424,14 @@ test("the wrong JSON file is rejected with the name of the right one", async (t)
 });
 
 test("a session file records the recommended kind ordering", async () => {
-  // The connect UI offers [0] by default, so API keys must lead for the two
-  // vendors whose session files share a refresh token with the user's machine.
+  // Codex still accepts a deliberately supplied credential. Gemini and the
+  // new coding-agent connections are browser-only, so there is nothing to
+  // paste into their connect screen.
   assert.deepEqual(supportedCredentialKinds("codex"), ["api_key", "session_file"]);
-  assert.deepEqual(supportedCredentialKinds("gemini"), ["api_key", "session_file"]);
+  assert.deepEqual(supportedCredentialKinds("gemini"), []);
+  assert.deepEqual(supportedCredentialKinds("cursor"), []);
+  assert.deepEqual(supportedCredentialKinds("copilot"), []);
+  assert.deepEqual(supportedCredentialKinds("kiro"), []);
   // Claude can hold a session file now — a browser sign-in captures one — but
   // it is never offered for pasting, because no file on the user's machine is
   // one. Delivery accepts it; the connect UI does not list it.

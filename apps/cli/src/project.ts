@@ -78,8 +78,8 @@ export interface CodexAgentConfig extends AgentConfigBase {
  * supplied through `env`), never stored by the platform.
  */
 export interface PromptCliAgentConfig extends AgentConfigBase {
-  adapter: "claude" | "gemini";
-  /** Defaults to `claude` / `gemini` when omitted. */
+  adapter: "claude" | "gemini" | "cursor" | "copilot" | "kiro";
+  /** Defaults to the adapter's vendor CLI when omitted. */
   command?: string;
   /** Claude reasoning effort. Gemini does not support this setting. */
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -91,7 +91,14 @@ export type AgentConfig =
   | PromptCliAgentConfig;
 
 /** Adapters whose `command` defaults to the vendor CLI when omitted. */
-const OPTIONAL_COMMAND_ADAPTERS = ["codex", "claude", "gemini"] as const;
+const OPTIONAL_COMMAND_ADAPTERS = [
+  "codex",
+  "claude",
+  "gemini",
+  "cursor",
+  "copilot",
+  "kiro",
+] as const;
 
 export interface SandboxConfig {
   mode: "docker";
@@ -194,19 +201,22 @@ export const DEFAULT_CONFIG: ProjectConfig = {
    * what says the deployment can *run* that vendor, and nothing bridged the
    * two.
    *
-   * Both entries omit `command`, so each defaults to the vendor's own name on
+   * These entries omit `command`, so each defaults to the vendor's own name on
    * PATH (see OPTIONAL_COMMAND_ADAPTERS) and costs nothing when the CLI is
    * absent — an agent nobody mentions is never spawned, and one that is
    * mentioned without its CLI installed fails saying the command was not
    * found, which is a far better answer than being told no agent exists.
    *
-   * Gemini is left out deliberately: its CLI has no non-interactive login
-   * (see SIGN_IN_FLOWS in apps/web/src/providers.ts), so an entry would
-   * advertise something this deployment cannot actually sign in to.
+   * Each entry corresponds to a provider offered by My Agents, so connecting
+   * one in the browser is enough to make its task adapter resolvable.
    */
   agents: {
     codex: { adapter: "codex" },
     claude: { adapter: "claude" },
+    gemini: { adapter: "gemini" },
+    cursor: { adapter: "cursor" },
+    copilot: { adapter: "copilot" },
+    kiro: { adapter: "kiro" },
   },
 };
 
@@ -337,7 +347,15 @@ function assertAgent(name: string, value: unknown): AgentConfig {
   const agent = value as Partial<AgentConfig>;
   if (
     agent.adapter !== undefined &&
-    !["generic-cli", "codex", "claude", "gemini"].includes(agent.adapter)
+    ![
+      "generic-cli",
+      "codex",
+      "claude",
+      "gemini",
+      "cursor",
+      "copilot",
+      "kiro",
+    ].includes(agent.adapter)
   ) {
     fail(`agent "${name}" has an unsupported "adapter"`);
   }
@@ -432,7 +450,13 @@ function assertAgent(name: string, value: unknown): AgentConfig {
       ...common,
     };
   }
-  if (agent.adapter === "claude" || agent.adapter === "gemini") {
+  if (
+    agent.adapter === "claude" ||
+    agent.adapter === "gemini" ||
+    agent.adapter === "cursor" ||
+    agent.adapter === "copilot" ||
+    agent.adapter === "kiro"
+  ) {
     const promptAgent = agent as Partial<PromptCliAgentConfig>;
     if (
       promptAgent.effort !== undefined &&
@@ -444,7 +468,7 @@ function assertAgent(name: string, value: unknown): AgentConfig {
         `agent "${name}" needs "effort" to be low, medium, high, xhigh, or max`,
       );
     }
-    if (agent.adapter === "gemini" && promptAgent.effort !== undefined) {
+    if (agent.adapter !== "claude" && promptAgent.effort !== undefined) {
       fail(`agent "${name}" cannot set Claude-only "effort"`);
     }
     return {

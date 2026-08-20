@@ -174,7 +174,7 @@ function connectionGrid(agents, selected) {
     ${agents.map((agent) => agentCard(agent, agent.id === selected?.id)).join("")}
     ${addTile({
       title: "Add agent",
-      subtitle: "Connect Claude, Codex or Gemini",
+      subtitle: "Connect a coding agent",
       act: "agent-add",
     })}
   </div>`;
@@ -536,7 +536,7 @@ export function renderAgents() {
                 "robot",
                 agents.length === 0 ? "No agents connected" : "No agents match",
                 agents.length === 0
-                  ? "Connect Claude, Codex, or Gemini to give yourself an agent on this project."
+                  ? "Connect Cursor, Copilot, Kiro, Gemini, Claude, or Codex to give yourself an agent on this project."
                   : "Try another filter or search term.",
                 agents.length === 0
                   ? `<button class="btn btn-primary" data-act="agent-add">${icon(
@@ -682,6 +682,7 @@ async function signInAgent(providerId, mode, rerender) {
   }
 
   const exchange = (flow.mode ?? mode) === "code_exchange";
+  const browserOnly = (flow.mode ?? mode) === "browser";
   const link =
     `<p class="modal-hint"><a class="link" target="_blank" rel="noopener noreferrer"
        href="${esc(flow.verificationUrl)}">Open the ${esc(agentLabelOf(providerId))} sign-in page</a>
@@ -715,7 +716,7 @@ async function signInAgent(providerId, mode, rerender) {
   const values = await showModal({
     title: `Sign in to ${agentLabelOf(providerId)}`,
     subtitle: "Your account, not this machine's.",
-    confirm: exchange ? "Connect" : "I've approved it",
+    confirm: exchange ? "Connect" : browserOnly ? "I've signed in" : "I've approved it",
     body: exchange
       ? `${link}
          <label class="field"><span>Code from that page
@@ -726,7 +727,18 @@ async function signInAgent(providerId, mode, rerender) {
            time that is all it takes and this will finish on its own; if the
            page shows you a code instead, paste it above. This deployment
            never sees your password.</p>`
-      : `${link}
+      : browserOnly
+        ? `${link}
+         ${
+           flow.userCode
+             ? `<p class="modal-code">${esc(flow.userCode)}</p>
+                <p class="modal-hint">Enter that code if the sign-in page asks for it.</p>`
+             : ""
+         }
+         <p class="modal-hint">Finish signing in in that tab, then come back
+           here. This deployment receives the agent session but never your
+           password.</p>`
+        : `${link}
          <p class="modal-code">${esc(flow.userCode ?? "")}</p>
          <p class="modal-hint">Enter that code on the page, approve it, then
            come back here.</p>`,

@@ -23,9 +23,9 @@ import {
   UserCredentialError,
   UserCredentialStore,
   assertSessionFile,
+  captureBrowserSession,
   captureClaudeSession,
   credentialHint,
-  SESSION_FILE_SHARES_REFRESH_TOKEN,
   withCredentialHome,
   type CredentialHome,
   type CredentialVisibility,
@@ -81,10 +81,19 @@ import {
  * without a flag day.
  */
 
-export type ProviderId = "anthropic" | "openai" | "google";
+export type ProviderId =
+  | "anthropic"
+  | "openai"
+  | "google"
+  | "cursor"
+  | "copilot"
+  | "kiro";
 export const PROVIDER_IDS: readonly ProviderId[] = [
   "anthropic",
   "openai",
+  "cursor",
+  "copilot",
+  "kiro",
   "google",
 ];
 
@@ -262,9 +271,10 @@ export interface ProviderStatus {
 const SIGN_IN_FLOWS: Partial<Record<ProviderId, DeviceAuthMode>> = {
   openai: "approve",
   anthropic: "code_exchange",
-  // Google is deliberately absent: the Gemini CLI has no login subcommand —
-  // authentication is a menu inside its interactive UI — so there is nothing
-  // here to drive.
+  cursor: "browser",
+  copilot: "browser",
+  kiro: "browser",
+  google: "browser",
 };
 
 export interface ProviderModelOption {
@@ -327,6 +337,9 @@ const PROVIDER_NAMES: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
+  cursor: "Cursor",
+  copilot: "GitHub Copilot",
+  kiro: "Kiro",
 };
 
 /** The dashboard names providers by vendor; the CLIs name them by tool. */
@@ -334,6 +347,9 @@ const PROVIDER_VENDORS: Record<ProviderId, VendorCliKind> = {
   anthropic: "claude",
   openai: "codex",
   google: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
 };
 
 /** The inverse of {@link PROVIDER_VENDORS}, for reporting a stored vendor back. */
@@ -341,6 +357,9 @@ const VENDOR_PROVIDERS: Record<VendorCliKind, ProviderId> = {
   claude: "anthropic",
   codex: "openai",
   gemini: "google",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
 };
 
 /** What a user has to do to obtain a credential we can accept. */
@@ -360,10 +379,20 @@ export const CREDENTIAL_INSTRUCTIONS: Record<ProviderId, string[]> = {
       "key's account instead of your subscription.",
   ],
   google: [
-    "Paste a Google AI Studio API key from aistudio.google.com. This is the " +
-      "recommended way to connect Gemini.",
-    "Advanced: paste the contents of ~/.gemini/oauth_creds.json to use your " +
-      `Google subscription. ${SESSION_FILE_SHARES_REFRESH_TOKEN}`,
+    "Sign in with Google in the browser opened by Gemini CLI. Lattice stores " +
+      "only the session issued to this deployment.",
+  ],
+  cursor: [
+    "Sign in to Cursor in the browser opened by Cursor Agent CLI. API keys " +
+      "and copied session files are not accepted.",
+  ],
+  copilot: [
+    "Sign in to GitHub in the browser opened by Copilot CLI. API keys and " +
+      "personal access tokens are not accepted for this agent connection.",
+  ],
+  kiro: [
+    "Sign in to Kiro in the browser opened by Kiro CLI. API keys and copied " +
+      "session files are not accepted.",
   ],
 };
 
@@ -841,6 +870,9 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
   ],
+  cursor: [],
+  copilot: [],
+  kiro: [],
 };
 
 /**
@@ -854,6 +886,9 @@ const SUGGESTED_EFFORTS: Record<ProviderId, string[]> = {
   anthropic: [...CLAUDE_EFFORTS],
   openai: ["minimal", "low", "medium", "high", "xhigh"],
   google: [],
+  cursor: [],
+  copilot: [],
+  kiro: [],
 };
 const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
 
@@ -1251,7 +1286,7 @@ function spawnLongRunning(
  * one extra step for the user and a whole extra leg for the server, which is
  * why the two are named rather than collapsed.
  */
-export type DeviceAuthMode = "approve" | "code_exchange";
+export type DeviceAuthMode = "approve" | "code_exchange" | "browser";
 
 /** What the browser needs to show a device-authorization prompt. */
 export interface DeviceAuthStart {
@@ -1309,11 +1344,15 @@ export function parseDeviceAuthLine(line: string): {
   const result: { url?: string; code?: string; expiresInMinutes?: number } = {};
   const url = /https?:\/\/[^\s"'<>]+/u.exec(clean);
   if (url !== null) {
-    result.url = url[0];
+    result.url = url[0].replace(/[),.;]+$/u, "");
   }
   // Deliberately anchored to the whole line: a bare grouped code on its own
   // line is the code, whereas the same shape inside prose is not.
-  const code = /^([A-Z0-9]{4,8}-[A-Z0-9]{4,8})$/u.exec(clean);
+  const code =
+    /^(?:code:\s*)?([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?)$/iu.exec(clean) ??
+    /\b(?:enter|use|code(?: is)?)[ :]+([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?)\b/iu.exec(
+      clean,
+    );
   if (code !== null && code[1] !== undefined) {
     result.code = code[1];
   }
@@ -1322,6 +1361,15 @@ export function parseDeviceAuthLine(line: string): {
     result.expiresInMinutes = Number.parseInt(expiry[1], 10);
   }
   return result;
+}
+
+function isUserVerificationUrl(value: string): boolean {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host !== "localhost" && host !== "127.0.0.1" && host !== "::1";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1598,6 +1646,53 @@ export function resolveGeminiCommand(): { command: string; prefixArgs: string[] 
     }
   }
   return { command: "gemini", prefixArgs: [] };
+}
+
+interface BrowserCliSpec {
+  command: string;
+  prefixArgs: string[];
+  loginArgs: string[];
+  label: string;
+}
+
+/** Commands used by the browser-only agent connections. */
+function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
+  if (provider === "cursor") {
+    return { command: "agent", prefixArgs: [], loginArgs: ["login"], label: "Cursor" };
+  }
+  if (provider === "copilot") {
+    return {
+      command: "copilot",
+      prefixArgs: [],
+      loginArgs: ["login"],
+      label: "GitHub Copilot",
+    };
+  }
+  if (provider === "kiro") {
+    return {
+      command: "kiro-cli",
+      prefixArgs: [],
+      loginArgs: ["login"],
+      label: "Kiro",
+    };
+  }
+  if (provider === "google") {
+    const gemini = resolveGeminiCommand();
+    return {
+      ...gemini,
+      // Screen-reader mode keeps the OAuth URL in ordinary stdout rather than
+      // an alternate terminal screen, which is what lets the web flow relay
+      // it. A one-shot prompt also makes Gemini exit after authentication
+      // instead of dropping into an interactive chat that never completes.
+      loginArgs: [
+        "--screen-reader",
+        "-p",
+        "Reply with exactly: signed in",
+      ],
+      label: "Gemini",
+    };
+  }
+  return undefined;
 }
 
 /** The Codex CLI may live off PATH; the actively-used install is a fallback. */
@@ -1931,8 +2026,10 @@ export class ProviderChatService {
         state = await this.detectClaude();
       } else if (provider === "openai") {
         state = await this.detectCodex();
-      } else {
+      } else if (provider === "google") {
         state = await this.detectGemini();
+      } else {
+        state = await this.detectBrowserCli(provider);
       }
     } catch (error) {
       state = {
@@ -1962,7 +2059,7 @@ export class ProviderChatService {
      */
     userId?: string;
   }): Promise<ProviderUsageReport> {
-    if (input.provider === "google") {
+    if (input.provider !== "anthropic" && input.provider !== "openai") {
       return {
         source: PROVIDER_NAMES[input.provider],
         windows: [],
@@ -2299,6 +2396,23 @@ export class ProviderChatService {
     return { detected: true, loggedIn, ...(account ? { account } : {}) };
   }
 
+  private async detectBrowserCli(provider: "cursor" | "copilot" | "kiro"):
+    Promise<ProviderCliState> {
+    const spec = browserCliSpec(provider) as BrowserCliSpec;
+    const version = await this.runner(
+      spec.command,
+      [...spec.prefixArgs, "--version"],
+      { timeoutMs: 30_000, maxOutputBytes: 65_536 },
+    );
+    return {
+      detected: version.exitCode === 0,
+      // Per-user sessions are always staged into a temporary home and are
+      // reflected by `ownCredential`; ambient host login is intentionally not
+      // treated as somebody else's connection for these browser-only agents.
+      loggedIn: false,
+    };
+  }
+
   /* ------------------------------------------------------- statuses ----- */
 
   public async list(input: {
@@ -2350,7 +2464,9 @@ export class ProviderChatService {
             ? DEFAULT_CLAUDE_MODEL
             : id === "openai"
               ? (await this.codexModels())?.[0]?.id ?? "codex default"
-              : "gemini"),
+              : id === "google"
+                ? "gemini"
+                : `${id} default`),
         ...(settings.effort === undefined
           ? id === "anthropic"
             ? { effort: DEFAULT_CLAUDE_EFFORT }
@@ -2601,8 +2717,6 @@ export class ProviderChatService {
   }): Promise<DeviceAuthStart> {
     const signInFlow = SIGN_IN_FLOWS[input.provider];
     if (signInFlow === undefined) {
-      // The Gemini CLI has no login subcommand at all — authentication is a
-      // menu inside its interactive UI — so there is nothing here to drive.
       throw new ProviderChatError(
         400,
         "unsupported_flow",
@@ -2624,10 +2738,25 @@ export class ProviderChatService {
     await this.cancelDeviceAuthFor(input.userId, input.provider);
 
     const anthropic = input.provider === "anthropic";
+    const openai = input.provider === "openai";
+    const browser = browserCliSpec(input.provider);
     const home = await mkdtemp(path.join(os.tmpdir(), "coord-device-"));
     const env: NodeJS.ProcessEnv = {
       ...sanitizeChildEnv(process.env),
-      ...(anthropic ? { CLAUDE_CONFIG_DIR: home } : { CODEX_HOME: home }),
+      ...(anthropic
+        ? { CLAUDE_CONFIG_DIR: home }
+        : openai
+          ? { CODEX_HOME: home }
+          : {
+              HOME: home,
+              USERPROFILE: home,
+              // Make CLIs print the URL instead of opening it on the server.
+              BROWSER: "echo",
+              GH_BROWSER: "echo",
+              ...(input.provider === "google"
+                ? { GEMINI_CLI_TRUST_WORKSPACE: "true" }
+                : {}),
+            }),
     };
     // The host's own keys must not be visible to a sign-in: an inherited one
     // would let the CLI succeed without the user ever signing in, and the
@@ -2637,6 +2766,19 @@ export class ProviderChatService {
       "ANTHROPIC_API_KEY",
       "ANTHROPIC_AUTH_TOKEN",
       "CLAUDE_CODE_OAUTH_TOKEN",
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "COPILOT_GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "CURSOR_API_KEY",
+      "KIRO_API_KEY",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "AWS_PROFILE",
+      "AWS_WEB_IDENTITY_TOKEN_FILE",
     ]) {
       delete env[name];
     }
@@ -2666,15 +2808,35 @@ export class ProviderChatService {
     flow.process = this.longRunningSpawner(
       anthropic
         ? resolveClaudeCommand("claude")
-        : resolveCodexCommand(this.homeDirectory),
-      anthropic ? ["auth", "login"] : ["login", "--device-auth"],
+        : openai
+          ? resolveCodexCommand(this.homeDirectory)
+          : (browser as BrowserCliSpec).command,
+      anthropic
+        ? ["auth", "login"]
+        : openai
+          ? ["login", "--device-auth"]
+          : [
+              ...(browser as BrowserCliSpec).prefixArgs,
+              ...(browser as BrowserCliSpec).loginArgs,
+            ],
       // Claude waits on stdin for the code the browser hands the user, so its
       // flow must be able to answer. Codex never reads stdin and keeps it
       // closed.
-      { env, cwd: home, ...(anthropic ? { stdin: "pipe" as const } : {}) },
+      {
+        env,
+        cwd: home,
+        ...(anthropic || input.provider === "google"
+          ? { stdin: "pipe" as const }
+          : {}),
+      },
       (line) => {
         const parsed = parseDeviceAuthLine(line);
-        flow.verificationUrl ??= parsed.url;
+        if (
+          parsed.url !== undefined &&
+          (flow.mode !== "browser" || isUserVerificationUrl(parsed.url))
+        ) {
+          flow.verificationUrl ??= parsed.url;
+        }
         flow.userCode ??= parsed.code;
         if (parsed.expiresInMinutes !== undefined) {
           flow.expiresAtMs = Date.now() + parsed.expiresInMinutes * 60_000;
@@ -2684,12 +2846,21 @@ export class ProviderChatService {
         // — the browser does — so its URL alone is the whole prompt.
         if (
           flow.verificationUrl !== undefined &&
-          (flow.mode === "code_exchange" || flow.userCode !== undefined)
+          (flow.mode === "code_exchange" ||
+            flow.mode === "browser" ||
+            flow.userCode !== undefined)
         ) {
           announce();
         }
       },
     );
+    // Gemini exposes sign-in as the first option in its interactive auth
+    // picker. Screen-reader mode plus a piped answer makes that menu drivable
+    // from the web flow while the rest of the OAuth exchange stays in the
+    // user's browser.
+    if (input.provider === "google") {
+      flow.process.write("1");
+    }
 
     this.deviceAuthFlows.set(flow.id, flow);
     void flow.process.done.then(
@@ -2815,6 +2986,10 @@ export class ProviderChatService {
       await this.finishClaudeAuth(flow, output);
       return;
     }
+    if (flow.provider !== "openai") {
+      await this.finishBrowserAuth(flow, output);
+      return;
+    }
     try {
       const authPath = path.join(flow.home, "auth.json");
       const secret = await readFile(authPath, "utf8");
@@ -2885,6 +3060,64 @@ export class ProviderChatService {
       // The staged home has served its purpose either way: the credential is
       // in the vault now, and leaving a live session on disk would outlast the
       // isolation everything else here maintains.
+      await removeCredentialHome(flow.home);
+    }
+  }
+
+  /** Stores the browser session written by Cursor, Copilot, Kiro or Gemini. */
+  private async finishBrowserAuth(
+    flow: DeviceAuthFlow,
+    output: ProcessOutput,
+  ): Promise<void> {
+    const vendor = PROVIDER_VENDORS[flow.provider];
+    try {
+      const secret =
+        flow.provider === "google"
+          ? await readFile(
+              path.join(flow.home, ".gemini", "oauth_creds.json"),
+              "utf8",
+            )
+          : await captureBrowserSession(flow.home);
+      assertSessionFile(vendor, secret);
+      const store = await this.credentialStore();
+      const previous = await store.summary(flow.userId, vendor);
+      const credential: UserCredential = {
+        vendor,
+        kind: "session_file",
+        secret,
+        origin: "device_auth",
+        createdAt: new Date().toISOString(),
+        lastVerifiedAt: undefined,
+        hint: credentialHint("session_file", secret),
+        visibility: previous?.visibility ?? "personal",
+        label: undefined,
+      };
+      const account = await this.verifyCredential(flow.provider, credential);
+      await store.put(flow.userId, vendor, {
+        kind: "session_file",
+        secret,
+        origin: "device_auth",
+        label: account ?? `${PROVIDER_NAMES[flow.provider]} sign-in`,
+        ...(previous?.visibility === undefined
+          ? {}
+          : { visibility: previous.visibility }),
+      });
+      await store.markVerified(flow.userId, vendor, account);
+      await this.ensureConnectionRecord(flow.userId, flow.provider);
+      flow.status = "completed";
+      flow.account = account;
+    } catch (error) {
+      flow.status = "failed";
+      flow.detail =
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? `The sign-in did not complete: ${probeFailureDetail(output)}`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+    } finally {
+      if (flow.timer !== undefined) {
+        clearTimeout(flow.timer);
+      }
       await removeCredentialHome(flow.home);
     }
   }
@@ -3147,16 +3380,71 @@ export class ProviderChatService {
       return { ok: false, detail: probeFailureDetail(output) };
     }
 
-    const gemini = resolveGeminiCommand();
-    const output = await this.runner(
-      gemini.command,
-      [...gemini.prefixArgs, "-p", "Reply with exactly: pong", "-o", "json"],
-      options,
-    );
+    const output =
+      provider === "google"
+        ? await (() => {
+            const gemini = resolveGeminiCommand();
+            return this.runner(
+              gemini.command,
+              [
+                ...gemini.prefixArgs,
+                "-p",
+                "Reply with exactly: pong",
+                "-o",
+                "json",
+              ],
+              options,
+            );
+          })()
+        : await this.runBrowserCliPrompt(
+            provider as "cursor" | "copilot" | "kiro",
+            "Reply with exactly: pong",
+            undefined,
+            options,
+          );
     if (output.exitCode === 0 && output.stdout.includes("pong")) {
       return { ok: true, detail: "verified" };
     }
     return { ok: false, detail: probeFailureDetail(output) };
+  }
+
+  /** Runs one non-interactive turn for the browser-account CLIs. */
+  private async runBrowserCliPrompt(
+    provider: "cursor" | "copilot" | "kiro",
+    prompt: string,
+    settings: ProviderSettings | undefined,
+    options: Parameters<ProcessRunner>[2],
+  ): Promise<ProcessOutput> {
+    const spec = browserCliSpec(provider) as BrowserCliSpec;
+    const model = settings?.model;
+    const args =
+      provider === "cursor"
+        ? [
+            ...spec.prefixArgs,
+            "-p",
+            "--output-format",
+            "json",
+            "--force",
+            ...(model === undefined ? [] : ["--model", model]),
+            prompt,
+          ]
+        : provider === "copilot"
+          ? [
+              ...spec.prefixArgs,
+              "--allow-all-tools",
+              ...(model === undefined ? [] : ["--model", model]),
+              "-p",
+              prompt,
+            ]
+          : [
+              ...spec.prefixArgs,
+              "chat",
+              "--no-interactive",
+              "--trust-all-tools",
+              ...(model === undefined ? [] : ["--model", model]),
+              prompt,
+            ];
+    return await this.runner(spec.command, args, options);
   }
 
   /**
@@ -3191,11 +3479,14 @@ export class ProviderChatService {
         note: "Claude Code is opening a claude.ai sign-in in the host's browser. Finish there, then press Check again.",
       };
     }
-    const gemini = resolveGeminiCommand();
-    this.detachedSpawner(gemini.command, [...gemini.prefixArgs]);
+    const browser = browserCliSpec(input.provider) as BrowserCliSpec;
+    this.detachedSpawner(browser.command, [
+      ...browser.prefixArgs,
+      ...browser.loginArgs,
+    ]);
     return {
       started: true,
-      note: "The Gemini CLI is starting; complete its Google sign-in on the host, then press Check again.",
+      note: `${browser.label} is starting; complete sign-in in the host browser, then press Check again.`,
     };
   }
 
@@ -3498,14 +3789,24 @@ export class ProviderChatService {
         notes: [],
       };
     }
+    if (input.provider === "google") {
+      return {
+        models: null,
+        efforts: null,
+        allowCustomModel: false,
+        suggestedModels: [...SUGGESTED_MODELS.google],
+        suggestedEfforts: [...SUGGESTED_EFFORTS.google],
+        notes: [
+          "Gemini CLI settings become available once the signed-in account is eligible to use it.",
+        ],
+      };
+    }
     return {
       models: null,
       efforts: null,
-      allowCustomModel: false,
-      suggestedModels: [...SUGGESTED_MODELS.google],
-      suggestedEfforts: [...SUGGESTED_EFFORTS.google],
+      allowCustomModel: true,
       notes: [
-        "Gemini CLI settings become available once the signed-in account is eligible to use it.",
+        `${PROVIDER_NAMES[input.provider]} uses the model selected by the signed-in account unless you provide one.`,
       ],
     };
   }
@@ -3686,14 +3987,23 @@ export class ProviderChatService {
                     env,
                     workingDirectory,
                   )
-                : await this.streamViaCodexCli(
-                    prompt.text,
-                    prompt.settings,
-                    input.cliSessionId,
-                    onEvent,
-                    env,
-                    workingDirectory,
-                  );
+                : input.provider === "openai"
+                  ? await this.streamViaCodexCli(
+                      prompt.text,
+                      prompt.settings,
+                      input.cliSessionId,
+                      onEvent,
+                      env,
+                      workingDirectory,
+                    )
+                  : await this.completeViaBrowserProvider(
+                      input.provider,
+                      prompt.text,
+                      prompt.settings,
+                      env,
+                      workingDirectory,
+                      onEvent,
+                    );
             } catch (error) {
               // Record a real auth failure while the completion still owns the
               // credential reservation. No task can rotate the session between
@@ -3901,13 +4211,21 @@ export class ProviderChatService {
                     env,
                     workingDirectory,
                   )
-                : await this.completeViaCodexCli(
-                    prompt.text,
-                    prompt.settings,
-                    input.cliSessionId,
-                    env,
-                    workingDirectory,
-                  );
+                : input.provider === "openai"
+                  ? await this.completeViaCodexCli(
+                      prompt.text,
+                      prompt.settings,
+                      input.cliSessionId,
+                      env,
+                      workingDirectory,
+                    )
+                  : await this.completeViaBrowserProvider(
+                      input.provider,
+                      prompt.text,
+                      prompt.settings,
+                      env,
+                      workingDirectory,
+                    );
             } catch (error) {
               // Keep the failure update inside the same reservation as the CLI;
               // see the streaming path above for the ordering guarantee.
@@ -4383,6 +4701,79 @@ export class ProviderChatService {
       ...(contextWindow === undefined ? {} : { contextWindow }),
     };
   }
+
+  /** Completion path shared by Gemini and the browser-only coding CLIs. */
+  private async completeViaBrowserProvider(
+    provider: Exclude<ProviderId, "anthropic" | "openai">,
+    prompt: string,
+    settings: ProviderSettings,
+    env: NodeJS.ProcessEnv | undefined,
+    workingDirectory: string,
+    onEvent?: (event: ChatStreamEvent) => void,
+  ): Promise<ChatReply> {
+    const options = {
+      cwd: workingDirectory,
+      ...(env === undefined ? {} : { env }),
+      timeoutMs: CLI_TIMEOUT_MS,
+      maxOutputBytes: MAX_OUTPUT_BYTES,
+    };
+    let output: ProcessOutput;
+    if (provider === "google") {
+      const gemini = resolveGeminiCommand();
+      output = await this.runner(
+        gemini.command,
+        [
+          ...gemini.prefixArgs,
+          "-p",
+          prompt,
+          "--output-format",
+          "json",
+          ...(settings.model === undefined
+            ? []
+            : ["--model", settings.model]),
+        ],
+        options,
+      );
+    } else {
+      output = await this.runBrowserCliPrompt(provider, prompt, settings, options);
+    }
+    if (output.exitCode !== 0) {
+      throw this.cliFailure(PROVIDER_NAMES[provider], output);
+    }
+    const text = browserCliReplyText(output.stdout, PROVIDER_NAMES[provider]);
+    onEvent?.({ type: "text", delta: text });
+    return {
+      provider,
+      model: settings.model ?? `${provider} default`,
+      text,
+      usage: {},
+    };
+  }
+}
+
+/** Extracts answer text without inventing usage or reasoning metadata. */
+function browserCliReplyText(stdout: string, name: string): string {
+  const trimmed = stdout.trim();
+  if (trimmed.length === 0) {
+    throw new ProviderChatError(502, "cli_failed", `${name} returned no answer`);
+  }
+  try {
+    const value = JSON.parse(trimmed) as unknown;
+    if (typeof value === "string") {
+      return value;
+    }
+    if (typeof value === "object" && value !== null) {
+      const record = value as Record<string, unknown>;
+      for (const key of ["response", "result", "text", "message"]) {
+        if (typeof record[key] === "string") {
+          return record[key] as string;
+        }
+      }
+    }
+  } catch {
+    // Copilot and Kiro intentionally use plain text in non-interactive mode.
+  }
+  return trimmed;
 }
 
 /* ----------------------------------------------------- stream parsing ---- */

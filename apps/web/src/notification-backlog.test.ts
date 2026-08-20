@@ -55,6 +55,18 @@ test("news already seen does not get announced again", async () => {
   assert.match(data, /id: notificationId\(event\),/u);
 });
 
+test("marking every notification read survives a rebuilt audit window", async () => {
+  const data = await publicFile("data.js");
+  const screen = await publicFile("screen-notifications.js");
+
+  assert.match(data, /sequence: entry\.sequence/u);
+  assert.match(data, /export function notificationIsRead\(row\)/u);
+  assert.match(data, /"ag\.notificationReadThrough"/u);
+  assert.match(data, /export function markAllNotificationsRead/u);
+  assert.match(screen, /markAllNotificationsRead\(\);/u);
+  assert.match(screen, /!notificationIsRead\(row\)/u);
+});
+
 test("a frame is recorded before it is judged", async () => {
   const app = await publicFile("app.js");
   const audit = app.indexOf('if (frame?.type === "audit") {\n      // Remembered');

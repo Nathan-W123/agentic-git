@@ -31,7 +31,7 @@ exact implemented and later-phase boundary.
 
 ## Implemented
 
-- Generic JSONL, Codex, Claude, and Gemini adapters with plan, execute,
+- Generic JSONL, Codex, Claude, Gemini, Cursor, Copilot, and Kiro adapters with plan, execute,
   cancel, scope-change, and replan behavior; the generic protocol also
   supports pause and resume.
 - Greenfield project start, local Git import, and credential-safe GitHub
@@ -144,10 +144,11 @@ node apps/cli/dist/index.js doctor
 ```
 
 Configure agents and repository validation commands in
-`.coordinator/config.json`. The default configuration is intentionally missing
-an agent so a project cannot silently execute with an unintended provider. Its
-portable validation baseline is `git diff --check`; replace or extend that
-command with the repository's real test and build commands.
+`.coordinator/config.json`. The default configuration names the supported
+vendor adapters but leaves the default agent unset, so a task cannot silently
+execute with an unintended provider. Its portable validation baseline is
+`git diff --check`; replace or extend that command with the repository's real
+test and build commands.
 
 ## Web Control Room
 
