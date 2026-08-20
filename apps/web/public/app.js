@@ -32,6 +32,8 @@ import {
   currentRepository,
   currentUserId,
   currentUserName,
+  DEFAULT_ACCENT,
+  DEFAULT_ACCENT_SECONDARY,
   disconnectGitHub,
   loadContext,
   loadDeferredContext,
@@ -1634,6 +1636,19 @@ function appearanceCard() {
           .join("")}
       </div>`,
     )}
+
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Default colours</div>
+        <div class="sr-sub">Restore the original primary, secondary, and agent
+          colours.</div>
+      </span>
+      <span class="sr-ctl">
+        <button type="button" class="btn btn-quiet" data-act="colours-reset">
+          Reset colours
+        </button>
+      </span>
+    </div>
   </section>`;
 }
 
@@ -5815,6 +5830,14 @@ document.addEventListener("click", (event) => {
     case "theme-toggle":
       setMyTheme(myTheme() === "light" ? "dark" : "light");
       render();
+      return;
+    case "colours-reset":
+      state.openWheel = undefined;
+      void saveAppearanceChoice({
+        accent: DEFAULT_ACCENT,
+        accentSecondary: DEFAULT_ACCENT_SECONDARY,
+        agentColor: DEFAULT_ACCENT,
+      });
       return;
     case "avatar-clear":
       setMyAvatar(undefined);
