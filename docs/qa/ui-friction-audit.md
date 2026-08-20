@@ -13,6 +13,9 @@ already recorded as deliberately deferred in the messaging diagnosis are not
 repeated except where the picture has since changed; the carry-over list is at
 the end.
 
+The remediation half — what to write for each finding, in what order, and what
+has to be decided first — is [`ui-friction-fix-plan.md`](ui-friction-fix-plan.md).
+
 Paths are `apps/web/public/` unless another one is given.
 
 ## Dead ends: surfaces the interface no longer reaches
