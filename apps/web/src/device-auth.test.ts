@@ -276,54 +276,86 @@ test("a browser sign-in is refused when its CLI is not installed", async () => {
   );
 });
 
-test("Cursor browser sign-in stores only the session written in its isolated home", async () => {
+test("the three new agents accept a browser code and store their isolated session", async () => {
   const harness = await createHarness();
-  let finish: (() => void) | undefined;
+  const submitted: Array<{ command: string; code: string }> = [];
   const spawner = (
-    _command: string,
+    command: string,
     _args: readonly string[],
-    options: { env: NodeJS.ProcessEnv },
+    options: { env: NodeJS.ProcessEnv; stdin?: string },
     onLine: (line: string) => void,
   ) => {
-    onLine("Continue in your browser: https://cursor.com/auth/cli");
+    onLine(`Continue in your browser: https://signin.example/${command}`);
+    let finish: ((code: string) => void) | undefined;
     const done = new Promise<ReturnType<typeof output>>((resolve) => {
-      finish = () => {
+      finish = (code) => {
         void (async () => {
-          const session = path.join(String(options.env["HOME"]), ".cursor");
+          const session = path.join(String(options.env["HOME"]), ".agent-auth");
           await mkdir(session, { recursive: true });
           await writeFile(
-            path.join(session, "cli-config.json"),
-            JSON.stringify({ accessToken: "cursor-session" }),
+            path.join(session, "session.json"),
+            JSON.stringify({ accessToken: `${command}-${code}` }),
             "utf8",
           );
           resolve(output("signed in"));
         })();
       };
     });
-    return { done, kill: () => finish?.(), write: () => undefined };
+    assert.equal(options.stdin, "pipe");
+    return {
+      done,
+      kill: () => finish?.("cancelled"),
+      write: (code: string) => {
+        submitted.push({ command, code });
+        finish?.(code);
+      },
+    };
   };
   const service = new ProviderChatService(harness.project, {
     homeDirectory: harness.home,
     runner: scriptedRunner({
       agent: (args) =>
-        args[0] === "--version" ? output("1.0.0") : output('{"result":"pong"}'),
+        args[0] === "--version" ? output("1.0.0") : output("pong"),
+      copilot: (args) =>
+        args[0] === "--version" ? output("1.0.0") : output("pong"),
+      "kiro-cli": (args) =>
+        args[0] === "--version" ? output("1.0.0") : output("pong"),
     }),
     longRunningSpawner: spawner,
   });
 
-  const started = await service.startDeviceAuth({
-    userId: "u1",
-    provider: "cursor",
-  });
-  assert.equal(started.mode, "browser");
-  assert.equal(started.verificationUrl, "https://cursor.com/auth/cli");
-  finish?.();
-  assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
-  const cursor = (await service.list({ userId: "u1", systemAdmin: false }))
-    .find((entry) => entry.id === "cursor");
-  assert.equal(cursor?.connected, true);
-  assert.equal(cursor?.ownCredential?.origin, "device_auth");
-  assert.deepEqual(cursor?.acceptedCredentialKinds, []);
+  for (const [provider, command] of [
+    ["cursor", "agent"],
+    ["copilot", "copilot"],
+    ["kiro", "kiro-cli"],
+  ] as const) {
+    const started = await service.startDeviceAuth({
+      userId: "u1",
+      provider,
+    });
+    assert.equal(started.mode, "code_exchange");
+    assert.equal(started.verificationUrl, `https://signin.example/${command}`);
+    await service.submitDeviceAuthCode({
+      userId: "u1",
+      flowId: started.flowId,
+      code: `${provider}-code`,
+    });
+    assert.equal(
+      await settledStatus(service, "u1", started.flowId),
+      "completed",
+    );
+    const connected = (
+      await service.list({ userId: "u1", systemAdmin: false })
+    ).find((entry) => entry.id === provider);
+    assert.equal(connected?.connected, true);
+    assert.equal(connected?.ownCredential?.origin, "device_auth");
+    assert.deepEqual(connected?.acceptedCredentialKinds, []);
+  }
+  assert.deepEqual(submitted, [
+    { command: "agent", code: "cursor-code" },
+    { command: "copilot", code: "copilot-code" },
+    { command: "kiro-cli", code: "kiro-code" },
+  ]);
 });
 
 /**
@@ -499,6 +531,77 @@ test("Google browser sign-in reports a missing Gemini CLI", async () => {
     service.startDeviceAuth({ userId: "u1", provider: "google" }),
     /No usable Google CLI was found/u,
   );
+});
+
+test("Gemini opens web sign-in and accepts the returned code in Lattice", async () => {
+  const harness = await createHarness();
+  const submitted: string[] = [];
+  const spawner = (
+    _command: string,
+    _args: readonly string[],
+    options: { env: NodeJS.ProcessEnv; stdin?: string },
+    onLine: (line: string) => void,
+  ) => {
+    assert.equal(options.stdin, "pipe");
+    onLine("Open https://accounts.google.com/o/oauth2/auth in your browser");
+    let settle: ((result: ReturnType<typeof output>) => void) | undefined;
+    const done = new Promise<ReturnType<typeof output>>((resolve) => {
+      settle = resolve;
+    });
+    return {
+      done,
+      kill: () => settle?.(output("cancelled", 1)),
+      write: (value: string) => {
+        submitted.push(value);
+        if (value === "1") {
+          return;
+        }
+        void (async () => {
+          const gemini = path.join(String(options.env["HOME"]), ".gemini");
+          await mkdir(gemini, { recursive: true });
+          await writeFile(
+            path.join(gemini, "oauth_creds.json"),
+            JSON.stringify({
+              access_token: "gemini-access",
+              refresh_token: "gemini-refresh",
+            }),
+            "utf8",
+          );
+          settle?.(output("signed in"));
+        })();
+      },
+    };
+  };
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      gemini: (args) =>
+        args.includes("--version") ? output("1.0.0") : output("pong"),
+    }),
+    longRunningSpawner: spawner,
+  });
+
+  const started = await service.startDeviceAuth({
+    userId: "u1",
+    provider: "google",
+  });
+  assert.equal(started.mode, "code_exchange");
+  assert.equal(
+    started.verificationUrl,
+    "https://accounts.google.com/o/oauth2/auth",
+  );
+  await service.submitDeviceAuthCode({
+    userId: "u1",
+    flowId: started.flowId,
+    code: "returned-code",
+  });
+  assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
+  assert.deepEqual(submitted, ["1", "returned-code"]);
+  const gemini = (
+    await service.list({ userId: "u1", systemAdmin: false })
+  ).find((entry) => entry.id === "google");
+  assert.equal(gemini?.connected, true);
+  assert.deepEqual(gemini?.acceptedCredentialKinds, []);
 });
 
 test("signing in again after an expired session keeps an org-wide agent org-wide", async () => {
