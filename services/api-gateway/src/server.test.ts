@@ -13348,3 +13348,90 @@ test("the classify prompt is biased toward acting on its own judgment", async (t
   // The guardrails this replaced nothing about are still here.
   assert.match(asked, /do not interrupt their conversation/u);
 });
+
+/**
+ * The reported case, end to end: the sender's own agent is mid-task, the
+ * free agent in the room is somebody else's — and that agent's credential
+ * is broken. Reading the message runs on the chosen agent's own sign-in, a
+ * per-user thing that fails independently of anything about the message, so
+ * before this the whole decision died with it: the free agent errored
+ * silently and the busy one, perfectly able to queue the work, was never
+ * asked. An unreachable pick now hands the decision to the runner-up; a
+ * real verdict — IGNORE included — still ends the line, so two agents never
+ * rule on one message.
+ */
+test("an unreachable pick hands the decision to the runner-up, not to silence", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "understudy");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const cofounder = await addColleague(runtime, "understudy-cofounder@example.com");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(cofounder.id, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  // Names that share no token with the request, so no fit tier: this is the
+  // pure fallback path.
+  for (const [agent, name] of [
+    ["anthropic", "Willow"],
+    [`${cofounder.id}:openai`, "Cedar"],
+  ] as const) {
+    assert.equal(
+      (await owner.request(`${base}/agents/${agent}`, {
+        method: "POST",
+        body: { name },
+      })).status,
+      200,
+    );
+  }
+  // The owner's own agent is mid-task — an unfinished row under the same
+  // (owner, agent) key the busy signal reads.
+  await runtime.store.submitTask({
+    repositoryId,
+    objective: "long refactor still running",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+
+  // Tier 2 skips the busy own agent; tier 3 picks the cofounder's free
+  // Codex. Its first two classify attempts — the retry — produce nothing,
+  // which is what an expired sign-in looks like from here. The third call is
+  // the understudy: the owner's busy Claude, whose credential works fine.
+  runtime.setClassifyFailures(2);
+  runtime.setTaskClassification("ACT");
+  const before = runtime.chatPrompts.length;
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "please rework the shipping calculator" },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the understudy never dispatched the work",
+  );
+  // Landed on the busy-but-reachable agent, spending its owner's account —
+  // the sender's own, here — and queued behind its current task rather than
+  // vanishing.
+  assert.equal(runtime.submittedTasks[0]?.actorId, ownerId);
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+  const classifies = runtime.chatPrompts
+    .slice(before)
+    .filter((entry) =>
+      /Reply with exactly one of these three lines/u.test(entry.prompt),
+    );
+  assert.equal(
+    classifies.length,
+    3,
+    "two attempts on the pick, one on the understudy — and no more",
+  );
+});
