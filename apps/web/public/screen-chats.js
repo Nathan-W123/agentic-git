@@ -1389,11 +1389,12 @@ function threadSaidCount(said) {
  * words survive for screen readers, and the sentence itself is still in the
  * room, one message down, now pointing back here.
  *
- * A run still going draws its position as a small filling donut in the corner
- * of the face of the agent running it, where that face's status dot sits; the
- * face is also lifted to the front of the stack. The bar this replaces sat on
- * its own line under the thread and could only ever say that something was
- * moving, never who was moving it.
+ * A run still going draws its position as a pie filling the whole face of the
+ * agent running it — dark for the part still to come, a light wash of the
+ * accent for the part already travelled — and that face is lifted to the
+ * front of the stack. The bar this replaces sat on its own line under the
+ * thread and could only ever say that something was moving, never who was
+ * moving it.
  */
 function threadSummaryLink(entry, replies, repositoryId, progress) {
   const titled = threadTitleReply(entry);

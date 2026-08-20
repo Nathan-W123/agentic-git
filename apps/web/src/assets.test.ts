@@ -3265,35 +3265,26 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.doesNotMatch(idle, /ctl-working/u);
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
-  // Two pixels of accent, and a full circle so the part still to come is there
-  // to be read against — drawn as the badge in the face's bottom right corner
-  // rather than as a ring around the whole portrait.
+  // A pie over the whole face rather than a badge in its corner: the wedge
+  // still to come is darker than the wedge already travelled, which is the
+  // entire read.
   const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
-  assert.notEqual(ring, undefined, "the ring should be drawn on the face");
+  assert.notEqual(ring, undefined, "the pie should be drawn on the face");
   assert.match(ring ?? "", /border-radius: 50%;/u);
   assert.match(
     ring ?? "",
-    /conic-gradient\(\s*var\(--accent\) calc\(var\(--run, 0\) \* 1%\)/u,
+    /conic-gradient\(\s*color-mix\(in srgb, var\(--accent\) 42%, transparent\) calc\(var\(--run, 0\) \* 1%\)/u,
   );
-  assert.match(
-    ring ?? "",
-    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 2px\)/u,
-  );
-  // A status mark, not a frame: it is pinned to one corner and sized in
-  // pixels, so it cannot grow back into a ring around the face.
-  assert.match(ring ?? "", /right: -2px;/u);
-  assert.match(ring ?? "", /bottom: 0;/u);
-  assert.match(ring ?? "", /width: 10px;/u);
-  assert.match(ring ?? "", /height: 10px;/u);
-  assert.doesNotMatch(ring ?? "", /inset:/u);
-
-  // And it sits on the chat's own ground, the way the presence dot does, so
-  // the hollow middle reads as a gauge rather than as a hole in the portrait.
-  const seat = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
-    .exec(css)?.[1];
-  assert.notEqual(seat, undefined, "the badge should be seated on the face");
-  assert.match(seat ?? "", /background: var\(--bg-chat\);/u);
+  // Undone is the darker of the two, and it is what the rest of the circle is
+  // filled with.
+  assert.match(ring ?? "", /rgba\(0, 0, 0, 0\.55\) 0\s*\);/u);
+  // It covers the icon rather than sitting in a corner of it, so nothing may
+  // pin it to one edge or cut a hole in its middle.
+  assert.match(ring ?? "", /inset: -1px;/u);
+  assert.doesNotMatch(ring ?? "", /mask:/u);
+  assert.doesNotMatch(ring ?? "", /width:/u);
+  assert.doesNotMatch(ring ?? "", /height:/u);
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {
