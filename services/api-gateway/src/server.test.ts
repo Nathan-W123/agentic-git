@@ -3775,6 +3775,14 @@ test("automatic continuation matches an existing user-rooted task thread", async
     body: { content },
   });
   assert.equal(first.status, 201, JSON.stringify(first.data));
+  const bumpedRoots: string[] = [];
+  const bumpChannelMessage = runtime.store.bumpChannelMessage.bind(
+    runtime.store,
+  );
+  runtime.store.bumpChannelMessage = async (repo, messageId, at) => {
+    bumpedRoots.push(messageId);
+    await bumpChannelMessage(repo, messageId, at);
+  };
   const second = await owner.request(`${base}/messages`, {
     method: "POST",
     body: { content },
@@ -3795,7 +3803,13 @@ test("automatic continuation matches an existing user-rooted task thread", async
   );
   assert.equal(root?.kind, "user");
   assert.ok(root?.taskId !== undefined);
-  assert.equal(repeated?.taskId, undefined);
+  assert.ok(repeated !== undefined);
+  assert.equal(repeated.taskId, undefined);
+  assert.deepEqual(
+    bumpedRoots,
+    [root.id],
+    "a channel-originated continuation must still refresh the existing thread",
+  );
   assert.ok(
     (root?.replies ?? []).some(
       (reply) => reply.kind === "user" && reply.content === content,
@@ -5466,6 +5480,26 @@ test("a reply in an open thread continues the conversation, whoever it mentions"
   await runtime.store.claimSubmittedTasks(repositoryId);
   await runtime.store.openSubmittedTask(threadRoot.taskId);
 
+  // This thread is now older than another room message. Continuing inside it
+  // should update the conversation without changing either root's position.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const newerRoot = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: ownerId,
+    content: "A newer room message that should remain below the thread.",
+  });
+  const beforeReply = await runtime.store.listChannelMessages(
+    repositoryId,
+    ownerId,
+  );
+  assert.ok(
+    beforeReply.findIndex((message) => message.id === threadRoot.id) <
+      beforeReply.findIndex((message) => message.id === newerRoot.id),
+    "the test needs an older thread followed by a newer room message",
+  );
+
   const replied = await owner.request(
     `${base}/messages/${encodeURIComponent(threadRoot.id)}/replies`,
     {
@@ -5489,6 +5523,26 @@ test("a reply in an open thread continues the conversation, whoever it mentions"
   assert.match(
     runtime.submittedTasks[1]?.objective ?? "",
     /config loader/u,
+  );
+  const afterReply = await runtime.store.listChannelMessages(
+    repositoryId,
+    ownerId,
+  );
+  assert.deepEqual(
+    afterReply.map((message) => message.id),
+    beforeReply.map((message) => message.id),
+    "replying inside a thread must preserve its channel position",
+  );
+  const updatedRoot = afterReply.find(
+    (message) => message.id === threadRoot.id,
+  );
+  assert.ok(
+    updatedRoot?.replies.some(
+      (reply) =>
+        reply.kind === "user" &&
+        reply.content === "@Other now update the config loader the same way",
+    ),
+    "the reply must still append to the intended thread",
   );
   // And the next turn's submission settled the previous open one: at most
   // one turn of a conversation is ever open.

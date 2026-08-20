@@ -10944,12 +10944,13 @@ export class ApiGateway {
         content: opener.content,
       }).catch(() => undefined);
     }
-    if (continuing !== undefined) {
-      // Back to the foot of the channel. Work joining an old thread would
-      // otherwise land wherever that thread has scrolled to, which is the
-      // failure mode that kept merging explicit-only — so the merge is made
-      // visible rather than merely correct. The timestamp is untouched; only
-      // the position moves (`bumpChannelMessage`).
+    if (continuing !== undefined && input.threadMessageId === undefined) {
+      // A request made in the channel and merged into an old thread needs to
+      // bring that thread back to the foot so the merge is visible. A request
+      // made inside an already-open thread is visible where it was written;
+      // moving its root would unexpectedly reorder the surrounding room.
+      // The timestamp is untouched; only the position moves
+      // (`bumpChannelMessage`).
       await this.options.store
         .bumpChannelMessage(repositoryId, continuing, new Date().toISOString())
         .catch(() => undefined);
