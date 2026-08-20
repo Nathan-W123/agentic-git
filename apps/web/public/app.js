@@ -34,6 +34,7 @@ import {
   currentUserName,
   disconnectGitHub,
   loadContext,
+  loadDeferredContext,
   loadGitHub,
   loadHealth,
   loadProviders,
@@ -6521,8 +6522,20 @@ async function boot() {
   if (await handleInviteLink()) {
     return;
   }
+  // Health says whether this control plane has an owner yet; the context call
+  // says who is asking. Neither answer depends on the other, so a cold start
+  // asks for both at once instead of paying two round trips in a row for what
+  // is one wait on a phone. The context failure is captured rather than
+  // thrown, because it has to be handled after the health answer is in.
+  // Read before the context call can answer: "nobody is signed in yet" has to
+  // mean what it meant when this ran second.
+  const signedOut = state.principal === undefined;
+  const contextFailure = loadContext({ defer: true }).then(
+    () => undefined,
+    (error) => error,
+  );
   await loadHealth();
-  if (state.health?.setupRequired === true && state.principal === undefined) {
+  if (state.health?.setupRequired === true && signedOut) {
     // First-time setup outranks the link: neither signing in nor registering
     // can succeed against a control plane that has no owner yet.
     authMode = "bootstrap";
@@ -6532,15 +6545,14 @@ async function boot() {
       authMode = mode;
     }
   }
-  try {
-    await loadContext();
-  } catch (error) {
-    if (error.status === 401) {
+  const failure = await contextFailure;
+  if (failure !== undefined) {
+    if (failure.status === 401) {
       state.principal = undefined;
       showAuth();
       return;
     }
-    state.loadError = error.message;
+    state.loadError = failure.message;
   }
   // A link that names a signed-out form is a request for that form. This used
   // to be answered by rewriting the hash to "#chats" whenever a session was
@@ -6557,6 +6569,11 @@ async function boot() {
   applyHash();
   render();
 
+  // Everything below this line happens with a screen already up. The audit
+  // feed, the run history, the metrics tile and the worker fleet are read on
+  // screens somebody has to navigate to first, so they no longer stand between
+  // tapping the icon and seeing the app.
+  void loadDeferredContext().then(() => render());
   void loadProviders().then(() => render());
   void loadGitHub().then(() => {
     if (state.route === "settings") {

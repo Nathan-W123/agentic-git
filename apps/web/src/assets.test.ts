@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import type { StaticAsset } from "@coord/api-gateway";
 
 import { loadStaticAssets } from "./assets.js";
 import { AGENT_CALL_SIGNS } from "./providers.js";
@@ -55,6 +58,93 @@ test("loads every control-room asset with an explicit content type", async () =>
       `${module} should be served`,
     );
   }
+});
+
+test("every dashboard file also has a name that carries its own digest", async () => {
+  const assets = await loadStaticAssets();
+  // A stable name costs a phone one revalidation round trip per file on every
+  // launch, because the name says nothing about which build it holds. A name
+  // with a digest in it can be promised never to change, which is what turns a
+  // repeat launch into zero requests.
+  const digested = [...assets.keys()].filter((url) =>
+    /^\/[a-z-]+\.[0-9a-f]{12}\.(?:js|css)$/u.test(url),
+  );
+  for (const name of ["app", "data", "ui", "screen-chats", "boot-plan"]) {
+    assert.equal(
+      digested.some((url) => url.startsWith(`/${name}.`)),
+      true,
+      `${name}.js should have a digested name`,
+    );
+  }
+  assert.equal(
+    digested.some((url) => url.startsWith("/styles.")),
+    true,
+    "the stylesheet should have a digested name",
+  );
+  for (const url of digested) {
+    assert.equal(
+      assets.get(url)?.immutable,
+      true,
+      `${url} should be cacheable forever`,
+    );
+  }
+});
+
+test("index.html names the digested build and is itself never cached", async () => {
+  const assets = await loadStaticAssets();
+  const html = assets.get("/index.html")?.body.toString("utf8") ?? "";
+  // The document is the one file that still revalidates on every launch, and
+  // it is what names which build the rest of the launch loads. That is the
+  // whole of the old-client guarantee: a phone can hold the digested files
+  // forever precisely because it re-reads this one.
+  assert.equal(assets.get("/index.html")?.immutable, undefined);
+  assert.equal(/src="\/app\.[0-9a-f]{12}\.js"/u.test(html), true);
+  assert.equal(/href="\/styles\.[0-9a-f]{12}\.css"/u.test(html), true);
+  assert.equal(html.includes('src="/app.js"'), false);
+  assert.equal(html.includes('href="/styles.css"'), false);
+});
+
+test("a digested module imports its dependencies by their digested names", async () => {
+  const assets = await loadStaticAssets();
+  const app = [...assets.keys()].find((url) =>
+    /^\/app\.[0-9a-f]{12}\.js$/u.test(url),
+  );
+  assert.ok(app, "app.js should be served under a digested name");
+  const source = assets.get(app)?.body.toString("utf8") ?? "";
+  // A module cached forever must never be able to reach a URL that has since
+  // stopped existing, so its imports carry digests too — and they are the same
+  // digest, because the modules import each other cyclically and are renamed
+  // as one graph.
+  const digest = /^\/app\.([0-9a-f]{12})\.js$/u.exec(app)?.[1];
+  assert.equal(source.includes(`from "./data.${digest}.js"`), true);
+  assert.equal(source.includes('from "./data.js"'), false);
+  assert.equal(assets.get(`/data.${digest}.js`) !== undefined, true);
+});
+
+test("changing one module renames the whole graph", async (t) => {
+  const original = await loadStaticAssets();
+  const digestOfApp = (assets: ReadonlyMap<string, StaticAsset>): string =>
+    /^\/app\.([0-9a-f]{12})\.js$/u.exec(
+      [...assets.keys()].find((url) => /^\/app\.[0-9a-f]{12}\.js$/u.test(url)) ??
+        "",
+    )?.[1] ?? "";
+
+  // A second copy of the public directory with one module edited: the digest
+  // has to move, or a phone told to cache forever would keep serving the old
+  // bytes after a deploy.
+  const scratch = await mkdtemp(path.join(tmpdir(), "coord-assets-"));
+  t.after(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+  await cp(path.join(packageRoot, "public"), scratch, { recursive: true });
+  await writeFile(
+    path.join(scratch, "boot-plan.js"),
+    `${await readFile(path.join(scratch, "boot-plan.js"), "utf8")}\n// edited\n`,
+  );
+  const edited = await loadStaticAssets(scratch, false, false);
+
+  assert.notEqual(digestOfApp(original), "");
+  assert.notEqual(digestOfApp(original), digestOfApp(edited));
 });
 
 test("the retired HUD assets are no longer served", async () => {

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import {
+  request as httpRequest,
+  type IncomingHttpHeaders,
+} from "node:http";
 import net from "node:net";
 import test, { type TestContext } from "node:test";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -156,6 +161,45 @@ interface TestRuntime {
     reason: string;
     actorId: string;
   }>;
+}
+
+/**
+ * Stands in for the dashboard's JavaScript: text, and large enough that
+ * compressing it is worth the header it costs.
+ */
+const SCRIPT_ASSET = `export const screens = ${JSON.stringify(
+  Array.from({ length: 400 }, (_, index) => `screen-${index}`),
+)};\n`.repeat(4);
+
+/** The digest a build would put in that module's name. */
+const SCRIPT_DIGEST = "0123456789ab";
+
+/**
+ * One static request, made with `http` rather than `fetch` so the test decides
+ * what it accepts and reads what comes back byte for byte. `fetch` rewrites
+ * `Accept-Encoding` and silently decompresses, which hides the two things
+ * these tests are about.
+ */
+async function fetchAsset(
+  origin: string,
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }> {
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest(`${origin}${path}`, { headers }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks),
+        });
+      });
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 class TestClient {
@@ -789,6 +833,17 @@ async function startRuntime(
       [
         "/index.html",
         { body: "<!doctype html><title>Relay</title>", contentType: "text/html" },
+      ],
+      // A module big enough to be worth compressing, under both the stable
+      // name and the digested one the document actually points at.
+      ["/app.js", { body: SCRIPT_ASSET, contentType: "text/javascript" }],
+      [
+        `/app.${SCRIPT_DIGEST}.js`,
+        {
+          body: SCRIPT_ASSET,
+          contentType: "text/javascript",
+          immutable: true,
+        },
       ],
     ]),
   });
@@ -12613,4 +12668,98 @@ test("registration says so when the deployment has no relay and only logged the 
   assert.equal(started.data.delivery, "log");
   assert.equal(logged.length, 1);
   assert.match(logged[0] ?? "", /confirmation code/iu);
+});
+
+test("static assets are compressed for the clients that can read them", async (t) => {
+  const runtime = await startRuntime(t);
+  const identity = await fetchAsset(runtime.origin, "/app.js");
+
+  assert.equal(identity.status, 200);
+  assert.equal(identity.headers["content-encoding"], undefined);
+  assert.equal(identity.headers["vary"], "Accept-Encoding");
+  const size = identity.body.length;
+
+  // The dashboard ships close to a megabyte of JavaScript and a quarter of a
+  // megabyte of CSS as plain text. Over a phone connection that is most of the
+  // wait, and it was going down the wire uncompressed.
+  const gzip = await fetchAsset(runtime.origin, "/app.js", {
+    "Accept-Encoding": "gzip",
+  });
+  assert.equal(gzip.headers["content-encoding"], "gzip");
+  assert.equal(gunzipSync(gzip.body).toString("utf8"), identity.body.toString("utf8"));
+  assert.equal(gzip.body.length < size / 4, true);
+  assert.equal(gzip.headers["content-length"], String(gzip.body.length));
+
+  const brotli = await fetchAsset(runtime.origin, "/app.js", {
+    "Accept-Encoding": "br, gzip",
+  });
+  assert.equal(brotli.headers["content-encoding"], "br");
+  assert.equal(
+    brotliDecompressSync(brotli.body).toString("utf8"),
+    identity.body.toString("utf8"),
+  );
+  // Brotli wins when both are on offer, which is every phone that can install
+  // this app.
+  assert.equal(brotli.body.length < gzip.body.length, true);
+
+  // A client that says it can read neither still gets the bytes.
+  const refused = await fetchAsset(runtime.origin, "/app.js", {
+    "Accept-Encoding": "gzip;q=0, br;q=0",
+  });
+  assert.equal(refused.headers["content-encoding"], undefined);
+  assert.equal(refused.body.length, size);
+
+  // Small assets are left alone: the header would cost more than the saving.
+  const document = await fetchAsset(runtime.origin, "/", {
+    "Accept-Encoding": "br, gzip",
+  });
+  assert.equal(document.headers["content-encoding"], undefined);
+});
+
+test("a compressed asset revalidates against its own tag", async (t) => {
+  const runtime = await startRuntime(t);
+  const gzip = await fetchAsset(runtime.origin, "/app.js", {
+    "Accept-Encoding": "gzip",
+  });
+  const identity = await fetchAsset(runtime.origin, "/app.js");
+  const gzipTag = String(gzip.headers["etag"]);
+  const identityTag = String(identity.headers["etag"]);
+
+  // Two representations of one file. A cache holding the compressed one must
+  // not answer a request that can only read the plain one, and the tag is the
+  // only thing keeping them apart.
+  assert.notEqual(gzipTag, identityTag);
+  assert.match(gzipTag, /-gzip"$/u);
+
+  const unchanged = await fetchAsset(runtime.origin, "/app.js", {
+    "Accept-Encoding": "gzip",
+    "If-None-Match": gzipTag,
+  });
+  assert.equal(unchanged.status, 304);
+  const mismatched = await fetchAsset(runtime.origin, "/app.js", {
+    "Accept-Encoding": "gzip",
+    "If-None-Match": identityTag,
+  });
+  assert.equal(mismatched.status, 200);
+});
+
+test("a digested asset name is cached forever and a stable one is not", async (t) => {
+  const runtime = await startRuntime(t);
+
+  // The point of the digest: a repeat launch reads these out of local cache
+  // and makes no request at all, where a stable name costs a revalidation
+  // round trip per file every single time.
+  const digested = await fetchAsset(runtime.origin, `/app.${SCRIPT_DIGEST}.js`);
+  assert.equal(digested.status, 200);
+  assert.equal(
+    digested.headers["cache-control"],
+    "public, max-age=31536000, immutable",
+  );
+
+  // The document that names the build still revalidates, which is what makes
+  // the promise above safe to make.
+  const stable = await fetchAsset(runtime.origin, "/app.js");
+  assert.equal(stable.headers["cache-control"], "no-cache");
+  const document = await fetchAsset(runtime.origin, "/");
+  assert.equal(document.headers["cache-control"], "no-cache");
 });
