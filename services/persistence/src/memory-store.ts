@@ -2254,6 +2254,19 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (input.authorId === input.recipientId) {
       throw new Error("A direct message needs two people");
     }
+    if (input.referencedMessageId !== undefined) {
+      const target = this.directMessages.get(input.referencedMessageId);
+      if (
+        target === undefined ||
+        target.projectId !== input.projectId ||
+        directPairKey(target.authorId, target.recipientId) !==
+          directPairKey(input.authorId, input.recipientId)
+      ) {
+        throw new Error(
+          "A direct message reference must target the same conversation",
+        );
+      }
+    }
     const message: DirectMessage = {
       id: createId("dm"),
       projectId: input.projectId,
@@ -2261,6 +2274,9 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       recipientId: input.recipientId,
       content,
       createdAt: new Date().toISOString(),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     };
     this.directMessages.set(message.id, message);
     return { ...message };
@@ -2280,6 +2296,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       return undefined;
     }
     this.directMessages.delete(messageId);
+    for (const candidate of this.directMessages.values()) {
+      if (candidate.referencedMessageId === messageId) {
+        delete candidate.referencedMessageId;
+      }
+    }
     return { ...message };
   }
 

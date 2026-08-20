@@ -345,8 +345,7 @@ test("openai with no cached model list stays usable instead of refusing everythi
   const options = await service.options({ provider: "openai" });
   assert.equal(options.models, null);
   assert.equal(options.allowCustomModel, true);
-  // And it says why, rather than leaving the screen to invent a list.
-  assert.match(options.notes.join(" "), /No model list yet for this account/u);
+  assert.deepEqual(options.notes, []);
   // No suggested model names at all. A suggestion here is a guess about
   // somebody else's entitlements, and offering it in a picker reads as
   // offering something available — which is how a ChatGPT-account Codex came
@@ -411,10 +410,10 @@ test("every provider offers a model list to pick from, cached or not", async () 
     // Codex is the exception, and deliberately: with no cached list there is
     // nothing to offer that is not a guess about this account's entitlements,
     // and a guess presented as a choice is how an account was set to a model
-    // it answers 400 for. It gets a free-text field and a note instead.
+    // it answers 400 for. It gets a free-text field instead.
     if (provider === "openai" && options.models === null) {
       assert.equal(options.allowCustomModel, true);
-      assert.ok(options.notes.length > 0);
+      assert.deepEqual(options.notes, []);
       continue;
     }
     assert.ok(
@@ -496,6 +495,7 @@ test("anthropic reports no model list when the CLI offers neither source", async
   assert.equal(options.modelListSource, undefined);
   assert.equal(options.allowCustomModel, true);
   assert.deepEqual(options.efforts, ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(options.notes, []);
 
   await service.connect({
     userId: "u",

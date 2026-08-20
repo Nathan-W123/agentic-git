@@ -3306,6 +3306,22 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (input.authorId === input.recipientId) {
       throw new Error("A direct message needs two people");
     }
+    if (input.referencedMessageId !== undefined) {
+      const target = await this.query(
+        `SELECT id FROM direct_messages
+         WHERE id = $1 AND project_id = $2 AND pair_key = $3`,
+        [
+          input.referencedMessageId,
+          input.projectId,
+          directPairKey(input.authorId, input.recipientId),
+        ],
+      );
+      if (target.rows.length === 0) {
+        throw new Error(
+          "A direct message reference must target the same conversation",
+        );
+      }
+    }
     const message: DirectMessage = {
       id: createId("dm"),
       projectId: input.projectId,
@@ -3313,12 +3329,15 @@ export class PostgresCoordinationStore implements CoordinationStore {
       recipientId: input.recipientId,
       content,
       createdAt: new Date().toISOString(),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     };
     await this.query(
       `INSERT INTO direct_messages
          (id, project_id, pair_key, author_id, recipient_id, content,
-          created_at, read_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)`,
+          created_at, read_at, referenced_message_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8)`,
       [
         message.id,
         message.projectId,
@@ -3327,6 +3346,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         message.recipientId,
         message.content,
         message.createdAt,
+        message.referencedMessageId ?? null,
       ],
     );
     return message;
@@ -3422,6 +3442,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   private toDirectMessage(row: Row): DirectMessage {
     const readAt = optionalText(row, "read_at");
+    const referencedMessageId = optionalText(row, "referenced_message_id");
     return {
       id: text(row, "id"),
       projectId: text(row, "project_id"),
@@ -3430,6 +3451,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       content: text(row, "content"),
       createdAt: text(row, "created_at"),
       ...(readAt === undefined ? {} : { readAt }),
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     };
   }
 

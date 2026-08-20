@@ -34,6 +34,18 @@ function conversationFor(agentId) {
 }
 
 /**
+ * What is half-typed to one agent.
+ *
+ * The composer's textarea is rebuilt on every render, and it used to be drawn
+ * empty every time — so a background refresh arriving mid-sentence took the
+ * message with it. The draft lives in `state` and is written back into the
+ * box here, keyed by agent so two panels cannot share one draft.
+ */
+export function agentChatDraft(agentId) {
+  return agentId === undefined ? "" : (state.agentChatDrafts[agentId] ?? "");
+}
+
+/**
  * Rewinds a private conversation to just before one message.
  *
  * The private panel has no server-side transcript to delete from — the
@@ -225,28 +237,45 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
   const busy = state.sending[agent?.id] === true;
   const ready = agent !== undefined;
 
-  return `<form class="composer" data-act="chat-submit">
-    <textarea data-act="chat-input" rows="1" spellcheck="true"
-      enterkeyhint="send"
-      placeholder="${esc(placeholder)}"${busy || !ready ? " disabled" : ""}></textarea>
-    <div class="composer-bar">
-      ${iconButton("plus", {
-        act: "composer-plus",
-        value: "chat",
-        title: "Add to this message",
-        cls: "composer-plus",
-      })}
-      ${contextRing(contextPercentFor(agent?.id), true)}
-      <span class="spacer"></span>
-      ${miniSelect("chat-model", models, agent?.model ?? "", "Model")}
-      ${miniSelect("chat-effort", efforts, agent?.effort ?? "", "Reasoning effort")}
-      <button class="send-btn" type="submit" title="Send"${
-        busy || !ready ? " disabled" : ""
-      }>
-        ${busy ? icon("clock") : icon("send")}
-      </button>
-    </div>
-  </form>`;
+  // The agent is named on the form and on the box itself. `currentAgent` reads
+  // the Code screen's selection, which nothing sets when this composer is the
+  // one in the channel's agent panel — so a message sent from there went to
+  // whichever agent happened to be first, or to none at all. The id on the box
+  // is also what tells a keystroke which draft it belongs to.
+  const agentId = esc(agent?.id ?? "");
+  // Wrapped, because the "/" and "@" pickers open upward out of the box and
+  // need something positioned to open out of — the same wrapper the thread's
+  // reply box uses, so the two look and sit identically. The surface inside
+  // it is left empty here and filled by `paintComposerSuggestions` after
+  // every render: this module is imported by the screens rather than the
+  // other way round, so it cannot ask them for that markup.
+  return `<div class="thread-composer-wrap chat-composer-wrap">
+    <div data-chat-composer-suggestions></div>
+    <form class="composer" data-act="chat-submit" data-value="${agentId}">
+      <textarea data-act="chat-input" data-value="${agentId}" rows="1"
+        spellcheck="true" enterkeyhint="send"
+        placeholder="${esc(placeholder)}"${
+          busy || !ready ? " disabled" : ""
+        }>${esc(agentChatDraft(agent?.id))}</textarea>
+      <div class="composer-bar">
+        ${iconButton("plus", {
+          act: "composer-plus",
+          value: "chat",
+          title: "Add to this message",
+          cls: "composer-plus",
+        })}
+        ${contextRing(contextPercentFor(agent?.id), true)}
+        <span class="spacer"></span>
+        ${miniSelect("chat-model", models, agent?.model ?? "", "Model")}
+        ${miniSelect("chat-effort", efforts, agent?.effort ?? "", "Reasoning effort")}
+        <button class="send-btn" type="submit" title="Send"${
+          busy || !ready ? " disabled" : ""
+        }>
+          ${busy ? icon("clock") : icon("send")}
+        </button>
+      </div>
+    </form>
+  </div>`;
 }
 
 function shortModel(label) {

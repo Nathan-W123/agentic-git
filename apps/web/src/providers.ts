@@ -3478,15 +3478,7 @@ export class ProviderChatService {
         ...(models === undefined
           ? { suggestedEfforts: [...SUGGESTED_EFFORTS.openai] }
           : {}),
-        notes:
-          models === undefined
-            ? [
-                "No model list yet for this account. Codex writes one to " +
-                  "~/.codex/models_cache.json after it runs, so pick a model " +
-                  "once this agent has completed a task — or type a name you " +
-                  "know the account has.",
-              ]
-            : [],
+        notes: [],
       };
     }
     if (input.provider === "anthropic") {
@@ -3503,10 +3495,7 @@ export class ProviderChatService {
         ...(claude.models.length > 0
           ? {}
           : { suggestedModels: [...SUGGESTED_MODELS.anthropic] }),
-        notes: [
-          "Any other model name still works — the value is passed to --model as-is.",
-          "Reasoning effort maps to the CLI's real --effort option.",
-        ],
+        notes: [],
       };
     }
     return {
