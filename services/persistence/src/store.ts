@@ -797,6 +797,13 @@ export interface CreateApprovalInput {
  * that gives unfinished threads an ending could not tell this thread already
  * had one and gave it a second.
  *
+ * `plan` is the deep plan a `/plan` task produces before anything runs. It is
+ * marked rather than left as an `agent` reply because it is not a thing said
+ * in a conversation: it is a document, several hundred words of it, and a
+ * thread that inlines it is a thread nobody can read the rest of. The mark is
+ * what lets the browser show it as a card in the thread and open the document
+ * itself in its own panel beside the room.
+ *
  * Stored as text like the others, so nothing migrates: rows written before
  * this existed are `agent`, which is what they were, and the text match stays
  * as the fallback that reads them.
@@ -806,7 +813,8 @@ export type ChannelEntryKind =
   | "agent"
   | "system"
   | "progress"
-  | "outcome";
+  | "outcome"
+  | "plan";
 
 /** One emoji's reaction summary from one viewer's point of view. */
 export interface ChannelReaction {

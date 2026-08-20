@@ -67,6 +67,7 @@ import {
   refreshChannelMessages,
   refreshProviderUsage,
   takePromptedThread,
+  takeReadyPlan,
   addChannelAgent,
   removeChannelAgent,
   removeChannelAgentForUser,
@@ -190,6 +191,7 @@ import {
   rosterMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
+  startPlannedWork,
   submitComposerMessage,
   submitThreadReply,
   updateComposerInput,
@@ -2991,6 +2993,7 @@ function resumeLiveUpdates() {
   if (state.route === "chats" && channel) {
     void refreshChannelMessages(channel).then(() => {
       openPromptedThread(channel);
+      openReadyPlan(channel);
       if (!renameFieldFocused()) {
         render();
       }
@@ -3174,7 +3177,7 @@ function setChanDrawer(open) {
 /**
  * Whichever side panel is showing, closed the way its own button closes it.
  *
- * The order is `renderChats`'s order, not an order of its own. Six things can
+ * The order is `renderChats`'s order, not an order of its own. Seven things can
  * occupy the one panel and only the first of them is on screen, so anything
  * closing by a different precedence closes something invisible. The two this
  * did not know about at all — an agent conversation and a direct message —
@@ -3182,6 +3185,10 @@ function setChanDrawer(open) {
  * the thread behind it and left the panel exactly where it was.
  */
 function closeSidePanel() {
+  if (state.activePlan !== undefined) {
+    state.activePlan = undefined;
+    return true;
+  }
   if (state.activeAgentPanel !== undefined) {
     state.activeAgentPanel = undefined;
     return true;
@@ -3219,6 +3226,7 @@ function closeSidePanel() {
 
 function sidePanelOpen() {
   return (
+    state.activePlan !== undefined ||
     state.activeAgentPanel !== undefined ||
     state.activeDm !== undefined ||
     state.chanFileView !== undefined ||
@@ -3268,6 +3276,43 @@ function openPromptedThread(repositoryId) {
   }
   state.activeChannelThread = messageId;
   state.autoOpenedThread = messageId;
+}
+
+/**
+ * Pops a plan open the moment the agent finishes writing it.
+ *
+ * `/plan` is the one command whose whole answer is a document somebody has to
+ * read and decide on, and until this it landed as a card inside a thread that
+ * may not even be on screen: the room showed a request, a working indicator,
+ * and then a hold line — while the thing being held for sat folded away.
+ *
+ * The same manners `openPromptedThread` has, for the same reasons. Desktop
+ * only, because on a phone the panel is the whole window and dropping a page
+ * of plan over somebody mid-sentence is rude rather than helpful — the card
+ * in the thread is how it is reached there. And it declines rather than
+ * interrupts: anything the reader deliberately put in the panel stays, and
+ * the only thing it will replace is a thread this app opened itself a moment
+ * ago, which for a `/plan` is exactly the thread this plan belongs to.
+ */
+function openReadyPlan(repositoryId) {
+  const messageId = takeReadyPlan(repositoryId);
+  if (
+    messageId === undefined ||
+    phoneLayout() ||
+    state.route !== "chats" ||
+    state.activePlan !== undefined ||
+    state.activeAgentPanel !== undefined ||
+    state.activeDm !== undefined ||
+    state.chanFileView !== undefined ||
+    state.chanTree === true ||
+    (state.activeChannelThread !== undefined &&
+      state.activeChannelThread !== state.autoOpenedThread)
+  ) {
+    return;
+  }
+  state.activePlan = messageId;
+  state.activeChannelThread = undefined;
+  state.autoOpenedThread = undefined;
 }
 
 /**
@@ -4747,6 +4792,43 @@ document.addEventListener("click", (event) => {
       return;
     case "channel-thread-close":
       state.activeChannelThread = undefined;
+      render();
+      return;
+    // A plan takes the panel the same way a thread does, and puts away
+    // whatever was in it — one column, one occupant.
+    case "plan-open":
+      if (!confirmDiscardEdit()) {
+        return;
+      }
+      state.activePlan = value;
+      state.activeChannelThread = undefined;
+      state.autoOpenedThread = undefined;
+      state.activeDm = undefined;
+      state.activeAgentPanel = undefined;
+      closeChannelFile();
+      render();
+      return;
+    case "plan-close":
+      state.activePlan = undefined;
+      render();
+      return;
+    // Reading it is done; saying something about it happens in the thread.
+    case "plan-thread-open":
+      state.activePlan = undefined;
+      state.activeChannelThread = value;
+      state.autoOpenedThread = undefined;
+      state.activeDm = undefined;
+      state.activeAgentPanel = undefined;
+      closeChannelFile();
+      render();
+      return;
+    // Approved. The thread opens on the way, because from here on the thing
+    // worth watching is the work rather than the plan.
+    case "plan-approve":
+      startPlannedWork(activeChannelId(), value);
+      state.activePlan = undefined;
+      state.activeChannelThread = value;
+      state.autoOpenedThread = undefined;
       render();
       return;
     // Replying to a message that is already inside a thread: the answer can
@@ -6731,6 +6813,7 @@ async function boot() {
       channelFrameTimer = window.setTimeout(() => {
         void refreshChannelMessages(channelRepositoryId).then(() => {
           openPromptedThread(channelRepositoryId);
+          openReadyPlan(channelRepositoryId);
           render();
         });
       }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS));

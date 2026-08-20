@@ -182,6 +182,23 @@ export const state = {
    */
   autoOpenedThread: undefined,
   /**
+   * The thread whose plan is open in the panel, if one is.
+   *
+   * A held `/plan` writes a document, not a remark, and a document read
+   * inside a thread is a document nobody reads: the reply column is narrow,
+   * the plan is the longest thing in it, and the sentence asking for a
+   * go-ahead ends up several screens below the plan it is about. So the plan
+   * gets the panel to itself and the thread keeps a card pointing at it.
+   */
+  activePlan: undefined,
+  /**
+   * A plan that has just been written, waiting to be shown — the same
+   * one-chance handoff `promptedThread` uses, for the same reason: it is news
+   * exactly once, and a surface that declines to show it must not leave it to
+   * ambush an unrelated refresh later.
+   */
+  readyPlan: undefined,
+  /**
    * The thread the composer is aimed at, if the reader chose one.
    *
    * Item 4 of the threading work, explicit rather than automatic: guessing
@@ -3214,6 +3231,55 @@ export function takePromptedThread(repositoryId) {
   return pending.messageId;
 }
 
+/**
+ * The plan a thread is holding, if it has one.
+ *
+ * The last one rather than the first: replanning after a change to the ask
+ * writes a second plan, and the one that matters is the one that answers what
+ * was last said.
+ */
+export function planReplyOf(entry) {
+  return (entry?.replies ?? []).filter((reply) => reply.kind === "plan").at(-1);
+}
+
+/**
+ * Spots a plan that was not there before, so the panel can open on it.
+ *
+ * Decided from the two timelines rather than from a frame, exactly as
+ * `notePromptedThread` decides its own question: the store stays the account
+ * of what exists, and a reconnect replaying old events cannot make a plan
+ * somebody has already read pop open again.
+ */
+function notePlanReady(repositoryId, before) {
+  if (before === undefined) {
+    return;
+  }
+  const already = new Set(
+    before
+      .map((entry) => planReplyOf(entry)?.id)
+      .filter((id) => id !== undefined),
+  );
+  const planned = state.channelMessages[repositoryId]
+    .filter((entry) => {
+      const plan = planReplyOf(entry);
+      return plan !== undefined && !already.has(plan.id);
+    })
+    .at(-1);
+  if (planned !== undefined) {
+    state.readyPlan = { repositoryId, messageId: planned.id };
+  }
+}
+
+/** The plan waiting to be shown here, taken rather than read. */
+export function takeReadyPlan(repositoryId) {
+  const pending = state.readyPlan;
+  if (pending === undefined || pending.repositoryId !== repositoryId) {
+    return undefined;
+  }
+  state.readyPlan = undefined;
+  return pending.messageId;
+}
+
 async function loadChannel(repositoryId) {
   const response = await apiOptional(channelPath(repositoryId, "/messages"), undefined);
   if (response === undefined) {
@@ -3227,6 +3293,7 @@ async function loadChannel(repositoryId) {
     : undefined;
   state.channelMessages[repositoryId] = (response.messages ?? []).map(withSentTime);
   notePromptedThread(repositoryId, before);
+  notePlanReady(repositoryId, before);
   state.channelAgentOverrides[repositoryId] = {
     ...state.channelAgentOverrides[repositoryId],
     ...response.agentOverrides,

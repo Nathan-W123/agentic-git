@@ -47,6 +47,7 @@ api,
   persist,
   personOnline,
   phoneLayout,
+  planReplyOf,
   postChannelReply,
   providerEffortOptions,
   providerModelOptions,
@@ -4098,6 +4099,169 @@ function threadPanel(repositoryId) {
 }
 
 /**
+ * The plan, in its own window beside the room.
+ *
+ * `/plan` stops before it writes anything and asks a person to decide, so
+ * what it produces is the only thing this app ever shows that is a document
+ * rather than a remark: headings, steps, files, risks. Reading a document in
+ * a reply column is the wrong shape at every width — so it gets the panel,
+ * the panel's drag handle, and the panel's full height.
+ *
+ * Two buttons, because a plan has exactly two answers. "Start work" is the
+ * `go ahead` the gateway is already listening for in this thread, posted as
+ * an ordinary reply so a plan approved from here and one approved by typing
+ * are the same event. "Discuss" aims the reader at the thread instead, which
+ * is where saying what to change belongs.
+ */
+function planPanel(repositoryId) {
+  const messageId = state.activePlan;
+  if (messageId === undefined) {
+    return "";
+  }
+  const root =
+    channelMessagesFor(repositoryId).find((entry) => entry.id === messageId) ??
+    (state.channelPins[repositoryId] ?? []).find(
+      (entry) => entry.id === messageId,
+    );
+  const plan = planReplyOf(root);
+  if (root === undefined || plan === undefined) {
+    return "";
+  }
+  const title = threadTitle(root) || "Plan";
+  // Only while it is still a plan. Once the work has been let go, the panel
+  // is a record of what was agreed rather than a decision waiting on
+  // somebody, and offering to start it a second time would submit it twice.
+  //
+  // Unknown counts as held. `threadAwaitsGoAhead` answers from the task list,
+  // which is polled separately from the channel — so a plan read before that
+  // list has arrived would otherwise be announced as already started, which
+  // is the one wrong answer that leaves somebody waiting on a run nobody
+  // authorised.
+  const known =
+    root.taskId !== undefined &&
+    state.tasks.some((task) => task.id === root.taskId);
+  const held = !known || threadAwaitsGoAhead(root);
+  return `<aside class="thread-panel plan-panel">
+    ${panelGrip()}
+    <header class="thread-head">
+      ${panelKind("Plan")}
+      <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
+      <span class="spacer"></span>
+      ${iconButton("reply", {
+        act: "plan-thread-open",
+        value: messageId,
+        title: "Open the thread this plan is in",
+      })}
+      ${panelClose("plan-close", "Close plan (Esc)")}
+    </header>
+    <div class="thread-body plan-body"
+      data-scroll-key="plan:${esc(repositoryId)}:${esc(plan.id)}">
+      ${planDocument(String(plan.content ?? ""))}
+    </div>
+    ${
+      held
+        ? `<div class="plan-actions">
+      <span class="plan-held">Nothing is running yet.</span>
+      <button type="button" class="btn" data-act="plan-thread-open"
+        data-value="${esc(messageId)}">Discuss</button>
+      <button type="button" class="btn btn-primary" data-act="plan-approve"
+        data-value="${esc(messageId)}">${icon("play")} Start work</button>
+    </div>`
+        : `<div class="plan-actions">
+      <span class="plan-held">This plan has been started.</span>
+      <button type="button" class="btn" data-act="plan-thread-open"
+        data-value="${esc(messageId)}">Open thread</button>
+    </div>`
+    }
+  </aside>`;
+}
+
+/**
+ * A plan as markup — headings, bullets, steps, paragraphs, and nothing else.
+ *
+ * Deliberately not a markdown renderer. Everything is escaped first and the
+ * structure is read off the line the model wrote, so the worst a plan can do
+ * to this window is look plain: a `#` heading becomes a heading, a `-` or a
+ * `1.` becomes a list item, a fenced block becomes preformatted text, and
+ * every other line is a paragraph. Inline `code` is the one span-level thing
+ * kept, because a plan that names files and functions is unreadable without
+ * it.
+ */
+function planDocument(text) {
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    return `<p class="plan-p">This plan came back empty.</p>`;
+  }
+  const inline = (line) =>
+    esc(line)
+      .replace(/`([^`]+)`/gu, "<code>$1</code>")
+      // The two marks a model reaches for without being asked. Both run on
+      // text that has already been escaped, so neither can smuggle markup in.
+      .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>");
+  const html = [];
+  let list;
+  let fence;
+  const closeList = () => {
+    if (list !== undefined) {
+      html.push(`<${list.tag} class="plan-list">${list.items.join("")}</${list.tag}>`);
+      list = undefined;
+    }
+  };
+  for (const raw of trimmed.split("\n")) {
+    const line = raw.trimEnd();
+    if (/^\s*```/u.test(line)) {
+      if (fence === undefined) {
+        closeList();
+        fence = [];
+      } else {
+        html.push(`<pre class="plan-pre">${esc(fence.join("\n"))}</pre>`);
+        fence = undefined;
+      }
+      continue;
+    }
+    if (fence !== undefined) {
+      fence.push(raw);
+      continue;
+    }
+    if (line.trim() === "") {
+      closeList();
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/u.exec(line.trim());
+    if (heading !== null) {
+      closeList();
+      // Two levels only. A plan's own heading depth is the model's habit
+      // rather than a structure worth honouring, and six sizes in a 340px
+      // column is noise.
+      const level = heading[1].length <= 2 ? "3" : "4";
+      html.push(`<h${level} class="plan-h">${inline(heading[2].trim())}</h${level}>`);
+      continue;
+    }
+    const bullet = /^\s*[-*•]\s+(.*)$/u.exec(line);
+    const numbered = /^\s*(\d{1,3})[.)]\s+(.*)$/u.exec(line);
+    if (bullet !== null || numbered !== null) {
+      const tag = bullet !== null ? "ul" : "ol";
+      if (list === undefined || list.tag !== tag) {
+        closeList();
+        list = { tag, items: [] };
+      }
+      list.items.push(
+        `<li>${inline((bullet !== null ? bullet[1] : numbered[2]).trim())}</li>`,
+      );
+      continue;
+    }
+    closeList();
+    html.push(`<p class="plan-p">${inline(line.trim())}</p>`);
+  }
+  if (fence !== undefined) {
+    html.push(`<pre class="plan-pre">${esc(fence.join("\n"))}</pre>`);
+  }
+  closeList();
+  return html.join("");
+}
+
+
+/**
  * Splits a thread into turns without inventing a task identifier in the UI.
  *
  * Every request that starts or extends work is stored as a `user` reply before
@@ -4215,7 +4379,13 @@ function threadReplies(root, repositoryId) {
           ? ""
           : summaryBlock(turn.prompt, repositoryId)
       }${thinking.html}${thinking.visible
-        .map((reply) => summaryBlock(reply, repositoryId))
+        .map((reply) =>
+          // A plan is a document, and the thread shows a card that opens it
+          // rather than the document itself — see `planCard`.
+          reply.kind === "plan"
+            ? planCard(root, reply)
+            : summaryBlock(reply, repositoryId),
+        )
         .join("")}`;
     })
     .join("");
@@ -4227,6 +4397,41 @@ function threadReplies(root, repositoryId) {
     </div>
     <div class="thread-replies-flow">${flow}</div>
   </section>`;
+}
+
+/**
+ * A plan, in the thread, as the one line that opens it.
+ *
+ * The plan the agent wrote is a page of headings — what the request means,
+ * the approach, the files, the steps, the risks. Pasted into a thread it
+ * buries everything said after it, and the reply column is the narrowest
+ * surface in the app to read a page in. So the thread keeps the fact that a
+ * plan exists, and the plan itself opens beside the room where there is width
+ * to read it.
+ *
+ * Named by its first heading rather than by "Plan", when it has one: two
+ * plans in one thread — the first and the one written after somebody asked
+ * for a change — are otherwise two identical cards.
+ */
+function planCard(root, reply) {
+  const open = state.activePlan === root.id;
+  const lines = String(reply.content ?? "")
+    .split("\n")
+    .map((line) => line.replace(/^#+\s*/u, "").trim())
+    .filter((line) => line.length > 0);
+  const summary = lines[0] ?? "";
+  return `<button type="button" class="plan-card${open ? " active" : ""}"
+    data-act="plan-open" data-value="${esc(root.id)}"
+    aria-pressed="${String(open)}">
+    ${icon("file")}
+    <span class="pc-text">
+      <span class="pc-title">${esc(threadTitle(root) || "Plan")}</span>
+      <span class="pc-sub">${esc(
+        summary.length > 90 ? `${summary.slice(0, 90)}…` : summary,
+      )}</span>
+    </span>
+    <span class="pc-open">${open ? "Showing" : "Open plan"}</span>
+  </button>`;
 }
 
 /**
@@ -4649,10 +4854,16 @@ export function renderChats() {
       ${composer(repositoryId)}
     </div>
     ${
-      // A conversation opened by tapping somebody takes the panel: it is the
-      // most recent thing the reader asked for, and the thread they were in
-      // is still where they left it when they close this.
-      state.activeAgentPanel !== undefined
+      // A plan outranks everything else in the panel. It is the one surface
+      // opened by a decision that is waiting on the reader — the work does
+      // not start until they answer it — and it is only ever there because
+      // they asked for it or because their own `/plan` just finished.
+      //
+      // Below it: a conversation opened by tapping somebody takes the panel,
+      // being the most recent thing the reader asked for, and the thread they
+      // were in is still where they left it when they close this.
+      (state.activePlan !== undefined && planPanel(repositoryId)) ||
+      (state.activeAgentPanel !== undefined
         ? agentPanel()
         : state.activeDm !== undefined
         ? dmPanel()
@@ -4661,7 +4872,7 @@ export function renderChats() {
         : state.chanTree === true
           ? chanTreePanel(repositoryId)
           : (threadPanel(repositoryId) ||
-           (state.chanThreadList === true ? threadListPanel(repositoryId) : ""))
+           (state.chanThreadList === true ? threadListPanel(repositoryId) : "")))
     }
   </div>`;
 }
@@ -5013,6 +5224,8 @@ export function openChannel(repositoryId, rerender) {
   // dismissal, and "you just navigated somewhere" is itself a close.
   state.chanSidebarOpen = false;
   state.activeChannelThread = undefined;
+  // A plan hangs off one thread in one room, so it leaves with the room.
+  state.activePlan = undefined;
   // A thread belongs to the channel it hangs in, so an aim taken in one
   // channel must not follow the reader into the next and post there.
   state.composerThreadId = undefined;
@@ -5167,6 +5380,21 @@ function composerThreadChip(repositoryId) {
       small: true,
     })}
   </div>`;
+}
+
+/**
+ * Lets a plan go, from the panel it is being read in.
+ *
+ * The words matter and are not decoration: the gateway releases a held plan
+ * when somebody says `go ahead` in its thread (`startPlannedTaskFor`), so
+ * this posts exactly that as an ordinary reply. A plan approved by pressing
+ * the button and one approved by typing the sentence are then the same event,
+ * with the same record in the thread of who released it and when — rather
+ * than a second, invisible way to spend an agent.
+ */
+export function startPlannedWork(repositoryId, messageId) {
+  chime("sent");
+  postChannelReply(repositoryId, messageId, "go ahead");
 }
 
 export function submitThreadReply(rerender) {
