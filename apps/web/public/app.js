@@ -433,10 +433,22 @@ function renderInvite() {
       <form class="auth-card" data-act="${
         signIn ? "invite-signin" : "invite-accept"
       }">
-        <label class="field">
+        ${
+          // An open link names nobody, so the address is asked for rather
+          // than shown. The addressed form still shows it and still will not
+          // let it be edited: changing it there would be accepting somebody
+          // else's invitation.
+          invite.open === true
+            ? `<label class="field">
+          <span>Email address</span>
+          <input class="input" name="email" type="email" autocomplete="email"
+            required placeholder="you@company.com">
+        </label>`
+            : `<label class="field">
           <span>Email address</span>
           <input class="input" value="${esc(invite.email)}" disabled>
-        </label>
+        </label>`
+        }
         ${
           signIn
             ? ""
@@ -470,7 +482,11 @@ function renderInvite() {
       </form>
       <p class="auth-foot">${
         signIn
-          ? `No account for ${esc(invite.email)} yet? <a class="link-muted" href="#" data-act="invite-mode" data-value="join">Create one</a>.`
+          ? `${
+              invite.open === true
+                ? "No account yet?"
+                : `No account for ${esc(invite.email)} yet?`
+            } <a class="link-muted" href="#" data-act="invite-mode" data-value="join">Create one</a>.`
           : `Already have a Lattice account? <a class="link-muted" href="#" data-act="invite-mode" data-value="signin">Sign in instead</a>.`
       }</p>
     </div>
@@ -1005,6 +1021,7 @@ async function submitInviteAccept(form) {
       state.inviteToken,
       String(data.get("displayName") ?? ""),
       String(data.get("password") ?? ""),
+      String(data.get("email") ?? ""),
     );
     await enterAfterInvitation();
   } catch (error) {
@@ -1033,7 +1050,12 @@ async function submitInviteSignIn(form) {
   const data = new FormData(form);
   try {
     await signInForInvitation(
-      state.invite?.email ?? "",
+      // An open link names nobody, so the address is the one typed on this
+      // form; an addressed one uses its own, which is why that field is
+      // shown disabled rather than as an input.
+      state.invite?.open === true
+        ? String(data.get("email") ?? "")
+        : (state.invite?.email ?? ""),
       String(data.get("password") ?? ""),
     );
     await acceptInvitation(state.inviteToken);
@@ -1716,12 +1738,7 @@ async function inviteSomebody(rerender, repositoryId) {
       : "Access is granted per repository. Pick the one to share, or share " +
         "everything if they are joining the team properly.",
     confirm: "Create invite link",
-    body: `<label class="field">
-        <span>Email address</span>
-        <input class="input" name="email" type="email" required
-          placeholder="colleague@company.com">
-      </label>
-      ${
+    body: `${
         fixed
           ? `<input type="hidden" name="repositoryId" value="${esc(repositoryId)}">`
           : `<label class="field">
@@ -1734,9 +1751,6 @@ async function inviteSomebody(rerender, repositoryId) {
               }>${esc(repo.id)}</option>`,
             )
             .join("")}
-          <option value=""${preselected === "" ? " selected" : ""}>
-            Every repository in ${esc(state.project?.name ?? "this project")}
-          </option>
         </select>
       </label>`
       }
@@ -1751,17 +1765,16 @@ async function inviteSomebody(rerender, repositoryId) {
         </select>
       </label>`,
   });
-  if (values === undefined || !values.email?.trim()) {
+  if (values === undefined) {
     return;
   }
   try {
-    const created = await createInvitation(
-      values.email.trim(),
-      values.role,
-      values.repositoryId,
-    );
+    // No address. The button makes the link, and where the link goes is not
+    // this app's business — most of the time it is the group chat the team
+    // is already in, which was never something an email field could express.
+    const created = await createInvitation(values.role, values.repositoryId);
     rerender();
-    await showInviteLink(created.token, values.email.trim(), values.repositoryId);
+    await showInviteLink(created.token, values.repositoryId);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -1774,14 +1787,15 @@ async function inviteSomebody(rerender, repositoryId) {
  * copy it — which the copy has to say, or somebody will close it and assume
  * they can find it again later.
  */
-async function showInviteLink(token, email, repositoryId) {
+async function showInviteLink(token, repositoryId) {
   const link = invitationLink(token);
   await showModal({
     title: "Send this link",
-    subtitle: `${email} will get ${
-      repositoryId ? repositoryId : "every repository in this project"
-    }. The link works once, within seven days, and is not stored — so this is
-      the only time it can be copied.`,
+    subtitle: `Anyone who opens it joins ${
+      repositoryId ? `#${repositoryId}` : "this project"
+    }, and as many people can as you send it to. It works for seven days
+      unless you revoke it, and it is not stored — so this is the only time
+      it can be copied.`,
     confirm: "Copy link",
     cancel: "Done",
     body: `<div class="invite-link"><code>${esc(link)}</code></div>`,

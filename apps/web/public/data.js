@@ -385,6 +385,63 @@ export function persist(key, value) {
   window.localStorage.setItem(key, String(value));
 }
 
+/**
+ * Drops what this browser remembers about the *previous* account when a
+ * different one signs in.
+ *
+ * Signing out clears the session and reloads, and never touched any of this.
+ * So whoever signed in next inherited the last account's organization,
+ * project and room. `loadContext` resets a selection the account cannot
+ * reach — but the deployment's first account administers every organization
+ * on it, so a newer account's workspace was perfectly reachable and the
+ * guard had nothing to catch. The owner signed back in and was shown
+ * somebody else's empty workspace, which is indistinguishable from having
+ * lost everything.
+ *
+ * Read markers, drafts and favourites go with it. A draft is somebody's
+ * unsent words and must never appear in another account's composer, and
+ * inherited read markers would tell the arriving account it had already seen
+ * rooms it has never opened.
+ *
+ * Theme, accent, layout and panel widths are deliberately kept. Those
+ * describe this browser rather than the person using it, and a shared
+ * machine should not change colour because somebody else signed in.
+ *
+ * Returns true only when something really did belong to another account,
+ * which is the caller's signal that a reload is worth it.
+ */
+export function forgetOtherAccount(storage, userId) {
+  const owned = [
+    "ag.org",
+    "ag.project",
+    "ag.repo",
+    "ag.agent",
+    "ag.agentview",
+    "ag.avatar",
+    "ag.chanCollapsed",
+    "ag.chandrafts",
+    "ag.chanread",
+    "ag.chatOpen",
+    "ag.eventCursor",
+    "ag.favourites",
+    "ag.newsThrough",
+    "ag.read",
+  ];
+  if (storage.getItem("ag.user") === userId) {
+    return false;
+  }
+  storage.setItem("ag.user", userId);
+  let cleared = false;
+  for (const key of owned) {
+    if (storage.getItem(key) === null) {
+      continue;
+    }
+    storage.removeItem(key);
+    cleared = true;
+  }
+  return cleared;
+}
+
 /* ---------------------------------------------------------- transport ---- */
 
 function csrfToken() {
@@ -503,6 +560,19 @@ export async function loadContext({ defer = false } = {}) {
   ]);
   state.principal = principal;
 
+  // Before a single record is read for this account. `state` took its copy of
+  // the remembered organization, room, drafts and read markers at import
+  // time, so clearing storage on its own would leave the previous account's
+  // values sitting in memory — the reload is what actually starts the
+  // arriving account clean. It happens once, on a real change of account.
+  if (
+    forgetOtherAccount(window.localStorage, state.principal?.user?.id ?? "")
+  ) {
+    window.location.reload();
+    return;
+  }
+
+  const organizations = await api("/organizations");
   state.organizations = organizations.organizations ?? [];
   if (!state.organizations.some((org) => org.id === state.organizationId)) {
     state.organizationId = state.organizations[0]?.id ?? "";
@@ -1423,13 +1493,14 @@ export async function loadInvitations() {
  * the invitation admits the person to every repository the organization has,
  * which is a different and much larger thing to hand out.
  */
-export async function createInvitation(email, role, repositoryId) {
+export async function createInvitation(role, repositoryId) {
   const response = await api(
     `/organizations/${encodeURIComponent(state.organizationId)}/invitations`,
     {
       method: "POST",
       body: {
-        email,
+        // No address: the link is the invitation, and it is shared wherever
+        // the team already talks rather than mailed to one person.
         role,
         ...(repositoryId === undefined || repositoryId === ""
           ? {}
@@ -1468,13 +1539,20 @@ export async function readInvitation(token) {
  * password the server would ignore only invites the reader to think their
  * existing one is being changed.
  */
-export async function acceptInvitation(token, displayName, password) {
+export async function acceptInvitation(token, displayName, password, email) {
   return await api(`/invitations/${encodeURIComponent(token)}/accept`, {
     method: "POST",
     body:
       displayName === undefined && password === undefined
         ? {}
-        : { displayName, password },
+        : {
+            displayName,
+            password,
+            // Only an open link carries one: an addressed invitation already
+            // knows the address, and letting one be typed there would be a
+            // way to accept somebody else's.
+            ...(email === undefined || email === "" ? {} : { email }),
+          },
   });
 }
 

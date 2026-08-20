@@ -20,11 +20,12 @@ import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
 import {
   agentIdentity,
   ApiGateway,
+  autoClaimProposal,
   describeTaskState,
   explainAnswerFailure,
   looksLikeTaskRequest,
   narrateTaskEvent,
-  readsAsDirectRequest,
+  parseAutoClaimVerdict,
   readsAsEchoOfRequest,
   summariseObjective,
   type ApiOperations,
@@ -148,6 +149,14 @@ interface TestRuntime {
   }>;
   /** What the agent answers when asked whether a message is work. */
   setTaskClassification: (answer: string) => void;
+  /**
+   * What the local pass says about a message, before any agent is asked.
+   *
+   * Defaults to "not sure about anything", which is the answer that changes
+   * nothing: every message goes on to the agent, exactly as it did before
+   * there was a local pass. A test about the filter says otherwise.
+   */
+  setLocalChatter: (reads: (text: string) => boolean) => void;
   /** Makes the next revert answer with this instead of succeeding. */
   setRollbackOutcome: (
     outcome: { status: string; explanation: string } | undefined,
@@ -361,7 +370,15 @@ async function startRuntime(
   const usageCalls: TestRuntime["usageCalls"] = [];
   const mail: TestRuntime["mail"] = [];
   /** How the agent answers "is this work?" — "yes" unless a test says else. */
-  let taskClassification = "yes";
+  // The unnamed path now asks for a decision, not a yes/no: ACT, OFFER with
+  // a proposal, or IGNORE. The default keeps the offer flow every dispatch
+  // test was written against, and the proposal is worded the way the fixed
+  // sentence used to be so those assertions still describe what is posted.
+  let taskClassification = "OFFER: Want me to take this on?";
+  // The real filter loads a 22 MB model. Every test that is not about the
+  // filter gets one that decides nothing, which is also the honest default:
+  // "unsure" is what it answers for anything it is not certain about.
+  let localChatter: (text: string) => boolean = () => false;
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
   // What `rollbackRepository` answers. Undefined is the ordinary success; a
@@ -399,11 +416,23 @@ async function startRuntime(
         ? {}
         : { repositoryId: String(input.repositoryId) }),
     });
-    // The unnamed path asks the agent whether a message is work before it
-    // offers to take it. Answered here rather than through `chatAnswer` so a
-    // test about dispatch does not have to know the question exists; a test
-    // about the check itself sets `taskClassification` to "no".
-    if (/Answer with one word: yes or no/u.test(asked)) {
+    // The unnamed path asks the agent what to do about a message before it
+    // does anything. Answered here rather than through `chatAnswer` so a test
+    // about dispatch does not have to know the question exists; a test about
+    // the decision itself sets `taskClassification`.
+    if (/Reply with exactly one of these three lines/u.test(asked)) {
+      // An acknowledgement is never work, and a fake that answered otherwise
+      // would be unfaithful in the one way that matters: with no word list in
+      // front of it, every "yes", "ok" and "thanks" in a channel now reaches
+      // the model, and a model reads those for what they are.
+      const current = /Current message: ([\s\S]*)$/u.exec(asked)?.[1] ?? "";
+      if (
+        /^\s*(yes|yeah|yep|ok|okay|sure|thanks|thx|no|nope)\b[\s!.,?]*$/iu.test(
+          current,
+        )
+      ) {
+        return { text: "IGNORE" };
+      }
       return { text: taskClassification };
     }
     for (const event of chatAnswer.streamEvents ?? []) {
@@ -808,6 +837,10 @@ async function startRuntime(
     store,
     operations,
     bootstrapToken: BOOTSTRAP_TOKEN,
+    chatterFilter: {
+      readsAsChatter: async (text: string) => localChatter(text),
+      available: async () => true,
+    },
     mailer: async (message) => {
       mail.push(message);
     },
@@ -879,6 +912,9 @@ async function startRuntime(
     },
     setTaskClassification: (answer) => {
       taskClassification = answer;
+    },
+    setLocalChatter: (reads) => {
+      localChatter = reads;
     },
     runCalls,
     cancelCalls,
@@ -4323,19 +4359,21 @@ test("a request that names no verb this list knows is still work when an agent i
   const taskRoot = (after.data.messages as any[]).find(
     (message) => message.id === posted.data.message.id,
   );
-  const agentMessages = (taskRoot?.replies ?? []).filter(
-    (reply: any) => reply.kind === "agent",
-  );
-  assert.equal(agentMessages.length, 1);
-  // The work was taken — but no thread is opened for it yet. The title and
-  // reasoning wait until the run narrates something specific to this task,
-  // so a one-line change never grows a thread to hold a title nobody reads.
+  // The work was taken and nothing was said about taking it. The request is
+  // its own root — see "dispatch starts work without posting a chat
+  // acknowledgement" — so there is no reply here at all until the run
+  // narrates something specific to this task.
   const replies = taskRoot?.replies ?? [];
+  assert.deepEqual(
+    replies.filter((reply: any) => reply.kind === "agent"),
+    [],
+    "picking work up is not something to announce",
+  );
   assert.equal(taskRoot?.kind, "user");
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
   assert.equal(taskRoot?.taskId, task?.id);
-  assert.equal(replies.length, 1);
-  // Whenever it is written, it is named after the work rather than an id.
+  // Whenever something is written here, it is named after the work rather
+  // than after an id.
   assert.ok(
     !replies.some((reply: any) => /task_[0-9a-f-]{8}/u.test(String(reply.content))),
     "a task id is not a name anybody can read",
@@ -9195,12 +9233,16 @@ test("the sweep leaves a quiet task alone, and closes a thread its watcher aband
 
   const swept = await runtime.store.listChannelMessages(repo, ownerId);
   const quietRoot = swept.find((message) => message.taskId === task.id);
-  assert.equal(
-    quietRoot?.replies.length,
-    1,
+  // Nothing at all under the root. Dispatch stopped announcing itself — see
+  // "dispatch starts work without posting a chat acknowledgement" — so a
+  // quick task that ended flat has no replies to begin with, and the sweep's
+  // job here is to leave it that way rather than paste a canned ending under
+  // work whose ending is already in the room.
+  assert.deepEqual(
+    quietRoot?.replies,
+    [],
     "the sweep added narration to a quick task that had already ended flat",
   );
-  assert.equal(quietRoot?.replies[0]?.kind, "agent");
   assert.equal(
     swept.filter((message) => message.kind === "outcome").length,
     1,
@@ -11007,30 +11049,46 @@ test("asking about work is not asking for it", () => {
   }
 });
 
-test("open-room work requests do not need agent vocabulary or an @mention", () => {
-  // These all hand a task to the room. The old task-verb-only gate missed
-  // them because "own", "takers" and "a hand" describe delegation rather
-  // than the repository operation itself.
-  for (const request of [
-    "any takers for the flaky auth ticket?",
-    "who can own the release checklist?",
-    "could someone take a look at the checkout failure?",
-    "we could use a hand with the database migration",
-    "can one of the agents own the release checklist?",
-    "looking for someone to pick up the accessibility pass",
-  ]) {
-    assert.equal(readsAsDirectRequest(request), true, request);
-  }
+/**
+ * Work handed to the room without naming anybody.
+ *
+ * "any takers for the flaky auth ticket?" is a real ask, and a task-verb
+ * list missed every one of these because "own", "takers" and "a hand"
+ * describe delegation rather than the repository operation. Nothing decides
+ * this by phrasing any more — the agent reads the sentence — so what has to
+ * hold is that these reach it at all, which is asserted against the real
+ * model in `packages/local-triage`, and that the agent's answer is what
+ * dispatches. This pins the second half.
+ */
+test("an open-room request is picked up without anybody being named", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "open-room");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
-  // A problem being discussed is not, by itself, an invitation for an agent
-  // to enter the conversation.
-  for (const remark of [
-    "the flaky auth ticket is annoying",
-    "the release checklist is almost ready",
-    "we should probably revisit accessibility later",
-  ]) {
-    assert.equal(readsAsDirectRequest(remark), false, remark);
-  }
+  runtime.setTaskClassification("ACT");
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "any takers for the flaky auth ticket?" },
+    })).status,
+    201,
+  );
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  assert.match(
+    String(runtime.submittedTasks[0]?.objective),
+    /flaky auth ticket/u,
+  );
 });
 
 test("/stop names one agent even with words after the name", async (t) => {
@@ -11100,6 +11158,25 @@ test("an unnamed request starts without a proactive assistant response", async (
     body: { content: "please update the settings page layout" },
   });
   assert.equal(posted.status, 201);
+  // Nothing has run. Choosing the agent is a guess, and a wrong guess costs a
+  // checkout, a run and somebody's usage; a slow one costs a word.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const offered = await owner.request(`${base}/messages`);
+  // In the agent's own voice, not the channel's: it is the one being asked,
+  // and the author line is how a reader sees whose usage this would spend.
+  const offer = (offered.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
+  assert.match(offer.content, /Want me to take this on\?/u);
+  assert.match(offer.content, /Say "yes"/u);
+  assert.match(offer.content, /@mention someone else/u);
+
+  const agreed = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201);
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   assert.match(
     String(runtime.submittedTasks[0]?.objective),
@@ -11132,13 +11209,12 @@ test("an explicit invitation to the room starts without an assistant offer", asy
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
   assert.equal(runtime.submittedTasks.length, 1);
-  assert.equal(runtime.submittedTasks[0]?.objective, request);
-
-  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
-  assert.deepEqual(
-    messages.map((message) => ({ kind: message.kind, content: message.content })),
-    [{ kind: "user", content: request }],
-  );
+  // Both halves of what was agreed: the words the person used, and the offer
+  // they said yes to. The remark alone is what was asked; the proposal alone
+  // throws away how they asked it.
+  const objective = String(runtime.submittedTasks[0]?.objective);
+  assert.match(objective, /any takers for the flaky auth ticket/u);
+  assert.match(objective, /Agreed in the channel/u);
 });
 
 test("proactive routing reads lean channel context without replying", async (t) => {
@@ -11192,6 +11268,18 @@ test("proactive routing reads lean channel context without replying", async (t) 
     "the current request should be classified once, outside the background",
   );
 
+  const offered = await owner.request(`${base}/messages`);
+  const offer = (offered.data.messages as any[]).find((message) =>
+    /^Want me to take this/u.test(String(message.content)),
+  );
+  assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
+  assert.match(String(offer.content), /Want me to take this on\?/u);
+
+  const agreed = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   const task = runtime.submittedTasks[0];
   assert.match(String(task?.objective), /please fix that flow/u);
@@ -11316,7 +11404,7 @@ test("a later yes stays ordinary conversation after proactive dispatch", async (
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
 });
 
-test("a remark about work is not a request and dispatches nothing", async (t) => {
+test("a message the agent reads as chatter is answered with silence", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11327,9 +11415,11 @@ test("a remark about work is not a request and dispatches nothing", async (t) =>
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
-  // Every one of these is about work and asks for none. The verb list alone
-  // could not tell them from an instruction, which is why the unnamed path
-  // wants an imperative or a phrase handing the work over.
+  // Every one of these is about work and asks for none. They are read — that
+  // is the point of reading rather than matching — and the agent's answer is
+  // to say nothing, which has to mean nothing: no offer, no task, no line in
+  // the room.
+  runtime.setTaskClassification("IGNORE");
   for (const remark of [
     "the retry loop was rewritten last week",
     "I updated the readme this morning",
@@ -11344,12 +11434,7 @@ test("a remark about work is not a request and dispatches nothing", async (t) =>
   }
   assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
   const after = await owner.request(`${base}/messages`);
-  const offers = (after.data.messages as any[]).filter(
-    (message) =>
-      message.kind === "agent" &&
-      /Want me to take this/u.test(message.content),
-  );
-  assert.deepEqual(offers, [], JSON.stringify(offers));
+  assert.deepEqual(agentSpeech(after.data.messages), []);
 });
 
 test("a revert reports that it worked, and takes the thread's file list back with it", async (t) => {
@@ -11543,7 +11628,10 @@ test("the agent reads the message before auto-dispatching, and no means no task"
   // It was read — one prompt, and it asked the question this gate asks.
   const asked = runtime.chatPrompts.slice(before);
   assert.equal(asked.length, 1, JSON.stringify(asked));
-  assert.match(String(asked[0]?.prompt), /Answer with one word: yes or no/u);
+  assert.match(
+    String(asked[0]?.prompt),
+    /Reply with exactly one of these three lines/u,
+  );
   assert.match(String(asked[0]?.prompt), /settings page layout/u);
 
   // And nothing was said or started.
@@ -11558,7 +11646,7 @@ test("the agent reads the message before auto-dispatching, and no means no task"
   );
 });
 
-test("a remark that opens with a noun from the verb list is never read at all", async (t) => {
+test("every unaddressed message is read, whatever words it uses", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11569,30 +11657,46 @@ test("a remark that opens with a noun from the verb list is never read at all", 
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
-  // The reason the word list stays in front of the model: these cost nothing
-  // to refuse, and a channel that is only talking must not spend an account
-  // per sentence to find that out. "Changes look good" opens with a word from
-  // the verb list and is a person saying the changes look good.
-  const before = runtime.chatPrompts.length;
-  for (const remark of [
+  // A word list used to answer for these without asking anybody, and it had
+  // to: "Changes look good" opens with a word from the verb list and is a
+  // person saying the changes look good. But the same list also answered for
+  // "the gray background looks rough" — silence — and for "the update went
+  // out" — a request. It cannot do better, because the difference is not in
+  // the words. So every message is read now, and the agent decides.
+  const remarks = [
     "Changes have been made and look good",
     "Changes look good",
     "Yo what's up",
     "the update went out this morning",
     "the build is fixed now",
-  ]) {
+  ];
+  runtime.setTaskClassification("IGNORE");
+  const before = runtime.chatPrompts.length;
+  for (const remark of remarks) {
     const posted = await owner.request(`${base}/messages`, {
       method: "POST",
       body: { content: remark },
     });
     assert.equal(posted.status, 201, remark);
   }
-  assert.deepEqual(
-    runtime.chatPrompts.slice(before),
-    [],
-    "no agent was asked about any of these",
+
+  const asked = runtime.chatPrompts.slice(before);
+  assert.equal(
+    asked.length,
+    remarks.length,
+    `each message reaches the agent: ${JSON.stringify(asked.map((entry) => entry.prompt.slice(-60)))}`,
   );
+  for (const remark of remarks) {
+    assert.ok(
+      asked.some((entry) => entry.prompt.endsWith(remark)),
+      `"${remark}" was read`,
+    );
+  }
+  // And read is not the same as acted on. Every one of them was answered
+  // with silence.
   assert.equal(runtime.submittedTasks.length, 0);
+  const after = await owner.request(`${base}/messages`);
+  assert.deepEqual(agentSpeech(after.data.messages), []);
 });
 
 test("a thread opens on the request that caused it, in the words it was asked in", async (t) => {
@@ -12670,96 +12774,624 @@ test("registration says so when the deployment has no relay and only logged the 
   assert.match(logged[0] ?? "", /confirmation code/iu);
 });
 
-test("static assets are compressed for the clients that can read them", async (t) => {
+/**
+ * Reported as data loss, and it was not: the records were untouched. A second
+ * account had been created on the deployment, and signing back in as the
+ * first showed an empty workspace — because the owner administers every
+ * organization on the deployment and the list came back ordered by name, so
+ * the newcomer's took the head of it.
+ */
+test("a newer account's workspace never displaces the owner's own", async (t) => {
   const runtime = await startRuntime(t);
-  const identity = await fetchAsset(runtime.origin, "/app.js");
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
 
-  assert.equal(identity.status, 200);
-  assert.equal(identity.headers["content-encoding"], undefined);
-  assert.equal(identity.headers["vary"], "Accept-Encoding");
-  const size = identity.body.length;
-
-  // The dashboard ships close to a megabyte of JavaScript and a quarter of a
-  // megabyte of CSS as plain text. Over a phone connection that is most of the
-  // wait, and it was going down the wire uncompressed.
-  const gzip = await fetchAsset(runtime.origin, "/app.js", {
-    "Accept-Encoding": "gzip",
+  // Registration hands a self-signed-up account its own organization, named
+  // after them — and "Aria's team" sorts ahead of the owner's "Relay Test".
+  const newcomer = new TestClient(runtime.origin);
+  const registered = await registerAccount(newcomer, runtime.mail, {
+    email: "aria@example.com",
+    displayName: "Aria",
+    password: PASSWORD,
   });
-  assert.equal(gzip.headers["content-encoding"], "gzip");
-  assert.equal(gunzipSync(gzip.body).toString("utf8"), identity.body.toString("utf8"));
-  assert.equal(gzip.body.length < size / 4, true);
-  assert.equal(gzip.headers["content-length"], String(gzip.body.length));
+  assert.equal(registered.status, 201, JSON.stringify(registered.data));
 
-  const brotli = await fetchAsset(runtime.origin, "/app.js", {
-    "Accept-Encoding": "br, gzip",
-  });
-  assert.equal(brotli.headers["content-encoding"], "br");
-  assert.equal(
-    brotliDecompressSync(brotli.body).toString("utf8"),
-    identity.body.toString("utf8"),
+  const listed = await owner.request("/api/v1/organizations");
+  assert.equal(listed.status, 200);
+  const organizations = listed.data.organizations as {
+    id: string;
+    name: string;
+  }[];
+
+  // A system administrator really can reach it, and it stays listed: hiding
+  // it would break the administration the role exists for.
+  assert.ok(
+    organizations.some((entry) => entry.name === "Aria's team"),
+    "the administrator can still reach every organization",
   );
-  // Brotli wins when both are on offer, which is every phone that can install
-  // this app.
-  assert.equal(brotli.body.length < gzip.body.length, true);
-
-  // A client that says it can read neither still gets the bytes.
-  const refused = await fetchAsset(runtime.origin, "/app.js", {
-    "Accept-Encoding": "gzip;q=0, br;q=0",
-  });
-  assert.equal(refused.headers["content-encoding"], undefined);
-  assert.equal(refused.body.length, size);
-
-  // Small assets are left alone: the header would cost more than the saving.
-  const document = await fetchAsset(runtime.origin, "/", {
-    "Accept-Encoding": "br, gzip",
-  });
-  assert.equal(document.headers["content-encoding"], undefined);
-});
-
-test("a compressed asset revalidates against its own tag", async (t) => {
-  const runtime = await startRuntime(t);
-  const gzip = await fetchAsset(runtime.origin, "/app.js", {
-    "Accept-Encoding": "gzip",
-  });
-  const identity = await fetchAsset(runtime.origin, "/app.js");
-  const gzipTag = String(gzip.headers["etag"]);
-  const identityTag = String(identity.headers["etag"]);
-
-  // Two representations of one file. A cache holding the compressed one must
-  // not answer a request that can only read the plain one, and the tag is the
-  // only thing keeping them apart.
-  assert.notEqual(gzipTag, identityTag);
-  assert.match(gzipTag, /-gzip"$/u);
-
-  const unchanged = await fetchAsset(runtime.origin, "/app.js", {
-    "Accept-Encoding": "gzip",
-    "If-None-Match": gzipTag,
-  });
-  assert.equal(unchanged.status, 304);
-  const mismatched = await fetchAsset(runtime.origin, "/app.js", {
-    "Accept-Encoding": "gzip",
-    "If-None-Match": identityTag,
-  });
-  assert.equal(mismatched.status, 200);
-});
-
-test("a digested asset name is cached forever and a stable one is not", async (t) => {
-  const runtime = await startRuntime(t);
-
-  // The point of the digest: a repeat launch reads these out of local cache
-  // and makes no request at all, where a stable name costs a revalidation
-  // round trip per file every single time.
-  const digested = await fetchAsset(runtime.origin, `/app.${SCRIPT_DIGEST}.js`);
-  assert.equal(digested.status, 200);
+  // But it is not what they are shown. The control room opens whatever comes
+  // first, so ordering by name alone handed the owner somebody else's empty
+  // workspace and read as having lost their own.
   assert.equal(
-    digested.headers["cache-control"],
-    "public, max-age=31536000, immutable",
+    organizations[0]?.name,
+    "Relay Test",
+    "the owner's own organization leads their list",
   );
 
-  // The document that names the build still revalidates, which is what makes
-  // the promise above safe to make.
-  const stable = await fetchAsset(runtime.origin, "/app.js");
-  assert.equal(stable.headers["cache-control"], "no-cache");
-  const document = await fetchAsset(runtime.origin, "/");
-  assert.equal(document.headers["cache-control"], "no-cache");
+  // And the boundary still holds in the other direction: the newcomer sees
+  // one organization, theirs.
+  const theirs = await newcomer.request("/api/v1/organizations");
+  assert.deepEqual(
+    (theirs.data.organizations as { name: string }[]).map(
+      (entry) => entry.name,
+    ),
+    ["Aria's team"],
+  );
+});
+
+/* ------------------------------------------- unaddressed message verdict --- */
+
+/**
+ * What an agent decides about a message nobody addressed to it.
+ *
+ * The reply is a line of text from a model, so the parser is the boundary
+ * between "a model said something" and "somebody's account is about to be
+ * spent". Everything it cannot read is silence.
+ */
+test("a decision is read out of the agent's reply, and only a clear one", () => {
+  assert.deepEqual(parseAutoClaimVerdict("ACT"), { verdict: "act" });
+  assert.deepEqual(parseAutoClaimVerdict("act\n"), { verdict: "act" });
+  assert.deepEqual(parseAutoClaimVerdict("OFFER: Shall I change the background colour?"), {
+    verdict: "offer",
+    proposal: "Shall I change the background colour?",
+  });
+  // Models reach for quotes and bullets when asked for a sentence; none of
+  // that belongs in the room.
+  assert.deepEqual(parseAutoClaimVerdict('OFFER "Shall I retire the old flag?"'), {
+    verdict: "offer",
+    proposal: "Shall I retire the old flag?",
+  });
+  assert.deepEqual(parseAutoClaimVerdict("IGNORE"), { verdict: "ignore" });
+
+  // Everything unreadable lands on silence, which is the direction that costs
+  // nothing: a paragraph where a word was asked for, a refusal, an empty
+  // answer, a timeout that produced nothing at all.
+  for (const unreadable of [
+    undefined,
+    "",
+    "   ",
+    "I'm not sure what you mean.",
+    "MAYBE",
+    "OFFER:",
+    "OFFER:    ",
+  ]) {
+    assert.deepEqual(
+      parseAutoClaimVerdict(unreadable),
+      { verdict: "ignore" },
+      JSON.stringify(unreadable),
+    );
+  }
+});
+
+test("an offer is recognised by its tail, and gives up its proposal", () => {
+  const posted =
+    'Shall I change the background colour?\n\nSay "yes" and I\'ll ask you ' +
+    "what I need before I start — or @mention someone else.";
+  assert.equal(
+    autoClaimProposal(posted),
+    "Shall I change the background colour?",
+  );
+  // Anything else in the transcript is not an offer, and acceptance must not
+  // find one where none was made.
+  assert.equal(autoClaimProposal("Shall I change the background colour?"), undefined);
+  assert.equal(autoClaimProposal("yes"), undefined);
+});
+
+/**
+ * The clear half of the three-way decision: a message that says what it wants
+ * is taken, and nothing is asked.
+ *
+ * The offer exists to resolve doubt. Where there is none it is a round trip
+ * that buys nothing, and a person who wrote "change the background to blue"
+ * and was answered "would you like me to change the background?" has been
+ * asked to say the same thing twice.
+ */
+test("a message that plainly asks for work is taken without an offer", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "acts-at-once");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("ACT");
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "change the background on the settings page to blue" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  assert.match(
+    String(runtime.submittedTasks[0]?.objective),
+    /background on the settings page to blue/u,
+  );
+  // Not asked first, and not asked afterwards either: there was nothing
+  // unclear, so the question round is not forced.
+  assert.doesNotMatch(
+    String(runtime.submittedTasks[0]?.objective),
+    /force a question round/u,
+  );
+  const after = await owner.request(`${base}/messages`);
+  assert.deepEqual(
+    (after.data.messages as any[]).filter((message) =>
+      /Say "yes" and I'll ask you what I need/u.test(String(message.content)),
+    ),
+    [],
+    "nothing was offered — it was simply taken",
+  );
+});
+
+/**
+ * The unsure half: work is implied but not asked for, so the agent names the
+ * specific thing it would do and waits. Saying yes starts it *asking*.
+ */
+test("an implied request is proposed on, and yes starts it in its question round", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "proposes-first");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification(
+    "OFFER: Shall I change the background colour on the settings page?",
+  );
+  const remark = "it looks like the background doesn't look great with gray";
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: remark },
+    })).status,
+    201,
+  );
+
+  // Offered in the agent's own words, about this message. A fixed sentence
+  // could only have said "want me to take this?", which is not a question
+  // about anything and cannot be answered without re-reading the room.
+  const offered = await owner.request(`${base}/messages`);
+  const offer = (offered.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.match(
+    String(offer?.content),
+    /Shall I change the background colour on the settings page\?/u,
+  );
+  assert.equal(runtime.submittedTasks.length, 0, "an offer is not a start");
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "yes" },
+    })).status,
+    201,
+  );
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  const objective = String(runtime.submittedTasks[0]?.objective);
+  // Both halves travel. The remark is the words a person chose; the proposal
+  // is what they said yes to, and neither alone is the job.
+  assert.match(objective, /doesn't look great with gray/u);
+  assert.match(objective, /Shall I change the background colour/u);
+  // And it goes in asking — which colour was never said, and guessing at it
+  // is the whole reason an offer was made instead of an edit.
+  assert.match(objective, /force a question round/u);
+});
+
+/**
+ * Who an unaddressed request goes to, when nothing about it points anywhere.
+ *
+ * Fit decides first and is worth queueing behind — the right agent to ask is
+ * still the right one when it is busy. Below that there is no "right", only
+ * "whose account", and the answer is the person who asked. Below *that* the
+ * only remaining question is who can start now.
+ */
+test("an unmatched request goes to the sender's own agent, then to whoever is free", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "fallback-order");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const teammate = await runtime.store.createUser({
+    email: "fallback-colleague@example.com",
+    displayName: "Colleague Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: teammate.id,
+    role: "developer",
+  });
+  const colleague = new TestClient(runtime.origin);
+  await colleague.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: teammate.email, password: PASSWORD },
+  });
+
+  // One agent each, both org-wide so either could take anything.
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(teammate.id, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Named so that nothing in the request can match either of them, and no
+  // role set on either: this is the case where fit has no answer at all.
+  for (const [agent, name] of [
+    ["anthropic", "Willow"],
+    [`${teammate.id}:openai`, "Cedar"],
+  ] as const) {
+    assert.equal(
+      (await owner.request(`${base}/agents/${agent}`, {
+        method: "POST",
+        body: { name },
+      })).status,
+      200,
+    );
+  }
+
+  runtime.setTaskClassification("ACT");
+  assert.equal(
+    (await colleague.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "rewrite the shipping calculator" },
+    })).status,
+    201,
+  );
+
+  // Tier two: nothing matched, so the person who asked spends their own
+  // account rather than a colleague's.
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(
+    runtime.submittedTasks[0]?.actorId,
+    teammate.id,
+    "the sender's own agent takes an unmatched request",
+  );
+
+  // That task is now in flight — nothing has finished it — so the same
+  // sender asking again finds their own agent busy.
+  assert.equal(
+    (await colleague.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "rewrite the invoice totals page" },
+    })).status,
+    201,
+  );
+
+  // Tier three: anybody who can start now, rather than a queue behind an
+  // agent that was only ever the fallback pick.
+  assert.equal(runtime.submittedTasks.length, 2, JSON.stringify(runtime.submittedTasks));
+  assert.equal(
+    runtime.submittedTasks[1]?.actorId,
+    ownerId,
+    "a busy fallback hands over to whoever is free",
+  );
+});
+
+/**
+ * An invitation with no address on it: a link, not a letter.
+ *
+ * The addressed form named one mailbox and was spent the first time it was
+ * opened, which is not how an invitation gets used. It gets pasted into the
+ * chat the team is already in, and the second person to click it was told it
+ * had already been used.
+ */
+test("an invite link with no address admits more than one person", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "open-link");
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: {
+        role: "developer",
+        repositoryId: repo,
+        projectId: DEFAULT_PROJECT_ID,
+      },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  const token = invited.data.token as string;
+  assert.match(token, /^inv_[\w-]+\.[\w-]+$/u);
+
+  // Nobody is named, and the screen the recipient lands on has to know that
+  // so it asks who they are rather than showing a blank disabled field.
+  const preview = await new TestClient(runtime.origin).request(
+    `/api/v1/invitations/${token}`,
+  );
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.invitation.open, true);
+  assert.equal(preview.data.invitation.email, "");
+  assert.equal(preview.data.invitation.role, "developer");
+
+  // Two people, one link, neither of them named on it.
+  for (const [email, name] of [
+    ["first@example.com", "First Joiner"],
+    ["second@example.com", "Second Joiner"],
+  ] as const) {
+    const joiner = new TestClient(runtime.origin);
+    const accepted = await joiner.request(
+      `/api/v1/invitations/${token}/accept`,
+      { method: "POST", body: { email, displayName: name, password: PASSWORD } },
+    );
+    assert.equal(accepted.status, 200, `${email}: ${JSON.stringify(accepted.data)}`);
+    assert.equal(accepted.data.user.email, email);
+    // The same grant the addressed form makes, and no more: one repository,
+    // no organization membership, because any organization role would reach
+    // every repository and undo the scoping.
+    assert.deepEqual(accepted.data.memberships, []);
+  }
+
+  const grants = await runtime.store.listRepositoryGrants(repo);
+  assert.deepEqual(
+    grants.map((grant) => grant.role),
+    ["developer", "developer"],
+  );
+
+  // An address that already has an account is refused rather than signed in:
+  // holding the link proves nothing about who is holding it.
+  const impostor = new TestClient(runtime.origin);
+  const taken = await impostor.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: {
+      email: "first@example.com",
+      displayName: "Not First",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.data.error?.code ?? taken.data.code, "account_exists");
+
+  // And it still ends when somebody ends it.
+  const listed = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+  );
+  const open = (listed.data.invitations as any[]).find(
+    (entry) => entry.email === "",
+  );
+  assert.equal(open?.status, "pending", "an open link is not spent by use");
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations/${open.id}`,
+        { method: "DELETE" },
+      )
+    ).status,
+    200,
+  );
+  const late = new TestClient(runtime.origin);
+  const refused = await late.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: {
+      email: "third@example.com",
+      displayName: "Too Late",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(refused.status, 409, JSON.stringify(refused.data));
+});
+
+/**
+ * The offer as a prompt, not only as a sentence to answer in words.
+ *
+ * It is the same prompt an agent's own questions use — one list, one set of
+ * keyboard shortcuts, one rule about who may answer — because an offer is the
+ * same kind of thing: one person's decision, with work waiting on it.
+ */
+test("an offer puts up the choice prompt, and tapping yes starts the work", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-prompt");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("OFFER: Shall I retire the old feature flag?");
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "that old flag is still hanging around everywhere" },
+    })).status,
+    201,
+  );
+
+  const open = await owner.request(`${base}/questions`);
+  assert.equal(open.status, 200);
+  const prompt = (open.data.questions as any[])[0];
+  assert.notEqual(prompt, undefined, JSON.stringify(open.data));
+  assert.equal(
+    prompt.questions[0].question,
+    "Shall I retire the old feature flag?",
+  );
+  assert.deepEqual(prompt.questions[0].options, ["Yes, go ahead", "No thanks"]);
+  assert.equal(runtime.submittedTasks.length, 0, "a prompt is not a start");
+
+  // Somebody else's prompt is nobody else's decision — the same rule the
+  // agent's own questions follow.
+  const stranger = new TestClient(runtime.origin);
+  const other = await runtime.store.createUser({
+    email: "offer-prompt-other@example.com",
+    displayName: "Other Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: other.id,
+    role: "developer",
+  });
+  await stranger.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: other.email, password: PASSWORD },
+  });
+  assert.deepEqual(
+    (await stranger.request(`${base}/questions`)).data.questions,
+    [],
+  );
+
+  const answered = await owner.request(
+    `${base}/questions/${encodeURIComponent(prompt.requestId)}/answer`,
+    { method: "POST", body: { answers: [{ chosen: 0 }] } },
+  );
+  assert.equal(answered.status, 200);
+
+  // The tap dispatches exactly what a typed "yes" dispatches: the words the
+  // person used, the proposal they agreed to, and the question round.
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "tapping yes never dispatched the work",
+  );
+  const objective = String(runtime.submittedTasks[0]?.objective);
+  assert.match(objective, /old flag is still hanging around/u);
+  assert.match(objective, /Shall I retire the old feature flag/u);
+  assert.match(objective, /force a question round/u);
+
+  // And the prompt is gone, so the work cannot be started a second time by
+  // somebody typing "yes" underneath it.
+  assert.deepEqual((await owner.request(`${base}/questions`)).data.questions, []);
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "yes" },
+    })).status,
+    201,
+  );
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+});
+
+test("declining the prompt starts nothing, and says nothing about it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-declined");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("OFFER: Shall I tidy the imports?");
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "the imports in that module are a mess" },
+  });
+  const prompt = (await owner.request(`${base}/questions`)).data.questions[0];
+  const before = (await owner.request(`${base}/messages`)).data.messages.length;
+
+  assert.equal(
+    (
+      await owner.request(
+        `${base}/questions/${encodeURIComponent(prompt.requestId)}/answer`,
+        { method: "POST", body: { answers: [{ chosen: 1 }] } },
+      )
+    ).status,
+    200,
+  );
+
+  assert.equal(runtime.submittedTasks.length, 0);
+  // Declining a suggestion is not an event the room needs narrating to it.
+  assert.equal(
+    (await owner.request(`${base}/messages`)).data.messages.length,
+    before,
+  );
+  assert.deepEqual((await owner.request(`${base}/questions`)).data.questions, []);
+});
+
+/**
+ * The local pass, and the one thing it is allowed to do.
+ *
+ * Reading every unaddressed message is what replaced the word list, and it
+ * is right — but it runs on somebody's subscription, and most of a working
+ * channel is people talking to each other. This keeps that half off the
+ * agents entirely, and is allowed to answer only when it is sure.
+ */
+test("conversation the local pass is sure about never reaches an agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-triage");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setLocalChatter((text) => text.startsWith("hi "));
+  runtime.setTaskClassification("ACT");
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "hi Ethan, how was the weekend" },
+    })).status,
+    201,
+  );
+  assert.deepEqual(
+    runtime.chatPrompts.slice(before),
+    [],
+    "no agent was asked, and nobody's usage was spent",
+  );
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  // And the filter decides nothing else. A message it is not sure about goes
+  // on to the agent exactly as before — that is what makes it safe to put in
+  // front of the decision rather than in place of it.
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "change the background on settings to blue" },
+    })).status,
+    201,
+  );
+  // Counted by the decision prompt itself: dispatching also asks the agent
+  // to compose what it says when it picks work up, and that is not this.
+  const decisions = runtime.chatPrompts
+    .slice(before)
+    .filter((entry) =>
+      /Reply with exactly one of these three lines/u.test(entry.prompt),
+    );
+  assert.equal(decisions.length, 1, JSON.stringify(decisions.map((d) => d.prompt.slice(-40))));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
 });
