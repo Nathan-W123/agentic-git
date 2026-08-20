@@ -96,6 +96,7 @@ test(
   async () => {
     const app = await publicFile("app.js");
     const chats = await publicFile("screen-chats.js");
+    const css = await publicFile("styles.css");
 
     const replyCase = app.slice(
       app.indexOf('case "dm-reply-quote":'),
@@ -104,6 +105,11 @@ test(
     assert.match(replyCase, /state\.dmReplyMessageId = target\?\.id;/u);
     assert.doesNotMatch(replyCase, /state\.dmDraft\s*=/u);
     assert.match(chats, /directReplyChip\(replyTarget, name\)/u);
+    assert.match(
+      css,
+      /\.composer-thread svg \{[\s\S]*?width: 14px;[\s\S]*?height: 14px;[\s\S]*?\}/u,
+      "the reply marker should stay an icon instead of using the SVG's intrinsic size",
+    );
   },
 );
 

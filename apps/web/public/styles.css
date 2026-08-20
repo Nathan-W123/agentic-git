@@ -9749,6 +9749,8 @@ dialog.modal[open]::backdrop {
 
 .composer-thread svg {
   flex: none;
+  width: 14px;
+  height: 14px;
   color: var(--accent-bright);
 }
 
