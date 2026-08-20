@@ -71,7 +71,9 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     // the channel and never becomes a task, so nothing can be written — and
     // the prompt silently keeps the agent read-only, so the reply is just the
     // answer rather than an explanation of the command or an offer to work.
-    summary: "Do not code — read and answer only, changing nothing",
+    // Read-only is not helpless: it may open files and run commands that only
+    // look, which is what makes "how many lines is this?" answerable.
+    summary: "Do not code — look, run read-only checks, and answer",
     usage: "/dnc @agent your question",
     takesObjective: true,
   },

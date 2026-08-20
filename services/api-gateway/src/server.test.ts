@@ -6014,6 +6014,38 @@ test("/dnc is answered without announcing the constraint and files no task", asy
   assert.match(prompt, /The message: @Claude \(Owner\) rework the retry loop/u);
 });
 
+test("/dnc prompt permits read-only shell inspection but forbids edits", async (t) => {
+  // "Do not code" is not "do not look". Asked for a line count, the agent used
+  // to answer that it had no permission to run a shell command — a refusal the
+  // reader could do nothing about, in place of the number they asked for.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-may-look");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "About 90,000 lines across 400 files.";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @Claude (Owner) just give me a LOC report" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  // Commands are asked for by name, in either shell the host might run.
+  assert.match(prompt, /run whatever shell commands you need/u);
+  assert.match(prompt, /bash or PowerShell/u);
+  // And the half that has to survive: reading only, and no code.
+  assert.match(prompt, /as long as they only read/u);
+  assert.match(prompt, /Do not write or change code/u);
+  assert.doesNotMatch(prompt, /Do not write, change, or run anything/u);
+});
+
 test("/dnc in a thread is answered without announcing the constraint or filing a task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
