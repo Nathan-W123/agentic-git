@@ -5685,7 +5685,8 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   );
   const replies = (root?.replies ?? []).map((reply) => reply.content).join("\n");
   assert.doesNotMatch(replies, /That's the plan/u);
-  assert.doesNotMatch(replies, /Reply "go ahead" and I'll start/u);
+  assert.match(replies, /Waiting on you/u);
+  assert.match(replies, /reply "go ahead" and I'll start/iu);
   // The plan itself is a reply of its own kind, not another agent remark:
   // that mark is what lets the browser keep the document out of the thread
   // and open it in its own panel beside the room.
@@ -6447,12 +6448,10 @@ test("/push reports refusals and unsupported deployments in the channel", async 
   assert.equal(limitedRuntime.submittedTasks.length, 0);
 });
 
-test("a held run says in the room that it is waiting, not only in its thread", async (t) => {
-  // The hold announced itself with a sentence inside the thread and nothing
-  // anywhere else, and a thread is collapsed until somebody opens it. From
-  // the channel a held plan looked exactly like a run still going — the
-  // request, a working indicator, and then silence — so the person who asked
-  // waited for an agent that was waiting for them.
+test("a held run keeps its waiting status inside the task thread", async (t) => {
+  // Workflow state belongs to the task's story. The thread and task status
+  // make the hold visible without interrupting the repository-wide transcript
+  // with a standalone agent message.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -6476,18 +6475,31 @@ test("a held run says in the room that it is waiting, not only in its thread", a
       repositoryId,
       ownerId,
     );
-    return messages.some(
-      (message) =>
-        message.kind === "outcome" && /Waiting on you/u.test(message.content),
+    const thread = messages.find(
+      (message) => message.kind === "user" && message.taskId !== undefined,
     );
-  }, "the room was never told the plan was held");
+    return (thread?.replies ?? []).some((reply) =>
+      /Waiting on you/u.test(reply.content),
+    );
+  }, "the plan's thread never recorded that it was held");
 
-  // In the room, and saying what to do about it: the reply that releases the
-  // hold is the only thing this line has to carry.
-  const announced = (
-    await runtime.store.listChannelMessages(repositoryId, ownerId)
-  ).find((message) => message.kind === "outcome");
+  const messages = await runtime.store.listChannelMessages(
+    repositoryId,
+    ownerId,
+  );
+  const thread = messages.find(
+    (message) => message.kind === "user" && message.taskId !== undefined,
+  );
+  const announced = (thread?.replies ?? []).find((reply) =>
+    /Waiting on you/u.test(reply.content),
+  );
+  assert.equal(announced?.kind, "outcome");
   assert.match(announced?.content ?? "", /go ahead/u);
+  assert.equal(
+    messages.some((message) => /Waiting on you/u.test(message.content)),
+    false,
+    JSON.stringify(messages.map((message) => message.content)),
+  );
 });
 
 test('"go ahead" releases a review gate from the thread it was announced in', async (t) => {
@@ -6558,11 +6570,9 @@ test('"go ahead" releases a review gate from the thread it was announced in', as
   );
 });
 
-test("the room is told when a hold is released, not only the thread", async (t) => {
-  // Half a fix is its own bug. The hold announced itself in the room and the
-  // release did not, so the channel's last word stayed "⏸ Waiting on you"
-  // about a run that had already started again — stale in the direction that
-  // asks the reader to act on something already done.
+test("a released hold keeps both workflow markers inside the task thread", async (t) => {
+  // The release follows the hold in the same task story. Neither lifecycle
+  // marker becomes a standalone group-chat message.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -6586,8 +6596,12 @@ test("the room is told when a hold is released, not only the thread", async (t) 
       repositoryId,
       ownerId,
     );
-    return messages.some((message) => /Waiting on you/u.test(message.content));
-  }, "the room was never told the plan was held");
+    return messages.some((message) =>
+      (message.replies ?? []).some((reply) =>
+        /Waiting on you/u.test(reply.content),
+      ),
+    );
+  }, "the thread was never told the plan was held");
 
   const root = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
@@ -6603,34 +6617,47 @@ test("the room is told when a hold is released, not only the thread", async (t) 
       repositoryId,
       ownerId,
     );
-    return messages.some((message) => /picking this back up/iu.test(message.content));
-  }, "the room was never told the hold had been released");
+    return messages.some((message) =>
+      (message.replies ?? []).some((reply) =>
+        /Go-ahead received/u.test(reply.content),
+      ),
+    );
+  }, "the thread was never told the hold had been released");
 
-  // Exactly one hold line, and it is no longer the room's last word.
+  // Exactly one ordered pair in the thread, and neither status in the room.
   const messages = await runtime.store.listChannelMessages(
     repositoryId,
     ownerId,
   );
   assert.equal(
-    messages.filter((message) => /Waiting on you/u.test(message.content)).length,
-    1,
+    messages.some((message) =>
+      /Waiting on you|Go-ahead received/u.test(message.content),
+    ),
+    false,
     JSON.stringify(messages.map((message) => message.content)),
   );
-  const held = messages.findIndex((message) =>
-    /Waiting on you/u.test(message.content),
+  const updatedRoot = messages.find((message) => message.id === root?.id);
+  const replies = updatedRoot?.replies ?? [];
+  assert.equal(
+    replies.filter((reply) => /Waiting on you/u.test(reply.content)).length,
+    1,
+    JSON.stringify(replies.map((reply) => reply.content)),
   );
-  const released = messages.findIndex((message) =>
-    /picking this back up/iu.test(message.content),
+  const held = replies.findIndex((reply) =>
+    /Waiting on you/u.test(reply.content),
+  );
+  const released = replies.findIndex((reply) =>
+    /Go-ahead received/u.test(reply.content),
   );
   assert.ok(released > held, "the release did not follow the hold");
 });
 
-test("a gate announces itself once and is withdrawn however it is decided", async (t) => {
+test("a gate's hold and release stay ordered and deduplicated in its thread", async (t) => {
   // Two ways in and one way out. The audit stream is polled rather than
   // delivered once, and a run can ask for a second gate while the first is
-  // still up — both would put the same sentence in the room twice, which
+  // still up — both would put the same sentence in the thread twice, which
   // reads as two separate things waiting on the reader. And a reviewer who
-  // clears the gate from the Approvals screen never touches the channel, so
+  // clears the gate from the Approvals screen never touches the thread, so
   // the withdrawal has to be read from the stream both routes report to.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -6669,8 +6696,12 @@ test("a gate announces itself once and is withdrawn however it is decided", asyn
       repositoryId,
       ownerId,
     );
-    return messages.some((message) => /needs a review/u.test(message.content));
-  }, "the room was never told the run was gated");
+    return messages.some((message) =>
+      (message.replies ?? []).some((reply) =>
+        /Waiting on you/u.test(reply.content),
+      ),
+    );
+  }, "the thread was never told the run was gated");
 
   // Asked for again while the first is still up: still one line.
   await runtime.store.appendAudit(undefined, {
@@ -6689,25 +6720,42 @@ test("a gate announces itself once and is withdrawn however it is decided", asyn
       ownerId,
     );
     return messages.some((message) =>
-      /picking this back up/iu.test(message.content),
+      (message.replies ?? []).some((reply) =>
+        /Go-ahead received/u.test(reply.content),
+      ),
     );
-  }, "the room was never told the gate had been cleared");
+  }, "the thread was never told the gate had been cleared");
 
   const messages = await runtime.store.listChannelMessages(
     repositoryId,
     ownerId,
   );
   assert.equal(
-    messages.filter((message) => /needs a review/u.test(message.content)).length,
-    1,
+    messages.some((message) =>
+      /Waiting on you|Go-ahead received/u.test(message.content),
+    ),
+    false,
     JSON.stringify(messages.map((message) => message.content)),
+  );
+  const thread = messages.find((message) => message.taskId === taskId);
+  const replies = thread?.replies ?? [];
+  assert.equal(
+    replies.filter((reply) => /Waiting on you/u.test(reply.content)).length,
+    1,
+    JSON.stringify(replies.map((reply) => reply.content)),
   );
   assert.equal(
-    messages.filter((message) => /picking this back up/iu.test(message.content))
-      .length,
+    replies.filter((reply) => /Go-ahead received/u.test(reply.content)).length,
     1,
-    JSON.stringify(messages.map((message) => message.content)),
+    JSON.stringify(replies.map((reply) => reply.content)),
   );
+  const held = replies.findIndex((reply) =>
+    /Waiting on you/u.test(reply.content),
+  );
+  const released = replies.findIndex((reply) =>
+    /Go-ahead received/u.test(reply.content),
+  );
+  assert.ok(released > held, "the release did not follow the hold");
 });
 
 test("a channel's chosen model and reasoning level travel to the task", async (t) => {
