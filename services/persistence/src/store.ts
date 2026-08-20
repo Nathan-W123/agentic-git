@@ -711,7 +711,15 @@ export interface RecordTokenUsageInput {
   phase: TokenUsagePhase;
   inputTokens?: number;
   outputTokens?: number;
-  /** Cache-adjusted input plus output; absent for legacy/aggregate reporters. */
+  /**
+   * Cache-adjusted input plus output; absent for legacy/aggregate reporters.
+   *
+   * Replaced, not merged, on a repeat report of the same key. Reports carry a
+   * running total, so a fresh figure kept from an earlier snapshot would sit
+   * beside a total that has since grown and quietly undercount; leaving it
+   * absent means "this reporter is not splitting cache out", which is what
+   * the room's activity line needs to know.
+   */
   freshTokens?: number;
   totalTokens: number;
   recordedAt: string;

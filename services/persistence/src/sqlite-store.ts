@@ -1124,7 +1124,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
   ): Promise<TokenUsageRecord> {
     // Upsert, not insert: the worker reports the same lease and phase again
     // with a larger running total, and summing those snapshots would inflate
-    // the bill by the heartbeat rate.
+    // the bill by the heartbeat rate. Every reported column is replaced,
+    // `fresh_tokens` included: a report that no longer carries the cache
+    // split has stopped vouching for the older one.
     this.db
       .prepare(
         `INSERT INTO token_usage
@@ -1135,7 +1137,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
          ON CONFLICT(usage_key) DO UPDATE SET
            input_tokens = excluded.input_tokens,
            output_tokens = excluded.output_tokens,
-           fresh_tokens = COALESCE(excluded.fresh_tokens, token_usage.fresh_tokens),
+           fresh_tokens = excluded.fresh_tokens,
            total_tokens = excluded.total_tokens,
            run_id = COALESCE(excluded.run_id, token_usage.run_id),
            recorded_at = excluded.recorded_at`,

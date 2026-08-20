@@ -1162,7 +1162,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
     input: RecordTokenUsageInput,
   ): Promise<TokenUsageRecord> {
     // Upsert for the same reason the SQLite backend does: reports carry a
-    // running total, so the newest one replaces its predecessor.
+    // running total, so the newest one replaces its predecessor — including
+    // clearing `fresh_tokens` when the newest report has no cache split.
     const rows = (
       await this.query(
         `INSERT INTO token_usage
@@ -1173,7 +1174,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
          ON CONFLICT (usage_key) DO UPDATE SET
            input_tokens = EXCLUDED.input_tokens,
            output_tokens = EXCLUDED.output_tokens,
-           fresh_tokens = COALESCE(EXCLUDED.fresh_tokens, token_usage.fresh_tokens),
+           fresh_tokens = EXCLUDED.fresh_tokens,
            total_tokens = EXCLUDED.total_tokens,
            run_id = COALESCE(EXCLUDED.run_id, token_usage.run_id),
            recorded_at = EXCLUDED.recorded_at

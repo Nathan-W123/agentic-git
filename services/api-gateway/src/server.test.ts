@@ -27,6 +27,7 @@ import {
   narrateTaskEvent,
   parseAutoClaimVerdict,
   readsAsEchoOfRequest,
+  reportedFreshTokens,
   summariseObjective,
   type ApiOperations,
 } from "./server.js";
@@ -8212,6 +8213,70 @@ test("channel stats exclude cached context from the token activity total", async
   assert.equal(response.status, 200);
   assert.equal(response.data.tokens, 3_200);
   assert.equal(response.data.tokensIncomplete, true);
+});
+
+test("channel stats keep an inconsistent token report inside its own bounds", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "token-bounds");
+
+  // A fresh figure larger than what was billed is impossible, and letting it
+  // through is how the line reads high; the billed total is the ceiling.
+  await runtime.store.recordTokenUsage({
+    usageKey: "over:planning",
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    taskId: "task_over",
+    agentId: "codex",
+    phase: "planning",
+    inputTokens: 4_000,
+    outputTokens: 100,
+    freshTokens: 9_000,
+    totalTokens: 5_000,
+    recordedAt: "2026-08-20T00:00:00.000Z",
+  });
+  // Output is always new work, so it is the floor even when the reported
+  // fresh figure somehow lands beneath it.
+  await runtime.store.recordTokenUsage({
+    usageKey: "under:execution",
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    taskId: "task_under",
+    agentId: "claude",
+    phase: "execution",
+    inputTokens: 30_000,
+    outputTokens: 400,
+    freshTokens: 50,
+    totalTokens: 31_000,
+    recordedAt: "2026-08-20T00:01:00.000Z",
+  });
+
+  const response = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/stats`,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.data.tokens, 5_400);
+  // Both rows carry a cache split, so nothing here is a lower bound.
+  assert.equal(response.data.tokensIncomplete, false);
+});
+
+test("a worker report without a fresh figure still separates cached context", () => {
+  // Rollout reality: a worker built before the fresh field existed reports
+  // the split and nothing else. Its total exceeding the two sides means the
+  // cache is accounted for separately, so input plus output is new work.
+  assert.equal(reportedFreshTokens(undefined, 2_000, 500, 25_000), 2_500);
+  // A total that is exactly the two sides is the ambiguous case — cache
+  // folded into the input reads identically — so no figure is claimed and
+  // the row counts as a lower bound instead.
+  assert.equal(reportedFreshTokens(undefined, 2_000, 500, 2_500), undefined);
+  // An explicit figure is taken as given, unless it exceeds what was billed.
+  assert.equal(reportedFreshTokens(1_200, 2_000, 500, 25_000), 1_200);
+  assert.equal(reportedFreshTokens(30_000, 2_000, 500, 25_000), undefined);
+  assert.equal(
+    reportedFreshTokens(undefined, undefined, 500, 25_000),
+    undefined,
+  );
 });
 
 test("asking an agent to audit dispatches work instead of discussing it", async (t) => {
