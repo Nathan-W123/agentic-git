@@ -320,6 +320,8 @@ export const state = {
   pinsOpen: true,
   /** A one-shot message id the next channel render should scroll to. */
   scrollToMessage: undefined,
+  /** A one-shot message id the next thread render should scroll to. */
+  scrollToThreadMessage: undefined,
   /** Everyone in each repository's room — org members plus repo grantees. */
   channelPeople: {},
   /**
@@ -4174,11 +4176,14 @@ export async function deleteChannelMessageEntry(
       (entry) => entry.id !== messageId,
     );
   }
-  // A pinned message that has gone must not stay in the banner pointing at a
-  // jump target the document no longer has.
-  state.channelPins[repositoryId] = (
-    state.channelPins[repositoryId] ?? []
-  ).filter((entry) => entry.id !== messageId);
+  // A redacted thread root still exists, and so does its pin. Only a message
+  // the server actually removed should leave the banner without somebody
+  // explicitly unpinning it.
+  if (response?.redacted !== true) {
+    state.channelPins[repositoryId] = (
+      state.channelPins[repositoryId] ?? []
+    ).filter((entry) => entry.id !== messageId);
+  }
   return { cancelledTask: response?.cancelledTask === true };
 }
 

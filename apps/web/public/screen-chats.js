@@ -5178,6 +5178,18 @@ function watchImageSizes() {
  * it. Called with the new DOM in place.
  */
 export function restoreChannelScroll(saved) {
+  // Opening a pin creates a new thread surface, so there is no captured
+  // anchor to restore. Aim it explicitly at the message that was chosen.
+  if (state.scrollToThreadMessage !== undefined) {
+    const messageId = state.scrollToThreadMessage;
+    state.scrollToThreadMessage = undefined;
+    const root = state.activeChannelThread;
+    const selector =
+      messageId === root
+        ? ".thread-root"
+        : `#thread-msg-${CSS.escape(messageId)}`;
+    document.querySelector(selector)?.scrollIntoView({ block: "center" });
+  }
   const list = document.querySelector("#chan-messages");
   if (list === null) {
     return;
@@ -5431,7 +5443,7 @@ function pinnedBanner(repositoryId) {
                   : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
               return `<div class="chan-pin-row">
                 <button type="button" class="chan-pin-jump"
-                  data-act="channel-pin-jump" data-value="${esc(entry.id)}"
+                  data-act="channel-pinned-open" data-value="${esc(entry.id)}"
                   title="Pinned by ${esc(pinner)}">
                   <span class="cp-title">${esc(title)}</span>
                   <span class="cp-time">${esc(clockTime(entry.at ?? entry.createdAt))}</span>

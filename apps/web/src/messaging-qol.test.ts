@@ -377,3 +377,37 @@ test("sending a message takes the command picker down with the draft", async () 
     slashIndex: 0,
   });
 });
+
+test("pinned messages stay available and open at their thread root", async () => {
+  const [app, chats, data] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+    publicFile("data.js"),
+  ]);
+  const action = slice(
+    app,
+    'case "channel-pinned-open":',
+    'case "channel-pin-jump":',
+  );
+  assert.match(chats, /data-act="channel-pinned-open"/u);
+  assert.match(action, /state\.activeChannelThread = value;/u);
+  assert.match(action, /state\.scrollToThreadMessage = value;/u);
+  assert.match(action, /state\.activePlan = undefined;/u);
+  assert.doesNotMatch(action, /channelPins/u);
+  assert.doesNotMatch(action, /entry\.kind|entry\.replies|entry\.taskId/u);
+
+  const restore = slice(
+    chats,
+    "export function restoreChannelScroll(",
+    'const list = document.querySelector("#chan-messages")',
+  );
+  assert.match(restore, /messageId === root\s*\? "\.thread-root"/u);
+  assert.match(restore, /scrollIntoView\(\{ block: "center" \}\)/u);
+
+  const deletion = slice(
+    data,
+    "export async function deleteChannelMessageEntry(",
+    "/**\n * Removes one whole thread",
+  );
+  assert.match(deletion, /if \(response\?\.redacted !== true\)/u);
+});

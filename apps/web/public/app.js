@@ -4656,9 +4656,27 @@ document.addEventListener("click", (event) => {
       state.pinsOpen = state.pinsOpen !== true;
       render();
       return;
-    // A pinned task opens as a thread; a person's message (including one with
-    // inline replies) scrolls into view. The banner's copy answers for pins
-    // whose transcript row has aged past the loaded page.
+    // A pin is a durable doorway into its conversation. Even a person's
+    // root with no replies yet opens in the thread panel, and the one-shot
+    // target prevents a previously scrolled thread from opening elsewhere.
+    case "channel-pinned-open":
+      if (!confirmDiscardEdit()) {
+        return;
+      }
+      state.activeChannelThread = value;
+      state.scrollToThreadMessage = value;
+      state.threadReplyMessageId = undefined;
+      state.autoOpenedThread = undefined;
+      state.activePlan = undefined;
+      state.activeDm = undefined;
+      state.activeAgentPanel = undefined;
+      state.chanTree = false;
+      closeChannelFile();
+      render();
+      return;
+    // References to tasks open their thread; references to a person's message
+    // (including one with inline replies) scroll the channel into view. The
+    // pin list is still a fallback for references older than loaded history.
     case "channel-pin-jump": {
       const repositoryId = activeChannelId();
       const entry =
