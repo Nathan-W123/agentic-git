@@ -251,18 +251,29 @@ export async function createRepository(rerender) {
     return;
   }
   try {
-    await api(
+    const asked = values.name.trim();
+    const created = await api(
       `/projects/${encodeURIComponent(state.projectId)}/repositories`,
       {
         method: "POST",
         body: {
-          id: values.name.trim(),
+          id: asked,
           mode: "create",
           branch: values.branch?.trim() || "main",
         },
       },
     );
-    toast(`Created ${values.name.trim()}`, "ok");
+    // The name somebody types is not always the id they get: another project
+    // on this control plane may already hold it, in which case the server
+    // registers a numbered variant rather than refusing. Report the id that
+    // actually exists, because that is what every other screen addresses it by.
+    const id = created?.repository?.id ?? asked;
+    toast(
+      id === asked
+        ? `Created ${asked}`
+        : `Created ${id} — the name ${asked} was already taken`,
+      "ok",
+    );
     await loadContext();
     rerender();
   } catch (error) {
@@ -298,7 +309,7 @@ export async function connectRepository(rerender) {
     // through to plain creation and answered 201 with a brand new *empty*
     // repository, one "Initial commit" on `main` and none of the remote's
     // history. The symptom was a connected repository with no files in it.
-    await api(
+    const imported = await api(
       `/projects/${encodeURIComponent(state.projectId)}/repositories/github`,
       {
         method: "POST",
@@ -309,7 +320,13 @@ export async function connectRepository(rerender) {
         },
       },
     );
-    toast("Repository imported", "ok");
+    const importedId = imported?.repository?.id;
+    toast(
+      importedId === undefined
+        ? "Repository imported"
+        : `Repository imported as ${importedId}`,
+      "ok",
+    );
     await loadContext();
     rerender();
   } catch (error) {

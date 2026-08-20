@@ -5742,15 +5742,21 @@ button.chip.lg:hover {
   display: none;
 }
 
-/* The run's position, drawn as the badge in the corner of the face running
-   it: a two-pixel donut of the reader's accent closing clockwise as the
-   narration below it advances. It used to be a ring around the whole face,
-   which swallowed the portrait it was reporting on — so it sits where the
-   presence dot sits, small enough to be a status mark and hollow enough to
-   read as a gauge rather than a blob.
+/* The run's position, drawn as a pie over the whole face of the agent running
+   it: the part still to come lies over the portrait as a dark wedge, and the
+   part already travelled as a light wash of the reader's accent, so the icon
+   visibly fills up clockwise as the narration below it advances. Dark for
+   undone and light for done is the whole read — nothing to parse, just how
+   much of the face has brightened.
 
-   `z-index` keeps the badge whole: the faces in a stack overlap leftwards,
-   and the next one along would otherwise cut the corner this is drawn in. */
+   Both wedges are translucent, which is what lets this cover the entire icon
+   rather than sit in a corner: the mark underneath still says which agent it
+   is while the sweep says how far along it is. A hollow badge in the corner
+   said the same thing at a twelfth of the size, and at that size the sweep
+   was a guess.
+
+   `z-index` keeps the pie whole: the faces in a stack overlap leftwards, and
+   the next one along would otherwise cut into it. */
 .cmsg-thread-link .ctl-faces .ctl-working {
   position: relative;
   z-index: 1;
@@ -5758,48 +5764,14 @@ button.chip.lg:hover {
   align-items: center;
 }
 
-/* The disc the badge is set on, in the chat's own ground: the same trick the
-   presence dot plays with its border, so the gauge reads as sitting on the
-   face rather than as part of the drawing underneath it. */
-.cmsg-thread-link .ctl-faces .ctl-working::before {
-  content: "";
-  position: absolute;
-  right: -3px;
-  bottom: -1px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--bg-chat);
-  pointer-events: none;
-}
-
 .cmsg-thread-link .ctl-faces .ctl-working::after {
   content: "";
   position: absolute;
-  right: -2px;
-  bottom: 0;
-  width: 10px;
-  height: 10px;
+  inset: -1px;
   border-radius: 50%;
-  /* The travelled arc in the accent, the rest of the circle in the accent's
-     own wash — a gauge reads as a gauge only when the part still to come is
-     visibly there. */
   background: conic-gradient(
-    var(--accent) calc(var(--run, 0) * 1%),
-    var(--accent-wash) 0
-  );
-  /* Two pixels of that circle, and the disc cut out of the middle. A border
-     cannot carry a conic gradient, so the ring has to be a masked disc: keep
-     the outermost two pixels, drop everything inside them. */
-  -webkit-mask: radial-gradient(
-    closest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 2px)
-  );
-  mask: radial-gradient(
-    closest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 2px)
+    color-mix(in srgb, var(--accent) 42%, transparent) calc(var(--run, 0) * 1%),
+    rgba(0, 0, 0, 0.55) 0
   );
   pointer-events: none;
 }

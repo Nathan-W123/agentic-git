@@ -181,14 +181,80 @@ async function leaseQueuedWork(
 }
 
 /** Registered repositories are addressed by a short, filesystem-safe id. */
+const MAX_REPOSITORY_ID_LENGTH = 80;
+
 function assertRepositoryId(id: string): string {
-  if (id.length > 80 || !/^[a-z0-9][a-z0-9._-]*$/iu.test(id)) {
+  if (
+    id.length > MAX_REPOSITORY_ID_LENGTH ||
+    !/^[a-z0-9][a-z0-9._-]*$/iu.test(id)
+  ) {
     throw new Error(
-      `Repository id must be at most 80 characters, start alphanumeric, and ` +
-        `contain only letters, digits, dot, dash, or underscore: ${id}`,
+      `Repository id must be at most ${MAX_REPOSITORY_ID_LENGTH} characters, ` +
+        `start alphanumeric, and contain only letters, digits, dot, dash, or ` +
+        `underscore: ${id}`,
     );
   }
   return id;
+}
+
+/** Dot, dash and underscore are legal in an id, so a name is not a pattern. */
+function escapeForRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+/**
+ * Settles which id a new repository is registered under.
+ *
+ * Ids are one flat namespace across the whole control plane — they name a
+ * mirror directory and address the repository in every route — but the name
+ * somebody types is theirs alone. Every account that signs up gets its own
+ * organization and project, so the first person to register `platform` used
+ * to take that word away from every stranger who joined afterwards, and the
+ * second person's creation simply failed. That is the collision this
+ * resolves: a name already used inside the caller's *own* project is a real
+ * duplicate and still refused, and a name taken anywhere else is registered
+ * under the next free numbered variant instead, the way a filesystem hands
+ * out a second copy of a file name.
+ *
+ * The project's own repository for a name may itself be sitting under a
+ * numbered variant — that is the whole point — so "do I already have this
+ * one" asks about the name and its variants together, rather than the exact
+ * word alone, which would let a project collect `app`, `app-2`, `app-3` by
+ * asking for `app` three times.
+ */
+async function availableRepositoryId(
+  store: CoordinationStore,
+  requested: string,
+  projectId: string,
+): Promise<string> {
+  if ((await store.getRepository(requested)) === undefined) {
+    return requested;
+  }
+  const variants = new RegExp(
+    `^${escapeForRegExp(requested)}(?:-[0-9]+)?$`,
+    "u",
+  );
+  const withinProject = await store.listProjectRepositories(projectId);
+  if (withinProject.some((entry) => variants.test(entry.id))) {
+    throw new Error(
+      `A repository named ${requested} is already registered in this ` +
+        `project. Pass --id to choose another name.`,
+    );
+  }
+  for (let attempt = 2; attempt <= 999; attempt += 1) {
+    const marker = `-${attempt}`;
+    const candidate = `${requested.slice(
+      0,
+      MAX_REPOSITORY_ID_LENGTH - marker.length,
+    )}${marker}`;
+    if ((await store.getRepository(candidate)) === undefined) {
+      return candidate;
+    }
+  }
+  throw new Error(
+    `No free repository id remains near ${requested}. Pass --id to choose ` +
+      `another name.`,
+  );
 }
 
 /**
@@ -340,15 +406,12 @@ export async function repoAdd(
   options: RepoAddOptions,
 ): Promise<StoredRepository> {
   const sourcePath = path.resolve(options.sourcePath);
-  const id = assertRepositoryId(
-    options.id ?? path.basename(sourcePath).toLowerCase(),
+  const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
+  const id = await availableRepositoryId(
+    store,
+    assertRepositoryId(options.id ?? path.basename(sourcePath).toLowerCase()),
+    projectId,
   );
-
-  if ((await store.getRepository(id)) !== undefined) {
-    throw new Error(
-      `A repository named ${id} is already registered. Pass --id to choose another name.`,
-    );
-  }
 
   const branch = options.branch ?? "main";
   const destination = path.join(project.repositoriesPath, `${id}.git`);
@@ -378,7 +441,7 @@ export async function repoAdd(
     const version = await repositories.getCanonicalVersion(canonical);
     await store.saveRepository(stored);
     registered = true;
-    await store.linkRepository(options.projectId ?? DEFAULT_PROJECT_ID, stored.id);
+    await store.linkRepository(projectId, stored.id);
     await store.saveCanonicalVersion(stored.id, version);
 
     if (
@@ -447,12 +510,14 @@ export async function repoImportGitHub(
       : remoteUrl,
   ).pathname.replace(/\.git$/u, "");
   const inferred = remotePath.split("/").filter(Boolean).at(-1) ?? "repository";
-  const id = assertRepositoryId(options.id ?? inferred.toLowerCase());
-  if ((await store.getRepository(id)) !== undefined) {
-    throw new Error(
-      `A repository named ${id} is already registered. Pass --id to choose another name.`,
-    );
-  }
+  const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
+  // Two accounts importing `owner/app` and `other/app` both infer `app`, so
+  // an import needs the same collision handling a fresh creation gets.
+  const id = await availableRepositoryId(
+    store,
+    assertRepositoryId(options.id ?? inferred.toLowerCase()),
+    projectId,
+  );
 
   const destination = path.join(project.repositoriesPath, `${id}.git`);
   await mkdir(project.repositoriesPath, { recursive: true });
@@ -486,7 +551,7 @@ export async function repoImportGitHub(
     const version = await repositories.getCanonicalVersion(canonical);
     await store.saveRepository(stored);
     registered = true;
-    await store.linkRepository(options.projectId ?? DEFAULT_PROJECT_ID, stored.id);
+    await store.linkRepository(projectId, stored.id);
     await store.saveCanonicalVersion(stored.id, version);
     if (
       options.setDefault === true ||

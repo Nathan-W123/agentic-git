@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 
 import {
@@ -240,6 +241,64 @@ test("registering the same repository id twice is refused", async () => {
         id: "greeter",
       }),
       /already registered/u,
+    );
+  } finally {
+    await store.close();
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("another project may register a name a first project took", async () => {
+  const harness = await createHarness();
+  const store = harness.project.openStore();
+  try {
+    const first = await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "greeter",
+    });
+    assert.equal(first.id, "greeter");
+
+    // A second account signing up gets its own organization and project, and
+    // naming its repository the same thing is not a clash with anybody — it
+    // is registered alongside the first under a numbered id.
+    const organization = await store.createOrganization({
+      slug: "second-team",
+      name: "Second Team",
+    });
+    const project = await store.createProject({
+      organizationId: organization.id,
+      slug: "default",
+      name: "My Project",
+    });
+    const second = await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "greeter",
+      projectId: project.id,
+    });
+    assert.equal(second.id, "greeter-2");
+    assert.notEqual(second.path, first.path);
+
+    // Each project sees its own repository and not the other's.
+    assert.deepEqual(
+      (await store.listProjectRepositories(project.id)).map((row) => row.id),
+      ["greeter-2"],
+    );
+    assert.equal(
+      (await store.listProjectRepositories(DEFAULT_PROJECT_ID)).some(
+        (row) => row.id === "greeter-2",
+      ),
+      false,
+    );
+
+    // Within one project the name is still taken, which is the case the
+    // refusal was always for.
+    await assert.rejects(
+      repoAdd(harness.project, store, {
+        sourcePath: harness.sourcePath,
+        id: "greeter",
+        projectId: project.id,
+      }),
+      /already registered in this project/u,
     );
   } finally {
     await store.close();
