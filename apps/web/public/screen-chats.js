@@ -38,11 +38,14 @@ api,
   currentUserId,
   currentUserName,
   dmUnreadFrom,
+  dmUnreadTotal,
+  unreadCount,
   flushChannelDrafts,
   markChannelRead,
   memberName,
   myAgents,
   myAvatar,
+  outstandingQuestionsFor,
   pendingQuestionFor,
   persist,
   personOnline,
@@ -92,6 +95,20 @@ import {
 } from "./ui.js";
 
 /* ------------------------------------------------------------- sidebar ---- */
+
+/**
+ * A count in the corner of a button, or nothing.
+ *
+ * Two of these live in the sidebar's foot. The Chats screen draws no topbar —
+ * see `BARE` in app.js — so the bell and the account badge that sit up there
+ * on every other screen are absent on the one screen people are actually on,
+ * and this is where they go instead.
+ */
+function countBadge(count) {
+  return count === 0
+    ? ""
+    : `<span class="dot-badge">${esc(String(count > 99 ? "99+" : count))}</span>`;
+}
 
 /**
  * A channel, and the things you can do to it.
@@ -1095,11 +1112,24 @@ function chanSidebar(activeRepositoryId) {
           ? `<div class="sys-line" title="Control plane unreachable"><span class="dot grey"></span>Control plane unreachable</div>`
           : ""
       }
-      <button type="button" class="chan-account" data-act="user-menu"
-        title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
-        ${avatar(user, 32, user, myAvatar())}
-        <span class="chan-account-copy"><b>${esc(user)}</b></span>
-      </button>
+      <div class="chan-foot-row">
+        <button type="button" class="chan-account" data-act="user-menu"
+          title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
+          ${avatar(user, 32, user, myAvatar())}
+          <span class="chan-account-copy"><b>${esc(user)}</b></span>
+          ${countBadge(dmUnreadTotal())}
+        </button>
+        ${(() => {
+          // Asked once. `unreadCount()` walks the audit feed to answer, and
+          // this button asks for it twice — the label and the badge.
+          const unread = unreadCount();
+          return `<button type="button" class="icon-btn bell chan-bell"
+          data-act="go-notifications" title="Notifications"
+          aria-label="${
+            unread === 0 ? "Notifications" : `Notifications, ${unread} unread`
+          }">${icon("bell")}${countBadge(unread)}</button>`;
+        })()}
+      </div>
     </div>
   </aside>`;
 }
@@ -1591,7 +1621,15 @@ function changedFilesBlock(entry, repositoryId) {
           file.status === "deleted"
             ? ""
             : ` role="button" tabindex="0" data-act="chan-file-open"
-                data-value="${esc(file.path)}"
+                data-value="${esc(file.path)}"${
+                  // Which work this file was opened *from*. The diff panel
+                  // reads it to show that task's changeset rather than
+                  // whichever one the Code screen happens to be holding —
+                  // see `ensureChangeSetForTask`.
+                  entry.taskId === undefined
+                    ? ""
+                    : ` data-task="${esc(entry.taskId)}"`
+                }
                 title="Open ${esc(file.path)}"`
         }><span class="cmsg-file-mark">${
           CHANGED_FILE_MARK[file.status] ?? "~"
@@ -1601,8 +1639,15 @@ function changedFilesBlock(entry, repositoryId) {
         )}</li>`,
     )
     .join("");
-  return `<details class="cmsg-changes">
-    <summary><span class="cf-caret">${icon("chevronRight")}</span>
+  // Open state is remembered, the way `thread-thinking` and the summary block
+  // already remember theirs. Every poll rebuilds this list, so a disclosure
+  // that held nothing folded itself back up roughly every thirty seconds —
+  // under a reader who was halfway down it.
+  return `<details class="cmsg-changes"${
+    state.changesOpen[entry.id] === true ? " open" : ""
+  }>
+    <summary data-act="changed-files-toggle" data-value="${esc(entry.id)}"
+      ><span class="cf-caret">${icon("chevronRight")}</span>
       <span class="cf-title">${files.length} file${
         files.length === 1 ? "" : "s"
       } changed</span>
@@ -1939,6 +1984,10 @@ function messageRow(
   // row could still *do* goes with the words. React, pin, revert and delete
   // all act on a line that is no longer there.
   const deleted = entry.deletedAt !== undefined;
+  // Whether this row is a reply *in the store*, which is a different question
+  // from whether it is drawn in the reply style — see the reaction guard
+  // below. A reply carries the id of the root it hangs under; a root does not.
+  const isReplyRow = entry.messageId !== undefined;
   // Who the face and the name belong to, and so whether they are pressable at
   // all. Resolved once and used by both: a transcript where the picture opens
   // somebody and the name beside it does nothing is a worse answer than
@@ -1967,6 +2016,13 @@ function messageRow(
   }${path?.through === true ? " cmsg-thread-path-through" : ""}${
     path?.end === true ? " cmsg-thread-path-end" : ""
   }${deleted ? " cmsg-deleted" : ""}${
+    // A post whose write never reached the server. `sendChannelMessage` and
+    // `postChannelReply` have set this flag all along and no renderer read
+    // it, so a message that failed sat in the transcript looking exactly like
+    // one that had been delivered — the toast was the only evidence and it
+    // clears itself.
+    entry.failed === true ? " cmsg-failed" : ""
+  }${entry.sending === true ? " cmsg-sending" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
     // recognisable as the unprompted ones — and in *the reader's* accent
@@ -2037,7 +2093,39 @@ function messageRow(
             )
       }</div>
       ${
-        deleted || reactions.length === 0
+        // Said plainly, beside a way to try again. The resend re-posts the
+        // same content under the same local id — see `resendChannelMessage`
+        // — rather than minting a second message.
+        //
+        // Honest about its limit: this row is local, so it does not survive a
+        // reload. A durable outbox is a bigger piece of work; what this buys
+        // is that the failure is visible and recoverable for as long as the
+        // tab lives, which is the window somebody would retype it in.
+        entry.failed !== true
+          ? entry.sending === true
+            ? `<div class="cmsg-failed-note"><span>Sending…</span></div>`
+            : ""
+          : `<div class="cmsg-failed-note">
+              <span class="cmsg-failed-mark">${icon("alert")} Not sent</span>
+              <button type="button" class="cmsg-resend"
+                data-act="chan-message-resend" data-value="${esc(entry.id)}"
+                >Send again</button>
+            </div>`
+      }
+      ${
+        // Reactions live on `channel_messages`; a reply is a row in another
+        // table entirely, so `toggleChannelReaction` throws for one and the
+        // route 404s — while the optimistic emoji stays on screen, advertising
+        // a reaction the server has no record of. Same rule the pin button
+        // below carries, decided the way the delete button below decides it:
+        // on `messageId`, which is the field that says what a row *is*, not on
+        // `isReply`, which only says how it looks. The thread panel draws its
+        // own root in the reply style, and that root is a channel message that
+        // can be reacted to perfectly well.
+        //
+        // Reacting to a reply is a real feature with a schema, a route and a
+        // payload shape behind it. It is recorded as wanted, not faked here.
+        deleted || isReplyRow || reactions.length === 0
           ? ""
           : `<div class="cmsg-reactions">${reactions
               .map(
@@ -2083,7 +2171,9 @@ function messageRow(
             })
       }
       ${
-        deleted
+        // Behind the same guard as the tally above, for the reason given
+        // there: an affordance whose write can only 404 is worse than none.
+        deleted || isReplyRow
           ? ""
           : iconButton("smile", {
               act: "channel-react-pick",
@@ -2306,20 +2396,70 @@ function typingIndicator(repositoryId, threadId) {
   </div>`;
 }
 
+/**
+ * The way back into history, at the top of the transcript.
+ *
+ * Only while the server has said there is more — `channelHasMore` is set from
+ * whether the last page came back full — so this is never a button that can
+ * only answer "nothing". Disabled while a page is in flight rather than
+ * hidden, because a control that vanishes under the finger that pressed it
+ * reads as a misfire.
+ */
+function loadEarlierControl(repositoryId) {
+  if (state.channelHasMore[repositoryId] !== true) {
+    return "";
+  }
+  const loading = state.channelLoadingEarlier === repositoryId;
+  return `<div class="chan-earlier">
+    <button type="button" class="btn btn-sm" data-act="channel-load-earlier"
+      data-value="${esc(repositoryId)}" ${loading ? "disabled" : ""}>${
+        loading ? "Loading…" : "Load earlier messages"
+      }</button>
+  </div>`;
+}
+
+/**
+ * Whether a search term is anywhere in this thread.
+ *
+ * Roots and their replies both, because nearly everything an agent says lives
+ * in a thread — searching only the roots meant searching past the answers and
+ * being told there was nothing there.
+ */
+function matchesQuery(entry, query) {
+  if (query === "") {
+    return true;
+  }
+  if (String(entry.content ?? "").toLowerCase().includes(query)) {
+    return true;
+  }
+  return (entry.replies ?? []).some((reply) =>
+    String(reply.content ?? "").toLowerCase().includes(query),
+  );
+}
+
 function messageList(repositoryId) {
   const query = state.chanMsgQuery.trim().toLowerCase();
-  const entries = channelMessagesFor(repositoryId).filter(
-    (entry) => query === "" || entry.content.toLowerCase().includes(query),
+  const entries = channelMessagesFor(repositoryId).filter((entry) =>
+    matchesQuery(entry, query),
   );
   if (entries.length === 0) {
     return `<div class="chan-messages" id="chan-messages" role="log"
       aria-live="polite" aria-relevant="additions" aria-label="Channel messages"
-      data-scroll-key="channel:${esc(repositoryId)}">${emptyState(
+      data-scroll-key="channel:${esc(repositoryId)}">${loadEarlierControl(
+      repositoryId,
+    )}${emptyState(
       "chatBubble",
       query === "" ? "No messages yet" : "Nothing matches that search",
       query === ""
         ? "Say hello — messages sent here stay in this channel for your session."
-        : "Try a different search term.",
+        : // Names the boundary rather than reporting a limit as an answer.
+          // Search reads what is loaded, and saying "nothing matches" when
+          // older pages had simply never been fetched is the part of this
+          // that actually misleads people — the control above offers the
+          // pages the sentence is talking about.
+          state.channelHasMore[repositoryId] === true
+          ? "Nothing in the messages loaded so far. Load earlier messages to search further back."
+          : "Try a different search term.",
       // Also on the empty branch: an empty channel is exactly where somebody
       // starting to type matters most, and leaving it off here meant the dots
       // could not appear until the room already had a message in it.
@@ -2429,9 +2569,9 @@ function messageList(repositoryId) {
   });
   return `<div class="chan-messages" id="chan-messages" role="log"
     aria-live="polite" aria-relevant="additions" aria-label="Channel messages"
-    data-scroll-key="channel:${esc(repositoryId)}">${rows.join(
-    "",
-  )}${typingIndicator(repositoryId, undefined)}</div>`;
+    data-scroll-key="channel:${esc(repositoryId)}">${loadEarlierControl(
+    repositoryId,
+  )}${rows.join("")}${typingIndicator(repositoryId, undefined)}</div>`;
 }
 
 /**
@@ -2709,12 +2849,12 @@ function channelSlashCandidates(repositoryId, target = "channel") {
   );
   if (target === "thread") {
     // The server sends one channel-wide command list, with the general task
-    // commands first. Reusing its first six entries in a thread pushed
-    // `/retry` and `/cancel` below the picker's hard limit, even though those
-    // are the two commands whose meaning is specifically tied to a thread.
-    // Put every command the thread handles directly first. A more specific
-    // query still finds any other command because ordering happens after the
-    // prefix filter.
+    // commands first. In a thread the commands tied to that thread should be
+    // the ones under the cursor, so they are ordered to the front — the cut
+    // that used to make this load-bearing is gone, but the ordering is still
+    // what a reader in a thread wants first. A more specific query still
+    // finds any other command because ordering happens after the prefix
+    // filter.
     const threadFirst = ["retry", "cancel", "push", "ask", "dnc", "simple"];
     matching.sort((left, right) => {
       const leftAt = threadFirst.indexOf(String(left.name ?? ""));
@@ -2725,7 +2865,12 @@ function channelSlashCandidates(repositoryId, target = "channel") {
       );
     });
   }
-  return matching.slice(0, 6);
+  // Every match, not the first six. The table holds ten commands, so an empty
+  // query — which is what the picker opens on — hid `retry`, `cancel`, `stop`
+  // and `help` behind a cut nobody could see, including the one command whose
+  // entire job is to list the others. Ten rows is not a scale problem; the
+  // list scrolls (see `.mention-pop` in styles.css) rather than truncating.
+  return matching;
 }
 
 function slashPopover(candidates, target = "channel") {
@@ -2850,6 +2995,44 @@ export function paintComposerSuggestions(repositoryId) {
  * One set at a time. Two prompts stacked over the composer is a form, and a
  * person who owes two agents an answer is better served by finishing one.
  */
+/**
+ * A line saying an agent is still waiting, when the prompt has been dismissed.
+ *
+ * "Not now" should stay possible — a question arriving mid-sentence is an
+ * interruption, and being able to put it aside is the point. What was wrong
+ * was that putting it aside left nothing at all: the run went on holding a
+ * workspace and its wait was invisible, so the only way back was to remember
+ * it had happened.
+ *
+ * Reads the list *before* the dismissal filter, rather than reproducing the
+ * filter, so this chip and the prompt cannot come to disagree about what is
+ * outstanding.
+ */
+function dismissedQuestionChip(repositoryId) {
+  const outstanding = outstandingQuestionsFor(repositoryId);
+  if (outstanding.length === 0 || pendingQuestionFor(repositoryId) !== undefined) {
+    return "";
+  }
+  const waiting = outstanding[0];
+  const askerName = String(
+    channelAuthor(repositoryId, {
+      kind: "agent",
+      authorId: waiting.agentId,
+    }).name ?? "An agent",
+  ).split(" (")[0];
+  return `<div class="ask-waiting">
+    <span class="aw-icon">${icon("alert")}</span>
+    <span class="aw-text">${esc(askerName)} is waiting on an answer${
+      outstanding.length > 1
+        ? ` — ${String(outstanding.length)} outstanding`
+        : ""
+    }</span>
+    <span class="spacer"></span>
+    <button type="button" class="btn btn-sm" data-act="question-undismiss"
+      data-value="${esc(waiting.requestId)}">Answer</button>
+  </div>`;
+}
+
 function agentQuestionPrompt(repositoryId) {
   const pending = pendingQuestionFor(repositoryId);
   const questions = pending?.questions ?? [];
@@ -4001,6 +4184,11 @@ function dmPanel() {
     (state.dmAttaching ?? 0) > 0 ||
     draftAttachments(repositoryId, state.dmDraft).length > 0 ||
     replyTarget !== undefined;
+  // Day separators, the same ones the room's transcript draws and from the
+  // same rule. A bare `14:32` on something said last Tuesday is the one thing
+  // in this panel that actively misinforms, and it is most of why a private
+  // conversation reads as thinner than the channel beside it.
+  let lastDay = "";
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -4021,7 +4209,17 @@ function dmPanel() {
           : messages
               .map((message) => {
                 const mine = message.authorId === currentUserId();
-                return `<div class="dm-msg${mine ? " dm-mine" : ""}"
+                const day = new Date(
+                  message.createdAt ?? Date.now(),
+                ).toDateString();
+                const separator =
+                  day === lastDay
+                    ? ""
+                    : `<div class="chan-day">${
+                        day === new Date().toDateString() ? "Today" : esc(day)
+                      }</div>`;
+                lastDay = day;
+                return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}"
                     id="dm-msg-${esc(message.id)}">
                   ${directMessageReference(message, messages, name)}
                   <div class="dm-bubble cmsg-text">${messageBody(
@@ -4129,6 +4327,20 @@ function threadPanel(repositoryId) {
       ${panelKind("Thread", "channel-threads-toggle")}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
+      ${
+        // Stopping the run, where somebody watching it decides it has gone
+        // wrong. The thread header already owns this thread's task, and there
+        // was no clickable way to stop an agent anywhere in the product —
+        // `/cancel` typed into the composer was the whole of it. The handler
+        // asks first: this ends work that is mid-run and holding a workspace.
+        threadIsWorking(root)
+          ? iconButton("close", {
+              act: "thread-task-cancel",
+              value: root.taskId ?? "",
+              title: "Stop this task",
+            })
+          : ""
+      }
       ${iconButton("pin", {
         act: "channel-pin",
         value: messageId,
@@ -4644,12 +4856,29 @@ function codeDataLoadedFor(repositoryId) {
  * one of them can be the answer at a time — and reading a diff should not
  * cost you sight of the conversation that explains it.
  */
+/**
+ * The changeset a file panel should be reading.
+ *
+ * The task the file was opened from, where one is known — see
+ * `ensureChangeSetForTask`. `state.changeSet` is the fallback and means
+ * "whatever the Code screen last loaded", which is the right answer only for
+ * the Code screen: opening a file from an older thread against it showed
+ * another task's diff, or claimed the file was not in the changeset at all.
+ */
+function panelChangeSet() {
+  const taskId = state.chanFileTaskId;
+  return (
+    (taskId === undefined ? undefined : state.changeSets[taskId]) ??
+    state.changeSet
+  );
+}
+
 function filePanel() {
   const path = state.chanFileView;
   if (path === undefined) {
     return "";
   }
-  const patch = (state.changeSet?.patches ?? []).find(
+  const patch = (panelChangeSet()?.patches ?? []).find(
     (entry) => entry.path === path,
   );
   const editing = state.chanFileMode === "edit";
@@ -4723,7 +4952,7 @@ function fileEditor(path) {
     </div>`;
   }
   if (state.chanFileError !== undefined) {
-    const hasDiff = (state.changeSet?.patches ?? []).some(
+    const hasDiff = (panelChangeSet()?.patches ?? []).some(
       (entry) => entry.path === path,
     );
     return `<div class="thread-body fp-editor-wrap"
@@ -4952,6 +5181,7 @@ export function renderChats() {
       ${messageList(repositoryId)}
       ${jumpToLatest()}
       ${agentQuestionPrompt(repositoryId)}
+      ${dismissedQuestionChip(repositoryId)}
       ${composer(repositoryId)}
     </div>
     ${
@@ -5178,6 +5408,18 @@ function watchImageSizes() {
  * it. Called with the new DOM in place.
  */
 export function restoreChannelScroll(saved) {
+  // Opening a pin creates a new thread surface, so there is no captured
+  // anchor to restore. Aim it explicitly at the message that was chosen.
+  if (state.scrollToThreadMessage !== undefined) {
+    const messageId = state.scrollToThreadMessage;
+    state.scrollToThreadMessage = undefined;
+    const root = state.activeChannelThread;
+    const selector =
+      messageId === root
+        ? ".thread-root"
+        : `#thread-msg-${CSS.escape(messageId)}`;
+    document.querySelector(selector)?.scrollIntoView({ block: "center" });
+  }
   const list = document.querySelector("#chan-messages");
   if (list === null) {
     return;
@@ -5334,6 +5576,7 @@ export function openChannel(repositoryId, rerender) {
   // the transcript opens scannable rather than mid-review.
   state.chanOpenFiles = [];
   state.chanFileView = undefined;
+  state.chanFileTaskId = undefined;
   state.chatRenamingId = undefined;
   state.chatSettingsOpenId = undefined;
   rerender();
@@ -5431,7 +5674,7 @@ function pinnedBanner(repositoryId) {
                   : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
               return `<div class="chan-pin-row">
                 <button type="button" class="chan-pin-jump"
-                  data-act="channel-pin-jump" data-value="${esc(entry.id)}"
+                  data-act="channel-pinned-open" data-value="${esc(entry.id)}"
                   title="Pinned by ${esc(pinner)}">
                   <span class="cp-title">${esc(title)}</span>
                   <span class="cp-time">${esc(clockTime(entry.at ?? entry.createdAt))}</span>

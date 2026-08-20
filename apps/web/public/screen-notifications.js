@@ -117,6 +117,13 @@ export function readAll(rerender) {
   rerender();
 }
 
+/**
+ * Marks one row read. Where it *goes* is the `notif-open` case in app.js.
+ *
+ * Deliberately still only the read mark: opening needs the router and the
+ * channel, neither of which this screen module has, and marking read has to
+ * happen whether or not there turns out to be anywhere to go.
+ */
 export function readOne(id, rerender) {
   markRead([id]);
   rerender();

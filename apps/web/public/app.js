@@ -98,6 +98,12 @@ import {
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
+  unreadCount,
+  dmUnreadTotal,
+  memberName,
+  loadEarlierChannelMessages,
+  resendChannelMessage,
+  ensureChangeSetForTask,
 } from "./data.js";
 import {
   $,
@@ -150,6 +156,7 @@ import {
   toggleDirectory,
 } from "./screen-code.js";
 import {
+  TERMINAL_TASK_STATUS,
   cancelTask,
   connectAgent,
   connectGitHubAccount,
@@ -1106,8 +1113,83 @@ function topbar() {
         ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
         : ""
     }
-    <button data-act="user-menu" title="${esc(user)}">${avatar(user, 32, user, myAvatar())}</button>
+    ${notificationBell()}
+    <button class="account-btn" data-act="user-menu" title="${esc(user)}"
+      >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
   </header>`;
+}
+
+/**
+ * The way into Notifications, and the count that makes it worth pressing.
+ *
+ * The route, the screen, its filters, `unreadCount()` and even a
+ * `go-notifications` case in the action handler all existed already; nothing
+ * anywhere emitted the action, so the screen could only be reached by typing
+ * its hash. This is the button — which is also what makes the comment on
+ * `agentNameForTask` ("which the bell badge asks for on every render") a
+ * description of the product again rather than archaeology.
+ */
+function notificationBell() {
+  const unread = unreadCount();
+  return `<button type="button" class="icon-btn bell" data-act="go-notifications"
+    title="Notifications" aria-label="${
+      unread === 0 ? "Notifications" : `Notifications, ${unread} unread`
+    }">${icon("bell")}${
+      unread === 0
+        ? ""
+        : `<span class="dot-badge">${esc(String(unread > 99 ? "99+" : unread))}</span>`
+    }</button>`;
+}
+
+/**
+ * The screens the account menu is the way into.
+ *
+ * Both account buttons — the topbar avatar and the channel sidebar's foot —
+ * open the same menu, so this is one change point for all three. Each of them
+ * was a live screen or panel with no door: the routes existed, the screens
+ * rendered, `go-notifications` was even a case in the action handler, and
+ * nothing anywhere navigated to any of them.
+ *
+ * The counts are read here rather than carried in state, so a number in this
+ * menu cannot disagree with the list it sits above.
+ */
+function accountDestinations() {
+  const unread = unreadCount();
+  const dms = dmUnreadTotal();
+  return [
+    {
+      act: "go-notifications",
+      label: "Notifications",
+      iconName: "bell",
+      ...(unread === 0 ? {} : { hint: `${unread} unread` }),
+    },
+    {
+      act: "dm-list",
+      label: "Direct messages",
+      iconName: "chatBubble",
+      ...(dms === 0 ? {} : { hint: `${dms} unread` }),
+    },
+    // Unconditional. The only navigation to My Agents was the "Connect an
+    // agent first" item in the channel's agent menu, offered *only* while this
+    // account had connected nothing — so connecting a second vendor became
+    // unreachable the moment the first one worked. That item is a good empty
+    // state and stays; it was never a navigation strategy.
+    { act: "nav", value: "agents", label: "My agents", iconName: "robot" },
+  ];
+}
+
+/**
+ * Everything waiting in direct messages, on the account button.
+ *
+ * A DM from somebody who is not in the room on screen had no signal anywhere:
+ * the count was loaded with the conversation list and only ever rendered
+ * beside a person already in this channel's roster.
+ */
+function dmBadge() {
+  const unread = dmUnreadTotal();
+  return unread === 0
+    ? ""
+    : `<span class="dot-badge">${esc(String(unread > 99 ? "99+" : unread))}</span>`;
 }
 
 /* ----------------------------------------------------------- settings ---- */
@@ -1212,11 +1294,12 @@ function settingsScreen() {
             <div class="sr-title">${esc(repository?.id ?? "No repository open")}</div>
             <div class="sr-sub">${esc(
               repository?.remoteUrl ?? "No remote recorded",
-            )}. Publishing canonical to a remote branch is a CLI operation;
-            there is no HTTP route for it, so this is not a button.</div>
+            )}. Publishing canonical to a remote branch is <code>/push</code> in
+            the channel; the CLI does the same thing from outside the product.
+            </div>
           </span>
           <span class="sr-ctl">
-            <code class="hint-code">coord repo push</code>
+            <code class="hint-code">/push</code>
           </span>
         </div>
         <div class="set-row">
@@ -1227,72 +1310,6 @@ function settingsScreen() {
           </span>
           <span class="sr-ctl">${esc(repository?.branch ?? "—")}</span>
         </div>
-      </section>
-
-      <section class="card">
-        <div class="panel-head"><div><h3>Your agents</h3>
-          <p>Personal connections; other collaborators cannot see them</p></div></div>
-        ${
-          state.providers.length === 0
-            ? `<div class="set-row"><span class="sr-body">
-                <div class="sr-sub">No provider connections are available on this
-                deployment.</div></span></div>`
-            : state.providers
-                .map(
-                  (provider) => {
-                    // "Connected" has meant two different things here, and the
-                    // difference is the whole point of per-user accounts: a
-                    // provider reads as connected whenever *this machine's*
-                    // CLI is signed in, which is somebody else's account for
-                    // everyone but the person who set the host up. Offering
-                    // "Disconnect" in that state hid the connect flow behind a
-                    // button that did the opposite — there was no way to
-                    // attach your own account at all.
-                    //
-                    // So the control follows the user's own credential, not
-                    // the machine's, and the subtitle says which is in use.
-                    const mine = provider.ownCredential !== undefined;
-                    const hostAccount = provider.connected && !mine;
-                    // Stored is not the same as working. A sign-in that has
-                    // stopped authenticating still sits in the vault, so
-                    // without this the row said "connected" while every task
-                    // the agent was given failed.
-                    const broken = provider.ownCredential?.unusableReason;
-                    return `<div class="set-row">
-                    <span class="sr-body">
-                      <div class="sr-title">${esc(provider.name ?? provider.id)}</div>
-                      <div class="sr-sub">${esc(
-                        broken !== undefined && broken !== ""
-                          ? broken
-                          : mine
-                            ? (provider.model ?? "Connected as you")
-                            : hostAccount
-                              ? "Using this machine's account — connect your own"
-                              : "Not connected",
-                      )}</div>
-                    </span>
-                    <span class="sr-ctl">
-                      <button class="btn btn-sm" data-act="${
-                        mine && (broken === undefined || broken === "")
-                          ? "agent-disconnect"
-                          : "agent-connect"
-                      }" data-value="${esc(provider.id)}">
-                        ${
-                          broken !== undefined && broken !== ""
-                            ? "Reconnect"
-                            : mine
-                              ? "Disconnect"
-                              : hostAccount
-                                ? "Connect yours"
-                                : "Connect"
-                        }
-                      </button>
-                    </span>
-                  </div>`;
-                  },
-                )
-                .join("")
-        }
       </section>
 
       ${githubCard()}
@@ -1388,8 +1405,8 @@ function agentsCard() {
   const agents = myAgents();
   return `<section class="card">
     <div class="panel-head"><div><h3>Agents</h3>
-      <p>Signed in to your account, and usable in every channel you join them
-        to</p></div></div>
+      <p>What this deployment offers, and which of them you have connected —
+        one row per provider, usable in every channel you join it to</p></div></div>
     ${
       agents.length === 0
         ? `<div class="set-row"><span class="sr-body">
@@ -1409,11 +1426,23 @@ function agentsCard() {
               // Three states, not two: a credential that has stopped
               // authenticating is stored but useless, and saying "connected"
               // about it is what let every task it was given fail in silence.
+              // Four states, because the merged card has to keep the
+              // distinction the second card existed for: a provider the
+              // deployment offers, one this machine's account is signed in to,
+              // one *you* are signed in to, and a stored credential that has
+              // stopped authenticating. Saying "connected" about the second or
+              // the fourth is what let every task an agent was given fail
+              // without the screen ever admitting anything was wrong.
               const state_ = agent.needsReconnect
                 ? { text: "Sign-in expired", cls: " sr-warn" }
-                : agent.connected
-                  ? { text: "Connected", cls: "" }
-                  : { text: "Not connected", cls: "" };
+                : agent.mine
+                  ? { text: "Connected as you", cls: "" }
+                  : agent.hostAccount
+                    ? {
+                        text: "Available on this deployment — using this machine's account",
+                        cls: "",
+                      }
+                    : { text: "Not connected", cls: "" };
               return `<div class="set-row">
                 <span class="sr-body">
                   ${
@@ -1441,7 +1470,7 @@ function agentsCard() {
                     // rename on a vendor this account has never connected,
                     // and the server says so rather than guessing. An expired
                     // sign-in still has one, so it can still be renamed.
-                    renaming || !(agent.connected || agent.needsReconnect)
+                    renaming || !(agent.mine || agent.needsReconnect)
                       ? ""
                       : `<button type="button" class="btn btn-sm"
                           data-act="agent-rename-toggle"
@@ -1449,14 +1478,23 @@ function agentsCard() {
                           title="Rename this agent everywhere">Rename</button>`
                   }
                   ${
-                    agent.connected
+                    // The control follows this account's own credential, not
+                    // the machine's. Offering "Disconnect" on a host-account
+                    // row hid the connect flow behind a button that did the
+                    // opposite, and there was no way to attach your own
+                    // account at all.
+                    agent.mine && !agent.needsReconnect
                       ? `<button type="button" class="btn btn-sm"
                           data-act="agent-disconnect"
                           data-value="${esc(agent.id)}">Disconnect</button>`
                       : `<button type="button" class="btn btn-sm btn-primary"
                           data-act="agent-connect"
                           data-value="${esc(agent.id)}">${
-                            agent.needsReconnect ? "Reconnect" : "Connect"
+                            agent.needsReconnect
+                              ? "Reconnect"
+                              : agent.hostAccount
+                                ? "Connect yours"
+                                : "Connect"
                           }</button>`
                   }
                 </span>
@@ -2174,7 +2212,8 @@ const ATTACH_TARGETS = {
 };
 
 /**
- * Puts images in the draft, as the reference a message carries.
+ * Puts images in the draft, as the reference a message carries, and says
+ * plainly what it would not take.
  *
  * Uploaded one at a time and appended as they land, so a slow one does not
  * hold up the others and a failure loses only itself. The draft is written
@@ -2187,14 +2226,30 @@ async function attachChannelImages(files, target = "channel") {
   const repositoryId = activeChannelId();
   const dmUserId = target === "dm" ? state.activeDm : undefined;
   const images = files.filter((file) => file.type.startsWith("image/"));
+  // Named, not counted. Dropping a screenshot and a log together attached the
+  // screenshot and said nothing at all about the log — the message went out
+  // referring to a file that was never uploaded, and the sender had no way to
+  // know. The allowlist itself is deliberately short and is not widened here:
+  // that crosses a security boundary `attachments.ts` keeps on purpose and
+  // deserves its own review.
+  const skipped = files.filter((file) => !file.type.startsWith("image/"));
+  if (skipped.length > 0) {
+    const named = skipped
+      .slice(0, 3)
+      .map((file) => file.name)
+      .join(", ");
+    toast(
+      `Not attached: ${named}${
+        skipped.length > 3 ? ` and ${skipped.length - 3} more` : ""
+      } — only PNG, JPEG, GIF and WebP images can be attached.`,
+      "error",
+    );
+  }
   if (
     repositoryId === undefined ||
     images.length === 0 ||
     (target === "dm" && dmUserId === undefined)
   ) {
-    if (files.length > 0) {
-      toast("Only images can be attached.", "error");
-    }
     return;
   }
   state[where.counter] = (state[where.counter] ?? 0) + images.length;
@@ -2895,6 +2950,211 @@ document.addEventListener("drop", (event) => {
     void ensureCodeData(render);
     render();
   });
+});
+
+/* ------------------------------------------------- keyboard shortcuts ---- */
+
+/**
+ * The quick switcher, and the two keys beside it.
+ *
+ * Everything reachable in this product is reachable by pointing at it, and
+ * nothing was reachable any other way — no shortcut moved between rooms, and
+ * a keyboard user crossed the whole sidebar to change channel. This is the
+ * one that pays for itself: a room, a person or a screen by name.
+ *
+ * Drawn in `#layer-root` rather than inside the app shell, the same place
+ * popovers live, because the shell is replaced wholesale on every poll — an
+ * overlay rendered inside it would be swept away mid-search.
+ */
+let switcherIndex = 0;
+
+function switcherEntries(query) {
+  const term = query.trim().toLowerCase();
+  const rows = [
+    ...state.repositories.map((repo) => ({
+      kind: "Channel",
+      label: `# ${repo.id}`,
+      act: "switch-channel",
+      value: repo.id,
+      iconName: "chatBubble",
+    })),
+    ...state.dmPeople
+      .filter((person) => person.id !== currentUserId())
+      .map((person) => ({
+        kind: "Person",
+        label: person.name ?? memberName(person.id) ?? person.id,
+        act: "switch-person",
+        value: person.id,
+        iconName: "users",
+      })),
+    ...[
+      { route: "chats", label: "Chats" },
+      { route: "agents", label: "My agents" },
+      { route: "notifications", label: "Notifications" },
+      { route: "settings", label: "Settings" },
+    ].map((screen) => ({
+      kind: "Screen",
+      label: screen.label,
+      act: "switch-screen",
+      value: screen.route,
+      iconName: "arrowRight",
+    })),
+  ];
+  return rows
+    .filter((row) => term === "" || row.label.toLowerCase().includes(term))
+    .slice(0, 40);
+}
+
+function paintSwitcher() {
+  const layer = document.querySelector("#qs-layer");
+  if (layer === null) {
+    return;
+  }
+  const input = layer.querySelector("[data-act='switch-input']");
+  const rows = switcherEntries(input?.value ?? "");
+  switcherIndex = rows.length === 0 ? 0 : switcherIndex % rows.length;
+  const list = layer.querySelector(".qs-list");
+  if (list === null) {
+    return;
+  }
+  list.innerHTML =
+    rows.length === 0
+      ? `<div class="qs-empty">Nothing matches that</div>`
+      : rows
+          .map(
+            (row, index) => `<button type="button" class="qs-item${
+              index === switcherIndex ? " active" : ""
+            }" data-act="${row.act}" data-value="${esc(row.value)}">
+              ${icon(row.iconName)}
+              <span class="qs-label">${esc(row.label)}</span>
+              <span class="qs-kind">${esc(row.kind)}</span>
+            </button>`,
+          )
+          .join("");
+  list.querySelector(".qs-item.active")?.scrollIntoView({ block: "nearest" });
+}
+
+function closeSwitcher() {
+  document.querySelector("#qs-layer")?.remove();
+}
+
+function openSwitcher() {
+  if (document.querySelector("#qs-layer") !== null) {
+    closeSwitcher();
+    return;
+  }
+  closePopover();
+  switcherIndex = 0;
+  const layer = document.createElement("div");
+  layer.id = "qs-layer";
+  layer.className = "qs-layer";
+  layer.innerHTML = `<div class="pop-scrim" data-act="switch-close"></div>
+    <div class="qs-card" role="dialog" aria-label="Go to">
+      <input class="qs-input" data-act="switch-input" type="text"
+        placeholder="Go to a channel, a person, or a screen…"
+        aria-label="Go to" autocomplete="off">
+      <div class="qs-list" role="listbox"></div>
+    </div>`;
+  document.querySelector("#layer-root").append(layer);
+  paintSwitcher();
+  layer.querySelector("[data-act='switch-input']")?.focus();
+}
+
+/** What the keys do, said in one place rather than learned by accident. */
+function openShortcutSheet() {
+  const pairs = [
+    ["Ctrl / ⌘ + K", "Go to a channel, a person, or a screen"],
+    ["/", "Search the messages in this channel"],
+    ["?", "This list"],
+    ["Esc", "Close whatever is stacked over the conversation"],
+    ["Enter", "Send; Shift + Enter starts a new line"],
+    ["↑ / ↓", "Move through an open command or name list"],
+  ];
+  closeSwitcher();
+  const layer = document.createElement("div");
+  layer.id = "qs-layer";
+  layer.className = "qs-layer";
+  layer.innerHTML = `<div class="pop-scrim" data-act="switch-close"></div>
+    <div class="qs-card" role="dialog" aria-label="Keyboard shortcuts">
+      <div class="qs-head">Keyboard shortcuts</div>
+      <div class="qs-keys">${pairs
+        .map(
+          ([keys, what]) =>
+            `<div class="qs-key"><kbd>${esc(keys)}</kbd><span>${esc(what)}</span></div>`,
+        )
+        .join("")}</div>
+    </div>`;
+  document.querySelector("#layer-root").append(layer);
+}
+
+/** Whether the keyboard currently belongs to something being typed in. */
+function typingSomewhere(target) {
+  const field = target?.closest?.(
+    "input, textarea, select, [contenteditable='true']",
+  );
+  return field !== null && field !== undefined;
+}
+
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    openSwitcher();
+    return;
+  }
+  const inSwitcher = event.target?.dataset?.act === "switch-input";
+  if (inSwitcher) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSwitcher();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const rows = switcherEntries(event.target.value);
+      if (rows.length > 0) {
+        switcherIndex =
+          (switcherIndex + (event.key === "ArrowDown" ? 1 : rows.length - 1)) %
+          rows.length;
+        paintSwitcher();
+      }
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      document
+        .querySelector("#qs-layer .qs-item.active")
+        ?.click();
+      return;
+    }
+    // Anything else is a keystroke in the box; repaint after the browser has
+    // put it there.
+    window.setTimeout(() => {
+      switcherIndex = 0;
+      paintSwitcher();
+    }, 0);
+    return;
+  }
+  if (event.key === "Escape" && document.querySelector("#qs-layer") !== null) {
+    event.preventDefault();
+    closeSwitcher();
+    return;
+  }
+  // The single-key shortcuts, and only when the keyboard is not somebody's
+  // sentence. A composer must go on receiving "/" and "?" as characters.
+  if (typingSomewhere(event.target) || event.metaKey || event.ctrlKey || event.altKey) {
+    return;
+  }
+  if (event.key === "?") {
+    event.preventDefault();
+    openShortcutSheet();
+    return;
+  }
+  if (event.key === "/" && state.route === "chats" && activeChannelId()) {
+    event.preventDefault();
+    state.chanMsgSearchOpen = true;
+    render();
+    document.querySelector("[data-act='channel-msg-search']")?.focus();
+  }
 });
 
 /* The separator answers the keyboard too, since dragging is not available to
@@ -3746,6 +4006,17 @@ function restoreFocus(saved) {
   }
 }
 
+/** One question for every way of stopping a run — see `task-cancel`. */
+function confirmTaskCancel(taskId) {
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  return window.confirm(
+    `Stop this task?\n\n${
+      task?.objective ? `"${task.objective}"\n\n` : ""
+    }The agent stops where it is and its workspace is released. Anything it ` +
+      `has already written stays; nothing is reverted.`,
+  );
+}
+
 function confirmDiscardEdit() {
   if (
     state.chanFileMode !== "edit" ||
@@ -4445,11 +4716,55 @@ document.addEventListener("click", (event) => {
       return;
     case "user-menu":
       showMenu(node, [
+        ...accountDestinations(),
         { act: "nav", value: "settings", label: "Settings", iconName: "gear" },
         { separator: true },
         { act: "logout", label: "Sign out", iconName: "logout" },
       ]);
       return;
+    case "switch-close":
+      closeSwitcher();
+      return;
+    case "switch-channel":
+      closeSwitcher();
+      navigate("chats");
+      openChannel(value, render);
+      return;
+    case "switch-person":
+      closeSwitcher();
+      navigate("chats");
+      state.activeDm = value;
+      state.activeAgentPanel = undefined;
+      state.dmDraft = "";
+      state.dmReplyMessageId = undefined;
+      render();
+      void loadDmThread(value).then(() => render());
+      return;
+    case "switch-screen":
+      closeSwitcher();
+      navigate(value);
+      return;
+    /** The conversations themselves, with who each one is waiting from. */
+    case "dm-list": {
+      const conversations = [...state.dmConversations].sort(
+        (left, right) => Number(right.unread ?? 0) - Number(left.unread ?? 0),
+      );
+      showMenu(
+        node,
+        conversations.length === 0
+          ? [{ act: "noop", label: "No conversations yet", disabled: true }]
+          : conversations.slice(0, 12).map((conversation) => ({
+              act: "dm-open",
+              value: conversation.userId,
+              label: memberName(conversation.userId) ?? conversation.userId,
+              iconName: "chatBubble",
+              ...(Number(conversation.unread ?? 0) === 0
+                ? {}
+                : { hint: `${conversation.unread} unread` }),
+            })),
+      );
+      return;
+    }
     case "repo-menu":
       showMenu(node, [
         { act: "open-repo", value, label: "Open", iconName: "arrowRight" },
@@ -4620,7 +4935,7 @@ document.addEventListener("click", (event) => {
       // A tally carries the emoji it counts; the fallback is only for a caller
       // that has not said, which is now nobody.
       const emoji = node.dataset.emoji || "👍";
-      toggleChannelReaction(activeChannelId(), value, emoji);
+      toggleChannelReaction(activeChannelId(), value, emoji, render);
       render();
       return;
     }
@@ -4633,7 +4948,7 @@ document.addEventListener("click", (event) => {
         return;
       }
       closePopover();
-      toggleChannelReaction(activeChannelId(), value, emoji);
+      toggleChannelReaction(activeChannelId(), value, emoji, render);
       render();
       return;
     }
@@ -4656,9 +4971,27 @@ document.addEventListener("click", (event) => {
       state.pinsOpen = state.pinsOpen !== true;
       render();
       return;
-    // A pinned task opens as a thread; a person's message (including one with
-    // inline replies) scrolls into view. The banner's copy answers for pins
-    // whose transcript row has aged past the loaded page.
+    // A pin is a durable doorway into its conversation. Even a person's
+    // root with no replies yet opens in the thread panel, and the one-shot
+    // target prevents a previously scrolled thread from opening elsewhere.
+    case "channel-pinned-open":
+      if (!confirmDiscardEdit()) {
+        return;
+      }
+      state.activeChannelThread = value;
+      state.scrollToThreadMessage = value;
+      state.threadReplyMessageId = undefined;
+      state.autoOpenedThread = undefined;
+      state.activePlan = undefined;
+      state.activeDm = undefined;
+      state.activeAgentPanel = undefined;
+      state.chanTree = false;
+      closeChannelFile();
+      render();
+      return;
+    // References to tasks open their thread; references to a person's message
+    // (including one with inline replies) scroll the channel into view. The
+    // pin list is still a fallback for references older than loaded history.
     case "channel-pin-jump": {
       const repositoryId = activeChannelId();
       const entry =
@@ -4711,6 +5044,16 @@ document.addEventListener("click", (event) => {
         : !details.open;
       return;
     }
+    // Exactly the shape above, for the same reason: the browser has not
+    // flipped the `<details>` yet when this runs, so the value being stored
+    // is the state it is about to be in — and re-rendering here would fight
+    // the animation for nothing.
+    case "changed-files-toggle": {
+      const details = node?.closest?.("details");
+      state.changesOpen[value] =
+        details === null || details === undefined ? true : !details.open;
+      return;
+    }
     case "chan-collapse-toggle": {
       state.chanCollapsed = state.chanCollapsed !== true;
       persist("ag.chanCollapsed", state.chanCollapsed);
@@ -4730,6 +5073,33 @@ document.addEventListener("click", (event) => {
     case "chan-sidebar-close":
       setChanDrawer(false);
       return;
+    // Posts the same words again under the same local id — see
+    // `resendChannelMessage` for why it must not mint a second one.
+    case "chan-message-resend":
+      resendChannelMessage(activeChannelId(), value, render);
+      return;
+    // The page of roots before the oldest one loaded. The reader's position
+    // is held across the prepend by the anchoring in `render`: content is
+    // being added *above* the viewport, so the offset that was captured means
+    // nothing and the `scrollHeight` delta is what has to be applied.
+    case "channel-load-earlier": {
+      const list = document.querySelector("#chan-messages");
+      const anchor = list === null ? undefined : {
+        height: list.scrollHeight,
+        top: list.scrollTop,
+      };
+      void loadEarlierChannelMessages(value, () => {
+        render();
+        if (anchor === undefined) {
+          return;
+        }
+        const next = document.querySelector("#chan-messages");
+        if (next !== null) {
+          next.scrollTop = anchor.top + (next.scrollHeight - anchor.height);
+        }
+      });
+      return;
+    }
     case "question-choose":
       answerQuestionStep({ chosen: Number(value) });
       return;
@@ -4766,6 +5136,14 @@ document.addEventListener("click", (event) => {
       }
       return;
     }
+    // The way back to a question that was put aside. Dismissal stays what it
+    // was — the prompt goes away — but it is no longer silent: the chip above
+    // the composer says an agent is still waiting, and this is its button.
+    case "question-undismiss":
+      delete state.questionDismissed[value];
+      render();
+      $("[data-act='question-text']")?.focus();
+      return;
     case "chan-tree-dir": {
       const open = state.chanTreeOpen ?? [];
       state.chanTreeOpen = open.includes(value)
@@ -5067,6 +5445,11 @@ document.addEventListener("click", (event) => {
       const focused = document.activeElement === toggle;
       const open = !(state.chanToolsOpen === true);
       state.chanToolsOpen = open;
+      // Kept, the same way `chan-collapse-toggle` keeps its own fold. Opening
+      // the tools is a statement about how this reader works rather than
+      // about this visit, and re-hiding them on every load made it a choice
+      // to make again every time instead of once.
+      persist("ag.chantools", open);
 
       // Opening the fold changes which tools are in the header, so the rest
       // of the screen still needs its ordinary render. Keep this button,
@@ -5144,6 +5527,15 @@ document.addEventListener("click", (event) => {
       // it in the transcript, which pushed the messages explaining the change
       // off the screen.
       state.chanFileView = value;
+      // Which work this file was opened from, so its Diff tab can show that
+      // task's changeset rather than whichever run the Code screen last
+      // loaded. The changed-file rows carry it; a file opened from anywhere
+      // else has none and falls back to the global, which is what "latest"
+      // means and is correct there.
+      state.chanFileTaskId = node?.dataset?.task ?? undefined;
+      if (state.chanFileTaskId !== undefined) {
+        void ensureChangeSetForTask(state.chanFileTaskId, render);
+      }
       state.activeChannelThread = undefined;
       state.activeAgentPanel = undefined;
       state.activeDm = undefined;
@@ -5451,6 +5843,16 @@ document.addEventListener("click", (event) => {
     case "agent-tab":
       state.agentTab = value;
       render();
+      // The Files tab is scoped to this agent's own work now, which means it
+      // needs that work's changeset — one fetch per task, cached. Without
+      // this the tab would be honest and permanently empty, which is only
+      // half the fix.
+      if (value === "files") {
+        const task = currentAgent()?.task;
+        if (task !== undefined) {
+          void ensureChangeSetForTask(task.id, render);
+        }
+      }
       return;
     case "agent-filter":
       state.agentFilter = value;
@@ -5590,12 +5992,37 @@ document.addEventListener("click", (event) => {
     case "agent-usage-refresh":
       void refreshProviderUsage(value, render);
       return;
-    case "task-cancel":
+    /**
+     * Stopping a run, asked about first.
+     *
+     * Cancelling ends work that is mid-flight and holding a workspace, and
+     * this fired straight through on one click from a plain button sitting
+     * beside Retry. One confirm helper serves every entry point — the agent
+     * detail's button and the thread header's — so the two cannot come to
+     * disagree about how much of a decision this is.
+     */
+    case "thread-task-cancel":
+    case "task-cancel": {
+      // A thread whose task id is missing renders no control at all, so this
+      // is a belt-and-braces guard rather than a state anybody can reach.
+      if (!value || !confirmTaskCancel(value)) {
+        return;
+      }
       void cancelTask(value, render);
       return;
-    case "task-retry":
+    }
+    // Only work that has actually stopped. Retry was offered whatever state a
+    // task was in, including while it was running, where the server refuses
+    // it — a button that exists to be refused is worse than no button.
+    case "task-retry": {
+      const task = state.tasks.find((entry) => entry.id === value);
+      if (task !== undefined && !TERMINAL_TASK_STATUS.has(task.status)) {
+        toast("That task has not finished yet.", "error");
+        return;
+      }
       void retryTask(value, render);
       return;
+    }
 
     /* Coordinator */
     case "coord-tab":
@@ -5620,9 +6047,46 @@ document.addEventListener("click", (event) => {
     case "notif-read-all":
       readAll(render);
       return;
-    case "notif-open":
+    /**
+     * Reading a notification takes you to what it is about.
+     *
+     * It used to only tick the row off, which made every row on the screen a
+     * dead end: "Task failed" told you something had gone wrong and left
+     * finding it to you. The rows have carried a `taskId` all along, and
+     * `notifications()` now carries the repository beside it, so the
+     * destination is a lookup rather than a new route.
+     *
+     * Marking read is unconditional and happens first: a notification that
+     * cannot be opened — the task has aged out of the loaded window, or the
+     * event never had one — should still stop nagging.
+     */
+    case "notif-open": {
       readOne(value, render);
+      const row = notifications().find((entry) => entry.id === value);
+      const repositoryId = row?.repositoryId;
+      if (repositoryId === undefined) {
+        return;
+      }
+      navigate("chats");
+      openChannel(repositoryId, render);
+      void ensureChannelMessages(repositoryId, render).then(() => {
+        // The thread the failure happened in, where there is one. A root
+        // carries the `taskId` of the work hanging under it — the same field
+        // `chan-revert-task` acts on. No match means the root is older than
+        // the loaded page; the channel itself is still the right place to
+        // have landed, so that is where the reader is left.
+        const root = channelMessagesFor(repositoryId).find(
+          (entry) =>
+            row.taskId !== undefined && entry.taskId === row.taskId,
+        );
+        if (root !== undefined) {
+          state.activeChannelThread = root.id;
+          state.scrollToMessage = root.id;
+        }
+        render();
+      });
       return;
+    }
 
     /* People */
     case "invite":
