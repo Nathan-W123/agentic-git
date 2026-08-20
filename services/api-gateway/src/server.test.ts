@@ -3650,10 +3650,18 @@ test("an org-wide agent accepts a stranger's @mention and dispatches under the o
   assert.match(task.objective, /please fix the login bug/u);
 
   const after = await owner.request(`${base}/messages`);
-  assert.deepEqual(agentSpeech(after.data.messages), []);
+  const [acknowledgement] = agentSpeech(after.data.messages);
+  assert.equal(
+    acknowledgement?.content,
+    "I've taken this task and I'm working on it.",
+  );
+  assert.equal(
+    acknowledgement?.authorId,
+    `${bootstrapped.user.id}:anthropic`,
+  );
 });
 
-test("dispatch starts work without posting a chat acknowledgement", async (t) => {
+test("dispatch immediately acknowledges the task without a model call", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -3672,7 +3680,12 @@ test("dispatch starts work without posting a chat acknowledgement", async (t) =>
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
   const after = await owner.request(`${base}/messages`);
-  assert.deepEqual(agentSpeech(after.data.messages), []);
+  const speech = agentSpeech(after.data.messages);
+  assert.equal(speech.length, 1, JSON.stringify(after.data.messages));
+  assert.equal(
+    speech[0]?.content,
+    "I've taken this task and I'm working on it.",
+  );
   assert.equal(runtime.submittedTasks.length, 1);
   assert.ok(
     runtime.chatPrompts.every(
@@ -3682,7 +3695,7 @@ test("dispatch starts work without posting a chat acknowledgement", async (t) =>
   );
 });
 
-test("work uses the request as its root without adding an acknowledgement", async (t) => {
+test("work acknowledges inside the user request's thread", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -3704,7 +3717,17 @@ test("work uses the request as its root without adding an acknowledgement", asyn
   );
   assert.equal(thread?.kind, "user");
   assert.equal(thread?.content, "@Claude (Owner) tighten the retry policy");
-  assert.deepEqual(thread?.replies ?? [], []);
+  const acknowledgement = (thread?.replies ?? []).find(
+    (reply: any) => reply.kind === "agent",
+  );
+  assert.equal(
+    acknowledgement?.content,
+    "I've taken this task and I'm working on it.",
+  );
+  assert.equal(
+    acknowledgement?.authorId,
+    `${bootstrapped.user.id}:anthropic`,
+  );
   assert.equal(runtime.submittedTasks.length, 1);
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
   assert.equal(thread?.taskId, task?.id);
@@ -3713,10 +3736,10 @@ test("work uses the request as its root without adding an acknowledgement", asyn
       entry.type === "channel_message_posted" &&
       entry.data["messageId"] === posted.data.message.id,
   );
-  assert.ok(events.length >= 1, JSON.stringify(events));
+  assert.ok(events.length >= 2, JSON.stringify(events));
 
-  // The persisted task now supplies the agent identity that the deleted
-  // acknowledgement used to carry, so a bare follow-up still reaches it.
+  // A bare follow-up still reaches the agent attributed by the persisted
+  // task and the acknowledgement.
   runtime.chatAnswer.text = "I'm working through the retry callers.";
   const replied = await owner.request(
     `${base}/messages/${encodeURIComponent(posted.data.message.id)}/replies`,
@@ -3780,8 +3803,17 @@ test("automatic continuation matches an existing user-rooted task thread", async
   );
   assert.equal(
     (root?.replies ?? []).filter((reply) => reply.kind === "agent").length,
-    0,
+    2,
     JSON.stringify(root?.replies),
+  );
+  assert.equal(
+    (root?.replies ?? [])
+      .filter((reply) => reply.kind === "agent")
+      .every(
+        (reply) =>
+          reply.content === "I've taken this task and I'm working on it.",
+      ),
+    true,
   );
 });
 
@@ -3810,7 +3842,10 @@ test("an agent's own owner can always @mention it, personal or org-wide", async 
   assert.equal(selfTask.vendor, "claude");
 
   const after = await owner.request(`${base}/messages`);
-  assert.deepEqual(agentSpeech(after.data.messages), []);
+  assert.equal(
+    agentSpeech(after.data.messages)[0]?.content,
+    "I've taken this task and I'm working on it.",
+  );
 });
 
 test("a human channel participant can be @mentioned without an agent refusal", async (t) => {
@@ -4093,8 +4128,15 @@ test("a clearly-scoped task message auto-claims to the one obviously-best agent"
   assert.equal(task.actorId, bootstrapped.user.id);
   assert.equal(task.vendor, "claude");
 
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return agentSpeech(listed.data.messages).length === 1;
+  }, "the auto-claimed task was not acknowledged");
   const after = await owner.request(`${base}/messages`);
-  assert.deepEqual(agentSpeech(after.data.messages), []);
+  assert.equal(
+    agentSpeech(after.data.messages)[0]?.content,
+    "I've taken this task and I'm working on it.",
+  );
 });
 
 test("an ambiguous task message is dispatched anyway, deterministically", async (t) => {
@@ -4146,15 +4188,21 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
     "the same request must reach the same agent twice",
   );
 
-  // Dispatching the chosen agent adds no acknowledgement or system aside.
+  // Each chosen agent confirms its handoff in the request's thread.
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return agentSpeech(listed.data.messages).length === 2;
+  }, "the auto-claimed tasks were not acknowledged");
   const after = await owner.request(`${base}/messages`);
   const agentMessages = agentSpeech(after.data.messages);
-  assert.deepEqual(agentMessages, [], JSON.stringify(after.data.messages));
-  // No thread yet, deliberately. The title and opening reasoning are held
-  // until the run says something specific to this task, so a change small
-  // enough to finish without explaining itself stays two lines in the
-  // channel instead of a thread nobody needs to open. Nothing has been
-  // narrated here, so nothing has been written.
+  assert.equal(agentMessages.length, 2, JSON.stringify(after.data.messages));
+  assert.equal(
+    agentMessages.every(
+      (message) =>
+        message.content === "I've taken this task and I'm working on it.",
+    ),
+    true,
+  );
 });
 
 test("a plain non-task message auto-claims nothing", async (t) => {
@@ -4275,7 +4323,12 @@ test("an explicit @mention suppresses auto-claim even when an unmentioned agent 
   );
 
   const after = await owner.request(`${base}/messages`);
-  assert.deepEqual(agentSpeech(after.data.messages), []);
+  const [acknowledgement] = agentSpeech(after.data.messages);
+  assert.equal(
+    acknowledgement?.content,
+    "I've taken this task and I'm working on it.",
+  );
+  assert.equal(acknowledgement?.authorId, `${backend.id}:openai`);
 });
 
 test("registration can be closed off", async (t) => {
@@ -4406,15 +4459,15 @@ test("a request that names no verb this list knows is still work when an agent i
   const taskRoot = (after.data.messages as any[]).find(
     (message) => message.id === posted.data.message.id,
   );
-  // The work was taken and nothing was said about taking it. The request is
-  // its own root — see "dispatch starts work without posting a chat
-  // acknowledgement" — so there is no reply here at all until the run
-  // narrates something specific to this task.
+  // The request remains the root and the agent confirms the handoff beneath
+  // it before the run has anything task-specific to narrate.
   const replies = taskRoot?.replies ?? [];
-  assert.deepEqual(
-    replies.filter((reply: any) => reply.kind === "agent"),
-    [],
-    "picking work up is not something to announce",
+  const [acknowledgement] = replies.filter(
+    (reply: any) => reply.kind === "agent",
+  );
+  assert.equal(
+    acknowledgement?.content,
+    "I've taken this task and I'm working on it.",
   );
   assert.equal(taskRoot?.kind, "user");
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
@@ -4493,8 +4546,15 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   assert.equal(runtime.submittedTasks[0]?.actorId, bootstrapped.user.id);
 
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return agentSpeech(listed.data.messages).length === 1;
+  }, "the unmatched auto-claimed task was not acknowledged");
   const after = await owner.request(`${base}/messages`);
-  assert.deepEqual(agentSpeech(after.data.messages), []);
+  assert.equal(
+    agentSpeech(after.data.messages)[0]?.content,
+    "I've taken this task and I'm working on it.",
+  );
 });
 
 test("recent activity is one agent's, not its owner's whole roster", async (t) => {
@@ -5619,6 +5679,10 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   const root = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
   ).find((message) => message.kind === "user" && message.taskId !== undefined);
+  assert.equal(
+    root?.replies[0]?.content,
+    "I've taken this task and I'm working on the plan.",
+  );
   assert.match(
     (root?.replies ?? []).map((reply) => reply.content).join("\n"),
     /nothing is running yet/u,
@@ -5840,6 +5904,20 @@ test("/queue chains one agent's follow-up work without claiming it early", async
   const second = tasks.find((task) => task.objective.includes("second follow-up"));
   assert.equal(first?.afterTaskId, current.id);
   assert.equal(second?.afterTaskId, first?.id);
+  const queuedRoots = await runtime.store.listChannelMessages(
+    repositoryId,
+    ownerId,
+  );
+  assert.equal(
+    queuedRoots
+      .flatMap((root) => root.replies)
+      .filter(
+        (reply) =>
+          reply.content ===
+          "I've taken this task and queued it behind my current work.",
+      ).length,
+    2,
+  );
   assert.deepEqual(
     await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID),
     [],
@@ -8568,7 +8646,7 @@ test("a finished thread carries its summary and its line counts", async (t) => {
   ]);
 });
 
-test("a quick task keeps its outcome inline and opens no task thread", async (t) => {
+test("a quick task keeps its outcome inline after acknowledging the handoff", async (t) => {
   // The counterpart of the test above, and the one that was missing while the
   // feature it covers sat inert. Holding the ceremony is only half of it: the
   // held set has to name *every* line that is true of all runs, and
@@ -8652,12 +8730,24 @@ test("a quick task keeps its outcome inline and opens no task thread", async (t)
     /Changed the retry count to 2\./u,
     `the ending did not carry the agent's own words: ${JSON.stringify(ending)}`,
   );
-  // The request has no ceremonial reply. The browser keeps it in the
-  // chronological room unless substantive narration opens a thread.
+  // The request has only the immediate handoff reply; routine run ceremony is
+  // still held back and the concise outcome stays in the room.
   const root = messages.find(
     (message) => message.kind === "user" && message.taskId === task.id,
   );
-  assert.deepEqual(root?.replies ?? [], [], JSON.stringify(root));
+  assert.deepEqual(
+    (root?.replies ?? []).map((reply) => ({
+      kind: reply.kind,
+      content: reply.content,
+    })),
+    [
+      {
+        kind: "agent",
+        content: "I've taken this task and I'm working on it.",
+      },
+    ],
+    JSON.stringify(root),
+  );
 });
 
 /**
@@ -9390,14 +9480,12 @@ test("the sweep leaves a quiet task alone, and closes a thread its watcher aband
 
   const swept = await runtime.store.listChannelMessages(repo, ownerId);
   const quietRoot = swept.find((message) => message.taskId === task.id);
-  // Nothing at all under the root. Dispatch stopped announcing itself — see
-  // "dispatch starts work without posting a chat acknowledgement" — so a
-  // quick task that ended flat has no replies to begin with, and the sweep's
-  // job here is to leave it that way rather than paste a canned ending under
-  // work whose ending is already in the room.
+  // Only the handoff acknowledgement remains under the root. The sweep must
+  // not paste a canned ending beneath work whose ending is already in the
+  // room.
   assert.deepEqual(
-    quietRoot?.replies,
-    [],
+    (quietRoot?.replies ?? []).map((reply) => reply.content),
+    ["I've taken this task and I'm working on it."],
     "the sweep added narration to a quick task that had already ended flat",
   );
   assert.equal(
@@ -10966,7 +11054,7 @@ test("an answer after the deadline is told it was late, not chatted at", async (
   );
 });
 
-test("the task root exists immediately without an agent acknowledgement", async (t) => {
+test("the task root and acknowledgement exist immediately", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11012,9 +11100,12 @@ test("the task root exists immediately without an agent acknowledgement", async 
   const root = (listed.data.messages as any[]).find(
     (message) => message.id === request.data.message.id,
   );
+  const acknowledgement = (root?.replies ?? []).find(
+    (reply: any) => reply.kind === "agent",
+  );
   assert.equal(
-    (root?.replies ?? []).filter((reply: any) => reply.kind === "agent").length,
-    0,
+    acknowledgement?.content,
+    "I've taken this task and I'm working on it.",
   );
   assert.ok(
     runtime.chatPrompts.every(
@@ -11619,14 +11710,18 @@ test("a thread opens on the request that caused it, in the words it was asked in
   }, "the mention never became a task");
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
 
-  // No ceremonial reply exists before substantive narration.
+  // The handoff reply exists before any task-specific narration.
   const beforeNarration = await owner.request(`${base}/messages`);
   const quiet = (beforeNarration.data.messages as any[]).find(
     (message) => message.taskId === task!.id,
   );
   assert.equal(quiet?.kind, "user");
   assert.equal(quiet?.content, asked);
-  assert.deepEqual(quiet?.replies ?? [], []);
+  assert.equal(quiet?.replies?.length, 1);
+  assert.equal(
+    quiet?.replies?.[0]?.content,
+    "I've taken this task and I'm working on it.",
+  );
 
   await runtime.store.appendAudit(undefined, {
     type: "agent_progress",
@@ -11653,13 +11748,15 @@ test("a thread opens on the request that caused it, in the words it was asked in
     (message) => message.taskId === task!.id,
   );
   const replies = (thread?.replies ?? []) as any[];
-  // The root itself is the person's exact request; its replies are narration.
+  // The root itself is the person's exact request; its replies begin with the
+  // handoff and continue with narration.
   assert.equal(thread?.kind, "user");
   assert.equal(thread?.content, asked);
   assert.equal(thread?.authorId, ownerId);
   assert.ok(replies.length > 0, JSON.stringify(replies));
-  assert.ok(
-    replies.every((reply) => reply.kind !== "agent"),
+  assert.equal(
+    replies.filter((reply) => reply.kind === "agent").length,
+    1,
     JSON.stringify(replies),
   );
 });

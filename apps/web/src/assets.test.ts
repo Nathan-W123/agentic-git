@@ -932,7 +932,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
-test("user-rooted task threads promote only after substantive narration", async () => {
+test("user-rooted tasks promote when their first reply arrives", async () => {
   const chats = await publicFile("screen-chats.js");
   const row = chats.slice(
     chats.indexOf("function messageRow("),
@@ -958,7 +958,7 @@ test("user-rooted task threads promote only after substantive narration", async 
   assert.match(
     row,
     /inlineReply \|\| \(entry\.kind === "user" && !hasTaskThread\)/u,
-    "a task stays inline until substantive narration arrives",
+    "a task stays inline until the agent acknowledges it",
   );
   assert.match(
     list,
