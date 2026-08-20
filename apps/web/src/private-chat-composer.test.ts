@@ -64,7 +64,10 @@ test("Enter sends a direct message and Shift+Enter does not", async () => {
   // live in the click handler only, where the keyboard could never reach it.
   const submitListener = app.slice(app.indexOf('document.addEventListener("submit"'));
   assert.match(submitListener, /case "dm-submit": \{/u);
-  assert.match(submitListener, /sendDirectMessage\(other, draft\)/u);
+  assert.match(
+    submitListener,
+    /sendDirectMessage\(other, draft, referencedMessageId\)/u,
+  );
 
   const clickListener = app.slice(
     app.indexOf('document.addEventListener("click"'),
@@ -86,6 +89,57 @@ test("Enter sends a direct message and Shift+Enter does not", async () => {
     // command is not also the Enter that sends the message.
     assert.match(handler, /if \(handleComposerKeydown\(event, render\)\) \{\s*\n\s*return;/u);
   }
+});
+
+test(
+  "replying in a private chat preserves the current draft and selects the source message",
+  async () => {
+    const app = await publicFile("app.js");
+    const chats = await publicFile("screen-chats.js");
+
+    const replyCase = app.slice(
+      app.indexOf('case "dm-reply-quote":'),
+      app.indexOf('case "dm-reply-clear":'),
+    );
+    assert.match(replyCase, /state\.dmReplyMessageId = target\?\.id;/u);
+    assert.doesNotMatch(replyCase, /state\.dmDraft\s*=/u);
+    assert.match(chats, /directReplyChip\(replyTarget, name\)/u);
+  },
+);
+
+test("cancelling a private-chat reply clears the reference without replacing the draft", async () => {
+  const app = await publicFile("app.js");
+  const clearCase = app.slice(
+    app.indexOf('case "dm-reply-clear":'),
+    app.indexOf('case "dm-reference-jump":'),
+  );
+
+  assert.match(clearCase, /state\.dmReplyMessageId = undefined;/u);
+  assert.doesNotMatch(clearCase, /state\.dmDraft\s*=/u);
+});
+
+test("a private chat sends the selected reply reference and clears it after sending", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const submitCase = app.slice(
+    app.indexOf('case "dm-submit":'),
+    app.indexOf('case "channel-submit":'),
+  );
+
+  assert.match(
+    submitCase,
+    /const referencedMessageId = state\.dmReplyMessageId;/u,
+  );
+  assert.match(submitCase, /state\.dmReplyMessageId = undefined;/u);
+  assert.match(
+    submitCase,
+    /sendDirectMessage\(other, draft, referencedMessageId\)/u,
+  );
+  assert.match(data, /referencedMessageId === undefined/u);
+  assert.match(data, /\{ referencedMessageId \}/u);
+  assert.match(chats, /message\.referencedMessageId/u);
+  assert.match(chats, /data-act="dm-reference-jump"/u);
 });
 
 test("a private chat keeps the channel's command and name pickers", async () => {

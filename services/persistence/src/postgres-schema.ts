@@ -882,4 +882,15 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE token_usage ADD COLUMN fresh_tokens BIGINT`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 38,
+    name: "direct-message-references",
+    statements: [
+      `ALTER TABLE direct_messages ADD COLUMN referenced_message_id TEXT
+         REFERENCES direct_messages(id) ON DELETE SET NULL`,
+      `CREATE INDEX direct_messages_by_reference
+         ON direct_messages(referenced_message_id)`,
+    ],
+  },
 ];

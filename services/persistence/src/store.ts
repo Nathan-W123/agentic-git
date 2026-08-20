@@ -1087,6 +1087,8 @@ export interface DirectMessage {
   recipientId: string;
   content: string;
   createdAt: string;
+  /** The earlier message this one answers, when it is a direct reply. */
+  referencedMessageId?: string;
   /** When the recipient read it. Absent while it is still unread. */
   readAt?: string;
 }
@@ -1096,6 +1098,7 @@ export interface AppendDirectMessageInput {
   authorId: string;
   recipientId: string;
   content: string;
+  referencedMessageId?: string;
 }
 
 /** One correspondent and the state of that conversation, for the inbox. */

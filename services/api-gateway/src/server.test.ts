@@ -8218,6 +8218,19 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
   assert.equal(sent.status, 201, JSON.stringify(sent.data));
   assert.equal(sent.data.message.content, "Just between us.");
 
+  const reply = await friend.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}`,
+    {
+      method: "POST",
+      body: {
+        content: "I agree.",
+        referencedMessageId: sent.data.message.id,
+      },
+    },
+  );
+  assert.equal(reply.status, 201, JSON.stringify(reply.data));
+  assert.equal(reply.data.message.referencedMessageId, sent.data.message.id);
+
   // The conversation reads the same from either side.
   for (const [client, other] of [
     [owner, friendId],
@@ -8229,7 +8242,7 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
     assert.equal(thread.status, 200);
     assert.deepEqual(
       thread.data.messages.map((message: { content: string }) => message.content),
-      ["Just between us."],
+      ["Just between us.", "I agree."],
     );
   }
 
@@ -8243,8 +8256,19 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
     assert.equal(peek.status, 200);
     assert.deepEqual(peek.data.messages, []);
   }
+  const unrelatedReference = await bystander.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${friendId}`,
+    {
+      method: "POST",
+      body: {
+        content: "Can I join in?",
+        referencedMessageId: sent.data.message.id,
+      },
+    },
+  );
+  assert.equal(unrelatedReference.status, 400);
 
-  // Unread is counted for the recipient only, and clears when they read it.
+  // Unread is counted for each recipient only, and clears when they read it.
   const inbox = await friend.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`,
   );
@@ -8253,7 +8277,7 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
   assert.equal(
     (await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`))
       .data.conversations[0].unread,
-    0,
+    1,
   );
   // The roster names everyone else, and never the person asking.
   assert.deepEqual(

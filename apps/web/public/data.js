@@ -286,6 +286,8 @@ export const state = {
   simplifying: {},
   /** What is half-typed to them. */
   dmDraft: "",
+  /** The message the next direct message answers, if any. */
+  dmReplyMessageId: undefined,
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
   /**
@@ -2919,14 +2921,17 @@ export async function loadDmThread(userId) {
   await loadDirectMessages();
 }
 
-export async function sendDirectMessage(userId, content) {
+export async function sendDirectMessage(userId, content, referencedMessageId) {
   const body = String(content ?? "").trim();
   if (body.length === 0 || !userId) {
     return;
   }
   const response = await api(directPath(`/${encodeURIComponent(userId)}`), {
     method: "POST",
-    body: { content: body },
+    body: {
+      content: body,
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
+    },
   });
   // The socket frame echoes to the sender too, so this only has to cover the
   // case where it does not arrive — appending twice is prevented by id.
@@ -2955,6 +2960,9 @@ export async function deleteDirectMessageEntry(userId, messageId) {
   state.dmThreads[userId] = (state.dmThreads[userId] ?? []).filter(
     (entry) => entry.id !== messageId,
   );
+  if (state.activeDm === userId && state.dmReplyMessageId === messageId) {
+    state.dmReplyMessageId = undefined;
+  }
   await loadDirectMessages();
 }
 
@@ -3013,6 +3021,9 @@ export function noteDirectMessageDeleted(frame) {
   state.dmThreads[other] = (state.dmThreads[other] ?? []).filter(
     (entry) => entry.id !== messageId,
   );
+  if (state.activeDm === other && state.dmReplyMessageId === messageId) {
+    state.dmReplyMessageId = undefined;
+  }
   // The inbox row shows the last message and an unread count, and the deleted
   // one may have been either. Re-read rather than recompute: this is the same
   // "the store stays the source of truth" the audit stream follows.

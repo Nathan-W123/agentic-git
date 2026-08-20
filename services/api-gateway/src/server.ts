@@ -7522,11 +7522,31 @@ export class ApiGateway {
       // store, which would surface as a 500.
       const content =
         stringField(body["content"], "content", { min: 1, max: 8000 }) ?? "";
+      const referencedMessageId = stringField(
+        body["referencedMessageId"],
+        "referencedMessageId",
+        { optional: true },
+      );
+      if (referencedMessageId !== undefined) {
+        const conversation = await this.options.store.listDirectMessages(
+          projectId,
+          principal.user.id,
+          otherId,
+        );
+        if (!conversation.some((entry) => entry.id === referencedMessageId)) {
+          throw new HttpError(
+            400,
+            "invalid_reference",
+            "A direct message reply must reference this conversation",
+          );
+        }
+      }
       const message = await this.options.store.appendDirectMessage({
         projectId,
         authorId: principal.user.id,
         recipientId: otherId,
         content,
+        ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
       });
       // To the two of them and nobody else, and not through the audit stream:
       // that log is replayed to every subscriber of the project, which is the

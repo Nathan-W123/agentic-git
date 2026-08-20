@@ -3276,12 +3276,14 @@ for (const backend of backends) {
         await new Promise((resolve) => setTimeout(resolve, 2));
       };
       await tick();
-      await store.appendDirectMessage({
+      const reply = await store.appendDirectMessage({
         projectId: DEFAULT_PROJECT_ID,
         authorId: bob.id,
         recipientId: alice.id,
         content: "Looking now.",
+        referencedMessageId: first.id,
       });
+      assert.equal(reply.referencedMessageId, first.id);
       await tick();
       await store.appendDirectMessage({
         projectId: DEFAULT_PROJECT_ID,
@@ -3299,6 +3301,17 @@ for (const backend of backends) {
       assert.deepEqual(
         asAlice.map((message) => message.content),
         ["Can you look at the deploy?", "Looking now."],
+      );
+      assert.equal(asAlice[1]?.referencedMessageId, first.id);
+      await assert.rejects(
+        store.appendDirectMessage({
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: carol.id,
+          recipientId: alice.id,
+          content: "This is not Carol's conversation.",
+          referencedMessageId: first.id,
+        }),
+        /same conversation/u,
       );
       const asBob = await store.listDirectMessages(
         DEFAULT_PROJECT_ID,
@@ -3423,16 +3436,16 @@ for (const backend of backends) {
       assert.equal(unsent?.id, first.id);
       assert.equal(unsent?.recipientId, bob.id);
       for (const viewer of [alice, bob]) {
+        const remaining = await store.listDirectMessages(
+          DEFAULT_PROJECT_ID,
+          viewer.id,
+          viewer.id === alice.id ? bob.id : alice.id,
+        );
         assert.deepEqual(
-          (
-            await store.listDirectMessages(
-              DEFAULT_PROJECT_ID,
-              viewer.id,
-              viewer.id === alice.id ? bob.id : alice.id,
-            )
-          ).map((message) => message.content),
+          remaining.map((message) => message.content),
           ["Looking now."],
         );
+        assert.equal(remaining[0]?.referencedMessageId, undefined);
       }
       // Deleting twice is not an error, and still says nothing was there.
       assert.equal(

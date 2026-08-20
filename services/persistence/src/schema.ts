@@ -1089,6 +1089,19 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE token_usage ADD COLUMN fresh_tokens BIGINT`,
     ],
   },
+  {
+    // A direct reply keeps its address separate from its words, just as a
+    // channel reply does. The target is nullable so unsending the original
+    // leaves the answer in the conversation without a dangling reference.
+    version: 38,
+    name: "direct-message-references",
+    statements: [
+      `ALTER TABLE direct_messages ADD COLUMN referenced_message_id TEXT
+         REFERENCES direct_messages(id) ON DELETE SET NULL`,
+      `CREATE INDEX direct_messages_by_reference
+         ON direct_messages(referenced_message_id)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

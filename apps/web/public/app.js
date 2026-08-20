@@ -3199,6 +3199,7 @@ function closeSidePanel() {
   if (state.activeDm !== undefined) {
     state.activeDm = undefined;
     state.dmDraft = "";
+    state.dmReplyMessageId = undefined;
     return true;
   }
   if (state.chanFileView !== undefined) {
@@ -4943,13 +4944,23 @@ document.addEventListener("click", (event) => {
     case "dm-reply-quote": {
       const messages = state.dmThreads[state.activeDm] ?? [];
       const target = messages.find((message) => message.id === value);
-      state.dmDraft = `${replyQuote(target?.content)}${state.dmDraft}`;
+      state.dmReplyMessageId = target?.id;
       render();
       {
         const input = $("[data-act='dm-input']");
         input?.focus();
         input?.setSelectionRange(input.value.length, input.value.length);
       }
+      return;
+    }
+    case "dm-reply-clear":
+      state.dmReplyMessageId = undefined;
+      render();
+      $("[data-act='dm-input']")?.focus();
+      return;
+    case "dm-reference-jump": {
+      const target = document.querySelector(`#dm-msg-${CSS.escape(value)}`);
+      target?.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
     // Tapping somebody opens the conversation with them. Rendered before the
@@ -4960,6 +4971,7 @@ document.addEventListener("click", (event) => {
       state.activeDm = value;
       state.activeAgentPanel = undefined;
       state.dmDraft = "";
+      state.dmReplyMessageId = undefined;
       render();
       void loadDmThread(value).then(() => render());
       return;
@@ -4997,6 +5009,7 @@ document.addEventListener("click", (event) => {
     case "dm-close":
       state.activeDm = undefined;
       state.dmDraft = "";
+      state.dmReplyMessageId = undefined;
       render();
       return;
     // Your own agent, one to one, without leaving the room.
@@ -5931,9 +5944,11 @@ document.addEventListener("submit", (event) => {
         return;
       }
       state.dmDraft = "";
+      const referencedMessageId = state.dmReplyMessageId;
+      state.dmReplyMessageId = undefined;
       closeComposerAutocomplete("dm");
       render();
-      void sendDirectMessage(other, draft)
+      void sendDirectMessage(other, draft, referencedMessageId)
         .then(() => render())
         .catch((error) => toast(`Could not send: ${error.message}`, "error"));
       return;

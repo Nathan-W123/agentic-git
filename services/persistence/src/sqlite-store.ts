@@ -3231,6 +3231,23 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (input.authorId === input.recipientId) {
       throw new Error("A direct message needs two people");
     }
+    if (input.referencedMessageId !== undefined) {
+      const target = this.db
+        .prepare(
+          `SELECT id FROM direct_messages
+           WHERE id = ? AND project_id = ? AND pair_key = ?`,
+        )
+        .get(
+          input.referencedMessageId,
+          input.projectId,
+          directPairKey(input.authorId, input.recipientId),
+        );
+      if (target === undefined) {
+        throw new Error(
+          "A direct message reference must target the same conversation",
+        );
+      }
+    }
     const message: DirectMessage = {
       id: createId("dm"),
       projectId: input.projectId,
@@ -3238,13 +3255,16 @@ export class SqliteCoordinationStore implements CoordinationStore {
       recipientId: input.recipientId,
       content,
       createdAt: new Date().toISOString(),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     };
     this.db
       .prepare(
         `INSERT INTO direct_messages
            (id, project_id, pair_key, author_id, recipient_id, content,
-            created_at, read_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+            created_at, read_at, referenced_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
       )
       .run(
         message.id,
@@ -3254,6 +3274,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         message.recipientId,
         message.content,
         message.createdAt,
+        message.referencedMessageId ?? null,
       );
     return message;
   }
@@ -3350,6 +3371,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   private toDirectMessage(row: Row): DirectMessage {
     const readAt = optionalText(row, "read_at");
+    const referencedMessageId = optionalText(row, "referenced_message_id");
     return {
       id: text(row, "id"),
       projectId: text(row, "project_id"),
@@ -3358,6 +3380,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       content: text(row, "content"),
       createdAt: text(row, "created_at"),
       ...(readAt === undefined ? {} : { readAt }),
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     };
   }
 

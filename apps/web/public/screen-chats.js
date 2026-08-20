@@ -3931,6 +3931,53 @@ function agentPanel() {
  * panels competing for the same space and a reader having to work out which
  * one they are looking at.
  */
+/** The compact address above a direct message that answers another one. */
+function directMessageReference(message, messages, otherName) {
+  const target = messages.find(
+    (candidate) => candidate.id === message.referencedMessageId,
+  );
+  if (target === undefined) {
+    return "";
+  }
+  const authorName =
+    target.authorId === currentUserId() ? currentUserName() : otherName;
+  const line =
+    String(target.content ?? "")
+      .split(/\n/u)
+      .map((part) => part.trim())
+      .find((part) => part.length > 0) ?? "";
+  return `<button type="button" class="cmsg-ref" data-act="dm-reference-jump"
+      data-value="${esc(target.id)}">
+      <span class="cmsg-ref-elbow" aria-hidden="true"></span>
+      ${avatar(authorName, 16)}
+      <span class="cmsg-ref-name">${esc(authorName)}</span>
+      <span class="cmsg-ref-text">${esc(
+        line.length > 80 ? `${line.slice(0, 77)}…` : line,
+      )}</span>
+    </button>`;
+}
+
+/** The selected direct-message reply, kept outside the textarea. */
+function directReplyChip(target, otherName) {
+  if (target === undefined) {
+    return "";
+  }
+  const authorName =
+    target.authorId === currentUserId() ? currentUserName() : otherName;
+  const title = `${authorName}: ${String(target.content ?? "").trim()}`;
+  return `<div class="composer-thread">
+    ${icon("reply")}
+    <span class="ct-label">Replying to</span>
+    <span class="ct-title" title="${esc(title)}">${esc(title.slice(0, 70))}</span>
+    <span class="spacer"></span>
+    ${iconButton("close", {
+      act: "dm-reply-clear",
+      title: "Cancel reply",
+      small: true,
+    })}
+  </div>`;
+}
+
 function dmPanel() {
   const userId = state.activeDm;
   if (userId === undefined) {
@@ -3939,11 +3986,15 @@ function dmPanel() {
   const person = state.dmPeople.find((candidate) => candidate.id === userId);
   const name = person?.name ?? memberName(userId) ?? "Someone";
   const messages = state.dmThreads[userId] ?? [];
+  const replyTarget = messages.find(
+    (message) => message.id === state.dmReplyMessageId,
+  );
   const online = personOnline(userId);
   const repositoryId = activeChannelId();
   const dmPending =
     (state.dmAttaching ?? 0) > 0 ||
-    draftAttachments(repositoryId, state.dmDraft).length > 0;
+    draftAttachments(repositoryId, state.dmDraft).length > 0 ||
+    replyTarget !== undefined;
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -3964,7 +4015,9 @@ function dmPanel() {
           : messages
               .map((message) => {
                 const mine = message.authorId === currentUserId();
-                return `<div class="dm-msg${mine ? " dm-mine" : ""}">
+                return `<div class="dm-msg${mine ? " dm-mine" : ""}"
+                    id="dm-msg-${esc(message.id)}">
+                  ${directMessageReference(message, messages, name)}
                   <div class="dm-bubble cmsg-text">${messageBody(
                     message.content,
                     repositoryId,
@@ -4002,6 +4055,7 @@ function dmPanel() {
            having them here is what stops "/" and "@" meaning one thing in the
            room and nothing in the message beside it. -->
       <div data-dm-composer-suggestions>${composerSuggestions(repositoryId, "dm")}</div>
+      ${directReplyChip(replyTarget, name)}
       ${draftAttachmentPreviews(repositoryId, {
         draft: state.dmDraft,
         removeAct: "dm-attachment-remove",
