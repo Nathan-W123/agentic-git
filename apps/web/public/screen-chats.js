@@ -4746,7 +4746,7 @@ export function channelInfoPopoverHtml(repositoryId) {
               : String(value);
         return `${stats.messages}${stats.capped ? "+" : ""} messages · ` +
           `${fmt(stats.replies)} replies · ${fmt(stats.tokens)}` +
-          `${stats.tokensIncomplete ? "+" : ""} non-cached tokens`;
+          `${stats.tokensIncomplete ? "+" : ""} tokens`;
       })()}</p>
     </div>
     <div class="pop-block">
