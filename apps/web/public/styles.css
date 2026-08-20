@@ -6061,68 +6061,25 @@ button.chip.lg:hover {
   margin-bottom: 8px;
 }
 
-/* The plan, in the thread, as the card that opens it.
-
-   A row rather than a block quote: what it has to say is "there is a plan and
-   it opens over there", and a surface any taller than one row starts
-   competing with the plan itself. Tinted with the accent because pressing it
-   is navigation, not reading. */
-.plan-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
+/* The plan opens automatically when it lands. This plain link is only the
+   unobtrusive way to reopen it after the panel has been closed. */
+.plan-link {
+  appearance: none;
+  display: inline;
   margin: 4px 0 8px;
-  padding: 9px 11px;
-  border: 1px solid var(--accent-line);
-  border-radius: 10px;
-  background: var(--accent-wash);
-  color: var(--text);
-  text-align: left;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-bright);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
 }
 
-.plan-card:hover,
-.plan-card.active {
-  background: var(--accent-wash-strong);
-}
-
-.plan-card > svg {
-  flex: none;
-  color: var(--accent-bright);
-}
-
-.plan-card .pc-text {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
-}
-
-.plan-card .pc-title,
-.plan-card .pc-sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.plan-card .pc-title {
-  font-size: 0.86rem;
-  font-weight: 600;
-}
-
-.plan-card .pc-sub {
-  color: var(--text-3);
-  font-size: 0.76rem;
-}
-
-.plan-card .pc-open {
-  margin-left: auto;
-  flex: none;
-  color: var(--accent-bright);
-  font-size: 0.74rem;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+.plan-link:hover,
+.plan-link:focus-visible {
+  color: var(--accent-2-bright);
 }
 
 /* The plan's own window. It borrows the thread panel wholesale — the column,

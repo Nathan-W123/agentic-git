@@ -11125,21 +11125,10 @@ export class ApiGateway {
           kind: "plan",
           content: planned.plan,
         }).catch(() => undefined);
-        await this.appendChannelThreadReply({
-          projectId,
-          repositoryId,
-          messageId: threadRootId,
-          authorId: `${candidate.userId}:${candidate.provider}`,
-          content:
-            `That's the plan — it's open beside this thread, and nothing is ` +
-            `running yet. Reply "go ahead" and I'll start; say what to ` +
-            `change and I'll take it from there.`,
-        }).catch(() => undefined);
-        // …and said in the room as well, because the sentence above is inside
-        // a thread nobody has been given a reason to open. A held plan looks
-        // exactly like a run in progress from the channel — the request, a
-        // working indicator, and then nothing — so the person who asked waits
-        // for an agent that is itself waiting for them.
+        // The room still gets a short hold notice. The plan opens on its own,
+        // but without a completion marker in the channel a held plan looks
+        // exactly like a run in progress: the request, a working indicator,
+        // and then nothing.
         await this.announceHold({
           projectId,
           repositoryId,

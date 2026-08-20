@@ -4230,18 +4230,20 @@ test("every dashboard module parses before it is served", async () => {
   }
 });
 
-test("a held plan opens in its own panel rather than inside the thread", async () => {
+test("a held plan auto-opens with a simple link back to its panel", async () => {
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");
   const app = await browserSource();
   const css = await publicFile("styles.css");
 
   // The gateway marks the plan as its own kind of reply. The thread renders
-  // that mark as a card, never as the document — a page of headings pasted
+  // that mark as a link, never as the document — a page of headings pasted
   // into the reply column buries everything said after it.
-  assert.match(chats, /reply\.kind === "plan"\s*\?\s*planCard\(root, reply\)/u);
-  assert.match(chats, /function planCard\(/u);
+  assert.match(chats, /reply\.kind === "plan"\s*\?\s*planLink\(root\)/u);
+  assert.match(chats, /function planLink\(/u);
   assert.match(chats, /data-act="plan-open"/u);
+  assert.match(chats, />\s*\$\{open \? "Plan open" : "Open plan"\}\s*<\/button>/u);
+  assert.doesNotMatch(chats, /class="plan-card/u);
 
   // The panel itself is the thread panel's column, so it inherits the grip,
   // the width the reader dragged and the phone behaviour.
@@ -4266,6 +4268,10 @@ test("a held plan opens in its own panel rather than inside the thread", async (
   // deliberately put in the panel.
   assert.match(data, /export function takeReadyPlan\(/u);
   assert.match(data, /export function planReplyOf\(/u);
+  assert.match(
+    data,
+    /export function takeReadyPlan\([^)]*\) \{[\s\S]*?state\.readyPlan = undefined;[\s\S]*?return pending\.messageId;/u,
+  );
   assert.match(app, /function openReadyPlan\(repositoryId\)/u);
   assert.match(app, /openReadyPlan\(channelRepositoryId\);/u);
   assert.match(app, /state\.activePlan = messageId;/u);
@@ -4275,7 +4281,7 @@ test("a held plan opens in its own panel rather than inside the thread", async (
     /function closeSidePanel\(\) \{\s*if \(state\.activePlan !== undefined\)/u,
   );
 
-  assert.match(css, /\n\.plan-card \{/u);
+  assert.match(css, /\n\.plan-link \{/u);
+  assert.doesNotMatch(css, /\n\.plan-card \{/u);
   assert.match(css, /\n\.plan-actions \{/u);
 });
-
