@@ -13435,3 +13435,142 @@ test("an unreachable pick hands the decision to the runner-up, not to silence", 
     "two attempts on the pick, one on the understudy — and no more",
   );
 });
+
+/**
+ * The reported case: sender's own agent is genuinely free, no roles are set —
+ * and the work went to the cofounder's agent anyway. The busy signal counted
+ * every unfinished task row, and a conversational turn that has landed parks
+ * at `open` BY DESIGN — the row stays so the conversation can continue, but
+ * nothing is running. One chat with your own agent marked it busy for the
+ * rest of time, and tier two skipped it forever after.
+ */
+test("a parked conversation does not make the sender's own agent busy", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "parked-conversation");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const cofounder = await addColleague(runtime, "parked-cofounder@example.com");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(cofounder.id, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  // No shared tokens with the request, so the fit tier stays out of it.
+  for (const [agent, name] of [
+    ["anthropic", "Willow"],
+    [`${cofounder.id}:openai`, "Cedar"],
+  ] as const) {
+    assert.equal(
+      (await owner.request(`${base}/agents/${agent}`, {
+        method: "POST",
+        body: { name },
+      })).status,
+      200,
+    );
+  }
+
+  // One earlier conversation with the owner's agent, landed and parked open.
+  const turn = await runtime.store.submitTask({
+    repositoryId,
+    objective: "earlier conversational turn, long since answered",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+    conversationId: "conv_parked",
+  });
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  await runtime.store.openSubmittedTask(turn.id);
+
+  runtime.setTaskClassification("ACT");
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "please rework the shipping calculator" },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the unaddressed request was never dispatched",
+  );
+  // Tier two: the sender's own, free agent — not a colleague's, and not the
+  // colleague's because of a chat that ended hours ago.
+  assert.equal(runtime.submittedTasks[0]?.actorId, ownerId);
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+});
+
+/**
+ * The other way the busy signal lied: nothing reaps a task whose run
+ * crashed, so a `claimed` row from a run that died days ago counted as "this
+ * agent is busy" forever. A corpse past the age bound stops being evidence.
+ */
+test("a stranded task from a dead run ages out of the busy signal", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "stale-corpse");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const cofounder = await addColleague(runtime, "stale-cofounder@example.com");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(cofounder.id, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  for (const [agent, name] of [
+    ["anthropic", "Willow"],
+    [`${cofounder.id}:openai`, "Cedar"],
+  ] as const) {
+    assert.equal(
+      (await owner.request(`${base}/agents/${agent}`, {
+        method: "POST",
+        body: { name },
+      })).status,
+      200,
+    );
+  }
+
+  // A run that died three hours ago: the row stranded `claimed`, and nothing
+  // will ever finish it. Backdated through the store's own map — the public
+  // API stamps submission time itself, which is exactly why a corpse cannot
+  // be made through it.
+  const corpse = await runtime.store.submitTask({
+    repositoryId,
+    objective: "run that crashed and never reported",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  const rows = (
+    runtime.store as unknown as {
+      submitted: Map<string, { submittedAt: string }>;
+    }
+  ).submitted;
+  const row = rows.get(corpse.id);
+  assert.notEqual(row, undefined);
+  row!.submittedAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+
+  runtime.setTaskClassification("ACT");
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "please rework the shipping calculator" },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the unaddressed request was never dispatched",
+  );
+  assert.equal(runtime.submittedTasks[0]?.actorId, ownerId);
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+});
