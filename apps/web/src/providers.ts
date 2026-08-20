@@ -1360,7 +1360,10 @@ export function parseDeviceAuthLine(line: string): {
     /\b(?:enter|use)[ :]+([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?)\b/iu.exec(
       clean,
     );
-  if (code !== null && code[1] !== undefined) {
+  // A vendor's device code always carries a digit; an ordinary word that
+  // happens to follow "enter"/"code" in a sentence ("Enter this...", "code
+  // here") never does. Without this, that word is misread as the code.
+  if (code !== null && code[1] !== undefined && /\d/u.test(code[1])) {
     result.code = code[1];
   }
   const expiry = /expires? in (\d{1,3}) minutes?/iu.exec(clean);
