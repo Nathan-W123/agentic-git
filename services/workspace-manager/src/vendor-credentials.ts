@@ -46,7 +46,14 @@ import path from "node:path";
  * with the Docker sandbox at all; whoever wires that up must take the
  * submitter's credential rather than the host's files.
  */
-export type VendorCliKind = "codex" | "claude" | "gemini";
+/** Coding CLIs that can run under an isolated, per-user browser session. */
+export type VendorCliKind =
+  | "codex"
+  | "claude"
+  | "gemini"
+  | "cursor"
+  | "copilot"
+  | "kiro";
 
 export type CredentialMountMode = "ephemeral-copy" | "read-only";
 
@@ -104,6 +111,30 @@ const PROFILES: Record<VendorCliKind, VendorProfile> = {
       { relativePath: ".gemini/google_accounts.json", required: false },
       { relativePath: ".gemini/projects.json", required: false },
       { relativePath: ".gemini/installation_id", required: false },
+    ],
+    env: () => ({}),
+  },
+  cursor: {
+    // Cursor's CLI has changed the exact filename between releases. Mounting
+    // the small auth/config directories keeps the profile forward compatible
+    // without exposing the rest of the host home.
+    files: [
+      { relativePath: ".cursor/cli-config.json", required: false },
+      { relativePath: ".config/cursor/auth.json", required: false },
+    ],
+    env: () => ({}),
+  },
+  copilot: {
+    files: [
+      { relativePath: ".copilot/config.json", required: false },
+      { relativePath: ".config/github-copilot/hosts.json", required: false },
+    ],
+    env: () => ({}),
+  },
+  kiro: {
+    files: [
+      { relativePath: ".local/share/kiro-cli/auth.json", required: false },
+      { relativePath: ".config/kiro-cli/config.json", required: false },
     ],
     env: () => ({}),
   },
@@ -197,6 +228,13 @@ export async function resolveVendorCredentials(
     await mkdir(path.dirname(staged), { recursive: true });
     await copyFile(hostPath, staged);
     mounts.push({ hostPath: staged, containerPath, readOnly: false });
+  }
+
+  if (mounts.length === 0) {
+    throw new Error(
+      `No ${kind} CLI browser-session files were found under ${home}. ` +
+        `Sign in with the vendor CLI on this host first.`,
+    );
   }
 
   return {

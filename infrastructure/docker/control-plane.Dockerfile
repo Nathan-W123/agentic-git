@@ -129,12 +129,29 @@ RUN apt-get update \
 # any) belongs to that bump rather than to whoever happened to deploy next.
 ARG CLAUDE_CODE_VERSION=2.1.235
 ARG CODEX_VERSION=0.147.0
+ARG GEMINI_CLI_VERSION=latest
+ARG COPILOT_CLI_VERSION=latest
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @openai/codex@${CODEX_VERSION} \
+      @google/gemini-cli@${GEMINI_CLI_VERSION} \
+      @github/copilot@${COPILOT_CLI_VERSION} \
   && npm cache clean --force \
   && claude --version \
-  && codex --version
+  && codex --version \
+  && gemini --version \
+  && copilot --version
+# Cursor and Kiro publish their CLIs through vendor installers rather than the
+# npm registry. Install into the image once, then expose only the resulting
+# executables to the unprivileged runtime user. Their sign-in state is never
+# stored in this layer; the web flow always redirects HOME to a per-user
+# temporary directory and encrypts the captured session afterwards.
+RUN curl -fsSL https://cursor.com/install | bash \
+  && curl -fsSL https://cli.kiro.dev/install | bash \
+  && install -m 0755 /root/.local/bin/agent /usr/local/bin/agent \
+  && install -m 0755 /root/.local/bin/kiro-cli /usr/local/bin/kiro-cli \
+  && agent --version \
+  && kiro-cli --version
 # COORD_PORT is deliberately not set here. A platform that assigns a port
 # passes it as PORT, and pinning COORD_PORT in the image would outrank it —
 # leaving the container listening where the router is not looking. Unset, the

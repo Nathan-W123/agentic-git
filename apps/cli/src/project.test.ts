@@ -120,12 +120,15 @@ test("a Codex agent can use the default executable", () => {
   );
 });
 
-test("Claude and Gemini agents default their executables; unknown adapters fail", () => {
+test("vendor CLI agents default their executables; unknown adapters fail", () => {
   const config = assertProjectConfig({
     ...VALID,
     agents: {
       claude: { adapter: "claude" },
       gemini: { adapter: "gemini", command: "gemini-preview" },
+      cursor: { adapter: "cursor" },
+      copilot: { adapter: "copilot" },
+      kiro: { adapter: "kiro" },
     },
     defaultAgent: "claude",
   });
@@ -134,11 +137,14 @@ test("Claude and Gemini agents default their executables; unknown adapters fail"
     adapter: "gemini",
     command: "gemini-preview",
   });
+  assert.deepEqual(config.agents.cursor, { adapter: "cursor" });
+  assert.deepEqual(config.agents.copilot, { adapter: "copilot" });
+  assert.deepEqual(config.agents.kiro, { adapter: "kiro" });
   assert.throws(
     () =>
       assertProjectConfig({
         ...VALID,
-        agents: { mystery: { adapter: "copilot" } as never },
+        agents: { mystery: { adapter: "unknown-vendor" } as never },
       }),
     /unsupported "adapter"/u,
   );
@@ -271,6 +277,10 @@ test("a fresh project does not inherit another project's edits", async () => {
       assert.deepEqual(Object.keys(second.config.agents).sort(), [
         "claude",
         "codex",
+        "copilot",
+        "cursor",
+        "gemini",
+        "kiro",
       ]);
     });
   });

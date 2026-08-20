@@ -131,10 +131,21 @@ const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
  * `apps/web/src/providers.ts`, which cannot be imported here without coupling
  * the gateway to that implementation.
  */
-const PROVIDER_TO_VENDOR: Record<string, "claude" | "codex" | "gemini"> = {
+type AgentVendor =
+  | "claude"
+  | "codex"
+  | "gemini"
+  | "cursor"
+  | "copilot"
+  | "kiro";
+
+const PROVIDER_TO_VENDOR: Record<string, AgentVendor> = {
   anthropic: "claude",
   openai: "codex",
   google: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
 };
 
 /** People say "Claude", not "Anthropic" — mirrors `AGENT_LABEL` in data.js. */
@@ -142,6 +153,9 @@ const AGENT_LABEL: Record<string, string> = {
   anthropic: "Claude",
   openai: "Codex",
   google: "Gemini",
+  cursor: "Cursor",
+  copilot: "Copilot",
+  kiro: "Kiro",
 };
 
 interface ProviderUsageWindow {
@@ -1525,9 +1539,10 @@ export function narrateTaskEvent(
       // vendor name and the objective handed back. The objective is already
       // the thread's title, so that is the canned line with extra steps —
       // better to say the plain thing than to dress it up as a summary.
-      const isAdapterFallback = /^(?:claude|codex|gemini)\s+completed\s/iu.test(
-        written,
-      );
+      const isAdapterFallback =
+        /^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\s/iu.test(
+          written,
+        );
       if (written.length === 0 || isAdapterFallback) {
         return CHANNEL_TERMINAL_EVENTS[type];
       }
@@ -1661,7 +1676,7 @@ type ChannelMentionCandidate = {
   userId: string;
   userName: string;
   provider: string;
-  vendor: "claude" | "codex" | "gemini";
+  vendor: AgentVendor;
   visibility: "personal" | "org";
   name: string;
   /** This channel's declared role for the agent, or "" if unlabeled. */
@@ -2359,7 +2374,14 @@ export interface ApiOperations {
   listAgents?(): Promise<
     Array<{
       id: string;
-      adapter: "codex" | "claude" | "gemini" | "generic-cli";
+      adapter:
+        | "codex"
+        | "claude"
+        | "gemini"
+        | "cursor"
+        | "copilot"
+        | "kiro"
+        | "generic-cli";
       default: boolean;
     }>
   >;
@@ -2436,7 +2458,7 @@ export interface ApiOperations {
      * names. An implementation that accepts this resolves it to a real
      * `agentId` itself. Ignored when `agentId` is also given.
      */
-    vendor?: "claude" | "codex" | "gemini";
+    vendor?: AgentVendor;
     actorId: string;
     /**
      * What the request was asked inside, for the agent that will run it —
@@ -2499,7 +2521,7 @@ export interface ApiOperations {
     repositoryId: string;
     taskIds?: string[];
     agentId?: string;
-    vendor?: "claude" | "codex" | "gemini";
+    vendor?: AgentVendor;
     /**
      * Narrow a vendor-scoped stop to one persona's work. A channel persona
      * is an (owner, vendor) pair, and every persona of one vendor resolves
@@ -8649,14 +8671,14 @@ export class ApiGateway {
       const chatProviderMatch = matchPath(
         path,
         new RegExp(
-          `^${API_PREFIX}/chat/providers/(anthropic|openai|google)$`,
+          `^${API_PREFIX}/chat/providers/(anthropic|openai|google|cursor|copilot|kiro)$`,
           "u",
         ),
       );
       const chatProviderActionMatch = matchPath(
         path,
         new RegExp(
-          `^${API_PREFIX}/chat/providers/(anthropic|openai|google)` +
+          `^${API_PREFIX}/chat/providers/(anthropic|openai|google|cursor|copilot|kiro)` +
             `/(signin|options|settings|usage|credential|device-auth)$`,
           "u",
         ),
@@ -8935,7 +8957,14 @@ export class ApiGateway {
       if (path === `${API_PREFIX}/chat/complete` && method === "POST") {
         const body = objectBody(await this.readJson(request));
         const provider = stringField(body["provider"], "provider", { max: 20 }) ?? "";
-        if (!["anthropic", "openai", "google"].includes(provider)) {
+        if (![
+          "anthropic",
+          "openai",
+          "google",
+          "cursor",
+          "copilot",
+          "kiro",
+        ].includes(provider)) {
           throw new HttpError(400, "invalid_request", "provider is unknown");
         }
         const cliSessionId = stringField(body["cliSessionId"], "cliSessionId", {
@@ -8966,7 +8995,14 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const provider =
           stringField(body["provider"], "provider", { max: 20 }) ?? "";
-        if (!["anthropic", "openai", "google"].includes(provider)) {
+        if (![
+          "anthropic",
+          "openai",
+          "google",
+          "cursor",
+          "copilot",
+          "kiro",
+        ].includes(provider)) {
           throw new HttpError(400, "invalid_request", "provider is unknown");
         }
         const cliSessionId = stringField(
@@ -10177,7 +10213,7 @@ export class ApiGateway {
     const target = (
       /^@?([\w.-]+(?:\s*\([^)]*\))?)/u.exec(input.rest.trim())?.[1] ?? ""
     ).replace(/[,.:;!?]+$/u, "");
-    let vendor: "claude" | "codex" | "gemini" | undefined;
+    let vendor: AgentVendor | undefined;
     // The named persona's owner. The vendor alone is not a persona: every
     // persona of one vendor runs through the same configured agent, so a
     // vendor-only stop would take other people's same-vendor work with it.

@@ -10,7 +10,10 @@ import {
 import {
   PROMPT_CLI_EFFORTS,
   createClaudeAdapter,
+  createCopilotAdapter,
+  createCursorAdapter,
   createGeminiAdapter,
+  createKiroAdapter,
   type PromptCliEffort,
 } from "@coord/adapter-prompt-cli";
 import type {
@@ -927,7 +930,7 @@ export class Worker {
     // reasoning depth than the machine next to it would have.
     const args = withModelOverride(agent.args, assignment.task.model);
     const configuredEffort =
-      agent.adapter === "claude" || agent.adapter === "gemini"
+      agent.adapter === "claude"
         ? agent.effort
         : undefined;
     const effort = assignment.task.effort ?? configuredEffort;
@@ -984,7 +987,13 @@ export class Worker {
           : { runner: this.options.codexRunner }),
       });
     }
-    if (agent.adapter === "claude" || agent.adapter === "gemini") {
+    if (
+      agent.adapter === "claude" ||
+      agent.adapter === "gemini" ||
+      agent.adapter === "cursor" ||
+      agent.adapter === "copilot" ||
+      agent.adapter === "kiro"
+    ) {
       if (sandbox !== undefined) {
         throw new Error(
           `A container sandbox is configured, but ${agent.adapter} agents run ` +
@@ -1002,8 +1011,13 @@ export class Worker {
         );
       }
       const promptEffort = effort as PromptCliEffort | undefined;
-      const create =
-        agent.adapter === "claude" ? createClaudeAdapter : createGeminiAdapter;
+      const create = {
+        claude: createClaudeAdapter,
+        gemini: createGeminiAdapter,
+        cursor: createCursorAdapter,
+        copilot: createCopilotAdapter,
+        kiro: createKiroAdapter,
+      }[agent.adapter];
       return create({
         agentId,
         repository: {

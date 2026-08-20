@@ -1,6 +1,6 @@
-# Agent adapters: Claude, Codex, Gemini, and generic CLIs
+# Agent adapters: vendor coding CLIs and generic CLIs
 
-Four adapter kinds drive coding agents through the platform's plan-first
+Seven adapter kinds drive coding agents through the platform's plan-first
 lifecycle (plan → admission → execute in an isolated worktree → changeset →
 validation → promotion). Which one runs is chosen per agent in
 `.coordinator/config.json`:
@@ -11,6 +11,9 @@ validation → promotion). Which one runs is chosen per agent in
     "claude":  { "adapter": "claude" },
     "codex":   { "adapter": "codex" },
     "gemini":  { "adapter": "gemini", "args": ["--model", "gemini-2.5-pro"] },
+    "cursor":  { "adapter": "cursor" },
+    "copilot": { "adapter": "copilot" },
+    "kiro":    { "adapter": "kiro" },
     "scripted": { "command": "node", "args": ["my-agent.js"] }
   },
   "defaultAgent": "claude"
@@ -22,10 +25,13 @@ validation → promotion). Which one runs is chosen per agent in
 | `claude` | Claude Code CLI | `claude -p --output-format json`; planning under `--permission-mode plan` (edits structurally refused), execution under `--dangerously-skip-permissions` inside the granted worktree |
 | `codex` | OpenAI Codex CLI | `codex exec` with `--output-schema` enforcement; planning read-only, execution under Codex's `workspace-write` sandbox; native Windows explicitly uses the `elevated` backend |
 | `gemini` | Gemini CLI | `gemini -p --output-format json`; planning in a disposable worktree, execution with `--yolo` auto-approval |
+| `cursor` | Cursor Agent CLI | `agent -p --output-format json --force` in disposable planning and granted execution worktrees |
+| `copilot` | GitHub Copilot CLI | `copilot -p --allow-all-tools` in disposable planning and granted execution worktrees |
+| `kiro` | Kiro CLI | `kiro-cli chat --no-interactive --trust-all-tools` in disposable planning and granted execution worktrees |
 | `generic-cli` | anything | Your executable speaks the NDJSON protocol in `docs/protocol/generic-cli.md` over stdin/stdout |
 
 `command` overrides the executable path; `args` accepts only a single
-`--model <id>` pair for claude/codex/gemini (anything else is rejected so
+`--model <id>` pair for vendor CLI adapters (anything else is rejected so
 configuration cannot weaken the enforced invocation mode); `env` adds
 environment variables for the process. `planningTimeoutMs` and
 `executionTimeoutMs` put hard deadlines on the corresponding provider calls;
@@ -42,10 +48,10 @@ blocked by local policy; both modes retain scoped filesystem boundaries.
    executes tasks** — the control-plane host for local runs, each worker host
    for remote runs. That means `claude` (login via claude.ai/console account
    or `ANTHROPIC_API_KEY`), `codex login` (ChatGPT account or
-   `OPENAI_API_KEY`), or `gemini` (Google login or `GEMINI_API_KEY`). You do
-   **not** log in through the dashboard, and the platform never sees or
-   stores these credentials; API keys can alternatively be supplied per agent
-   via the `env` block.
+   `OPENAI_API_KEY`). Cursor, Copilot, Kiro, and Gemini connections are made
+   from **My Agents**: the server runs the official CLI in an empty temporary
+   home, the user finishes in their own browser, and the resulting per-user
+   session is encrypted. Those four do not accept pasted keys in the web UI.
 
    That machine login funds *every* user's tasks. A deployment serving more
    than one person should instead have each user connect their own provider
@@ -65,7 +71,7 @@ login prompt) fails the task rather than promoting an empty changeset.
 
 ## Confinement caveat
 
-The `claude`, `codex`, and `gemini` adapters run the vendor CLI **on the
+The vendor adapters run the vendor CLI **on the
 host**, using its own login state; their write-blast radius is bounded by the
 task worktree plus each CLI's own sandboxing, and only the worktree diff
 enters the pipeline. They therefore refuse to combine with the project's

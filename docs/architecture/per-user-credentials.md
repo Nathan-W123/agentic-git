@@ -1,7 +1,7 @@
 # Per-user provider accounts
 
 Every user of a Relay deployment can run their prompts and tasks under **their
-own** Claude, Codex, or Gemini account, instead of everyone sharing whatever
+own** Claude, Codex, Gemini, Cursor, Copilot, or Kiro account, instead of everyone sharing whatever
 account the control-plane host machine is logged into.
 
 This document records what per-user authentication is actually available from
@@ -24,7 +24,7 @@ Registered remote workers were already fine: each worker machine runs its own
 logged-in CLI, so work dispatched to a worker already ran under that machine's
 account. The gap was specifically the dashboard-only path.
 
-## The near-blocker: only one vendor offers a grant
+## Browser grants and vendor-owned OAuth clients
 
 The design one would reach for first is a real OAuth flow — Relay registers as
 a client, each user authorizes it, Relay holds a per-user grant and refreshes
@@ -34,9 +34,10 @@ Claude Code's login is an OAuth PKCE flow bound to *Claude Code's own* client
 identifier, built for a CLI running on the end user's machine. There is no
 published client registration for third-party servers, no redirect-URI
 allowlist to join, and no consent screen that would name a different
-application. Driving that flow from Relay's server would mean impersonating
-Anthropic's own OAuth client and handling users' claude.ai credentials
-directly. The Gemini CLI is the same shape.
+application. Reimplementing that flow in Relay would mean impersonating
+Anthropic's own OAuth client. Launching the official CLI in an isolated home
+does not: the vendor's own client handles the grant and Relay only relays the
+public browser step. The Gemini CLI is the same shape.
 
 **Codex is the exception.** `codex login --device-auth` is a device
 authorization flow: the CLI runs on the server, prints a verification URL and
@@ -46,8 +47,11 @@ a genuine per-user grant, obtained through a flow the vendor built for exactly
 this situation. It is the best per-user connection available anywhere in this
 system, and Relay implements it.
 
-For Claude and Gemini the ideal remains unavailable, and no amount of
-implementation effort produces it. What follows is the realistic path.
+The dashboard does not reproduce those OAuth protocols. It launches each
+vendor's official CLI in an isolated temporary home and relays the CLI's URL,
+code, and completion state to the browser. Cursor, Copilot, Kiro, and Gemini
+use only this path for new web connections; the encrypted session is issued
+to the isolated home and no password or pasted key crosses the dashboard.
 
 ## What is available: credentials the user mints
 
@@ -60,21 +64,21 @@ headless runner — the mechanism built for CI:
 | Claude | Subscription OAuth token (`sk-ant-oat…`) | `claude setup-token` on their own machine | `CLAUDE_CODE_OAUTH_TOKEN` |
 | Claude | Anthropic API key | console.anthropic.com | `ANTHROPIC_API_KEY` |
 | Codex | OpenAI API key | platform.openai.com | **`auth.json` in the staged `CODEX_HOME`** — not the variable |
-| Gemini | Google AI Studio key | aistudio.google.com | `GEMINI_API_KEY` |
-| Gemini | **Google subscription session** (advanced) | copy `~/.gemini/oauth_creds.json` | `oauth_creds.json` + `settings.json` in a redirected home |
+| Gemini | **Google browser session** | Gemini CLI sign-in run by Relay | `oauth_creds.json` + `settings.json` in a redirected home |
+| Cursor | **Cursor browser session** | Cursor Agent CLI sign-in run by Relay | bounded session bundle in a redirected home |
+| Copilot | **GitHub browser session** | Copilot CLI sign-in run by Relay | bounded session bundle in a redirected home |
+| Kiro | **Kiro browser session** | Kiro CLI sign-in run by Relay | bounded session bundle in a redirected home |
 
-### Session files share a refresh token
+Older Gemini API-key and copied-session records remain readable so an upgrade
+does not strand a working agent, but new Gemini connections are browser-only.
 
-The two "subscription session" rows differ in one way that matters. A Codex
-device-auth session is *issued* to this deployment and is nobody else's copy.
-A Gemini session file is *copied* from the user's own machine, and both sides
-then hold the same rotating refresh token — whichever refreshes first can
-invalidate the other, logging the user out of their local CLI.
+### Copied session files share a refresh token
 
-That is why the Gemini API key is the recommended option and the session file
-is presented as advanced, with the tradeoff stated in the connect form itself
-rather than buried here. `credentialOrigin` records which case a stored
-credential is, so the UI warns only where the cost is real.
+A browser-auth session is issued into this deployment's isolated home and is
+nobody else's copy. Only a legacy Gemini session pasted from another machine
+shares that machine's rotating refresh token; whichever copy refreshes first
+can invalidate the other. `credentialOrigin` keeps those old copied records
+distinct from browser grants so the warning is shown only where it is real.
 
 **Gemini needs an auth method declared.** Dropping `oauth_creds.json` into a
 home is not enough: the CLI refuses to start with "Please set an Auth method",
@@ -102,11 +106,10 @@ Claude subscription rather than metered API credit, so per-user billing works
 the way people expect without anyone buying API credits.
 
 **Codex and Gemini subscription logins have no environment equivalent** — but
-that does not make them uncarryable, which was an early and wrong conclusion
-here. Both store their session in a *file*, and a file can be staged into an
-isolated home exactly like an API key. Codex gets its own session through
-device authorization; Gemini's must be copied, with the refresh-token cost
-described above. An API key remains the recommended option for Gemini.
+that does not make them uncarryable. Both store their session in a *file*, and
+a file can be staged into an isolated home. Each now gets its own session
+through the official CLI's browser flow; only legacy Gemini connections use a
+copied file or API key.
 
 ## The part that is easy to get wrong
 

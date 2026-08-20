@@ -1170,7 +1170,7 @@ export interface ChannelAgentOverride {
  */
 export interface AgentCallSign {
   userId: string;
-  /** A chat provider id — "anthropic", "openai", "google". */
+  /** A chat provider id, such as "anthropic", "cursor", or "google". */
   provider: string;
   callSign: string;
   assignedAt: string;

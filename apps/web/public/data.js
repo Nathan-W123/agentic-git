@@ -2093,6 +2093,9 @@ const AGENT_LABEL = {
   anthropic: "Claude",
   openai: "Codex",
   google: "Gemini",
+  cursor: "Cursor",
+  copilot: "Copilot",
+  kiro: "Kiro",
 };
 
 /**
@@ -3273,6 +3276,9 @@ export const VENDOR_FOR_PROVIDER = {
   anthropic: "claude",
   openai: "codex",
   google: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
 };
 
 /** The vendor CLI one agent drives, however that agent was resolved. */

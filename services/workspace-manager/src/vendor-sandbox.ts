@@ -30,6 +30,13 @@ export const DEFAULT_EGRESS_ALLOWLISTS: Record<VendorCliKind, readonly string[]>
       "oauth2.googleapis.com",
       "cloudcode-pa.googleapis.com",
     ],
+    cursor: ["api2.cursor.sh", "authenticator.cursor.sh", "cursor.com"],
+    copilot: ["api.github.com", "github.com", "api.githubcopilot.com"],
+    kiro: [
+      "auth.us-east-1.amazoncognito.com",
+      "oidc.us-east-1.amazonaws.com",
+      "q.us-east-1.amazonaws.com",
+    ],
   };
 
 /**

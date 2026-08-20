@@ -595,6 +595,8 @@ export function avatarStack(names, max = 4, size = 26) {
 export const AGENTS = {
   anthropic: { label: "Claude", doodle: "claude" },
   cursor: { label: "Cursor", doodle: "cursor" },
+  copilot: { label: "Copilot", doodle: "generic" },
+  kiro: { label: "Kiro", doodle: "generic" },
   openai: { label: "Codex", doodle: "codex" },
   google: { label: "Gemini", doodle: "gemini" },
   xai: { label: "Grok", doodle: "grok" },
@@ -606,6 +608,8 @@ export const AGENTS = {
 const AGENT_ALIASES = {
   claude: "anthropic",
   cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
   codex: "openai",
   gpt: "openai",
   gemini: "google",

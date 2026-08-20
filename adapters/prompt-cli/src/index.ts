@@ -112,6 +112,11 @@ export interface PromptCliProfile {
     jsonSchema: string | undefined,
   ): string[];
   /**
+   * Most CLIs accept the prompt on stdin. Browser-account CLIs whose
+   * non-interactive command requires a positional value opt into `argument`.
+   */
+  promptDelivery?: "stdin" | "argument";
+  /**
    * Unwraps the CLI's stdout into the model's text answer, or throws when
    * the envelope itself reports failure.
    */
@@ -466,6 +471,93 @@ export const GEMINI_PROFILE: PromptCliProfile = {
     }
     return record.response;
   },
+};
+
+/** Unwraps the small JSON envelopes used by browser-account coding CLIs. */
+function unwrapBrowserCli(stdout: string, name: string): string {
+  const trimmed = stdout.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`${name} returned no result`);
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (typeof parsed === "string") {
+      return parsed;
+    }
+    if (typeof parsed === "object" && parsed !== null) {
+      const record = parsed as Record<string, unknown>;
+      for (const key of ["response", "result", "text", "message"]) {
+        if (typeof record[key] === "string") {
+          return record[key] as string;
+        }
+      }
+    }
+  } catch {
+    // Plain text is the documented output of Copilot and Kiro. The model is
+    // still required to put one JSON object in that text, and the adapter's
+    // existing extractor validates it at the next boundary.
+  }
+  return trimmed;
+}
+
+/** Cursor Agent CLI in non-interactive print mode. */
+export const CURSOR_PROFILE: PromptCliProfile = {
+  name: "cursor",
+  defaultCommand: "agent",
+  promptDelivery: "argument",
+  planningArgs: (model) => [
+    "-p",
+    "--output-format",
+    "json",
+    "--force",
+    ...(model === undefined ? [] : ["--model", model]),
+  ],
+  executionArgs: (model) => [
+    "-p",
+    "--output-format",
+    "json",
+    "--force",
+    ...(model === undefined ? [] : ["--model", model]),
+  ],
+  unwrap: (stdout) => unwrapBrowserCli(stdout, "Cursor"),
+};
+
+/** GitHub Copilot CLI using the account connected by `copilot login`. */
+export const COPILOT_PROFILE: PromptCliProfile = {
+  name: "copilot",
+  defaultCommand: "copilot",
+  promptDelivery: "argument",
+  planningArgs: (model) => [
+    "--allow-all-tools",
+    ...(model === undefined ? [] : ["--model", model]),
+    "-p",
+  ],
+  executionArgs: (model) => [
+    "--allow-all-tools",
+    ...(model === undefined ? [] : ["--model", model]),
+    "-p",
+  ],
+  unwrap: (stdout) => unwrapBrowserCli(stdout, "Copilot"),
+};
+
+/** Kiro CLI's non-interactive chat mode. */
+export const KIRO_PROFILE: PromptCliProfile = {
+  name: "kiro",
+  defaultCommand: "kiro-cli",
+  promptDelivery: "argument",
+  planningArgs: (model) => [
+    "chat",
+    "--no-interactive",
+    "--trust-all-tools",
+    ...(model === undefined ? [] : ["--model", model]),
+  ],
+  executionArgs: (model) => [
+    "chat",
+    "--no-interactive",
+    "--trust-all-tools",
+    ...(model === undefined ? [] : ["--model", model]),
+  ],
+  unwrap: (stdout) => unwrapBrowserCli(stdout, "Kiro"),
 };
 
 export interface PromptCliAdapterOptions {
@@ -1976,24 +2068,30 @@ export class PromptCliAdapter implements AgentAdapter {
   ): Promise<ProcessOutput> {
     const controller = new AbortController();
     record.controller = controller;
-    // The prompt travels over stdin so objectives are never visible in the
-    // process list and never parsed as flags.
-    const active = this.runner(this.command, argv, {
-      cwd: workingDirectory,
-      input: prompt,
-      ...(this.options.env === undefined ? {} : { env: this.options.env }),
-      timeoutMs,
-      maxOutputBytes: this.maxOutputBytes,
-      // The end of the stream is the payload: the result envelope is the
-      // last line, and head retention was guaranteed to discard it on
-      // exactly the long runs that most needed to finish. The narrator
-      // still sees every byte live regardless of what is retained.
-      retainOutput: "tail",
-      signal: controller.signal,
-      ...(narrate && this.profile.narrate !== undefined
-        ? { onStdout: this.narrator(record) }
-        : {}),
-    });
+    // Prefer stdin so objectives are not visible in the process list. A few
+    // vendor CLIs expose non-interactive mode only through a positional
+    // prompt; their profile opts into that explicitly above.
+    const promptInArgument = this.profile.promptDelivery === "argument";
+    const active = this.runner(
+      this.command,
+      promptInArgument ? [...argv, prompt] : argv,
+      {
+        cwd: workingDirectory,
+        ...(promptInArgument ? {} : { input: prompt }),
+        ...(this.options.env === undefined ? {} : { env: this.options.env }),
+        timeoutMs,
+        maxOutputBytes: this.maxOutputBytes,
+        // The end of the stream is the payload: the result envelope is the
+        // last line, and head retention was guaranteed to discard it on
+        // exactly the long runs that most needed to finish. The narrator
+        // still sees every byte live regardless of what is retained.
+        retainOutput: "tail",
+        signal: controller.signal,
+        ...(narrate && this.profile.narrate !== undefined
+          ? { onStdout: this.narrator(record) }
+          : {}),
+      },
+    );
     record.active = active;
     try {
       return await active;
@@ -2525,4 +2623,22 @@ export function createGeminiAdapter(
   options: NamedPromptCliOptions,
 ): PromptCliAdapter {
   return new PromptCliAdapter({ ...options, profile: GEMINI_PROFILE });
+}
+
+export function createCursorAdapter(
+  options: NamedPromptCliOptions,
+): PromptCliAdapter {
+  return new PromptCliAdapter({ ...options, profile: CURSOR_PROFILE });
+}
+
+export function createCopilotAdapter(
+  options: NamedPromptCliOptions,
+): PromptCliAdapter {
+  return new PromptCliAdapter({ ...options, profile: COPILOT_PROFILE });
+}
+
+export function createKiroAdapter(
+  options: NamedPromptCliOptions,
+): PromptCliAdapter {
+  return new PromptCliAdapter({ ...options, profile: KIRO_PROFILE });
 }

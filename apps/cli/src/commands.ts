@@ -8,7 +8,10 @@ import { GenericCliAdapter } from "@coord/adapter-generic-cli";
 import {
   PROMPT_CLI_EFFORTS,
   createClaudeAdapter,
+  createCopilotAdapter,
+  createCursorAdapter,
   createGeminiAdapter,
+  createKiroAdapter,
   type PromptCliEffort,
 } from "@coord/adapter-prompt-cli";
 import type { AgentAdapter } from "@coord/agent-protocol";
@@ -133,7 +136,15 @@ async function localRunnerWorkerId(
     // Leases are taken by explicit task id rather than by polling for
     // compatible work, so this list is a description of the process rather
     // than a filter anything matches against.
-    adapters: ["generic-cli", "claude", "codex", "gemini"],
+    adapters: [
+      "generic-cli",
+      "claude",
+      "codex",
+      "gemini",
+      "cursor",
+      "copilot",
+      "kiro",
+    ],
     version: "in-process",
   });
   return worker.id;
@@ -265,6 +276,9 @@ const VENDOR_ADAPTERS: Partial<Record<string, VendorCliKind>> = {
   claude: "claude",
   codex: "codex",
   gemini: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
 };
 
 function toCanonical(repository: StoredRepository): CanonicalRepository {
@@ -944,7 +958,7 @@ function createAdapter(
   // too, because the channel can now ask for one and the adapter can now
   // honour it — deployment config catching up is a separate change.
   const configuredEffort =
-    agent.adapter === "claude" || agent.adapter === "gemini"
+    agent.adapter === "claude"
       ? agent.effort
       : undefined;
   const effort = override.effort ?? configuredEffort;
@@ -990,7 +1004,13 @@ function createAdapter(
     });
   }
 
-  if (agent.adapter === "claude" || agent.adapter === "gemini") {
+  if (
+    agent.adapter === "claude" ||
+    agent.adapter === "gemini" ||
+    agent.adapter === "cursor" ||
+    agent.adapter === "copilot" ||
+    agent.adapter === "kiro"
+  ) {
     if (sandbox !== undefined) {
       throw new Error(
         `${agent.adapter} agents run the vendor CLI on the host with its own ` +
@@ -1015,8 +1035,13 @@ function createAdapter(
       );
     }
     const promptEffort = effort as PromptCliEffort | undefined;
-    const create =
-      agent.adapter === "claude" ? createClaudeAdapter : createGeminiAdapter;
+    const create = {
+      claude: createClaudeAdapter,
+      gemini: createGeminiAdapter,
+      cursor: createCursorAdapter,
+      copilot: createCopilotAdapter,
+      kiro: createKiroAdapter,
+    }[agent.adapter];
     return create({
       agentId,
       repository,

@@ -809,15 +809,16 @@ function summarize(
 /**
  * How each vendor takes each credential kind.
  *
- * Only Claude reads a credential from the environment. Codex ignores
+ * Claude and legacy Gemini API-key records read credentials from the
+ * environment. Codex ignores
  * `OPENAI_API_KEY` outright — with only the variable set it sends no
  * credential and the API answers `401 … Missing bearer or basic
  * authentication in header` — so even its API key is written to `auth.json`.
  *
  * Declaration order is meaningful: the first kind listed for a vendor is the
  * one {@link supportedCredentialKinds} recommends, and the connect UI offers
- * it by default. API keys lead for Codex and Gemini because a session file
- * shares a refresh token with the user's own machine.
+ * it by default. Browser-only providers exclude their delivery-only kinds
+ * from that list below.
  */
 type CredentialDelivery = { via: "env"; variable: string } | { via: "files" };
 
@@ -841,6 +842,11 @@ const DELIVERY: Record<
     api_key: { via: "env", variable: "GEMINI_API_KEY" },
     session_file: { via: "files" },
   },
+  // These CLIs intentionally accept no pasted API key here. A connection is
+  // the browser session their own login command issued to this deployment.
+  cursor: { session_file: { via: "files" } },
+  copilot: { session_file: { via: "files" } },
+  kiro: { session_file: { via: "files" } },
 };
 
 /**
@@ -891,7 +897,8 @@ async function writeCodexAuthFile(
  */
 export const CLAUDE_SESSION_FILES = "files";
 const MAX_CAPTURED_FILE_BYTES = 256 * 1024;
-const MAX_CAPTURED_FILES = 32;
+const MAX_CAPTURED_FILES = 128;
+const MAX_CAPTURED_TOTAL_BYTES = 4 * 1024 * 1024;
 
 /** Serialises a signed-in configuration directory for the credential store. */
 export async function captureClaudeSession(
@@ -937,6 +944,89 @@ export async function restoreClaudeSession(
   }
 }
 
+/**
+ * Captures a CLI's isolated login home as a bounded relative-path map.
+ *
+ * Cursor, Copilot and Kiro do not promise one portable token filename. Their
+ * own login is still safe to persist because it runs in an otherwise empty
+ * temporary home; this stores only regular files written there, with strict
+ * file/count/total bounds, and restores them only beneath another temporary
+ * home.
+ */
+export async function captureBrowserSession(home: string): Promise<string> {
+  const files: Record<string, string> = {};
+  let totalBytes = 0;
+  const visit = async (directory: string): Promise<void> => {
+    if (Object.keys(files).length >= MAX_CAPTURED_FILES) {
+      return;
+    }
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(full);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const size = (await stat(full)).size;
+      if (
+        size > MAX_CAPTURED_FILE_BYTES ||
+        totalBytes + size > MAX_CAPTURED_TOTAL_BYTES ||
+        Object.keys(files).length >= MAX_CAPTURED_FILES
+      ) {
+        continue;
+      }
+      const relative = path.relative(home, full).split(path.sep).join("/");
+      // Auth stores are not guaranteed to be JSON (some releases use a
+      // small SQLite/keyring file), so preserve bytes rather than decoding
+      // and silently corrupting a binary session.
+      files[relative] = `base64:${(await readFile(full)).toString("base64")}`;
+      totalBytes += size;
+    }
+  };
+  await visit(home);
+  if (Object.keys(files).length === 0) {
+    throw new UserCredentialError(
+      "The browser sign-in completed but wrote no session to capture",
+      "invalid_session_file",
+    );
+  }
+  return JSON.stringify({ [CLAUDE_SESSION_FILES]: files });
+}
+
+/** Restores a bounded browser-session bundle beneath an isolated home. */
+export async function restoreBrowserSession(
+  home: string,
+  secret: string,
+): Promise<void> {
+  const parsed = JSON.parse(secret) as Record<string, Record<string, string>>;
+  for (const [relative, contents] of Object.entries(
+    parsed[CLAUDE_SESSION_FILES] ?? {},
+  )) {
+    const normalized = path.posix.normalize(relative.replaceAll("\\", "/"));
+    if (
+      normalized === ".." ||
+      normalized.startsWith("../") ||
+      path.posix.isAbsolute(normalized)
+    ) {
+      throw new UserCredentialError(
+        "The stored browser session contains an unsafe path",
+        "invalid_session_file",
+      );
+    }
+    const target = path.join(home, ...normalized.split("/"));
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(
+      target,
+      contents.startsWith("base64:")
+        ? Buffer.from(contents.slice("base64:".length), "base64")
+        : contents,
+      { mode: 0o600 },
+    );
+  }
+}
+
 export function assertSessionFile(
   vendor: CredentialService,
   secret: string,
@@ -960,7 +1050,12 @@ export function assertSessionFile(
   }
   const record = parsed as Record<string, unknown>;
 
-  if (vendor === "claude") {
+  if (
+    vendor === "claude" ||
+    vendor === "cursor" ||
+    vendor === "copilot" ||
+    vendor === "kiro"
+  ) {
     const files = record[CLAUDE_SESSION_FILES];
     const valid =
       typeof files === "object" &&
@@ -971,7 +1066,7 @@ export function assertSessionFile(
       );
     if (!valid) {
       throw new UserCredentialError(
-        "That is not a captured Claude sign-in. Connect Claude through the " +
+        `That is not a captured ${vendor} sign-in. Connect it through the ` +
           "dashboard rather than pasting a file.",
         "invalid_session_file",
       );
@@ -1059,6 +1154,17 @@ const ALL_CREDENTIAL_VARIABLES = [
   "OPENAI_API_KEY",
   "GEMINI_API_KEY",
   "GOOGLE_API_KEY",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "CURSOR_API_KEY",
+  "COPILOT_GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "KIRO_API_KEY",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_PROFILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
 ];
 
 /**
@@ -1102,6 +1208,13 @@ const CAPTURE_ONLY_KINDS: Partial<
   Record<VendorCliKind, readonly UserCredentialKind[]>
 > = {
   claude: ["session_file"],
+  // New Gemini connections are browser-only. Delivery remains capable of
+  // opening older API-key/session records so this does not strand an existing
+  // deployment, but the connection API no longer offers or accepts them.
+  gemini: ["api_key", "session_file"],
+  cursor: ["session_file"],
+  copilot: ["session_file"],
+  kiro: ["session_file"],
 };
 
 /** The kinds the connect UI offers, in the order it should offer them. */
@@ -1167,6 +1280,9 @@ async function readSessionSnapshot(
         "utf8",
       );
       return raw.trim();
+    }
+    if (vendor === "cursor" || vendor === "copilot" || vendor === "kiro") {
+      return await captureBrowserSession(directory);
     }
   } catch {
     // Missing, unreadable, or — for Claude — nothing worth capturing. All of
@@ -1239,7 +1355,7 @@ export async function openCredentialHome(input: {
       }
     }
   } else {
-    // Gemini has no configuration-directory variable, so the whole home is
+    // These CLIs have no configuration-directory variable, so the whole home is
     // redirected instead. That is blunter but achieves the same thing: the
     // host's ~/.gemini session is not on the path the CLI searches.
     env["HOME"] = directory;
@@ -1249,9 +1365,11 @@ export async function openCredentialHome(input: {
     // directory — it exits 55 naming this variable, before it ever attempts
     // authentication, which would otherwise surface as a confusing
     // "credential rejected".
-    env["GEMINI_CLI_TRUST_WORKSPACE"] = "true";
+    if (vendor === "gemini") {
+      env["GEMINI_CLI_TRUST_WORKSPACE"] = "true";
+    }
 
-    if (credential.kind === "session_file") {
+    if (vendor === "gemini" && credential.kind === "session_file") {
       const geminiDirectory = path.join(directory, ".gemini");
       await mkdir(geminiDirectory, { recursive: true });
       await writeFile(
@@ -1272,6 +1390,8 @@ export async function openCredentialHome(input: {
         })}\n`,
         { encoding: "utf8", mode: 0o600 },
       );
+    } else if (credential.kind === "session_file") {
+      await restoreBrowserSession(directory, credential.secret);
     }
   }
 
