@@ -876,6 +876,27 @@ const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
 const CEREMONIAL_MODELS: Partial<Record<ProviderId, string>> = {
   anthropic: "claude-haiku-4-5",
 };
+
+/**
+ * The reasoning level a throwaway line runs at, per provider.
+ *
+ * The cheap model was only half the saving. Effort stayed the account's own —
+ * {@link DEFAULT_CLAUDE_EFFORT} unless somebody changed it — so a call whose
+ * entire answer is one word out of three was still reasoning at the level
+ * somebody picked for writing code, and spent seconds thinking before saying
+ * it. That time is paid in front of a person waiting in a chat window: the
+ * unaddressed-message verdict is a ceremonial call, and until it comes back
+ * the room shows nothing at all.
+ *
+ * Same rule as the model table: only where the value is one this deployment
+ * can name with confidence. `low` is a real `--effort` the Claude CLI takes
+ * (see {@link CLAUDE_EFFORTS}); an absent entry means the account's own
+ * level, exactly as before, because a rejected effort would turn every
+ * ceremonial call into an error rather than a faster answer.
+ */
+const CEREMONIAL_EFFORTS: Partial<Record<ProviderId, string>> = {
+  anthropic: "low",
+};
 const DEFAULT_CLAUDE_EFFORT = "high";
 
 const MAX_MESSAGES = 40;
@@ -3757,17 +3778,27 @@ export class ProviderChatService {
       );
     }
     const settings = connection?.settings ?? {};
-    // A ceremonial turn overrides only the model. Effort, call sign and
-    // everything else stay the account's own, so the line still sounds like
-    // this agent — it is just not worth a frontier model to say it.
+    // A ceremonial turn overrides how hard the model works and which model
+    // does it, and nothing else. Call sign and the rest stay the account's
+    // own, so the line still sounds like this agent — it is just not worth a
+    // frontier model, or seconds of reasoning, to say it.
+    const ceremonialModel =
+      input.ceremonial === true ? CEREMONIAL_MODELS[input.provider] : undefined;
+    const ceremonialEffort =
+      input.ceremonial === true ? CEREMONIAL_EFFORTS[input.provider] : undefined;
     const ceremonial =
-      input.ceremonial === true
-        ? CEREMONIAL_MODELS[input.provider]
-        : undefined;
+      ceremonialModel === undefined && ceremonialEffort === undefined
+        ? undefined
+        : {
+            ...(ceremonialModel === undefined ? {} : { model: ceremonialModel }),
+            ...(ceremonialEffort === undefined
+              ? {}
+              : { effort: ceremonialEffort }),
+          };
     return {
       text: latest.content,
       settings:
-        ceremonial === undefined ? settings : { ...settings, model: ceremonial },
+        ceremonial === undefined ? settings : { ...settings, ...ceremonial },
       credential,
     };
   }

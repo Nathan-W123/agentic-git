@@ -2297,6 +2297,8 @@ test("a ceremonial line runs on the cheap model, and real work does not", async 
 
   const modelOf = (args: readonly string[]) =>
     args[args.indexOf("--model") + 1];
+  const effortOf = (args: readonly string[]) =>
+    args[args.indexOf("--effort") + 1];
 
   // The account chose Opus. A six-word thread title is not worth it, so a
   // ceremonial turn is answered by Haiku instead.
@@ -2308,6 +2310,9 @@ test("a ceremonial line runs on the cheap model, and real work does not", async 
     ceremonial: true,
   });
   assert.equal(modelOf(seen[0] ?? []), "claude-haiku-4-5");
+  // And it does not reason about it for seconds either. Somebody is waiting
+  // on this line in a chat window, and it is one word long.
+  assert.equal(effortOf(seen[0] ?? []), "low");
 
   // And the override reaches nothing else: a real turn is still the model the
   // account is paying for and chose on purpose.
@@ -2318,6 +2323,7 @@ test("a ceremonial line runs on the cheap model, and real work does not", async 
     messages: [{ role: "user", content: "now do the actual work" }],
   });
   assert.equal(modelOf(seen[1] ?? []), "claude-opus-5");
+  assert.equal(effortOf(seen[1] ?? []), "high");
 });
 
 test("claude's cache tokens are counted, not silently dropped", () => {

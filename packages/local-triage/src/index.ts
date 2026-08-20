@@ -24,10 +24,38 @@ export { CHATTER_PROTOTYPES, WORK_PROTOTYPES } from "./prototypes.js";
  * The model is a 22 MB sentence-embedding model (MiniLM), run on CPU through
  * ONNX. A message is embedded once — about three milliseconds — and compared
  * with two small sets of example sentences. No text leaves the process.
+ *
+ * Nothing here is ever allowed to be the reason a message waits. Loading the
+ * model is not three milliseconds — it is an import, a download the first
+ * time, and an ONNX session — and every message that arrived during it used
+ * to sit behind it, which made the first unaddressed message after a deploy
+ * the slowest one the room would ever see. Both waits are now bounded and
+ * both time out to the same safe answer the rest of this file fails to: the
+ * message goes to the agent, the load carries on in the background, and the
+ * next message finds it ready.
  */
 
 /** How far onto the chatter side a message must fall to be dropped locally. */
 export const DEFAULT_CHATTER_MARGIN = 0.2;
+
+/**
+ * How long a message will wait for a model that is still loading.
+ *
+ * Short on purpose. A message that gives up here is not mis-classified, it is
+ * un-classified: it goes on to the agent, which is exactly what happens on a
+ * deployment where the model never loads at all. Spending a person's wait on
+ * a saving that is measured in cents is the wrong trade in a chat window.
+ */
+export const DEFAULT_WARMUP_BUDGET_MS = 500;
+
+/**
+ * How long one message's own embedding may take before it is handed on.
+ *
+ * The embedding is milliseconds when the process is healthy, so this is not a
+ * tuning knob — it is a ceiling, so a wedged ONNX session degrades to "the
+ * filter is not helping" rather than to a room that has stopped answering.
+ */
+export const DEFAULT_DECISION_BUDGET_MS = 2_000;
 
 /** The model this runs on. Small, quantized, and CPU-only by design. */
 export const DEFAULT_TRIAGE_MODEL = "Xenova/all-MiniLM-L6-v2";
@@ -58,6 +86,47 @@ export interface ChatterFilterOptions {
   embedder?: Embedder;
   /** How decisive the answer has to be. Higher keeps more messages. */
   margin?: number;
+  /**
+   * How long a message waits for a model that is still loading. Anything
+   * but a finite, positive number means "wait as long as it takes".
+   */
+  warmupBudgetMs?: number;
+  /** How long a message waits for its own embedding, same convention. */
+  decisionBudgetMs?: number;
+}
+
+/**
+ * The value, or `undefined` if it did not arrive inside the budget.
+ *
+ * The work is never cancelled, only stopped waiting on: a model half loaded
+ * is worth finishing, and the message after this one gets it ready. Racing
+ * also keeps a later rejection handled, so a load that fails after its budget
+ * ran out does not surface as an unhandled rejection.
+ */
+async function within<T>(
+  work: Promise<T>,
+  budgetMs: number,
+): Promise<T | undefined> {
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) {
+    return await work;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          resolve(undefined);
+        }, budgetMs);
+        // Never a reason to hold a process open for a triage decision.
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function dot(a: readonly number[], b: readonly number[]): number {
@@ -115,6 +184,9 @@ export function createChatterFilter(
 ): ChatterFilter {
   const margin = options.margin ?? DEFAULT_CHATTER_MARGIN;
   const model = options.model ?? DEFAULT_TRIAGE_MODEL;
+  const warmupBudgetMs = options.warmupBudgetMs ?? DEFAULT_WARMUP_BUDGET_MS;
+  const decisionBudgetMs =
+    options.decisionBudgetMs ?? DEFAULT_DECISION_BUDGET_MS;
   // One load per process, shared by every channel. Started on the first
   // message rather than at boot: a deployment whose rooms are quiet should
   // not pay a second of startup for a model it is not going to use.
@@ -151,18 +223,27 @@ export function createChatterFilter(
   };
 
   return {
+    // Diagnostics wait for the real answer: "is this deployment able to
+    // filter at all" is a different question from "can it filter this
+    // message right now", and only the second one has somebody waiting on it.
     available: async () => (await ready()) !== undefined,
     readsAsChatter: async (text) => {
       const trimmed = text.trim();
       if (trimmed.length === 0) {
         return false;
       }
-      const loaded = await ready();
+      // Starts the load if it has not started, but does not stand in the
+      // message's way while it runs.
+      const loaded = await within(ready(), warmupBudgetMs);
       if (loaded === undefined) {
         return false;
       }
       try {
-        const [vector] = await loaded.embedder([trimmed]);
+        const embedded = await within(
+          loaded.embedder([trimmed]),
+          decisionBudgetMs,
+        );
+        const vector = embedded?.[0];
         if (vector === undefined) {
           return false;
         }

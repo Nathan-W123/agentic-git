@@ -113,6 +113,66 @@ test("the prototypes are embedded once, not once per message", async () => {
   assert.equal(batches, 4);
 });
 
+test("a message does not wait for a model that is still loading", async () => {
+  // Loading is an import, a download the first time, and an ONNX session.
+  // Whatever it costs, it is not allowed to be what a room is waiting on:
+  // the message goes to the agent, and the load carries on behind it.
+  let release: () => void = () => {};
+  const loaded = new Promise<void>((resolve) => {
+    release = () => {
+      resolve();
+    };
+  });
+  const embed = (texts: readonly string[]): number[][] =>
+    texts.map((text) =>
+      CHATTER_PROTOTYPES.includes(text)
+        ? [1, 0]
+        : WORK_PROTOTYPES.includes(text)
+          ? [0, 1]
+          : [0.9, 0.1],
+    );
+  const filter = createChatterFilter({
+    margin: 0.2,
+    warmupBudgetMs: 10,
+    embedder: async (texts) => {
+      // The prototype pass is the load. Messages arriving during it must not
+      // queue behind it.
+      if (CHATTER_PROTOTYPES.includes(texts[0] ?? "")) {
+        await loaded;
+      }
+      return embed(texts);
+    },
+  });
+
+  assert.equal(
+    await filter.readsAsChatter("good morning all"),
+    false,
+    "a message that arrives mid-load belongs to the agent, not to a queue",
+  );
+
+  release();
+  assert.equal(await filter.available(), true);
+  // And the work was not thrown away: the next message finds it ready.
+  assert.equal(await filter.readsAsChatter("good morning all"), true);
+});
+
+test("a message does not wait indefinitely for its own embedding", async () => {
+  const filter = createChatterFilter({
+    margin: 0.2,
+    decisionBudgetMs: 10,
+    embedder: async (texts) => {
+      if (CHATTER_PROTOTYPES.includes(texts[0] ?? "")) {
+        return texts.map((text) =>
+          CHATTER_PROTOTYPES.includes(text) ? [1, 0] : [0, 1],
+        );
+      }
+      // A wedged inference session: never answers, never fails.
+      return await new Promise<number[][]>(() => {});
+    },
+  });
+  assert.equal(await filter.readsAsChatter("good morning all"), false);
+});
+
 test("an empty message is not classified at all", async () => {
   const filter = createChatterFilter({
     margin: 0.2,

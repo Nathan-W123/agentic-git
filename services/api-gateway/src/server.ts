@@ -1582,6 +1582,20 @@ type ChannelMentionCandidate = {
   effort?: string;
 };
 
+/**
+ * What the agents in one repository have recently been asked to do.
+ *
+ * Named so a caller that has already read it can hand it on — see
+ * `agentActivityIn`, which is one full pass over the repository's tasks and
+ * is worth doing once per decision rather than once per question asked of it.
+ */
+type AgentActivity = {
+  /** What this agent has recently been asked to do here, newest first. */
+  recentObjectives: (candidate: ChannelMentionCandidate) => string[];
+  /** Whether it already has work here that has not finished. */
+  busy: (candidate: ChannelMentionCandidate) => boolean;
+};
+
 /** One human participant whose displayed channel name can be @mentioned. */
 type ChannelPersonMention = {
   userId: string;
@@ -13881,12 +13895,7 @@ export class ApiGateway {
    * behaviour that exists today, wrong only in the way described above and
    * no worse than before.
    */
-  private async agentActivityIn(repositoryId: string): Promise<{
-    /** What this agent has recently been asked to do here, newest first. */
-    recentObjectives: (candidate: ChannelMentionCandidate) => string[];
-    /** Whether it already has work here that has not finished. */
-    busy: (candidate: ChannelMentionCandidate) => boolean;
-  }> {
+  private async agentActivityIn(repositoryId: string): Promise<AgentActivity> {
     const agentIdByAdapter = new Map<string, string>();
     const configured = await Promise.resolve(
       this.options.operations.listAgents?.(),
@@ -15860,16 +15869,25 @@ export class ApiGateway {
     if (await this.chatterFilter.readsAsChatter(content)) {
       return;
     }
-    const context = await this.autoClaimContext({
-      repositoryId,
-      viewerId: senderId,
-      request: { authorId: senderId, content },
-    });
+    // The room's recent lines and its recent work are two independent reads,
+    // and neither depends on the other's answer. Run one after the other and
+    // their round trips are spent in front of somebody watching an empty
+    // channel, on top of the model call that follows; run them together and
+    // only the slower of the two is.
+    const [context, activity] = await Promise.all([
+      this.autoClaimContext({
+        repositoryId,
+        viewerId: senderId,
+        request: { authorId: senderId, content },
+      }),
+      this.agentActivityIn(repositoryId),
+    ]);
     const chosen = await this.chooseAutoClaimCandidate({
       repositoryId,
       content,
       senderId,
       candidates,
+      activity,
       ...(context === undefined ? {} : { context }),
     });
     if (chosen === undefined) {
@@ -16416,6 +16434,15 @@ export class ApiGateway {
     candidates: ChannelMentionCandidate[];
     /** Bounded room history used only as a secondary relevance signal. */
     context?: string;
+    /**
+     * The repository's recent work, when the caller already has it.
+     *
+     * Read here when absent, so every other caller is unchanged. The
+     * unaddressed path passes it because it reads the room's history at the
+     * same time, and two serial database passes in front of a model call is
+     * two more waits than that decision needs.
+     */
+    activity?: AgentActivity;
   }): Promise<ChannelMentionCandidate | undefined> {
     const { repositoryId, content, senderId, candidates } = input;
     const dispatchable = candidates.filter(
@@ -16431,7 +16458,8 @@ export class ApiGateway {
     // (e.g. real recent-files-per-agent) is used here, and
     // `recentObjectivesFor` for how it is keyed per agent rather than per
     // person.
-    const { recentObjectives, busy } = await this.agentActivityIn(repositoryId);
+    const { recentObjectives, busy } =
+      input.activity ?? (await this.agentActivityIn(repositoryId));
     const direct = dispatchable
       .map((candidate) => ({
         candidate,
