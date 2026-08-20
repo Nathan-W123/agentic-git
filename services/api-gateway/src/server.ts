@@ -1886,11 +1886,17 @@ export function autoClaimProposal(content: string): string | undefined {
 /**
  * What an agent decided to do about a message nobody addressed to it.
  *
- * Three outcomes rather than two, because the middle one is most of real
- * conversation. "The gray background looks rough" is neither a request nor
- * chatter: it is a person noticing something, and the useful answer is to
- * name what would be done about it and ask. Offering costs one line; acting
- * on it uncalled costs somebody's usage, and ignoring it wastes the remark.
+ * Three outcomes rather than two, because the middle one is where a message
+ * that is genuinely unclear belongs — not where every unspelled-out detail
+ * belongs. "The gray background looks rough" is neither a request nor
+ * chatter: it is a person noticing something, and it is closer to "act" now
+ * than it once was — a reasonable colour is a judgment call, not a fork in
+ * the work, and the agent is expected to make it rather than ask. What still
+ * offers is a message that could mean two substantially different pieces of
+ * work, or that touches something costly or hard to undo. Offering costs one
+ * line; acting uncalled for costs somebody's usage; ignoring wastes the
+ * remark — and of the three, an offer nobody answers is the one where real
+ * work simply never happens, which is why the bar for reaching it went up.
  */
 export type AutoClaimVerdict =
   | { verdict: "act" }
@@ -15751,14 +15757,20 @@ export class ApiGateway {
    * through `dispatchOneMention` — the same method and the same `submitTask`
    * call an explicit @mention uses.
    *
-   * Three outcomes, decided by the agent rather than by a vocabulary:
+   * Three outcomes, decided by the agent rather than by a vocabulary, and
+   * biased toward the first of them:
    *
-   * - Plainly a request, plainly clear: it is taken, and nothing is asked.
-   *   The round trip buys nothing when there is no doubt to resolve.
-   * - Work is implied but the request is not made, or is too vague to start
-   *   on: the agent proposes the specific thing it would do and waits for a
-   *   yes. Saying yes starts the work in its question round — the agent asks
-   *   what it would otherwise have guessed at, exactly as `/ask` does.
+   * - A real problem or ask, however it is phrased — direct or observed,
+   *   fully specified or not: it is taken, with the agent's own judgment
+   *   filling in whatever was left unsaid. Asking first when a reasonable
+   *   default exists trades a cheap follow-up message for the certainty of
+   *   nothing happening if the offer goes unanswered, which is the worse
+   *   trade in most of a channel's ordinary traffic.
+   * - Genuinely unclear which of several different things was meant, or the
+   *   work is costly or hard to undo: the agent proposes the specific thing
+   *   it would do and waits for a yes. Saying yes starts the work in its
+   *   question round — the agent asks what it would otherwise have had to
+   *   guess at, exactly as `/ask` does.
    * - Anything else: silence.
    *
    * Silence is still the expected common case. The best-scoring candidate
@@ -16108,20 +16120,38 @@ export class ApiGateway {
       "You are an agent in a team chat for a software project. Someone " +
       "wrote the current message below. Nobody named you in it. Decide " +
       "what to do about it.\n\n" +
+      "Lean toward acting. A capable teammate who overheard this would " +
+      "usually just go do it rather than ask first, filling in whatever " +
+      "was not spelled out with their own reasonable judgment — that is " +
+      "the standard to match. Asking is for when you would otherwise be " +
+      "guessing at something that could send the work in a genuinely " +
+      "different direction, not for every detail the message left " +
+      "unsaid.\n\n" +
       "Reply with exactly one of these three lines, and nothing else:\n\n" +
       "ACT\n" +
-      "  Use this when the message plainly asks for work on the " +
-      "repository and says clearly enough what it wants that you could " +
-      "start now. Acting spends the account's usage, so use it only when " +
-      "there is no real doubt about what was asked for. A request made to " +
-      "someone, anyone, or the room at large is made to you as well, even " +
-      "with no @mention in it.\n\n" +
+      "  The default whenever the message names a real problem or " +
+      "something to build, fix, change, or investigate on the repository " +
+      "— whether it is phrased as a direct request (\"fix the retry " +
+      "loop\") or as an observation (\"the retry loop keeps failing\"). " +
+      "Use your own judgment for whatever it leaves unsaid, the way a " +
+      "capable teammate would, rather than asking first: a reasonable " +
+      "default that turns out wrong costs a follow-up message, while an " +
+      "unanswered offer costs the work never happening at all. Acting " +
+      "still spends the account's usage, so it wants a real problem or a " +
+      "real ask behind it — not a compliment, a status question, or " +
+      "chatter — but not every detail nailed down. A request made to " +
+      "someone, anyone, or the room at large is made to you as well, " +
+      "even with no @mention in it.\n\n" +
       "OFFER: <one short yes/no question>\n" +
-      "  Use this when the message points at work without asking for it, " +
-      "or asks for something too vague to start on. Your question must " +
-      "name the specific thing you would do, so it can be answered with " +
-      "yes. Do not ask for the details you would need to do it — you get " +
-      "to ask those afterwards, once somebody says yes.\n\n" +
+      "  Reserve this for when guessing is genuinely the wrong move, not " +
+      "merely when something was left unspecified: the message could " +
+      "mean two or more substantially different pieces of work and " +
+      "picking wrong would mean redoing it, or it touches something " +
+      "costly or hard to undo — deleting data, rewriting something " +
+      "others depend on, a migration nobody has agreed to. Your question " +
+      "must name the specific thing you would do, so it can be answered " +
+      "with yes. Do not ask for the details you would need to do it — " +
+      "you get to ask those afterwards, once somebody says yes.\n\n" +
       "IGNORE\n" +
       "  Use this for everything else: greetings, people talking to each " +
       "other, opinions with nothing to do, questions about the status of " +

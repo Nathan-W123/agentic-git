@@ -13524,3 +13524,69 @@ test("a failed classify attempt gets a second try before the message goes quiet"
     );
   assert.equal(attempts.length, 2, "exactly one retry, not an unbounded loop");
 });
+
+/**
+ * The instruction actually says what the product wants: act on its own
+ * judgment by default, and reserve asking for a real fork in the work.
+ *
+ * A prompt is not code a type checker holds still — nothing stops a later
+ * edit from quietly softening "lean toward acting" back into "when in
+ * doubt, ask," and the softened version would still pass every dispatch
+ * test in this file, because those all set the verdict directly rather than
+ * reading it from a real model. This is the one guard that actually reads
+ * the words the model is given.
+ */
+test("the classify prompt is biased toward acting on its own judgment", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "leans-toward-acting");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("ACT");
+  const before = runtime.chatPrompts.length;
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "it looks like the token usage is wrong" },
+  });
+  await waitFor(
+    async () => runtime.chatPrompts.length > before,
+    "the classify call never ran",
+  );
+  const asked =
+    runtime.chatPrompts
+      .slice(before)
+      .map((entry) => entry.prompt)
+      .find((prompt) =>
+        /Reply with exactly one of these three lines/u.test(prompt),
+      ) ?? "";
+
+  // The framing that sets the default.
+  assert.match(asked, /Lean toward acting/u);
+  assert.match(
+    asked,
+    /fill(?:ing)? in whatever was not spelled out with their own reasonable judgment/u,
+  );
+  // ACT no longer requires the message to spell out what it wants — an
+  // observation is enough, and unspecified detail is not by itself a reason
+  // to offer instead.
+  assert.match(asked, /whether it is phrased as a direct request[\s\S]{0,40}or as an observation/u);
+  assert.match(
+    asked,
+    /not merely when something was left unspecified/u,
+  );
+  // What still offers: real ambiguity between different pieces of work, or
+  // stakes high enough that guessing is the wrong instinct even with a
+  // guess in hand — not "some detail is missing."
+  assert.match(
+    asked,
+    /could mean two or more substantially different pieces of work/u,
+  );
+  assert.match(asked, /costly or hard to undo/u);
+  // The guardrails this replaced nothing about are still here.
+  assert.match(asked, /do not interrupt their conversation/u);
+});
