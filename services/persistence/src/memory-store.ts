@@ -838,6 +838,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       phase: input.phase,
       inputTokens: input.inputTokens ?? 0,
       outputTokens: input.outputTokens ?? 0,
+      freshTokens: input.freshTokens,
       totalTokens: input.totalTokens,
       recordedAt: input.recordedAt,
     };

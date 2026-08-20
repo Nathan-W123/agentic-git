@@ -2769,6 +2769,9 @@ export class Coordinator {
               ...(usage.outputTokens === undefined
                 ? {}
                 : { outputTokens: usage.outputTokens }),
+              ...(usage.freshTokens === undefined
+                ? {}
+                : { freshTokens: usage.freshTokens }),
               recordedAt: new Date().toISOString(),
             });
           }

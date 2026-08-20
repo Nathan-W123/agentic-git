@@ -1080,6 +1080,15 @@ export const MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX password_resets_by_token ON password_resets(token_hash)`,
     ],
   },
+  {
+    // Human-facing activity excludes cached context replays. Nullable keeps
+    // historical aggregate-only rows distinguishable from a genuine zero.
+    version: 37,
+    name: "fresh-token-usage",
+    statements: [
+      `ALTER TABLE token_usage ADD COLUMN fresh_tokens BIGINT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

@@ -371,6 +371,8 @@ export interface AgentTokenUsage {
   totalTokens: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Uncached input plus output, when the provider exposes its cache split. */
+  freshTokens?: number;
 }
 
 export interface AgentAdapter {

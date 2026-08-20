@@ -99,6 +99,33 @@ test("a backlog collapses into one banner", async () => {
   assert.match(app, /if \(frame\?\.type === "connected"\) \{\s*beginCatchUp\(\);/u);
 });
 
+test("a replay settles before it redraws the screen", async () => {
+  const app = await publicFile("app.js");
+
+  // Replays arrive in batches roughly 500ms apart. Both redraw paths have to
+  // use the longer replay window, or the timer fires between every batch and
+  // a phone appears to reload once a second until all history is delivered.
+  assert.match(
+    app,
+    /function replayAwareDelay\(liveDelay\) \{\s*return catchingUp \? BACKLOG_SETTLE_MS : liveDelay;\s*\}/u,
+  );
+  assert.match(
+    app,
+    /replayAwareDelay\(CHANNEL_FRAME_COALESCE_MS\)/u,
+    "the channel should reconcile once after replay",
+  );
+  assert.match(
+    app,
+    /replayAwareDelay\(CONTEXT_REFRESH_MS\)/u,
+    "the app context should refresh once after replay",
+  );
+  assert.match(
+    app,
+    /if \(frame\?\.type === "connected"\) \{\s*beginCatchUp\(\);\s*return;/u,
+    "a handshake without any changed data should not redraw the app",
+  );
+});
+
 test("a banner can be closed, and only one is up at a time", async () => {
   const ui = await publicFile("ui.js");
   const styles = await publicFile("styles.css");

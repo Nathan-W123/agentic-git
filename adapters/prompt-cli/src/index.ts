@@ -2065,7 +2065,11 @@ export class PromptCliAdapter implements AgentAdapter {
         outputTokens: current.outputTokens + entry.outputTokens,
       });
     }
-    return [...totals].map(([phase, sums]) => ({ phase, ...sums }));
+    return [...totals].map(([phase, sums]) => ({
+      phase,
+      ...sums,
+      freshTokens: sums.inputTokens + sums.outputTokens,
+    }));
   }
 
   /**

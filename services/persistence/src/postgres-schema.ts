@@ -874,4 +874,12 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX password_resets_by_token ON password_resets(token_hash)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 37,
+    name: "fresh-token-usage",
+    statements: [
+      `ALTER TABLE token_usage ADD COLUMN fresh_tokens BIGINT`,
+    ],
+  },
 ];

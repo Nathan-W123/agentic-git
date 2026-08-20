@@ -6422,6 +6422,15 @@ const NEWS_COALESCE_MS = 350;
 const CHANNEL_FRAME_COALESCE_MS = 120;
 
 /**
+ * How quickly an ordinary event re-reads the rest of the control plane.
+ *
+ * A live frame should become visible promptly. A replay is different: the
+ * event hub delivers its history in batches, so refreshing between batches
+ * repeatedly replaces the whole mobile screen while the app is opening.
+ */
+const CONTEXT_REFRESH_MS = 400;
+
+/**
  * How long news waits while the stream is still handing over a backlog.
  *
  * The hub drains from the cursor in batches of five hundred, one poll apart,
@@ -6456,6 +6465,14 @@ let catchUpTimer;
  * watching. It changes only how long news waits before it speaks.
  */
 let catchingUp = false;
+
+/**
+ * Lets a replay settle before work that redraws the screen, while preserving
+ * the shorter delay for an event that happened while the app was already up.
+ */
+function replayAwareDelay(liveDelay) {
+  return catchingUp ? BACKLOG_SETTLE_MS : liveDelay;
+}
 
 function beginCatchUp() {
   catchingUp = true;
@@ -6603,11 +6620,13 @@ async function boot() {
   connectSocket((frame) => {
     // The hub's handshake, and the only warning that a replay is about to
     // start. Everything between here and the stream going quiet is history
-    // this browser missed rather than something happening now. Not returned
-    // on: this frame has always fallen through to the refresh at the bottom,
-    // which is what repaints a screen that has been away.
+    // this browser missed rather than something happening now. The handshake
+    // itself carries no changed data, and boot/resume already loaded context;
+    // letting it fall through would redraw the app on every reconnect even
+    // when there is nothing to catch up on.
     if (frame?.type === "connected") {
       beginCatchUp();
+      return;
     }
     // Transient, and never part of the audit replay — see `broadcastTransient`
     // on the hub. Re-rendered immediately so the dots appear while the other
@@ -6714,7 +6733,7 @@ async function boot() {
           openPromptedThread(channelRepositoryId);
           render();
         });
-      }, CHANNEL_FRAME_COALESCE_MS);
+      }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS));
     }
     // The audit half of the same news. The transient frame above is what
     // arrives while somebody is watching; this is what a browser coming back
@@ -6763,7 +6782,10 @@ async function boot() {
     // The stream tells us something changed; the store stays the source of
     // truth, so re-read rather than patching state from the frame.
     window.clearTimeout(state.timer);
-    state.timer = window.setTimeout(() => void refresh({ quiet: true }), 400);
+    state.timer = window.setTimeout(
+      () => void refresh({ quiet: true }),
+      replayAwareDelay(CONTEXT_REFRESH_MS),
+    );
   });
 
   window.clearInterval(state.poll);

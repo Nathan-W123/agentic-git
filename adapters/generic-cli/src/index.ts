@@ -308,6 +308,36 @@ interface CliSession {
 }
 
 /**
+ * One `done` token report, in the shape the coordinator stores.
+ *
+ * The cache-free figure is claimed only when the report's total exceeds its
+ * two sides: the excess is cache traffic, so the agent is accounting for
+ * cache separately and its input is the uncached part. When the total is
+ * exactly input plus output there is no telling a run that used no cache
+ * from one that folded its cache into the input figure, and calling the
+ * second fresh is what made a long conversation's activity read in the
+ * millions. Those reports carry no fresh figure and count as a lower bound.
+ */
+export function executionTokenUsage(tokens: {
+  total: number;
+  input?: number;
+  output?: number;
+}): AgentTokenUsage {
+  const { total, input, output } = tokens;
+  const cacheAccountedSeparately =
+    input !== undefined && output !== undefined && total > input + output;
+  return {
+    phase: "execution",
+    totalTokens: total,
+    ...(input === undefined ? {} : { inputTokens: input }),
+    ...(output === undefined ? {} : { outputTokens: output }),
+    ...(cacheAccountedSeparately
+      ? { freshTokens: (input ?? 0) + (output ?? 0) }
+      : {}),
+  };
+}
+
+/**
  * Provider-neutral process driver for command-line coding agents.
  *
  * The agent speaks newline-delimited JSON on stdin and stdout. See
@@ -571,16 +601,7 @@ export class GenericCliAdapter implements AgentAdapter {
         explanation: done.explanation,
       };
       if (done.tokens !== undefined) {
-        record.tokenUsage.push({
-          phase: "execution",
-          totalTokens: done.tokens.total,
-          ...(done.tokens.input === undefined
-            ? {}
-            : { inputTokens: done.tokens.input }),
-          ...(done.tokens.output === undefined
-            ? {}
-            : { outputTokens: done.tokens.output }),
-        });
+        record.tokenUsage.push(executionTokenUsage(done.tokens));
       }
       this.emitEvent(record, {
         event: "completed",

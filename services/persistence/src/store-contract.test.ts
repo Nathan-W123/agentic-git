@@ -2680,11 +2680,13 @@ for (const backend of backends) {
         phase: "planning",
         inputTokens: 900,
         outputTokens: 100,
+        freshTokens: 250,
         totalTokens: 1_000,
         recordedAt: "2026-01-01T00:01:00.000Z",
       });
       assert.equal(updated.totalTokens, 1_000);
       assert.equal(updated.inputTokens, 900);
+      assert.equal(updated.freshTokens, 250);
 
       await store.recordTokenUsage({
         ...base,
@@ -2715,6 +2717,49 @@ for (const backend of backends) {
         1,
       );
       assert.deepEqual(await store.listTokenUsage({ taskId: "task_other" }), []);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a token report without a cache split clears the old one`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const base = {
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryId: REPOSITORY.id,
+        taskId: TASK.id,
+        leaseId: "lease_split",
+        agentId: TASK.agentId,
+        usageKey: "lease_split:execution",
+        phase: "execution",
+      } as const;
+
+      await store.recordTokenUsage({
+        ...base,
+        inputTokens: 2_000,
+        outputTokens: 500,
+        freshTokens: 2_500,
+        totalTokens: 25_000,
+        recordedAt: "2026-01-01T00:00:00.000Z",
+      });
+      // The next snapshot of the same phase reports a larger total and no
+      // split. Keeping the earlier fresh figure would leave it beside a total
+      // that has since grown — stale, not a smaller truth — and the room's
+      // activity line would undercount while claiming to be complete.
+      const cleared = await store.recordTokenUsage({
+        ...base,
+        totalTokens: 40_000,
+        recordedAt: "2026-01-01T00:01:00.000Z",
+      });
+      assert.equal(cleared.totalTokens, 40_000);
+      assert.equal(cleared.freshTokens, undefined);
+
+      const stored = await store.listTokenUsage({ leaseId: "lease_split" });
+      assert.equal(stored.length, 1);
+      assert.equal(stored[0]?.freshTokens, undefined);
     } finally {
       await store.close();
       await cleanup();

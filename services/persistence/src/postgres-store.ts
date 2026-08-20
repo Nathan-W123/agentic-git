@@ -1149,6 +1149,10 @@ export class PostgresCoordinationStore implements CoordinationStore {
       phase: row["phase"] as TokenUsageRecord["phase"],
       inputTokens: Number(row["input_tokens"]),
       outputTokens: Number(row["output_tokens"]),
+      freshTokens:
+        row["fresh_tokens"] === null || row["fresh_tokens"] === undefined
+          ? undefined
+          : Number(row["fresh_tokens"]),
       totalTokens: Number(row["total_tokens"]),
       recordedAt: String(row["recorded_at"]),
     };
@@ -1158,17 +1162,19 @@ export class PostgresCoordinationStore implements CoordinationStore {
     input: RecordTokenUsageInput,
   ): Promise<TokenUsageRecord> {
     // Upsert for the same reason the SQLite backend does: reports carry a
-    // running total, so the newest one replaces its predecessor.
+    // running total, so the newest one replaces its predecessor — including
+    // clearing `fresh_tokens` when the newest report has no cache split.
     const rows = (
       await this.query(
         `INSERT INTO token_usage
            (id, usage_key, project_id, repository_id, task_id, lease_id,
             run_id, agent_id, phase, input_tokens, output_tokens,
-            total_tokens, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            fresh_tokens, total_tokens, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (usage_key) DO UPDATE SET
            input_tokens = EXCLUDED.input_tokens,
            output_tokens = EXCLUDED.output_tokens,
+           fresh_tokens = EXCLUDED.fresh_tokens,
            total_tokens = EXCLUDED.total_tokens,
            run_id = COALESCE(EXCLUDED.run_id, token_usage.run_id),
            recorded_at = EXCLUDED.recorded_at
@@ -1185,6 +1191,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
           input.phase,
           input.inputTokens ?? 0,
           input.outputTokens ?? 0,
+          input.freshTokens ?? null,
           input.totalTokens,
           input.recordedAt,
         ],

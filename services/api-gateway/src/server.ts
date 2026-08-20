@@ -32,6 +32,7 @@ import type {
   StoredRepository,
   SubmittedTask,
   SubmittedTaskStatus,
+  TokenUsageRecord,
 } from "@coord/persistence";
 import {
   buildAuditPrompt,
@@ -463,6 +464,52 @@ function changedFilesFrom(
       Number.isFinite(removed);
     return [{ path, status, ...(counted ? { added, removed } : {}) }];
   });
+}
+
+/**
+ * The fresh figure to store for one reported phase, if there is an honest one.
+ *
+ * A reporter that gives the split but no explicit fresh figure has still said
+ * enough whenever its total exceeds the two sides: the excess is cache
+ * traffic, so input plus output is the uncached part. Where the total is
+ * exactly the two sides, the split may have cache folded into it — that
+ * ambiguity is what made a long conversation read in the millions — and the
+ * row is left without a fresh figure so it counts only as a lower bound.
+ * A figure larger than the billed total is impossible and is discarded.
+ */
+export function reportedFreshTokens(
+  reported: number | undefined,
+  inputTokens: number | undefined,
+  outputTokens: number | undefined,
+  total: number,
+): number | undefined {
+  const fresh =
+    reported ??
+    (inputTokens !== undefined &&
+    outputTokens !== undefined &&
+    total > inputTokens + outputTokens
+      ? inputTokens + outputTokens
+      : undefined);
+  return fresh === undefined || fresh > total ? undefined : fresh;
+}
+
+/**
+ * The part of one usage row that was certainly new work.
+ *
+ * `freshTokens` is uncached input plus output, and is the figure the room's
+ * activity line is built from. Rows written before the split existed, and
+ * reporters that only ever give an aggregate, have none: their output is the
+ * only part that is certainly not a replay of cached context, so it stands as
+ * a lower bound rather than letting the billed total back in. The clamp keeps
+ * an inconsistent report from reading either below that bound or above what
+ * was billed, which is what a `fresh` larger than `total` would otherwise do.
+ */
+export function freshUsageTokens(entry: TokenUsageRecord): number {
+  const fresh = Math.max(
+    entry.freshTokens ?? entry.outputTokens,
+    entry.outputTokens,
+  );
+  return Math.min(fresh, entry.totalTokens);
 }
 
 /**
@@ -7125,22 +7172,27 @@ export class ApiGateway {
       // Fresh tokens, not the billed total. A cached prompt prefix is re-read
       // every turn, so summing `totalTokens` counted the same context once per
       // turn of every task in the room and the line read in the millions
-      // against an afternoon's work. Input plus output is the figure that
-      // grows with what was actually said, and it is the same convention the
-      // per-agent context reading uses. Budgets still enforce against the
-      // billed total, where cache traffic belongs. A reporter that gave no
-      // split at all falls back to its total rather than counting as zero.
-      const tokens = (
-        await this.options.store.listTokenUsage({ repositoryId })
-      ).reduce((sum, entry) => {
-        const fresh = entry.inputTokens + entry.outputTokens;
-        return sum + (fresh > 0 ? fresh : entry.totalTokens);
-      }, 0);
+      // against an afternoon's work. The explicit fresh figure also separates
+      // new cache-aware records from historical rows whose `inputTokens`
+      // already included their cache. For those legacy or aggregate-only rows,
+      // output is the only certainly fresh part and is shown as a lower bound.
+      // Budgets still enforce against the billed total, where cache belongs.
+      const usage = await this.options.store.listTokenUsage({ repositoryId });
+      const tokens = usage.reduce(
+        (sum, entry) => sum + freshUsageTokens(entry),
+        0,
+      );
+      const tokensIncomplete = usage.some(
+        (entry) =>
+          entry.freshTokens === undefined &&
+          entry.totalTokens > entry.outputTokens,
+      );
       this.sendJson(response, 200, {
         messages: messages.length,
         replies,
         capped: messages.length >= 200,
         tokens,
+        tokensIncomplete,
       });
       return;
     }
@@ -16924,6 +16976,14 @@ export class ApiGateway {
           ? value
           : undefined;
       };
+      const inputTokens = count("inputTokens");
+      const outputTokens = count("outputTokens");
+      const freshTokens = reportedFreshTokens(
+        count("freshTokens"),
+        inputTokens,
+        outputTokens,
+        total,
+      );
       await this.options.store.recordTokenUsage({
         // One row per lease and phase, carrying the running total: the worker
         // re-reports a larger figure as it goes, and summing those snapshots
@@ -16937,12 +16997,13 @@ export class ApiGateway {
         leaseId: lease.id,
         agentId: task?.agentId ?? lease.workerId,
         phase,
-        ...(count("inputTokens") === undefined
-          ? {}
-          : { inputTokens: count("inputTokens")! }),
-        ...(count("outputTokens") === undefined
-          ? {}
-          : { outputTokens: count("outputTokens")! }),
+        ...(inputTokens === undefined ? {} : { inputTokens }),
+        ...(outputTokens === undefined ? {} : { outputTokens }),
+        // Reports carry a running total, so an absent fresh figure leaves
+        // the field off and the store clears what it held: an earlier
+        // snapshot beside a total that has since grown is stale, not a
+        // smaller truth.
+        ...(freshTokens === undefined ? {} : { freshTokens }),
         totalTokens: total,
         recordedAt: at,
       });

@@ -17,7 +17,11 @@ import {
   type WorkspaceSandbox,
 } from "@coord/workspace-manager";
 
-import { AgentProtocolError, GenericCliAdapter } from "./index.js";
+import {
+  AgentProtocolError,
+  GenericCliAdapter,
+  executionTokenUsage,
+} from "./index.js";
 
 /**
  * A minimal JSONL agent used as the process under test. Its behavior is
@@ -214,6 +218,45 @@ async function createWorkspace(fixture: Fixture): Promise<TaskWorkspace> {
     ),
   });
 }
+
+test("claims a cache-free token figure only when the agent split its cache out", () => {
+  // A report whose total exceeds its two sides is accounting for cached
+  // context separately, so input plus output is the part that was new work.
+  assert.deepEqual(
+    executionTokenUsage({ total: 25_000, input: 2_000, output: 500 }),
+    {
+      phase: "execution",
+      totalTokens: 25_000,
+      inputTokens: 2_000,
+      outputTokens: 500,
+      freshTokens: 2_500,
+    },
+  );
+  // A total that is exactly the two sides could be a run with no cache or one
+  // that folded its cache into the input figure. Calling the second fresh is
+  // what made an afternoon's work read in the millions, so nothing is claimed
+  // and the room counts the row as a lower bound instead.
+  assert.deepEqual(
+    executionTokenUsage({ total: 2_500, input: 2_000, output: 500 }),
+    {
+      phase: "execution",
+      totalTokens: 2_500,
+      inputTokens: 2_000,
+      outputTokens: 500,
+    },
+  );
+  // A bare total is recorded as a bare total; a missing half is never
+  // invented as a zero.
+  assert.deepEqual(executionTokenUsage({ total: 900 }), {
+    phase: "execution",
+    totalTokens: 900,
+  });
+  assert.deepEqual(executionTokenUsage({ total: 900, output: 100 }), {
+    phase: "execution",
+    totalTokens: 900,
+    outputTokens: 100,
+  });
+});
 
 test("drives a real child process from plan through changeset", async () => {
   const fixture = await createFixture();
