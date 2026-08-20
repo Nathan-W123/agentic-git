@@ -4380,10 +4380,10 @@ function threadReplies(root, repositoryId) {
           : summaryBlock(turn.prompt, repositoryId)
       }${thinking.html}${thinking.visible
         .map((reply) =>
-          // A plan is a document, and the thread shows a card that opens it
-          // rather than the document itself — see `planCard`.
+          // A plan is a document, and the thread shows a link that opens it
+          // rather than the document itself — see `planLink`.
           reply.kind === "plan"
-            ? planCard(root, reply)
+            ? planLink(root)
             : summaryBlock(reply, repositoryId),
         )
         .join("")}`;
@@ -4400,7 +4400,7 @@ function threadReplies(root, repositoryId) {
 }
 
 /**
- * A plan, in the thread, as the one line that opens it.
+ * A plan, in the thread, as the simple link that opens it.
  *
  * The plan the agent wrote is a page of headings — what the request means,
  * the approach, the files, the steps, the risks. Pasted into a thread it
@@ -4409,28 +4409,15 @@ function threadReplies(root, repositoryId) {
  * plan exists, and the plan itself opens beside the room where there is width
  * to read it.
  *
- * Named by its first heading rather than by "Plan", when it has one: two
- * plans in one thread — the first and the one written after somebody asked
- * for a change — are otherwise two identical cards.
+ * The plan opens automatically when it first lands, but this remains as the
+ * quiet manual way back to it after the panel has been closed.
  */
-function planCard(root, reply) {
+function planLink(root) {
   const open = state.activePlan === root.id;
-  const lines = String(reply.content ?? "")
-    .split("\n")
-    .map((line) => line.replace(/^#+\s*/u, "").trim())
-    .filter((line) => line.length > 0);
-  const summary = lines[0] ?? "";
-  return `<button type="button" class="plan-card${open ? " active" : ""}"
+  return `<button type="button" class="plan-link${open ? " active" : ""}"
     data-act="plan-open" data-value="${esc(root.id)}"
     aria-pressed="${String(open)}">
-    ${icon("file")}
-    <span class="pc-text">
-      <span class="pc-title">${esc(threadTitle(root) || "Plan")}</span>
-      <span class="pc-sub">${esc(
-        summary.length > 90 ? `${summary.slice(0, 90)}…` : summary,
-      )}</span>
-    </span>
-    <span class="pc-open">${open ? "Showing" : "Open plan"}</span>
+    ${open ? "Plan open" : "Open plan"}
   </button>`;
 }
 

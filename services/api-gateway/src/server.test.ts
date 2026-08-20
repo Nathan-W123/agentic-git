@@ -5683,10 +5683,9 @@ test("a command and a mention work together, and /plan holds the run", async (t)
     root?.replies[0]?.content,
     "I've taken this task and I'm working on the plan.",
   );
-  assert.match(
-    (root?.replies ?? []).map((reply) => reply.content).join("\n"),
-    /nothing is running yet/u,
-  );
+  const replies = (root?.replies ?? []).map((reply) => reply.content).join("\n");
+  assert.doesNotMatch(replies, /That's the plan/u);
+  assert.doesNotMatch(replies, /Reply "go ahead" and I'll start/u);
   // The plan itself is a reply of its own kind, not another agent remark:
   // that mark is what lets the browser keep the document out of the thread
   // and open it in its own panel beside the room.
