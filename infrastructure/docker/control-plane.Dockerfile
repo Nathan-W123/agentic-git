@@ -146,12 +146,44 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
 # executables to the unprivileged runtime user. Their sign-in state is never
 # stored in this layer; the web flow always redirects HOME to a per-user
 # temporary directory and encrypts the captured session afterwards.
-RUN curl -fsSL https://cursor.com/install | bash \
-  && curl -fsSL https://cli.kiro.dev/install | bash \
-  && install -m 0755 /root/.local/bin/agent /usr/local/bin/agent \
-  && install -m 0755 /root/.local/bin/kiro-cli /usr/local/bin/kiro-cli \
-  && agent --version \
-  && kiro-cli --version
+#
+# Neither installer takes a version pin the way the npm block above does —
+# `cursor.com/install` is a live script that embeds whatever build Cursor
+# currently ships, and that script then fetches the real package from a
+# *second* host (downloads.cursor.com). That is two more points, beyond
+# npm's own, where somebody else's server having a bad minute breaks this
+# build — and unlike the npm CLIs, a broken Cursor or Kiro install was
+# failing the entire image: the API gateway and web app, which have nothing
+# to do with either vendor, would not deploy because a CDN neither of them
+# calls was briefly unreachable.
+#
+# So each install is retried, and a Cursor or Kiro that still cannot be
+# reached does not fail the build. That is not a degraded deployment:
+# `detectBrowserCli` already answers "No usable ... CLI was found on this
+# host" when the binary is absent — the same answer a fresh host gives
+# before any vendor CLI is configured — so the connect screen reports that
+# one option unavailable instead of the container never booting.
+RUN for attempt in 1 2 3; do \
+      curl -fsSL https://cursor.com/install | bash && break; \
+      echo "Cursor CLI install failed (attempt ${attempt}/3)"; \
+      [ "${attempt}" = 3 ] || sleep 5; \
+    done; \
+    for attempt in 1 2 3; do \
+      curl -fsSL https://cli.kiro.dev/install | bash && break; \
+      echo "Kiro CLI install failed (attempt ${attempt}/3)"; \
+      [ "${attempt}" = 3 ] || sleep 5; \
+    done; \
+    if [ -f /root/.local/bin/agent ]; then \
+      install -m 0755 /root/.local/bin/agent /usr/local/bin/agent && agent --version; \
+    else \
+      echo "Cursor CLI did not install; continuing without it"; \
+    fi; \
+    if [ -f /root/.local/bin/kiro-cli ]; then \
+      install -m 0755 /root/.local/bin/kiro-cli /usr/local/bin/kiro-cli && kiro-cli --version; \
+    else \
+      echo "Kiro CLI did not install; continuing without it"; \
+    fi; \
+    true
 # COORD_PORT is deliberately not set here. A platform that assigns a port
 # passes it as PORT, and pinning COORD_PORT in the image would outrank it —
 # leaving the container listening where the router is not looking. Unset, the
