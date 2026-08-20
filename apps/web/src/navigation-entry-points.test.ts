@@ -12,8 +12,9 @@ import { defaultPublicDirectory } from "./assets.js";
  * screen, its state and even its action handler all existed and shipped, and
  * nothing anywhere on any screen navigated to them. Notifications could only
  * be reached by typing its hash; My Agents was offered only while you had no
- * agents; and a notification, once clicked, marked itself read and left
- * finding the failure to you.
+ * agents (it is reached by name from the quick switcher now, and no longer
+ * sits in the account menu); and a notification, once clicked, marked itself
+ * read and left finding the failure to you.
  *
  * Pinned the way the rest of the browser surface is pinned — by the shape of
  * the source — because the dashboard ships as plain ES modules with no
@@ -35,9 +36,9 @@ function slice(source: string, from: string, to: string): string {
 test("the account menu is the door into every screen that had none", async () => {
   const app = await publicFile("app.js");
 
-  // The three destinations that were live and unreachable. One list, because
-  // the topbar avatar and the channel sidebar's foot open the same menu — a
-  // single change point for all three.
+  // The destinations that were live and unreachable. One list, because the
+  // topbar avatar and the channel sidebar's foot open the same menu — a
+  // single change point for both.
   const destinations = slice(
     app,
     "function accountDestinations() {",
@@ -45,7 +46,9 @@ test("the account menu is the door into every screen that had none", async () =>
   );
   assert.match(destinations, /act: "go-notifications"/u);
   assert.match(destinations, /act: "dm-list"/u);
-  assert.match(destinations, /label: "My agents"/u);
+  // My Agents is not one of them: this menu is what is waiting for you and
+  // who is writing to you, not a roster of agent connections.
+  assert.doesNotMatch(destinations, /value: "agents"/u);
 
   // The counts are read at the moment the menu is built, not carried in
   // state: a number that can disagree with the list under it is worse than no
@@ -174,10 +177,11 @@ test("the account menu opens settings, notifications, and people", async () => {
   assert.match(menu, /value: "settings", label: "Settings"/u);
 
   // Notifications and Direct messages come from the shared list, so both
-  // account buttons offer the same three doors.
+  // account buttons offer the same doors — and neither offers My Agents.
   const destinations = slice(app, "function accountDestinations() {", "\n/**");
   assert.match(destinations, /act: "go-notifications"/u);
   assert.match(destinations, /act: "dm-list"/u);
+  assert.doesNotMatch(destinations, /value: "agents"/u);
 });
 
 test("direct messages are offered with people and with nobody else", async () => {

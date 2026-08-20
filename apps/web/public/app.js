@@ -1146,7 +1146,7 @@ function notificationBell() {
  * The screens the account menu is the way into.
  *
  * Both account buttons — the topbar avatar and the channel sidebar's foot —
- * open the same menu, so this is one change point for all three. Each of them
+ * open the same menu, so this is one change point for both. Each destination
  * was a live screen or panel with no door: the routes existed, the screens
  * rendered, `go-notifications` was even a case in the action handler, and
  * nothing anywhere navigated to any of them.
@@ -1170,12 +1170,11 @@ function accountDestinations() {
       iconName: "chatBubble",
       ...(dms === 0 ? {} : { hint: `${dms} unread` }),
     },
-    // Unconditional. The only navigation to My Agents was the "Connect an
-    // agent first" item in the channel's agent menu, offered *only* while this
-    // account had connected nothing — so connecting a second vendor became
-    // unreachable the moment the first one worked. That item is a good empty
-    // state and stays; it was never a navigation strategy.
-    { act: "nav", value: "agents", label: "My agents", iconName: "robot" },
+    // My Agents is deliberately absent. This menu is the account's own
+    // things — what is waiting for you and who is writing to you — and a
+    // roster of agent connections is not that. The screen keeps its other
+    // doors: the quick switcher by name, and the channel agent menu's
+    // "Connect an agent first" while this account has connected nothing.
   ];
 }
 
