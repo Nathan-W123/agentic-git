@@ -574,7 +574,7 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   );
 });
 
-test("people and agents fold up into the channel list as the sidebar collapses", async () => {
+test("people and agents only animate downward when the sidebar expands", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
@@ -605,13 +605,16 @@ test("people and agents fold up into the channel list as the sidebar collapses",
   );
   assert.match(css, /\.chan-roster \{[\s\S]{0,320}grid-template-rows 0\.22s/u);
 
-  // The lists stagger, one behind the other, in opposite orders at the two
-  // ends — otherwise the four of them move as one block and nothing reads as
-  // coming out from under the channels.
+  // The lists stagger on the way down, but closing suppresses their transitions
+  // so people and agents do not visibly slide upward into the channels.
   assert.match(css, /\.chan-roster-agents \{\s*transition-delay: 0\.09s;/u);
   assert.match(
     css,
     /\.chats-shell\.chan-collapsed \.chan-sec-people \{\s*transition-delay: 0\.09s/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-folding\.chan-collapsed :is\([\s\S]{0,160}\.chan-roster[\s\S]{0,80}transition: none;/u,
   );
 
   // Clipping only while the fold runs. An agent's usage card hangs below its

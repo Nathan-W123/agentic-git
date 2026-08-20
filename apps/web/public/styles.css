@@ -8322,17 +8322,9 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
-  /* People and agents roll up into the channel list rather than being
-     switched off with it. `display: none` is a cut: on the way in the two
-     lists were simply gone before the panel had finished narrowing, and on
-     the way out they were already standing in the rail's 64px, wrapped, while
-     it widened around them. Folding the heading and the list to nothing keeps
-     the panel one moving thing — everything below the channels rises into
-     them, bottom pair first, and comes back down the same way.
-
-     Bottom-up here, top-down in the expanded rules above: whichever way the
-     sidebar is going, the list nearest the channels is the last to leave and
-     the first to return. */
+  /* People and agents unfold beneath the channel list when the sidebar opens.
+     Closing is deliberately asymmetric: those sections disappear immediately
+     instead of sliding upward while the sidebar narrows. */
   /* Clipped while the fold is running, and only then. An agent's usage card
      opens below its row and the last row's card reaches past the bottom of
      the list, so a list that clipped at rest would swallow it (see
@@ -8372,9 +8364,19 @@ dialog.modal[open]::backdrop {
     grid-template-rows: 0fr;
   }
 
-  /* Hidden only once it has finished shrinking — a container that goes
-     invisible at the start of the fold takes its rows with it and leaves an
-     empty box closing on nothing. */
+  /* `chan-folding` and `chan-collapsed` coexist only while the sidebar is
+     closing. Suppress the roster transitions in that direction; when opening,
+     `chan-collapsed` is removed first and the base transitions above remain in
+     force, so the sections still unfold downward. */
+  .chats-shell.chan-folding.chan-collapsed :is(
+      .chan-sec-people,
+      .chan-sec-agents,
+      .chan-roster
+    ) {
+    transition: none;
+  }
+
+  /* The delays sequence the downward reveal when the sidebar opens. */
   .chats-shell.chan-collapsed .chan-roster-agents {
     transition-delay: 0s, 0s, 0s, 0.22s;
   }
