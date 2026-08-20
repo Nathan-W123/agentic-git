@@ -1359,10 +1359,11 @@ function threadSaidCount(said) {
  * words survive for screen readers, and the sentence itself is still in the
  * room, one message down, now pointing back here.
  *
- * A run still going draws its position as a one-pixel ring around the face of
- * the agent running it, which is also lifted to the front of the stack. The
- * bar this replaces sat on its own line under the thread and could only ever
- * say that something was moving, never who was moving it.
+ * A run still going draws its position as a small filling donut in the corner
+ * of the face of the agent running it, where that face's status dot sits; the
+ * face is also lifted to the front of the stack. The bar this replaces sat on
+ * its own line under the thread and could only ever say that something was
+ * moving, never who was moving it.
  */
 function threadSummaryLink(entry, replies, repositoryId, progress) {
   const titled = threadTitleReply(entry);
@@ -1370,10 +1371,10 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
   const participants = threadParticipants(replies, repositoryId);
-  // Whoever the ring belongs to goes first. A stack of faces is in the order
+  // Whoever the badge belongs to goes first. A stack of faces is in the order
   // people happened to speak, which is no help at all when the question the
   // reader has is "who is on this right now" — so the one being measured is
-  // lifted to the front of the stack, where the ring is unobstructed and the
+  // lifted to the front of the stack, where the badge is unobstructed and the
   // answer is the first thing in the row.
   const working =
     progress === undefined
