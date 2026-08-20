@@ -1061,6 +1061,15 @@ test("a conversation is scoped to one user's own provider connection", async () 
   assert.equal(/projects\/\$\{[^}]*\}\/chat/u.test(source), false);
 });
 
+test("agent settings use browser sign-in codes instead of Gemini credential paste", async () => {
+  const source = await publicFile("screen-agents.js");
+  assert.match(source, /window\.open\("", "_blank"\)/u);
+  assert.match(source, /Code from that page/u);
+  assert.match(source, /submitProviderSignInCode/u);
+  assert.equal(source.includes("oauth_creds.json"), false);
+  assert.equal(source.includes("Google AI Studio"), false);
+});
+
 test("every composer control sits on one row with an icon-sized context dial", async () => {
   const source = await publicFile("chat.js");
   const bar = /<div class="composer-bar">([\s\S]*?)<\/div>/u.exec(source)?.[1];

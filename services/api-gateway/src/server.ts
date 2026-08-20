@@ -2794,9 +2794,9 @@ export interface ChatProviderOperations {
     /**
      * Hands a waiting sign-in the code the browser gave the user.
      *
-     * Only some vendors need this leg. Codex approves in the browser and the
-     * CLI polls; Anthropic issues the user a code that has to be given back
-     * to the CLI sitting on stdin.
+     * Codex approves in the browser and the CLI polls. Claude, Gemini,
+     * Cursor, Copilot and Kiro may instead issue the user a code that has to
+     * be given back to the CLI sitting on stdin.
      */
     submitCode?(input: {
       userId: string;

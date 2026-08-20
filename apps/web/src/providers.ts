@@ -271,10 +271,14 @@ export interface ProviderStatus {
 const SIGN_IN_FLOWS: Partial<Record<ProviderId, DeviceAuthMode>> = {
   openai: "approve",
   anthropic: "code_exchange",
-  cursor: "browser",
-  copilot: "browser",
-  kiro: "browser",
-  google: "browser",
+  // These CLIs all hand the browser round trip back to the waiting process.
+  // Some releases finish by polling while others show an authorization code;
+  // keeping stdin open supports both, and gives the dashboard one consistent
+  // connect -> browser -> paste-code workflow.
+  cursor: "code_exchange",
+  copilot: "code_exchange",
+  kiro: "code_exchange",
+  google: "code_exchange",
 };
 
 export interface ProviderModelOption {
@@ -1281,18 +1285,18 @@ function spawnLongRunning(
  * `approve` is Codex: the CLI shows a code, the user approves it, and the CLI
  * polls until the vendor says yes. Nothing comes back to us.
  *
- * `code_exchange` is Claude: the CLI shows a URL, the user signs in and is
- * handed a code, and that code has to be given back to the waiting CLI. It is
- * one extra step for the user and a whole extra leg for the server, which is
- * why the two are named rather than collapsed.
+ * `code_exchange` is Claude, Gemini, Cursor, Copilot and Kiro: the CLI shows a
+ * URL, the user signs in and may be handed a code, and that code can be given
+ * back to the waiting CLI. CLIs that complete by polling use the same mode and
+ * simply finish before a code is submitted.
  */
-export type DeviceAuthMode = "approve" | "code_exchange" | "browser";
+export type DeviceAuthMode = "approve" | "code_exchange";
 
 /** What the browser needs to show a device-authorization prompt. */
 export interface DeviceAuthStart {
   flowId: string;
   verificationUrl: string;
-  /** Absent on `code_exchange`, where the browser issues the code instead. */
+  /** Usually absent on `code_exchange`; present if the CLI also prints one. */
   userCode: string;
   expiresAt: string;
   mode: DeviceAuthMode;
@@ -2819,13 +2823,13 @@ export class ProviderChatService {
               ...(browser as BrowserCliSpec).prefixArgs,
               ...(browser as BrowserCliSpec).loginArgs,
             ],
-      // Claude waits on stdin for the code the browser hands the user, so its
-      // flow must be able to answer. Codex never reads stdin and keeps it
-      // closed.
+      // Code-exchange flows keep stdin open for the authorization code the
+      // browser may hand the user. Codex approves by polling and never reads
+      // stdin, so it stays closed.
       {
         env,
         cwd: home,
-        ...(anthropic || input.provider === "google"
+        ...(signInFlow === "code_exchange"
           ? { stdin: "pipe" as const }
           : {}),
       },
@@ -2833,7 +2837,9 @@ export class ProviderChatService {
         const parsed = parseDeviceAuthLine(line);
         if (
           parsed.url !== undefined &&
-          (flow.mode !== "browser" || isUserVerificationUrl(parsed.url))
+          (input.provider === "anthropic" ||
+            input.provider === "openai" ||
+            isUserVerificationUrl(parsed.url))
         ) {
           flow.verificationUrl ??= parsed.url;
         }
@@ -2846,9 +2852,7 @@ export class ProviderChatService {
         // — the browser does — so its URL alone is the whole prompt.
         if (
           flow.verificationUrl !== undefined &&
-          (flow.mode === "code_exchange" ||
-            flow.mode === "browser" ||
-            flow.userCode !== undefined)
+          (flow.mode === "code_exchange" || flow.userCode !== undefined)
         ) {
           announce();
         }
@@ -2938,7 +2942,7 @@ export class ProviderChatService {
         400,
         "unsupported_flow",
         `${PROVIDER_NAMES[flow.provider]} approves in the browser and takes ` +
-          "no code here",
+          "no code back in Lattice",
       );
     }
     if (flow.status !== "pending") {

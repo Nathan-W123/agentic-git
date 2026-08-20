@@ -590,14 +590,6 @@ const CREDENTIAL_HELP = {
       ["api_key", "API key from platform.openai.com"],
     ],
   },
-  google: {
-    hint: "On a Gemini subscription, sign in with <code>gemini</code> on your own machine and paste the contents of <code>~/.gemini/oauth_creds.json</code>. Otherwise paste an API key from aistudio.google.com.",
-    placeholder: "AIza… or the contents of oauth_creds.json",
-    kinds: [
-      ["session_file", "Gemini subscription (contents of ~/.gemini/oauth_creds.json)"],
-      ["api_key", "API key from Google AI Studio"],
-    ],
-  },
 };
 
 /**
@@ -634,15 +626,14 @@ function pause(ms) {
  *
  * This is what "connect" should have meant all along: the deployment runs the
  * vendor's own sign-in, the user approves it on their own machine, and no
- * secret is ever hunted down or pasted. It is offered first, and a credential
- * is what happens when it is not available or does not work.
+ * long-lived credential has to be found or copied from another machine.
  *
  * Two shapes, and the server says which. `approve` shows a code the user
  * confirms in the browser and the CLI polls for the answer. `code_exchange`
  * shows a link and takes a code back — the vendor's page issues it, and the
  * waiting CLI needs it before it can finish.
  *
- * Returns `true` when connected, `false` to fall back to a credential, and
+ * Returns `true` when connected, `false` when retry should be offered, and
  * `null` when the user walked away.
  */
 async function signInAgent(providerId, mode, rerender) {
@@ -666,8 +657,8 @@ async function signInAgent(providerId, mode, rerender) {
     flow = await startProviderSignIn(providerId);
   } catch (error) {
     tab?.close();
-    // Not fatal: the credential path below still works, and saying why beats
-    // silently showing a paste box the user did not ask for.
+    // The caller offers a fresh attempt, and saying why beats silently
+    // showing a credential form the user did not ask for.
     toast(`${agentLabelOf(providerId)} sign-in unavailable — ${error.message}`, "error");
     return false;
   }
@@ -682,7 +673,6 @@ async function signInAgent(providerId, mode, rerender) {
   }
 
   const exchange = (flow.mode ?? mode) === "code_exchange";
-  const browserOnly = (flow.mode ?? mode) === "browser";
   const link =
     `<p class="modal-hint"><a class="link" target="_blank" rel="noopener noreferrer"
        href="${esc(flow.verificationUrl)}">Open the ${esc(agentLabelOf(providerId))} sign-in page</a>
@@ -692,21 +682,26 @@ async function signInAgent(providerId, mode, rerender) {
   // own, and the CLI exits without ever prompting. So the flow is polled
   // while the dialog is open, and the code box is a fallback rather than a
   // requirement — asking for a code that was never issued is a dead end.
-  let finishedWithoutCode = false;
-  const watch = (async () => {
+  let settledWhileOpen;
+  let modalOpen = true;
+  void (async () => {
     for (let attempt = 0; attempt < 240; attempt += 1) {
       await pause(1500);
+      if (!modalOpen) {
+        return undefined;
+      }
       let current;
       try {
         current = await providerSignInStatus(providerId, flow.flowId);
       } catch {
         return undefined;
       }
+      if (!modalOpen) {
+        return current;
+      }
       if (current.status !== "pending") {
-        if (current.status === "completed") {
-          finishedWithoutCode = true;
-          document.querySelector("#modal")?.close();
-        }
+        settledWhileOpen = current;
+        document.querySelector("#modal")?.close();
         return current;
       }
     }
@@ -716,36 +711,42 @@ async function signInAgent(providerId, mode, rerender) {
   const values = await showModal({
     title: `Sign in to ${agentLabelOf(providerId)}`,
     subtitle: "Your account, not this machine's.",
-    confirm: exchange ? "Connect" : browserOnly ? "I've signed in" : "I've approved it",
+    confirm: exchange ? "Connect" : "I've approved it",
     body: exchange
       ? `${link}
+         ${
+           flow.userCode
+             ? `<p class="modal-code">${esc(flow.userCode)}</p>
+                <p class="modal-hint">Enter that code on the sign-in page if it asks for one.</p>`
+             : ""
+         }
          <label class="field"><span>Code from that page
              <span class="field-optional">only if it shows one</span></span>
-           <input class="input" name="code" autocomplete="off"
+           <input class="input" name="code" autocomplete="one-time-code"
              placeholder="Paste it here if you were given one"></label>
          <p class="modal-hint">Approve the sign-in in that tab. Most of the
            time that is all it takes and this will finish on its own; if the
            page shows you a code instead, paste it above. This deployment
            never sees your password.</p>`
-      : browserOnly
-        ? `${link}
-         ${
-           flow.userCode
-             ? `<p class="modal-code">${esc(flow.userCode)}</p>
-                <p class="modal-hint">Enter that code if the sign-in page asks for it.</p>`
-             : ""
-         }
-         <p class="modal-hint">Finish signing in in that tab, then come back
-           here. This deployment receives the agent session but never your
-           password.</p>`
-        : `${link}
+      : `${link}
          <p class="modal-code">${esc(flow.userCode ?? "")}</p>
          <p class="modal-hint">Enter that code on the page, approve it, then
            come back here.</p>`,
   });
+  // Stop the dialog watcher before the submit path starts polling. A terminal
+  // status is intentionally readable only once, so two pollers can otherwise
+  // race and turn a successful code exchange into an "unknown sign-in" error.
+  modalOpen = false;
 
-  if (finishedWithoutCode) {
-    const settled = await watch;
+  if (settledWhileOpen !== undefined) {
+    const settled = settledWhileOpen;
+    if (settled.status !== "completed") {
+      toast(
+        settled.detail ?? `${agentLabelOf(providerId)} sign-in did not complete`,
+        "error",
+      );
+      return false;
+    }
     toast(
       `${agentLabelOf(providerId)} connected as ${settled?.account ?? "your account"}`,
     );
@@ -835,6 +836,13 @@ export async function connectAgent(providerId, rerender) {
   }
   // Only providers with no sign-in flow of their own reach here. For those a
   // pasted credential is the only way in, so it stays.
+  if (["google", "cursor", "copilot", "kiro"].includes(providerId)) {
+    // These agents are intentionally browser-only. In particular, Gemini no
+    // longer falls back to the old API-key / copied OAuth-file modal when a
+    // deployment cannot advertise the new flow.
+    toast(`${agentLabelOf(providerId)} browser sign-in is unavailable`, "error");
+    return;
+  }
 
   const help = CREDENTIAL_HELP[providerId] ?? {
     hint: "Paste a credential for this provider.",
