@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1295,8 +1296,10 @@ test("agent news is one compact banner, not a stack of cards", async () => {
 
   const bannerRule = /\.toast\.banner \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
   assert.match(bannerRule, /max-width: min\(320px, calc\(100vw - 24px\)\)/u);
-  assert.match(bannerRule, /border-color: var\(--border\)/u);
-  assert.match(bannerRule, /box-shadow: var\(--shadow-card\)/u);
+  // Restyled by request: the glow went, and the accent moved to a left edge
+  // — the quiet "this is news" marker — instead of a border all round.
+  assert.match(bannerRule, /border-left-color: var\(--accent\)/u);
+  assert.doesNotMatch(bannerRule, /box-shadow/u);
   assert.match(bannerRule, /overflow-wrap: anywhere/u);
   assert.match(bannerRule, /animation: none/u);
   assert.equal(/accent-line/u.test(bannerRule), false, "news should not look selected");
@@ -4199,4 +4202,30 @@ test("a browser that has never been signed in is not reloaded", async () => {
   // here would be a visible stutter on every first sign-in for no reason.
   assert.equal(forget(storage, "user_owner"), false);
   assert.equal(storage.getItem("ag.user"), "user_owner");
+});
+
+
+/**
+ * Every dashboard module has to parse, before anything subtler is worth
+ * asking about it.
+ *
+ * These files are plain browser JS — no bundler, no tsc — so nothing else in
+ * the build ever parses them. A bad merge left `loadContext` in data.js with
+ * the same constant declared twice, which is a SyntaxError: one unparseable
+ * module fails every module that imports it, and data.js is imported by all
+ * of them, so the deployed app rendered as a black screen with the only
+ * diagnostic sitting in the browser console of whoever hit it.
+ */
+test("every dashboard module parses before it is served", async () => {
+  const dir = path.join(packageRoot, "public");
+  const modules = (await readdir(dir)).filter((name) => name.endsWith(".js"));
+  assert.ok(modules.length >= 5, `expected several modules, saw ${modules.length}`);
+  for (const name of modules) {
+    const checked = spawnSync(
+      process.execPath,
+      ["--check", path.join(dir, name)],
+      { encoding: "utf8" },
+    );
+    assert.equal(checked.status, 0, `${name} does not parse:\n${checked.stderr}`);
+  }
 });

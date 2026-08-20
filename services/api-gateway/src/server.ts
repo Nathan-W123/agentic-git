@@ -1881,13 +1881,17 @@ const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
 /**
  * How long an offer stays answerable by a bare "yes".
  *
- * A casual "yes" should not revive an old offer after the room has moved on.
- * Ten minutes is ample for the deliberate two-line handshake and short
- * enough that an offer left above a later conversation becomes inert. The
- * choice prompt beside it lives longer, because a tap on a specific question
- * cannot be mistaken for agreement to something else.
+ * The same six hours the choice prompt beside it lives, because the two are
+ * one offer and the reader cannot see a difference between them. This was
+ * ten minutes for a while, on the reasoning that a casual "yes" should not
+ * revive an old offer — but the offer's own text promises "say yes" with no
+ * expiry, the prompt kept working for six hours, and a yes at minute eleven
+ * died silently, which read as the feature being broken rather than the
+ * room having moved on. The guard that actually protects against a stale
+ * yes is the one below: any other person speaking between the offer and the
+ * yes invalidates it.
  */
-const AUTO_CLAIM_OFFER_TTL_MS = 10 * 60 * 1000;
+const AUTO_CLAIM_OFFER_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * The last line of every offer the reader is asked to answer.
@@ -2212,6 +2216,20 @@ const FINISHED_TASK_STATUSES: ReadonlySet<SubmittedTaskStatus> = new Set([
   "failed",
   "cancelled",
 ]);
+
+/**
+ * How long an unfinished task keeps counting as "this agent is busy".
+ *
+ * Nothing reaps a task whose run crashed, was killed mid-deploy, or never
+ * started — the row sits `submitted` or `claimed` forever. Counting those
+ * made an agent that had ever had one bad run read as busy for the rest of
+ * time, and the sender's own free agent was skipped in favour of a
+ * colleague's on the strength of a corpse. Two hours is far past any run
+ * this product produces; a genuinely long run that outlives it merely makes
+ * its agent look free, which at worst queues a second task behind it —
+ * exactly what tier one already does on purpose.
+ */
+const BUSY_TASK_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
 const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
   "submitted",
@@ -13962,10 +13980,19 @@ export class ApiGateway {
     }
     const perAgent = agentIdByAdapter.size > 0;
     const recent = new Map<string, string[]>();
-    // Anything not yet finished. Queued counts as busy alongside running:
-    // the question this answers is "would handing it this mean waiting",
-    // and a task sitting in front of the one that is running means yes.
+    // Anything not yet finished — with two exclusions that both answer the
+    // actual question, which is "would handing it this mean waiting".
+    //
+    // A conversational turn that has landed parks at `open` by design: the
+    // row stays so the conversation can continue, but nothing is running and
+    // nothing is queued. Counting it made one chat with an agent mark that
+    // agent busy permanently.
+    //
+    // And a row is only evidence while it is fresh. Nothing reaps a task
+    // whose run died, so an unfinished row past {@link BUSY_TASK_MAX_AGE_MS}
+    // is a corpse, not a queue.
     const working = new Set<string>();
+    const staleBefore = Date.now() - BUSY_TASK_MAX_AGE_MS;
     // Newest first — see `recentFirst`. Never read `listSubmittedTasks`
     // directly here: it returns oldest first, and taking the first
     // {@link RECENT_ACTIVITY_LOOKBACK} of that is each owner's *earliest*
@@ -13984,7 +14011,13 @@ export class ApiGateway {
         list.push(task.objective);
         recent.set(key, list);
       }
-      if (!FINISHED_TASK_STATUSES.has(task.status)) {
+      const submittedAtMs = Date.parse(task.submittedAt);
+      if (
+        !FINISHED_TASK_STATUSES.has(task.status) &&
+        task.status !== "open" &&
+        Number.isFinite(submittedAtMs) &&
+        submittedAtMs > staleBefore
+      ) {
         working.add(key);
       }
     }
@@ -15919,6 +15952,15 @@ export class ApiGateway {
     // channel is conversation, and paying a vendor to be told so was the
     // cost of reading every message rather than matching it.
     if (await this.chatterFilter.readsAsChatter(content)) {
+      // Traced, because this is the one refusal decided by a local model
+      // nobody can interrogate afterwards. Every way an unaddressed message
+      // can end now leaves one line saying which gate ended it — silence
+      // with no trace is what made two of these bugs undiagnosable.
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: local filter read it as conversation",
+      );
       return;
     }
     // The room's recent lines and its recent work are two independent reads,
@@ -15934,7 +15976,7 @@ export class ApiGateway {
       }),
       this.agentActivityIn(repositoryId),
     ]);
-    const chosen = await this.chooseAutoClaimCandidate({
+    const ranked = await this.chooseAutoClaimCandidate({
       repositoryId,
       content,
       senderId,
@@ -15942,7 +15984,12 @@ export class ApiGateway {
       activity,
       ...(context === undefined ? {} : { context }),
     });
-    if (chosen === undefined) {
+    if (ranked.length === 0) {
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: no dispatchable agent in this channel's roster",
+      );
       return;
     }
     // Everything from here on is a real model call, and — if it decides to
@@ -15963,7 +16010,7 @@ export class ApiGateway {
       repositoryId,
       content,
       senderId,
-      chosen,
+      ranked,
       ...(context === undefined ? {} : { context }),
       ...(input.referencedMessageId === undefined
         ? {}
@@ -15976,6 +16023,28 @@ export class ApiGateway {
   }
 
   /**
+   * One line per unaddressed message saying how it ended.
+   *
+   * The pipeline has many legitimate ways to do nothing — the local filter,
+   * an IGNORE verdict, an empty roster — and every one of them used to be
+   * indistinguishable from a failure, from the outside and from the logs
+   * alike. Two of the three bugs reported against this path came down to
+   * exactly that: nobody could say which gate had eaten the message. The
+   * message itself is truncated hard, because this is a diagnostic line in a
+   * server log, not a transcript.
+   */
+  private traceAutoClaim(
+    repositoryId: string,
+    content: string,
+    outcome: string,
+  ): void {
+    const summary = content.length > 80 ? `${content.slice(0, 77)}...` : content;
+    process.stderr.write(
+      `[channel] unaddressed in ${repositoryId} — ${outcome}: "${summary}"\n`,
+    );
+  }
+
+  /**
    * The model half of an unaddressed message: read it, then act on what was
    * read. Split out of {@link maybeAutoClaimTask} and run without being
    * awaited there — see the comment at its one call site for why.
@@ -15985,24 +16054,55 @@ export class ApiGateway {
     repositoryId: string;
     content: string;
     senderId: string;
-    chosen: ChannelMentionCandidate;
+    /** The chooser's pick, then its one understudy — see the chooser. */
+    ranked: ChannelMentionCandidate[];
     context?: string;
     referencedMessageId?: string;
   }): Promise<void> {
-    const { projectId, repositoryId, content, senderId, chosen, context } =
-      input;
+    const { projectId, repositoryId, content, senderId, context } = input;
     // The agent that would take it reads the message, on the cheap model —
     // see CEREMONIAL_MODELS — and says which of three things to do about it.
-    const decision = await this.readAutoClaimVerdict(
-      chosen,
-      content,
-      repositoryId,
-      context,
-    );
+    //
+    // "It" is the pick, and then the understudy, but only when the pick was
+    // *unreachable* — its CLI down, its sign-in expired, both attempts
+    // producing nothing. A verdict, including IGNORE, ends the line: two
+    // agents ruling on the same message would make "who decides" depend on
+    // who errored, and one considered no is an answer, not an outage.
+    let chosen: ChannelMentionCandidate | undefined;
+    let decision: AutoClaimVerdict | undefined;
+    for (const candidate of input.ranked) {
+      const verdict = await this.readAutoClaimVerdict(
+        candidate,
+        content,
+        repositoryId,
+        context,
+      );
+      if (verdict === "unreachable") {
+        continue;
+      }
+      chosen = candidate;
+      decision = verdict;
+      break;
+    }
+    if (chosen === undefined || decision === undefined) {
+      // Every reachable-looking agent turned out not to be. Each failure has
+      // already been written to the log with its reason by the reader.
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: every candidate unreachable",
+      );
+      return;
+    }
     if (decision.verdict === "ignore") {
+      // The most common answer, and the one that has to be tellable apart
+      // from a failure after the fact: a model that replied with a paragraph
+      // or an empty string also lands here, via parseAutoClaimVerdict.
+      this.traceAutoClaim(repositoryId, content, `ignored by ${chosen.name}`);
       return;
     }
     if (decision.verdict === "act") {
+      this.traceAutoClaim(repositoryId, content, `acted on by ${chosen.name}`);
       // Straight to work, with nothing asked. Reserved for a message that
       // says plainly what it wants: the round trip buys nothing when there is
       // no doubt to resolve, and a person who wrote "change the background to
@@ -16028,6 +16128,7 @@ export class ApiGateway {
     // category the message was sorted into. In the agent's own voice, too:
     // it is the one being asked, and the reader can see whose usage is about
     // to be spent.
+    this.traceAutoClaim(repositoryId, content, `offered by ${chosen.name}`);
     const posted = await this.appendChannelEntry({
       projectId,
       repositoryId,
@@ -16140,7 +16241,15 @@ export class ApiGateway {
           proposal: input.proposal,
           request: input.request,
           ...(input.context === undefined ? {} : { context: input.context }),
-        }).catch(() => undefined);
+        }).catch((error: unknown) => {
+          // The person tapped yes and the work did not start. Most failures
+          // inside dispatch already report themselves into the thread; this
+          // catches the ones before that point, which used to vanish without
+          // even a log line.
+          process.stderr.write(
+            `[channel] accepted offer failed to start in ${input.repositoryId}: ${describeError(error)}\n`,
+          );
+        });
       },
     });
     this.announceAgentQuestions(input.projectId);
@@ -16232,7 +16341,7 @@ export class ApiGateway {
     content: string,
     repositoryId: string,
     context?: string,
-  ): Promise<AutoClaimVerdict> {
+  ): Promise<AutoClaimVerdict | "unreachable"> {
     const prompt =
       "You are an agent in a team chat for a software project. Someone " +
       "wrote the current message below. Nobody named you in it. Decide " +
@@ -16302,7 +16411,9 @@ export class ApiGateway {
       `[channel] ${candidate.name} could not read an unaddressed message in ` +
         `${repositoryId} after two attempts: ${lastError ?? "unknown error"}\n`,
     );
-    return { verdict: "ignore" };
+    // Distinct from IGNORE on purpose: nothing here is a decision about the
+    // message, and the caller holds one understudy for exactly this case.
+    return "unreachable";
   }
 
   /**
@@ -16351,9 +16462,17 @@ export class ApiGateway {
       ) {
         // Already answered through the prompt. Not "no offer here" — it was
         // made and it was settled, and saying yes to it a second time must
-        // not start the work again.
+        // not start the work again. Said out loud, though: the person just
+        // agreed to something, and silence here reads as the agreement being
+        // lost rather than the work already being underway.
         if (this.settledAutoClaimOffers.has(message.id)) {
-          return false;
+          await this.postChannelSystemMessage(
+            projectId,
+            repositoryId,
+            "That offer was already answered — the work is underway or was " +
+              "declined. Mention an agent if you want something new started.",
+          );
+          return true;
         }
         offerAt = index;
         break;
@@ -16495,14 +16614,14 @@ export class ApiGateway {
      * two more waits than that decision needs.
      */
     activity?: AgentActivity;
-  }): Promise<ChannelMentionCandidate | undefined> {
+  }): Promise<ChannelMentionCandidate[]> {
     const { repositoryId, content, senderId, candidates } = input;
     const dispatchable = candidates.filter(
       (candidate) =>
         candidate.visibility === "org" || candidate.userId === senderId,
     );
     if (dispatchable.length === 0) {
-      return undefined;
+      return [];
     }
     const messageTokens = relevanceTokens(content);
     // The only reasonably cheap "recent activity" signal that already
@@ -16551,58 +16670,69 @@ export class ApiGateway {
     // a request that matches nobody is still a request, and a channel that
     // ignores it is worse than one that occasionally picks the less apt
     // agent — the sender can always name someone to override it.
-    //
-    // 1. Fit. Whoever the message and the room's recent work actually point
-    //    at. A real match is worth waiting for, so this tier does not care
-    //    whether the agent is busy: being the right one to ask outranks
-    //    being the free one.
-    const matched = scored.filter((entry) => entry.score > 0);
-    if (matched.length > 0) {
-      const [best] = matched;
-      if (best === undefined) {
-        return undefined;
-      }
-      // A tie is broken rather than refused. The margin rules used to fail
-      // closed on "two similarly relevant agents", and with two agents
-      // connected — the ordinary case — near-ties are the norm, so the
-      // channel simply never answered anything unaddressed. The tie-break is
-      // the question the margin was standing in for: whose usage is this?
-      // The sender's own agent first, because a person spending their own
-      // account needs no protecting from themselves; otherwise the earliest
-      // candidate, which is stable across identical messages so the same
-      // request does not land somewhere different each time.
-      const runnerUpScore = matched[1]?.score ?? 0;
-      const clearWinner =
-        best.score - runnerUpScore >= MIN_MARGIN_ABSOLUTE &&
-        best.score >= runnerUpScore * MIN_MARGIN_RATIO;
-      if (clearWinner) {
-        return best.candidate;
-      }
-      const tied = matched.filter((entry) => entry.score === best.score);
-      return (
-        tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]
-      )?.candidate;
-    }
-
-    // 2. The sender's own. Nothing matched on role or on what the room has
-    //    been doing, so there is no "right" agent to find — and where there
-    //    is no reason to spend somebody else's account, the person who asked
-    //    should be spending their own. A busy one is skipped here, because a
-    //    fallback pick has no claim worth queueing behind.
     const ordered = scored.map((entry) => entry.candidate);
-    const mine = ordered.filter((candidate) => candidate.userId === senderId);
-    const free = mine.find((candidate) => !busy(candidate));
-    if (free !== undefined) {
-      return free;
-    }
+    const primary = ((): ChannelMentionCandidate | undefined => {
+      // 1. Fit. Whoever the message and the room's recent work actually point
+      //    at. A real match is worth waiting for, so this tier does not care
+      //    whether the agent is busy: being the right one to ask outranks
+      //    being the free one.
+      const matched = scored.filter((entry) => entry.score > 0);
+      if (matched.length > 0) {
+        const [best] = matched;
+        if (best === undefined) {
+          return undefined;
+        }
+        // A tie is broken rather than refused. The margin rules used to fail
+        // closed on "two similarly relevant agents", and with two agents
+        // connected — the ordinary case — near-ties are the norm, so the
+        // channel simply never answered anything unaddressed. The tie-break is
+        // the question the margin was standing in for: whose usage is this?
+        // The sender's own agent first, because a person spending their own
+        // account needs no protecting from themselves; otherwise the earliest
+        // candidate, which is stable across identical messages so the same
+        // request does not land somewhere different each time.
+        const runnerUpScore = matched[1]?.score ?? 0;
+        const clearWinner =
+          best.score - runnerUpScore >= MIN_MARGIN_ABSOLUTE &&
+          best.score >= runnerUpScore * MIN_MARGIN_RATIO;
+        if (clearWinner) {
+          return best.candidate;
+        }
+        const tied = matched.filter((entry) => entry.score === best.score);
+        return (
+          tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]
+        )?.candidate;
+      }
 
-    // 3. Anyone. The sender has no agent here, or the one they have is
-    //    already working. Free first for the same reason as above, and
-    //    falling back to a busy one rather than to silence: the queue is a
-    //    real answer, and no answer is not.
-    return (
-      ordered.find((candidate) => !busy(candidate)) ?? ordered[0]
-    );
+      // 2. The sender's own. Nothing matched on role or on what the room has
+      //    been doing, so there is no "right" agent to find — and where there
+      //    is no reason to spend somebody else's account, the person who asked
+      //    should be spending their own. A busy one is skipped here, because a
+      //    fallback pick has no claim worth queueing behind.
+      const mine = ordered.filter((candidate) => candidate.userId === senderId);
+      const free = mine.find((candidate) => !busy(candidate));
+      if (free !== undefined) {
+        return free;
+      }
+
+      // 3. Anyone. The sender has no agent here, or the one they have is
+      //    already working. Free first for the same reason as above, and
+      //    falling back to a busy one rather than to silence: the queue is a
+      //    real answer, and no answer is not.
+      return ordered.find((candidate) => !busy(candidate)) ?? ordered[0];
+    })();
+    if (primary === undefined) {
+      return [];
+    }
+    // One understudy behind the pick, because reading the message runs on
+    // the pick's own credential — a per-user thing that fails independently
+    // of anything about the message. An expired sign-in on the free agent
+    // must not read as the room having nothing to say when the busy one
+    // could still take it; free first, for the same reason as tier 3.
+    const fallback =
+      ordered.find((candidate) => candidate !== primary && !busy(candidate)) ??
+      ordered.find((candidate) => candidate !== primary);
+    return fallback === undefined ? [primary] : [primary, fallback];
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */
