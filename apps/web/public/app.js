@@ -101,6 +101,7 @@ import {
   unreadCount,
   dmUnreadTotal,
   memberName,
+  personOnline,
   loadEarlierChannelMessages,
   resendChannelMessage,
   ensureChangeSetForTask,
@@ -4744,24 +4745,76 @@ document.addEventListener("click", (event) => {
       closeSwitcher();
       navigate(value);
       return;
-    /** The conversations themselves, with who each one is waiting from. */
+    /**
+     * Who this account can write to privately — people, and only people.
+     *
+     * Two halves. The conversations already going come first, ordered by what
+     * is waiting in them, and everyone else on the project follows, so the
+     * menu is a way to *start* a private conversation and not only a list of
+     * the ones that happen to exist. "No conversations yet" was a dead end:
+     * the one state in which somebody most needs this menu was the one state
+     * in which it offered nothing to press.
+     *
+     * Agents are deliberately not here, and are filtered out rather than
+     * merely not added — a direct message is between two accounts. Talking to
+     * your own agent is `agent-chat-open`, which opens beside the channel
+     * instead of taking the room away, and an org agent's whole point is that
+     * it works where the team can see it. Both are reached from the roster.
+     */
     case "dm-list": {
-      const conversations = [...state.dmConversations].sort(
-        (left, right) => Number(right.unread ?? 0) - Number(left.unread ?? 0),
+      const me = currentUserId();
+      // By id, because that is what a conversation and a roster row agree on.
+      // An id that belongs to an agent is by definition not a person's, so
+      // this can only ever remove the wrong kind of row.
+      const agentIds = new Set(state.agents.map((agent) => agent.id));
+      const isPerson = (userId) =>
+        userId !== "" && userId !== me && !agentIds.has(userId);
+      const conversations = [...state.dmConversations]
+        .filter((conversation) => isPerson(conversation.userId))
+        .sort(
+          (left, right) => Number(right.unread ?? 0) - Number(left.unread ?? 0),
+        );
+      const talking = new Set(
+        conversations.map((conversation) => conversation.userId),
       );
+      // Everyone reachable who has not been written to yet. `dmPeople` is the
+      // project's whole room as the server counts it — memberships plus
+      // repository grants — and it arrives with the inbox above.
+      const others = state.dmPeople.filter(
+        (person) => isPerson(person.id) && !talking.has(person.id),
+      );
+      const rows = [
+        ...conversations.slice(0, 12).map((conversation) => ({
+          act: "dm-open",
+          value: conversation.userId,
+          label: memberName(conversation.userId) ?? conversation.userId,
+          iconName: "chatBubble",
+          ...(Number(conversation.unread ?? 0) === 0
+            ? {}
+            : { hint: `${conversation.unread} unread` }),
+        })),
+        ...(conversations.length > 0 && others.length > 0
+          ? [{ separator: true }]
+          : []),
+        ...others.slice(0, 12).map((person) => ({
+          act: "dm-open",
+          value: person.id,
+          label: person.name ?? memberName(person.id) ?? person.id,
+          iconName: "users",
+          hint: personOnline(person.id) ? "Here now" : "Send a message",
+        })),
+      ];
       showMenu(
         node,
-        conversations.length === 0
-          ? [{ act: "noop", label: "No conversations yet", disabled: true }]
-          : conversations.slice(0, 12).map((conversation) => ({
-              act: "dm-open",
-              value: conversation.userId,
-              label: memberName(conversation.userId) ?? conversation.userId,
-              iconName: "chatBubble",
-              ...(Number(conversation.unread ?? 0) === 0
-                ? {}
-                : { hint: `${conversation.unread} unread` }),
-            })),
+        rows.length === 0
+          ? [
+              {
+                act: "noop",
+                label: "Nobody else on this project yet",
+                disabled: true,
+              },
+            ]
+          : rows,
       );
       return;
     }

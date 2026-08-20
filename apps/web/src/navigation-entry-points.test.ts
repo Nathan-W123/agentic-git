@@ -160,3 +160,44 @@ test("the keyboard can reach a room, a person, or a screen", async () => {
   assert.match(app, /if \(event\.key === "\?"\)/u);
   assert.match(app, /function openShortcutSheet\(\)/u);
 });
+
+test("the account menu opens settings, notifications, and people", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+
+  // One button at the foot of the channel sidebar, which is the only account
+  // control on the one screen that draws no topbar — so whatever this menu
+  // holds is the whole of what is reachable from there.
+  assert.match(chats, /class="chan-account" data-act="user-menu"/u);
+  const menu = slice(app, 'case "user-menu":', 'case "switch-close":');
+  assert.match(menu, /\.\.\.accountDestinations\(\)/u);
+  assert.match(menu, /value: "settings", label: "Settings"/u);
+
+  // Notifications and Direct messages come from the shared list, so both
+  // account buttons offer the same three doors.
+  const destinations = slice(app, "function accountDestinations() {", "\n/**");
+  assert.match(destinations, /act: "go-notifications"/u);
+  assert.match(destinations, /act: "dm-list"/u);
+});
+
+test("direct messages are offered with people and with nobody else", async () => {
+  const app = await publicFile("app.js");
+
+  const list = slice(app, 'case "dm-list": {', 'case "repo-menu":');
+
+  // An agent is not somebody you send private mail to: your own is reached by
+  // `agent-chat-open` beside the channel, and an org agent works in the room.
+  // Filtered by id rather than simply not added, because the conversation
+  // list arrives from the server and is not this menu's to assume about.
+  assert.match(list, /const agentIds = new Set\(state\.agents\.map/u);
+  assert.match(list, /!agentIds\.has\(userId\)/u);
+  // Nor yourself. Writing to yourself is not a conversation.
+  assert.match(list, /userId !== me/u);
+
+  // The half that makes it a way to start one: everybody reachable who is not
+  // already in a thread with this account. "No conversations yet" used to be
+  // the whole menu for anyone who had not written to somebody first.
+  assert.match(list, /state\.dmPeople\.filter/u);
+  assert.match(list, /!talking\.has\(person\.id\)/u);
+  assert.match(list, /label: "Nobody else on this project yet"/u);
+});
