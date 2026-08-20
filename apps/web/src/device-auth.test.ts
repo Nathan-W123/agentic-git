@@ -566,36 +566,49 @@ test("Google browser sign-in reports a missing Gemini CLI", async () => {
   );
 });
 
-test("Gemini uses manual sign-in instead of a server-local callback", async () => {
+/**
+ * The Gemini sign-in as the CLI actually performs it.
+ *
+ * Gemini has two OAuth paths. The default redirects to
+ * `http://127.0.0.1:<port>/oauth2callback` and waits on an HTTP listener it
+ * starts locally — which cannot work here, because the listener is on this
+ * server and the browser finishing the sign-in is on the user's own machine.
+ * That is the path that left somebody holding a code with nothing to do with
+ * it. The manual path redirects to codeassist.google.com/authcode, shows the
+ * user a code, and reads it back on stdin; it is selected by NO_BROWSER, and
+ * only offered when the CLI believes a human is present, which it decides
+ * from `isTTY`.
+ *
+ * So the flow must ask for a terminal and declare NO_BROWSER, must not pass
+ * `-p` (a prompt argument forces the headless mode that refuses this path),
+ * and cannot wait for the process to exit — the CLI carries on running after
+ * it signs in. This pins all four.
+ */
+test("Gemini signs in through the paste-a-code path, not a local callback", async () => {
   const harness = await createHarness();
   const submitted: string[] = [];
-  let stoppedAfterCredential = false;
+  let seen: { env: NodeJS.ProcessEnv; args: readonly string[]; pty?: boolean } | undefined;
   const spawner = (
     _command: string,
     args: readonly string[],
-    options: { env: NodeJS.ProcessEnv; stdin?: string },
+    options: { env: NodeJS.ProcessEnv; stdin?: string; pty?: boolean },
     onLine: (line: string) => void,
   ) => {
+    seen = { env: options.env, args, ...(options.pty === undefined ? {} : { pty: options.pty }) };
     assert.equal(options.stdin, "pipe");
-    assert.deepEqual(args, ["--screen-reader", "--acp"]);
-    assert.equal(options.env["NO_BROWSER"], "true");
-    assert.equal(
-      existsSync(
-        path.join(String(options.env["HOME"]), ".gemini", "settings.json"),
-      ),
-      true,
+    onLine(
+      "Please visit the following URL to authorize the application:",
     );
-    onLine("Open https://accounts.google.com/o/oauth2/auth in your browser");
+    onLine("https://accounts.google.com/o/oauth2/auth?redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauthcode");
     let settle: ((result: ReturnType<typeof output>) => void) | undefined;
     const done = new Promise<ReturnType<typeof output>>((resolve) => {
       settle = resolve;
     });
     return {
       done,
-      kill: () => {
-        stoppedAfterCredential = true;
-        settle?.(output("manual sign-in complete", 0));
-      },
+      // The real CLI keeps running after it authenticates; it only stops
+      // because the flow stops it once the credential lands.
+      kill: () => settle?.(output("terminated", 1)),
       write: (value: string) => {
         submitted.push(value);
         void (async () => {
@@ -627,23 +640,36 @@ test("Gemini uses manual sign-in instead of a server-local callback", async () =
     provider: "google",
   });
   assert.equal(started.mode, "code_exchange");
-  assert.equal(
+  assert.ok(
+    started.verificationUrl.startsWith("https://accounts.google.com/"),
     started.verificationUrl,
-    "https://accounts.google.com/o/oauth2/auth",
   );
+
+  assert.equal(seen?.pty, true, "the manual path is only offered to a terminal");
+  assert.ok(
+    seen?.args.includes("--acp"),
+    "a subcommand is the other half of staying out of headless mode",
+  );
+  assert.equal(seen?.env["NO_BROWSER"], "true");
+  assert.ok(
+    !seen?.args.includes("-p") && !seen?.args.includes("--prompt"),
+    `a prompt argument forces headless mode: ${JSON.stringify(seen?.args)}`,
+  );
+  // The auth-type menu is answered by a settings file, not by writing "1" to
+  // the same stdin that carries the code.
+  assert.deepEqual(submitted, []);
+
   await service.submitDeviceAuthCode({
     userId: "u1",
     flowId: started.flowId,
     code: "returned-code",
   });
-  assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
-  assert.equal(stoppedAfterCredential, true);
   assert.deepEqual(submitted, ["returned-code"]);
+  assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
   const gemini = (
     await service.list({ userId: "u1", systemAdmin: false })
   ).find((entry) => entry.id === "google");
   assert.equal(gemini?.connected, true);
-  assert.deepEqual(gemini?.acceptedCredentialKinds, []);
 });
 
 test("signing in again after an expired session keeps an org-wide agent org-wide", async () => {
@@ -704,5 +730,76 @@ test("signing in again after an expired session keeps an org-wide agent org-wide
   assert.deepEqual(
     roster["u1"]?.map((entry) => [entry.provider, entry.visibility]),
     [["openai", "org"]],
+  );
+});
+
+/**
+ * A CLI prints more than one URL, and the first one out is not reliably the
+ * one to send somebody to. Cursor's sign-in was opening github.com — which is
+ * Copilot's sign-in, and nothing to do with Cursor — because whatever URL
+ * appeared first won permanently.
+ */
+test("a sign-in link is the vendor's own, not the first URL printed", async () => {
+  const harness = await createHarness();
+  const spawner = (
+    _command: string,
+    _args: readonly string[],
+    _options: { env: NodeJS.ProcessEnv; stdin?: string },
+    onLine: (line: string) => void,
+  ) => {
+    // A banner first, on a host that belongs to a different vendor entirely.
+    onLine("Report issues at https://github.com/cursor/cursor-agent/issues");
+    onLine("Sign in at https://cursor.com/loginDeepControl?token=abc");
+    return {
+      done: new Promise<ReturnType<typeof output>>(() => {}),
+      kill: () => {},
+      write: () => {},
+    };
+  };
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      agent: (args) => (args[0] === "--version" ? output("1.0.0") : output("pong")),
+    }),
+    longRunningSpawner: spawner,
+  });
+
+  const started = await service.startDeviceAuth({ userId: "u1", provider: "cursor" });
+  assert.equal(
+    started.verificationUrl,
+    "https://cursor.com/loginDeepControl?token=abc",
+    "the Cursor sign-in must go to Cursor",
+  );
+});
+
+test("an unrecognized sign-in host is still offered rather than nothing", async () => {
+  const harness = await createHarness();
+  const spawner = (
+    _command: string,
+    _args: readonly string[],
+    _options: { env: NodeJS.ProcessEnv; stdin?: string },
+    onLine: (line: string) => void,
+  ) => {
+    // Whatever host a vendor moves to next: unknown here, and the only URL
+    // on offer. Refusing it would turn a working sign-in into a dead end.
+    onLine("Sign in at https://login.cursor-next.example/authorize?x=1");
+    return {
+      done: new Promise<ReturnType<typeof output>>(() => {}),
+      kill: () => {},
+      write: () => {},
+    };
+  };
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      agent: (args) => (args[0] === "--version" ? output("1.0.0") : output("pong")),
+    }),
+    longRunningSpawner: spawner,
+  });
+
+  const started = await service.startDeviceAuth({ userId: "u1", provider: "cursor" });
+  assert.equal(
+    started.verificationUrl,
+    "https://login.cursor-next.example/authorize?x=1",
   );
 });

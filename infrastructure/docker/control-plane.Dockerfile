@@ -142,10 +142,26 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
   && gemini --version \
   && copilot --version
 # Cursor and Kiro publish their CLIs through vendor installers rather than the
-# npm registry. Install into the image once, then expose only the resulting
-# executables to the unprivileged runtime user. Their sign-in state is never
-# stored in this layer; the web flow always redirects HOME to a per-user
-# temporary directory and encrypts the captured session afterwards.
+# npm registry. Install into the image once, then expose the results to the
+# unprivileged runtime user. Their sign-in state is never stored in this
+# layer; the web flow always redirects HOME to a per-user temporary directory
+# and encrypts the captured session afterwards.
+#
+# The two are exposed differently on purpose, because they are different
+# shapes. `kiro-cli` is one self-contained ELF binary and copies fine. Cursor
+# is not a binary at all: `cursor-agent` is a small bash launcher that resolves
+# its own directory (through symlinks, with realpath) and execs a *bundled*
+# node against `index.js` beside it — 569 files in total, native modules
+# included. Copying that launcher to /usr/local/bin, which is what this did,
+# left it looking for `/usr/local/bin/index.js`; the node image does have a
+# `/usr/local/bin/node` for it to find first, so the failure came a step later
+# and read as the CLI being broken rather than misplaced. `agent --version`
+# then failed for every build and every run. So the package directory is moved
+# whole and the launcher is symlinked into it, which is exactly what the
+# vendor's own installer does (it symlinks ~/.local/bin/agent into
+# ~/.local/share/cursor-agent/versions/<v>/). Verified both ways against the
+# real package: copied out it cannot find its node, symlinked in it prints its
+# version.
 #
 # Neither installer takes a version pin the way the npm block above does —
 # `cursor.com/install` is a live script that embeds whatever build Cursor
@@ -180,7 +196,8 @@ RUN for attempt in 1 2 3; do \
       && [ -f "${cursor_agent_dir}/index.js" ]; then \
       install -d /usr/local/lib/cursor-agent; \
       cp -a "${cursor_agent_dir}/." /usr/local/lib/cursor-agent/; \
-      ln -sf /usr/local/lib/cursor-agent/agent /usr/local/bin/agent; \
+      chmod -R a+rX /usr/local/lib/cursor-agent; \
+      ln -sf "/usr/local/lib/cursor-agent/$(basename "${cursor_agent_path}")" /usr/local/bin/agent; \
       if ! agent --version; then \
         rm -f /usr/local/bin/agent; \
         echo "Cursor CLI installed incompletely; continuing without it"; \
@@ -236,12 +253,24 @@ ENV PATH=/home/node/.local/bin:$PATH
 # its own OAuth App (with Enable Device Flow ticked) and replace the id —
 # compose deployments already mask it with whatever their .env says.
 ENV COORD_GITHUB_CLIENT_ID=Ov23liGI2B1T62b0ifdC
+# Where the Copilot CLI unpacks itself. The published package is a launcher;
+# the program proper is an 8.7MB app.js plus ~200 sibling files it extracts on
+# first run, and its default location is $HOME/.cache — which every sign-in and
+# every task run redirects to a fresh throwaway directory. Left there it is
+# re-extracted per invocation, and the credential capture that walks that home
+# stores fragments of the program instead of the token.
+#
+# One shared directory on the writable layer, owned by the runtime user, so the
+# unpack happens once per container. It holds no secrets: the program is
+# identical for every user, and each user's sign-in stays in their own home.
+ENV COORD_COPILOT_PKG_CACHE=/var/cache/coord/copilot
 WORKDIR /app
 COPY --from=build /app /app
 COPY infrastructure/docker/control-plane-entrypoint.sh /usr/local/bin/coord-control-plane
 RUN chmod +x /usr/local/bin/coord-control-plane \
-  && mkdir -p /data \
-  && chown node:node /data
+  && mkdir -p /data /var/cache/coord/copilot \
+  && chown node:node /data \
+  && chown -R node:node /var/cache/coord
 # No `USER node` here, and the entrypoint is why.
 #
 # A mounted volume replaces the directory created above with a fresh

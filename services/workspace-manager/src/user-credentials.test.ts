@@ -13,10 +13,12 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  captureBrowserSession,
   captureClaudeSession,
   captureCredentialKey,
   openCredentialHome,
   resolveCredentialKey,
+  restoreBrowserSession,
   supportedCredentialKinds,
   supportsUserCredential,
   UserCredentialError,
@@ -913,4 +915,97 @@ test("a first connection is personal until its owner says otherwise", async (t) 
     secret: "sk-second-connection",
   });
   assert.equal(fresh.visibility, "personal");
+});
+
+/**
+ * The Copilot CLI ships as a launcher that unpacks itself into the home on
+ * first run. That home is the *staged credential home*, so the capture below
+ * used to walk straight into it — and its bounds (128 files, 256KB each) are
+ * what turned that into a broken credential rather than merely a fat one: the
+ * 13KB `index.js` fits and is stored, the 8.7MB `app.js` it imports does not,
+ * and restoring the pair leaves a half-extracted package the launcher prefers
+ * over a good one. The CLI then dies on its own missing `app.js`, which
+ * surfaced to users as "GitHub Copilot rejected that credential".
+ *
+ * Sizes here are the real ones from @github/copilot-linux-x64@1.0.80.
+ */
+test("a CLI that unpacks itself into the home does not become the credential", async (t) => {
+  const directory = await scratch(t);
+  const home = path.join(directory, "staged-home");
+  const unpacked = path.join(home, ".cache", "copilot", "pkg", "linux-x64", "1.0.80");
+  await mkdir(unpacked, { recursive: true });
+  // The launcher's entry point: small enough to pass every bound.
+  await writeFile(path.join(unpacked, "index.js"), "import './app.js';\n");
+  // The program it imports: past the per-file bound, so it can never be stored
+  // alongside the entry point that needs it.
+  await writeFile(path.join(unpacked, "app.js"), "x".repeat(300 * 1024));
+  // Enough small siblings to exhaust the file budget on their own.
+  for (let i = 0; i < 200; i += 1) {
+    await writeFile(path.join(unpacked, `chunk-${i}.js`), `// ${i}\n`);
+  }
+  // The thing actually worth keeping, written last so only a walk that skips
+  // the package cache still has room for it.
+  await writeFile(path.join(home, "copilot-auth.json"), '{"token":"real"}');
+
+  const captured = JSON.parse(await captureBrowserSession(home)) as {
+    files: Record<string, string>;
+  };
+  const names = Object.keys(captured.files);
+
+  assert.ok(
+    names.includes("copilot-auth.json"),
+    `the sign-in must be captured, got: ${names.slice(0, 5).join(", ")}`,
+  );
+  assert.deepEqual(
+    names.filter((name) => name.startsWith(".cache/")),
+    [],
+    "no part of the unpacked program belongs in a credential",
+  );
+});
+
+test("a credential stored before the fix restores without the broken package", async (t) => {
+  const directory = await scratch(t);
+  const home = path.join(directory, "restore-home");
+  await mkdir(home, { recursive: true });
+  // Exactly the shape the old capture produced: an entry point with no program
+  // beside it, plus the token.
+  const legacy = JSON.stringify({
+    files: {
+      ".cache/copilot/pkg/linux-x64/1.0.80/index.js": "import './app.js';\n",
+      "copilot-auth.json": '{"token":"real"}',
+    },
+  });
+
+  await restoreBrowserSession(home, legacy);
+
+  await assert.rejects(
+    () => stat(path.join(home, ".cache", "copilot", "pkg", "linux-x64", "1.0.80", "index.js")),
+    "a half-extracted package must not be written back",
+  );
+  assert.ok(
+    (await stat(path.join(home, "copilot-auth.json"))).isFile(),
+    "the token in an old credential still restores",
+  );
+});
+
+test("Copilot unpacks itself outside the home that becomes the credential", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "copilot", {
+    kind: "session_file",
+    secret: JSON.stringify({ files: { "copilot-auth.json": "{}" } }),
+  });
+  const credential = await vault.get("user-1", "copilot");
+  assert.ok(credential !== undefined);
+
+  await withCredentialHome({ vendor: "copilot", credential }, async (home) => {
+    const cache = home.env["COPILOT_PKG_CACHE_HOME"];
+    assert.ok(cache !== undefined, "the package cache must be redirected");
+    assert.ok(
+      !cache.startsWith(home.path),
+      `the cache must sit outside the staged home, got ${cache}`,
+    );
+    // A version bump downloading mid-probe races the extraction being read.
+    assert.equal(home.env["COPILOT_AUTO_UPDATE"], "false");
+  });
 });
