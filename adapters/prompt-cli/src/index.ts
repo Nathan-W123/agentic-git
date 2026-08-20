@@ -2054,13 +2054,14 @@ export class PromptCliAdapter implements AgentAdapter {
       };
       totals.set(entry.phase, {
         totalTokens: current.totalTokens + entry.totalTokens,
-        // Cache traffic is input the request was billed for, so it belongs on
-        // the input side rather than nowhere.
-        inputTokens:
-          current.inputTokens +
-          entry.inputTokens +
-          entry.cacheReadTokens +
-          entry.cacheCreationTokens,
+        // Fresh input only. Cache traffic is billed and stays in
+        // `totalTokens`, which is what budgets are enforced against, but
+        // folding it in here left nothing anywhere that meant "new tokens
+        // this run" — and a room's "tokens spent" line, built from the split,
+        // then counted the same cached prefix once per turn and read in the
+        // millions. The cached figure is recoverable as the difference
+        // between `totalTokens` and the two sides.
+        inputTokens: current.inputTokens + entry.inputTokens,
         outputTokens: current.outputTokens + entry.outputTokens,
       });
     }

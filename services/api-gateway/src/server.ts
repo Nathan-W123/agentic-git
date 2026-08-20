@@ -6893,9 +6893,20 @@ export class ApiGateway {
         (sum, message) => sum + (message.replies?.length ?? 0),
         0,
       );
+      // Fresh tokens, not the billed total. A cached prompt prefix is re-read
+      // every turn, so summing `totalTokens` counted the same context once per
+      // turn of every task in the room and the line read in the millions
+      // against an afternoon's work. Input plus output is the figure that
+      // grows with what was actually said, and it is the same convention the
+      // per-agent context reading uses. Budgets still enforce against the
+      // billed total, where cache traffic belongs. A reporter that gave no
+      // split at all falls back to its total rather than counting as zero.
       const tokens = (
         await this.options.store.listTokenUsage({ repositoryId })
-      ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+      ).reduce((sum, entry) => {
+        const fresh = entry.inputTokens + entry.outputTokens;
+        return sum + (fresh > 0 ? fresh : entry.totalTokens);
+      }, 0);
       this.sendJson(response, 200, {
         messages: messages.length,
         replies,
