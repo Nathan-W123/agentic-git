@@ -1898,7 +1898,6 @@ function messageRow(
   {
     isReply = false,
     inlineReplyTo = undefined,
-    hideChanges = false,
     actions = "",
     compact = false,
     threadPath = undefined,
@@ -1951,9 +1950,10 @@ function messageRow(
   const path =
     threadPath ??
     (channelThread ? { start: true, through: false, end: true } : undefined);
-  const changedBlock = hideChanges
-    ? ""
-    : changedFilesBlock(entry, repositoryId);
+  // Changed-file summaries belong to the focused thread, where the work they
+  // describe can be reviewed in context. Keep the room's timeline to the
+  // conversation itself, including for task roots and inline replies.
+  const changedBlock = isReply ? changedFilesBlock(entry, repositoryId) : "";
   // The run is drawn around the face running it, inside the thread link — see
   // `threadSummaryLink`. It used to be a bar on its own line under the route,
   // which spent a full line of the room saying something no reader could
@@ -2325,21 +2325,6 @@ function messageList(repositoryId) {
       // could not appear until the room already had a message in it.
     )}${typingIndicator(repositoryId, undefined)}</div>`;
   }
-  // One file summary per task, and the thread's copy wins. A task can be
-  // named by more than one channel entry — the thread that follows its work
-  // and a bare outcome line — and each carries the same task id, so the same
-  // list rendered under both read as two different changes. The thread is
-  // where the story lives, so it keeps the summary and the loose mention
-  // goes without.
-  const threadedTasks = new Set(
-    entries
-      .filter(
-        (entry) =>
-          entry.taskId !== undefined &&
-          channelMessageHasTaskThread(entry),
-      )
-      .map((entry) => entry.taskId),
-  );
   // A person's reply is a message in the room, not a branch off the message
   // it answers. Sitting it directly under its target pushed the newest thing
   // said back up into history — you replied and your own words appeared
@@ -2428,10 +2413,6 @@ function messageList(repositoryId) {
         messageRow(entry, repositoryId, { inlineReplyTo: item.inlineReplyTo })
       );
     }
-    const hideChanges =
-      (entry.replies ?? []).length === 0 &&
-      entry.taskId !== undefined &&
-      threadedTasks.has(entry.taskId);
     // Search results are independent hits rather than a faithful transcript;
     // always name them so filtering an intervening author cannot create a
     // group that did not exist in the channel.
@@ -2441,7 +2422,6 @@ function messageList(repositoryId) {
     return (
       separator +
       messageRow(entry, repositoryId, {
-        hideChanges,
         compact,
         threadPath: threadPaths[index],
       })
