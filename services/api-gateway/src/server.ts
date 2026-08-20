@@ -12,6 +12,11 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { Duplex } from "node:stream";
+import {
+  brotliCompressSync,
+  constants as zlibConstants,
+  gzipSync,
+} from "node:zlib";
 
 import type {
   AuditEventFilter,
@@ -2168,7 +2173,33 @@ export interface StaticAsset {
   body: Buffer | string;
   contentType: string;
   etag?: string;
+  /**
+   * Set on assets whose URL carries a digest of their own contents. Those
+   * bytes can never change, so a browser is told to keep them for a year and
+   * never ask again — which is what makes a repeat launch cost no requests at
+   * all rather than one revalidation per file.
+   */
+  immutable?: boolean;
 }
+
+/**
+ * Asset kinds worth compressing. Everything here is text; the PNGs and the
+ * fonts are already compressed and would only get bigger.
+ */
+const COMPRESSIBLE_ASSET = /^(?:text\/|image\/svg\+xml|application\/(?:json|manifest\+json|javascript))/u;
+
+/**
+ * Below this, a compressed body saves less than the header it costs.
+ */
+const COMPRESSION_THRESHOLD_BYTES = 1024;
+
+/**
+ * Brotli level. The result is cached for the life of the process, so this is
+ * paid once per asset per encoding — but the first request pays it, and level
+ * 11 on a quarter-megabyte stylesheet is seconds of that request's life for a
+ * few percent. Six is the knee.
+ */
+const BROTLI_QUALITY = 6;
 
 /** Identifies one user's overlay workspace of one repository. */
 export interface WorkspaceScopeInput {
@@ -3356,6 +3387,11 @@ export class ApiGateway {
   private readonly auditsRunning = new Set<string>();
   private readonly bodyLimit: number;
   private readonly allowedOrigins: ReadonlySet<string>;
+  /** Compressed representations of static assets, computed on first ask. */
+  private readonly compressedAssets = new WeakMap<
+    StaticAsset,
+    Map<string, Buffer>
+  >();
   /**
    * How many proxies sit in front of this control plane.
    *
@@ -7054,9 +7090,20 @@ export class ApiGateway {
         (sum, message) => sum + (message.replies?.length ?? 0),
         0,
       );
+      // Fresh tokens, not the billed total. A cached prompt prefix is re-read
+      // every turn, so summing `totalTokens` counted the same context once per
+      // turn of every task in the room and the line read in the millions
+      // against an afternoon's work. Input plus output is the figure that
+      // grows with what was actually said, and it is the same convention the
+      // per-agent context reading uses. Budgets still enforce against the
+      // billed total, where cache traffic belongs. A reporter that gave no
+      // split at all falls back to its total rather than counting as zero.
       const tokens = (
         await this.options.store.listTokenUsage({ repositoryId })
-      ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+      ).reduce((sum, entry) => {
+        const fresh = entry.inputTokens + entry.outputTokens;
+        return sum + (fresh > 0 ? fresh : entry.totalTokens);
+      }, 0);
       this.sendJson(response, 200, {
         messages: messages.length,
         replies,
@@ -10304,7 +10351,7 @@ export class ApiGateway {
     }
     // Both commands require an explicit agent: `/ask` needs one task owner
     // for its forced question round, while `/dnc` needs one direct answerer.
-    // Neither should fall through to the auto-claim offer.
+    // Neither should fall through to the auto-claim path.
     if (parsed?.command.name === "ask" || parsed?.command.name === "dnc") {
       await this.postChannelSystemMessage(
         projectId,
@@ -10492,11 +10539,11 @@ export class ApiGateway {
      * Distinguishes an explicit @mention from an auto-claim in the audit
      * trail. Both paths submit through this exact method and the exact same
      * `submitTask` call below — see `maybeAutoClaimTask` — differing only in
-     * how the candidate was chosen and how the claim is announced.
+     * how the candidate was chosen.
      */
     trigger?: "mention" | "auto_claim" | "audit_fix" | "conversation";
     /**
-     * Lean room context for a proactive offer the sender accepted.
+     * Lean room context for a proactive dispatch.
      *
      * Explicit mentions need no ambient inference and leave this absent.
      * Kept beside the objective so a request such as "fix that" stays short
@@ -16817,6 +16864,80 @@ export class ApiGateway {
     }
   }
 
+  /**
+   * Which encoding, if any, this client asked for and this asset is worth.
+   *
+   * Brotli first: it is roughly a fifth smaller than gzip on this dashboard's
+   * JavaScript, and every phone that can install the app supports it.
+   */
+  private negotiateEncoding(
+    request: IncomingMessage,
+    asset: StaticAsset,
+    size: number,
+  ): "br" | "gzip" | undefined {
+    if (
+      size < COMPRESSION_THRESHOLD_BYTES ||
+      !COMPRESSIBLE_ASSET.test(asset.contentType)
+    ) {
+      return undefined;
+    }
+    const header = request.headers["accept-encoding"];
+    if (typeof header !== "string") {
+      return undefined;
+    }
+    const offered = new Map<string, number>();
+    for (const part of header.split(",")) {
+      const [name, ...parameters] = part.trim().split(";");
+      const quality = parameters
+        .map((parameter) => parameter.trim())
+        .find((parameter) => parameter.startsWith("q="));
+      offered.set(
+        (name ?? "").trim().toLowerCase(),
+        quality === undefined ? 1 : Number.parseFloat(quality.slice(2)),
+      );
+    }
+    for (const candidate of ["br", "gzip"] as const) {
+      const quality = offered.get(candidate) ?? offered.get("*");
+      if (quality !== undefined && quality > 0) {
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The compressed form of one asset, computed once and kept.
+   *
+   * Keyed weakly by the asset itself, so replacing the asset map — the only
+   * way these bytes ever change — drops the cache with it.
+   */
+  private compressedAsset(
+    asset: StaticAsset,
+    body: Buffer,
+    encoding: "br" | "gzip",
+  ): Buffer {
+    let byEncoding = this.compressedAssets.get(asset);
+    if (byEncoding === undefined) {
+      byEncoding = new Map<string, Buffer>();
+      this.compressedAssets.set(asset, byEncoding);
+    }
+    const cached = byEncoding.get(encoding);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const compressed =
+      encoding === "gzip"
+        ? gzipSync(body)
+        : brotliCompressSync(body, {
+            params: {
+              [zlibConstants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY,
+              [zlibConstants.BROTLI_PARAM_SIZE_HINT]: body.length,
+            },
+          });
+    byEncoding.set(encoding, compressed);
+    return compressed;
+  }
+
   private async serveStatic(context: RequestContext): Promise<void> {
     const { request, response, url } = context;
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -16834,22 +16955,47 @@ export class ApiGateway {
     const body = Buffer.isBuffer(asset.body)
       ? asset.body
       : Buffer.from(asset.body, "utf8");
-    const etag =
+    const encoding = this.negotiateEncoding(request, asset, body.length);
+    const payload =
+      encoding === undefined
+        ? body
+        : this.compressedAsset(asset, body, encoding);
+    const identityTag =
       asset.etag ??
       `"${createHash("sha256").update(body).digest("base64url")}"`;
+    // One entity, two representations: a cache that holds the gzip must not
+    // answer a request that can only read the identity, and the tag is what
+    // keeps them apart.
+    const etag =
+      encoding === undefined
+        ? identityTag
+        : identityTag.replace(/"$/u, `-${encoding}"`);
+    response.setHeader("Vary", "Accept-Encoding");
     if (request.headers["if-none-match"] === etag) {
       response.writeHead(304);
       response.end();
       return;
     }
     response.setHeader("Content-Type", asset.contentType);
-    response.setHeader("Content-Length", String(body.length));
+    response.setHeader("Content-Length", String(payload.length));
     response.setHeader("ETag", etag);
-    // Asset names are stable rather than content-hashed, so every navigation
-    // must revalidate the ETag to avoid mixing an old client with a new API.
-    response.setHeader("Cache-Control", "no-cache");
+    if (encoding !== undefined) {
+      response.setHeader("Content-Encoding", encoding);
+    }
+    // A digested name is a promise that these bytes never change, so the
+    // browser is told never to ask again. Everything still served under a
+    // stable name revalidates instead: the name says nothing about which
+    // build it holds, and pairing an old client with a new API is worse than
+    // a round trip. `index.html` is always in the second group, which is what
+    // makes the first one safe — it is the document that names the build.
+    response.setHeader(
+      "Cache-Control",
+      asset.immutable === true
+        ? "public, max-age=31536000, immutable"
+        : "no-cache",
+    );
     response.writeHead(200);
-    response.end(request.method === "HEAD" ? undefined : body);
+    response.end(request.method === "HEAD" ? undefined : payload);
   }
 
   private assertOrigin(request: IncomingMessage): void {

@@ -7,6 +7,10 @@
  * agents are mine" or "what counts as a conflict" instead of one per screen.
  */
 
+import {
+  DEFERRED_PROJECT_LOADS,
+  FIRST_PAINT_PROJECT_LOADS,
+} from "./boot-plan.js";
 import { toast } from "./ui.js";
 
 export const API_ROOT = "/api/v1";
@@ -517,9 +521,44 @@ export async function loadHealth() {
   return state.health;
 }
 
-export async function loadContext() {
+/**
+ * Runs one table from the boot plan and files the answers into state.
+ *
+ * Every load in a table is independent of every other, so the whole table is
+ * one round trip rather than one per row.
+ */
+async function runProjectLoads(loads, project, organization) {
+  const responses = await Promise.all(
+    loads.map((load) => {
+      const path = load.path(project, organization);
+      return load.optional ? apiOptional(path, {}) : api(path);
+    }),
+  );
+  loads.forEach((load, index) => {
+    state[load.key] = responses[index]?.[load.field] ?? load.empty;
+  });
+}
+
+/**
+ * Loads the context a screen can be drawn from.
+ *
+ * `defer` splits the project fan-out in two: with it, only the loads a first
+ * paint cannot happen without are awaited, and the caller is expected to run
+ * {@link loadDeferredContext} once something is on screen. Without it — every
+ * caller that is refreshing an app somebody is already looking at — the whole
+ * plan is fetched in one go, which is still a single round trip.
+ *
+ * The session and the organization list are asked for together: neither
+ * depends on the other, and asking serially cost a whole round trip of the
+ * cold start for nothing.
+ */
+export async function loadContext({ defer = false } = {}) {
   state.loadError = undefined;
-  state.principal = await api("/auth/me");
+  const [principal, organizations] = await Promise.all([
+    api("/auth/me"),
+    api("/organizations"),
+  ]);
+  state.principal = principal;
 
   // Before a single record is read for this account. `state` took its copy of
   // the remembered organization, room, drafts and read markers at import
@@ -559,38 +598,13 @@ export async function loadContext() {
   persist("ag.project", state.projectId);
 
   if (state.projectId) {
-    const project = encodeURIComponent(state.projectId);
-    const org = encodeURIComponent(state.organizationId);
-    const [
-      repositories,
-      tasks,
-      runs,
-      approvals,
-      audit,
-      agents,
-      detail,
-      metrics,
-      workers,
-    ] = await Promise.all([
-      api(`/projects/${project}/repositories`),
-      api(`/projects/${project}/tasks`),
-      api(`/projects/${project}/runs?limit=100`),
-      api(`/projects/${project}/approvals`),
-      api(`/projects/${project}/audit`),
-      apiOptional(`/projects/${project}/agents`, { agents: [] }),
-      api(`/projects/${project}`),
-      apiOptional(`/projects/${project}/metrics`, { metrics: undefined }),
-      apiOptional(`/workers?organizationId=${org}`, { workers: [] }),
-    ]);
-    state.repositories = repositories.repositories ?? [];
-    state.tasks = tasks.tasks ?? [];
-    state.runs = runs.runs ?? [];
-    state.approvals = approvals.approvals ?? [];
-    state.audit = audit.events ?? [];
-    state.agents = agents.agents ?? [];
-    state.project = detail.project;
-    state.metrics = metrics.metrics;
-    state.workers = workers.workers ?? [];
+    await runProjectLoads(
+      defer
+        ? FIRST_PAINT_PROJECT_LOADS
+        : [...FIRST_PAINT_PROJECT_LOADS, ...DEFERRED_PROJECT_LOADS],
+      encodeURIComponent(state.projectId),
+      encodeURIComponent(state.organizationId),
+    );
   } else {
     Object.assign(state, {
       repositories: [],
@@ -612,6 +626,24 @@ export async function loadContext() {
     state.repositoryId = "";
   }
   state.loaded = true;
+}
+
+/**
+ * The rest of the project, fetched once the screen is up.
+ *
+ * Safe to call at any time and safe to lose: a failure here leaves the
+ * deferred slices as they were rather than tearing down a screen that is
+ * already usable, because none of them is what somebody opened the app for.
+ */
+export async function loadDeferredContext() {
+  if (!state.projectId) {
+    return;
+  }
+  await runProjectLoads(
+    DEFERRED_PROJECT_LOADS,
+    encodeURIComponent(state.projectId),
+    encodeURIComponent(state.organizationId),
+  ).catch(() => undefined);
 }
 
 export async function loadProviders() {

@@ -7854,13 +7854,21 @@ body.resizing-panel {
   top: 20px;
 }
 
+/* Flat, like every other panel: the opaque card ground, one hairline border,
+   no shadow and no wash behind the text. What a toast is — a small card that
+   arrives in a corner — is already said by its position and its arrival, and
+   a raised, faintly lit surface on top of that only made it look like it had
+   been added by a different hand than the rest of the room. */
 .toast {
   padding: 10px 15px;
-  background: var(--bg-card-2);
-  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  /* The type stripe, and the only place a toast carries colour. Solid rather
+     than a wash, on the leading edge, so the kind of news is legible at a
+     glance while the surface and the sentence itself stay neutral. */
+  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius);
   font-size: 12.5px;
-  box-shadow: var(--shadow-pop);
   animation: toast-in 0.18s ease;
   max-width: 340px;
 }
@@ -7869,10 +7877,8 @@ body.resizing-panel {
   width: fit-content;
   max-width: min(320px, calc(100vw - 24px));
   padding: 9px 34px 9px 12px;
-  background: var(--bg-card);
-  border-color: var(--border);
+  border-left-color: var(--accent);
   border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-card);
   line-height: 1.4;
   overflow-wrap: anywhere;
   animation: none;
@@ -7888,8 +7894,7 @@ body.resizing-panel {
 }
 
 .toast.error {
-  border-color: rgba(248, 113, 113, 0.4);
-  color: #fca5a5;
+  border-left-color: var(--red);
   pointer-events: auto;
   padding-right: 34px;
   position: relative;
@@ -7908,7 +7913,7 @@ body.resizing-panel {
 }
 
 .toast-close:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-hover);
 }
 
 .toast.banner .toast-close {
@@ -7928,8 +7933,7 @@ body.resizing-panel {
 }
 
 .toast.ok {
-  border-color: rgba(74, 222, 128, 0.36);
-  color: #86efac;
+  border-left-color: var(--green);
 }
 
 @keyframes toast-in {

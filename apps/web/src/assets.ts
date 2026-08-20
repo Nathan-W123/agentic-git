@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -14,6 +15,7 @@ const PUBLIC_FILES = [
   ["index.html", "text/html; charset=utf-8"],
   ["styles.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
+  ["boot-plan.js", "text/javascript; charset=utf-8"],
   ["ui.js", "text/javascript; charset=utf-8"],
   ["data.js", "text/javascript; charset=utf-8"],
   ["chat.js", "text/javascript; charset=utf-8"],
@@ -124,6 +126,99 @@ async function loadDirectory(
   );
 }
 
+/**
+ * How much of a digest goes in a file name. Long enough that two builds of
+ * this dashboard will not collide, short enough to read in a network log.
+ */
+const DIGEST_LENGTH = 12;
+
+function digestOf(...parts: readonly (string | Buffer)[]): string {
+  const hash = createHash("sha256");
+  for (const part of parts) {
+    hash.update(part);
+  }
+  return hash.digest("hex").slice(0, DIGEST_LENGTH);
+}
+
+/**
+ * Gives the dashboard's own files content-addressed names.
+ *
+ * Stable names cost every launch a revalidation round trip per file — the
+ * gateway cannot let a phone reuse `app.js` from cache without asking,
+ * because the name says nothing about which build it holds, and pairing an
+ * old client with a new API is the one outcome worth a slow start. A name
+ * that carries its own digest removes the question: the bytes at that URL can
+ * never change, so a repeat launch reads them out of local cache and makes no
+ * request at all. Only `index.html` still revalidates, and it is the document
+ * that names which build the rest of the launch loads.
+ *
+ * The modules share one digest, taken over the whole graph, rather than one
+ * each. They import each other — several of them cyclically — so per-file
+ * digests would have to be computed in an order that does not exist, and the
+ * first stale import specifier would be a 404 on a phone that had cached the
+ * importer forever. One digest for the graph means any change to any module
+ * renames all of them together, which is the property that makes `immutable`
+ * safe to promise.
+ */
+function withDigestedNames(
+  sources: ReadonlyMap<string, { body: Buffer; contentType: string }>,
+): Map<string, StaticAsset> {
+  const assets = new Map<string, StaticAsset>();
+  const modules = [...sources.entries()]
+    .filter(([name]) => name.endsWith(".js"))
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const graphDigest = digestOf(
+    ...modules.flatMap(([name, source]) => [name, source.body]),
+  );
+  const digested = new Map<string, string>(
+    modules.map(([name]) => [
+      name,
+      `${name.slice(0, -".js".length)}.${graphDigest}.js`,
+    ]),
+  );
+  const styles = sources.get("styles.css");
+  if (styles !== undefined) {
+    digested.set("styles.css", `styles.${digestOf(styles.body)}.css`);
+  }
+
+  const rewrite = (name: string, body: Buffer): Buffer => {
+    if (name.endsWith(".js")) {
+      let source = body.toString("utf8");
+      for (const [from, to] of digested) {
+        if (from.endsWith(".js")) {
+          source = source.replaceAll(`"./${from}"`, `"./${to}"`);
+        }
+      }
+      return Buffer.from(source, "utf8");
+    }
+    if (name === "index.html") {
+      let source = body.toString("utf8");
+      for (const [from, to] of digested) {
+        source = source.replaceAll(`"/${from}"`, `"/${to}"`);
+      }
+      return Buffer.from(source, "utf8");
+    }
+    return body;
+  };
+
+  for (const [name, source] of sources) {
+    const body = rewrite(name, source.body);
+    // The stable name keeps answering — a bookmark, a test, anything that
+    // learned the old URL — but it revalidates, because it is still a name
+    // that says nothing about its contents.
+    assets.set(`/${name}`, { body, contentType: source.contentType });
+    const alias = digested.get(name);
+    if (alias !== undefined) {
+      assets.set(`/${alias}`, {
+        body,
+        contentType: source.contentType,
+        immutable: true,
+      });
+    }
+  }
+  return assets;
+}
+
 export async function loadStaticAssets(
   directory = defaultPublicDirectory(),
   /** `false` disables the vendored editor entirely (used by tests). */
@@ -132,19 +227,17 @@ export async function loadStaticAssets(
   collabDirectory: string | false | undefined = defaultCollabDirectory(),
 ): Promise<ReadonlyMap<string, StaticAsset>> {
   const root = path.resolve(directory);
-  const assets = new Map<string, StaticAsset>();
+  const sources = new Map<string, { body: Buffer; contentType: string }>();
   await Promise.all(
     PUBLIC_FILES.map(async ([name, contentType]) => {
       const filePath = path.resolve(root, name);
       if (path.dirname(filePath) !== root) {
         throw new Error(`Static asset escapes the public directory: ${name}`);
       }
-      assets.set(`/${name}`, {
-        body: await readFile(filePath),
-        contentType,
-      });
+      sources.set(name, { body: await readFile(filePath), contentType });
     }),
   );
+  const assets = withDigestedNames(sources);
   // A deployment without the vendored editor still serves the dashboard; the
   // editor tab reports that its assets are unavailable.
   if (monacoDirectory !== undefined && monacoDirectory !== false) {
