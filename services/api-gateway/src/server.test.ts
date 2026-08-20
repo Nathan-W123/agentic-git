@@ -8171,6 +8171,49 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
   );
 });
 
+test("channel stats exclude cached context from the token activity total", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "token-stats");
+
+  await runtime.store.recordTokenUsage({
+    usageKey: "fresh:planning",
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    taskId: "task_fresh",
+    agentId: "codex",
+    phase: "planning",
+    inputTokens: 10_000,
+    outputTokens: 500,
+    freshTokens: 2_500,
+    totalTokens: 25_000,
+    recordedAt: "2026-08-20T00:00:00.000Z",
+  });
+  // Historical rows have no explicit cache-adjusted value. Their output is
+  // still certainly fresh, so it contributes as a lower bound rather than
+  // falling back to the much larger billed total.
+  await runtime.store.recordTokenUsage({
+    usageKey: "legacy:execution",
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    taskId: "task_legacy",
+    agentId: "claude",
+    phase: "execution",
+    inputTokens: 90_000,
+    outputTokens: 700,
+    totalTokens: 90_700,
+    recordedAt: "2026-08-20T00:01:00.000Z",
+  });
+
+  const response = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/stats`,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.data.tokens, 3_200);
+  assert.equal(response.data.tokensIncomplete, true);
+});
+
 test("asking an agent to audit dispatches work instead of discussing it", async (t) => {
   // `audit` was not among the task verbs, so "can you audit the codebase" was
   // classified as a question and answered by a model with no repository in

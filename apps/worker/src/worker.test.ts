@@ -508,13 +508,19 @@ test("a task past its token budget is stopped while it is still spending", async
 
   // Under the cap: the lease is extended and the spend is on the record.
   await client.heartbeat(assignment.lease.id, [
-    { phase: "planning", totalTokens: 1_200, inputTokens: 1_000 },
+    {
+      phase: "planning",
+      totalTokens: 1_200,
+      inputTokens: 1_000,
+      freshTokens: 800,
+    },
   ]);
   const recorded = await runtime.store.listTokenUsage({
     leaseId: assignment.lease.id,
   });
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]?.totalTokens, 1_200);
+  assert.equal(recorded[0]?.freshTokens, 800);
   assert.equal(recorded[0]?.agentId, "local");
 
   // Over the cap, reported mid-flight. The enforcement point is here rather

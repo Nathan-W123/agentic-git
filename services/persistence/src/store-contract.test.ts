@@ -2680,11 +2680,13 @@ for (const backend of backends) {
         phase: "planning",
         inputTokens: 900,
         outputTokens: 100,
+        freshTokens: 250,
         totalTokens: 1_000,
         recordedAt: "2026-01-01T00:01:00.000Z",
       });
       assert.equal(updated.totalTokens, 1_000);
       assert.equal(updated.inputTokens, 900);
+      assert.equal(updated.freshTokens, 250);
 
       await store.recordTokenUsage({
         ...base,

@@ -7107,22 +7107,27 @@ export class ApiGateway {
       // Fresh tokens, not the billed total. A cached prompt prefix is re-read
       // every turn, so summing `totalTokens` counted the same context once per
       // turn of every task in the room and the line read in the millions
-      // against an afternoon's work. Input plus output is the figure that
-      // grows with what was actually said, and it is the same convention the
-      // per-agent context reading uses. Budgets still enforce against the
-      // billed total, where cache traffic belongs. A reporter that gave no
-      // split at all falls back to its total rather than counting as zero.
-      const tokens = (
-        await this.options.store.listTokenUsage({ repositoryId })
-      ).reduce((sum, entry) => {
-        const fresh = entry.inputTokens + entry.outputTokens;
-        return sum + (fresh > 0 ? fresh : entry.totalTokens);
-      }, 0);
+      // against an afternoon's work. The explicit fresh figure also separates
+      // new cache-aware records from historical rows whose `inputTokens`
+      // already included their cache. For those legacy or aggregate-only rows,
+      // output is the only certainly fresh part and is shown as a lower bound.
+      // Budgets still enforce against the billed total, where cache belongs.
+      const usage = await this.options.store.listTokenUsage({ repositoryId });
+      const tokens = usage.reduce(
+        (sum, entry) => sum + (entry.freshTokens ?? entry.outputTokens),
+        0,
+      );
+      const tokensIncomplete = usage.some(
+        (entry) =>
+          entry.freshTokens === undefined &&
+          entry.totalTokens > entry.outputTokens,
+      );
       this.sendJson(response, 200, {
         messages: messages.length,
         replies,
         capped: messages.length >= 200,
         tokens,
+        tokensIncomplete,
       });
       return;
     }
@@ -16767,6 +16772,9 @@ export class ApiGateway {
           ? value
           : undefined;
       };
+      const inputTokens = count("inputTokens");
+      const outputTokens = count("outputTokens");
+      const freshTokens = count("freshTokens");
       await this.options.store.recordTokenUsage({
         // One row per lease and phase, carrying the running total: the worker
         // re-reports a larger figure as it goes, and summing those snapshots
@@ -16780,12 +16788,11 @@ export class ApiGateway {
         leaseId: lease.id,
         agentId: task?.agentId ?? lease.workerId,
         phase,
-        ...(count("inputTokens") === undefined
+        ...(inputTokens === undefined ? {} : { inputTokens }),
+        ...(outputTokens === undefined ? {} : { outputTokens }),
+        ...(freshTokens === undefined || freshTokens > total
           ? {}
-          : { inputTokens: count("inputTokens")! }),
-        ...(count("outputTokens") === undefined
-          ? {}
-          : { outputTokens: count("outputTokens")! }),
+          : { freshTokens }),
         totalTokens: total,
         recordedAt: at,
       });

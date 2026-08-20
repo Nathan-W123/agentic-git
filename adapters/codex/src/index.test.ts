@@ -28,6 +28,7 @@ import {
 import {
   CodexAdapter,
   CodexWriteDeniedError,
+  parseCodexJsonUsage,
   parseCodexSessionId,
   parseCodexTokens,
   type CodexProcessRunner,
@@ -206,6 +207,8 @@ test("runs structured read-only planning then workspace-write execution", async 
     assert.equal(calls[0]?.executable, "codex-test");
     assert.ok(calls[0]?.args.includes("--ephemeral"));
     assert.ok(calls[0]?.args.includes("--ignore-user-config"));
+    assert.ok(calls[0]?.args.includes("--json"));
+    assert.ok(calls[0]?.args.includes("--output-last-message"));
     if (process.platform === "win32") {
       const configIndex = calls[0]?.args.indexOf("-c") ?? -1;
       assert.equal(
@@ -892,6 +895,30 @@ function completedWith(tokens: string | undefined): ProcessOutput {
   );
 }
 
+function completedJson(
+  result: unknown,
+  usage: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  },
+): ProcessOutput {
+  return output(
+    [
+      JSON.stringify({
+        type: "thread.started",
+        thread_id: "thread-cdx-usage-1234",
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: JSON.stringify(result) },
+      }),
+      JSON.stringify({ type: "turn.completed", usage }),
+    ].join("\n"),
+  );
+}
+
 test("parses the token figure Codex prints, and refuses to invent one", () => {
   // The exact shapes seen from the real CLI, thousands separators and all.
   assert.equal(parseCodexTokens("codex\nREADY\ntokens used\n14,907\n"), 14907);
@@ -903,6 +930,27 @@ test("parses the token figure Codex prints, and refuses to invent one", () => {
   assert.equal(parseCodexTokens(""), undefined);
 });
 
+test("separates cached context from fresh Codex token usage", () => {
+  const transcript = [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-12345678" }),
+    JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 14_907,
+        cached_input_tokens: 12_000,
+        output_tokens: 300,
+        total_tokens: 15_207,
+      },
+    }),
+  ].join("\n");
+  assert.deepEqual(parseCodexJsonUsage(transcript), {
+    totalTokens: 15_207,
+    inputTokens: 2_907,
+    outputTokens: 300,
+  });
+  assert.equal(parseCodexJsonUsage("not json"), undefined);
+});
+
 test("records what each Codex call cost, tagged by phase and in order", async () => {
   const fixture = await createFixture();
   // The first execution asks for more scope, so this session spends three
@@ -911,14 +959,17 @@ test("records what each Codex call cost, tagged by phase and in order", async ()
   const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
     const sandbox = args[args.indexOf("--sandbox") + 1];
     if (sandbox === "read-only") {
-      return output(JSON.stringify(PLAN), {
-        stderr: "codex\ntokens used\n1,000\n",
+      return completedJson(PLAN, {
+        input_tokens: 900,
+        cached_input_tokens: 600,
+        output_tokens: 100,
+        total_tokens: 1_000,
       });
     }
     executions += 1;
     if (executions === 1) {
-      return output(
-        `${JSON.stringify({
+      return completedJson(
+        {
           outcome: "scope_change_requested",
           symbolsChanged: [],
           explanation: "needs another file",
@@ -931,8 +982,13 @@ test("records what each Codex call cost, tagged by phase and in order", async ()
           additionalTests: [],
           additionalServices: [],
           reason: "discovered mid-run",
-        })}`,
-        { stderr: "codex\ntokens used\n2,500\n" },
+        },
+        {
+          input_tokens: 2_200,
+          cached_input_tokens: 1_500,
+          output_tokens: 300,
+          total_tokens: 2_500,
+        },
       );
     }
     assert.ok(options.cwd !== undefined);
@@ -941,7 +997,28 @@ test("records what each Codex call cost, tagged by phase and in order", async ()
       "export const value = 2;\n",
       "utf8",
     );
-    return completedWith("3,750");
+    return completedJson(
+      {
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "done",
+        requestId: "",
+        additionalFiles: [],
+        additionalSymbols: [],
+        additionalApis: [],
+        additionalSchemas: [],
+        additionalConfigKeys: [],
+        additionalTests: [],
+        additionalServices: [],
+        reason: "",
+      },
+      {
+        input_tokens: 3_000,
+        cached_input_tokens: 2_000,
+        output_tokens: 750,
+        total_tokens: 3_750,
+      },
+    );
   };
 
   try {
@@ -997,6 +1074,22 @@ test("records what each Codex call cost, tagged by phase and in order", async ()
       ],
     );
     assert.equal(adapter.totalTokens(), 7250);
+    assert.deepEqual(adapter.reportedTokenUsage(session.id), [
+      {
+        phase: "planning",
+        totalTokens: 1_000,
+        inputTokens: 300,
+        outputTokens: 100,
+        freshTokens: 400,
+      },
+      {
+        phase: "execution",
+        totalTokens: 6_250,
+        inputTokens: 1_700,
+        outputTokens: 1_050,
+        freshTokens: 2_750,
+      },
+    ]);
     assert.deepEqual(
       [...new Set(adapter.allTokenUsage().map((entry) => entry.taskId))],
       [TASK.id],

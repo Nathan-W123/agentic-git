@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -559,13 +559,16 @@ function assertWritesPermitted(
 /**
  * What one `codex exec` invocation cost.
  *
- * Codex reports a single aggregate figure on stdout rather than an
- * input/output/reasoning split, so that is what is recorded — inventing a
- * breakdown it never reported would be worse than reporting one number.
+ * The billed total is always retained. Newer Codex JSON events also provide
+ * the input/output/cache split used for human-facing activity metrics; the
+ * fields remain optional for transcripts from older CLIs.
  */
 export interface CodexTokenUsage {
   phase: CodexPhase;
   tokens: number;
+  /** Uncached input, when JSON event output supplied a breakdown. */
+  inputTokens?: number;
+  outputTokens?: number;
   durationMs: number;
   at: string;
 }
@@ -589,6 +592,129 @@ export function parseCodexTokens(output: string): number | undefined {
   }
   const tokens = Number.parseInt(match[1].replaceAll(",", ""), 10);
   return Number.isSafeInteger(tokens) ? tokens : undefined;
+}
+
+/** The useful, non-cache portion of one Codex turn's reported usage. */
+export interface CodexUsageBreakdown {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+function tokenField(
+  source: Record<string, unknown>,
+  name: string,
+): number | undefined {
+  const value = source[name];
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+    ? value
+    : undefined;
+}
+
+/**
+ * Reads the final usage event emitted by `codex exec --json`.
+ *
+ * Codex's aggregate `tokens used` line includes the cached context replayed
+ * on every turn. That is the right number for budget enforcement, but using
+ * it for the room's activity stat makes a long conversation appear to create
+ * its entire context again on every reply. The JSON event carries the split
+ * needed to keep the billed total while exposing uncached input separately.
+ */
+export function parseCodexJsonUsage(
+  output: string,
+): CodexUsageBreakdown | undefined {
+  let result: CodexUsageBreakdown | undefined;
+  for (const line of output.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (event["type"] !== "turn.completed") {
+      continue;
+    }
+    const raw = event["usage"];
+    if (typeof raw !== "object" || raw === null) {
+      continue;
+    }
+    const usage = raw as Record<string, unknown>;
+    const input = tokenField(usage, "input_tokens");
+    const outputTokens = tokenField(usage, "output_tokens");
+    if (input === undefined || outputTokens === undefined) {
+      continue;
+    }
+    const cached = Math.min(
+      input,
+      tokenField(usage, "cached_input_tokens") ?? 0,
+    );
+    result = {
+      totalTokens: Math.max(
+        tokenField(usage, "total_tokens") ?? 0,
+        input + outputTokens,
+      ),
+      inputTokens: input - cached,
+      outputTokens,
+    };
+  }
+  return result;
+}
+
+/** Last schema-constrained agent message from a JSONL transcript. */
+function parseCodexJsonResult(output: string): string | undefined {
+  let result: string | undefined;
+  for (const line of output.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+      const item = event["item"];
+      if (
+        event["type"] === "item.completed" &&
+        typeof item === "object" &&
+        item !== null &&
+        (item as Record<string, unknown>)["type"] === "agent_message" &&
+        typeof (item as Record<string, unknown>)["text"] === "string"
+      ) {
+        result = (item as Record<string, unknown>)["text"] as string;
+      }
+    } catch {
+      // A diagnostic line is not part of the JSON event stream.
+    }
+  }
+  return result;
+}
+
+/** Thread id from the opening event of a JSONL Codex run. */
+function parseCodexJsonSessionId(output: string): string | undefined {
+  for (const line of output.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+      const thread = event["thread_id"];
+      if (
+        event["type"] === "thread.started" &&
+        typeof thread === "string" &&
+        CODEX_THREAD_ID.test(thread)
+      ) {
+        return thread;
+      }
+    } catch {
+      // A diagnostic line is not part of the JSON event stream.
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -1332,12 +1458,44 @@ export class CodexAdapter implements AgentAdapter {
    * anyone asking that question instead.
    */
   public reportedTokenUsage(sessionId: string): AgentTokenUsage[] {
-    const totals = new Map<AgentTokenUsage["phase"], number>();
+    const totals = new Map<
+      AgentTokenUsage["phase"],
+      {
+        totalTokens: number;
+        inputTokens: number;
+        outputTokens: number;
+        completeBreakdown: boolean;
+      }
+    >();
     for (const entry of this.requireSession(sessionId).tokenUsage) {
       const phase = entry.phase === "execution" ? "execution" : "planning";
-      totals.set(phase, (totals.get(phase) ?? 0) + entry.tokens);
+      const current = totals.get(phase) ?? {
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        completeBreakdown: true,
+      };
+      totals.set(phase, {
+        totalTokens: current.totalTokens + entry.tokens,
+        inputTokens: current.inputTokens + (entry.inputTokens ?? 0),
+        outputTokens: current.outputTokens + (entry.outputTokens ?? 0),
+        completeBreakdown:
+          current.completeBreakdown &&
+          entry.inputTokens !== undefined &&
+          entry.outputTokens !== undefined,
+      });
     }
-    return [...totals].map(([phase, totalTokens]) => ({ phase, totalTokens }));
+    return [...totals].map(([phase, usage]) => ({
+      phase,
+      totalTokens: usage.totalTokens,
+      ...(usage.completeBreakdown
+        ? {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            freshTokens: usage.inputTokens + usage.outputTokens,
+          }
+        : {}),
+    }));
   }
 
   public async pause(_sessionId: string): Promise<void> {
@@ -1583,6 +1741,10 @@ export class CodexAdapter implements AgentAdapter {
     // whose next turn wants the thread back. Read off `record.input`, which
     // replans rebind, so the posture survives a replan.
     const conversational = record.input.conversational === true;
+    const resultPath = path.join(
+      path.dirname(schemaPath),
+      "last-message.json",
+    );
     const args = [
       "exec",
       ...this.additionalArgs,
@@ -1604,6 +1766,9 @@ export class CodexAdapter implements AgentAdapter {
       workingDirectory,
       "--output-schema",
       schemaPath,
+      "--json",
+      "--output-last-message",
+      resultPath,
       "-",
     ];
     // A held thread id rides every invocation of a conversational session —
@@ -1629,9 +1794,13 @@ export class CodexAdapter implements AgentAdapter {
               : ["-c", `model_reasoning_effort="${this.effort}"`]),
             "--output-schema",
             schemaPath,
+            "--json",
+            "--output-last-message",
+            resultPath,
             "-",
           ]
         : undefined;
+    await rm(resultPath, { force: true });
     let output = await this.spawnCodex(
       record,
       workingDirectory,
@@ -1652,6 +1821,7 @@ export class CodexAdapter implements AgentAdapter {
       // profile apply. The token is dropped first, so a later round in this
       // same turn does not repeat the failure.
       record.resume = undefined;
+      await rm(resultPath, { force: true });
       output = await this.spawnCodex(
         record,
         workingDirectory,
@@ -1667,21 +1837,24 @@ export class CodexAdapter implements AgentAdapter {
         `exit code ${output.exitCode}`;
       throw new Error(`Codex ${sandbox} execution failed: ${reason}`);
     }
-    if (output.stdoutTruncated === true) {
-      throw new Error("Codex structured output exceeded the configured limit");
-    }
     assertWritesPermitted(sandbox, output);
-    // Under `--output-schema` stdout carries nothing but the structured
-    // result, and Codex prints its banner and its own cost to stderr. Both
-    // streams are searched because a bare invocation without a schema puts the
-    // figure on stdout instead, and reading only the wrong one would silently
-    // report every run as costing nothing.
+    // Prefer the JSON event's split while retaining the old aggregate-line
+    // fallback for older CLIs and process stubs.
+    const breakdown = parseCodexJsonUsage(output.stdout);
     const tokens =
-      parseCodexTokens(output.stderr) ?? parseCodexTokens(output.stdout);
+      breakdown?.totalTokens ??
+      parseCodexTokens(output.stderr) ??
+      parseCodexTokens(output.stdout);
     if (tokens !== undefined) {
       record.tokenUsage.push({
         phase,
         tokens,
+        ...(breakdown === undefined
+          ? {}
+          : {
+              inputTokens: breakdown.inputTokens,
+              outputTokens: breakdown.outputTokens,
+            }),
         durationMs: output.durationMs,
         at: new Date().toISOString(),
       });
@@ -1690,10 +1863,25 @@ export class CodexAdapter implements AgentAdapter {
     // id, and the newest names the state as this invocation left it. An
     // ephemeral run prints none and contributes nothing.
     const thread =
-      parseCodexSessionId(output.stderr) ?? parseCodexSessionId(output.stdout);
+      parseCodexJsonSessionId(output.stdout) ??
+      parseCodexSessionId(output.stderr) ??
+      parseCodexSessionId(output.stdout);
     if (thread !== undefined) {
       record.resume = thread;
     }
+    const writtenResult = await readFile(resultPath, "utf8").catch(
+      () => undefined,
+    );
+    const structuredResult =
+      writtenResult?.trim() || parseCodexJsonResult(output.stdout);
+    if (structuredResult !== undefined) {
+      return structuredResult;
+    }
+    if (output.stdoutTruncated === true) {
+      throw new Error("Codex structured output exceeded the configured limit");
+    }
+    // Compatibility with process stubs that return the schema-constrained
+    // message directly instead of a JSON event stream.
     return output.stdout;
   }
 
@@ -1707,17 +1895,45 @@ export class CodexAdapter implements AgentAdapter {
   ): Promise<ProcessOutput> {
     const controller = new AbortController();
     record.controller = controller;
+    // The bounded transcript keeps its tail, while `thread.started` is the
+    // first JSON event. Preserve only the two small accounting/session events
+    // as they stream so a very chatty tool run cannot discard either end of
+    // the metadata we need.
+    let pendingJsonLine = "";
+    let jsonMetadata = "";
+    const observeJson = (chunk: string): void => {
+      pendingJsonLine += chunk;
+      const lines = pendingJsonLine.split(/\r?\n/u);
+      pendingJsonLine = lines.pop() ?? "";
+      for (const line of lines) {
+        if (
+          /"type"\s*:\s*"(?:thread\.started|turn\.completed)"/u.test(line)
+        ) {
+          jsonMetadata += `${line}\n`;
+        }
+      }
+      if (pendingJsonLine.length > 256 * 1024) {
+        pendingJsonLine = pendingJsonLine.slice(-64 * 1024);
+      }
+    };
     const active = this.runner(this.command, argv, {
       cwd: workingDirectory,
       input: prompt,
       ...(this.options.env === undefined ? {} : { env: this.options.env }),
       timeoutMs,
       maxOutputBytes: this.maxOutputBytes,
+      // JSON event output can be verbose, but usage and completion arrive at
+      // the end. Keep that tail under the existing output bound.
+      retainOutput: "tail",
       signal: controller.signal,
+      onStdout: observeJson,
     });
     record.active = active;
     try {
-      return await active;
+      const output = await active;
+      return jsonMetadata.length === 0
+        ? output
+        : { ...output, stdout: `${jsonMetadata}${output.stdout}` };
     } finally {
       if (record.active === active) {
         record.active = undefined;

@@ -711,6 +711,8 @@ export interface RecordTokenUsageInput {
   phase: TokenUsagePhase;
   inputTokens?: number;
   outputTokens?: number;
+  /** Cache-adjusted input plus output; absent for legacy/aggregate reporters. */
+  freshTokens?: number;
   totalTokens: number;
   recordedAt: string;
 }
@@ -727,6 +729,7 @@ export interface TokenUsageRecord {
   phase: TokenUsagePhase;
   inputTokens: number;
   outputTokens: number;
+  freshTokens: number | undefined;
   totalTokens: number;
   recordedAt: string;
 }
