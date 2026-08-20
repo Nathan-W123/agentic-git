@@ -1834,13 +1834,17 @@ const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
 /**
  * How long an offer stays answerable by a bare "yes".
  *
- * A casual "yes" should not revive an old offer after the room has moved on.
- * Ten minutes is ample for the deliberate two-line handshake and short
- * enough that an offer left above a later conversation becomes inert. The
- * choice prompt beside it lives longer, because a tap on a specific question
- * cannot be mistaken for agreement to something else.
+ * The same six hours the choice prompt beside it lives, because the two are
+ * one offer and the reader cannot see a difference between them. This was
+ * ten minutes for a while, on the reasoning that a casual "yes" should not
+ * revive an old offer — but the offer's own text promises "say yes" with no
+ * expiry, the prompt kept working for six hours, and a yes at minute eleven
+ * died silently, which read as the feature being broken rather than the
+ * room having moved on. The guard that actually protects against a stale
+ * yes is the one below: any other person speaking between the offer and the
+ * yes invalidates it.
  */
-const AUTO_CLAIM_OFFER_TTL_MS = 10 * 60 * 1000;
+const AUTO_CLAIM_OFFER_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * The last line of every offer the reader is asked to answer.
@@ -2165,6 +2169,20 @@ const FINISHED_TASK_STATUSES: ReadonlySet<SubmittedTaskStatus> = new Set([
   "failed",
   "cancelled",
 ]);
+
+/**
+ * How long an unfinished task keeps counting as "this agent is busy".
+ *
+ * Nothing reaps a task whose run crashed, was killed mid-deploy, or never
+ * started — the row sits `submitted` or `claimed` forever. Counting those
+ * made an agent that had ever had one bad run read as busy for the rest of
+ * time, and the sender's own free agent was skipped in favour of a
+ * colleague's on the strength of a corpse. Two hours is far past any run
+ * this product produces; a genuinely long run that outlives it merely makes
+ * its agent look free, which at worst queues a second task behind it —
+ * exactly what tier one already does on purpose.
+ */
+const BUSY_TASK_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
 const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
   "submitted",
@@ -13910,10 +13928,19 @@ export class ApiGateway {
     }
     const perAgent = agentIdByAdapter.size > 0;
     const recent = new Map<string, string[]>();
-    // Anything not yet finished. Queued counts as busy alongside running:
-    // the question this answers is "would handing it this mean waiting",
-    // and a task sitting in front of the one that is running means yes.
+    // Anything not yet finished — with two exclusions that both answer the
+    // actual question, which is "would handing it this mean waiting".
+    //
+    // A conversational turn that has landed parks at `open` by design: the
+    // row stays so the conversation can continue, but nothing is running and
+    // nothing is queued. Counting it made one chat with an agent mark that
+    // agent busy permanently.
+    //
+    // And a row is only evidence while it is fresh. Nothing reaps a task
+    // whose run died, so an unfinished row past {@link BUSY_TASK_MAX_AGE_MS}
+    // is a corpse, not a queue.
     const working = new Set<string>();
+    const staleBefore = Date.now() - BUSY_TASK_MAX_AGE_MS;
     // Newest first — see `recentFirst`. Never read `listSubmittedTasks`
     // directly here: it returns oldest first, and taking the first
     // {@link RECENT_ACTIVITY_LOOKBACK} of that is each owner's *earliest*
@@ -13932,7 +13959,13 @@ export class ApiGateway {
         list.push(task.objective);
         recent.set(key, list);
       }
-      if (!FINISHED_TASK_STATUSES.has(task.status)) {
+      const submittedAtMs = Date.parse(task.submittedAt);
+      if (
+        !FINISHED_TASK_STATUSES.has(task.status) &&
+        task.status !== "open" &&
+        Number.isFinite(submittedAtMs) &&
+        submittedAtMs > staleBefore
+      ) {
         working.add(key);
       }
     }
@@ -15867,6 +15900,15 @@ export class ApiGateway {
     // channel is conversation, and paying a vendor to be told so was the
     // cost of reading every message rather than matching it.
     if (await this.chatterFilter.readsAsChatter(content)) {
+      // Traced, because this is the one refusal decided by a local model
+      // nobody can interrogate afterwards. Every way an unaddressed message
+      // can end now leaves one line saying which gate ended it — silence
+      // with no trace is what made two of these bugs undiagnosable.
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: local filter read it as conversation",
+      );
       return;
     }
     // The room's recent lines and its recent work are two independent reads,
@@ -15891,6 +15933,11 @@ export class ApiGateway {
       ...(context === undefined ? {} : { context }),
     });
     if (ranked.length === 0) {
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: no dispatchable agent in this channel's roster",
+      );
       return;
     }
     // Everything from here on is a real model call, and — if it decides to
@@ -15921,6 +15968,28 @@ export class ApiGateway {
         `[channel] auto-claim decision failed in ${repositoryId}: ${describeError(error)}\n`,
       );
     });
+  }
+
+  /**
+   * One line per unaddressed message saying how it ended.
+   *
+   * The pipeline has many legitimate ways to do nothing — the local filter,
+   * an IGNORE verdict, an empty roster — and every one of them used to be
+   * indistinguishable from a failure, from the outside and from the logs
+   * alike. Two of the three bugs reported against this path came down to
+   * exactly that: nobody could say which gate had eaten the message. The
+   * message itself is truncated hard, because this is a diagnostic line in a
+   * server log, not a transcript.
+   */
+  private traceAutoClaim(
+    repositoryId: string,
+    content: string,
+    outcome: string,
+  ): void {
+    const summary = content.length > 80 ? `${content.slice(0, 77)}...` : content;
+    process.stderr.write(
+      `[channel] unaddressed in ${repositoryId} — ${outcome}: "${summary}"\n`,
+    );
   }
 
   /**
@@ -15966,12 +16035,22 @@ export class ApiGateway {
     if (chosen === undefined || decision === undefined) {
       // Every reachable-looking agent turned out not to be. Each failure has
       // already been written to the log with its reason by the reader.
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: every candidate unreachable",
+      );
       return;
     }
     if (decision.verdict === "ignore") {
+      // The most common answer, and the one that has to be tellable apart
+      // from a failure after the fact: a model that replied with a paragraph
+      // or an empty string also lands here, via parseAutoClaimVerdict.
+      this.traceAutoClaim(repositoryId, content, `ignored by ${chosen.name}`);
       return;
     }
     if (decision.verdict === "act") {
+      this.traceAutoClaim(repositoryId, content, `acted on by ${chosen.name}`);
       // Straight to work, with nothing asked. Reserved for a message that
       // says plainly what it wants: the round trip buys nothing when there is
       // no doubt to resolve, and a person who wrote "change the background to
@@ -15997,6 +16076,7 @@ export class ApiGateway {
     // category the message was sorted into. In the agent's own voice, too:
     // it is the one being asked, and the reader can see whose usage is about
     // to be spent.
+    this.traceAutoClaim(repositoryId, content, `offered by ${chosen.name}`);
     const posted = await this.appendChannelEntry({
       projectId,
       repositoryId,
@@ -16109,7 +16189,15 @@ export class ApiGateway {
           proposal: input.proposal,
           request: input.request,
           ...(input.context === undefined ? {} : { context: input.context }),
-        }).catch(() => undefined);
+        }).catch((error: unknown) => {
+          // The person tapped yes and the work did not start. Most failures
+          // inside dispatch already report themselves into the thread; this
+          // catches the ones before that point, which used to vanish without
+          // even a log line.
+          process.stderr.write(
+            `[channel] accepted offer failed to start in ${input.repositoryId}: ${describeError(error)}\n`,
+          );
+        });
       },
     });
     this.announceAgentQuestions(input.projectId);
@@ -16322,9 +16410,17 @@ export class ApiGateway {
       ) {
         // Already answered through the prompt. Not "no offer here" — it was
         // made and it was settled, and saying yes to it a second time must
-        // not start the work again.
+        // not start the work again. Said out loud, though: the person just
+        // agreed to something, and silence here reads as the agreement being
+        // lost rather than the work already being underway.
         if (this.settledAutoClaimOffers.has(message.id)) {
-          return false;
+          await this.postChannelSystemMessage(
+            projectId,
+            repositoryId,
+            "That offer was already answered — the work is underway or was " +
+              "declined. Mention an agent if you want something new started.",
+          );
+          return true;
         }
         offerAt = index;
         break;
