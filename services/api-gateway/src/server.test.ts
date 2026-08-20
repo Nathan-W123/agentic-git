@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import {
+  request as httpRequest,
+  type IncomingHttpHeaders,
+} from "node:http";
 import net from "node:net";
 import test, { type TestContext } from "node:test";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -165,6 +170,45 @@ interface TestRuntime {
     reason: string;
     actorId: string;
   }>;
+}
+
+/**
+ * Stands in for the dashboard's JavaScript: text, and large enough that
+ * compressing it is worth the header it costs.
+ */
+const SCRIPT_ASSET = `export const screens = ${JSON.stringify(
+  Array.from({ length: 400 }, (_, index) => `screen-${index}`),
+)};\n`.repeat(4);
+
+/** The digest a build would put in that module's name. */
+const SCRIPT_DIGEST = "0123456789ab";
+
+/**
+ * One static request, made with `http` rather than `fetch` so the test decides
+ * what it accepts and reads what comes back byte for byte. `fetch` rewrites
+ * `Accept-Encoding` and silently decompresses, which hides the two things
+ * these tests are about.
+ */
+async function fetchAsset(
+  origin: string,
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }> {
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest(`${origin}${path}`, { headers }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks),
+        });
+      });
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 class TestClient {
@@ -822,6 +866,17 @@ async function startRuntime(
       [
         "/index.html",
         { body: "<!doctype html><title>Relay</title>", contentType: "text/html" },
+      ],
+      // A module big enough to be worth compressing, under both the stable
+      // name and the digested one the document actually points at.
+      ["/app.js", { body: SCRIPT_ASSET, contentType: "text/javascript" }],
+      [
+        `/app.${SCRIPT_DIGEST}.js`,
+        {
+          body: SCRIPT_ASSET,
+          contentType: "text/javascript",
+          immutable: true,
+        },
       ],
     ]),
   });
@@ -3749,30 +3804,15 @@ test("a human channel participant can be @mentioned without an agent refusal", a
 });
 
 
-/**
- * What the agents actually said, minus the "want me to take this?" offer.
- *
- * An unnamed request draws an offer in the agent's own voice before anything
- * runs, so it is an agent message like any other. These assertions are about
- * what an agent says once it has the work.
- */
+/** What the agents actually said, including replies inside task threads. */
 function agentSpeech(messages: unknown[]): any[] {
   return (messages as any[])
     .flatMap((message) => [message, ...(message.replies ?? [])])
-    .filter(
-      (message) =>
-        message.kind === "agent" &&
-        !/^Want me to take this/u.test(String(message.content ?? "")),
-    );
+    .filter((message) => message.kind === "agent");
 }
 
 /**
- * Posts an unaddressed request and says yes to the offer it draws.
- *
- * An unnamed request is offered rather than started — picking the agent is a
- * guess, and a wrong guess spends somebody's account — so the two-step is the
- * behaviour, not scaffolding. These tests are about *which* agent a request
- * reaches, which is the same question either way.
+ * Posts an unaddressed request and lets the no-mention route dispatch it.
  */
 async function autoClaim(
   client: TestClient,
@@ -3784,11 +3824,6 @@ async function autoClaim(
     body: { content },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
-  const agreed = await client.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
-  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
 }
 
 test("a human mention suppresses auto-claim but not an explicit agent mention", async (t) => {
@@ -6018,7 +6053,7 @@ test("only a reply that adds nothing counts as the request repeated back", () =>
   assert.equal(readsAsEchoOfRequest("", "Change the background"), false);
 });
 
-test("/dnc with nobody mentioned never becomes an auto-claim offer, and says how to ask", async (t) => {
+test("/dnc with nobody mentioned never auto-claims, and says how to ask", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -6030,19 +6065,13 @@ test("/dnc with nobody mentioned never becomes an auto-claim offer, and says how
   await joinAllConnectedAgents(runtime, repositoryId);
 
   // Task-worded and unaddressed — without the command this is exactly the
-  // message auto-claim exists to offer on, and a "yes" to that offer submits
-  // a task. The command's promise has to hold on this path too.
+  // message auto-claim dispatches. The command's promise has to hold on this
+  // path too.
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
     body: { content: "/dnc fix the retry loop" },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
-  const agreed = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
-  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
-
   assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
   const after = await owner.request(`${base}/messages`);
   const contents = (after.data.messages as any[]).map((message) =>
@@ -11113,7 +11142,7 @@ test("/stop names one agent even with words after the name", async (t) => {
   assert.doesNotMatch(said, /Nobody here answers/u);
 });
 
-test("an unnamed request is offered before it is started, and yes starts it", async (t) => {
+test("an unnamed request starts without a proactive assistant response", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11149,14 +11178,20 @@ test("an unnamed request is offered before it is started, and yes starts it", as
   });
   assert.equal(agreed.status, 201);
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
-  // The sender's own words are the objective, not "yes".
   assert.match(
     String(runtime.submittedTasks[0]?.objective),
     /settings page layout/u,
   );
+  // The existing task/question surfaces carry the follow-up. Auto-claim does
+  // not duplicate them with a chat line asking the sender to say "yes".
+  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
+  assert.deepEqual(
+    messages.map((message) => ({ kind: message.kind, content: message.content })),
+    [{ kind: "user", content: "please update the settings page layout" }],
+  );
 });
 
-test("an explicit invitation to the room draws an offer without a task verb", async (t) => {
+test("an explicit invitation to the room starts without an assistant offer", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11173,19 +11208,6 @@ test("an explicit invitation to the room draws an offer without a task verb", as
     body: { content: request },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
-  assert.equal(runtime.submittedTasks.length, 0);
-
-  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
-  const offer = messages.find((message) =>
-    String(message.content).startsWith("Want me to take this"),
-  );
-  assert.ok(offer !== undefined, JSON.stringify(messages));
-  assert.equal(offer.referencedMessageId, posted.data.message.id);
-
-  await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
   assert.equal(runtime.submittedTasks.length, 1);
   // Both halves of what was agreed: the words the person used, and the offer
   // they said yes to. The remark alone is what was asked; the proposal alone
@@ -11195,7 +11217,7 @@ test("an explicit invitation to the room draws an offer without a task verb", as
   assert.match(objective, /Agreed in the channel/u);
 });
 
-test("a proactive offer reads lean channel context and carries it into accepted work", async (t) => {
+test("proactive routing reads lean channel context without replying", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11267,7 +11289,11 @@ test("a proactive offer reads lean channel context and carries it into accepted 
   assert.match(context, /context marker 9:/u);
   assert.doesNotMatch(context, /please fix that flow/u);
   assert.doesNotMatch(context, /Want me to take this/u);
-  assert.doesNotMatch(context, /\byes\b/iu);
+  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
+  assert.equal(
+    messages.some((message) => /^Want me to take this/u.test(String(message.content))),
+    false,
+  );
 });
 
 test("a generic proactive follow-up uses recent context to choose its agent", async (t) => {
@@ -11329,7 +11355,7 @@ test("a generic proactive follow-up uses recent context to choose its agent", as
   assert.equal(runtime.submittedTasks[1]?.vendor, "codex");
 });
 
-test("only a prompt acceptance from the asker can start an offer", async (t) => {
+test("a later yes stays ordinary conversation after proactive dispatch", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11359,36 +11385,22 @@ test("only a prompt acceptance from the asker can start an offer", async (t) => 
     method: "POST",
     body: { content: "please update the settings page layout" },
   });
-  assert.equal(runtime.submittedTasks.length, 0);
+  assert.equal(runtime.submittedTasks.length, 1);
 
-  // "yes" is a common word in a busy channel, and the pick was made on the
-  // question of whose account pays. Somebody else agreeing is not that person
-  // agreeing, and once they have spoken the original offer is stale: a later
-  // bare "yes" from the asker could be agreeing with the new conversation.
+  // "yes" is common conversation, not a second task trigger now that there is
+  // no chat offer to accept.
   const theirs = await colleague.request(`${base}/messages`, {
     method: "POST",
     body: { content: "yes" },
   });
   assert.equal(theirs.status, 201);
-  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
 
   const mine = await owner.request(`${base}/messages`, {
     method: "POST",
     body: { content: "yes" },
   });
   assert.equal(mine.status, 201);
-  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
-
-  // Asking again creates a fresh, unambiguous handshake, which the original
-  // asker can still accept normally.
-  await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "please update the settings page layout" },
-  });
-  await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
 });
 
@@ -11590,7 +11602,7 @@ test("a revert that fails validation is not reported as one that worked", async 
   ]);
 });
 
-test("the agent reads the message before offering, and a remark gets no offer", async (t) => {
+test("the agent reads the message before auto-dispatching, and no means no task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -11622,7 +11634,7 @@ test("the agent reads the message before offering, and a remark gets no offer", 
   );
   assert.match(String(asked[0]?.prompt), /settings page layout/u);
 
-  // And nothing was offered or started.
+  // And nothing was said or started.
   assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
   const after = await owner.request(`${base}/messages`);
   assert.deepEqual(agentSpeech(after.data.messages), []);
