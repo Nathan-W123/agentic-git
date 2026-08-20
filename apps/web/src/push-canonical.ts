@@ -75,15 +75,18 @@ async function pushCanonicalAs(
       operation = "push";
       pushed = await push();
     }
+    // One line, and only the two things the person who typed `/push` was
+    // waiting to hear: where it landed and whose account it went as. The
+    // revision, the remote URL and the objective summary were all already on
+    // screen in the channel; repeating them turned the confirmation into a
+    // paragraph nobody read to the end of.
     return {
       outcome: "done",
       detail: { url: pushed.remoteUrl },
       explanation:
-        `Pushed ${pushed.revision.slice(0, 8)} to ${pushed.targetBranch} on ` +
-        `${pushed.remoteUrl}` +
+        `Pushed to ${pushed.targetBranch}` +
         (connection.login === undefined ? "" : ` as ${connection.login}`) +
-        `. Summary: ${pushed.summary}. Open a pull request from that branch ` +
-        "when you want it reviewed.",
+        ".",
     };
   } catch (error) {
     const explanation = describeError(error);

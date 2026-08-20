@@ -744,8 +744,88 @@ function personRow(person) {
 /** The role the roster acts on. */
 const AUDITOR_ROLE = "auditor";
 
+/** Its mirror image, and the other name the server acts on. */
+const INVESTIGATOR_ROLE = "investigator";
+
+/**
+ * The two roles this system knows the meaning of, written the way the picker
+ * offers them.
+ *
+ * Every other role is free text an agent only reads as a sentence in its
+ * objective, so the field stays a field. These two are different: they are
+ * spelled exactly, or they are just words. Nobody should have to know that a
+ * capital A or a plural quietly turns the auditor back into prose, which is
+ * the whole reason there is a list to pick from at all.
+ */
+const RESERVED_ROLES = [
+  {
+    value: AUDITOR_ROLE,
+    label: "Auditor",
+    hint: "Reads everything merged here and posts what it finds",
+    iconName: "shield",
+  },
+  {
+    value: INVESTIGATOR_ROLE,
+    label: "Investigator",
+    hint: "Explains failed tasks and says what to try next",
+    iconName: "search",
+  },
+];
+
 function isAuditor(agent) {
   return (agent.role ?? "").trim().toLowerCase() === AUDITOR_ROLE;
+}
+
+/**
+ * What the chevron beside a role field offers.
+ *
+ * Built here, beside the field it belongs to, for the reason `rosterMenuItems`
+ * is: every condition in it is one the server will apply anyway, and a menu
+ * that offers what the server refuses is worse than no menu. A reserved role
+ * needs `manage_project` — checked by the caller, which is why there is no
+ * chevron at all without it — and it needs an org-wide agent, because an
+ * auditor spends its owner's account forever without being asked. That second
+ * rule is shown rather than hidden: the entry is there, greyed, saying why.
+ */
+export function roleMenuItems(agentId, repositoryId) {
+  const agent = channelAgentsFor(repositoryId).find(
+    (entry) => entry.id === agentId,
+  );
+  if (agent === undefined) {
+    return [];
+  }
+  const current = String(agent.role ?? "")
+    .trim()
+    .toLowerCase();
+  const personal = agent.visibility !== "org";
+  const items = RESERVED_ROLES.map((role) => ({
+    act: "agent-role-pick",
+    value: role.value,
+    label: role.label,
+    hint: personal
+      ? `Share this agent with the org first — ${role.label.toLowerCase()}s spend their owner's account unasked`
+      : current === role.value
+        ? "Held here now"
+        : role.hint,
+    iconName: current === role.value ? "check" : role.iconName,
+    disabled: personal || current === role.value,
+  }));
+  items.push({ separator: true });
+  items.push({
+    act: "agent-role-custom",
+    label: "Write a role…",
+    hint: "Any words; they ride on every task in this channel",
+    iconName: "pencil",
+  });
+  if (current !== "") {
+    items.push({
+      act: "agent-role-pick",
+      value: "",
+      label: "Clear role",
+      iconName: "close",
+    });
+  }
+  return items;
 }
 
 const AGENT_STATUS_TITLE = {
@@ -892,9 +972,14 @@ export function rosterMenuItems(agentId) {
  * to — which costs no row of its own, holds still while the list under it
  * grows, and puts the control where somebody counting the list is already
  * looking.
+ *
+ * `cls` names the section so the stylesheet can move it: the people and agent
+ * headings fold up into the channel list when the sidebar collapses, one just
+ * behind the other, and a rule cannot stagger two elements it cannot tell
+ * apart.
  */
-function section(label, act, value, title) {
-  return `<div class="chan-sec">
+function section(label, act, value, title, cls) {
+  return `<div class="chan-sec ${cls}">
     <span class="chan-sec-label">${esc(label)}</span>
     <button type="button" class="chan-sec-add" data-act="${act}"
       data-value="${value}" title="${esc(title)}" aria-label="${esc(title)}">
@@ -968,26 +1053,36 @@ function chanSidebar(activeRepositoryId) {
             : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
         }
       </div>
-      ${section("People", "invite-repo", channel, "Invite someone")}
-      <div class="chan-roster">
-        ${
-          // People first, then agents. The channel header already names the
-          // repository, so repeating it in the label said nothing the eye had
-          // not just read — and it grew with the name, which is why a long
-          // repository pushed the word "Agents" out of sight entirely.
-          people.length === 0
-            ? `<div class="util-empty">Nobody else yet.</div>`
-            : people.map((person) => personRow(person)).join("")
-        }
+      <!-- People and agents fold up under the channel list rather than
+           vanishing with it. Each list is a clipping box around one inner
+           block, which is the whole of what lets the stylesheet animate a
+           height nobody has measured: the row of the grid goes to zero, the
+           block inside it keeps its own height, and the box crops the
+           difference. -->
+      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people")}
+      <div class="chan-roster chan-roster-people">
+        <div class="chan-roster-inner">
+          ${
+            // People first, then agents. The channel header already names the
+            // repository, so repeating it in the label said nothing the eye had
+            // not just read — and it grew with the name, which is why a long
+            // repository pushed the word "Agents" out of sight entirely.
+            people.length === 0
+              ? `<div class="util-empty">Nobody else yet.</div>`
+              : people.map((person) => personRow(person)).join("")
+          }
+        </div>
       </div>
-      ${section("Agents", "channel-agent-menu", channel, "Add an agent")}
-      <div class="chan-roster">
-        ${
-          // No empty state. The "+" on the heading directly above is both the
-          // explanation and the thing to press; a sentence between them is a
-          // line to read on the way past.
-          roster.map((agent) => rosterRow(agent)).join("")
-        }
+      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents")}
+      <div class="chan-roster chan-roster-agents">
+        <div class="chan-roster-inner">
+          ${
+            // No empty state. The "+" on the heading directly above is both the
+            // explanation and the thing to press; a sentence between them is a
+            // line to read on the way past.
+            roster.map((agent) => rosterRow(agent)).join("")
+          }
+        </div>
       </div>
     </div>
     <!-- The profile is the one account control at the foot. Its menu already
@@ -1262,24 +1357,51 @@ function threadSaidCount(said) {
  * link for one fact. The dot keeps the fact and drops the repetition; the
  * words survive for screen readers, and the sentence itself is still in the
  * room, one message down, now pointing back here.
+ *
+ * A run still going draws its position as a one-pixel ring around the face of
+ * the agent running it, which is also lifted to the front of the stack. The
+ * bar this replaces sat on its own line under the thread and could only ever
+ * say that something was moving, never who was moving it.
  */
-function threadSummaryLink(entry, replies, repositoryId) {
+function threadSummaryLink(entry, replies, repositoryId, progress) {
   const titled = threadTitleReply(entry);
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
-  const faces = threadParticipants(replies, repositoryId)
+  const participants = threadParticipants(replies, repositoryId);
+  // Whoever the ring belongs to goes first. A stack of faces is in the order
+  // people happened to speak, which is no help at all when the question the
+  // reader has is "who is on this right now" — so the one being measured is
+  // lifted to the front of the stack, where the ring is unobstructed and the
+  // answer is the first thing in the row.
+  const working =
+    progress === undefined
+      ? undefined
+      : (threadWorkingAuthor(entry, repositoryId) ?? participants[0]);
+  const ordered =
+    working === undefined
+      ? participants
+      : [
+          working,
+          ...participants.filter((author) => author.name !== working.name),
+        ];
+  const faces = ordered
     .slice(0, 3)
-    .map((author) =>
-      author.agent !== undefined
-        ? agentFace(author.agent, 20)
-        : avatar(
-            author.name,
-            20,
-            author.name,
-            author.name === currentUserName() ? myAvatar() : undefined,
-          ),
-    )
+    .map((author, index) => {
+      const face =
+        author.agent !== undefined
+          ? agentFace(author.agent, 20)
+          : avatar(
+              author.name,
+              20,
+              author.name,
+              author.name === currentUserName() ? myAvatar() : undefined,
+            );
+      return working !== undefined && index === 0
+        ? `<span class="ctl-working" style="--run:${progress}"
+            title="${progress}% by phase">${face}<span class="sr-only">Working, ${progress}% done</span></span>`
+        : face;
+    })
     .join("");
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
@@ -1483,7 +1605,13 @@ function changedFilesBlock(entry, repositoryId) {
  * a fixed milestone, which is all a phase deserves.
  */
 function threadProgress(entry) {
-  const replies = entry.replies ?? [];
+  // Only the newest turn can be moving. A completed turn leaves its outcome
+  // and fixed ending in the thread forever; reading the whole reply history
+  // meant either one hid the bar when somebody added more work to the same
+  // thread. `threadReplyTurns` already owns both kinds of turn boundary, so
+  // the bar and the transcript now agree about which run is current.
+  const turns = threadReplyTurns(entry.replies ?? []);
+  const replies = turns[turns.length - 1]?.replies ?? [];
   if (replies.length === 0) {
     return undefined;
   }
@@ -1544,6 +1672,50 @@ function threadProgress(entry) {
     }
   }
   return sawRunMarker ? progress : undefined;
+}
+
+/**
+ * Who the current run belongs to, so the ring can be drawn on them.
+ *
+ * Read from the narration for the same reason the progress is: the agent that
+ * spoke last in the current turn is the one still speaking, and no assignment
+ * record has to be fetched or kept in step for that to be true. Threads carry
+ * whoever has replied — a person asking a follow-up, a second agent handed the
+ * next task — so "the last agent-authored line" is the only reading that
+ * survives a room with more than one participant in it.
+ */
+function threadWorkingAuthor(entry, repositoryId) {
+  const turns = threadReplyTurns(entry.replies ?? []);
+  const replies = turns[turns.length - 1]?.replies ?? [];
+  for (let index = replies.length - 1; index >= 0; index -= 1) {
+    const author = channelAuthor(repositoryId, replies[index]);
+    if (author?.agent !== undefined) {
+      return author;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The last agent to have said anything in a thread, whenever it said it.
+ *
+ * `threadWorkingAuthor` answers a narrower question — who is speaking in the
+ * turn happening right now — and goes quiet the moment a run ends, which is
+ * exactly when a log of finished work still needs a name against the row. This
+ * one reads the whole reply history backwards instead, so a thread names the
+ * agent currently on it while it runs and the one that last worked on it once
+ * it has stopped. Replies rather than the root: the root is the request, and
+ * the person who made it is not who did the work.
+ */
+function threadLastAgentAuthor(entry, repositoryId) {
+  const replies = entry.replies ?? [];
+  for (let index = replies.length - 1; index >= 0; index -= 1) {
+    const author = channelAuthor(repositoryId, replies[index]);
+    if (author?.agent !== undefined) {
+      return author;
+    }
+  }
+  return undefined;
 }
 
 /* ------------------------------------------------- message identity ---- */
@@ -1706,6 +1878,7 @@ function messageRow(
     hideChanges = false,
     actions = "",
     compact = false,
+    threadPath = undefined,
   } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
@@ -1719,18 +1892,16 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  // One acknowledgement under a person's task stays visually flat. Once the
-  // agent has substantive narration too, that same request becomes the root
-  // of the task thread. Legacy agent-authored roots keep their old shape.
+  // A person's task becomes a thread when substantive narration arrives.
+  // Until then its request stays visually flat. Legacy agent-authored roots
+  // keep their old shape.
   const inlineReply = inlineReplyTo !== undefined;
-  const hasTaskThread =
-    replies.length > 0 &&
-    (entry.kind !== "user" ||
-      (entry.taskId !== undefined && replies.length > 1));
-  // Agent answers and acknowledgements remain ordinary roots in the room's
-  // chronological transcript. Their stored reference is the address back to
-  // the request that prompted them; it does not replace the task thread the
-  // acknowledgement may also grow below itself. Resolve against the complete
+  const hasTaskThread = channelMessageHasTaskThread(entry);
+  const channelThread = hasTaskThread && !isReply;
+  // Agent answers and legacy acknowledgements remain ordinary roots in the
+  // room's chronological transcript. Their stored reference is the address
+  // back to the request that prompted them; it does not replace a task thread
+  // the root may also grow below itself. Resolve against the complete
   // loaded channel rather than the filtered `messageList`, so searching for
   // the answer does not make its address disappear.
   const referencedRoot =
@@ -1752,10 +1923,27 @@ function messageRow(
   // somebody and the name beside it does nothing is a worse answer than
   // neither being pressable.
   const identity = authorIdentity(repositoryId, entry, author);
+  // The path is assigned by `messageThreadPaths`, which can start it on an
+  // earlier compact-group message than the one that owns the task. A direct
+  // channel render still gets a complete standalone path as a safe fallback.
+  const path =
+    threadPath ??
+    (channelThread ? { start: true, through: false, end: true } : undefined);
+  const changedBlock = hideChanges
+    ? ""
+    : changedFilesBlock(entry, repositoryId);
+  // The run is drawn around the face running it, inside the thread link — see
+  // `threadSummaryLink`. It used to be a bar on its own line under the route,
+  // which spent a full line of the room saying something no reader could
+  // attribute to anybody in a thread with more than one participant.
+  const progress = channelThread ? threadProgress(entry) : undefined;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
-  }${hasTaskThread && !isReply ? " cmsg-threaded" : ""
+  }${channelThread ? " cmsg-threaded" : ""}${
+    path?.start === true ? " cmsg-thread-path-start" : ""
+  }${path?.through === true ? " cmsg-thread-path-through" : ""}${
+    path?.end === true ? " cmsg-thread-path-end" : ""
   }${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
@@ -1801,6 +1989,7 @@ function messageRow(
           )}</span>`
     }
     <div class="cmsg-body">
+      ${channelThread ? `<div class="cmsg-thread-route">` : ""}
       ${
         compact
           ? ""
@@ -1842,34 +2031,14 @@ function messageRow(
                     title="Add a reaction" aria-label="Add a reaction">${icon("smile")}</button></div>`
       }
       ${
-        // The file list belongs to the thread, so it renders under the
-        // thread's own link — the work is the thread's story, and a summary of
-        // it sitting directly under the opening message read as a property of
-        // that one message, beside a second copy wherever else the task was
-        // mentioned. A message with no thread keeps the block on itself
-        // because there is nothing else for it to hang from; the root inside
-        // the open thread keeps it because that is the thread. Crucially, the
-        // root does not repeat the channel's "N replies" link inside the panel
-        // those replies are already open in.
-        !hasTaskThread || isReply
-          ? hideChanges
-            ? ""
-            : changedFilesBlock(entry, repositoryId)
-          : threadSummaryLink(entry, replies, repositoryId) +
-            (() => {
-              // A few pixels of accent under the thread: how far its run has
-              // got, present only while there is a run to speak of. Quiet by
-              // design — the thread's own words carry the detail, this just
-              // spares opening it to learn "roughly where".
-              const progress = threadProgress(entry);
-              return progress === undefined
-                ? ""
-                : `<div class="thread-progress" title="${progress}% by phase">
-                     <i style="width:${progress}%"></i>
-                   </div>`;
-            })() +
-            changedFilesBlock(entry, repositoryId)
+        // The route ends at the thread link. The changed files are deliberately
+        // outside it, so opening them can never pull the grey connector down
+        // past the thing it identifies.
+        channelThread
+          ? threadSummaryLink(entry, replies, repositoryId, progress)
+          : changedBlock
       }
+      ${channelThread ? `</div>${changedBlock}` : ""}
     </div>
     <span class="cmsg-actions">
       ${
@@ -2013,6 +2182,66 @@ function continuesUserMessageGroup(previous, current, startsNewDay) {
   );
 }
 
+/** Whether a channel root owns the compact thread summary drawn under it. */
+function channelMessageHasTaskThread(entry) {
+  const replies = entry.replies ?? [];
+  return (
+    replies.length > 0 &&
+    (entry.kind !== "user" || entry.taskId !== undefined)
+  );
+}
+
+/**
+ * Assigns one connector path to every visible run of consecutive prompts.
+ *
+ * The path begins on the run's one visible avatar, crosses otherwise ordinary
+ * compact messages when necessary, branches at every task, and ends at the
+ * final task. Search results opt out because they are independent hits rather
+ * than a trustworthy uninterrupted run.
+ */
+function messageThreadPaths(timeline, groupConsecutive) {
+  const paths = timeline.map(() => undefined);
+  let groupStart = 0;
+  while (groupStart < timeline.length) {
+    let groupEnd = groupStart + 1;
+    if (groupConsecutive) {
+      while (groupEnd < timeline.length) {
+        const previous = timeline[groupEnd - 1];
+        const current = timeline[groupEnd];
+        const startsNewDay =
+          new Date(previous.at ?? 0).toDateString() !==
+          new Date(current.at ?? 0).toDateString();
+        if (!continuesUserMessageGroup(previous, current, startsNewDay)) {
+          break;
+        }
+        groupEnd += 1;
+      }
+    }
+
+    const branches = [];
+    for (let index = groupStart; index < groupEnd; index += 1) {
+      if (
+        timeline[index].inlineReplyTo === undefined &&
+        channelMessageHasTaskThread(timeline[index].entry)
+      ) {
+        branches.push(index);
+      }
+    }
+    if (branches.length > 0) {
+      const lastBranch = branches[branches.length - 1];
+      for (let index = groupStart; index <= lastBranch; index += 1) {
+        paths[index] = {
+          start: index === groupStart,
+          through: index < lastBranch,
+          end: index === lastBranch,
+        };
+      }
+    }
+    groupStart = groupEnd;
+  }
+  return paths;
+}
+
 /**
  * The three dots, for one surface.
  *
@@ -2081,8 +2310,7 @@ function messageList(repositoryId) {
       .filter(
         (entry) =>
           entry.taskId !== undefined &&
-          (entry.replies ?? []).length > 0 &&
-          (entry.kind !== "user" || (entry.replies ?? []).length > 1),
+          channelMessageHasTaskThread(entry),
       )
       .map((entry) => entry.taskId),
   );
@@ -2110,7 +2338,7 @@ function messageList(repositoryId) {
   for (const entry of entries) {
     if (
       entry.kind !== "user" ||
-      (entry.taskId !== undefined && (entry.replies ?? []).length > 1)
+      (entry.taskId !== undefined && (entry.replies ?? []).length > 0)
     ) {
       continue;
     }
@@ -2137,6 +2365,7 @@ function messageList(repositoryId) {
     timeline.push({ entry, inlineReplyTo: undefined, at: entry.at });
   }
   timeline.push(...pending.slice(next));
+  const threadPaths = messageThreadPaths(timeline, query === "");
   let lastDay = "";
   // Where this visit found the room, as a timestamp — see `snapshotChannelRead`.
   // Suppressed while searching: the results are hits scattered through history,
@@ -2184,7 +2413,12 @@ function messageList(repositoryId) {
       query === "" &&
       continuesUserMessageGroup(timeline[index - 1], item, startsNewDay);
     return (
-      separator + messageRow(entry, repositoryId, { hideChanges, compact })
+      separator +
+      messageRow(entry, repositoryId, {
+        hideChanges,
+        compact,
+        threadPath: threadPaths[index],
+      })
     );
   });
   return `<div class="chan-messages" id="chan-messages" role="log"
@@ -2390,14 +2624,11 @@ function isThreadEnding(reply) {
  * narration — was written for replies stored before that mark existed, and it
  * swallowed every sentence an agent addresses to a person inside a thread.
  *
- * That is what "they start on the task but they don't respond and confirm"
- * was. Asking for more work in a thread does get an acknowledgement, posted
- * before the task is even submitted — but it is a reply rather than a root, it
- * carries the default `agent` kind, and so it was filed as run chatter and
- * hoisted into a "Thinking" fold that renders closed once a thread has an
- * ending. The reader saw their request and then nothing. The same fold ate
- * "Starting now.", "Queued again — I'll report back here.", the held plan, and
- * every answer an agent gives to a question asked in a thread.
+ * This used to swallow task acknowledgements posted as ordinary `agent`
+ * replies, along with every answer an agent addressed to a person. Those
+ * acknowledgements are no longer posted, but historical replies and real
+ * conversational answers still need to remain visible rather than being
+ * hoisted into a closed "Thinking" fold.
  *
  * The cost is threads older than the `progress` mark, whose narration is
  * stored as `agent` and now renders inline instead of folded. That is a couple
@@ -2437,7 +2668,11 @@ function channelMentionCandidates(repositoryId) {
     ...channelParticipants(repositoryId)
       .filter((entry) => typeof entry.name === "string" && entry.name !== "")
       .filter(
-        (entry) => query === "" || entry.name.toLowerCase().includes(query),
+        (entry) =>
+          query === "" ||
+          entry.name.toLowerCase().includes(query) ||
+          (typeof entry.email === "string" &&
+            entry.email.toLowerCase().includes(query)),
       ),
     // Five, not seven. The picker opens upward from the composer and covers
     // the conversation you are replying to, so every extra row is a line of
@@ -2455,11 +2690,30 @@ function channelMentionCandidates(repositoryId) {
  * `/el` is guessing. The list comes from the server with the messages, so the
  * picker cannot offer something the channel would not recognise.
  */
-function channelSlashCandidates(repositoryId) {
+function channelSlashCandidates(repositoryId, target = "channel") {
   const query = state.slashQuery.trim().toLowerCase();
-  return (state.channelSlashCommands[repositoryId] ?? [])
-    .filter((entry) => String(entry.name ?? "").startsWith(query))
-    .slice(0, 6);
+  const matching = (state.channelSlashCommands[repositoryId] ?? []).filter(
+    (entry) => String(entry.name ?? "").startsWith(query),
+  );
+  if (target === "thread") {
+    // The server sends one channel-wide command list, with the general task
+    // commands first. Reusing its first six entries in a thread pushed
+    // `/retry` and `/cancel` below the picker's hard limit, even though those
+    // are the two commands whose meaning is specifically tied to a thread.
+    // Put every command the thread handles directly first. A more specific
+    // query still finds any other command because ordering happens after the
+    // prefix filter.
+    const threadFirst = ["retry", "cancel", "push", "ask", "dnc", "simple"];
+    matching.sort((left, right) => {
+      const leftAt = threadFirst.indexOf(String(left.name ?? ""));
+      const rightAt = threadFirst.indexOf(String(right.name ?? ""));
+      return (
+        (leftAt === -1 ? threadFirst.length : leftAt) -
+        (rightAt === -1 ? threadFirst.length : rightAt)
+      );
+    });
+  }
+  return matching.slice(0, 6);
 }
 
 function slashPopover(candidates, target) {
@@ -2517,7 +2771,7 @@ function composerSuggestions(repositoryId, target = "channel") {
   }
   return `${
     state.slashActive
-      ? slashPopover(channelSlashCandidates(repositoryId), target)
+      ? slashPopover(channelSlashCandidates(repositoryId, target), target)
       : ""
   }${
     state.mentionActive
@@ -2909,8 +3163,7 @@ function threadListPanel(repositoryId) {
     .filter(
       (entry) =>
         (entry.replies ?? []).length > 0 &&
-        (entry.kind !== "user" ||
-          (entry.taskId !== undefined && (entry.replies ?? []).length > 1)),
+        (entry.kind !== "user" || entry.taskId !== undefined),
     )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
@@ -2944,7 +3197,16 @@ function threadListPanel(repositoryId) {
                 const count = replies.filter(
                   (reply) => reply.kind !== "progress" && reply !== titled,
                 ).length;
-                const author = channelAuthor(repositoryId, entry);
+                // The agent that worked the thread, not the person whose
+                // message it hangs under. Every row in a channel one person
+                // asks in carried that same person's name, which answered a
+                // question nobody scanning a work log has; the useful name is
+                // the colleague who did — or is doing — the work. Falls back
+                // to the root author only for a thread no agent has spoken in
+                // yet, where there is no better answer.
+                const author =
+                  threadLastAgentAuthor(entry, repositoryId) ??
+                  channelAuthor(repositoryId, entry);
                 // The one thing a log of finished work cannot say for itself:
                 // which of these is still moving. Marked from the task's own
                 // status, the same signal that keeps the agent's typing dots
@@ -3350,11 +3612,27 @@ function agentSpec(agent, repositoryId) {
         here ? `How ${esc(agent.name)} contributes in #${esc(repository.id)}` : "Channel role"
       }</span>
     </span>
-    <input class="aspec-role" data-act="agent-role-input"
-      data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
-      value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
-      enterkeyhint="done" placeholder="Not set"
-      aria-label="Role for ${esc(agent.name)} in #${esc(repository.id)}">
+    <span class="aspec-role-field">
+      <input class="aspec-role" data-act="agent-role-input"
+        data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
+        value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
+        enterkeyhint="done" placeholder="Not set"
+        aria-label="Role for ${esc(agent.name)} in #${esc(repository.id)}">
+      ${
+        // The typed field is unchanged; this only puts the two spellings that
+        // mean something one press away. Drawn for moderators alone because
+        // they are the only people the server lets set one, and a chevron
+        // that opens a menu of refusals is not a shortcut.
+        canManageRepository(repository.id)
+          ? `<button type="button" class="aspec-role-pick"
+              data-act="agent-role-menu" data-value="${esc(agent.id)}"
+              data-repo="${esc(repository.id)}" title="Reserved roles"
+              aria-label="Choose a role for ${esc(agent.name)} in #${esc(
+                repository.id,
+              )}">${icon("chevronDown")}</button>`
+          : ""
+      }
+    </span>
   </form>`;
   // Model and reasoning are the agent's own credential spending its owner's
   // account, so only that owner picks them; a teammate reads what was chosen.
@@ -3455,7 +3733,9 @@ function agentSpec(agent, repositoryId) {
         <h3 class="aspec-label">Capabilities</h3>
         <div class="aspec-capabilities">
           ${roleField(currentRepository, currentAssignment, true)}
-          <div class="aspec-capability aspec-current-task">
+          <div class="aspec-capability aspec-current-task${
+            task === undefined ? "" : " aspec-current-task-active"
+          }">
             <span class="aspec-capability-mark">${icon("check")}</span>
             <span class="aspec-capability-copy">
               <span class="aspec-capability-title">${
@@ -3840,9 +4120,8 @@ function threadReplyTurns(replies) {
   };
   for (const reply of replies) {
     // A human prompt is the usual boundary. An outcome is also a durable
-    // boundary for work merged into this thread automatically: that path can
-    // add the next agent acknowledgement and run without copying the channel
-    // prompt into the reply list.
+    // boundary for older work merged into this thread without copying the
+    // channel prompt into the reply list.
     if (reply.kind === "user" || ended) {
       finish();
       turn = {
@@ -4030,8 +4309,7 @@ function threadTyping(root) {
   const replies = root.replies ?? [];
   // The *last* reply, not any of them. A thread whose earlier turn ended is
   // exactly where somebody asks for the next one, and asking whether the
-  // thread has ever ended meant the dots never came back for it — the same
-  // turn whose acknowledgement was being folded away, so it went quiet twice.
+  // thread has ever ended meant the dots never came back for a later turn.
   if (
     root.kind !== "agent" ||
     replies.length === 0 ||
@@ -4772,7 +5050,7 @@ export function submitComposerMessage(rerender) {
     }
     state.chatDraft = "";
     saveChannelDraft(repositoryId, "");
-    state.mentionActive = false;
+    closeComposerAutocomplete("channel");
     // A direct reply is one message, not a mode the composer stays trapped
     // in. Continuing an agent task remains sticky as before.
     const directReply =
@@ -4798,7 +5076,7 @@ export function submitComposerMessage(rerender) {
   }
   state.chatDraft = "";
   saveChannelDraft(repositoryId, "");
-  state.mentionActive = false;
+  closeComposerAutocomplete("channel");
   markChannelRead(repositoryId);
   rerender();
   scrollChannel();
@@ -4902,13 +5180,34 @@ export function submitThreadReply(rerender) {
   // same way a channel message does, and `messageBody` reads them back out.
   postChannelReply(activeChannelId(), state.activeChannelThread, state.threadDraft);
   state.threadDraft = "";
-  if (state.composerAutocompleteTarget === "thread") {
-    state.mentionActive = false;
-    state.mentionQuery = "";
-    state.slashActive = false;
-    state.slashQuery = "";
-  }
+  closeComposerAutocomplete("thread");
   rerender();
+}
+
+/**
+ * Closes whichever picker a composer was showing, because it just sent.
+ *
+ * Both pickers are a suggestion about the word under the cursor, and sending
+ * takes that word — the whole draft — away. Leaving either one open left a
+ * list of commands hanging over an emptied composer with nothing left to
+ * complete: the popup outlives the message it was helping to write, and,
+ * since only typing reopens the question, it stays there through a channel
+ * switch and everything after it.
+ *
+ * The query and the highlighted row go with it. A stale `/dep` left behind
+ * would decide what the next `/` offers before a single character of it has
+ * been typed.
+ */
+function closeComposerAutocomplete(target) {
+  if (state.composerAutocompleteTarget !== target) {
+    return;
+  }
+  state.mentionActive = false;
+  state.mentionQuery = "";
+  state.mentionIndex = 0;
+  state.slashActive = false;
+  state.slashQuery = "";
+  state.slashIndex = 0;
 }
 
 function autocompleteSnapshot() {
@@ -5105,7 +5404,7 @@ export function handleComposerKeydown(event, rerender) {
   // open at a time (see `updateMentionState`), so the two cannot both claim
   // an Enter.
   if (ownsSuggestions && state.slashActive) {
-    const list = channelSlashCandidates(activeChannelId());
+    const list = channelSlashCandidates(activeChannelId(), target);
     if (event.key === "ArrowDown") {
       event.preventDefault();
       state.slashIndex = list.length === 0 ? 0 : (state.slashIndex + 1) % list.length;

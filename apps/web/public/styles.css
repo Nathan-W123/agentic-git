@@ -99,6 +99,29 @@
   --shadow-pop: 0 6px 16px rgba(0, 0, 0, 0.44);
   --shadow-card: 0 1px 1px rgba(0, 0, 0, 0.28);
 
+  /* Motion. Three durations and one curve, named because a surface arriving
+     and the same surface leaving have to take the same time to read as one
+     movement played backwards, and two numbers written out separately do not
+     stay equal for long.
+
+     The curve is the phone drawer's: most of the distance covered early, then
+     a long quiet tail, which is how something thrown by a hand actually
+     moves. A symmetric ease over the same duration reads as slower, because
+     it saves half the travel for the second half of the time.
+
+     Only the rules that arrived with these tokens read them. The durations
+     written inline elsewhere in this file are the same vocabulary reached at
+     by hand, and rewriting them to point here would be a large diff that
+     changes nothing on screen. */
+  --ease-motion: cubic-bezier(0.32, 0.72, 0, 1);
+  /* A popup is anchored to the click that opened it and has nowhere to
+     travel; it only has to not blink into existence. */
+  --motion-pop: 0.14s;
+  /* A panel crosses real distance, so it gets long enough to be seen doing
+     it — still short enough that nobody opening one waits for it. */
+  --motion-panel: 0.2s;
+  --motion-scrim: 0.18s;
+
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas,
@@ -2559,6 +2582,19 @@ svg {
   position: absolute;
   inset: 0;
   background: rgba(4, 5, 9, 0.4);
+  animation: scrim-in var(--motion-scrim) ease;
+}
+
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes scrim-out {
+  to {
+    opacity: 0;
+  }
 }
 
 .popover {
@@ -2580,6 +2616,47 @@ svg {
   from {
     opacity: 0;
     transform: translateY(-5px);
+  }
+}
+
+/* The way out, mirroring `pop-in`. `closePopover` (ui.js) puts this class on
+   the layer and holds the node for the length of it rather than removing it
+   on the spot: a popup that eases in over eight frames and then vanishes
+   between two reads as a glitch, not as a dismissal. `forwards` so the last
+   frame holds until the node actually goes, and `pointer-events` off so a
+   surface on its way out cannot swallow the click that follows it. */
+.pop-layer.pop-closing {
+  pointer-events: none;
+}
+
+.pop-layer.pop-closing .popover {
+  animation: pop-out var(--motion-pop) ease forwards;
+}
+
+.pop-layer.pop-closing .pop-scrim {
+  animation: scrim-out var(--motion-scrim) ease forwards;
+}
+
+@keyframes pop-out {
+  to {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pop-scrim {
+    animation: none;
+  }
+
+  /* Not `animation: none` like the entrance above it. The exit animation is
+     the only reason the layer is still in the document, so turning it off
+     would leave the popup standing at full opacity for the length of the
+     hold and *then* blink out — more motion noticed, not less. Taken
+     straight to its destination instead; ui.js drops the node on the same
+     timer either way. */
+  .pop-layer.pop-closing {
+    display: none;
   }
 }
 
@@ -3905,6 +3982,12 @@ button.chip.lg:hover {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  /* The ground a closing side panel is pinned against while it leaves — see
+     `.thread-panel.panel-leaving`. Everything else positioned in here already
+     has a nearer relative ancestor of its own (`.chan-main` for the jump
+     pill, the panel itself for its drag grip), so this claims nothing that
+     was not already claimed. */
+  position: relative;
 }
 
 .chan-sidebar {
@@ -3972,6 +4055,28 @@ button.chip.lg:hover {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text);
+}
+
+/* The two headings below the channel list travel with the lists they name.
+   Their own `overflow: hidden` is what lets their height go to nothing
+   without costing them their stickiness: only a clipping *ancestor* breaks
+   `position: sticky`, and this is the sticky element itself. A max-height
+   rather than a grid row because a heading is one line of small caps beside a
+   20px button — a ceiling the content cannot reach is near enough to the real
+   height that the fold reads as immediate at either end. */
+.chan-sec-people,
+.chan-sec-agents {
+  max-height: 60px;
+  overflow: hidden;
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition:
+    max-height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    padding 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear;
 }
 
 .chan-sec-label {
@@ -4244,7 +4349,43 @@ button.chip.lg:hover {
 /* No scrollbar and no rule above it: `.chan-scroll` carries the scrolling for
    the whole column now, and the sticky heading is what separates one list
    from the next. */
+/* A clipping box around one block, so the desktop collapse can fold it away
+   instead of switching it off. `1fr` -> `0fr` on the row animates a height
+   that nothing had to measure — the inner block keeps whatever height its
+   rows add up to, and this box crops what no longer fits. Expanded it is the
+   plain container it always was; the row is the full height and the padding
+   has simply moved one level in. */
 .chan-roster {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition:
+    grid-template-rows 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear;
+}
+
+/* Out top-down on the way back: the heading appears, then its list under it,
+   then the next pair — which is what "unrolling from the channel list" looks
+   like. The collapsed rules below reverse the order, so the same four things
+   roll back up in the order they would have to. */
+.chan-roster-people {
+  transition-delay: 0.03s;
+}
+
+.chan-sec-agents {
+  transition-delay: 0.06s;
+}
+
+.chan-roster-agents {
+  transition-delay: 0.09s;
+}
+
+.chan-roster-inner {
+  min-height: 0;
   padding: 0 8px;
 }
 
@@ -4831,6 +4972,16 @@ button.chip.lg:hover {
 }
 
 .cmsg-row {
+  /* One column for the whole connector, named once. `--cmsg-body-x` is the
+     distance from the row's left edge to the body's text — 8px of row
+     padding, the 32px face, the 12px column gap — and `--cmsg-stem-x` is
+     where the stem stands inside that gutter. The stem crossing a grouped
+     row is placed from the row, while the final segment and its elbow are
+     placed from the body, so the three only read as one line while they
+     agree about this column. Spelling it out is what stops them drifting
+     apart when any of those three numbers moves. */
+  --cmsg-body-x: 52px;
+  --cmsg-stem-x: 23px;
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -4872,40 +5023,76 @@ button.chip.lg:hover {
   padding-bottom: 1px;
 }
 
+/* No face on this line, so the body pays for the gutter itself — the same
+   gutter, minus the row padding it already sits inside. */
 .cmsg-row.cmsg-compact .cmsg-body {
-  margin-left: 44px;
+  margin-left: calc(var(--cmsg-body-x) - 8px);
 }
 
 .cmsg-row.cmsg-compact .cmsg-text {
   margin-top: 0;
 }
 
-/* A thread branches from the root avatar into its compact reply summary.
-   Three pixels of a neutral border grey gives the branch enough presence to
-   read as a path rather than a divider, without the accent's colour pulling
-   the eye away from the message. It starts four pixels below the avatar and
-   stops short of the reply link, so the rounded stroke floats between the two
-   components. The elbow radius carries the extra pixel so the inner curve
-   keeps the shape it had at two. */
-.cmsg-row.cmsg-threaded::before {
+/* One stem belongs to the visible avatar, not to whichever compact message
+   happened to create a task. Rows before the group's final task carry that
+   stem all the way through, so two prompts read as branches of one path and a
+   task on the second prompt still leads back to the face above both of them. */
+.cmsg-row.cmsg-thread-path-through::before {
   content: "";
   position: absolute;
-  left: 23px;
-  top: 44px;
-  bottom: 18px;
-  width: 16px;
+  left: var(--cmsg-stem-x);
+  top: -1px;
+  bottom: -1px;
   border-left: 3px solid var(--border-strong);
-  border-bottom: 3px solid var(--border-strong);
   border-top-left-radius: 2px;
-  border-bottom-right-radius: 2px;
-  border-bottom-left-radius: 11px;
   pointer-events: none;
 }
 
-/* A thread whose root also answers something starts its avatar one reference
-   line lower, so the branch drawn under that avatar starts there too. */
-.cmsg-row.cmsg-threaded:has(> .cmsg-ref)::before {
-  top: 62px;
+/* Every grouped path leaves its avatar from the same point, four pixels below
+   the 32px face, regardless of the height of that first message. */
+.cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
+  top: 44px;
+}
+
+/* The final row owns a wrapper that stops immediately after the thread link.
+   Its stem can therefore end at that link without following the progress bar
+   or the changed-files disclosure when either grows. */
+.cmsg-thread-route {
+  position: relative;
+}
+
+/* Where the stem stops is the whole of whether the turn reads as one line.
+   The route's foot is the foot of the thread link itself — see the
+   `vertical-align` on `.cmsg-thread-link`, which is what takes the line
+   box's descent out of this sum — so `bottom: 23px` ends the stroke eleven
+   pixels above the middle of that 24px link, which is where the elbow's own
+   upright stands. It used to stop at `bottom: 11px`, level with the *outer
+   bottom* of the elbow — but by that point the elbow has curved away to the
+   right, so the last pixels of the stem stood alone beside the corner as a
+   tail poking past the swoosh. The stem now finishes inside the straight
+   part of that upright, four pixels below its top and three above where the
+   curve begins, so the two strokes overlap in the same column and no join is
+   visible. Any change here has to keep the end within that upright (see the
+   height and top of `.cmsg-row.cmsg-threaded .cmsg-thread-link::before`) —
+   too low and the tail comes back, too high and the line breaks in two.
+
+   The stroke is dropped two pixels above the wrapper so it overlaps the stem
+   of the row above rather than meeting it exactly: a group whose prompts each
+   carry a task is one path drawn in several pieces, and a hairline of rounding
+   between two of those pieces is a broken line. */
+.cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
+  top: -2px;
+  bottom: 23px;
+  border-left: 3px solid var(--border-strong);
+  pointer-events: none;
+}
+
+.cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
+  .cmsg-thread-route::before {
+  top: 37px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -5448,27 +5635,6 @@ button.chip.lg:hover {
   color: var(--danger, #f85149);
 }
 
-/* The run's position, as quietly as it can be said: three pixels of the
-   chosen accent under the thread it belongs to. The track is the accent's own
-   wash so it reads as one element in any theme, and the fill moves only when
-   the narration above it says something moved. */
-.thread-progress {
-  height: 2px;
-  margin: 6px 0;
-  max-width: 420px;
-  border-radius: 2px;
-  background: var(--accent-wash);
-  overflow: hidden;
-}
-
-.thread-progress i {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  transition: width 0.4s ease;
-}
-
 /* The way into a thread from the channel: faces, then a tinted count.
    No surface, no border, no chevron — the card treatment belongs to the
    threads pullout, where a row has to identify a thread with nothing above it.
@@ -5476,6 +5642,7 @@ button.chip.lg:hover {
    reader is "there is more, and this much of it". Sized to its content rather
    than the column so the hit area ends where the words do. */
 .cmsg-thread-link {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -5483,6 +5650,49 @@ button.chip.lg:hover {
   margin-top: 6px;
   padding: 2px 0;
   text-align: left;
+  /* Sat on the baseline, the link left the descent of its line box below it,
+     and the wrapper the stem is measured from ended that far past the link.
+     The descent is whatever the inherited font metrics say — which is not the
+     same number on a phone, where the browser is free to inflate transcript
+     text — so the stem's foot moved while the elbow it has to meet did not,
+     and past four pixels of drift the two came apart. Aligned to the bottom
+     of the line box, the wrapper ends where the link ends, and the join is
+     the same on every screen. */
+  vertical-align: bottom;
+}
+
+/* Each task turns out of the shared avatar stem at its thread summary. The
+   short vertical overlap makes consecutive elbows read as branches of one
+   path; the thirteen-pixel gap keeps the stroke clear of the replier faces.
+
+   `border-box` is what makes the turn seamless rather than decorative. The
+   elbow is placed from its right edge, so under the default content box its
+   own three-pixel left stroke hung *outside* the declared width and pushed
+   the whole corner three pixels further left than the stem it turns out of —
+   a visible step where the two should be one line. Sized by the border box,
+   the gap plus the 16px of elbow put that stroke in the connector's own
+   column, exactly where the stem above it stands: the gap is read from
+   `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
+   fall out of step with the stems either side of it.
+
+   Top and height are read together: the difference between them (18 - 15) is
+   what puts the horizontal run three pixels below the link's middle, where it
+   has always sat. The height is spent upwards, giving the upright seven
+   straight pixels above the corner's arc for the stem to finish inside —
+   enough overlap that neither stroke can end short of the other. */
+.cmsg-row.cmsg-threaded .cmsg-thread-link::before {
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+  top: calc(50% - 15px);
+  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 16px);
+  width: 16px;
+  height: 18px;
+  border-left: 3px solid var(--border-strong);
+  border-bottom: 3px solid var(--border-strong);
+  border-bottom-left-radius: 11px;
+  border-bottom-right-radius: 2px;
+  pointer-events: none;
 }
 
 /* The count is the link, and it is the reader's own accent rather than a
@@ -5523,6 +5733,53 @@ button.chip.lg:hover {
    answering a question nobody asked of a thread summary. */
 .cmsg-thread-link .ctl-faces .presence {
   display: none;
+}
+
+/* The run's position, drawn around the face running it: two pixels of the
+   reader's accent closing clockwise as the narration below it advances. It
+   was a bar on its own line under the thread, which spent a line of the room
+   on a fact nobody could attribute — in a thread with two agents and a person
+   in it, a bar in the margin says something is moving but never who.
+
+   `z-index` and the two margins are what keep the circle closed. The ring
+   stands three pixels outside a 20px face, so the stack's overlap is traded
+   back on this one face for exactly that much room on each side, and the
+   raised layer keeps the next face along from cutting the arc. */
+.cmsg-thread-link .ctl-faces .ctl-working {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 3px;
+  margin-right: 3px;
+}
+
+.cmsg-thread-link .ctl-faces .ctl-working::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  /* The travelled arc in the accent, the rest of the circle in the accent's
+     own wash — a gauge reads as a gauge only when the part still to come is
+     visibly there. */
+  background: conic-gradient(
+    var(--accent) calc(var(--run, 0) * 1%),
+    var(--accent-wash) 0
+  );
+  /* Two pixels of that circle, and the disc cut out of the middle. A border
+     cannot carry a conic gradient, so the ring has to be a masked disc: keep
+     the outermost two pixels, drop everything inside them. */
+  -webkit-mask: radial-gradient(
+    closest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  mask: radial-gradient(
+    closest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  pointer-events: none;
 }
 
 /* ------------------------------------------------------------ mention ---- */
@@ -5945,7 +6202,8 @@ button.chip.lg:hover {
 }
 
 /* The header's tools, revealed together. Laid out as one group so they read
-   as a tray that opened rather than as controls that appeared one by one. */
+   as a tray that opened rather than as controls that each turned up on their
+   own — the stagger below is one row unfolding, not five separate arrivals. */
 .chan-tools {
   display: inline-flex;
   align-items: center;
@@ -5963,6 +6221,116 @@ button.chip.lg:hover {
    revealed instead of spinning in place. */
 .chan-tools-toggle.on svg {
   transform: rotate(-90deg);
+}
+
+/* The tools coming out of the arrow, and going back into it.
+ *
+ * Driven from `playSurfaceMotion` in app.js rather than from the tray's own
+ * existence: the screen is one `innerHTML` assignment, so this row is a new
+ * element after every keystroke and every event off the stream, and a bare
+ * animation on `.chan-tools` would replay the whole reveal each time somebody
+ * typed. The classes below are only ever worn for the one render that opened
+ * or closed the fold.
+ *
+ * Each icon starts stacked under the arrow and travels the distance it
+ * actually sits from it, so the row unfolds out of that one point instead of
+ * sliding sideways as a block. 42px is the span between the last icon's
+ * centre and the arrow's (15 + the header's 12px gap + 15), and every step
+ * further along the row adds one 32px control pitch. The one nearest the arrow leads on the way out
+ * and the far one leads on the way back, which is what makes the return read
+ * as the row being drawn in rather than pushed away. */
+.chan-tools.tools-entering > * {
+  --tool-shift: 42px;
+  animation: chan-tool-out 0.22s cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+}
+
+.chan-tools.tools-entering > *:nth-last-child(2) {
+  --tool-shift: 74px;
+  animation-delay: 0.03s;
+}
+
+.chan-tools.tools-entering > *:nth-last-child(3) {
+  --tool-shift: 106px;
+  animation-delay: 0.06s;
+}
+
+.chan-tools.tools-entering > *:nth-last-child(4) {
+  --tool-shift: 138px;
+  animation-delay: 0.09s;
+}
+
+/* Everything beyond the fourth travels together. The tray holds five controls
+   today and the count is not fixed, so the last rule has to be open-ended
+   rather than one more line per icon somebody adds. */
+.chan-tools.tools-entering > *:nth-last-child(n + 5) {
+  --tool-shift: 170px;
+  animation-delay: 0.12s;
+}
+
+.chan-tools.tools-leaving > * {
+  --tool-shift: 42px;
+  animation: chan-tool-in 0.18s cubic-bezier(0.55, 0.06, 0.68, 0.19) both;
+}
+
+.chan-tools.tools-leaving > *:nth-last-child(2) {
+  --tool-shift: 74px;
+}
+
+.chan-tools.tools-leaving > *:nth-last-child(3) {
+  --tool-shift: 106px;
+}
+
+.chan-tools.tools-leaving > *:nth-last-child(4) {
+  --tool-shift: 138px;
+}
+
+.chan-tools.tools-leaving > *:nth-last-child(n + 5) {
+  --tool-shift: 170px;
+}
+
+/* Counted from the other end, because the exit runs the other way: the icon
+   furthest from the arrow sets off first and the one against it goes last. */
+.chan-tools.tools-leaving > *:nth-child(2) {
+  animation-delay: 0.03s;
+}
+
+.chan-tools.tools-leaving > *:nth-child(3) {
+  animation-delay: 0.06s;
+}
+
+.chan-tools.tools-leaving > *:nth-child(4) {
+  animation-delay: 0.09s;
+}
+
+.chan-tools.tools-leaving > *:nth-child(n + 5) {
+  animation-delay: 0.12s;
+}
+
+@keyframes chan-tool-out {
+  from {
+    opacity: 0;
+    transform: translateX(var(--tool-shift)) scale(0.6);
+  }
+}
+
+@keyframes chan-tool-in {
+  to {
+    opacity: 0;
+    transform: translateX(var(--tool-shift)) scale(0.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chan-tools.tools-entering > * {
+    animation: none;
+  }
+
+  /* As with the closing panel: the exit is the only reason the tray is still
+     in the document, so it is taken to its last frame rather than left
+     sitting there for the length of an animation that will not run. */
+  .chan-tools.tools-leaving {
+    display: none;
+  }
 }
 
 .preview-link {
@@ -6568,12 +6936,55 @@ button.chip.lg:hover {
   text-transform: capitalize;
 }
 
+/* Input and picker travel together, so the pair is what the row sizes. */
+.agent-spec .aspec-role-field {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 230px;
+  align-items: center;
+  gap: 2px;
+}
+
 .agent-spec .aspec-role {
   flex: 0 1 230px;
   padding: 7px 10px;
   border-color: var(--border-soft);
   background: var(--bg-card);
   font-size: 13px;
+}
+
+.agent-spec .aspec-role-field .aspec-role {
+  flex: 1 1 auto;
+}
+
+.agent-spec .aspec-role-pick {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  place-items: center;
+}
+
+.agent-spec .aspec-role-pick:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.agent-spec .aspec-role-pick:focus-visible {
+  border-color: var(--accent-line);
+  color: var(--text);
+  outline: none;
+}
+
+.agent-spec .aspec-role-pick svg {
+  width: 13px;
+  height: 13px;
 }
 
 .agent-spec .aspec-role:hover {
@@ -6594,6 +7005,39 @@ button.chip.lg:hover {
 
 .agent-spec .aspec-nav:hover {
   border-color: var(--border-soft);
+}
+
+/* A task that exists is the live assignment this profile is about, so it
+   becomes one accent surface instead of another grey capability row. The
+   available-for-work fallback keeps the unmodified row above. */
+.agent-spec .aspec-current-task-active {
+  margin-top: 10px;
+  padding: 13px 14px;
+  border-bottom: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.agent-spec .aspec-current-task-active .aspec-capability-mark,
+.agent-spec .aspec-current-task-active .aspec-capability-title,
+.agent-spec .aspec-current-task-active .aspec-capability-meta,
+.agent-spec .aspec-current-task-active .aspec-nav {
+  color: #fff;
+}
+
+.agent-spec .aspec-current-task-active .aspec-capability-meta {
+  opacity: 0.78;
+}
+
+.agent-spec .aspec-current-task-active .aspec-nav {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.agent-spec .aspec-current-task-active .aspec-nav:hover {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(0, 0, 0, 0.22);
 }
 
 .agent-spec .aspec-note {
@@ -6637,9 +7081,12 @@ button.chip.lg:hover {
     flex-wrap: wrap;
   }
 
-  .agent-spec .aspec-role {
+  .agent-spec .aspec-role-field {
     flex-basis: calc(100% - 36px);
     margin-left: 36px;
+  }
+
+  .agent-spec .aspec-role {
     text-align: left;
   }
 
@@ -6682,6 +7129,76 @@ button.chip.lg:hover {
   border-left: 1px solid var(--border-strong);
   box-shadow: -14px 0 30px -22px rgba(0, 0, 0, 0.9);
   z-index: 4;
+}
+
+/* Opening and closing, driven from `playSurfaceMotion` in app.js rather than
+   from the presence of the element itself.
+
+   A render replaces the whole tree, so this panel is a brand new node on
+   every keystroke and every event off the stream. An `animation` on the bare
+   class would therefore replay constantly — CSS cannot tell "just opened"
+   from "still open" here, and only the render loop knows the difference. It
+   adds the class for exactly one animation and takes it off again.
+
+   `panel-leaving` goes on the node the render threw away, put back into the
+   shell for the length of its exit. It is inert by then, so fading out is
+   all it can still do. */
+.thread-panel.panel-entering {
+  animation: panel-in var(--motion-panel) var(--ease-motion);
+}
+
+.thread-panel.panel-leaving {
+  animation: panel-out var(--motion-panel) var(--ease-motion) forwards;
+  pointer-events: none;
+}
+
+/* And out of the layout for the whole of that exit.
+
+   In the flex row it went on holding its column while it faded, so what the
+   reader actually saw on closing was the panel emptying to a bare grey slab
+   the width of itself — the shell showing through a transparent node — and
+   the conversation only widening a fifth of a second later when the node was
+   finally dropped. The panel appeared to close twice, and the second half of
+   it looked like something left behind.
+
+   Taken out of flow it is a ghost over a layout that has already settled: the
+   transcript takes the full width on the first frame and the panel leaves on
+   top of it. Only above the phone tier — below 600px `.thread-panel` is
+   already `fixed` over the whole screen, which is out of flow for the same
+   reason and must stay measured against the viewport rather than the shell. */
+@media (min-width: 601px) {
+  .thread-panel.panel-leaving {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+  }
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+@keyframes panel-out {
+  to {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thread-panel.panel-entering {
+    animation: none;
+  }
+
+  /* As with the closing popover: the exit is why the node is still here, so
+     it is taken to its last frame rather than turned off. */
+  .thread-panel.panel-leaving {
+    display: none;
+  }
 }
 
 /* Agent profiles need the breathing room of the reference's detail pane. A
@@ -7448,11 +7965,86 @@ dialog.modal {
   background: transparent;
   color: inherit;
   max-width: 92vw;
+  /* The centring a modal <dialog> normally gets for free, written out.
+     Browsers hang it off `dialog:modal`, and that stops matching the instant
+     `close()` is called — which is a frame before the exit transition below
+     has even started. Left to the default the card would drop out of the
+     middle of the screen and fade from wherever the top of the document put
+     it. Stated here, it is in the same place open, closing and closed. */
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: fit-content;
+  height: fit-content;
+  max-height: calc(100% - 2rem);
+  /* A native <dialog> is `display: none` until it is shown, and the top layer
+     it moves into is not an ordinary style either — so a plain opacity
+     transition has nothing to run between. `allow-discrete` on `display` and
+     `overlay` is what keeps both of those around for the length of the
+     transition, and `@starting-style` below supplies the frame to come *from*
+     on the way in. Without that pair this is a fade with only one end.
+
+     Held to a fade and a couple of pixels of rise: the dialog is already the
+     brightest thing on a dimmed screen, and anything more elaborate makes a
+     confirmation feel like a bigger decision than it is. */
+  opacity: 0;
+  transform: translateY(6px) scale(0.985);
+  transition:
+    opacity var(--motion-pop) ease,
+    transform var(--motion-pop) var(--ease-motion),
+    overlay var(--motion-pop) allow-discrete,
+    display var(--motion-pop) allow-discrete;
+}
+
+dialog.modal[open] {
+  opacity: 1;
+  transform: none;
+}
+
+/* Closed, but kept on screen by the transition above: it is a picture of a
+   dialog by then, and clicks belong to whatever it is fading away from. */
+dialog.modal:not([open]) {
+  pointer-events: none;
+}
+
+@starting-style {
+  dialog.modal[open] {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
 }
 
 dialog.modal::backdrop {
   background: rgba(4, 5, 9, 0.62);
   backdrop-filter: blur(2px);
+  /* The dim comes up with the card rather than a frame before it, so the two
+     read as one surface arriving. Same `allow-discrete` reasoning as above —
+     a backdrop only exists while its dialog is open. */
+  opacity: 0;
+  transition:
+    opacity var(--motion-scrim) ease,
+    overlay var(--motion-scrim) allow-discrete,
+    display var(--motion-scrim) allow-discrete;
+}
+
+dialog.modal[open]::backdrop {
+  opacity: 1;
+}
+
+@starting-style {
+  dialog.modal[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Only the transition goes. The open and closed states stay exactly as
+     declared above, so the dialog still arrives at full opacity and still
+     leaves — it simply does both in one frame. */
+  dialog.modal,
+  dialog.modal::backdrop {
+    transition: none;
+  }
 }
 
 .modal-card {
@@ -7590,16 +8182,87 @@ dialog.modal::backdrop {
     border-radius: 9px;
   }
 
+  /* The channels heading keeps its "+" and loses its word; the people and
+     agents headings keep both, because they are folding away as a whole and a
+     label that blinks out on the first frame of a fold is a cut inside an
+     animation. */
   .chats-shell.chan-collapsed :is(
       .chan-sidebar-head,
-      .chan-sec:not(.chan-sec-channels),
-      .chan-roster,
-      .chan-sec-label,
+      .chan-sec-channels .chan-sec-label,
       .cr-name,
       .cr-more,
       .chan-account-copy
     ) {
     display: none;
+  }
+
+  /* People and agents roll up into the channel list rather than being
+     switched off with it. `display: none` is a cut: on the way in the two
+     lists were simply gone before the panel had finished narrowing, and on
+     the way out they were already standing in the rail's 64px, wrapped, while
+     it widened around them. Folding the heading and the list to nothing keeps
+     the panel one moving thing — everything below the channels rises into
+     them, bottom pair first, and comes back down the same way.
+
+     Bottom-up here, top-down in the expanded rules above: whichever way the
+     sidebar is going, the list nearest the channels is the last to leave and
+     the first to return. */
+  /* Clipped while the fold is running, and only then. An agent's usage card
+     opens below its row and the last row's card reaches past the bottom of
+     the list, so a list that clipped at rest would swallow it (see
+     `.rr-usage`). The rail clips as well, where the lists are folded away and
+     nothing in them can be reached anyway. */
+  .chats-shell.chan-folding .chan-roster,
+  .chats-shell.chan-collapsed .chan-roster {
+    overflow: hidden;
+  }
+
+  /* And the rows are held at the panel's width while the column narrows
+     around them. Left to reflow, every name rewraps itself into 64px on the
+     way out — a second animation, playing over the fold, of text nobody is
+     going to read because it is leaving. Safe only inside the clipping box
+     above: a block wider than the rail that nothing crops is a rail that
+     scrolls sideways. */
+  .chats-shell.chan-folding .chan-roster-inner,
+  .chats-shell.chan-collapsed .chan-roster-inner {
+    width: 256px;
+  }
+
+  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents),
+  .chats-shell.chan-collapsed .chan-roster {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-10px);
+  }
+
+  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents) {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  .chats-shell.chan-collapsed .chan-roster {
+    grid-template-rows: 0fr;
+  }
+
+  /* Hidden only once it has finished shrinking — a container that goes
+     invisible at the start of the fold takes its rows with it and leaves an
+     empty box closing on nothing. */
+  .chats-shell.chan-collapsed .chan-roster-agents {
+    transition-delay: 0s, 0s, 0s, 0.22s;
+  }
+
+  .chats-shell.chan-collapsed .chan-sec-agents {
+    transition-delay: 0.03s, 0.03s, 0.03s, 0.03s, 0.25s;
+  }
+
+  .chats-shell.chan-collapsed .chan-roster-people {
+    transition-delay: 0.06s, 0.06s, 0.06s, 0.28s;
+  }
+
+  .chats-shell.chan-collapsed .chan-sec-people {
+    transition-delay: 0.09s, 0.09s, 0.09s, 0.09s, 0.31s;
   }
 
   /* No scrollbar gutter in the rail. A 40px control centred inside a scroller
@@ -7623,7 +8286,7 @@ dialog.modal::backdrop {
     padding: 4px 0 6px;
   }
 
-  .chats-shell.chan-collapsed .chan-sec-add {
+  .chats-shell.chan-collapsed .chan-sec-channels .chan-sec-add {
     width: 40px;
     height: 40px;
     border-radius: 9px;
@@ -7632,7 +8295,8 @@ dialog.modal::backdrop {
   /* One glyph size down the rail. Collapsed, these four controls are read as a
      single column of marks, and a 14px "+" between an 18px chat bubble and a
      16px collapse icon reads as three sizes of the same thing. */
-  .chats-shell.chan-collapsed :is(.chan-sec-add, .chan-collapse-btn) svg {
+  .chats-shell.chan-collapsed
+    :is(.chan-sec-channels .chan-sec-add, .chan-collapse-btn) svg {
     width: 18px;
     height: 18px;
   }
@@ -7700,6 +8364,22 @@ dialog.modal::backdrop {
     gap: 0;
     font-size: 0;
   }
+
+  /* Only the travel goes. Both states are still exactly what is declared
+     above — the two lists are still there expanded and still gone in the
+     rail — they simply change in one frame, with no drop, no rise and no
+     stagger between them. */
+  @media (prefers-reduced-motion: reduce) {
+    .chan-sidebar :is(.chan-sec-people, .chan-sec-agents, .chan-roster),
+    .chats-shell.chan-collapsed :is(
+        .chan-sec-people,
+        .chan-sec-agents,
+        .chan-roster
+      ) {
+      transition: none;
+      transform: none;
+    }
+  }
 }
 
 .desk-only {
@@ -7716,6 +8396,30 @@ dialog.modal::backdrop {
   .desk-only {
     display: inline-grid;
   }
+}
+
+/* Both scrims belong to a drawer, and a drawer only exists inside the
+   breakpoints below — so off is the default and each media query turns its
+   own back on.
+
+   This block used to sit near the bottom of the file, after the rules that
+   turn them on. Same selector, same specificity, later in the source: it won,
+   and neither scrim ever painted. The drawers still opened, so nothing looked
+   broken — the dim behind them was simply missing, and with it the large tap
+   target that closes one. Declared before its overrides now, which is the
+   only thing a default can be. (`.tree-toggle-btn` and `.chan-sidebar-btn`
+   below hit the same collision and answered it with `!important` at the
+   override end.) */
+.tree-scrim,
+.chan-sidebar-scrim {
+  display: none;
+}
+
+/* Above 900px the file tree is a grid column, not a drawer, and closing it
+   there changes nothing — so a pane held back for an exit has no exit to
+   play and must not take a column while it waits to be dropped. */
+.tree-pane.tree-leaving {
+  display: none;
 }
 
 @media (max-width: 900px) {
@@ -7774,6 +8478,71 @@ dialog.modal::backdrop {
     inset: 0;
     z-index: 77;
     background: rgba(4, 5, 9, 0.45);
+  }
+
+  /* On the class the render loop adds, not on `.tree-scrim` itself — the
+     scrim is re-created by every render the Code screen does, and a bare
+     `animation` here would flash it back to transparent each time. */
+  .tree-scrim.scrim-entering {
+    animation: scrim-in var(--motion-scrim) ease;
+  }
+
+  /* The drawer half of the same toggle. Classes rather than a bare
+     `animation`, and for the same reason as `.thread-panel` — the Code screen
+     re-renders while a file streams in, and the tree would slide in again
+     every time. `playSurfaceMotion` in app.js decides when each one is a
+     genuine open or close.
+
+     Only inside this breakpoint: above 900px the tree is an ordinary grid
+     column that never arrives or leaves, and the base rule further down keeps
+     a leaving node out of that layout entirely. */
+  .code-shell.tree-open .tree-pane.tree-entering {
+    animation: tree-in var(--motion-panel) var(--ease-motion);
+  }
+
+  /* The shell has already lost `tree-open` by the time this runs, so the
+     overlay geometry the pane was standing in has to be restated here — this
+     is the same drawer, on its way out. */
+  .tree-pane.tree-leaving {
+    display: grid;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 250px;
+    z-index: 78;
+    border-right: 1px solid var(--border);
+    animation: tree-out var(--motion-panel) var(--ease-motion) forwards;
+    pointer-events: none;
+  }
+
+  .tree-scrim.scrim-leaving {
+    animation: scrim-out var(--motion-scrim) ease forwards;
+    pointer-events: none;
+  }
+
+  @keyframes tree-in {
+    from {
+      transform: translateX(-100%);
+    }
+  }
+
+  @keyframes tree-out {
+    to {
+      transform: translateX(-100%);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .code-shell.tree-open .tree-pane.tree-entering,
+    .tree-scrim.scrim-entering {
+      animation: none;
+    }
+
+    .tree-pane.tree-leaving,
+    .tree-scrim.scrim-leaving {
+      display: none;
+    }
   }
 
   .coord-head,
@@ -8306,11 +9075,6 @@ dialog.modal::backdrop {
 /* Shown only inside the 600px phone breakpoint below — see the comment
    there. */
 .chan-sidebar-btn {
-  display: none;
-}
-
-.tree-scrim,
-.chan-sidebar-scrim {
   display: none;
 }
 

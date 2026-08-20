@@ -483,6 +483,169 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   );
 });
 
+test("people and agents fold up into the channel list as the sidebar collapses", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  // Each list is a clipping box around one block. Without the inner block
+  // there is no height for the row to shrink away from, and the fold becomes
+  // the cut it used to be.
+  assert.match(chats, /class="chan-roster chan-roster-people"/u);
+  assert.match(chats, /class="chan-roster chan-roster-agents"/u);
+  assert.match(chats, /class="chan-roster-inner"/u);
+  assert.match(chats, /section\("People",[^)]*"chan-sec-people"\)/u);
+  assert.match(chats, /section\("Agents",[^)]*"chan-sec-agents"\)/u);
+
+  // Folded, not switched off: the collapsed rail must no longer name the two
+  // lists in its `display: none` set, and must give them somewhere to travel.
+  const railRules = css.slice(css.indexOf(".chats-shell.chan-collapsed :is("));
+  assert.doesNotMatch(
+    railRules.slice(0, railRules.indexOf("display: none;")),
+    /\.chan-roster,/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed \.chan-roster \{\s*grid-template-rows: 0fr;/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed :is\(\.chan-sec-people, \.chan-sec-agents\),[\s\S]{0,120}transform: translateY\(-10px\);/u,
+  );
+  assert.match(css, /\.chan-roster \{[\s\S]{0,320}grid-template-rows 0\.22s/u);
+
+  // The lists stagger, one behind the other, in opposite orders at the two
+  // ends — otherwise the four of them move as one block and nothing reads as
+  // coming out from under the channels.
+  assert.match(css, /\.chan-roster-agents \{\s*transition-delay: 0\.09s;/u);
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed \.chan-sec-people \{\s*transition-delay: 0\.09s/u,
+  );
+
+  // Clipping only while the fold runs. An agent's usage card hangs below its
+  // row, so a list that clipped at rest would swallow it.
+  assert.match(
+    css,
+    /\.chats-shell\.chan-folding \.chan-roster,[\s\S]{0,80}overflow: hidden;/u,
+  );
+  const collapseAction = app.slice(
+    app.indexOf('case "chan-collapse-toggle"'),
+    app.indexOf('case "chan-sidebar-close"'),
+  );
+  assert.match(collapseAction, /markChanFolding\(shell\)/u);
+  assert.match(app, /function markChanFolding\(/u);
+  assert.match(app, /classList\.remove\("chan-folding"\)/u);
+});
+
+test("the pink tools toggle animates without replacing its node", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const action = app.slice(
+    app.indexOf('case "chan-tools-toggle"'),
+    app.indexOf('case "preview-start"'),
+  );
+
+  assert.match(
+    chats,
+    /class="icon-btn chan-tools-toggle\$\{[\s\S]{0,100}state\.chanToolsOpen === true \? " on" : ""/u,
+  );
+  assert.match(
+    css,
+    /\.icon-btn \{[\s\S]{0,260}transition: background 0\.15s ease, color 0\.15s ease;/u,
+  );
+  assert.match(
+    css,
+    /\.icon-btn\.on \{\s*background: var\(--accent-wash\);\s*color: var\(--accent-bright\);/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools-toggle svg \{\s*transition: transform 0\.15s ease;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools-toggle\.on svg \{\s*transform: rotate\(-90deg\);/u,
+  );
+
+  // The header itself must redraw because opening the fold adds its tools.
+  // Reattaching the clicked button in its old state before applying `on`
+  // gives both the pink treatment and the arrow a real before/after to tween.
+  assert.match(action, /const toggle = node;/u);
+  assert.match(action, /state\.chanToolsOpen = open;[\s\S]*?\brender\(\);/u);
+  assert.match(action, /replacement\.replaceWith\(toggle\);/u);
+  assert.match(action, /void toggle\.offsetWidth;/u);
+  assert.match(action, /toggle\.classList\.toggle\("on", open\);/u);
+  assert.match(action, /toggle\.setAttribute\("aria-expanded", String\(open\)\);/u);
+  assert.match(
+    action,
+    /toggle\.setAttribute\("title", open \? "Hide tools" : "Show tools"\);/u,
+  );
+});
+
+test("the header tools come out of the arrow and fold back into it", async () => {
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  // A screen is one `innerHTML` assignment, so the tray is a new element on
+  // every render and a bare CSS animation would replay the reveal whenever
+  // anything redrew. It joins the surfaces the render loop decides for.
+  const surfaces = app.slice(
+    app.indexOf("const MOTION_SURFACES = ["),
+    app.indexOf("/** Whether each surface was on screen"),
+  );
+  assert.match(
+    surfaces,
+    /selector: "\.chan-tools",\s*parent: "\.chan-head",\s*enter: "tools-entering",\s*leave: "tools-leaving",/u,
+  );
+
+  // A tray on its way out has to go back beside the arrow it is retreating
+  // into, not appended past it on the far side.
+  assert.match(surfaces, /place: \(parent, node\) => \{[\s\S]{0,200}toggle\.before\(node\);/u);
+  const play = app.slice(
+    app.indexOf("function playSurfaceMotion"),
+    app.indexOf("function animateOnce"),
+  );
+  assert.match(
+    play,
+    /if \(surface\.place === undefined\) \{\s*parent\.append\(closed\);\s*\} else \{\s*surface\.place\(parent, closed\);/u,
+  );
+
+  // Out of the arrow rather than in place: each icon starts the distance it
+  // sits from the arrow away from itself, and the row is staggered so it
+  // unfolds from that one point.
+  assert.match(
+    css,
+    /\.chan-tools\.tools-entering > \* \{\s*--tool-shift: 42px;\s*animation: chan-tool-out/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools\.tools-entering > \*:nth-last-child\(2\) \{\s*--tool-shift: 74px;\s*animation-delay: 0\.03s;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools\.tools-leaving > \*:nth-child\(2\) \{\s*animation-delay: 0\.03s;/u,
+  );
+  assert.match(
+    css,
+    /@keyframes chan-tool-out \{\s*from \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
+  );
+  assert.match(
+    css,
+    /@keyframes chan-tool-in \{\s*to \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
+  );
+
+  // The stagger has to finish inside the fallback timer that drops a closing
+  // surface, or the tray outlives its own exit.
+  assert.match(css, /animation: chan-tool-in 0\.18s/u);
+  assert.match(css, /\.chan-tools\.tools-leaving > \*:nth-child\(n \+ 5\) \{\s*animation-delay: 0\.12s;/u);
+
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.chan-tools\.tools-entering > \* \{\s*animation: none;\s*\}[\s\S]{0,320}\.chan-tools\.tools-leaving \{\s*display: none;/u,
+  );
+});
+
 test("the phone drawer is dragged out under the finger, not toggled", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
@@ -579,44 +742,100 @@ test("a reply carries a quiet visual path back to its root", async () => {
 
   assert.match(
     chats,
-    /hasTaskThread && !isReply \? " cmsg-threaded" : ""/u,
+    /channelThread \? " cmsg-threaded" : ""/u,
     "only channel roots with replies should grow a branch",
   );
   assert.match(
     chats,
-    /!hasTaskThread \|\| isReply/u,
+    /channelThread\s*\? threadSummaryLink\(entry, replies, repositoryId, progress\)\s*: changedBlock/u,
     "the open thread root should not repeat the channel's reply link",
+  );
+  assert.match(
+    chats,
+    /channelThread \? `<div class="cmsg-thread-route">` : ""/u,
+    "the route should wrap the message through its thread link",
+  );
+  assert.match(
+    chats,
+    /channelThread \? `<\/div>\$\{changedBlock\}` : ""/u,
+    "the changed files should sit after the route endpoint",
   );
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
-  const channelBranch = /\n\.cmsg-row\.cmsg-threaded::before \{([\s\S]*?)\n\}/u.exec(
-    css,
-  )?.[1];
-  const referencedChannelBranch =
-    /\n\.cmsg-row\.cmsg-threaded:has\(> \.cmsg-ref\)::before \{([\s\S]*?)\n\}/u.exec(
+  const channelStem =
+    /\n\.cmsg-row\.cmsg-thread-path-through::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const channelEnd =
+    /\n\.cmsg-row\.cmsg-thread-path-end \.cmsg-thread-route::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const channelElbow =
+    /\n\.cmsg-row\.cmsg-threaded \.cmsg-thread-link::before \{([\s\S]*?)\n\}/u.exec(
       css,
     )?.[1];
   const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
     css,
   )?.[1];
-  assert.notEqual(channelBranch, undefined, "the channel thread branch should exist");
-  assert.notEqual(
-    referencedChannelBranch,
-    undefined,
-    "a referenced thread root should retain its adjusted branch",
-  );
+  assert.notEqual(channelStem, undefined, "the shared channel stem should exist");
+  assert.notEqual(channelEnd, undefined, "the channel stem should end at its route");
+  assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
-  for (const branch of [channelBranch, panelBranch]) {
+  for (const branch of [channelElbow, panelBranch]) {
     assert.match(branch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
     assert.match(branch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
-    assert.match(branch ?? "", /border-top-left-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-left-radius: 11px;/u);
-    assert.match(branch ?? "", /top: 44px;/u);
   }
-  assert.match(channelBranch ?? "", /width: 16px;/u);
-  assert.match(referencedChannelBranch ?? "", /top: 62px;/u);
+  assert.match(channelStem ?? "", /top: -1px;/u);
+  assert.match(channelStem ?? "", /bottom: -1px;/u);
+  assert.match(channelEnd ?? "", /bottom: 23px;/u);
+  // Written from the column variables rather than as the 13px they work out
+  // to, which is what keeps the stem, the elbow and the final segment from
+  // drifting apart when any of those three numbers moves.
+  assert.match(
+    channelElbow ?? "",
+    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 16px\);/u,
+  );
+  // The elbow turns out of the stem, so its own upright has to stand in the
+  // stem's column. It is placed from its right edge, which means the gap plus
+  // its width must land on the stem's offset — and it must be measured by the
+  // border box, or the three-pixel stroke hangs outside that width and the
+  // turn steps sideways where it should read as one line.
+  assert.match(channelElbow ?? "", /box-sizing: border-box;/u);
+  const stemLeft = Number(/left: (-?\d+)px;/u.exec(channelEnd ?? "")?.[1]);
+  const elbowGap = Number(
+    /right: calc\(100% \+ (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
+  );
+  const elbowWidth = Number(/width: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  assert.equal(
+    elbowGap + elbowWidth,
+    -stemLeft,
+    "the elbow's upright should sit in the stem's own column",
+  );
+  // And it has to stop *inside* that upright. The route's foot sits fourteen
+  // pixels below the middle of the link, so `bottom` minus fourteen is how far
+  // above that middle the stem ends; the elbow's upright runs straight from
+  // its own top down to where the corner's arc begins, and an end below the
+  // arc leaves a tail poking past the swoosh while an end above the upright
+  // breaks the line in two.
+  const stemEnd = Number(/bottom: (\d+)px;/u.exec(channelEnd ?? "")?.[1]) - 14;
+  const elbowTop = Number(
+    /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
+  );
+  const elbowHeight = Number(/height: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  const arcStart = 11 - (elbowHeight - elbowTop);
+  assert.ok(
+    stemEnd >= arcStart && stemEnd <= elbowTop,
+    `the stem should end within the elbow's straight upright (${arcStart}..${elbowTop}), not at ${stemEnd}`,
+  );
+  assert.equal(
+    elbowHeight - elbowTop,
+    3,
+    "the elbow's horizontal run should stay three pixels below the link's middle",
+  );
+  assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
   assert.match(css, /\.thread-replies-head::after \{/u);
@@ -643,21 +862,21 @@ test("user-rooted task threads promote only after substantive narration", async 
 
   assert.match(
     row,
-    /entry\.kind !== "user" \|\|\s*\(entry\.taskId !== undefined && replies\.length > 1\)/u,
+    /entry\.kind !== "user" \|\|\s*entry\.taskId !== undefined/u,
   );
   assert.match(
     row,
     /inlineReply \|\| \(entry\.kind === "user" && !hasTaskThread\)/u,
-    "a lone acknowledgement remains an inline chronological reply",
+    "a task stays inline until substantive narration arrives",
   );
   assert.match(
     list,
-    /entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+    /entry\.taskId !== undefined &&\s*channelMessageHasTaskThread\(entry\)/u,
     "a promoted task keeps its replies out of the flat room timeline",
   );
   assert.match(
     panel,
-    /entry\.kind !== "user" \|\|[\s\S]{0,120}entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+    /entry\.kind !== "user" \|\| entry\.taskId !== undefined/u,
     "the thread list accepts new user roots and legacy agent roots",
   );
   assert.match(
@@ -1109,6 +1328,177 @@ test("the working dot reads the task list for teammates too", async () => {
     /if \(agent\.mine === true\) \{/u.test(body),
     false,
     "the durable half no longer needs to exclude teammates",
+  );
+});
+
+type LivenessTask = {
+  id: string;
+  repositoryId: string;
+  status: string;
+  agentId: string;
+  submittedBy: string;
+  submittedAt: string;
+};
+
+type LivenessModule = {
+  state: {
+    tasks: LivenessTask[];
+    agentBusy: Record<string, { expiresAt: number; at: number }>;
+  };
+  agentStatus: (
+    agent: { id: string; provider: string; userId: string; visibility: string },
+    repositoryId: string,
+  ) => string;
+  noteAgentBusy: (frame: {
+    repositoryId: string;
+    userId: string;
+    provider: string;
+    taskId: string;
+  }) => void;
+  agentsThinkingIn: (repositoryId: string) => string[];
+  threadIsWorking: (entry: { taskId: string }) => boolean;
+};
+
+/**
+ * The liveness selectors, run rather than read.
+ *
+ * Whether an agent is working is arithmetic over the task list and the busy
+ * table, and every way of asserting it by pattern has let the arithmetic be
+ * wrong while the shape stayed right. `data.js` reads `window.localStorage`
+ * as it loads, which is the whole of what it needs from a browser.
+ */
+async function liveness(): Promise<LivenessModule> {
+  const scope = globalThis as unknown as { window?: unknown };
+  scope.window ??= {
+    localStorage: {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    },
+  };
+  return (await import(
+    pathToFileURL(path.join(packageRoot, "public", "data.js")).href
+  )) as LivenessModule;
+}
+
+const LIVENESS_AGENT = {
+  id: "u1:openai",
+  provider: "openai",
+  userId: "u1",
+  visibility: "org",
+};
+
+/** A task of `LIVENESS_AGENT`'s, as the tasks route actually reports one. */
+function livenessTask(over: Partial<LivenessTask> = {}): LivenessTask {
+  return {
+    id: "task-1",
+    repositoryId: "repo",
+    status: "submitted",
+    agentId: "codex",
+    submittedBy: "u1",
+    submittedAt: new Date().toISOString(),
+    ...over,
+  };
+}
+
+test("a task nobody has picked up stops reading as an agent working", async () => {
+  const data = await liveness();
+  data.state.agentBusy = {};
+
+  // `submitted` is "queued, not started yet" in the server's own words. It
+  // counts for the seconds before a worker claims it, because that is when
+  // somebody is watching for the dots.
+  data.state.tasks = [livenessTask()];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+
+  // And stops counting once the queue plainly is not moving. This is the
+  // state a run whose worker died lands in — lease expiry puts the task back
+  // to `submitted` — so before this it was an agent shown as thinking, with
+  // nothing behind it, for as long as the tab stayed open.
+  data.state.tasks = [
+    livenessTask({ submittedAt: new Date(Date.now() - 10 * 60_000).toISOString() }),
+  ];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+
+  // A claimed task is a worker holding a heartbeat; nothing about it expires
+  // on the clock here.
+  data.state.tasks = [livenessTask({ status: "claimed" })];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+  data.state.tasks = [livenessTask({ status: "integrated" })];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+});
+
+test("a busy frame whose task never arrives is not ten minutes of dots", async () => {
+  const data = await liveness();
+  data.state.tasks = [];
+  data.state.agentBusy = {};
+  data.noteAgentBusy({
+    repositoryId: "repo",
+    userId: "u1",
+    provider: "openai",
+    taskId: "task-nobody-lists",
+  });
+
+  // The frame is the fastest signal there is, and until the task list has
+  // caught up with it, it is the only one.
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+  assert.equal(data.agentsThinkingIn("repo").length, 1);
+  assert.equal(data.threadIsWorking({ taskId: "task-nobody-lists" }), true);
+
+  // The list is re-read within a second of any frame and every thirty seconds
+  // besides, so an id it still does not know is not work in progress. It used
+  // to hold every indicator up for the ten-minute backstop instead — the
+  // longest an agent could claim to be busy having never started.
+  const entry = data.state.agentBusy["task-nobody-lists"];
+  assert.notEqual(entry, undefined, "the frame should have been recorded");
+  if (entry !== undefined) {
+    entry.at = Date.now() - 90_000;
+  }
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+  assert.equal(data.threadIsWorking({ taskId: "task-nobody-lists" }), false);
+  assert.equal(data.agentsThinkingIn("repo").length, 0);
+  assert.equal(
+    Object.keys(data.state.agentBusy).length,
+    0,
+    "a lapsed frame should be swept, not merely ignored",
+  );
+});
+
+test("a connected agent is not painted as a working one", async () => {
+  const data = await publicFile("data.js");
+  const chat = await publicFile("chat.js");
+  const agents = await publicFile("screen-agents.js");
+
+  // The roster route reports connections, not presence, so the browser used
+  // to call every teammate's agent online — and online is what the face
+  // breathes on. Connected is idle until something says otherwise.
+  const roster = data.slice(data.indexOf("const others = roster"));
+  assert.match(roster.slice(0, roster.indexOf("\n  });")), /presence: "idle",/u);
+  assert.equal(
+    /presence: "online",/u.test(roster.slice(0, roster.indexOf("\n  });"))),
+    false,
+    "presence must be derived, not asserted",
+  );
+
+  // Both places that write the word beside a dot must agree with it: green is
+  // working, amber is connected and doing nothing.
+  for (const [name, source] of [
+    ["chat.js", chat],
+    ["screen-agents.js", agents],
+  ] as const) {
+    assert.match(
+      source,
+      /agent\.presence === "idle"\s*\?\s*"orange"/u,
+      `${name} should mark an idle agent amber, not green`,
+    );
+  }
+
+  // And the count that opens the agents screen says what it counts.
+  assert.match(agents, /label: "Connected agents",/u);
+  assert.equal(
+    /label: "Active agents",/u.test(agents),
+    false,
+    "a stored credential is not an active agent",
   );
 });
 
@@ -1816,6 +2206,96 @@ test("channel @mentions include repository guests and surface directed unread pi
   assert.match(chats, /mentions > 0 \? "@"/u);
 });
 
+test("mention suggestions narrow agents and people by name or email", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const participantStart = data.indexOf("export function channelParticipants");
+  const participantEnd = data.indexOf("\nfunction seedMessages", participantStart);
+  assert.notEqual(participantStart, -1, "the participant resolver should exist");
+  assert.notEqual(participantEnd, -1, "the participant resolver should have a boundary");
+
+  const participantState = {
+    channelPeople: {
+      repo: [
+        {
+          userId: "mary",
+          user: { displayName: "Mary Jane", email: "mary@example.com" },
+        },
+      ],
+    },
+    members: [],
+  };
+  const participants = new Function(
+    "state",
+    "channelAgentsFor",
+    "currentUserId",
+    "currentUserName",
+    `${data
+      .slice(participantStart, participantEnd)
+      .replace("export function", "function")}\nreturn channelParticipants;`,
+  )(
+    participantState,
+    () => [
+      { id: "zeus", name: "Zeus" },
+      { id: "athena", name: "Athena" },
+    ],
+    () => "current-user",
+    () => "Current User",
+  ) as (repositoryId: string) => Array<{
+    id: string;
+    name: string;
+    email?: string;
+    kind: string;
+  }>;
+  const roster = participants("repo");
+  assert.equal(
+    roster.find((entry) => entry.id === "mary")?.email,
+    "mary@example.com",
+    "a person's email remains available as a search term",
+  );
+
+  const candidateStart = chats.indexOf("function channelMentionCandidates");
+  const candidateEnd = chats.indexOf("\n/**", candidateStart);
+  assert.notEqual(candidateStart, -1, "the mention candidate filter should exist");
+  assert.notEqual(candidateEnd, -1, "the mention candidate filter should have a boundary");
+  const mentionState = { mentionQuery: "" };
+  const candidates = new Function(
+    "state",
+    "channelParticipants",
+    `${chats.slice(candidateStart, candidateEnd)}\nreturn channelMentionCandidates;`,
+  )(mentionState, () => roster) as (repositoryId: string) => Array<{
+    name: string;
+    kind: string;
+  }>;
+
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["agents", "everyone", "Zeus", "Athena", "Mary Jane"],
+    "an empty @ keeps both agents and people visible",
+  );
+
+  mentionState.mentionQuery = "zeu";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Zeus"],
+    "typing an agent name removes unrelated agents and people",
+  );
+
+  mentionState.mentionQuery = "jane";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Mary Jane"],
+    "people remain searchable by display name",
+  );
+
+  mentionState.mentionQuery = "mary@";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Mary Jane"],
+    "people remain searchable by email",
+  );
+});
+
 test("@everyone is offered, highlighted, and pinged to every person in the room", async () => {
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");
@@ -2017,6 +2497,70 @@ test("thread composer paints pings and commands and opens their suggestion lists
   );
 });
 
+test("the thread slash picker surfaces its thread commands before the six-row limit", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function channelSlashCandidates");
+  const end = chats.indexOf("\nfunction slashPopover", start);
+  assert.notEqual(start, -1, "the slash candidate filter should exist");
+  assert.notEqual(end, -1, "the slash candidate filter should have a boundary");
+
+  const state = {
+    slashQuery: "",
+    channelSlashCommands: {
+      repo: [
+        "plan",
+        "queue",
+        "ask",
+        "dnc",
+        "simple",
+        "push",
+        "retry",
+        "cancel",
+        "stop",
+        "help",
+      ].map((name) => ({ name })),
+    },
+  };
+  const candidates = new Function(
+    "state",
+    `${chats.slice(start, end)}\nreturn channelSlashCandidates;`,
+  )(state) as (repositoryId: string, target?: string) => Array<{ name: string }>;
+
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["plan", "queue", "ask", "dnc", "simple", "push"],
+    "the channel keeps the server's general command order",
+  );
+  assert.deepEqual(
+    candidates("repo", "thread").map((entry) => entry.name),
+    ["retry", "cancel", "push", "ask", "dnc", "simple"],
+    "thread actions remain visible instead of being truncated",
+  );
+
+  state.slashQuery = "pl";
+  assert.deepEqual(
+    candidates("repo", "thread").map((entry) => entry.name),
+    ["plan"],
+    "typing a specific command still finds commands outside the first six",
+  );
+
+  const suggestions = chats.slice(
+    chats.indexOf("function composerSuggestions"),
+    chats.indexOf("\nfunction mentionActiveFor"),
+  );
+  assert.match(
+    suggestions,
+    /channelSlashCandidates\(repositoryId, target\)/u,
+    "the rendered picker asks for the order of its own composer",
+  );
+  const keys = chats.slice(chats.indexOf("export function handleComposerKeydown"));
+  assert.match(
+    keys,
+    /channelSlashCandidates\(activeChannelId\(\), target\)/u,
+    "keyboard selection uses the same contextual order as the visible list",
+  );
+});
+
 test("a posted ping highlights its full name with a quiet static treatment", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
@@ -2151,8 +2695,104 @@ test("channel messages compact only an uninterrupted run from one person", async
   assert.match(css, /\.cmsg-row\.cmsg-compact \{/u);
   assert.match(
     css,
-    /\.cmsg-row\.cmsg-compact \.cmsg-body \{[\s\S]{0,80}margin-left: 44px;/u,
+    /\.cmsg-row\.cmsg-compact \.cmsg-body \{[\s\S]{0,80}margin-left: calc\(var\(--cmsg-body-x\) - 8px\);/u,
   );
+});
+
+test("channel task branches share the compact group's visible avatar", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function continuesUserMessageGroup");
+  const end = chats.indexOf("\n/**\n * The three dots", start);
+  const createPaths = new Function(
+    `${chats.slice(start, end)}\nreturn messageThreadPaths;`,
+  );
+  const paths = createPaths() as (
+    timeline: unknown[],
+    groupConsecutive: boolean,
+  ) => Array<
+    { start: boolean; through: boolean; end: boolean } | undefined
+  >;
+  const item = (
+    authorId: string,
+    options: {
+      at?: string;
+      kind?: string;
+      reply?: boolean;
+      task?: boolean;
+    } = {},
+  ) => ({
+    entry: {
+      kind: options.kind ?? "user",
+      authorId,
+      taskId: options.task === true ? `task-${authorId}` : undefined,
+      replies: options.task === true ? [{}, {}] : [],
+    },
+    inlineReplyTo: options.reply === true ? { id: "root" } : undefined,
+    at: options.at ?? "2026-08-19T10:00:00.000Z",
+  });
+  const shared = [
+    { start: true, through: true, end: false },
+    { start: false, through: false, end: true },
+  ];
+
+  // A task on the compact second prompt starts at the first prompt's avatar.
+  assert.deepEqual(
+    paths([item("alice"), item("alice", { task: true })], true),
+    shared,
+  );
+  // Two task prompts use that same stem; each threaded row supplies an elbow.
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("alice", { task: true })],
+      true,
+    ),
+    shared,
+  );
+
+  const standalone = { start: true, through: false, end: true };
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("bob", { task: true })],
+      true,
+    ),
+    [standalone, standalone],
+    "another author starts another path",
+  );
+  assert.deepEqual(
+    paths(
+      [
+        item("alice", { task: true }),
+        item("alice", { at: "2026-08-20T10:00:00.000Z", task: true }),
+      ],
+      true,
+    ),
+    [standalone, standalone],
+    "a new day starts another path",
+  );
+  assert.deepEqual(
+    paths(
+      [
+        item("alice", { task: true }),
+        item("alice", { reply: true }),
+        item("alice", { task: true }),
+      ],
+      true,
+    ),
+    [standalone, undefined, standalone],
+    "an inline reply breaks the prompt group",
+  );
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("alice", { task: true })],
+      false,
+    ),
+    [standalone, standalone],
+    "search hits never invent a shared path",
+  );
+
+  assert.match(chats, /threadPath: threadPaths\[index\]/u);
+  assert.match(chats, /path\?\.through === true \? " cmsg-thread-path-through"/u);
+  assert.match(chats, /path\?\.end === true \? " cmsg-thread-path-end"/u);
 });
 
 test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
@@ -2285,12 +2925,9 @@ test("the browser does not name agents", async () => {
 });
 
 test("an agent's reply to a person is shown, not folded into the thinking block", async () => {
-  // Reported as "they start on the task but they don't respond and confirm".
-  // The server does post an acknowledgement when work is asked for inside a
-  // thread — before the task is even submitted — but it is a reply carrying
-  // the default `agent` kind, and the transcript treated any such reply as run
-  // chatter and hoisted it into a fold that renders closed once a thread has
-  // an ending. The reader saw their request and then nothing.
+  // Historical acknowledgements and current conversational answers both carry
+  // the default `agent` kind. Neither is run narration, so neither belongs in
+  // the thinking fold.
   const source = await publicFile("screen-chats.js");
   const start = source.indexOf("function isThreadThinking");
   const body = source.slice(start, source.indexOf("\n}", start));
@@ -2356,6 +2993,167 @@ test("each task turn puts its own thinking below its prompt and starts closed", 
     thinking.includes("?? !done"),
     false,
     "an active turn should start closed just like a finished turn",
+  );
+});
+
+test("the progress bar restarts for each task turn in a thread", async () => {
+  const source = await publicFile("screen-chats.js");
+  const progressStart = source.indexOf("function threadProgress(entry)");
+  const progressEnd = source.indexOf("\n/*", progressStart);
+  const turnsStart = source.indexOf("function threadReplyTurns(replies)");
+  const turnsEnd = source.indexOf(
+    "\n/** One turn's narration",
+    turnsStart,
+  );
+  assert.notEqual(progressStart, -1, "thread progress should still be derived");
+  assert.notEqual(progressEnd, -1, "thread progress should have a boundary");
+  assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
+  assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
+
+  const progress = Function(
+    "state",
+    "THREAD_FINISHED_RE",
+    `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
+      progressStart,
+      progressEnd,
+    )}\nreturn threadProgress;`,
+  )(
+    { tasks: [{ id: "task-1", status: "claimed" }] },
+    /^(Done —|I could not|This was cancelled)/u,
+  ) as (entry: {
+    taskId: string;
+    replies: Array<{ kind: string; content: string }>;
+  }) => number | undefined;
+
+  const thread = {
+    taskId: "task-1",
+    replies: [
+      { kind: "progress", content: "Planning workspace prepared" },
+      { kind: "progress", content: "Done — the first task landed" },
+      { kind: "outcome", content: "The first task is complete" },
+      { kind: "user", content: "Please do one more task in this thread" },
+      { kind: "progress", content: "Planning workspace prepared" },
+      { kind: "progress", content: "Execution started" },
+    ],
+  };
+
+  assert.equal(
+    progress(thread),
+    20,
+    "an earlier ending must not hide the active turn's progress",
+  );
+  assert.equal(
+    progress({
+      ...thread,
+      replies: thread.replies.filter((reply) => reply.kind !== "user"),
+    }),
+    20,
+    "a task added without a copied prompt must restart progress too",
+  );
+  thread.replies.push({ kind: "outcome", content: "The follow-up is complete" });
+  assert.equal(
+    progress(thread),
+    undefined,
+    "the bar should still disappear when the current turn ends",
+  );
+});
+
+test("the run is a ring on the agent working, at the front of the stack", async () => {
+  const source = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The bar under the thread is gone: it said something was moving without
+  // ever saying who, which is the whole reason it moved onto a face.
+  assert.doesNotMatch(css, /\.thread-progress\b/u);
+  assert.doesNotMatch(source, /class="thread-progress"/u);
+
+  const slice = (from: string, to: string) => {
+    const start = source.indexOf(from);
+    assert.notEqual(start, -1, `${from} should still exist`);
+    const end = source.indexOf(to, start + from.length);
+    assert.notEqual(end, -1, `${from} should have a boundary`);
+    return source.slice(start, end);
+  };
+  const summary = Function(
+    "threadTitleReply",
+    "isThreadThinking",
+    "threadSaidCount",
+    "threadAwaitsGoAhead",
+    "threadReplyTurns",
+    "channelAuthor",
+    "agentFace",
+    "avatar",
+    "currentUserName",
+    "myAvatar",
+    "esc",
+    `"use strict";\n${slice("function threadParticipants(replies", "\n/**")}\n${slice(
+      "function threadWorkingAuthor(entry",
+      "\n/*",
+    )}\n${slice("function threadSummaryLink(entry", "\n/**")}\nreturn threadSummaryLink;`,
+  )(
+    () => undefined,
+    () => false,
+    (said: number) => `${said} replies`,
+    () => false,
+    (replies: unknown[]) => [{ replies }],
+    (_repositoryId: string, reply: { author: string; agent?: boolean }) => ({
+      name: reply.author,
+      agent: reply.agent === true ? { id: reply.author } : undefined,
+    }),
+    (agent: { id: string }) => `<face>${agent.id}</face>`,
+    (name: string) => `<avatar>${name}</avatar>`,
+    () => "Ada",
+    () => undefined,
+    (value: string) => String(value),
+  ) as (
+    entry: unknown,
+    replies: unknown[],
+    repositoryId: string,
+    progress: number | undefined,
+  ) => string;
+
+  const replies = [
+    { author: "Ada" },
+    { author: "codex", agent: true },
+    { author: "Bo" },
+    { author: "claude", agent: true },
+  ];
+  const running = summary({ id: "m1", replies }, replies, "repo-1", 45);
+  assert.match(
+    running,
+    /<span class="ctl-working" style="--run:45"/u,
+    "the ring should carry the run's position",
+  );
+  assert.match(
+    running.slice(running.indexOf("ctl-faces")),
+    /ctl-working[\s\S]*?<face>claude<\/face>[\s\S]*?<avatar>Ada<\/avatar>/u,
+    "the agent still working should be ringed and first in the stack",
+  );
+  assert.equal(
+    running.match(/<face>claude<\/face>/gu)?.length,
+    1,
+    "moving a participant to the front must not duplicate them",
+  );
+
+  // Nothing running, nothing drawn: the stack goes back to being the order
+  // people spoke in.
+  const idle = summary({ id: "m1", replies }, replies, "repo-1", undefined);
+  assert.doesNotMatch(idle, /ctl-working/u);
+  assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
+
+  // Two pixels of accent, and a full circle so the part still to come is there
+  // to be read against.
+  const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
+    .exec(css)?.[1];
+  assert.notEqual(ring, undefined, "the ring should be drawn on the face");
+  assert.match(ring ?? "", /border-radius: 50%;/u);
+  assert.match(
+    ring ?? "",
+    /conic-gradient\(\s*var\(--accent\) calc\(var\(--run, 0\) \* 1%\)/u,
+  );
+  assert.match(
+    ring ?? "",
+    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 2px\)/u,
   );
 });
 
@@ -2808,11 +3606,42 @@ test("agent details use the reference profile without dropping existing controls
   assert.match(spec, /<h3 class="aspec-label">Works with<\/h3>/u);
   assert.match(spec, /<h3 class="aspec-label">Capabilities<\/h3>/u);
   assert.match(spec, /class="aspec-chip"/u);
-  assert.match(spec, /class="aspec-capability aspec-current-task"/u);
+  assert.match(
+    spec,
+    /class="aspec-capability aspec-current-task\$\{\s*task === undefined \? "" : " aspec-current-task-active"\s*\}"/u,
+  );
   assert.match(panel, /<aside class="thread-panel agent-detail-panel">/u);
   assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(680px, 64vw\)/su);
   assert.match(css, /\.agent-spec \.aspec-chip\s*\{/u);
   assert.match(css, /\.agent-spec \.aspec-capability\s*\{/u);
+
+  // Only a real assignment becomes the primary-colour bubble. Its own copy,
+  // state line, mark, and history control remain legible on that solid surface.
+  const activeTask = /\n\.agent-spec \.aspec-current-task-active \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(activeTask, undefined, "an active task has a shape rule");
+  assert.match(activeTask ?? "", /background: var\(--accent\);/u);
+  assert.match(activeTask ?? "", /border-radius: 14px;/u);
+  for (const child of [
+    "aspec-capability-mark",
+    "aspec-capability-title",
+    "aspec-capability-meta",
+    "aspec-nav",
+  ]) {
+    assert.match(
+      css,
+      new RegExp(`\\.aspec-current-task-active \\.${child}`, "u"),
+    );
+  }
+  assert.match(
+    css,
+    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-nav \{\s*color: #fff;/u,
+  );
+  assert.match(
+    css,
+    /\.aspec-current-task-active \.aspec-nav \{[\s\S]*?background: rgba\(0, 0, 0, 0\.14\);/u,
+  );
 
   // Every interactive or informative part of the former details page remains
   // on the single scrolling surface, including owner-only and read-only paths.
@@ -2833,6 +3662,55 @@ test("agent details use the reference profile without dropping existing controls
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
   assert.match(spec, /const readOnly =/u);
+});
+
+test("the role field offers the two reserved roles without stopping anyone typing one", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+  const spec = chats.slice(
+    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function agentPanel()"),
+  );
+  const menu = chats.slice(
+    chats.indexOf("const RESERVED_ROLES = ["),
+    chats.indexOf("const AGENT_STATUS_TITLE"),
+  );
+
+  // The field is still a field: free text, same commit contract as before.
+  assert.match(spec, /class="aspec-role" data-act="agent-role-input"/u);
+  // With a picker beside it, drawn only where the server would accept one.
+  assert.match(spec, /canManageRepository\(repository\.id\)/u);
+  assert.match(spec, /data-act="agent-role-menu"/u);
+  assert.match(css, /\.agent-spec \.aspec-role-field\s*\{/u);
+  assert.match(css, /\.agent-spec \.aspec-role-pick\s*\{/u);
+
+  // Both reserved names, spelled the way the server compares them.
+  assert.match(chats, /const INVESTIGATOR_ROLE = "investigator"/u);
+  assert.match(menu, /value: AUDITOR_ROLE/u);
+  assert.match(menu, /value: INVESTIGATOR_ROLE/u);
+  // A personal agent cannot hold either, so the entry says so rather than
+  // waiting for the server to refuse it.
+  assert.match(menu, /agent\.visibility !== "org"/u);
+  assert.match(menu, /disabled: personal \|\| current === role\.value/u);
+  // And the menu always leaves a way back to plain typing.
+  assert.match(menu, /act: "agent-role-custom"/u);
+  assert.match(menu, /export function roleMenuItems\(agentId, repositoryId\)/u);
+
+  // Picking one writes through the same setting path a typed role does.
+  assert.match(app, /case "agent-role-menu":/u);
+  assert.match(app, /roleMenuItems\(value, node\.dataset\.repo\)/u);
+  assert.match(app, /showMenu\(node, items\)/u);
+  assert.match(
+    app,
+    /setChannelAgentSetting\(target\.repositoryId, target\.agentId, "role", role, render\)/u,
+  );
+  // Opening the picker must not commit-and-redraw the field out from under
+  // the click that opens it.
+  assert.match(
+    app,
+    /event\.relatedTarget\?\.dataset\?\.act === "agent-role-menu"/u,
+  );
 });
 
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {

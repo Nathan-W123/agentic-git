@@ -65,6 +65,7 @@ import {
   ensureRepositoryGrants,
   refreshChannelMessages,
   refreshProviderUsage,
+  takePromptedThread,
   addChannelAgent,
   removeChannelAgent,
   removeChannelAgentForUser,
@@ -184,6 +185,7 @@ import {
   pickSlashCommand,
   reactionPicker,
   renderChats,
+  roleMenuItems,
   rosterMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
@@ -1493,6 +1495,52 @@ function commitChannelRole(input) {
   const role = input.value.trim();
   input.defaultValue = role;
   setChannelAgentSetting(repositoryId, agentId, "role", role, render);
+  render();
+}
+
+/**
+ * Which role field opened the picker.
+ *
+ * A menu item carries one value — the role — and the field it was opened from
+ * is the rest of the address. Remembered here rather than packed into that
+ * value because an agent id already contains a colon and a repository id is
+ * free text, so any separator chosen for them would be one somebody could
+ * type.
+ */
+let roleMenuTarget;
+
+/** The role field the picker was opened from, if it is still on screen. */
+function openRoleInput() {
+  if (roleMenuTarget === undefined) {
+    return null;
+  }
+  return (
+    $$("[data-act='agent-role-input']").find(
+      (node) =>
+        node.dataset.value === roleMenuTarget.agentId &&
+        node.dataset.repo === roleMenuTarget.repositoryId,
+    ) ?? null
+  );
+}
+
+/**
+ * Writes a role chosen from the picker, exactly as typing it would.
+ *
+ * The field is set first so it never disagrees with what was just picked in
+ * the frame before the redraw, and `defaultValue` moves with it so the blur
+ * that follows does not send the same word a second time.
+ */
+function pickChannelRole(role) {
+  const target = roleMenuTarget;
+  if (target === undefined) {
+    return;
+  }
+  const input = openRoleInput();
+  if (input !== null) {
+    input.value = role;
+    input.defaultValue = role;
+  }
+  setChannelAgentSetting(target.repositoryId, target.agentId, "role", role, render);
   render();
 }
 
@@ -2941,6 +2989,7 @@ function resumeLiveUpdates() {
   const channel = activeChannelId();
   if (state.route === "chats" && channel) {
     void refreshChannelMessages(channel).then(() => {
+      openPromptedThread(channel);
       if (!renameFieldFocused()) {
         render();
       }
@@ -3080,6 +3129,32 @@ let drawerDrag;
  * or not; it is always in the markup now (see `renderChats`), so nothing else
  * in the chats screen reads `chanSidebarOpen`.
  */
+/* How long the sidebar's people and agents take to fold away or unroll, in
+   milliseconds: the last pair's delay plus its own travel, rounded up. */
+const CHAN_FOLD_MS = 380;
+let chanFoldTimer;
+
+/**
+ * Say that the sidebar is mid-fold, for as long as it is.
+ *
+ * The two rosters have to clip their contents while their height is moving —
+ * that clipping is the fold — but an expanded roster must not clip, because an
+ * agent's usage card opens below its row and the last row's card reaches past
+ * the bottom of the list. Clipping only while the fold runs gives the
+ * animation the crop it needs and hands the card its overhang back the moment
+ * the sidebar has settled.
+ */
+function markChanFolding(shell) {
+  if (shell === null || shell === undefined) {
+    return;
+  }
+  shell.classList.add("chan-folding");
+  clearTimeout(chanFoldTimer);
+  chanFoldTimer = setTimeout(() => {
+    shell.classList.remove("chan-folding");
+  }, CHAN_FOLD_MS);
+}
+
 function setChanDrawer(open) {
   const next = open === true;
   state.chanSidebarOpen = next;
@@ -3150,6 +3225,48 @@ function sidePanelOpen() {
     state.activeChannelThread !== undefined ||
     state.chanThreadList === true
   );
+}
+
+/**
+ * Opens the thread an agent has just started, for the person who asked it to.
+ *
+ * Tasking an agent used to end in waiting: the request sat in the room saying
+ * nothing, and when the agent finally began narrating it did so inside a
+ * thread that showed up collapsed to a single summary line. The person who
+ * prompted it had to notice that line and click it to see any of the work
+ * they had asked for. `notePromptedThread` in data.js spots the moment a
+ * thread appears under one of this account's own requests; this decides
+ * whether the panel is free to show it.
+ *
+ * Desktop only. The thread panel is beside the transcript here, so opening it
+ * costs the reader nothing they were already looking at — where on a phone it
+ * is a full-screen surface dropped over the room, which is a different and
+ * much ruder thing to do to somebody mid-sentence.
+ *
+ * It also declines rather than interrupts. Anything the reader deliberately
+ * put in that panel — a file, the tree, a conversation, another agent, a
+ * thread they opened themselves — stays where they put it; the only thing
+ * this will replace is a thread it opened the same way a moment ago, so a
+ * second task prompted while the first one's thread is still up moves the
+ * panel on to the newer work.
+ */
+function openPromptedThread(repositoryId) {
+  const messageId = takePromptedThread(repositoryId);
+  if (
+    messageId === undefined ||
+    phoneLayout() ||
+    state.route !== "chats" ||
+    state.activeAgentPanel !== undefined ||
+    state.activeDm !== undefined ||
+    state.chanFileView !== undefined ||
+    state.chanTree === true ||
+    (state.activeChannelThread !== undefined &&
+      state.activeChannelThread !== state.autoOpenedThread)
+  ) {
+    return;
+  }
+  state.activeChannelThread = messageId;
+  state.autoOpenedThread = messageId;
 }
 
 /**
@@ -3631,6 +3748,182 @@ function renameFieldFocused() {
   );
 }
 
+/* ------------------------------------------------------ surface motion ---- */
+
+/**
+ * The surfaces that slide rather than appear, and how to tell they moved.
+ *
+ * Everything here is toggled by `state`, and `state` is drawn by replacing the
+ * whole document — so each of these is a brand new element after every
+ * keystroke and every event off the stream. That is what stops CSS from
+ * animating them on its own: an `animation` on `.thread-panel` runs when the
+ * node is created, and the node is created constantly, so the panel would
+ * slide in again every time somebody typed a character into the composer.
+ * `@starting-style` has the same problem for the same reason.
+ *
+ * Only the render loop knows whether a surface that is here now was here a
+ * moment ago, so the decision lives here and the classes below are the answer
+ * it hands to the stylesheet. The two phone surfaces that *are* pure CSS — the
+ * channel sidebar and its scrim — stay that way: both are toggled by a class
+ * on a container that survives the render, so a transition has two states to
+ * run between and needs none of this.
+ *
+ * `parent` is where a closing surface goes back to for the length of its exit.
+ * The node the render threw away is still a perfectly good element; putting
+ * it back is what gives a panel something to animate *out*, since by the time
+ * anybody knows it closed it is already gone from the new tree.
+ */
+const MOTION_SURFACES = [
+  // Thread, thread list, DM, agent profile and the file view are one column
+  // that shows one of them — so this is "the panel is open", not "the thread
+  // is open", and switching between two of them is deliberately not motion.
+  {
+    selector: ".thread-panel",
+    parent: ".chats-shell",
+    enter: "panel-entering",
+    leave: "panel-leaving",
+  },
+  // The file tree, which is a drawer only below 900px. Above that it is an
+  // ordinary grid column and never opens or closes at all — the classes are
+  // still applied there and styled to do nothing, which keeps the width test
+  // in the stylesheet where the rest of the breakpoint already lives.
+  //
+  // Open is asked of the shell rather than of the pane, because the pane is
+  // in the markup either way and it is the modifier that decides.
+  {
+    selector: ".tree-pane",
+    parent: ".code-shell",
+    enter: "tree-entering",
+    leave: "tree-leaving",
+    isOpen: (root) => root.querySelector(".code-shell.tree-open") !== null,
+  },
+  {
+    selector: ".tree-scrim",
+    parent: ".code-shell",
+    enter: "scrim-entering",
+    leave: "scrim-leaving",
+  },
+  // The channel header's tool tray, which comes out of the arrow beside it
+  // and folds back into it. The arrow is what a reader clicked, so the icons
+  // travel to and from that one point rather than fading where they stand.
+  //
+  // Where it goes back matters here in a way it does not for a panel:
+  // appended, a tray on its way out would reappear on the far side of the
+  // arrow it is supposed to be retreating into, which is why `place` exists.
+  {
+    selector: ".chan-tools",
+    parent: ".chan-head",
+    enter: "tools-entering",
+    leave: "tools-leaving",
+    place: (parent, node) => {
+      const toggle = parent.querySelector(".chan-tools-toggle");
+      if (toggle === null) {
+        parent.append(node);
+        return;
+      }
+      toggle.before(node);
+    },
+  },
+];
+
+/** Whether each surface was on screen, and the element it was, before the swap. */
+const surfaceWasOpen = new Map();
+const surfaceNode = new Map();
+
+/**
+ * The live element for a surface, never the one a close is still fading out.
+ *
+ * The distinction is the whole reason this is a function. A closing surface is
+ * put back into the shell and is, for those few frames, a perfectly ordinary
+ * match for its own selector — so the next render would read it as "open
+ * again", the render after that as "closed again", and the panel would sit
+ * there fading out on a loop for as long as anything kept redrawing.
+ */
+function liveNode(root, surface) {
+  return root.querySelector(`${surface.selector}:not(.${surface.leave})`);
+}
+
+function surfaceIsOpen(root, surface) {
+  return surface.isOpen === undefined
+    ? liveNode(root, surface) !== null
+    : surface.isOpen(root);
+}
+
+/** Reads the outgoing document. Must run before `innerHTML` throws it away. */
+function captureSurfaceMotion(root) {
+  for (const surface of MOTION_SURFACES) {
+    surfaceWasOpen.set(surface.selector, surfaceIsOpen(root, surface));
+    surfaceNode.set(surface.selector, liveNode(root, surface));
+  }
+}
+
+/** Plays whatever the swap turned out to be: an opening, a closing, or nothing. */
+function playSurfaceMotion(root) {
+  for (const surface of MOTION_SURFACES) {
+    const open = surfaceIsOpen(root, surface);
+    if (open === (surfaceWasOpen.get(surface.selector) === true)) {
+      continue;
+    }
+    if (open) {
+      const node = liveNode(root, surface);
+      if (node !== null) {
+        animateOnce(node, surface.enter, false);
+      }
+      continue;
+    }
+    const closed = surfaceNode.get(surface.selector);
+    const parent = root.querySelector(surface.parent);
+    if (closed === null || closed === undefined || parent === null) {
+      continue;
+    }
+    // Back in the document, but not back in the interface: it answers to
+    // nothing, takes no focus, and is gone before the animation is cold.
+    closed.inert = true;
+    if (surface.place === undefined) {
+      parent.append(closed);
+    } else {
+      surface.place(parent, closed);
+    }
+    animateOnce(closed, surface.leave, true);
+  }
+}
+
+/**
+ * Wears a class for exactly one animation, then cleans up after itself.
+ *
+ * The timer is not a belt-and-braces second try at `animationend` — it is the
+ * only guarantee. That event never fires at all when reduced motion has taken
+ * the animation away, and browsers hold it back while a tab is in the
+ * background, either of which would otherwise leave a closing panel pinned
+ * over the screen until the next render happened to notice.
+ */
+function animateOnce(node, className, drop) {
+  node.classList.add(className);
+  let done = false;
+  const finish = () => {
+    if (done) {
+      return;
+    }
+    done = true;
+    node.removeEventListener("animationend", onEnd);
+    node.classList.remove(className);
+    if (drop) {
+      node.remove();
+    }
+  };
+  // `animationend` bubbles, and a panel is full of small animations of its
+  // own — a status dot finishing a breath, a skeleton row shimmering. Without
+  // this test the first of them to reach the top would end the panel's
+  // animation on the panel's behalf, a frame or two in.
+  const onEnd = (event) => {
+    if (event.target === node) {
+      finish();
+    }
+  };
+  node.addEventListener("animationend", onEnd);
+  window.setTimeout(finish, 400);
+}
+
 export function render() {
   if (rendering) {
     renderAgain = true;
@@ -3654,6 +3947,10 @@ function renderNow() {
     return;
   }
   applyTheme();
+  // Before anything writes to `root`: the panels and drawers that animate are
+  // read off the outgoing document, and one line below this they stop
+  // existing. See `MOTION_SURFACES`.
+  captureSurfaceMotion(root);
   if (!state.loaded) {
     root.innerHTML = `<div class="app"><div class="main">
       <div class="page">${emptyState(
@@ -3692,6 +3989,14 @@ function renderNow() {
   </div>`;
 
   restoreSettingsScroll(savedSettingsScroll);
+  // What the swap turned out to have opened or closed. Before the transcript
+  // is put back where the reader had it, deliberately: an opening panel does
+  // take its column here, and restoring a scroll against the full width and
+  // then narrowing it again would move the very line the restore exists to
+  // keep still. A closing one no longer takes anything — it leaves out of
+  // flow, over a layout that has already settled — so this order costs it
+  // nothing.
+  playSurfaceMotion(root);
 
   // Chats owns this now: the inline file and diff blocks in the transcript are
   // the only place code is read, so the channel has to load its own changeset
@@ -3860,7 +4165,12 @@ function applyHash() {
  * it was closed and reopened.
  */
 function refreshChannelInfoPopover() {
-  const pop = $(".popover");
+  // Scoped through the id, not the bare class: a popover on its way out keeps
+  // its markup for the length of its exit animation and would be found first
+  // here, so the refresh would land on the copy nobody can see any more while
+  // the live one kept its stale roster. `closePopover` drops the id the
+  // moment a layer starts closing, which leaves exactly one match.
+  const pop = $("#pop-layer .popover");
   if (pop !== null && activeChannelId()) {
     pop.innerHTML = channelInfoPopoverHtml(activeChannelId());
   }
@@ -4266,6 +4576,8 @@ document.addEventListener("click", (event) => {
           return;
         }
         state.activeChannelThread = value;
+        // Chosen, so `openPromptedThread` will not choose over it.
+        state.autoOpenedThread = undefined;
         state.activeDm = undefined;
         state.activeAgentPanel = undefined;
         closeChannelFile();
@@ -4309,10 +4621,9 @@ document.addEventListener("click", (event) => {
       // Keep this DOM in place while its width changes. A whole-screen render
       // replaces the sidebar outright, which gives a newly inserted element
       // its final width and leaves CSS with nothing to animate between.
-      node.closest(".chats-shell")?.classList.toggle(
-        "chan-collapsed",
-        state.chanCollapsed,
-      );
+      const shell = node.closest(".chats-shell");
+      shell?.classList.toggle("chan-collapsed", state.chanCollapsed);
+      markChanFolding(shell);
       const label = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
       node.setAttribute("aria-pressed", String(state.chanCollapsed));
       node.setAttribute("aria-label", label);
@@ -4409,6 +4720,8 @@ document.addEventListener("click", (event) => {
         return;
       }
       state.activeChannelThread = value;
+      // Chosen, so `openPromptedThread` will not choose over it.
+      state.autoOpenedThread = undefined;
       // …and puts away an open conversation, for the same reason: they share
       // the one panel, and a direct message left on top of a thread the reader
       // just asked for would look like the thread failed to open.
@@ -4560,10 +4873,32 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
-    case "chan-tools-toggle":
-      state.chanToolsOpen = !(state.chanToolsOpen === true);
+    case "chan-tools-toggle": {
+      const toggle = node;
+      const focused = document.activeElement === toggle;
+      const open = !(state.chanToolsOpen === true);
+      state.chanToolsOpen = open;
+
+      // Opening the fold changes which tools are in the header, so the rest
+      // of the screen still needs its ordinary render. Keep this button,
+      // though: a replacement already wearing its final class has no previous
+      // state for the button colour or arrow rotation to transition from.
       render();
+      const replacement = document.querySelector(".chan-tools-toggle");
+      if (replacement !== null) {
+        replacement.replaceWith(toggle);
+        // Establish the retained button's old style after reattaching it,
+        // then move it to the new state so the existing CSS transition runs.
+        void toggle.offsetWidth;
+        toggle.classList.toggle("on", open);
+        toggle.setAttribute("aria-expanded", String(open));
+        toggle.setAttribute("title", open ? "Hide tools" : "Show tools");
+        if (focused) {
+          toggle.focus();
+        }
+      }
       return;
+    }
     case "preview-start":
       void startPreviewAction(value);
       return;
@@ -5003,6 +5338,36 @@ document.addEventListener("click", (event) => {
         })
         .catch((error) => toast(error.message, "error"));
       return;
+    /*
+     * The role field's picker. The field itself still takes any words — this
+     * only offers the two the server acts on, so nobody has to know their
+     * exact spelling to use them.
+     */
+    case "agent-role-menu": {
+      const items = roleMenuItems(value, node.dataset.repo);
+      if (items.length === 0) {
+        return;
+      }
+      roleMenuTarget = { agentId: value, repositoryId: node.dataset.repo };
+      showMenu(node, items);
+      return;
+    }
+    case "agent-role-pick": {
+      // `closePopover` returns focus to the chevron, which the redraw inside
+      // `pickChannelRole` then replaces — so the menu goes first.
+      closePopover();
+      pickChannelRole(value ?? "");
+      roleMenuTarget = undefined;
+      return;
+    }
+    case "agent-role-custom": {
+      const input = openRoleInput();
+      closePopover();
+      roleMenuTarget = undefined;
+      input?.focus();
+      input?.select();
+      return;
+    }
     case "agent-switch":
     case "agent-menu": {
       // Was folded in with the navigation cases below, so the three dots on
@@ -5890,6 +6255,14 @@ document.addEventListener("focusout", (event) => {
   // is how most edits to it end, and losing one because it was never
   // "submitted" would be the field quietly discarding work.
   if (act === "agent-role-input") {
+    // Unless the click that took focus away was the chevron beside it. That
+    // opens the picker, and committing here would redraw the field — taking
+    // the button the menu is anchored to out of the page before the click
+    // that opens it lands. Whatever was half-typed is still in the field and
+    // still commits on the next blur.
+    if (event.relatedTarget?.dataset?.act === "agent-role-menu") {
+      return;
+    }
     if (node.isConnected) {
       commitChannelRole(node);
     }
@@ -6320,7 +6693,10 @@ async function boot() {
       // all of them.
       window.clearTimeout(channelFrameTimer);
       channelFrameTimer = window.setTimeout(() => {
-        void refreshChannelMessages(channelRepositoryId).then(() => render());
+        void refreshChannelMessages(channelRepositoryId).then(() => {
+          openPromptedThread(channelRepositoryId);
+          render();
+        });
       }, CHANNEL_FRAME_COALESCE_MS);
     }
     // The audit half of the same news. The transient frame above is what

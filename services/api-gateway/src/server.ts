@@ -290,10 +290,10 @@ interface OpenAgentQuestion {
 /**
  * A task whose progress is being narrated into a channel thread.
  *
- * The channel shows one line per request — the agent's own answer — and
- * everything the task then does is a reply underneath it. Without this a
- * thread said "working on it" once and then nothing until somebody went
- * looking at the run, which reads as the agent having stopped.
+ * The channel shows the request itself, and everything the task does is a
+ * reply underneath it. Without this a request showed a working indicator and
+ * then nothing until somebody went looking at the run, which reads as the
+ * agent having stopped.
  */
 interface WatchedChannelTask {
   taskId: string;
@@ -318,8 +318,6 @@ interface WatchedChannelTask {
    * open. Flushed in order the moment something substantive does arrive.
    */
   pending: string[];
-  /** The agent acknowledgement, kept ahead of every narrated reply. */
-  acknowledgement?: Promise<unknown>;
   /**
    * The request that caused this work, held until the thread actually opens.
    *
@@ -527,7 +525,7 @@ function arbitrationNoticeKind(content: string): "hold" | "advisory" {
  *
  * A thread is answered by the agent whose thread it is, and which agent that
  * is has always been read from the root's *kind*. That worked for the
- * acknowledgement a dispatch posts, which is `agent`, and quietly failed for
+ * legacy acknowledgement roots, which are `agent`, and quietly failed for
  * everything else the same agent writes.
  *
  * `outcome` is the one that mattered. A task that ends without being
@@ -630,8 +628,7 @@ const AUDITOR_POLL_INTERVAL_MS = 15_000;
 const AUDITOR_EVENT_BATCH = 25;
 /**
  * How long an audit may take. Generous: it is reading a whole diff and
- * nothing downstream is blocked on it, unlike the acknowledgement timeout
- * above, which sits in front of a person.
+ * nothing downstream is blocked on it.
  */
 const AUDIT_TIMEOUT_MS = 180_000;
 
@@ -643,8 +640,6 @@ const AUDIT_TIMEOUT_MS = 180_000;
  * they can already read has been failed whether it arrives or not.
  */
 const SIMPLIFY_TIMEOUT_MS = 30_000;
-/** How long the opening line may take before a fixed one is used instead. */
-const ACKNOWLEDGEMENT_TIMEOUT_MS = 6000;
 /**
  * Marks a busy frame sent before its task exists, so the agent starts typing
  * when it is mentioned rather than when the coordinator answers.
@@ -673,16 +668,17 @@ const OPENING_TIMEOUT_MS = 120000;
  * What `/dnc` — "do not code" — adds to the answer prompt.
  *
  * The guarantee is structural: a `/dnc` message goes down the answer path,
- * which never submits a task, so nothing can be written. This says it to the
- * agent in words as well, because the reply should *read* like an answer —
- * an agent that closes with "I'll get started on that" has promised work the
- * command exists to rule out.
+ * which never submits a task, so nothing can be written. The prompt reinforces
+ * that guarantee silently: the reply should read like an answer, not explain
+ * the command or announce that the agent is obeying it.
  */
 const DO_NOT_CODE_DIRECTIVE =
-  "This is a do-not-code request: you are being asked to read and answer, " +
-  "not to work. Do not write, change, or run anything, and do not start — " +
-  "or offer to start — any work. If the answer would need code changes, say " +
-  "what you would change, in words, and stop there.";
+  "Silently treat this as read-only. Answer the message itself without " +
+  "mentioning `/dnc`, calling it a do-not-code request, narrating that you " +
+  "are only looking, or pointing out that no changes are being made. Do not " +
+  "write, change, or run anything, and do not start — or offer to start — " +
+  "any work. If the answer would need code changes, say what you would " +
+  "change, in words, and stop there.";
 
 /**
  * Internal objective marker for an explicit `/ask` task.
@@ -1033,7 +1029,7 @@ const THREAD_RECONCILE_INTERVAL_MS = 60_000;
  * Whether a terminal event is itself the thing the reader asked for.
  *
  * The no-thread ending exists for work whose whole story is "started, done":
- * a one-line outcome beside the acknowledgement, rather than a thread that
+ * a one-line outcome beside the request, rather than a thread that
  * exists only to hold it. A report is the opposite case. Asking an agent to
  * audit the codebase produces no diff and no intermediate commentary, so it
  * reached that branch and the entire findings were flattened into one channel
@@ -1631,7 +1627,7 @@ const ACK_ONLY_RE =
  * precisely to do it.
  */
 const TASK_VERB_RE =
-  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing)\b/iu;
+  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|animate|animates|animated|animating|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|help|helps|helped|helping|solve|solves|solved|solving|address|addresses|addressed|addressing|finish|finishes|finished|finishing|complete|completes|completed|completing|test|tests|tested|testing|verify|verifies|verified|verifying|tackle|tackles|tackled|tackling|improve|improves|improved|improving|figure ?out|take (?:a look|care of)|pick ?up)\b/iu;
 
 /**
  * A question about the status of existing work — asked *with* a task verb
@@ -1815,6 +1811,17 @@ const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
  * by the same reading a person gives it.
  */
 const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
+
+/**
+ * How long an offer stays answerable by a bare "yes".
+ *
+ * A casual "yes" should not revive an old offer after the room has moved on.
+ * Ten minutes is ample for the deliberate two-line handshake and short
+ * enough that an offer left above a later conversation becomes inert. The
+ * choice prompt beside it lives longer, because a tap on a specific question
+ * cannot be mistaken for agreement to something else.
+ */
+const AUTO_CLAIM_OFFER_TTL_MS = 10 * 60 * 1000;
 
 /**
  * The last line of every offer the reader is asked to answer.
@@ -2659,7 +2666,7 @@ export interface ChatProviderOperations {
     /** Canonical repository this answer may inspect, when asked in a channel. */
     repositoryId?: string;
     /**
-     * A throwaway line — a title, an acknowledgement — rather than work.
+     * A throwaway line — such as a title — rather than work.
      * The provider service runs these on a cheap model; see
      * `CEREMONIAL_MODELS` there.
      */
@@ -6054,6 +6061,17 @@ export class ApiGateway {
             `Task status must be one of ${TASK_STATUSES.join(", ")}`,
           );
         }
+        // A worker that dies mid-task leaves its lease behind it, and the
+        // task it was holding stays `claimed` — read everywhere as an agent
+        // working — until somebody expires that lease. Every other caller of
+        // this is a worker route, so the one case it matters in is the one
+        // case nothing ran: the worker is gone. Reading the task list is what
+        // always happens while somebody is looking at that dot, so the sweep
+        // happens here too. It is the same idempotent call the worker routes
+        // make, and it must never be able to fail a read.
+        await this.options.store
+          .expireWorkLeases(new Date().toISOString())
+          .catch(() => undefined);
         const tasks = await this.options.store.listSubmittedTasks({
           projectId,
           ...(status === undefined ? {} : { status }),
@@ -10481,19 +10499,13 @@ export class ApiGateway {
      */
     context?: string;
     /**
-     * Overrides the default "Submitted a task…" confirmation. Auto-claim
-     * uses this to explain *why* it picked this agent, since nobody asked
-     * for it by name.
-     */
-    claimMessage?: string;
-    /**
      * An existing thread to hang this work off, instead of opening a new one.
      *
      * Asking for more work inside a thread is somebody saying "this belongs
      * with that" — the one signal about relatedness that is never a guess,
-     * because a person made it. The acknowledgement then goes into that
-     * thread rather than starting another one beside it, so a follow-up
-     * fix stays with the work it follows.
+     * because a person made it. The work's narration then stays in that
+     * thread rather than starting another one beside it, so a follow-up fix
+     * stays with the work it follows.
      */
     threadMessageId?: string;
     /**
@@ -10526,7 +10538,6 @@ export class ApiGateway {
       senderId,
       candidate,
       trigger = "mention",
-      claimMessage,
     } = input;
     if (candidate.visibility === "personal" && candidate.userId !== senderId) {
       // Auto-claim never reaches this branch in practice — it filters a
@@ -10546,14 +10557,9 @@ export class ApiGateway {
     // Typing starts here, at the moment the agent is chosen, rather than once
     // there is a task to hang it on.
     //
-    // Everything below this line is slow in a way the channel used to hide.
-    // Composing the acknowledgement is a model call with a six-second timeout,
-    // and answering a question is another one; until the first of them lands
-    // there is no message, no thread and no indicator. A person who has just
-    // asked for something watches an empty room for several seconds and
-    // reasonably concludes they were ignored — which is the one thing the
-    // acknowledgement was written to prevent, and it cannot, because it is
-    // itself the thing being waited on.
+    // Everything below this line can be slow. Start the working indicator
+    // before classification or dispatch so the posted request never appears
+    // to have been ignored while those steps run.
     //
     // No task exists yet, so this is keyed on the agent instead. The frame
     // below carries the real id and supersedes it; the question path never
@@ -10579,9 +10585,18 @@ export class ApiGateway {
     // canonical repository. Questions can therefore be answered from the
     // files without becoming coordinated edit tasks; requests for code still
     // continue through the task path below.
+    //
+    // Not applied to work the unaddressed path decided on. That decision was
+    // already made, by a model, with the room in front of it, and its three
+    // answers include the one this check is for — a message that is only a
+    // question is IGNOREd there and never arrives here. Re-deciding it with
+    // a regex is how "any takers for the flaky auth ticket?" became an
+    // answer about the ticket instead of somebody picking it up: the
+    // question mark is grammar, and the agent had already read past it.
     if (
       input.queueAfterCurrent !== true &&
       input.forceQuestion !== true &&
+      input.trigger !== "auto_claim" &&
       readsAsQuestion(content)
     ) {
       await this.answerInChannel(
@@ -10627,18 +10642,6 @@ export class ApiGateway {
       return;
     }
 
-    // The agent answers first, in its own voice — but the voice is bought
-    // with a model call, and this used to wait for it before posting anything.
-    // New tasks already have the posted request as their durable root, so the
-    // acknowledgement can arrive underneath it without delaying dispatch.
-    // Internal dispatches with no request to root under retain the legacy
-    // placeholder path.
-    const openingLine =
-      input.queueAfterCurrent === true
-        ? "Queued."
-        : claimMessage === undefined
-          ? "On it."
-          : `On it. ${claimMessage}`;
     // Asked inside a thread, or close enough to one that it belongs there.
     // The explicit half is a person saying "and now this too"; the automatic
     // half is `findThreadToContinue`, held to a high bar because a wrong
@@ -10667,8 +10670,7 @@ export class ApiGateway {
           )?.id
         : undefined);
     // What the thread already said, read before this dispatch adds anything
-    // to it — the acknowledgement below would otherwise come back as the last
-    // thing the agent is told it said.
+    // to it.
     //
     // Only a request made *inside* a thread carries one. A brand-new request
     // that merely happens to open a thread has no history worth carrying, and
@@ -10685,9 +10687,9 @@ export class ApiGateway {
             request: content,
           });
     const taskContext = threadContext ?? input.context;
-    // A new task hangs directly off the request that caused it. Older channel
-    // history may still have agent-authored roots, and internal dispatches
-    // without a posted request keep that fallback.
+    // A new task hangs directly off the request that caused it. If an internal
+    // caller ever has no posted request, persist the request itself as the
+    // root instead of manufacturing an agent acknowledgement.
     const requestRootId =
       continuing === undefined ? input.referencedMessageId : undefined;
     const threadRootId =
@@ -10697,12 +10699,9 @@ export class ApiGateway {
         await this.appendChannelEntry({
           projectId,
           repositoryId,
-          kind: "agent",
-          authorId: `${candidate.userId}:${candidate.provider}`,
-          content: openingLine,
-          ...(input.referencedMessageId === undefined
-            ? {}
-            : { referencedMessageId: input.referencedMessageId }),
+          kind: "user",
+          authorId: senderId,
+          content,
         })
       ).id;
     // The request that caused this, in the words it was asked in, at the top
@@ -10723,7 +10722,7 @@ export class ApiGateway {
     // Skipped only when the request was made inside the thread already, since
     // then it is a reply and is in it by definition.
     const opener =
-      input.threadMessageId === undefined && requestRootId === undefined
+      continuing !== undefined && input.threadMessageId === undefined
         ? { authorId: senderId, content }
         : undefined;
     if (opener !== undefined && continuing !== undefined) {
@@ -10739,48 +10738,6 @@ export class ApiGateway {
         content: opener.content,
       }).catch(() => undefined);
     }
-    // The agent's own wording, fetched now that the thread it belongs to is
-    // already on the screen. Not awaited: a slow model must not hold up
-    // queueing the work, and the only thing riding on it is how the first
-    // line reads.
-    const acknowledgement = (
-      input.queueAfterCurrent === true
-        ? Promise.resolve(openingLine)
-        : this.composeAcknowledgement(candidate, content, claimMessage)
-    ).then(async (text) => {
-      if (requestRootId !== undefined) {
-        await this.appendChannelThreadReply({
-          projectId,
-          repositoryId,
-          messageId: requestRootId,
-          authorId: `${candidate.userId}:${candidate.provider}`,
-          content: text,
-        }).catch(() => undefined);
-        return text;
-      }
-      if (text === openingLine) {
-        return text;
-      }
-      if (continuing === undefined) {
-        await this.options.store
-          .setChannelMessageContent(repositoryId, threadRootId, text)
-          .catch(() => undefined);
-        await this.options.store
-          .appendAudit(undefined, {
-            type: "channel_message_posted",
-            data: {
-              projectId,
-              repositoryId,
-              messageId: threadRootId,
-              ...(input.referencedMessageId === undefined
-                ? {}
-                : { referencedMessageId: input.referencedMessageId }),
-            },
-          })
-          .catch(() => undefined);
-      }
-      return text;
-    });
     if (continuing !== undefined) {
       // Back to the foot of the channel. Work joining an old thread would
       // otherwise land wherever that thread has scrolled to, which is the
@@ -10791,32 +10748,6 @@ export class ApiGateway {
         .bumpChannelMessage(repositoryId, continuing, new Date().toISOString())
         .catch(() => undefined);
     }
-    if (continuing !== undefined) {
-      // Not awaited, for the same reason the root is not. Joining a thread
-      // needs no message created before the work can be queued, and awaiting
-      // the composed line here left a continuation waiting up to the
-      // acknowledgement timeout before its task was even submitted — the
-      // silence this whole reordering exists to remove, surviving on exactly
-      // the turn somebody is most likely to be watching.
-      void acknowledgement
-        .then(async (acknowledgementText) => {
-          await this.appendChannelThreadReply({
-            projectId,
-            repositoryId,
-            messageId: continuing,
-            authorId: `${candidate.userId}:${candidate.provider}`,
-            content:
-              input.threadMessageId === undefined
-                ? // Auto-merged. Said out loud, because the reader did not ask
-                  // for this thread and needs to know why their request landed
-                  // in it rather than somewhere new.
-                  `${acknowledgementText}\n\n(Adding this to the thread above — it looks like the same piece of work.)`
-                : acknowledgementText,
-          });
-        })
-        .catch(() => undefined);
-    }
-
     try {
       const task = await this.options.operations.submitTask({
         projectId,
@@ -10875,21 +10806,6 @@ export class ApiGateway {
           ? { queueAfterCurrent: true }
           : {}),
       });
-      if (
-        input.queueAfterCurrent === true &&
-        continuing === undefined &&
-        requestRootId === undefined
-      ) {
-        await this.options.store
-          .setChannelMessageContent(
-            repositoryId,
-            threadRootId,
-            task.afterTaskId === undefined
-              ? "On it."
-              : "Queued — I'll start this after my current task.",
-          )
-          .catch(() => undefined);
-      }
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
         taskId: task.id,
@@ -10971,7 +10887,6 @@ export class ApiGateway {
         // work nobody had approved, and leaving the thread still saying nothing
         // was running.
         const planned = await openingPromise;
-        await acknowledgement.catch(() => undefined);
         await this.appendChannelThreadReply({
           projectId,
           repositoryId,
@@ -10984,8 +10899,8 @@ export class ApiGateway {
         }).catch(() => undefined);
         // …and said in the room as well, because the sentence above is inside
         // a thread nobody has been given a reason to open. A held plan looks
-        // exactly like a run in progress from the channel — the request, an
-        // acknowledgement, and then nothing — so the person who asked waits
+        // exactly like a run in progress from the channel — the request, a
+        // working indicator, and then nothing — so the person who asked waits
         // for an agent that is itself waiting for them.
         await this.announceHold({
           projectId,
@@ -11026,10 +10941,11 @@ export class ApiGateway {
           // unreadable, no agent is configured for the vendor, a stored record
           // disagrees with itself. In every one of those cases the task writes
           // no audit events at all, so the watcher below has nothing to follow
-          // and holds its opening line waiting for a run that will never
-          // report. The person saw "On it." and then an hour of silence before
-          // the watchdog admitted defeat, and the one component that knew why
-          // had written the reason to a log nobody reading the channel can see.
+          // and holds its narration waiting for a run that will never report.
+          // The person saw the working indicator and then an hour of silence
+          // before the watchdog admitted defeat, and the one component that
+          // knew why had written the reason to a log nobody reading the channel
+          // can see.
           //
           // Dropping the watch as well, so the hour of silence does not happen
           // after the explanation either.
@@ -11042,7 +10958,6 @@ export class ApiGateway {
             repositoryId,
             taskId: task.id,
           });
-          await acknowledgement.catch(() => undefined);
           await this.appendChannelThreadReply({
             projectId,
             repositoryId,
@@ -11071,7 +10986,6 @@ export class ApiGateway {
         // substantive first, they simply arrive with the next line rather than
         // holding one up.
         pending: [],
-        ...(requestRootId === undefined ? {} : { acknowledgement }),
         // Held with the narration for the reason above: posting it now would
         // open a thread this task may never deserve.
         ...(opener === undefined || continuing !== undefined
@@ -11080,12 +10994,11 @@ export class ApiGateway {
         // Whether a room already exists, not whether one is deserved. The
         // held-narration rule is about sparing the channel a thread nobody
         // needs — but when this dispatch joined an existing thread the room is
-        // already there, the acknowledgement is already in it, and the person
-        // who asked is reading it. Hardcoding `false` there sent the turn's
-        // ending to `appendChannelEntry` as a loose message at the foot of the
-        // channel, leaving the thread stopped dead after "On it." with its
-        // held title and reasoning discarded. `startPlannedTaskFor` has always
-        // passed `true` for exactly this reason.
+        // already there and the person who asked is reading it. Hardcoding
+        // `false` there sent the turn's ending to `appendChannelEntry` as a
+        // loose message at the foot of the channel, leaving the thread stopped
+        // dead with its held title and reasoning discarded.
+        // `startPlannedTaskFor` has always passed `true` for exactly this reason.
         threaded: continuing !== undefined,
       });
       // Filled in when the model gets round to it. `pending` is read at flush
@@ -11101,7 +11014,6 @@ export class ApiGateway {
         })
         .catch(() => undefined);
     } catch (error) {
-      await acknowledgement.catch(() => undefined);
       await this.appendChannelThreadReply({
         repositoryId,
         messageId: threadRootId,
@@ -11451,14 +11363,23 @@ export class ApiGateway {
               AGENT_AUTHORED_ROOT_KINDS.has(reply.kind) &&
               reply.authorId.includes(":"),
           )?.authorId;
-    // The acknowledgement normally attributes a user-rooted task. During the
-    // short window before it lands, an explicit mention in the request is the
-    // same durable routing signal that dispatched the work in the first place.
     if (threadAuthorId === undefined && root.taskId !== undefined) {
-      const namedAtRoot = candidates.find((entry) =>
-        root.content.includes(`@${entry.name}`),
+      const task = (
+        await this.options.store.listSubmittedTasks({
+          repositoryId: input.repositoryId,
+        })
+      ).find((entry) => entry.id === root.taskId);
+      // Task ownership is the durable routing signal. It covers both explicit
+      // mentions and unnamed requests, and does not need a throwaway agent
+      // reply just to remember who is working in this thread.
+      threadAuthorId = await this.channelTaskAuthorId(task, candidates);
+      // Legacy tasks may not resolve against the current configured-agent
+      // list. An explicit mention in their root remains an unambiguous
+      // fallback.
+      const namedAtRoot = candidates.find(
+        (entry) => root.content.includes(`@${entry.name}`),
       );
-      if (namedAtRoot !== undefined) {
+      if (threadAuthorId === undefined && namedAtRoot !== undefined) {
         threadAuthorId = `${namedAtRoot.userId}:${namedAtRoot.provider}`;
       }
     }
@@ -12213,22 +12134,6 @@ export class ApiGateway {
   }
 
   /**
-   * What the agent says when it picks a request up.
-   *
-   * Asked of the model rather than written here, so the reply is about the
-   * thing actually being requested — "Sure, I'll get a chess board rendering
-   * first" rather than the same sentence every time regardless of what was
-   * said. It runs on the agent owner's own credential, which is the same
-   * account the work will be billed to.
-   *
-   * Bounded hard on both sides. The prompt asks for one short sentence, and
-   * the call is raced against a deadline: an acknowledgement that arrives
-   * after the person has given up is worse than a plain one that arrives at
-   * once, and this sits in front of the task actually starting. Any failure —
-   * no credential, a provider that is down, a model that rambles — falls back
-   * to a fixed line rather than leaving the request unanswered.
-   */
-  /**
    * Rewrites the images in a request into something an agent can open.
    *
    * A pasted screenshot reaches the channel as `![alt](attachment:<id>)`,
@@ -12271,73 +12176,6 @@ export class ApiGateway {
       );
     }
     return result;
-  }
-
-  private async composeAcknowledgement(
-    candidate: ChannelMentionCandidate,
-    request: string,
-    claimMessage: string | undefined,
-  ): Promise<string> {
-    // Deliberately says nothing about the request. A mechanical restatement
-    // reads worse than no restatement — it repeats the sender's own words,
-    // typos included, and calls it a summary. The paraphrase is the agent's
-    // job, and it arrives moments later as the thread's title; this line only
-    // has to prove the request was heard, inside a couple of seconds, which
-    // is far less time than a model call takes.
-    const fallback = "On it.";
-    const suffix = claimMessage === undefined ? "" : ` ${claimMessage}`;
-    const complete = this.options.operations.chatProviders?.complete;
-    if (complete === undefined) {
-      return `${fallback}${suffix}`;
-    }
-    try {
-      const answer = await Promise.race([
-        complete({
-          userId: candidate.userId,
-          systemAdmin: false,
-          provider: candidate.provider,
-          ceremonial: true,
-          messages: [
-            {
-              role: "user",
-              content:
-                `${agentIdentity(candidate)}\n\n` +
-                "You are about to start this task. It runs with the " +
-                "repository checked out and you can read, create and edit " +
-                "files in it — this message is only the acknowledgement, so " +
-                "do not say you are unable to reach the repository or that " +
-                "you can only draft something here. If the request is " +
-                "unclear, say what you will assume rather than asking.\n\n" +
-                "Reply with one short sentence — under 20 words — confirming " +
-                "you are picking it up and naming what you will do first. No " +
-                "preamble, no markdown, no quotes.\n\nTask: " +
-                request,
-            },
-          ],
-        }),
-        new Promise<undefined>((resolve) =>
-          setTimeout(() => resolve(undefined), ACKNOWLEDGEMENT_TIMEOUT_MS).unref?.(),
-        ),
-      ]);
-      // `ChatReply.text` is the field the provider service fills; `content`
-      // is the shape of the *request*. Reading only `content` found nothing
-      // every time, so this paid for a model call and then said the same
-      // fixed sentence anyway — the agent's own voice was bought and thrown
-      // away on every dispatch. Same order as `askAgent`, which had already
-      // learned this.
-      const reply = answer as { text?: unknown; content?: unknown } | undefined;
-      const text =
-        typeof answer === "string"
-          ? answer
-          : String(reply?.text ?? reply?.content ?? "");
-      const line = text.trim().split("\n")[0]?.trim() ?? "";
-      if (line.length === 0 || line.length > 300) {
-        return `${fallback}${suffix}`;
-      }
-      return `${line}${suffix}`;
-    } catch {
-      return `${fallback}${suffix}`;
-    }
   }
 
   /**
@@ -13931,14 +13769,39 @@ export class ApiGateway {
         candidate: assignee,
         threadMessageId: messageId,
         trigger: "audit_fix",
-        claimMessage:
-          assignee.userId === auditor.userId &&
-          assignee.provider === auditor.provider
-            ? `Taking finding ${String(finding.index)} myself.`
-            : `Handing finding ${String(finding.index)} to @${assignee.name}.`,
       });
     }
     return true;
+  }
+
+  /** Resolves a persisted task back to the channel agent that owns it. */
+  private async channelTaskAuthorId(
+    task: SubmittedTask | undefined,
+    candidates: readonly ChannelMentionCandidate[],
+  ): Promise<string | undefined> {
+    if (task?.submittedBy === undefined) {
+      return undefined;
+    }
+    const owned = candidates.filter(
+      (candidate) => candidate.userId === task.submittedBy,
+    );
+    const configured = await Promise.resolve(
+      this.options.operations.listAgents?.(),
+    ).catch(() => undefined);
+    const adapter = configured?.find(
+      (agent) => agent.id === task.agentId,
+    )?.adapter;
+    const matched = owned.find((candidate) =>
+      adapter === undefined
+        ? task.agentId.toLowerCase().includes(candidate.vendor)
+        : candidate.vendor === adapter,
+    );
+    // Older deployments expose no configured-agent list. A single connection
+    // owned by the submitter is still unambiguous; several are not.
+    const candidate = matched ?? (owned.length === 1 ? owned[0] : undefined);
+    return candidate === undefined
+      ? undefined
+      : `${candidate.userId}:${candidate.provider}`;
   }
 
   /**
@@ -14489,16 +14352,25 @@ export class ApiGateway {
         ) {
           continue;
         }
-        const authorId = AGENT_AUTHORED_ROOT_KINDS.has(message.kind)
+        let authorId = AGENT_AUTHORED_ROOT_KINDS.has(message.kind)
           ? message.authorId
           : replies.find(
               (reply) =>
                 AGENT_AUTHORED_ROOT_KINDS.has(reply.kind) &&
                 reply.authorId.includes(":"),
             )?.authorId;
-        // A user-rooted task is attributed by its persisted acknowledgement.
-        // If a crash happened before that reply landed, guessing would make
-        // the requester appear to have written the agent's ending.
+        if (authorId === undefined) {
+          const candidates = await this.resolveChannelMentionCandidates(
+            message.projectId,
+            repository.id,
+          ).catch(() => []);
+          authorId = await this.channelTaskAuthorId(
+            byId.get(taskId),
+            candidates,
+          );
+        }
+        // Never put the recovery ending in the requester's mouth if a legacy
+        // task can no longer be mapped to an agent.
         if (authorId === undefined) {
           continue;
         }
@@ -15179,10 +15051,6 @@ export class ApiGateway {
           taskId: watched.taskId,
           limit: 200,
         });
-        if (events.length > 0 && watched.acknowledgement !== undefined) {
-          await watched.acknowledgement.catch(() => undefined);
-          delete watched.acknowledgement;
-        }
         for (const record of events) {
           watched.cursor = record.sequence;
           const data = (record.event.data ?? {}) as Record<string, unknown>;
@@ -15489,8 +15357,6 @@ export class ApiGateway {
           await this.withdrawArbitrationNotice(watched);
           const abandoned =
             "I could not finish this — I stopped hearing back from the run.";
-          await watched.acknowledgement?.catch(() => undefined);
-          delete watched.acknowledgement;
           // Same rule as a terminal event: a run that never said anything
           // worth a thread should not open one purely to admit it gave up.
           if (watched.threaded) {
@@ -15581,7 +15447,12 @@ export class ApiGateway {
   private async appendChannelEntry(input: {
     projectId: string;
     repositoryId: string;
-    kind: "agent" | "system" | "outcome";
+    // "user" is here because a task dispatched with no posted request has to
+    // persist the request itself as its thread root — see `threadRootId` in
+    // `dispatchOneMention`, which is the only caller that passes it and the
+    // reason a thread opens on what somebody said rather than on the agent's
+    // restatement of it.
+    kind: "user" | "agent" | "system" | "outcome";
     authorId: string;
     content: string;
     /** Earlier channel root this flat entry answers. */
@@ -15629,9 +15500,8 @@ export class ApiGateway {
    * and nowhere else. That is the one place the announcement cannot do its
    * job: a thread is collapsed until somebody opens it, and nothing about a
    * held run distinguishes it in the channel from a run still going. The
-   * person who asked sees their request, an acknowledgement, and then
-   * silence, and concludes the agent is stuck — while the agent is waiting
-   * for them.
+   * person who asked sees their request and a working indicator, then silence,
+   * and concludes the agent is stuck — while the agent is waiting for them.
    *
    * One line, in the room, naming the reply that releases it. `outcome`
    * because that is what the browser retires the typing dots off, and this is
@@ -15830,6 +15700,12 @@ export class ApiGateway {
     if (requestAt < 0) {
       return undefined;
     }
+    // Identity matters to the classifier even though names do not. Two
+    // different people talking are the signal that "can you fix that?" may
+    // be addressed to a teammate rather than to the room. Stable, local
+    // labels expose that shape without putting anyone's display name into a
+    // prompt or making the eventual worker depend on who happened to speak.
+    const humanLabels = new Map<string, number>();
     const lines = messages
       .slice(0, requestAt)
       .filter(
@@ -15843,9 +15719,18 @@ export class ApiGateway {
       )
       .map((message) => {
         const content = collapseWhitespace(message.content);
-        return content.length <= 280
+        const clipped = content.length <= 280
           ? content
           : `${content.slice(0, 279).trimEnd()}…`;
+        if (message.kind !== "user") {
+          return `Agent: ${clipped}`;
+        }
+        let label = humanLabels.get(message.authorId);
+        if (label === undefined) {
+          label = humanLabels.size + 1;
+          humanLabels.set(message.authorId, label);
+        }
+        return `Human ${String(label)}: ${clipped}`;
       })
       .filter((line) => line.length > 0)
       .slice(-AUTO_CLAIM_CONTEXT_LOOKBACK);
@@ -16155,7 +16040,9 @@ export class ApiGateway {
         "  Use this when the message plainly asks for work on the " +
         "repository and says clearly enough what it wants that you could " +
         "start now. Acting spends the account's usage, so use it only when " +
-        "there is no real doubt about what was asked for.\n\n" +
+        "there is no real doubt about what was asked for. A request made to " +
+        "someone, anyone, or the room at large is made to you as well, even " +
+        "with no @mention in it.\n\n" +
         "OFFER: <one short yes/no question>\n" +
         "  Use this when the message points at work without asking for it, " +
         "or asks for something too vague to start on. Your question must " +
@@ -16165,9 +16052,13 @@ export class ApiGateway {
         "IGNORE\n" +
         "  Use this for everything else: greetings, people talking to each " +
         "other, opinions with nothing to do, questions about the status of " +
-        "work, remarks about work already finished.\n\n" +
-        "Use recent context only to resolve references such as \"that\"; " +
-        "decide about the current message, never about the background.\n\n" +
+        "work, remarks about work already finished. If the recent context " +
+        "shows people in conversation and this message could reasonably be " +
+        "meant for one particular person, ignore it — do not interrupt " +
+        "their conversation.\n\n" +
+        "Use recent context only to resolve references such as \"that\" and " +
+        "to see who is speaking to whom; decide about the current message, " +
+        "never about the background.\n\n" +
         (context === undefined ? "" : `${context}\n\n`) +
         "Current message: " +
         content,
@@ -16180,16 +16071,16 @@ export class ApiGateway {
   /**
    * Dispatches an offer the sender has just agreed to. True when it did.
    *
-   * The offer carries no stored state, so acceptance re-reads the transcript:
-   * the most recent offer, and the message before it, which is the request in
-   * the sender's own words — which is what the dispatch wants as its
-   * objective anyway. The agent is chosen again rather than parsed back out
-   * of the offer's prose; the scoring is deterministic, so it lands on the
-   * same one it named.
+   * The offer already records both facts acceptance needs: its author is the
+   * agent that volunteered and `referencedMessageId` is the request it read.
+   * Binding to those is safer than choosing again after roles or activity may
+   * have changed, and safer than assuming the nearest user line is still the
+   * request after a busy room has carried on talking.
    *
-   * Only the person who asked may accept. Anyone could type "yes" in a busy
-   * channel and mean something else entirely, and the pick was made on the
-   * question of whose account pays.
+   * Only the person who asked may accept, and only as the next human turn
+   * within a short window. Anyone could type "yes" later in a busy channel
+   * and mean something else entirely, and the pick was made on the question
+   * of whose account pays.
    */
   private async maybeAcceptAutoClaim(input: {
     projectId: string;
@@ -16207,8 +16098,7 @@ export class ApiGateway {
       senderId,
       { limit: AUTO_CLAIM_CONTEXT_LOOKBACK + 3 },
     );
-    // Oldest first, so the offer is the last one of ours in the window, and
-    // the request is the last thing a person said before it.
+    // Oldest first, so the offer is the last one of ours in the window.
     let offerAt = -1;
     // The tail first, because it is what every offer written now ends with;
     // the two openings are offers already sitting in channels from before
@@ -16235,12 +16125,58 @@ export class ApiGateway {
     if (offerAt < 0) {
       return false;
     }
-    let request: ChannelMessage | undefined;
-    for (let index = offerAt - 1; index >= 0; index -= 1) {
+    const offer = recent[offerAt];
+    if (offer === undefined) {
+      return false;
+    }
+    const offeredAt = new Date(offer.createdAt).getTime();
+    if (
+      !Number.isFinite(offeredAt) ||
+      Date.now() - offeredAt > AUTO_CLAIM_OFFER_TTL_MS
+    ) {
+      return false;
+    }
+    // The approval being handled is already stored. If any other person has
+    // spoken since the offer, the room has moved on and a bare "yes" is no
+    // longer specific enough to spend an account.
+    let approvalAt = -1;
+    for (let index = recent.length - 1; index > offerAt; index -= 1) {
       const message = recent[index];
-      if (message?.kind === "user") {
-        request = message;
+      if (
+        message?.kind === "user" &&
+        message.authorId === senderId &&
+        collapseWhitespace(message.content) === collapseWhitespace(input.content)
+      ) {
+        approvalAt = index;
         break;
+      }
+    }
+    if (
+      approvalAt < 0 ||
+      recent
+        .slice(offerAt + 1, approvalAt)
+        .some((message) => message.kind === "user")
+    ) {
+      return false;
+    }
+    let request =
+      offer.referencedMessageId === undefined
+        ? undefined
+        : await this.options.store
+            .getChannelMessage(
+              repositoryId,
+              offer.referencedMessageId,
+              senderId,
+            )
+            .catch(() => undefined);
+    // Compatibility for offers written before references were attached.
+    if (request === undefined) {
+      for (let index = offerAt - 1; index >= 0; index -= 1) {
+        const message = recent[index];
+        if (message?.kind === "user") {
+          request = message;
+          break;
+        }
       }
     }
     if (request === undefined || request.authorId !== senderId) {
@@ -16252,30 +16188,31 @@ export class ApiGateway {
       request,
       messages: recent,
     });
-    const chosen = await this.chooseAutoClaimCandidate({
-      repositoryId,
-      content: request.content,
-      senderId,
-      candidates,
-      ...(context === undefined ? {} : { context }),
-    });
+    const chosen = candidates.find(
+      (candidate) =>
+        `${candidate.userId}:${candidate.provider}` === offer.authorId &&
+        (candidate.visibility === "org" || candidate.userId === senderId),
+    );
     if (chosen === undefined) {
-      return false;
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        "That agent is no longer available here — mention another one if " +
+          "you still want this picked up.",
+      );
+      return true;
     }
-    const offer = recent[offerAt];
-    const proposal = autoClaimProposal(offer?.content ?? "");
-    if (offer !== undefined) {
-      // The words answered the prompt too, so take it down rather than leave
-      // a live choice for something that has just started.
-      this.settledAutoClaimOffers.add(offer.id);
-      if (
-        this.pendingAgentQuestions.delete(
-          `${AUTO_CLAIM_QUESTION_PREFIX}${offer.id}`,
-        )
-      ) {
-        this.announceAgentQuestions(projectId);
-      }
+    // The words answered the choice prompt too, so take it down rather than
+    // leave a live button for work that has just started.
+    this.settledAutoClaimOffers.add(offer.id);
+    if (
+      this.pendingAgentQuestions.delete(
+        `${AUTO_CLAIM_QUESTION_PREFIX}${offer.id}`,
+      )
+    ) {
+      this.announceAgentQuestions(projectId);
     }
+    const proposal = autoClaimProposal(offer.content);
     if (proposal !== undefined) {
       await this.startOfferedWork({
         projectId,
@@ -16340,7 +16277,15 @@ export class ApiGateway {
     const hasDirectMatch = direct.some((entry) => entry.score > 0);
     // The first line is framing for the worker, not conversation. Scoring it
     // would make an agent named "Context" look relevant to every request.
-    const contextualWords = input.context?.split("\n").slice(1).join("\n");
+    const contextualWords = input.context
+      ?.split("\n")
+      .slice(1)
+      .join("\n")
+      // Speaker labels help the classifier distinguish a human exchange but
+      // are not subject matter. Letting "Human" or "Agent" enter relevance
+      // scoring would make a persona with either word in its name win every
+      // generic follow-up for the wrong reason.
+      .replace(/^- (?:Human \d+|Agent): /gmu, "- ");
     const contextTokens =
       contextualWords === undefined ? undefined : relevanceTokens(contextualWords);
     const scored = (

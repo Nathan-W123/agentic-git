@@ -260,3 +260,71 @@ test("mobile message actions surface only for the selected message", async () =>
     /\.cmsg-row:hover \.cmsg-actions,\s*\.cmsg-row:focus-within \.cmsg-actions \{\s*opacity: 1;\s*pointer-events: auto;/u,
   );
 });
+
+test("sending a message takes the command picker down with the draft", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  // Sending empties the composer, so the list of completions for the word
+  // that was in it has nothing left to complete. It used to be left open:
+  // only a keystroke reconsiders the pickers, so a `/` picker that was still
+  // up at send hung over the emptied composer and followed the reader into
+  // the next channel.
+  const send = slice(
+    chats,
+    "export function submitComposerMessage(",
+    "function pinnedBanner(",
+  );
+  assert.equal(
+    send.match(/closeComposerAutocomplete\("channel"\)/gu)?.length,
+    2,
+    "both a channel message and a reply from the channel composer close it",
+  );
+  assert.doesNotMatch(
+    send,
+    /state\.mentionActive = false;/u,
+    "no send path should half-close the pickers by hand",
+  );
+  assert.match(
+    slice(
+      chats,
+      "export function submitThreadReply(",
+      "function closeComposerAutocomplete(",
+    ),
+    /closeComposerAutocomplete\("thread"\)/u,
+  );
+
+  const source = slice(
+    chats,
+    "function closeComposerAutocomplete(",
+    "function autocompleteSnapshot(",
+  );
+  const state = {
+    composerAutocompleteTarget: "channel",
+    mentionActive: true,
+    mentionQuery: "ma",
+    mentionIndex: 2,
+    slashActive: true,
+    slashQuery: "dep",
+    slashIndex: 3,
+  };
+  const close = new Function(
+    "state",
+    `${source}\nreturn closeComposerAutocomplete;`,
+  )(state) as (target: string) => void;
+
+  // The composer that did not send keeps its half-typed word and its picker.
+  close("thread");
+  assert.equal(state.slashActive, true);
+
+  // The query and the highlighted row go too, so the next `/` starts fresh.
+  close("channel");
+  assert.deepEqual(state, {
+    composerAutocompleteTarget: "channel",
+    mentionActive: false,
+    mentionQuery: "",
+    mentionIndex: 0,
+    slashActive: false,
+    slashQuery: "",
+    slashIndex: 0,
+  });
+});

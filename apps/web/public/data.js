@@ -162,6 +162,22 @@ export const state = {
   repositoryGrants: {},
   activeChannelThread: undefined,
   /**
+   * A thread that has just come into existence under something this account
+   * asked for, waiting to be opened — see `notePromptedThread`.
+   *
+   * `{ repositoryId, messageId }`, and only ever the most recent one: two
+   * agents finishing their first reply in the same reconcile is one panel
+   * with one occupant, and the newest is the one still being written.
+   */
+  promptedThread: undefined,
+  /**
+   * The thread `activeChannelThread` holds because the app opened it, rather
+   * than because the reader pressed something. Kept apart so the next
+   * prompted thread may replace one the app chose and never one the reader
+   * did.
+   */
+  autoOpenedThread: undefined,
+  /**
    * The thread the composer is aimed at, if the reader chose one.
    *
    * Item 4 of the threading work, explicit rather than automatic: guessing
@@ -1128,8 +1144,74 @@ export function agentNameTaken(repositoryId, name, exceptAgentId) {
 // not working.
 const WORKING_STATUS = new Set(["submitted", "claimed"]);
 
+/**
+ * How long a queued task may still read as work in progress.
+ *
+ * `submitted` means "queued, not started yet" — the server says it in those
+ * words. It belongs in `WORKING_STATUS` for the seconds between a dispatch
+ * and a worker claiming it, which is exactly when somebody is watching for
+ * the dots. Past that it means the opposite: nothing has picked the task up.
+ *
+ * Without this bound the dots never came down at all in the two cases that
+ * matter. A repository whose worker is gone leaves its tasks queued forever,
+ * and a run whose worker dies is *returned* to `submitted` by lease expiry —
+ * so a crashed run read as an agent thinking for as long as the tab was left
+ * open, which is the "it says active when it is not" this exists to stop.
+ */
+const QUEUED_GRACE_MS = 2 * 60_000;
+
+/**
+ * Whether a task is one an agent is working on right now.
+ *
+ * The single answer behind the typing dots, the roster dot, the thread marks
+ * and the agents screen. They read the same tasks and must not be able to
+ * disagree about which of them is live.
+ */
+function taskIsWorking(task, now = Date.now()) {
+  if (task === undefined || !WORKING_STATUS.has(task.status)) {
+    return false;
+  }
+  if (task.status !== "submitted") {
+    return true;
+  }
+  // An unparseable or absent stamp keeps the old answer rather than retiring
+  // work that may well be running: the bound is here to catch the queue that
+  // never moves, not to second-guess a record it cannot read.
+  const queuedAt = Date.parse(task.submittedAt ?? "");
+  return !Number.isFinite(queuedAt) || now - queuedAt < QUEUED_GRACE_MS;
+}
+
 /** Backstop only — the task's own status is what really retires an entry. */
 const BUSY_TTL_MS = 10 * 60_000;
+/**
+ * How long a busy frame may outlive a task list that never mentions it.
+ *
+ * A frame carries a task id so the dots can be retired against that task's
+ * real status. When no such task is in the list there is nothing to retire
+ * it: an id that never arrives — a task in a project the reader has since
+ * switched away from, or one deleted while the frame was in flight — used to
+ * hold the dots up for the whole ten-minute backstop. The list is re-read
+ * within a second of any frame and every thirty seconds besides, so an id
+ * still missing after this long is not a task anybody is working on.
+ */
+const UNKNOWN_TASK_TTL_MS = 60_000;
+
+/**
+ * Whether a busy frame still describes work happening now.
+ *
+ * Reads without retiring anything, so it is safe to call from a render.
+ */
+function busyIsLive(taskId, entry, now) {
+  if (entry === undefined || entry.expiresAt <= now) {
+    return false;
+  }
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  if (task !== undefined) {
+    return taskIsWorking(task, now);
+  }
+  return now - Number(entry.at ?? 0) < UNKNOWN_TASK_TTL_MS;
+}
+
 /** Matches `PENDING_BUSY_PREFIX` on the server; see `noteAgentBusy`. */
 const PENDING_BUSY_PREFIX = "pending:";
 /** How long a placeholder holds the dots up on its own. */
@@ -1149,7 +1231,7 @@ export function noteAgentBusy(frame) {
   }
   // The first frame of a request arrives before its task exists: it is what
   // makes an agent start typing the moment it is mentioned, instead of once
-  // the acknowledgement and the coordinator have both answered. It is keyed on
+  // the coordinator has submitted the task. It is keyed on
   // the agent, so the frame that follows with a real task id replaces it here
   // — otherwise both would sit in the table, and the placeholder, matching no
   // task and so never retired by status, would hold the dots up for its whole
@@ -1164,6 +1246,9 @@ export function noteAgentBusy(frame) {
     repositoryId: frame.repositoryId,
     userId: frame.userId,
     provider: frame.provider,
+    // When this arrived, which is what bounds a frame whose task the list
+    // never mentions — see `UNKNOWN_TASK_TTL_MS`.
+    at: Date.now(),
     // A placeholder has nothing but this to retire it. A question is answered
     // without ever becoming a task, and a dispatch can fail before it submits;
     // in both cases no status arrives to take the dots down. Long enough to
@@ -1187,9 +1272,7 @@ export function agentsThinkingIn(repositoryId) {
   const now = Date.now();
   const names = [];
   for (const [taskId, entry] of Object.entries(state.agentBusy)) {
-    const task = state.tasks.find((candidate) => candidate.id === taskId);
-    const finished = task !== undefined && !WORKING_STATUS.has(task.status);
-    if (finished || entry.expiresAt <= now) {
+    if (!busyIsLive(taskId, entry, now)) {
       delete state.agentBusy[taskId];
       continue;
     }
@@ -1233,12 +1316,10 @@ export function threadIsWorking(entry) {
   if (taskId === undefined || taskId === null || taskId === "") {
     return false;
   }
-  const task = state.tasks.find((candidate) => candidate.id === taskId);
-  if (task !== undefined) {
-    return WORKING_STATUS.has(task.status);
-  }
-  const busy = state.agentBusy[taskId];
-  return busy !== undefined && busy.expiresAt > Date.now();
+  return (
+    busyIsLive(taskId, state.agentBusy[taskId], Date.now()) ||
+    taskIsWorking(state.tasks.find((candidate) => candidate.id === taskId))
+  );
 }
 
 /**
@@ -1913,9 +1994,13 @@ export function myAgents() {
     // answered false for every provider and no agent of this account's was
     // ever seen running. `taskBelongsToAgent` maps between them, and carries
     // the owner check the surrounding filter is already doing.
+    // `taskIsWorking`, not `ACTIVE_TASK_STATUS`: that set is the coordinator's
+    // question ("is this work still ours"), and a task queued behind a runner
+    // that never comes is still the coordinator's while being nobody's work.
+    // Asking it here is what showed an agent as running on a queue.
     const running = tasks.find(
       (task) =>
-        ACTIVE_TASK_STATUS.has(task.status) &&
+        taskIsWorking(task) &&
         taskBelongsToAgent(task, { id: provider.id, provider: provider.id, userId: mine }),
     );
     // A credential the server has seen fail to authenticate. Stored is not
@@ -2433,10 +2518,13 @@ export function channelAgentsFor(repositoryId) {
         effort: "",
         connected: true,
         // The server has no live presence signal to read yet (see the
-        // `channel/agents` route in api-gateway) — a real, connected
-        // teammate's agent reads as online rather than as an invented
-        // idle/offline, which is the honest floor until presence is real.
-        presence: "online",
+        // `channel/agents` route in api-gateway), so "connected" is the whole
+        // of what it can honestly say — and connected is idle, not online.
+        // Claiming online for every roster entry made every teammate's agent
+        // breathe as though it were mid-thought, on a screen whose whole job
+        // is to say who is working. The override below lights it the moment
+        // it actually has work, and only then.
+        presence: "idle",
         // The same colour this person's avatar uses everywhere else
         // (`agentColorFor` already treats a member's chosen colour as public
         // within the organization); falls back to the same hash-based colour
@@ -2504,16 +2592,19 @@ export function channelParticipants(repositoryId) {
   // back keeps the picker useful during the roster request.
   const room = state.channelPeople[repositoryId] ?? [];
   const source = room.length > 0 ? room : state.members;
-  const humans = source.map((member) => ({
-    id: member.userId ?? member.id ?? member.user?.id,
-    name:
-      member.name ??
-      member.displayName ??
-      member.user?.displayName ??
-      member.email ??
-      member.user?.email,
-    kind: "human",
-  }));
+  const humans = source.map((member) => {
+    const email = member.email ?? member.user?.email;
+    return {
+      id: member.userId ?? member.id ?? member.user?.id,
+      name:
+        member.name ??
+        member.displayName ??
+        member.user?.displayName ??
+        email,
+      email,
+      kind: "human",
+    };
+  });
   if (humans.length === 0) {
     humans.push({ id: currentUserId(), name: currentUserName(), kind: "human" });
   }
@@ -2538,27 +2629,8 @@ function seedMessages(repositoryId) {
       kind: "agent",
       authorId: agents[0].id,
       content:
-        "Picked up the outstanding tasks on this repository and started on the highest-priority one. I'll post here once there's a changeset to review.",
-      at: new Date(now - 1000 * 60 * 60 * 20).toISOString(),
-    });
-  }
-  if (agents[1] !== undefined) {
-    rows.push({
-      id: `${repositoryId}-seed-3`,
-      kind: "agent",
-      authorId: agents[1].id,
-      content:
         "Reviewed the last changeset — looks clean. Flagged one file that might need a second pass on error handling.",
       at: new Date(now - 1000 * 60 * 60 * 3).toISOString(),
-      replies: [
-        {
-          id: `${repositoryId}-seed-3-r1`,
-          kind: "user",
-          authorId: currentUserId() || "you",
-          content: "Good catch, I'll take a look this afternoon.",
-          at: new Date(now - 1000 * 60 * 60 * 2).toISOString(),
-        },
-      ],
     });
   }
   return rows;
@@ -2921,11 +2993,10 @@ export function agentStatus(agent, repositoryId) {
 function agentIsWorking(agent, repositoryId) {
   const now = Date.now();
   for (const [taskId, entry] of Object.entries(state.agentBusy)) {
-    if (entry.repositoryId !== repositoryId || entry.expiresAt <= now) {
-      continue;
-    }
-    const task = state.tasks.find((candidate) => candidate.id === taskId);
-    if (task !== undefined && !WORKING_STATUS.has(task.status)) {
+    if (
+      entry.repositoryId !== repositoryId ||
+      !busyIsLive(taskId, entry, now)
+    ) {
       continue;
     }
     // Matched the way `agentsThinkingIn` matches, so the dot and the typing
@@ -2952,7 +3023,7 @@ function agentIsWorking(agent, repositoryId) {
   return state.tasks.some(
     (task) =>
       task.repositoryId === repositoryId &&
-      WORKING_STATUS.has(task.status) &&
+      taskIsWorking(task, now) &&
       taskBelongsToAgent(task, agent),
   );
 }
@@ -3053,12 +3124,78 @@ function withSentTime(message) {
   };
 }
 
+/**
+ * Whether a channel root is a thread standing under a task this account asked
+ * for — the shape `channelMessageHasTaskThread` draws in the transcript,
+ * narrowed to the person who prompted it.
+ */
+function ownTaskThread(entry) {
+  return (
+    entry.kind === "user" &&
+    entry.taskId !== undefined &&
+    String(entry.authorId ?? "") === currentUserId() &&
+    (entry.replies ?? []).length > 0
+  );
+}
+
+/**
+ * Remembers a thread that has just appeared under one of this account's own
+ * requests, so the surface can open it.
+ *
+ * Somebody asks an agent for something and then waits, watching a request
+ * that says nothing back until the narration arrives — and when it does it
+ * arrives *inside* a thread, collapsed to a one-line summary they still have
+ * to click. This is the transition worth catching: a root of theirs that had
+ * no replies a moment ago and has some now.
+ *
+ * `before` is the timeline this read replaced, and is undefined on a
+ * channel's first read — where every thread in the room is equally new and
+ * none of them is news. Deciding from the two timelines rather than from a
+ * message event keeps the client out of guessing which reply started a
+ * thread: the store stays the source of truth, exactly as `loadChannel`'s
+ * reconcile does for everything else.
+ */
+function notePromptedThread(repositoryId, before) {
+  if (before === undefined) {
+    return;
+  }
+  const already = new Set(before.filter(ownTaskThread).map((entry) => entry.id));
+  const opened = state.channelMessages[repositoryId]
+    .filter((entry) => ownTaskThread(entry) && !already.has(entry.id))
+    .at(-1);
+  if (opened !== undefined) {
+    state.promptedThread = { repositoryId, messageId: opened.id };
+  }
+}
+
+/**
+ * The thread waiting to be opened in this repository, taken rather than read:
+ * a reconcile that produces one gets exactly one chance to open it, and a
+ * surface that decides against opening it does not leave it to ambush the
+ * next unrelated refresh.
+ */
+export function takePromptedThread(repositoryId) {
+  const pending = state.promptedThread;
+  if (pending === undefined || pending.repositoryId !== repositoryId) {
+    return undefined;
+  }
+  state.promptedThread = undefined;
+  return pending.messageId;
+}
+
 async function loadChannel(repositoryId) {
   const response = await apiOptional(channelPath(repositoryId, "/messages"), undefined);
   if (response === undefined) {
     return false;
   }
+  // Taken before the replacement, and only for a channel that has been read
+  // once already — the local seed `channelMessagesFor` falls back to is not a
+  // timeline anything happened in.
+  const before = state.channelLoaded.has(repositoryId)
+    ? (state.channelMessages[repositoryId] ?? [])
+    : undefined;
   state.channelMessages[repositoryId] = (response.messages ?? []).map(withSentTime);
+  notePromptedThread(repositoryId, before);
   state.channelAgentOverrides[repositoryId] = {
     ...state.channelAgentOverrides[repositoryId],
     ...response.agentOverrides,

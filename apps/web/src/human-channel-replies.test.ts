@@ -69,9 +69,12 @@ test("a person's response takes its place at the end of the transcript", async (
     list,
     /messageRow\(entry, repositoryId, \{ inlineReplyTo: item\.inlineReplyTo \}\)/u,
   );
+  // A message that carries a task keeps its replies in its own thread rather
+  // than spilling them into the timeline — from the first one now, not the
+  // second: one reply under a task is already that thread's narration.
   assert.match(
     chats,
-    /entry\.taskId !== undefined && replies\.length > 1/u,
+    /entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 0/u,
   );
   assert.match(chats, /messageReference\(inlineReplyTo, repositoryId\)/u);
   assert.match(chats, /cmsg-inline-reply/u);
@@ -96,7 +99,7 @@ test("a person's response renders inline with the message it answers", async () 
   assert.match(row, /inlineReply \? " cmsg-inline-reply" : ""/u);
   assert.match(
     row,
-    /entry\.taskId !== undefined && replies\.length > 1/u,
+    /entry\.kind !== "user" \|\| entry\.taskId !== undefined/u,
     "a human reply must not become task-thread navigation",
   );
 });
@@ -118,8 +121,8 @@ test("an agent root keeps its chronological place while referencing the request"
   assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
   assert.match(
     row,
-    /entry\.kind !== "user" \|\|\s*\(entry\.taskId !== undefined && replies\.length > 1\)/u,
-    "the persisted reference must not replace an acknowledgement's task thread",
+    /entry\.kind !== "user" \|\| entry\.taskId !== undefined/u,
+    "the persisted reference must not replace an agent root's task thread",
   );
   assert.match(
     list,
@@ -144,7 +147,7 @@ test("task-bearing user messages join thread navigation without capturing person
 
   assert.match(
     panel,
-    /entry\.kind !== "user" \|\|[\s\S]{0,120}entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+    /entry\.kind !== "user" \|\| entry\.taskId !== undefined/u,
   );
   assert.match(
     chats,

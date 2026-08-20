@@ -1472,12 +1472,30 @@ export function showMenu(anchor, items) {
   return showPopover(anchor, `<div class="menu">${body}</div>`, { width: 216 });
 }
 
+/** How long `.pop-closing` is given before the layer is dropped, in ms. */
+const POP_EXIT_MS = 200;
+
 export function closePopover() {
   const open = $("#pop-layer");
   if (open === null) {
     return;
   }
-  open.remove();
+  // Held for the length of its exit rather than removed on the spot. A popup
+  // that eases in over a handful of frames and then vanishes between two of
+  // them reads as a glitch rather than as a dismissal, and there is nothing
+  // the stylesheet can do about it once the element is gone.
+  //
+  // The id goes first, which is what takes the layer out of circulation: this
+  // function finds the open popover by id, and so does the code that refreshes
+  // a live one, so a second Escape — or the `closePopover()` at the top of
+  // `showPopover`, opening the next menu straight from this one — finds
+  // nothing and starts nothing. `inert` does the same for the reader: a
+  // surface that is on its way out should not still be holding focus or
+  // answering to a stray Tab.
+  open.removeAttribute("id");
+  open.classList.add("pop-closing");
+  open.inert = true;
+  window.setTimeout(() => open.remove(), POP_EXIT_MS);
   popoverReturn?.focus();
   popoverReturn = undefined;
 }

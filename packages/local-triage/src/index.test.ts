@@ -164,6 +164,15 @@ test("the model separates conversation from requests", async (t) => {
     "audit the codebase for unused deps",
     "fix the login redirect",
     "this dropdown is broken on safari",
+    // Work handed to the room rather than to a person. A task-verb list
+    // missed all of these, because "own", "takers" and "a hand" describe
+    // delegation and not the operation — and they are exactly the messages a
+    // room most wants picked up.
+    "any takers for the flaky auth ticket?",
+    "who can own the release checklist?",
+    "could someone take a look at the checkout failure?",
+    "we could use a hand with the database migration",
+    "looking for someone to pick up the accessibility pass",
   ]) {
     assert.equal(
       await filter.readsAsChatter(work),
