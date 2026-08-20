@@ -189,12 +189,19 @@ RUN for attempt in 1 2 3; do \
       echo "Kiro CLI install failed (attempt ${attempt}/3)"; \
       [ "${attempt}" = 3 ] || sleep 5; \
     done; \
-    if [ -d /root/.local/share/cursor-agent/versions ]; then \
-      mv /root/.local/share/cursor-agent /opt/cursor-agent \
-      && chmod -R a+rX /opt/cursor-agent \
-      && ln -sf "$(find /opt/cursor-agent/versions -mindepth 1 -maxdepth 1 -type d | sort | tail -1)/cursor-agent" /usr/local/bin/agent \
-      && agent --version \
-      || echo "Cursor CLI did not install cleanly; continuing without it"; \
+    cursor_agent_path="$(realpath /root/.local/bin/agent 2>/dev/null || true)"; \
+    cursor_agent_dir="$(dirname "${cursor_agent_path:-/not-installed}")"; \
+    if [ -f "${cursor_agent_path}" ] \
+      && [ -f "${cursor_agent_dir}/node" ] \
+      && [ -f "${cursor_agent_dir}/index.js" ]; then \
+      install -d /usr/local/lib/cursor-agent; \
+      cp -a "${cursor_agent_dir}/." /usr/local/lib/cursor-agent/; \
+      chmod -R a+rX /usr/local/lib/cursor-agent; \
+      ln -sf "/usr/local/lib/cursor-agent/$(basename "${cursor_agent_path}")" /usr/local/bin/agent; \
+      if ! agent --version; then \
+        rm -f /usr/local/bin/agent; \
+        echo "Cursor CLI installed incompletely; continuing without it"; \
+      fi; \
     else \
       echo "Cursor CLI did not install; continuing without it"; \
     fi; \

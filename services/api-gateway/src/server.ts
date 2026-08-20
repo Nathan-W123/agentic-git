@@ -2794,9 +2794,9 @@ export interface ChatProviderOperations {
     /**
      * Hands a waiting sign-in the code the browser gave the user.
      *
-     * Codex approves in the browser and the CLI polls. Claude, Gemini,
-     * Cursor, Copilot and Kiro may instead issue the user a code that has to
-     * be given back to the CLI sitting on stdin.
+     * Codex, Copilot and Kiro approve in the browser while the CLI polls.
+     * Claude, Gemini and some Cursor releases instead issue the user a code
+     * that has to be given back to the CLI sitting on stdin.
      */
     submitCode?(input: {
       userId: string;
