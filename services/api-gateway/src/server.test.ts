@@ -13811,3 +13811,77 @@ test("a stranded task from a dead run ages out of the busy signal", async (t) =>
   assert.equal(runtime.submittedTasks[0]?.actorId, ownerId);
   assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
 });
+
+/**
+ * Accepting one offer twice across a restart starts the work once.
+ *
+ * The settled-offers set is in-memory and this deployment restarts on every
+ * merge. A tap posts no user message, so after a restart a typed "yes" under
+ * the still-visible offer passed every guard: the settled set was empty, the
+ * offer sat inside its window, and nobody had spoken in between. The durable
+ * evidence of acceptance is the dispatched task itself — its objective
+ * quotes the proposal — and that is what the acceptance path now checks.
+ */
+test("a yes after a restart does not start already-accepted work twice", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "restart-yes");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("OFFER: Shall I speed up the mobile boot?");
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "loading in from mobile feels slow" },
+  });
+  const prompt = (await owner.request(`${base}/questions`)).data.questions[0];
+  assert.notEqual(prompt, undefined);
+  assert.equal(
+    (
+      await owner.request(
+        `${base}/questions/${encodeURIComponent(prompt.requestId)}/answer`,
+        { method: "POST", body: { answers: [{ chosen: 0 }] } },
+      )
+    ).status,
+    200,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the tapped acceptance never dispatched",
+  );
+
+  // The restart: in-memory settlements are gone, the offer message is not.
+  (
+    runtime.gateway as unknown as { settledAutoClaimOffers: Set<string> }
+  ).settledAutoClaimOffers.clear();
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "yes" },
+    })).status,
+    201,
+  );
+
+  // Once. The durable task, not the forgotten set, is what says so — and the
+  // sender is told the work is already underway rather than met with either
+  // silence or a duplicate.
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
+  assert.ok(
+    messages.some(
+      (message) =>
+        message.kind === "system" &&
+        /already accepted/u.test(String(message.content)),
+    ),
+    JSON.stringify(messages.map((m) => [m.kind, String(m.content).slice(0, 50)])),
+  );
+});

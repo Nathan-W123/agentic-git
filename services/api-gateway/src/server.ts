@@ -16606,6 +16606,33 @@ export class ApiGateway {
     }
     const proposal = autoClaimProposal(offer.content);
     if (proposal !== undefined) {
+      // The durable half of "was this already accepted". The settled set
+      // above is in-memory, and this deployment restarts often — an offer
+      // accepted through the prompt, followed by a redeploy, followed by a
+      // typed "yes" under the still-visible offer, would start the same work
+      // twice: the tap posts no user message, so the intervening-speaker
+      // guard has nothing to see. What IS durable is the dispatch itself —
+      // an accepted offer's task carries the proposal verbatim inside its
+      // objective — so a task newer than the offer that quotes its proposal
+      // is proof of acceptance no restart can forget.
+      const offeredAtMs = Date.parse(offer.createdAt);
+      const alreadyStarted = (
+        await this.options.store.listSubmittedTasks({ repositoryId })
+      ).some(
+        (task) =>
+          task.objective.includes(proposal) &&
+          Number.isFinite(Date.parse(task.submittedAt)) &&
+          Date.parse(task.submittedAt) >= offeredAtMs,
+      );
+      if (alreadyStarted) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          "That offer was already accepted — the work is underway. Mention " +
+            "an agent if you want something new started.",
+        );
+        return true;
+      }
       await this.startOfferedWork({
         projectId,
         repositoryId,
