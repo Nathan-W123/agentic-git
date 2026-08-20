@@ -123,6 +123,7 @@ interface StoredChannelReply {
   authorId: string;
   content: string;
   createdAt: string;
+  referencedMessageId?: string;
 }
 
 interface StoredChannelMessage {
@@ -2196,6 +2197,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       return undefined;
     }
     const [reply] = message.replies.splice(index, 1);
+    for (const remaining of message.replies) {
+      if (remaining.referencedMessageId === reply?.id) {
+        delete remaining.referencedMessageId;
+      }
+    }
     return reply === undefined ? undefined : copy(reply);
   }
 
@@ -2405,6 +2411,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A reply must have content");
     }
+    if (
+      input.referencedMessageId !== undefined &&
+      input.referencedMessageId !== message.id &&
+      !message.replies.some((reply) => reply.id === input.referencedMessageId)
+    ) {
+      throw new Error("A reply reference must target the same thread");
+    }
     const reply: StoredChannelReply = {
       id: createId("chanreply"),
       messageId: message.id,
@@ -2412,6 +2425,9 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       authorId: input.authorId,
       content,
       createdAt: new Date().toISOString(),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     };
     message.replies.push(reply);
     return copy(reply);

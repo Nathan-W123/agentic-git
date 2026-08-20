@@ -831,6 +831,8 @@ export interface ChannelReply {
   authorId: string;
   content: string;
   createdAt: string;
+  /** The root or reply in this thread that this reply directly answers. */
+  referencedMessageId?: string;
 }
 
 /**
@@ -1063,6 +1065,7 @@ export interface AddChannelReplyInput {
   kind?: ChannelEntryKind;
   authorId: string;
   content: string;
+  referencedMessageId?: string;
 }
 
 export interface ChannelMessageFilter {

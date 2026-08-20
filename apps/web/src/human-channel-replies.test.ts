@@ -36,6 +36,44 @@ test("replying to a person aims the channel composer", async () => {
   assert.match(action, /\$\("\[data-act='channel-input'\]"\)\?\.focus\(\);/u);
 });
 
+test("replying inside a thread selects the message without rewriting the draft", async () => {
+  const [app, chats, data] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+    publicFile("data.js"),
+  ]);
+  const action = app.slice(
+    app.indexOf('case "thread-reply-quote":'),
+    app.indexOf('case "dm-reply-quote":'),
+  );
+
+  assert.match(action, /state\.threadReplyMessageId = target\?\.id;/u);
+  assert.doesNotMatch(action, /state\.threadDraft\s*=/u);
+  assert.match(chats, /threadReplyChip\(threadReplyTarget, repositoryId\)/u);
+  assert.match(chats, /state\.threadReplyMessageId = undefined;/u);
+  assert.match(
+    chats,
+    /postChannelReply\([\s\S]*referencedMessageId,[\s\S]*\);/u,
+  );
+  assert.match(data, /\{ referencedMessageId \}/u);
+});
+
+test("the thread header reply button keeps the open thread in place", async () => {
+  const [app, chats] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+  ]);
+  const action = app.slice(
+    app.indexOf('case "thread-composer-focus":'),
+    app.indexOf('case "composer-thread-clear":'),
+  );
+
+  assert.match(chats, /act: "thread-composer-focus"/u);
+  assert.match(action, /channel-thread-input/u);
+  assert.doesNotMatch(action, /activeChannelThread\s*=\s*undefined/u);
+  assert.doesNotMatch(action, /composerThreadId\s*=/u);
+});
+
 test("a person's response takes its place at the end of the transcript", async () => {
   const [chats, data, css] = await Promise.all([
     publicFile("screen-chats.js"),

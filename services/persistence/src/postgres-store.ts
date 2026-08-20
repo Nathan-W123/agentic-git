@@ -3197,6 +3197,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
         "DELETE FROM channel_message_reactions WHERE message_id = $1",
         [replyId],
       );
+      await client.query(
+        `UPDATE channel_message_replies SET referenced_message_id = NULL
+         WHERE message_id = $1 AND referenced_message_id = $2`,
+        [messageId, replyId],
+      );
       await client.query("DELETE FROM channel_message_replies WHERE id = $1", [
         replyId,
       ]);
@@ -3469,6 +3474,16 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A reply must have content");
     }
+    if (input.referencedMessageId !== undefined) {
+      const targetIsRoot = input.referencedMessageId === input.messageId;
+      const targetIsReply = await this.row(
+        "SELECT 1 FROM channel_message_replies WHERE id = $1 AND message_id = $2",
+        [input.referencedMessageId, input.messageId],
+      );
+      if (!targetIsRoot && targetIsReply === undefined) {
+        throw new Error("A reply reference must target the same thread");
+      }
+    }
     const reply: ChannelReply = {
       id: createId("chanreply"),
       messageId: input.messageId,
@@ -3476,11 +3491,15 @@ export class PostgresCoordinationStore implements CoordinationStore {
       authorId: input.authorId,
       content,
       createdAt: new Date().toISOString(),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     };
     await this.query(
       `INSERT INTO channel_message_replies
-         (id, message_id, kind, author_id, content, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+         (id, message_id, kind, author_id, content, created_at,
+          referenced_message_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         reply.id,
         reply.messageId,
@@ -3488,6 +3507,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         reply.authorId,
         reply.content,
         reply.createdAt,
+        reply.referencedMessageId ?? null,
       ],
     );
     return reply;
@@ -3927,6 +3947,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
   }
 
   private toChannelReply(row: Row): ChannelReply {
+    const referencedMessageId = optionalText(row, "referenced_message_id");
     return {
       id: text(row, "id"),
       messageId: text(row, "message_id"),
@@ -3934,6 +3955,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       authorId: text(row, "author_id"),
       content: text(row, "content"),
       createdAt: text(row, "created_at"),
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     };
   }
 
