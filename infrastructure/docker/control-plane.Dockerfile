@@ -5,12 +5,36 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json turbo.json tsconfig.base.json ./
+# Manifests before source, and only the manifests. `npm ci` reads every
+# workspace's package.json and none of its code, so copying the tree first —
+# which is what this did — put the whole source under the install layer and
+# made every commit reinstall a dependency tree that had not changed. One
+# line per workspace because a multi-source COPY flattens its sources into
+# the destination directory, losing the paths npm resolves the workspaces by.
+COPY adapters/codex/package.json ./adapters/codex/
+COPY adapters/generic-cli/package.json ./adapters/generic-cli/
+COPY adapters/prompt-cli/package.json ./adapters/prompt-cli/
+COPY apps/cli/package.json ./apps/cli/
+COPY apps/web/package.json ./apps/web/
+COPY apps/worker/package.json ./apps/worker/
+COPY packages/agent-protocol/package.json ./packages/agent-protocol/
+COPY packages/collab/package.json ./packages/collab/
+COPY packages/intent-analysis/package.json ./packages/intent-analysis/
+COPY packages/local-triage/package.json ./packages/local-triage/
+COPY packages/shared-types/package.json ./packages/shared-types/
+COPY services/api-gateway/package.json ./services/api-gateway/
+COPY services/code-intelligence/package.json ./services/code-intelligence/
+COPY services/coordinator/package.json ./services/coordinator/
+COPY services/integration-service/package.json ./services/integration-service/
+COPY services/persistence/package.json ./services/persistence/
+COPY services/repository-service/package.json ./services/repository-service/
+COPY services/workspace-manager/package.json ./services/workspace-manager/
+RUN npm ci
 COPY apps ./apps
 COPY services ./services
 COPY packages ./packages
 COPY adapters ./adapters
 COPY scripts ./scripts
-RUN npm ci
 # Concurrency capped deliberately. Turbo defaults to ten parallel tasks, and
 # seventeen packages compiling at once peaked at 1061 MB here against 605 MB at
 # two — while taking the same wall-clock time (26s vs 25s), because this build
@@ -20,6 +44,33 @@ RUN npm ci
 RUN npx turbo run build --concurrency=2
 # Drop devDependencies (turbo, typescript) from the runtime tree.
 RUN npm prune --omit=dev
+# The local message filter runs a small ONNX model, and `onnxruntime-node`
+# ships every platform it supports plus a CUDA build: 513 MB installed, of
+# which 315 MB is a GPU provider this image has no GPU for and 159 MB is
+# macOS and Windows. What actually loads here is linux/x64 CPU, at 36 MB.
+#
+# Deleted rather than avoided, because there is no install-time flag for it:
+# the binaries are inside the published package. Deleting the wrong one fails
+# visibly rather than silently — the filter reports itself unavailable and
+# every message goes to an agent, which is what happened before it existed.
+# Found rather than named: the directory under `bin` is the N-API version the
+# installed build targets (napi-v3, napi-v6, ...) and it changes with the
+# dependency, so a hardcoded path would quietly stop matching and put half a
+# gigabyte back. Both Linux architectures are kept — arm64 is 19 MB and
+# losing it would break an arm build to save nothing worth saving.
+RUN find node_modules/onnxruntime-node/bin -mindepth 2 -maxdepth 2 -type d \
+      \( -name darwin -o -name win32 \) -exec rm -rf {} + \
+  && find node_modules/onnxruntime-node -type f \
+      \( -name 'libonnxruntime_providers_cuda.*' \
+      -o -name 'libonnxruntime_providers_tensorrt.*' \) -delete
+# The model itself, fetched once here rather than on the first message in a
+# channel: a container with no egress to huggingface.co still filters, and
+# nobody's first sentence waits on a 22 MB download.
+RUN node -e "import('@coord/local-triage').then(async (m) => { \
+      if (!(await m.createChatterFilter().available())) { \
+        throw new Error('the triage model did not load'); \
+      } \
+    })"
 
 FROM node:24-bookworm-slim
 # git drives repository import, worktrees, bundles, and integration.

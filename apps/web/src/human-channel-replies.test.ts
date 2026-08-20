@@ -69,9 +69,12 @@ test("a person's response takes its place at the end of the transcript", async (
     list,
     /messageRow\(entry, repositoryId, \{ inlineReplyTo: item\.inlineReplyTo \}\)/u,
   );
+  // A message that carries a task keeps its replies in its own thread rather
+  // than spilling them into the timeline — from the first one now, not the
+  // second: one reply under a task is already that thread's narration.
   assert.match(
     chats,
-    /entry\.taskId !== undefined && replies\.length > 1/u,
+    /entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 0/u,
   );
   assert.match(chats, /messageReference\(inlineReplyTo, repositoryId\)/u);
   assert.match(chats, /cmsg-inline-reply/u);

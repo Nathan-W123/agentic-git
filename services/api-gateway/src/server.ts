@@ -74,6 +74,10 @@ import {
 } from "./auth.js";
 import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
+  createChatterFilter,
+  type ChatterFilter,
+} from "@coord/local-triage";
+import {
   authorizeOrganization,
   authorizeProject,
   authorizeRepository,
@@ -1591,11 +1595,15 @@ function textMentionsName(content: string, name: string): boolean {
 /* ------------------------------------------------- no-mention auto-claim --
  *
  * When a channel message carries no "@" at all, `maybeAutoClaimTask` (near
- * `dispatchChannelMentions`) decides whether it reads as a task and, if so,
- * whether exactly one connected agent is a clear enough fit to dispatch to
- * without being asked by name. Everything below is that decision's two
- * halves — "is this a task" and "who fits" — kept as free functions so each
- * is independently readable and testable.
+ * `dispatchChannelMentions`) decides whether exactly one connected agent is
+ * a clear enough fit to hand it to, and then asks that agent what to do
+ * about it: take it, propose something and wait for a yes, or say nothing.
+ *
+ * "Is this a task" used to be answered here, by a word list. It no longer
+ * is — the agent reads the sentence, because the difference between "update
+ * the readme" and "the update went out" is not in the words. What is left
+ * below is the half a list can answer: who fits, scored deterministically
+ * and kept as free functions so it stays independently testable.
  */
 
 /**
@@ -1797,100 +1805,132 @@ const THREAD_MERGE_MIN_OVERLAP = 0.42;
 const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /**
- * Phrasings that address a request to somebody, rather than merely mentioning
- * work. Broad on the "someone" forms on purpose: "can someone start building
- * the chess engine" is a request to the room, and the room is who is reading.
- */
-const REQUEST_OPENER_RE =
-  /\b(please|can you|could you|would you|will you|can we|could we|shall we|can (?:someone|somebody|anyone|anybody)|could (?:someone|somebody|anyone|anybody)|(?:someone|somebody|anyone|anybody) (?:should|able to|want to)|we need to|i need (?:you|someone|somebody)|let'?s|go ahead and)\b/iu;
-
-/**
- * Phrases that deliberately open work to the room without naming an agent.
- *
- * These are the most useful middle ground between "only @mentions work" and
- * an agent commenting on every problem humans discuss. Each one explicitly
- * solicits help or an owner. It therefore reaches the model-backed final gate
- * even when the request uses no verb from {@link TASK_VERB_RE}: "any takers
- * for the flaky tests?" and "who can own the auth ticket?" are real asks,
- * while "the flaky tests are annoying" is still just conversation.
- */
-const OPEN_WORK_REQUEST_RE =
-  /\b(?:(?:can|could|would|will) (?:someone|somebody|anyone|anybody|(?:one of )?(?:the )?agents?)|who (?:can|could|will|wants? to|has time to)|any takers?|(?:does|would) (?:someone|somebody|anyone|anybody|an? agent) want to|(?:i|we) (?:need|want|could use) (?:someone|somebody|anyone|anybody|an? agent|help|a hand)|looking for (?:someone|somebody|anyone|anybody|an? agent|help|a hand)|(?:someone|somebody|anyone|anybody|an? agent) (?:take|own|handle|pick ?up|look into|help with))\b/iu;
-
-function explicitlyOpensWorkToRoom(content: string): boolean {
-  return OPEN_WORK_REQUEST_RE.test(withoutMentions(content));
-}
-
-/** A sentence that opens with the work verb itself — an instruction. */
-const IMPERATIVE_OPENER_RE = new RegExp(`^(?:${TASK_VERB_RE.source})`, "iu");
-
-/**
- * Words that, following the opening one, prove it was the subject.
- *
- * Half the work vocabulary is also ordinary nouns — changes, updates, a
- * build, a review, a patch, a fix — so "Changes look good" opens with a word
- * from the verb list and is not an instruction, it is somebody saying the
- * changes look good. It was offered an agent, which is the complaint.
- *
- * English separates the two by what comes next: an imperative takes an object
- * or a preposition ("fix the login bug", "deploy to staging"), while a
- * finite verb after the opening word means that word was the thing doing it.
- * A closed list, because guessing is what got this wrong in the first place.
- */
-const SUBJECT_TAIL_RE =
-  /^(is|are|was|were|look|looks|looked|seem|seems|seemed|have|has|had|went|work|works|worked|came|come|comes|will|would|should|can|could|do|does|did|and|but|so)\b/iu;
-
-/**
- * Whether this is a request *addressed to somebody*, not just a sentence with
- * work vocabulary in it.
- *
- * {@link looksLikeTaskRequest} asks whether a message is about work at all,
- * which is the right question when an agent has been named — the sender chose
- * it, so the only doubt is what they want. It is too loose for the unnamed
- * path, where the same evidence has to answer a different question: is this
- * addressed to anyone? "The retry loop was rewritten last week" is about work
- * and asks for none, and an agent that opens a run on it has spent somebody's
- * account on a remark.
- *
- * So the unnamed path additionally wants either an instruction — a sentence
- * that opens with the verb — or a phrase that hands the work to somebody.
- * Both are things a person does deliberately; neither happens by accident in
- * conversation about a repository.
- */
-export function readsAsDirectRequest(content: string): boolean {
-  const text = withoutMentions(content).trim();
-  if (text.length === 0) {
-    return false;
-  }
-  if (explicitlyOpensWorkToRoom(text)) {
-    return true;
-  }
-  if (REQUEST_OPENER_RE.test(text)) {
-    return true;
-  }
-  const opening = IMPERATIVE_OPENER_RE.exec(text);
-  if (opening === null) {
-    return false;
-  }
-  // Only an instruction if the opening word is doing the instructing rather
-  // than being talked about — see SUBJECT_TAIL_RE.
-  return !SUBJECT_TAIL_RE.test(text.slice(opening[0].length).trimStart());
-}
-
-/**
- * How an unnamed request is offered, and how the acceptance below recognises
- * it. The request and agent are stored on the offer itself, but the prefix is
- * still the durable marker that distinguishes this invitation from ordinary
- * agent speech and preserves compatibility with older offers.
+ * How an unnamed request is offered, and how the acceptance below finds it
+ * again. A prefix rather than a stored flag: a channel message carries no
+ * metadata of its own, and the offer has to be recognisable in the transcript
+ * by the same reading a person gives it.
  */
 const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
 
 /**
+ * How long an offer stays answerable by a bare "yes".
+ *
  * A casual "yes" should not revive an old offer after the room has moved on.
  * Ten minutes is ample for the deliberate two-line handshake and short
- * enough that an offer left above a later conversation becomes inert.
+ * enough that an offer left above a later conversation becomes inert. The
+ * choice prompt beside it lives longer, because a tap on a specific question
+ * cannot be mistaken for agreement to something else.
  */
 const AUTO_CLAIM_OFFER_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * The last line of every offer the reader is asked to answer.
+ *
+ * The sentence above it is the agent's own — it names the specific thing it
+ * would do, which is the whole point of asking rather than guessing — so
+ * there is no fixed opening to recognise the offer by any more. The tail is
+ * fixed instead, and acceptance finds the offer by it and reads the proposal
+ * back off the message. Still no stored state: a channel message carries no
+ * metadata, and the transcript has to be readable by the same reading a
+ * person gives it.
+ */
+const AUTO_CLAIM_OFFER_TAIL =
+  'Say "yes" and I\'ll ask you what I need before I start — or @mention ' +
+  "someone else.";
+
+/**
+ * How long the offer's choice prompt stays up.
+ *
+ * Long enough to survive a lunch, short enough that a room does not collect
+ * prompts nobody is going to answer. Lapsing is not a refusal: the offer is
+ * still in the transcript and "yes" still starts it — this only takes the
+ * buttons down.
+ */
+const AUTO_CLAIM_QUESTION_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** Marks a pending question as an offer rather than a run's own question. */
+const AUTO_CLAIM_QUESTION_PREFIX = "offer:";
+
+const AUTO_CLAIM_QUESTION_YES = "Yes, go ahead";
+const AUTO_CLAIM_QUESTION_NO = "No thanks";
+
+/**
+ * The local filter this deployment runs, or one that decides nothing.
+ *
+ * On by default. `COORD_LOCAL_TRIAGE=0` turns it off, which puts every
+ * unaddressed message back in front of an agent — the behaviour before the
+ * filter existed, and the setting to reach for if a room is ever quiet about
+ * something it should have answered.
+ */
+function defaultChatterFilter(): ChatterFilter {
+  const raw = process.env["COORD_LOCAL_TRIAGE"]?.trim().toLowerCase() ?? "";
+  if (["0", "false", "off", "no"].includes(raw)) {
+    return {
+      readsAsChatter: async () => false,
+      available: async () => false,
+    };
+  }
+  return createChatterFilter();
+}
+
+/** The proposal out of an offer message, or nothing if this is not one. */
+export function autoClaimProposal(content: string): string | undefined {
+  const at = content.indexOf(AUTO_CLAIM_OFFER_TAIL);
+  if (at < 0) {
+    return undefined;
+  }
+  const proposal = content.slice(0, at).trim();
+  return proposal.length === 0 ? undefined : proposal;
+}
+
+/**
+ * What an agent decided to do about a message nobody addressed to it.
+ *
+ * Three outcomes rather than two, because the middle one is most of real
+ * conversation. "The gray background looks rough" is neither a request nor
+ * chatter: it is a person noticing something, and the useful answer is to
+ * name what would be done about it and ask. Offering costs one line; acting
+ * on it uncalled costs somebody's usage, and ignoring it wastes the remark.
+ */
+export type AutoClaimVerdict =
+  | { verdict: "act" }
+  | { verdict: "offer"; proposal: string }
+  | { verdict: "ignore" };
+
+/**
+ * Reads the classifier's reply.
+ *
+ * Deliberately forgiving about shape and unforgiving about meaning: a model
+ * that answers with a paragraph, an empty string, a refusal, or a word that
+ * is none of the three lands on `ignore`. That is the direction that costs
+ * nothing — silence, and the sender can still @mention anybody by hand,
+ * which always works. An `OFFER` with no question after it is not an offer
+ * either; there would be nothing to show the reader.
+ */
+export function parseAutoClaimVerdict(text: string | undefined): AutoClaimVerdict {
+  const first =
+    (text ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "";
+  if (/^act\b/iu.test(first)) {
+    return { verdict: "act" };
+  }
+  const offer = /^offer\b\s*:?\s*(.*)$/iu.exec(first);
+  if (offer !== null) {
+    // Quotes and leading bullets are what a model reaches for when asked for
+    // a sentence; none of them belong in the room.
+    const proposal = (offer[1] ?? "")
+      .trim()
+      .replace(/^["'\u201c\u2018\-\u2022\s]+/u, "")
+      .replace(/["'\u201d\u2019\s]+$/u, "")
+      .trim();
+    return proposal.length === 0
+      ? { verdict: "ignore" }
+      : { verdict: "offer", proposal };
+  }
+  return { verdict: "ignore" };
+}
 
 /**
  * How long the "is this a request" check may take.
@@ -2089,6 +2129,18 @@ const ROLES: readonly OrganizationRole[] = [
   "reviewer",
   "viewer",
 ];
+/**
+ * Statuses that mean an agent is done with a task.
+ *
+ * Everything else — submitted, claimed, planned, open — is work it still
+ * owes, which is what "busy" means when choosing who to hand something to.
+ */
+const FINISHED_TASK_STATUSES: ReadonlySet<SubmittedTaskStatus> = new Set([
+  "integrated",
+  "failed",
+  "cancelled",
+]);
+
 const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
   "submitted",
   "claimed",
@@ -2736,6 +2788,14 @@ export interface ApiGatewayOptions {
    */
   mailer?: Mailer;
   /**
+   * The local first pass over unaddressed channel messages.
+   *
+   * Defaults to the embedding filter, or to one that passes everything on
+   * when `COORD_LOCAL_TRIAGE` switches it off. Injected by tests, which must
+   * not load a model to prove what the gateway does with its answer.
+   */
+  chatterFilter?: ChatterFilter;
+  /**
    * Absolute origin this deployment is reached at, used to build links that
    * travel outside the browser. Defaults to `COORD_PUBLIC_URL`, and failing
    * that to the `Host` of the request that asked for the link.
@@ -3169,6 +3229,17 @@ export class ApiGateway {
    */
   private readonly announcedChannelHolds = new Set<string>();
   /**
+   * Offers that have already been answered, by the offer's message id.
+   *
+   * An offer can be answered two ways — the prompt's buttons, or "yes" in the
+   * room — and both have to end it. Without this, tapping Yes and then typing
+   * "yes" would start the same work twice, which is the one mistake an offer
+   * exists to make impossible. Bounded, and in memory only: an entry matters
+   * for as long as the offer is the most recent one in its channel, and a
+   * restart takes the prompt with it anyway.
+   */
+  private readonly settledAutoClaimOffers = new Set<string>();
+  /**
    * What each task in a thread has changed, by thread then by task.
    *
    * The stored list is one flat set per thread with no record of which task
@@ -3318,6 +3389,8 @@ export class ApiGateway {
   private readonly bootstrapToken: string | undefined;
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
+  /** The local pass that keeps ordinary conversation off the agents. */
+  private readonly chatterFilter: ChatterFilter;
   /** Configured origin for links that leave the browser, or "" to infer one. */
   private readonly publicUrl: string;
 
@@ -3329,6 +3402,7 @@ export class ApiGateway {
     if (this.bootstrapToken !== undefined && this.bootstrapToken.length < 24) {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
+    this.chatterFilter = options.chatterFilter ?? defaultChatterFilter();
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
     if (!Number.isSafeInteger(this.bodyLimit) || this.bodyLimit < 1) {
       throw new RangeError("Request body limit must be a positive integer");
@@ -4097,12 +4171,17 @@ export class ApiGateway {
         // bring in. Saying so here discloses nothing the same response does
         // not already: it names the address, and it takes the link's secret
         // to reach at all, so this cannot be used to test addresses.
-        const existing = await this.options.store.getUserByEmail(
-          invitation.email,
-        );
+        //
+        // An open link names nobody, so there is nothing to look up and
+        // nothing to prefill: whoever opens it says who they are.
+        const open = invitation.email === "";
+        const existing = open
+          ? undefined
+          : await this.options.store.getUserByEmail(invitation.email);
         this.sendJson(response, 200, {
           invitation: {
             email: invitation.email,
+            open,
             role: invitation.role,
             status: state,
             accountExists: existing !== undefined,
@@ -4125,27 +4204,75 @@ export class ApiGateway {
           );
         }
         const body = objectBody(await this.readJson(request));
-        let user = await this.options.store.getUserByEmail(invitation.email);
-        if (user === undefined) {
-          // The address is the invitation's, not something typed here, so only
-          // the password is retyped on this form.
-          this.assertAccountConfirmations(body);
-          user = await this.options.store.createUser({
-            email: invitation.email,
-            displayName:
-              stringField(body["displayName"], "displayName", { max: 120 }) ??
-              "",
-            passwordDigest: await hashPassword(
-              stringField(body["password"], "password", { max: 256 }) ?? "",
-            ),
-          });
+        const open = invitation.email === "";
+        const signedIn = await this.auth
+          .authenticate(request.headers.cookie)
+          .catch(() => undefined);
+        let user;
+        if (open) {
+          // Nobody is named, so whoever opened the link says who they are.
+          // Somebody already signed in simply takes the grant — the common
+          // case for a link pasted into a chat a team is already in, where
+          // most readers have accounts and one or two do not.
+          if (signedIn !== undefined) {
+            // The full account, not the session's public view: a fresh
+            // session is issued below and that needs the record, not the
+            // shape the browser is allowed to see.
+            user = await this.options.store.getUser(signedIn.user.id);
+            if (user === undefined) {
+              throw new HttpError(401, "unauthorized", "Sign in is required");
+            }
+          } else {
+            const email = emailField(body["email"]);
+            if (email === undefined) {
+              throw new HttpError(
+                400,
+                "invalid_request",
+                "An email address is required to join",
+              );
+            }
+            // Refused rather than signed in: holding the link proves nothing
+            // about who is holding it, so an existing account is claimed by
+            // signing in, exactly as the addressed form requires.
+            if (
+              (await this.options.store.getUserByEmail(email)) !== undefined
+            ) {
+              throw new HttpError(
+                409,
+                "account_exists",
+                `An account already uses ${email}. ` +
+                  "Sign in as that account to join.",
+              );
+            }
+            this.assertAccountConfirmations(body);
+            user = await this.options.store.createUser({
+              email,
+              displayName:
+                stringField(body["displayName"], "displayName", { max: 120 }) ??
+                "",
+              passwordDigest: await hashPassword(
+                stringField(body["password"], "password", { max: 256 }) ?? "",
+              ),
+            });
+          }
         } else {
-          // The account already exists, so the invitation is not proof of who
-          // is holding the link. Signing in is.
-          const signedIn = await this.auth
-            .authenticate(request.headers.cookie)
-            .catch(() => undefined);
-          if (signedIn?.user.id !== user.id) {
+          user = await this.options.store.getUserByEmail(invitation.email);
+          if (user === undefined) {
+            // The address is the invitation's, not something typed here, so
+            // only the password is retyped on this form.
+            this.assertAccountConfirmations(body);
+            user = await this.options.store.createUser({
+              email: invitation.email,
+              displayName:
+                stringField(body["displayName"], "displayName", { max: 120 }) ??
+                "",
+              passwordDigest: await hashPassword(
+                stringField(body["password"], "password", { max: 256 }) ?? "",
+              ),
+            });
+          } else if (signedIn?.user.id !== user.id) {
+            // The account already exists, so the invitation is not proof of
+            // who is holding the link. Signing in is.
             throw new HttpError(
               409,
               "account_exists",
@@ -4154,17 +4281,24 @@ export class ApiGateway {
             );
           }
         }
-        const claimed = await this.options.store.acceptInvitation(
-          invitation.id,
-          user.id,
-          new Date().toISOString(),
-        );
-        if (!claimed) {
-          throw new HttpError(
-            409,
-            "invitation_used",
-            "This invitation has already been used",
+        // An addressed invitation is spent here. An open one is not: it was
+        // made to be used by however many people it reaches, and marking it
+        // accepted would turn "shared with the team" into "the first person
+        // to click it". It still ends — on its expiry, or when somebody
+        // revokes it — and those are the two ways it is meant to.
+        if (!open) {
+          const claimed = await this.options.store.acceptInvitation(
+            invitation.id,
+            user.id,
+            new Date().toISOString(),
           );
+          if (!claimed) {
+            throw new HttpError(
+              409,
+              "invitation_used",
+              "This invitation has already been used",
+            );
+          }
         }
         // A repository-scoped invitation grants that repository and nothing
         // else — deliberately no organization membership, because any
@@ -4977,7 +5111,25 @@ export class ApiGateway {
       }
       if (method === "POST") {
         const body = objectBody(await this.readJson(request));
-        const email = emailField(body["email"]) ?? "";
+        // An address is optional, and without one this is a link rather than
+        // a letter: anybody holding it can join, and more than one person
+        // can. That is what an invitation actually gets used for — pasted
+        // into the group chat where the team already is — and the addressed
+        // form could not do it. It named one mailbox, it was spent the first
+        // time it was opened, and the second person to click it was told the
+        // invitation had already been used.
+        //
+        // What it is not is a weaker grant. The link still expires, is still
+        // revocable, still names exactly one repository, and still cannot
+        // hand out a role its author could not assign. It is a bearer
+        // credential for that one repository, which is what makes it worth
+        // keeping out of a public place — but the group chat it was always
+        // going to be pasted into is not one.
+        const offered =
+          body["email"] === undefined || body["email"] === ""
+            ? undefined
+            : emailField(body["email"]);
+        const email = offered ?? "";
         const role = stringField(body["role"], "role", { max: 20 }) as
           | OrganizationRole
           | undefined;
@@ -5043,6 +5195,9 @@ export class ApiGateway {
             organizationId,
             email,
             role,
+            // Worth telling apart in the record: one act of sharing that can
+            // become any number of members.
+            ...(email === "" ? { openLink: true } : {}),
             action: "invited",
             actorId: principal.user.id,
           },
@@ -9124,32 +9279,47 @@ export class ApiGateway {
   }
 
   /**
-   * Organizations the caller can reach at all.
+   * Organizations the caller can reach at all, their own first.
    *
    * Membership is no longer the only route in: somebody invited to a single
    * repository holds a grant and no organization role, and listing only their
    * memberships would leave them signed in and staring at nothing. The
    * organizations behind their grants are added so the interface can find the
    * project the repository lives in.
+   *
+   * Order is part of the answer, not a detail. A system administrator reaches
+   * every organization on the deployment, and the store returns them by name,
+   * so a second person signing up could land at the head of the owner's list
+   * — and an interface that opens whatever comes first would show the owner
+   * somebody else's empty workspace instead of their own. The caller's own
+   * memberships lead; everything they can only reach by administration or by
+   * grant follows.
    */
   private async reachableOrganizations(
     principal: AuthenticatedPrincipal,
   ): Promise<Organization[]> {
     const byMembership = await this.options.store.listOrganizations(
-      principal.user.systemAdmin ? undefined : principal.user.id,
+      principal.user.id,
     );
+    const seen = new Set(byMembership.map((entry) => entry.id));
+    const found = [...byMembership];
     if (principal.user.systemAdmin) {
-      return byMembership;
+      for (const organization of await this.options.store.listOrganizations()) {
+        if (seen.has(organization.id)) {
+          continue;
+        }
+        found.push(organization);
+        seen.add(organization.id);
+      }
+      return found;
     }
     const grants = await this.options.store.listGrantsForUser(
       principal.user.id,
     );
     if (grants.length === 0) {
-      return byMembership;
+      return found;
     }
     const granted = new Set(grants.map((grant) => grant.repositoryId));
-    const seen = new Set(byMembership.map((entry) => entry.id));
-    const found = [...byMembership];
     for (const organization of await this.options.store.listOrganizations()) {
       if (seen.has(organization.id)) {
         continue;
@@ -10415,9 +10585,18 @@ export class ApiGateway {
     // canonical repository. Questions can therefore be answered from the
     // files without becoming coordinated edit tasks; requests for code still
     // continue through the task path below.
+    //
+    // Not applied to work the unaddressed path decided on. That decision was
+    // already made, by a model, with the room in front of it, and its three
+    // answers include the one this check is for — a message that is only a
+    // question is IGNOREd there and never arrives here. Re-deciding it with
+    // a regex is how "any takers for the flaky auth ticket?" became an
+    // answer about the ticket instead of somebody picking it up: the
+    // question mark is grammar, and the agent had already read past it.
     if (
       input.queueAfterCurrent !== true &&
       input.forceQuestion !== true &&
+      input.trigger !== "auto_claim" &&
       readsAsQuestion(content)
     ) {
       await this.answerInChannel(
@@ -13649,9 +13828,12 @@ export class ApiGateway {
    * behaviour that exists today, wrong only in the way described above and
    * no worse than before.
    */
-  private async recentObjectivesFor(
-    repositoryId: string,
-  ): Promise<(candidate: ChannelMentionCandidate) => string[]> {
+  private async agentActivityIn(repositoryId: string): Promise<{
+    /** What this agent has recently been asked to do here, newest first. */
+    recentObjectives: (candidate: ChannelMentionCandidate) => string[];
+    /** Whether it already has work here that has not finished. */
+    busy: (candidate: ChannelMentionCandidate) => boolean;
+  }> {
     const agentIdByAdapter = new Map<string, string>();
     const configured = await Promise.resolve(
       this.options.operations.listAgents?.(),
@@ -13666,6 +13848,10 @@ export class ApiGateway {
     }
     const perAgent = agentIdByAdapter.size > 0;
     const recent = new Map<string, string[]>();
+    // Anything not yet finished. Queued counts as busy alongside running:
+    // the question this answers is "would handing it this mean waiting",
+    // and a task sitting in front of the one that is running means yes.
+    const working = new Set<string>();
     // Newest first — see `recentFirst`. Never read `listSubmittedTasks`
     // directly here: it returns oldest first, and taking the first
     // {@link RECENT_ACTIVITY_LOOKBACK} of that is each owner's *earliest*
@@ -13684,17 +13870,30 @@ export class ApiGateway {
         list.push(task.objective);
         recent.set(key, list);
       }
-    }
-    return (candidate) => {
-      if (!perAgent) {
-        return recent.get(candidate.userId) ?? [];
+      if (!FINISHED_TASK_STATUSES.has(task.status)) {
+        working.add(key);
       }
-      const agentId = agentIdByAdapter.get(candidate.vendor);
+    }
+    const keyFor = (candidate: ChannelMentionCandidate): string | undefined => {
+      if (!perAgent) {
+        return candidate.userId;
+      }
       // A vendor this deployment has no agent for has never run anything
       // here — a submission naming it fails before a task exists.
+      const agentId = agentIdByAdapter.get(candidate.vendor);
       return agentId === undefined
-        ? []
-        : (recent.get(`${candidate.userId}\0${agentId}`) ?? []);
+        ? undefined
+        : `${candidate.userId}\0${agentId}`;
+    };
+    return {
+      recentObjectives: (candidate) => {
+        const key = keyFor(candidate);
+        return key === undefined ? [] : (recent.get(key) ?? []);
+      },
+      busy: (candidate) => {
+        const key = keyFor(candidate);
+        return key !== undefined && working.has(key);
+      },
     };
   }
 
@@ -13721,7 +13920,7 @@ export class ApiGateway {
       return undefined;
     }
     const tokens = relevanceTokens(input.text);
-    const recentObjectives = await this.recentObjectivesFor(input.repositoryId);
+    const { recentObjectives } = await this.agentActivityIn(input.repositoryId);
     const [best] = input.candidates
       .map((candidate) => ({
         candidate,
@@ -15248,7 +15447,12 @@ export class ApiGateway {
   private async appendChannelEntry(input: {
     projectId: string;
     repositoryId: string;
-    kind: "agent" | "system" | "outcome";
+    // "user" is here because a task dispatched with no posted request has to
+    // persist the request itself as its thread root — see `threadRootId` in
+    // `dispatchOneMention`, which is the only caller that passes it and the
+    // reason a thread opens on what somebody said rather than on the agent's
+    // restatement of it.
+    kind: "user" | "agent" | "system" | "outcome";
     authorId: string;
     content: string;
     /** Earlier channel root this flat entry answers. */
@@ -15542,19 +15746,26 @@ export class ApiGateway {
   }
 
   /**
-   * The no-@mention path: guesses whether a channel message is a task for
-   * one of the agents actually present, and — only when exactly one stands
-   * out clearly — dispatches to it through `dispatchOneMention`, the same
-   * method and the same `submitTask` call an explicit @mention uses.
+   * The no-@mention path: decides what one of the agents actually present
+   * should do about a channel message, and when that is work, dispatches
+   * through `dispatchOneMention` — the same method and the same `submitTask`
+   * call an explicit @mention uses.
    *
-   * Silence is the expected common case, by design: `looksLikeTaskRequest`
-   * must first agree the message reads as a request for work at all, and
-   * then the best-scoring candidate must clear both a minimum score and a
-   * confidence margin over the runner-up. Both gates are deliberately
-   * conservative (see their own doc comments) because firing wrongly spends
-   * a real person's API/subscription usage on unwanted work — a strictly
-   * worse outcome than staying silent and letting the sender @mention
-   * explicitly, which always still works.
+   * Three outcomes, decided by the agent rather than by a vocabulary:
+   *
+   * - Plainly a request, plainly clear: it is taken, and nothing is asked.
+   *   The round trip buys nothing when there is no doubt to resolve.
+   * - Work is implied but the request is not made, or is too vague to start
+   *   on: the agent proposes the specific thing it would do and waits for a
+   *   yes. Saying yes starts the work in its question round — the agent asks
+   *   what it would otherwise have guessed at, exactly as `/ask` does.
+   * - Anything else: silence.
+   *
+   * Silence is still the expected common case. The best-scoring candidate
+   * must also clear both a minimum score and a confidence margin over the
+   * runner-up before anything is decided at all, because firing wrongly
+   * spends a real person's API/subscription usage — worse than staying quiet
+   * and letting the sender @mention explicitly, which always still works.
    *
    * A personal agent belonging to someone other than the sender is removed
    * from the candidate pool *before* scoring, not scored and then vetoed —
@@ -15576,17 +15787,18 @@ export class ApiGateway {
     referencedMessageId: string;
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
-    // Two gates, plus one deliberate escape from the vocabulary list.
-    // Ordinary requests still need both concrete work and direct-address
-    // evidence. Explicit open-room invitations ("any takers?", "who can
-    // own this?") are already stronger evidence of intent than a particular
-    // work verb, so they may reach the model even when the list does not know
-    // their phrasing. Remarks and human conversation clear neither path.
-    const opensWorkToRoom = explicitlyOpensWorkToRoom(content);
-    if (
-      !readsAsDirectRequest(content) ||
-      (!looksLikeTaskRequest(content) && !opensWorkToRoom)
-    ) {
+    // One structural guard, and no vocabulary. A message with no letters in
+    // it is an emoji or punctuation and there is nothing to read.
+    if (!/\p{L}/u.test(content)) {
+      return;
+    }
+    // Then the local pass, before anything is read from the store and long
+    // before anything is spent. It answers one question — is this
+    // confidently just people talking — and only that; anything it is unsure
+    // about goes on to the agent, which is what decides. Most of a working
+    // channel is conversation, and paying a vendor to be told so was the
+    // cost of reading every message rather than matching it.
+    if (await this.chatterFilter.readsAsChatter(content)) {
       return;
     }
     const context = await this.autoClaimContext({
@@ -15604,83 +15816,256 @@ export class ApiGateway {
     if (chosen === undefined) {
       return;
     }
-    // Offered, not started. Picking the agent is a guess — the scoring below
-    // breaks ties rather than refusing them, deliberately — and a guess that
-    // is wrong costs a checkout, a run and somebody's usage. A guess that is
-    // merely slow costs one line and a "yes". The sender can also ignore it
-    // and @mention whoever should have it, which was always the escape and is
-    // now the faster path when the pick is wrong.
-    // The word list gets the easy half right and cannot get the rest right:
-    // most of the work vocabulary is also ordinary nouns, and no list of
-    // words distinguishes "update the readme" from "the update went out".
-    // So the agent that would take it reads the message first, on the cheap
-    // model — see CEREMONIAL_MODELS. It is a sentence in, a word out, and it
-    // only runs for messages the free checks already think are requests, so
-    // an ordinary conversation costs nothing.
-    if (!(await this.readsAsWorkToAgent(chosen, content, context))) {
+    // The agent that would take it reads the message, on the cheap model —
+    // see CEREMONIAL_MODELS — and says which of three things to do about it.
+    const decision = await this.readAutoClaimVerdict(chosen, content, context);
+    if (decision.verdict === "ignore") {
       return;
     }
-    // In the agent's own voice, not the channel's. It is the one being asked
-    // to do it, the reader can see whose usage is about to be spent, and a
-    // system aside saying an agent "looks like the closest fit" was the
-    // system talking about an agent standing right there.
-    const sender = await this.options.store.getUser(senderId).catch(() => undefined);
-    const addressed =
-      sender === undefined || sender.displayName.trim() === ""
-        ? ""
-        : `, ${firstWord(sender.displayName)}`;
-    await this.appendChannelEntry({
+    if (decision.verdict === "act") {
+      // Straight to work, with nothing asked. Reserved for a message that
+      // says plainly what it wants: the round trip buys nothing when there is
+      // no doubt to resolve, and a person who wrote "change the background to
+      // blue" and got "would you like me to change the background?" has been
+      // asked to say it twice.
+      await this.dispatchOneMention({
+        projectId,
+        repositoryId,
+        content,
+        senderId,
+        candidate: chosen,
+        trigger: "auto_claim",
+        ...(input.referencedMessageId === undefined
+          ? {}
+          : { referencedMessageId: input.referencedMessageId }),
+        ...(context === undefined ? {} : { context }),
+      });
+      return;
+    }
+    // Offered, not started, and offered as something specific. The agent
+    // names the thing it would do — that sentence is the model's, not this
+    // file's, which is what keeps it about the message rather than about a
+    // category the message was sorted into. In the agent's own voice, too:
+    // it is the one being asked, and the reader can see whose usage is about
+    // to be spent.
+    const posted = await this.appendChannelEntry({
       projectId,
       repositoryId,
       kind: "agent",
       authorId: `${chosen.userId}:${chosen.provider}`,
-      content:
-        `${AUTO_CLAIM_OFFER_OPENING}${addressed}? Say "yes" and I'll get ` +
-        `started — or @mention someone else.`,
+      content: `${decision.proposal}\n\n${AUTO_CLAIM_OFFER_TAIL}`,
       referencedMessageId: input.referencedMessageId,
+    });
+    // And the same prompt `/ask` puts up, so the answer is a tap rather than
+    // a word. The message above is not redundant with it: the prompt is a
+    // live wait that ends, and the transcript is what is still there
+    // afterwards — including for anybody who was not looking when it opened.
+    // Typing "yes" keeps working for exactly that reason.
+    this.offerAsQuestion({
+      projectId,
+      repositoryId,
+      messageId: posted.id,
+      candidate: chosen,
+      senderId,
+      proposal: decision.proposal,
+      request: { id: input.referencedMessageId, content },
+      ...(context === undefined ? {} : { context }),
     });
   }
 
   /**
-   * Whether the agent that would take this reads it as work.
+   * Puts an offer up as the choice prompt, beside the line in the room.
    *
-   * The last gate, and the only one that reads the sentence rather than
-   * matching against it. Everything before it is free and stays first: this
-   * runs on the account whose agent would do the work, so an ordinary remark
-   * must never reach it, and the word list is what keeps the bill at zero for
-   * a channel that is just talking.
-   *
-   * Anything other than a plain yes is a no — a timeout, an unreachable CLI,
-   * an expired sign-in, a model that answered with a paragraph. Not offering
-   * costs a re-ask; offering wrongly is the noise this exists to remove.
+   * The prompt is the one an agent's own questions use — the same list, the
+   * same keyboard shortcuts, the same "only the person who asked sees it"
+   * rule — because an offer is the same kind of thing: a decision that
+   * belongs to one person and that work is waiting on. There is no task yet,
+   * so nothing is blocked by it; that is the only difference, and it is why
+   * this one is allowed to lapse quietly.
    */
-  private async readsAsWorkToAgent(
+  private offerAsQuestion(input: {
+    projectId: string;
+    repositoryId: string;
+    /** The offer message, which is what the prompt hangs off. */
+    messageId: string;
+    candidate: ChannelMentionCandidate;
+    senderId: string;
+    proposal: string;
+    request: { id?: string; content: string };
+    context?: string;
+  }): void {
+    const requestId = `${AUTO_CLAIM_QUESTION_PREFIX}${input.messageId}`;
+    const askedAtMs = Date.now();
+    const finish = (): void => {
+      this.pendingAgentQuestions.delete(requestId);
+      // Both routes to an answer end here, so a tap cannot be followed by a
+      // typed "yes" starting the same work twice.
+      this.settledAutoClaimOffers.add(input.messageId);
+      for (const id of this.settledAutoClaimOffers) {
+        if (this.settledAutoClaimOffers.size <= 500) {
+          break;
+        }
+        this.settledAutoClaimOffers.delete(id);
+      }
+      this.announceAgentQuestions(input.projectId);
+    };
+    const timer = setTimeout(() => {
+      // Lapsing is not a refusal. The offer stays in the transcript and
+      // "yes" still starts it — this only takes the prompt down, so a room
+      // does not accumulate choices nobody is going to make.
+      this.pendingAgentQuestions.delete(requestId);
+      this.announceAgentQuestions(input.projectId);
+    }, AUTO_CLAIM_QUESTION_TTL_MS);
+    timer.unref?.();
+    this.pendingAgentQuestions.set(requestId, {
+      // No task exists yet — that is the whole point of asking first. The id
+      // is the offer's, so anything that logs one can still be traced back
+      // to the message it came from.
+      taskId: requestId,
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId: `${input.candidate.userId}:${input.candidate.provider}`,
+      submitterId: input.senderId,
+      questions: [
+        {
+          question: input.proposal,
+          options: [AUTO_CLAIM_QUESTION_YES, AUTO_CLAIM_QUESTION_NO],
+        },
+      ],
+      askedAtMs,
+      deadlineAtMs: askedAtMs + AUTO_CLAIM_QUESTION_TTL_MS,
+      optionCount: 2,
+      settle: (answers) => {
+        clearTimeout(timer);
+        finish();
+        if (answers[0]?.chosen !== 0) {
+          // "No thanks", or a skip. Nothing is said in the room: the person
+          // declined a suggestion, which is not an event anybody else needs
+          // narrating to them.
+          return;
+        }
+        void this.startOfferedWork({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          candidate: input.candidate,
+          senderId: input.senderId,
+          proposal: input.proposal,
+          request: input.request,
+          ...(input.context === undefined ? {} : { context: input.context }),
+        }).catch(() => undefined);
+      },
+    });
+    this.announceAgentQuestions(input.projectId);
+  }
+
+  /**
+   * Starts what an offer offered, however it was agreed to.
+   *
+   * One method for the tap and for the typed "yes", so the two cannot drift
+   * into dispatching differently — which they would, because the objective
+   * they build is the interesting part and it is easy to get half right.
+   */
+  private async startOfferedWork(input: {
+    projectId: string;
+    repositoryId: string;
+    candidate: ChannelMentionCandidate;
+    senderId: string;
+    proposal: string;
+    request: { id?: string; content: string };
+    context?: string;
+  }): Promise<void> {
+    // Two things were said and the worker needs both. "The gray looks rough"
+    // is what the person wrote; "shall I change the background colour?" is
+    // what they said yes to. The remark alone is an observation, not an
+    // objective; the proposal alone throws away the words somebody actually
+    // chose. So the request leads and the agreement follows it — and the
+    // message stays the visible content, so the thread still reads as an
+    // answer to what was asked.
+    //
+    // And it goes in asking. An offer was made precisely because something
+    // was unclear — which colour, which page, how far — so the first round
+    // is the question round, exactly as `/ask` does it. What the agent would
+    // otherwise have guessed at is asked once, by the agent, instead of
+    // guessed at now and corrected later.
+    await this.dispatchOneMention({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      content: input.request.content,
+      objective:
+        `${input.request.content}\n\nAgreed in the channel — this is the ` +
+        `specific thing that was said yes to:\n${input.proposal}`,
+      forceQuestion: true,
+      senderId: input.senderId,
+      candidate: input.candidate,
+      trigger: "auto_claim",
+      ...(input.request.id === undefined
+        ? {}
+        : { referencedMessageId: input.request.id }),
+      ...(input.context === undefined ? {} : { context: input.context }),
+    });
+  }
+
+  /**
+   * What the agent that would take this decides to do about it.
+   *
+   * The only gate on this path, and the only one that reads the sentence
+   * rather than matching against it. It replaced a word list that got the
+   * easy half right and could not get the rest right: most work vocabulary
+   * is also ordinary English, so "the update went out" read as a request and
+   * "the gray looks rough" read as nothing at all. A list cannot tell those
+   * apart, because the difference is not in the words.
+   *
+   * The cost of dropping the list is that this now runs for every message in
+   * a channel that has an agent in it, rather than only for messages a list
+   * already liked. It runs on the cheap model, asks for one line, and the
+   * account it runs on is the one whose agent would do the work.
+   *
+   * Any failure is `ignore` — a timeout, an unreachable CLI, an expired
+   * sign-in, a paragraph where a word was asked for. Staying quiet costs a
+   * re-ask, which the sender can always make by @mentioning somebody.
+   */
+  private async readAutoClaimVerdict(
     candidate: ChannelMentionCandidate,
     content: string,
     context?: string,
-  ): Promise<boolean> {
+  ): Promise<AutoClaimVerdict> {
     const answer = await this.askAgent(
       candidate,
-      "Someone wrote the current message below in a team chat for a " +
-        "software project.\n\n" +
-        "Should you briefly offer to take repository work from this " +
-        "message? Answer yes only when the current message is a standalone " +
-        "request or clearly opens work to the room — a change, fix, " +
-        "investigation, or something built. A remark, opinion, greeting, " +
-        "status question, or comment about finished work is not. If recent " +
-        "context shows people talking and the message could reasonably be " +
-        "directed to one particular human, answer no; do not interrupt their " +
-        "conversation. An explicit request to someone, anyone, or the room " +
-        "is open to you even without an @mention.\n\n" +
-        "Use recent context only to resolve references and who is speaking; " +
-        "classify the current message, never the background itself.\n\n" +
+      "You are an agent in a team chat for a software project. Someone " +
+        "wrote the current message below. Nobody named you in it. Decide " +
+        "what to do about it.\n\n" +
+        "Reply with exactly one of these three lines, and nothing else:\n\n" +
+        "ACT\n" +
+        "  Use this when the message plainly asks for work on the " +
+        "repository and says clearly enough what it wants that you could " +
+        "start now. Acting spends the account's usage, so use it only when " +
+        "there is no real doubt about what was asked for. A request made to " +
+        "someone, anyone, or the room at large is made to you as well, even " +
+        "with no @mention in it.\n\n" +
+        "OFFER: <one short yes/no question>\n" +
+        "  Use this when the message points at work without asking for it, " +
+        "or asks for something too vague to start on. Your question must " +
+        "name the specific thing you would do, so it can be answered with " +
+        "yes. Do not ask for the details you would need to do it — you get " +
+        "to ask those afterwards, once somebody says yes.\n\n" +
+        "IGNORE\n" +
+        "  Use this for everything else: greetings, people talking to each " +
+        "other, opinions with nothing to do, questions about the status of " +
+        "work, remarks about work already finished. If the recent context " +
+        "shows people in conversation and this message could reasonably be " +
+        "meant for one particular person, ignore it — do not interrupt " +
+        "their conversation.\n\n" +
+        "Use recent context only to resolve references such as \"that\" and " +
+        "to see who is speaking to whom; decide about the current message, " +
+        "never about the background.\n\n" +
         (context === undefined ? "" : `${context}\n\n`) +
-        "Answer with one word: yes or no.\n\nCurrent message: " +
+        "Current message: " +
         content,
       CLASSIFY_TIMEOUT_MS,
       true,
     ).catch(() => ({ text: undefined }));
-    return /^\s*yes\b/iu.test(answer.text ?? "");
+    return parseAutoClaimVerdict(answer.text);
   }
 
   /**
@@ -15715,13 +16100,24 @@ export class ApiGateway {
     );
     // Oldest first, so the offer is the last one of ours in the window.
     let offerAt = -1;
+    // The tail first, because it is what every offer written now ends with;
+    // the two openings are offers already sitting in channels from before
+    // the agent started naming what it would do, and they still deserve an
+    // answer.
     for (let index = recent.length - 1; index >= 0; index -= 1) {
       const message = recent[index];
       if (
         message?.kind === "agent" &&
-        (message.content.startsWith(AUTO_CLAIM_OFFER_OPENING) ||
+        (autoClaimProposal(message.content) !== undefined ||
+          message.content.startsWith(AUTO_CLAIM_OFFER_OPENING) ||
           message.content.startsWith("Want me to take care of this?"))
       ) {
+        // Already answered through the prompt. Not "no offer here" — it was
+        // made and it was settled, and saying yes to it a second time must
+        // not start the work again.
+        if (this.settledAutoClaimOffers.has(message.id)) {
+          return false;
+        }
         offerAt = index;
         break;
       }
@@ -15806,6 +16202,32 @@ export class ApiGateway {
       );
       return true;
     }
+    // The words answered the choice prompt too, so take it down rather than
+    // leave a live button for work that has just started.
+    this.settledAutoClaimOffers.add(offer.id);
+    if (
+      this.pendingAgentQuestions.delete(
+        `${AUTO_CLAIM_QUESTION_PREFIX}${offer.id}`,
+      )
+    ) {
+      this.announceAgentQuestions(projectId);
+    }
+    const proposal = autoClaimProposal(offer.content);
+    if (proposal !== undefined) {
+      await this.startOfferedWork({
+        projectId,
+        repositoryId,
+        candidate: chosen,
+        senderId,
+        proposal,
+        request: { id: request.id, content: request.content },
+        ...(context === undefined ? {} : { context }),
+      });
+      return true;
+    }
+    // An offer from before the agent started naming what it would do. There
+    // is no proposal to carry, so this is the older dispatch: the request in
+    // the sender's own words, and no forced question round.
     await this.dispatchOneMention({
       projectId,
       repositoryId,
@@ -15842,7 +16264,7 @@ export class ApiGateway {
     // (e.g. real recent-files-per-agent) is used here, and
     // `recentObjectivesFor` for how it is keyed per agent rather than per
     // person.
-    const recentObjectives = await this.recentObjectivesFor(repositoryId);
+    const { recentObjectives, busy } = await this.agentActivityIn(repositoryId);
     const direct = dispatchable
       .map((candidate) => ({
         candidate,
@@ -15878,39 +16300,62 @@ export class ApiGateway {
             ),
           }))
     ).sort((a, b) => b.score - a.score);
-    // Relevance decides *who*, never *whether*. Requiring a minimum score
-    // meant a request had to share a word with some agent's role or name
-    // before anybody would take it, so "can someone start building general
-    // infrastructure for a chess engine" — unmistakably a task, addressed to
-    // the room — matched nothing and was met with silence. A channel that
-    // ignores plain requests is worse than one that occasionally picks the
-    // less apt agent, and the sender can always name someone to override it.
-    const [best] = scored;
-    if (best === undefined) {
-      return undefined;
-    }
-    // A tie no longer means silence. The margin rules were written so that
-    // "two similarly relevant agents" failed closed, on the reasoning that
-    // dispatching wrongly spends somebody's real usage — but with two agents
-    // connected, which is the ordinary case, near-ties are the norm and the
-    // channel simply never answered anything that was not @mentioned. Never
-    // answering is its own failure, and the more common one.
+    // Three tiers, tried in order. Relevance decides *who*, never *whether*:
+    // a request that matches nobody is still a request, and a channel that
+    // ignores it is worse than one that occasionally picks the less apt
+    // agent — the sender can always name someone to override it.
     //
-    // So a tie is broken rather than refused, and the tie-break is the
-    // question the margin was really standing in for: whose usage is this?
-    // The sender's own agent goes first, because a person spending their own
-    // account needs no protecting from themselves. Otherwise the earliest
-    // candidate wins, which is stable across identical messages so the same
-    // request does not land on a different agent each time.
-    const runnerUpScore = scored[1]?.score ?? 0;
-    const clearWinner =
-      best.score - runnerUpScore >= MIN_MARGIN_ABSOLUTE &&
-      best.score >= runnerUpScore * MIN_MARGIN_RATIO;
-    const tied = scored.filter((entry) => entry.score === best.score);
-    const chosen = clearWinner
-      ? best
-      : (tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]);
-    return chosen?.candidate;
+    // 1. Fit. Whoever the message and the room's recent work actually point
+    //    at. A real match is worth waiting for, so this tier does not care
+    //    whether the agent is busy: being the right one to ask outranks
+    //    being the free one.
+    const matched = scored.filter((entry) => entry.score > 0);
+    if (matched.length > 0) {
+      const [best] = matched;
+      if (best === undefined) {
+        return undefined;
+      }
+      // A tie is broken rather than refused. The margin rules used to fail
+      // closed on "two similarly relevant agents", and with two agents
+      // connected — the ordinary case — near-ties are the norm, so the
+      // channel simply never answered anything unaddressed. The tie-break is
+      // the question the margin was standing in for: whose usage is this?
+      // The sender's own agent first, because a person spending their own
+      // account needs no protecting from themselves; otherwise the earliest
+      // candidate, which is stable across identical messages so the same
+      // request does not land somewhere different each time.
+      const runnerUpScore = matched[1]?.score ?? 0;
+      const clearWinner =
+        best.score - runnerUpScore >= MIN_MARGIN_ABSOLUTE &&
+        best.score >= runnerUpScore * MIN_MARGIN_RATIO;
+      if (clearWinner) {
+        return best.candidate;
+      }
+      const tied = matched.filter((entry) => entry.score === best.score);
+      return (
+        tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]
+      )?.candidate;
+    }
+
+    // 2. The sender's own. Nothing matched on role or on what the room has
+    //    been doing, so there is no "right" agent to find — and where there
+    //    is no reason to spend somebody else's account, the person who asked
+    //    should be spending their own. A busy one is skipped here, because a
+    //    fallback pick has no claim worth queueing behind.
+    const ordered = scored.map((entry) => entry.candidate);
+    const mine = ordered.filter((candidate) => candidate.userId === senderId);
+    const free = mine.find((candidate) => !busy(candidate));
+    if (free !== undefined) {
+      return free;
+    }
+
+    // 3. Anyone. The sender has no agent here, or the one they have is
+    //    already working. Free first for the same reason as above, and
+    //    falling back to a busy one rather than to silence: the queue is a
+    //    real answer, and no answer is not.
+    return (
+      ordered.find((candidate) => !busy(candidate)) ?? ordered[0]
+    );
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */
