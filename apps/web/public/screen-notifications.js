@@ -7,7 +7,14 @@
  * needing a decision, and work that failed.
  */
 
-import { markRead, notifications, state, unreadCount } from "./data.js";
+import {
+  markAllNotificationsRead,
+  markRead,
+  notificationIsRead,
+  notifications,
+  state,
+  unreadCount,
+} from "./data.js";
 import {
   esc,
   icon,
@@ -34,7 +41,7 @@ const TONE_COLOR = {
 
 function visible(rows) {
   if (state.notificationFilter === "unread") {
-    return rows.filter((row) => !state.readNotifications.has(row.id));
+    return rows.filter((row) => !notificationIsRead(row));
   }
   if (state.notificationFilter === "approval") {
     return rows.filter((row) => row.kind === "approval");
@@ -46,7 +53,7 @@ function visible(rows) {
 }
 
 function notificationRow(row) {
-  const unread = !state.readNotifications.has(row.id);
+  const unread = !notificationIsRead(row);
   return `<button class="notif-row${unread ? " unread" : ""}"
     data-act="notif-open" data-value="${esc(row.id)}">
     <span class="nr-icon" style="color:${TONE_COLOR[row.tone] ?? "var(--text-3)"}">
@@ -113,7 +120,7 @@ export function renderNotifications() {
 }
 
 export function readAll(rerender) {
-  markRead(notifications().map((row) => row.id));
+  markAllNotificationsRead();
   rerender();
 }
 
