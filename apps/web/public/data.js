@@ -360,6 +360,17 @@ export const state = {
    */
   settingsRenamingId: undefined,
   chatDraft: "",
+  /**
+   * What is half-typed to each of this account's own agents, keyed by agent
+   * id, for the private one-to-one composer.
+   *
+   * Kept here rather than left in the textarea because that panel is rebuilt
+   * from scratch by every render — a poll, a stream frame, a task landing —
+   * and a value that only ever existed in the DOM went with the old box,
+   * deleting a half-written message mid-sentence. Keyed by agent so switching
+   * panels does not carry one agent's draft into another's.
+   */
+  agentChatDrafts: {},
   threadDraft: "",
   mentionActive: false,
   mentionQuery: "",

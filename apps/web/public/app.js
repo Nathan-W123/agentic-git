@@ -5058,19 +5058,6 @@ document.addEventListener("click", (event) => {
       state.activeAgentPanel = undefined;
       render();
       return;
-    case "dm-submit": {
-      const other = state.activeDm;
-      const draft = state.dmDraft.trim();
-      if (other === undefined || draft.length === 0) {
-        return;
-      }
-      state.dmDraft = "";
-      render();
-      void sendDirectMessage(other, draft)
-        .then(() => render())
-        .catch((error) => toast(`Could not send: ${error.message}`, "error"));
-      return;
-    }
     // Expanding a file happens where it is read — in the transcript — so this
     // only toggles which paths are open, with no route change to lose the
     // reader's place in the conversation.
@@ -5805,6 +5792,12 @@ document.addEventListener("click", (event) => {
       }
       const at = input.selectionStart ?? input.value.length;
       input.value = `${input.value.slice(0, at)}@${input.value.slice(at)}`;
+      // Through `state` as well: this writes straight to the box, and the next
+      // render draws the box from the draft.
+      const agentId = input.dataset.value;
+      if (agentId !== undefined && agentId !== "") {
+        state.agentChatDrafts[agentId] = input.value;
+      }
       input.focus();
       input.setSelectionRange(at + 1, at + 1);
       return;
@@ -5849,13 +5842,38 @@ document.addEventListener("submit", (event) => {
       return;
     case "chat-submit": {
       const input = $("[data-act='chat-input']", form);
-      const agent = currentAgent();
+      // The composer says which agent it belongs to; `currentAgent` is only
+      // the fallback now. It reads `state.selectedAgent`, which nothing sets
+      // when the private chat is opened from the channel's agent panel — so
+      // the message went to whichever agent happened to be first, or, with
+      // none connected on this screen, nowhere at all.
+      const agent =
+        myAgents().find((candidate) => candidate.id === form.dataset.value) ??
+        currentAgent();
       if (agent === undefined || input === null) {
         return;
       }
       const text = input.value;
       input.value = "";
+      delete state.agentChatDrafts[agent.id];
       void sendChat(agent.id, text, render);
+      return;
+    }
+    // Here rather than in the click handler it used to live in: the send
+    // button is a submit button, so a click reaches this listener the same way
+    // Enter does. Handled only on the click, pressing Enter raised a submit
+    // this switch had no answer for, and the message went nowhere.
+    case "dm-submit": {
+      const other = state.activeDm;
+      const draft = state.dmDraft.trim();
+      if (other === undefined || draft.length === 0) {
+        return;
+      }
+      state.dmDraft = "";
+      render();
+      void sendDirectMessage(other, draft)
+        .then(() => render())
+        .catch((error) => toast(`Could not send: ${error.message}`, "error"));
       return;
     }
     case "channel-submit":
@@ -6127,6 +6145,14 @@ document.addEventListener("input", (event) => {
     return;
   }
   if (act === "chat-input") {
+    // Held in `state` before anything else, and deliberately without a render:
+    // the panel is rebuilt by every background refresh, and a value that lived
+    // only in the textarea was thrown away with it — which is what deleted
+    // what somebody was typing to their agent.
+    const agentId = node.dataset.value;
+    if (agentId !== undefined && agentId !== "") {
+      state.agentChatDrafts[agentId] = node.value;
+    }
     // Cleared rather than measured once the box is empty: an empty composer
     // collapses to the lean bar, and a height measured against the open one
     // would hold the pill open with nothing in it.

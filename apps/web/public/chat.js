@@ -34,6 +34,18 @@ function conversationFor(agentId) {
 }
 
 /**
+ * What is half-typed to one agent.
+ *
+ * The composer's textarea is rebuilt on every render, and it used to be drawn
+ * empty every time — so a background refresh arriving mid-sentence took the
+ * message with it. The draft lives in `state` and is written back into the
+ * box here, keyed by agent so two panels cannot share one draft.
+ */
+export function agentChatDraft(agentId) {
+  return agentId === undefined ? "" : (state.agentChatDrafts[agentId] ?? "");
+}
+
+/**
  * Rewinds a private conversation to just before one message.
  *
  * The private panel has no server-side transcript to delete from — the
@@ -225,10 +237,18 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
   const busy = state.sending[agent?.id] === true;
   const ready = agent !== undefined;
 
-  return `<form class="composer" data-act="chat-submit">
-    <textarea data-act="chat-input" rows="1" spellcheck="true"
-      enterkeyhint="send"
-      placeholder="${esc(placeholder)}"${busy || !ready ? " disabled" : ""}></textarea>
+  // The agent is named on the form and on the box itself. `currentAgent` reads
+  // the Code screen's selection, which nothing sets when this composer is the
+  // one in the channel's agent panel — so a message sent from there went to
+  // whichever agent happened to be first, or to none at all. The id on the box
+  // is also what tells a keystroke which draft it belongs to.
+  const agentId = esc(agent?.id ?? "");
+  return `<form class="composer" data-act="chat-submit" data-value="${agentId}">
+    <textarea data-act="chat-input" data-value="${agentId}" rows="1"
+      spellcheck="true" enterkeyhint="send"
+      placeholder="${esc(placeholder)}"${
+        busy || !ready ? " disabled" : ""
+      }>${esc(agentChatDraft(agent?.id))}</textarea>
     <div class="composer-bar">
       ${iconButton("plus", {
         act: "composer-plus",
