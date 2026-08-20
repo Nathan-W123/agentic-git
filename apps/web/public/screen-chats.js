@@ -3709,11 +3709,6 @@ function agentSpec(agent, repositoryId) {
     state.repositories.find((repository) => repository.id === repositoryId) ?? {
       id: repositoryId,
     };
-  const currentRole = String(currentAssignment.role ?? "").trim();
-  const description =
-    currentRole === ""
-      ? `Ready to take on work in #${repositoryId}. Review how this agent is connected, who can task it, and how it is configured for this channel.`
-      : `Focused on ${currentRole} in #${repositoryId}. Review how this agent is connected, who can task it, and how it is configured for this channel.`;
   return `<div class="agent-spec">
     <div class="aspec-content">
       <section class="aspec-head">
@@ -3722,20 +3717,17 @@ function agentSpec(agent, repositoryId) {
           ${statusDot(status, AGENT_STATUS_TITLE[status])}
         </span>
         <h2>${esc(agent.name)}</h2>
-        <p class="aspec-description">${esc(description)}</p>
         <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
           repositoryId,
         )}${agent.mine ? " · Your agent" : ""}</div>
       </section>
 
       <section class="aspec-section">
-        <h3 class="aspec-label">Works with</h3>
         ${configuration}
         ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
       </section>
 
       <section class="aspec-section">
-        <h3 class="aspec-label">Capabilities</h3>
         <div class="aspec-capabilities">
           ${roleField(currentRepository, currentAssignment, true)}
           <div class="aspec-capability aspec-current-task${
@@ -3761,16 +3753,6 @@ function agentSpec(agent, repositoryId) {
               <span>History</span>${icon("arrowRight")}</button>
           </div>
         </div>
-        <div class="aspec-note">A role is what this agent is for here; it rides
-          on every task submitted in this channel.${
-            // Said where the switch is, because "anyone in the org" reads like
-            // handing over the key otherwise: it decides who may @mention the
-            // agent, and the credential behind it is still never shared.
-            agent.mine === true
-              ? ` Sharing it with the org lets teammates @mention it —
-          the credential itself is never shared.`
-              : ""
-          }</div>
       </section>
 
       ${
