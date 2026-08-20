@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -144,6 +145,7 @@ test("the device code and link are parsed out of the CLI's own banner", () => {
     "the URL must not carry colour codes",
   );
   assert.equal(seen.find((entry) => entry.code)?.code, "7EH1-W9FEV");
+  assert.equal(parseDeviceAuthLine("Use code: ABCD-EFGH").code, "ABCD-EFGH");
   assert.equal(
     seen.find((entry) => entry.expiresInMinutes)?.expiresInMinutes,
     15,
@@ -276,16 +278,26 @@ test("a browser sign-in is refused when its CLI is not installed", async () => {
   );
 });
 
-test("the three new agents accept a browser code and store their isolated session", async () => {
+test("browser-only agents use headless auth and store their isolated session", async () => {
   const harness = await createHarness();
   const submitted: Array<{ command: string; code: string }> = [];
+  const spawned: Array<{
+    command: string;
+    args: readonly string[];
+    stdin: string | undefined;
+  }> = [];
   const spawner = (
     command: string,
-    _args: readonly string[],
+    args: readonly string[],
     options: { env: NodeJS.ProcessEnv; stdin?: string },
     onLine: (line: string) => void,
   ) => {
+    spawned.push({ command, args, stdin: options.stdin });
     onLine(`Continue in your browser: https://signin.example/${command}`);
+    const deviceFlow = command !== "agent";
+    if (deviceFlow) {
+      onLine("Code: ABCD-EFGH");
+    }
     let finish: ((code: string) => void) | undefined;
     const done = new Promise<ReturnType<typeof output>>((resolve) => {
       finish = (code) => {
@@ -301,7 +313,10 @@ test("the three new agents accept a browser code and store their isolated sessio
         })();
       };
     });
-    assert.equal(options.stdin, "pipe");
+    assert.equal(options.stdin, deviceFlow ? undefined : "pipe");
+    if (deviceFlow) {
+      setTimeout(() => finish?.("approved"), 0);
+    }
     return {
       done,
       kill: () => finish?.("cancelled"),
@@ -333,13 +348,20 @@ test("the three new agents accept a browser code and store their isolated sessio
       userId: "u1",
       provider,
     });
-    assert.equal(started.mode, "code_exchange");
+    assert.equal(
+      started.mode,
+      provider === "cursor" ? "code_exchange" : "approve",
+    );
     assert.equal(started.verificationUrl, `https://signin.example/${command}`);
-    await service.submitDeviceAuthCode({
-      userId: "u1",
-      flowId: started.flowId,
-      code: `${provider}-code`,
-    });
+    if (provider === "cursor") {
+      await service.submitDeviceAuthCode({
+        userId: "u1",
+        flowId: started.flowId,
+        code: `${provider}-code`,
+      });
+    } else {
+      assert.equal(started.userCode, "ABCD-EFGH");
+    }
     assert.equal(
       await settledStatus(service, "u1", started.flowId),
       "completed",
@@ -353,8 +375,19 @@ test("the three new agents accept a browser code and store their isolated sessio
   }
   assert.deepEqual(submitted, [
     { command: "agent", code: "cursor-code" },
-    { command: "copilot", code: "copilot-code" },
-    { command: "kiro-cli", code: "kiro-code" },
+  ]);
+  assert.deepEqual(spawned, [
+    { command: "agent", args: ["login"], stdin: "pipe" },
+    {
+      command: "copilot",
+      args: ["login", "--device-code"],
+      stdin: undefined,
+    },
+    {
+      command: "kiro-cli",
+      args: ["login", "--use-device-flow"],
+      stdin: undefined,
+    },
   ]);
 });
 
@@ -533,16 +566,25 @@ test("Google browser sign-in reports a missing Gemini CLI", async () => {
   );
 });
 
-test("Gemini opens web sign-in and accepts the returned code in Lattice", async () => {
+test("Gemini uses manual sign-in instead of a server-local callback", async () => {
   const harness = await createHarness();
   const submitted: string[] = [];
+  let stoppedAfterCredential = false;
   const spawner = (
     _command: string,
-    _args: readonly string[],
+    args: readonly string[],
     options: { env: NodeJS.ProcessEnv; stdin?: string },
     onLine: (line: string) => void,
   ) => {
     assert.equal(options.stdin, "pipe");
+    assert.deepEqual(args, ["--screen-reader", "--acp"]);
+    assert.equal(options.env["NO_BROWSER"], "true");
+    assert.equal(
+      existsSync(
+        path.join(String(options.env["HOME"]), ".gemini", "settings.json"),
+      ),
+      true,
+    );
     onLine("Open https://accounts.google.com/o/oauth2/auth in your browser");
     let settle: ((result: ReturnType<typeof output>) => void) | undefined;
     const done = new Promise<ReturnType<typeof output>>((resolve) => {
@@ -550,12 +592,12 @@ test("Gemini opens web sign-in and accepts the returned code in Lattice", async 
     });
     return {
       done,
-      kill: () => settle?.(output("cancelled", 1)),
+      kill: () => {
+        stoppedAfterCredential = true;
+        settle?.(output("manual sign-in complete", 0));
+      },
       write: (value: string) => {
         submitted.push(value);
-        if (value === "1") {
-          return;
-        }
         void (async () => {
           const gemini = path.join(String(options.env["HOME"]), ".gemini");
           await mkdir(gemini, { recursive: true });
@@ -567,7 +609,6 @@ test("Gemini opens web sign-in and accepts the returned code in Lattice", async 
             }),
             "utf8",
           );
-          settle?.(output("signed in"));
         })();
       },
     };
@@ -596,7 +637,8 @@ test("Gemini opens web sign-in and accepts the returned code in Lattice", async 
     code: "returned-code",
   });
   assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
-  assert.deepEqual(submitted, ["1", "returned-code"]);
+  assert.equal(stoppedAfterCredential, true);
+  assert.deepEqual(submitted, ["returned-code"]);
   const gemini = (
     await service.list({ userId: "u1", systemAdmin: false })
   ).find((entry) => entry.id === "google");

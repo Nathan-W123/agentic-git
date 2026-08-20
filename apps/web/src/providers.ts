@@ -271,13 +271,12 @@ export interface ProviderStatus {
 const SIGN_IN_FLOWS: Partial<Record<ProviderId, DeviceAuthMode>> = {
   openai: "approve",
   anthropic: "code_exchange",
-  // These CLIs all hand the browser round trip back to the waiting process.
-  // Some releases finish by polling while others show an authorization code;
-  // keeping stdin open supports both, and gives the dashboard one consistent
-  // connect -> browser -> paste-code workflow.
+  // Cursor and Gemini hand an authorization code back to the waiting CLI.
+  // Copilot and Kiro have real device flows: the CLI prints a one-time code,
+  // the user enters it on the vendor page, and the CLI polls for completion.
   cursor: "code_exchange",
-  copilot: "code_exchange",
-  kiro: "code_exchange",
+  copilot: "approve",
+  kiro: "approve",
   google: "code_exchange",
 };
 
@@ -1282,13 +1281,14 @@ function spawnLongRunning(
  * How a browser sign-in finishes, which differs by vendor and changes what
  * the screen has to render.
  *
- * `approve` is Codex: the CLI shows a code, the user approves it, and the CLI
- * polls until the vendor says yes. Nothing comes back to us.
+ * `approve` is Codex, Copilot and Kiro: the CLI shows a code, the user
+ * approves it, and the CLI polls until the vendor says yes. Nothing comes
+ * back to us.
  *
- * `code_exchange` is Claude, Gemini, Cursor, Copilot and Kiro: the CLI shows a
- * URL, the user signs in and may be handed a code, and that code can be given
- * back to the waiting CLI. CLIs that complete by polling use the same mode and
- * simply finish before a code is submitted.
+ * `code_exchange` is Claude, Gemini and Cursor: the CLI shows a URL, the user
+ * signs in and may be handed a code, and that code can be given back to the
+ * waiting CLI. A Cursor release that completes by polling simply finishes
+ * before a code is submitted.
  */
 export type DeviceAuthMode = "approve" | "code_exchange";
 
@@ -1354,7 +1354,10 @@ export function parseDeviceAuthLine(line: string): {
   // line is the code, whereas the same shape inside prose is not.
   const code =
     /^(?:code:\s*)?([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?)$/iu.exec(clean) ??
-    /\b(?:enter|use|code(?: is)?)[ :]+([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?)\b/iu.exec(
+    /\bcode(?: is)?[ :]+([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?)\b/iu.exec(
+      clean,
+    ) ??
+    /\b(?:enter|use)[ :]+([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?)\b/iu.exec(
       clean,
     );
   // A vendor's device code always carries a digit; an ordinary word that
@@ -1671,7 +1674,11 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
     return {
       command: "copilot",
       prefixArgs: [],
-      loginArgs: ["login"],
+      // The web flow redirects to a loopback listener on the server. From a
+      // user's browser that is their own localhost, so it ends on a blank
+      // page and can never reach the CLI. Device auth is made explicit rather
+      // than relying on the CLI's changing idea of a headless environment.
+      loginArgs: ["login", "--device-code"],
       label: "GitHub Copilot",
     };
   }
@@ -1679,7 +1686,9 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
     return {
       command: "kiro-cli",
       prefixArgs: [],
-      loginArgs: ["login"],
+      // As with Copilot, a local callback belongs to the server, not the
+      // browser that pressed Connect. Kiro exposes its headless flow directly.
+      loginArgs: ["login", "--use-device-flow"],
       label: "Kiro",
     };
   }
@@ -1687,15 +1696,11 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
     const gemini = resolveGeminiCommand();
     return {
       ...gemini,
-      // Screen-reader mode keeps the OAuth URL in ordinary stdout rather than
-      // an alternate terminal screen, which is what lets the web flow relay
-      // it. A one-shot prompt also makes Gemini exit after authentication
-      // instead of dropping into an interactive chat that never completes.
-      loginArgs: [
-        "--screen-reader",
-        "-p",
-        "Reply with exactly: signed in",
-      ],
+      // ACP keeps Gemini interactive while using piped stdio. Together with
+      // NO_BROWSER below, that selects Gemini's manual authorization-code
+      // flow instead of its localhost callback. The process is stopped once
+      // oauth_creds.json has landed; otherwise ACP would wait indefinitely.
+      loginArgs: ["--screen-reader", "--acp"],
       label: "Gemini",
     };
   }
@@ -2761,7 +2766,14 @@ export class ProviderChatService {
               BROWSER: "echo",
               GH_BROWSER: "echo",
               ...(input.provider === "google"
-                ? { GEMINI_CLI_TRUST_WORKSPACE: "true" }
+                ? {
+                    GEMINI_CLI_TRUST_WORKSPACE: "true",
+                    // Gemini's ordinary OAuth flow returns to a loopback
+                    // listener. In a hosted deployment that listener is on
+                    // the server while the browser is on the user's machine.
+                    // Its manual flow returns a code that can cross that gap.
+                    NO_BROWSER: "true",
+                  }
                 : {}),
             }),
     };
@@ -2788,6 +2800,22 @@ export class ProviderChatService {
       "AWS_WEB_IDENTITY_TOKEN_FILE",
     ]) {
       delete env[name];
+    }
+
+    if (input.provider === "google") {
+      // Choose Google OAuth up front. Driving Gemini's full-screen auth menu
+      // by writing "1" raced the menu listener and changed meaning whenever
+      // the CLI reordered its choices. The same settings field is already
+      // used when a stored Gemini session is staged for an agent run.
+      const geminiDirectory = path.join(home, ".gemini");
+      await mkdir(geminiDirectory, { recursive: true });
+      await writeFile(
+        path.join(geminiDirectory, "settings.json"),
+        `${JSON.stringify({
+          security: { auth: { selectedType: "oauth-personal" } },
+        })}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
     }
 
     const flow: DeviceAuthFlow = {
@@ -2861,14 +2889,6 @@ export class ProviderChatService {
         }
       },
     );
-    // Gemini exposes sign-in as the first option in its interactive auth
-    // picker. Screen-reader mode plus a piped answer makes that menu drivable
-    // from the web flow while the rest of the OAuth exchange stays in the
-    // user's browser.
-    if (input.provider === "google") {
-      flow.process.write("1");
-    }
-
     this.deviceAuthFlows.set(flow.id, flow);
     void flow.process.done.then(
       (output) => this.finishDeviceAuth(flow, output),
@@ -2971,7 +2991,36 @@ export class ProviderChatService {
     }
     flow.codeSubmitted = true;
     flow.process.write(code);
+    if (flow.provider === "google") {
+      // Gemini enters ACP after manual authentication and therefore does not
+      // exit by itself. Wait until its token file is complete before stopping
+      // it; `finishBrowserAuth` then validates and stores that file exactly as
+      // it does for a naturally-exiting login process.
+      void this.stopGeminiAfterCredential(flow);
+    }
     return this.describeDeviceAuth(flow);
+  }
+
+  private async stopGeminiAfterCredential(flow: DeviceAuthFlow): Promise<void> {
+    const credentialPath = path.join(
+      flow.home,
+      ".gemini",
+      "oauth_creds.json",
+    );
+    while (flow.status === "pending" && Date.now() <= flow.expiresAtMs) {
+      try {
+        const secret = await readFile(credentialPath, "utf8");
+        assertSessionFile("gemini", secret);
+        flow.process.kill();
+        return;
+      } catch {
+        // ENOENT is the usual case while Gemini exchanges the code. A partial
+        // JSON write is treated the same way and retried rather than captured.
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 100);
+      });
+    }
   }
 
   /**

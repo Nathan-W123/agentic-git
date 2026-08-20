@@ -652,6 +652,17 @@ async function signInAgent(providerId, mode, rerender) {
   // about:blank forever. The opener reference is dropped below instead, which
   // gets the same protection while keeping the handle.
   const tab = window.open("", "_blank");
+  if (tab !== null && tab !== undefined) {
+    // Starting the CLI can take a few seconds. Leaving the claimed tab as
+    // about:blank during that wait made a working sign-in look broken before
+    // its URL had even arrived.
+    tab.document.title = `Opening ${agentLabelOf(providerId)} sign-in`;
+    tab.document.body.style.cssText =
+      "margin:0;display:grid;min-height:100vh;place-items:center;" +
+      "font:16px system-ui,sans-serif;color:#334155;background:#f8fafc";
+    tab.document.body.textContent =
+      `Preparing the ${agentLabelOf(providerId)} sign-in page…`;
+  }
   let flow;
   try {
     flow = await startProviderSignIn(providerId);
