@@ -1167,7 +1167,13 @@ export interface LongRunningProcess {
 export type LongRunningSpawner = (
   command: string,
   args: readonly string[],
-  options: { env: NodeJS.ProcessEnv; cwd?: string; stdin?: "ignore" | "pipe" },
+  options: {
+    env: NodeJS.ProcessEnv;
+    cwd?: string;
+    stdin?: "ignore" | "pipe";
+    /** Run on a pseudo-terminal, for a CLI that refuses piped stdio. */
+    pty?: boolean;
+  },
   onLine: (line: string) => void,
 ) => LongRunningProcess;
 
@@ -1189,17 +1195,60 @@ export function stripAnsi(value: string): string {
 }
 
 /**
+ * Wraps a command so it runs on a pseudo-terminal instead of plain pipes.
+ *
+ * Some CLIs refuse the manual, paste-the-code sign-in unless they believe a
+ * human is present, and they decide that from `stdin.isTTY`/`stdout.isTTY`.
+ * Piped stdio therefore reads as headless no matter what else is set — see
+ * {@link browserCliSpec} for the Gemini case this exists to serve.
+ *
+ * `script` is used rather than a native pty binding because it is part of
+ * `bsdutils`, which Debian marks Essential, so it is already in the runtime
+ * image and cannot be pruned out from under this.
+ */
+function ptyLaunch(
+  command: string,
+  args: readonly string[],
+): { command: string; args: string[] } {
+  const quoted = [command, ...args]
+    .map((part) => `'${part.replaceAll("'", `'\\''`)}'`)
+    .join(" ");
+  // `stty -echo` is not cosmetic. A terminal echoes what is typed into it, so
+  // without it the authorization code pasted by the user comes straight back
+  // out on stdout — into the captured transcript, and from there into the
+  // failure detail a refused sign-in shows on screen. Verified live: with
+  // echo left on, the code appears in the output and the echo continues after
+  // the child exits, growing the transcript without bound.
+  //
+  // -q silences script's own banner, -e returns the child's exit status
+  // rather than script's, and the typescript file is discarded because the
+  // transcript is already captured from the pipes below.
+  return {
+    command: "script",
+    args: ["-qec", `stty -echo 2>/dev/null; ${quoted}`, "/dev/null"],
+  };
+}
+
+/**
  * Default {@link LongRunningSpawner}: a plain child process whose stdout is
  * split into lines and whose handle stays available for cancellation.
  */
 function spawnLongRunning(
   command: string,
   args: readonly string[],
-  options: { env: NodeJS.ProcessEnv; cwd?: string; stdin?: "ignore" | "pipe" },
+  options: {
+    env: NodeJS.ProcessEnv;
+    cwd?: string;
+    stdin?: "ignore" | "pipe";
+    pty?: boolean;
+  },
   onLine: (line: string) => void,
 ): LongRunningProcess {
   const startedAt = Date.now();
-  const child = spawn(command, [...args], {
+  const launch = options.pty === true
+    ? ptyLaunch(command, args)
+    : { command, args: [...args] };
+  const child = spawn(launch.command, launch.args, {
     env: options.env,
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     // Written as two literal tuples rather than one computed array so the
@@ -1399,6 +1448,16 @@ async function removeCredentialHome(directory: string): Promise<void> {
 
 /** How long to wait for the CLI to print a code before giving up on it. */
 const DEVICE_AUTH_PROMPT_TIMEOUT_MS = 60_000;
+/** How often a Gemini sign-in is checked for its finished credential file. */
+const GEMINI_CREDENTIAL_POLL_MS = 1_000;
+/**
+ * How long a URL on an unrecognized host waits for a better one.
+ *
+ * Long enough that a banner printed just before the real sign-in link does
+ * not win, short enough that a vendor changing hosts costs a pause rather
+ * than the whole flow.
+ */
+const UNRECOGNIZED_SIGN_IN_URL_GRACE_MS = 2_000;
 /** Fallback when the CLI does not state an expiry in its own output. */
 const DEVICE_AUTH_DEFAULT_EXPIRY_MS = 15 * 60_000;
 
@@ -1661,12 +1720,30 @@ interface BrowserCliSpec {
   prefixArgs: string[];
   loginArgs: string[];
   label: string;
+  /** Sign-in needs a pseudo-terminal; see {@link ptyLaunch}. */
+  ptyLogin?: boolean;
+  /**
+   * Hosts whose pages are this vendor's own sign-in.
+   *
+   * A CLI prints more than one URL — docs, a status page, a repository — and
+   * the first one out is not reliably the one to send somebody to. Cursor in
+   * particular was sending people to github.com, which is Copilot's sign-in
+   * and not Cursor's at all. An empty list means "take the first URL", which
+   * is what the CLIs with a known single banner do.
+   */
+  signInHosts?: string[];
 }
 
 /** Commands used by the browser-only agent connections. */
 function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
   if (provider === "cursor") {
-    return { command: "agent", prefixArgs: [], loginArgs: ["login"], label: "Cursor" };
+    return {
+      command: "agent",
+      prefixArgs: [],
+      loginArgs: ["login"],
+      label: "Cursor",
+      signInHosts: ["cursor.com", "cursor.sh"],
+    };
   }
   if (provider === "copilot") {
     return {
@@ -1674,6 +1751,7 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
       prefixArgs: [],
       loginArgs: ["login"],
       label: "GitHub Copilot",
+      signInHosts: ["github.com"],
     };
   }
   if (provider === "kiro") {
@@ -1682,6 +1760,7 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
       prefixArgs: [],
       loginArgs: ["login"],
       label: "Kiro",
+      signInHosts: ["kiro.dev", "amazon.com", "awsapps.com", "amazonaws.com"],
     };
   }
   if (provider === "google") {
@@ -1690,17 +1769,48 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
       ...gemini,
       // Screen-reader mode keeps the OAuth URL in ordinary stdout rather than
       // an alternate terminal screen, which is what lets the web flow relay
-      // it. A one-shot prompt also makes Gemini exit after authentication
-      // instead of dropping into an interactive chat that never completes.
-      loginArgs: [
-        "--screen-reader",
-        "-p",
-        "Reply with exactly: signed in",
-      ],
+      // it.
+      //
+      // Deliberately no `-p`. A prompt argument puts the CLI in headless
+      // mode, and headless is exactly the mode that cannot finish this
+      // sign-in: with NO_BROWSER set the CLI refuses outright ("Manual
+      // authorization is required but the current session is
+      // non-interactive"), and without it the CLI runs its *other* OAuth
+      // path, which redirects to http://127.0.0.1:<port>/oauth2callback and
+      // waits on a local HTTP listener. That listener is on this server,
+      // while the browser completing the sign-in is on the user's own
+      // machine, so the callback never arrives and the code the user is
+      // holding has nothing to go to — the sign-in that "gets to pasting the
+      // code and then nothing happens".
+      //
+      // Interactive plus NO_BROWSER selects the manual path instead: the CLI
+      // prints a URL that redirects to codeassist.google.com/authcode, a real
+      // page that shows the user a code, and reads that code back on stdin.
+      // Interactive is decided by `stdin.isTTY`/`stdout.isTTY`, hence the
+      // pseudo-terminal.
+      loginArgs: ["--screen-reader"],
       label: "Gemini",
+      ptyLogin: true,
+      signInHosts: ["accounts.google.com", "google.com"],
     };
   }
   return undefined;
+}
+
+/** Whether a URL is on one of the hosts this vendor signs in through. */
+function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
+  if (hosts === undefined || hosts.length === 0) {
+    return true;
+  }
+  let host: string;
+  try {
+    host = new URL(value).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return hosts.some(
+    (allowed) => host === allowed || host.endsWith(`.${allowed}`),
+  );
 }
 
 /** The Codex CLI may live off PATH; the actively-used install is a fallback. */
@@ -2767,7 +2877,15 @@ export class ProviderChatService {
               // is what produced a stored session the CLI could not load.
               ...programCacheEnv(PROVIDER_VENDORS[input.provider]),
               ...(input.provider === "google"
-                ? { GEMINI_CLI_TRUST_WORKSPACE: "true" }
+                ? {
+                    GEMINI_CLI_TRUST_WORKSPACE: "true",
+                    // Selects the manual paste-a-code sign-in over the one
+                    // that redirects to a port on this server; see
+                    // `browserCliSpec`. `BROWSER` alone does not do it — the
+                    // CLI only treats the literal value "www-browser" as a
+                    // suppressed browser.
+                    NO_BROWSER: "true",
+                  }
                 : {}),
             }),
     };
@@ -2796,6 +2914,23 @@ export class ProviderChatService {
       delete env[name];
     }
 
+    // Declaring the method up front means the CLI never shows its auth-type
+    // menu. That menu used to be answered by writing "1" to stdin the instant
+    // the process started, which is a race this cannot afford now: the same
+    // stdin carries the authorization code, and a "1" the menu did not
+    // consume is read as the code instead.
+    if (input.provider === "google") {
+      const geminiDirectory = path.join(home, ".gemini");
+      await mkdir(geminiDirectory, { recursive: true });
+      await writeFile(
+        path.join(geminiDirectory, "settings.json"),
+        `${JSON.stringify({
+          security: { auth: { selectedType: "oauth-personal" } },
+        })}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    }
+
     const flow: DeviceAuthFlow = {
       id: randomUUID(),
       userId: input.userId,
@@ -2817,6 +2952,8 @@ export class ProviderChatService {
     const announced = new Promise<void>((resolve) => {
       announce = resolve;
     });
+    /** A URL the CLI printed that is not on a known sign-in host. */
+    let fallbackUrl: string | undefined;
 
     flow.process = this.longRunningSpawner(
       anthropic
@@ -2841,6 +2978,7 @@ export class ProviderChatService {
         ...(signInFlow === "code_exchange"
           ? { stdin: "pipe" as const }
           : {}),
+        ...(browser?.ptyLogin === true ? { pty: true as const } : {}),
       },
       (line) => {
         const parsed = parseDeviceAuthLine(line);
@@ -2850,7 +2988,31 @@ export class ProviderChatService {
             input.provider === "openai" ||
             isUserVerificationUrl(parsed.url))
         ) {
-          flow.verificationUrl ??= parsed.url;
+          // A URL on the vendor's own sign-in host is taken at once. Any
+          // other is only held as a fallback, because the first URL a CLI
+          // prints is often a banner, a docs page or a status link — Cursor
+          // was sending people to github.com this way, which is Copilot's
+          // sign-in and not Cursor's. The fallback is still promoted shortly
+          // after, so a vendor moving to a host not listed here degrades to
+          // the old behaviour instead of never showing a link at all.
+          if (isSignInUrl(parsed.url, browser?.signInHosts)) {
+            flow.verificationUrl ??= parsed.url;
+          } else if (fallbackUrl === undefined) {
+            fallbackUrl = parsed.url;
+            const promote = setTimeout(() => {
+              if (flow.verificationUrl === undefined) {
+                flow.verificationUrl = fallbackUrl;
+                if (flow.mode === "code_exchange" || flow.userCode !== undefined) {
+                  announce();
+                }
+              }
+            }, UNRECOGNIZED_SIGN_IN_URL_GRACE_MS);
+            // Deliberately not unref'd: this timer *is* the sign-in prompt
+            // when no recognized URL follows, and an unref'd one can be
+            // dropped before it fires, leaving the flow waiting on a link
+            // that was already in hand.
+            void promote;
+          }
         }
         flow.userCode ??= parsed.code;
         if (parsed.expiresInMinutes !== undefined) {
@@ -2867,14 +3029,6 @@ export class ProviderChatService {
         }
       },
     );
-    // Gemini exposes sign-in as the first option in its interactive auth
-    // picker. Screen-reader mode plus a piped answer makes that menu drivable
-    // from the web flow while the rest of the OAuth exchange stays in the
-    // user's browser.
-    if (input.provider === "google") {
-      flow.process.write("1");
-    }
-
     this.deviceAuthFlows.set(flow.id, flow);
     void flow.process.done.then(
       (output) => this.finishDeviceAuth(flow, output),
@@ -2883,6 +3037,13 @@ export class ProviderChatService {
         flow.detail = error instanceof Error ? error.message : String(error);
       },
     );
+    // Gemini does not exit once it is signed in — it goes on to the chat it
+    // would normally start, so waiting for the process to end waits forever.
+    // The credential file appearing is the actual completion signal, so it is
+    // watched for, and the CLI is stopped once it lands.
+    if (input.provider === "google") {
+      this.watchForGeminiCredential(flow);
+    }
     flow.timer = setTimeout(() => {
       if (flow.status === "pending") {
         flow.status = "expired";
@@ -3075,6 +3236,52 @@ export class ProviderChatService {
       // isolation everything else here maintains.
       await removeCredentialHome(flow.home);
     }
+  }
+
+  /**
+   * Finishes a Gemini sign-in the moment its credential file appears.
+   *
+   * Every other CLI here exits when its sign-in is done, so the process
+   * ending is the signal. Gemini's manual flow runs inside the interactive
+   * session — the only mode that offers it — and that session keeps running
+   * afterwards, so there is nothing to wait for. What does happen, exactly
+   * once, is `oauth_creds.json` being written.
+   */
+  private watchForGeminiCredential(flow: DeviceAuthFlow): void {
+    const credentials = path.join(flow.home, ".gemini", "oauth_creds.json");
+    const deadline = flow.expiresAtMs;
+    const poll = async (): Promise<void> => {
+      while (flow.status === "pending" && Date.now() < deadline) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, GEMINI_CREDENTIAL_POLL_MS);
+          timer.unref?.();
+        });
+        if (flow.status !== "pending" || !existsSync(credentials)) {
+          continue;
+        }
+        // The CLI writes the file and then carries on; stopping it here is
+        // what lets the staged home be read and removed. `finishBrowserAuth`
+        // is called directly rather than through `done` because a killed
+        // process reports failure, and the credential is already on disk.
+        flow.process.kill();
+        await flow.process.done.catch(() => undefined);
+        if (flow.status === "pending") {
+          await this.finishBrowserAuth(flow, {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            durationMs: 0,
+          });
+        }
+        return;
+      }
+    };
+    void poll().catch((error: unknown) => {
+      if (flow.status === "pending") {
+        flow.status = "failed";
+        flow.detail = error instanceof Error ? error.message : String(error);
+      }
+    });
   }
 
   /** Stores the browser session written by Cursor, Copilot, Kiro or Gemini. */

@@ -142,10 +142,26 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
   && gemini --version \
   && copilot --version
 # Cursor and Kiro publish their CLIs through vendor installers rather than the
-# npm registry. Install into the image once, then expose only the resulting
-# executables to the unprivileged runtime user. Their sign-in state is never
-# stored in this layer; the web flow always redirects HOME to a per-user
-# temporary directory and encrypts the captured session afterwards.
+# npm registry. Install into the image once, then expose the results to the
+# unprivileged runtime user. Their sign-in state is never stored in this
+# layer; the web flow always redirects HOME to a per-user temporary directory
+# and encrypts the captured session afterwards.
+#
+# The two are exposed differently on purpose, because they are different
+# shapes. `kiro-cli` is one self-contained ELF binary and copies fine. Cursor
+# is not a binary at all: `cursor-agent` is a small bash launcher that resolves
+# its own directory (through symlinks, with realpath) and execs a *bundled*
+# node against `index.js` beside it — 569 files in total, native modules
+# included. Copying that launcher to /usr/local/bin, which is what this did,
+# left it looking for `/usr/local/bin/index.js`; the node image does have a
+# `/usr/local/bin/node` for it to find first, so the failure came a step later
+# and read as the CLI being broken rather than misplaced. `agent --version`
+# then failed for every build and every run. So the package directory is moved
+# whole and the launcher is symlinked into it, which is exactly what the
+# vendor's own installer does (it symlinks ~/.local/bin/agent into
+# ~/.local/share/cursor-agent/versions/<v>/). Verified both ways against the
+# real package: copied out it cannot find its node, symlinked in it prints its
+# version.
 #
 # Neither installer takes a version pin the way the npm block above does —
 # `cursor.com/install` is a live script that embeds whatever build Cursor
@@ -173,8 +189,12 @@ RUN for attempt in 1 2 3; do \
       echo "Kiro CLI install failed (attempt ${attempt}/3)"; \
       [ "${attempt}" = 3 ] || sleep 5; \
     done; \
-    if [ -f /root/.local/bin/agent ]; then \
-      install -m 0755 /root/.local/bin/agent /usr/local/bin/agent && agent --version; \
+    if [ -d /root/.local/share/cursor-agent/versions ]; then \
+      mv /root/.local/share/cursor-agent /opt/cursor-agent \
+      && chmod -R a+rX /opt/cursor-agent \
+      && ln -sf "$(find /opt/cursor-agent/versions -mindepth 1 -maxdepth 1 -type d | sort | tail -1)/cursor-agent" /usr/local/bin/agent \
+      && agent --version \
+      || echo "Cursor CLI did not install cleanly; continuing without it"; \
     else \
       echo "Cursor CLI did not install; continuing without it"; \
     fi; \
