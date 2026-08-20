@@ -226,12 +226,24 @@ ENV PATH=/home/node/.local/bin:$PATH
 # its own OAuth App (with Enable Device Flow ticked) and replace the id —
 # compose deployments already mask it with whatever their .env says.
 ENV COORD_GITHUB_CLIENT_ID=Ov23liGI2B1T62b0ifdC
+# Where the Copilot CLI unpacks itself. The published package is a launcher;
+# the program proper is an 8.7MB app.js plus ~200 sibling files it extracts on
+# first run, and its default location is $HOME/.cache — which every sign-in and
+# every task run redirects to a fresh throwaway directory. Left there it is
+# re-extracted per invocation, and the credential capture that walks that home
+# stores fragments of the program instead of the token.
+#
+# One shared directory on the writable layer, owned by the runtime user, so the
+# unpack happens once per container. It holds no secrets: the program is
+# identical for every user, and each user's sign-in stays in their own home.
+ENV COORD_COPILOT_PKG_CACHE=/var/cache/coord/copilot
 WORKDIR /app
 COPY --from=build /app /app
 COPY infrastructure/docker/control-plane-entrypoint.sh /usr/local/bin/coord-control-plane
 RUN chmod +x /usr/local/bin/coord-control-plane \
-  && mkdir -p /data \
-  && chown node:node /data
+  && mkdir -p /data /var/cache/coord/copilot \
+  && chown node:node /data \
+  && chown -R node:node /var/cache/coord
 # No `USER node` here, and the entrypoint is why.
 #
 # A mounted volume replaces the directory created above with a fresh

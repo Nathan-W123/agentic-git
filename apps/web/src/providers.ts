@@ -26,6 +26,7 @@ import {
   captureBrowserSession,
   captureClaudeSession,
   credentialHint,
+  programCacheEnv,
   withCredentialHome,
   type CredentialHome,
   type CredentialVisibility,
@@ -2760,6 +2761,11 @@ export class ProviderChatService {
               // Make CLIs print the URL instead of opening it on the server.
               BROWSER: "echo",
               GH_BROWSER: "echo",
+              // Keep the CLI's own program cache out of the home that is about
+              // to be captured as this user's credential. Copilot unpacks ~200
+              // files here otherwise, and capturing those instead of the token
+              // is what produced a stored session the CLI could not load.
+              ...programCacheEnv(PROVIDER_VENDORS[input.provider]),
               ...(input.provider === "google"
                 ? { GEMINI_CLI_TRUST_WORKSPACE: "true" }
                 : {}),

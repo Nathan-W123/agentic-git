@@ -945,6 +945,31 @@ export async function restoreClaudeSession(
 }
 
 /**
+ * Directories a CLI fills with its *program*, never with a credential.
+ *
+ * These CLIs ship as a small launcher that unpacks a large payload into the
+ * home on first run — Copilot alone writes ~200 files, including an 8.7MB
+ * `app.js`, under `.cache/copilot/pkg/`. Walking into that is not merely
+ * wasteful, it corrupts the credential: the bounds below stop at 128 files of
+ * 256KB, so the small `index.js` is captured while the `app.js` it imports is
+ * skipped for size, and the real token is crowded out entirely. Restoring that
+ * bundle then leaves a half-extracted package the launcher prefers over a good
+ * one, and the CLI dies with ERR_MODULE_NOT_FOUND on its own missing `app.js`.
+ *
+ * Matched by name at any depth: XDG and macOS caches, npm's own two, and the
+ * `pkg`/`versions` directories these launchers unpack into. No vendor stores a
+ * sign-in under any of these names.
+ */
+const PROGRAM_CACHE_DIRECTORIES = new Set([
+  ".cache",
+  "Caches",
+  "node_modules",
+  ".npm",
+  "pkg",
+  "versions",
+]);
+
+/**
  * Captures a CLI's isolated login home as a bounded relative-path map.
  *
  * Cursor, Copilot and Kiro do not promise one portable token filename. Their
@@ -963,7 +988,9 @@ export async function captureBrowserSession(home: string): Promise<string> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const full = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        await visit(full);
+        if (!PROGRAM_CACHE_DIRECTORIES.has(entry.name)) {
+          await visit(full);
+        }
         continue;
       }
       if (!entry.isFile()) {
@@ -1014,6 +1041,18 @@ export async function restoreBrowserSession(
         "The stored browser session contains an unsafe path",
         "invalid_session_file",
       );
+    }
+    // Credentials captured before program caches were excluded still carry
+    // fragments of the CLI's own payload. Writing those back is what leaves a
+    // half-extracted package the launcher then prefers over a good one, so
+    // they are dropped here too and the CLI unpacks itself cleanly instead.
+    if (
+      normalized
+        .split("/")
+        .slice(0, -1)
+        .some((segment) => PROGRAM_CACHE_DIRECTORIES.has(segment))
+    ) {
+      continue;
     }
     const target = path.join(home, ...normalized.split("/"));
     await mkdir(path.dirname(target), { recursive: true });
@@ -1145,6 +1184,53 @@ const CONFIG_DIRECTORY_VARIABLES: Partial<Record<VendorCliKind, string>> = {
   claude: "CLAUDE_CONFIG_DIR",
   codex: "CODEX_HOME",
 };
+
+/**
+ * Where the Copilot CLI may unpack itself: shared, stable, and outside every
+ * staged home.
+ *
+ * The published `@github/copilot` package is a launcher; the program proper is
+ * an 8.7MB `app.js` and ~200 sibling files that it extracts on first run. Left
+ * to its default it picks `$HOME/.cache/copilot/pkg`, and since each run gets
+ * a fresh throwaway home that is a full re-extraction *per invocation* — slow,
+ * disk-hungry, and sitting exactly where the credential capture walks.
+ *
+ * `COPILOT_PKG_CACHE_HOME` is first in the launcher's own search order, so
+ * pointing it at one shared directory makes the unpack happen once per
+ * container. Nothing secret lives here: it is the program, identical for every
+ * user, and each user's *sign-in* stays in their own isolated home.
+ */
+export function copilotPackageCacheDirectory(): string {
+  // The image points this at a directory on the container's own writable layer
+  // and owned by the runtime user. Falling back to the temp directory keeps
+  // development and tests working, at the cost of re-extracting whenever that
+  // is cleared.
+  const configured = process.env["COORD_COPILOT_PKG_CACHE"];
+  return configured !== undefined && configured.length > 0
+    ? configured
+    : path.join(os.tmpdir(), "coord-copilot-pkg");
+}
+
+/**
+ * Environment that keeps a vendor CLI's program cache out of a staged home.
+ *
+ * Applied wherever one of these CLIs is launched against an isolated home —
+ * credential probes, real runs, and the browser sign-in that first creates the
+ * credential — so all three agree on where the program lives.
+ */
+export function programCacheEnv(
+  vendor: VendorCliKind,
+): Record<string, string> {
+  if (vendor !== "copilot") {
+    return {};
+  }
+  return {
+    COPILOT_PKG_CACHE_HOME: copilotPackageCacheDirectory(),
+    // A background version bump mid-probe races the extraction it is reading
+    // from, and the image already pins the version it installed.
+    COPILOT_AUTO_UPDATE: "false",
+  };
+}
 
 /** Every variable that could carry a credential into one of these CLIs. */
 const ALL_CREDENTIAL_VARIABLES = [
@@ -1360,6 +1446,16 @@ export async function openCredentialHome(input: {
     // host's ~/.gemini session is not on the path the CLI searches.
     env["HOME"] = directory;
     env["USERPROFILE"] = directory;
+    // Redirecting the home also redirects wherever the CLI unpacks itself, so
+    // the program cache is pointed back out at a shared directory. Without it
+    // Copilot re-extracts ~200 files into every throwaway home.
+    const programCache = programCacheEnv(vendor);
+    Object.assign(env, programCache);
+    if (vendor === "copilot") {
+      await mkdir(copilotPackageCacheDirectory(), { recursive: true }).catch(
+        () => undefined,
+      );
+    }
     // Redirecting the home also loses whatever directories the user had
     // marked trusted, and the CLI refuses to run headless in an untrusted
     // directory — it exits 55 naming this variable, before it ever attempts
