@@ -41,7 +41,10 @@ test("a reaction can be any emoji, not only the one the client could send", asyn
   assert.match(app, /case "channel-react-pick":/u);
   assert.match(app, /reactionPicker\(node, activeChannelId\(\), value\)/u);
   assert.match(app, /case "channel-react-choose":/u);
-  assert.match(app, /toggleChannelReaction\(activeChannelId\(\), value, emoji\)/u);
+  assert.match(
+    app,
+    /toggleChannelReaction\(activeChannelId\(\), value, emoji, render\)/u,
+  );
 
   // A tally under a message toggles the emoji it counts. It used to carry no
   // emoji at all, so clicking somebody else's 🎉 added a 👍 beside it.
@@ -410,4 +413,87 @@ test("pinned messages stay available and open at their thread root", async () =>
     "/**\n * Removes one whole thread",
   );
   assert.match(deletion, /if \(response\?\.redacted !== true\)/u);
+});
+
+test("a reaction is only offered where it can be saved, and is taken back when it is not", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+
+  // Reactions live on `channel_messages`. A reply is a row in another table
+  // entirely, so `toggleChannelReaction` in the store throws for one, the
+  // route answers 404 — and the optimistic emoji stayed on screen anyway,
+  // claiming a reaction the server had no record of.
+  //
+  // Decided on `messageId`, the field that says what a row *is*, rather than
+  // on the flag that says how it is drawn: the thread panel renders its own
+  // root in the reply style, and that root is a channel message which can be
+  // reacted to perfectly well.
+  assert.match(chats, /const isReplyRow = entry\.messageId !== undefined;/u);
+  const row = slice(chats, "  const reactions = Object.entries", "\n    <span class=\"cmsg-actions\">");
+  assert.match(
+    row,
+    /deleted \|\| isReplyRow \|\| reactions\.length === 0/u,
+    "the reaction tally should be drawn only where a reaction can be saved",
+  );
+  const actions = slice(chats, '    <span class="cmsg-actions">', "\n/**");
+  assert.match(
+    actions,
+    /deleted \|\| isReplyRow\s*\n\s*\? ""\s*\n\s*: iconButton\("smile"/u,
+    "the hover React button should be behind the same guard",
+  );
+
+  // And where a reaction *can* be sent, a refusal puts the tally back — the
+  // same rollback `toggleChannelMessagePin` does, for the same reason: nothing
+  // re-reads reactions until somebody else posts in the room.
+  const toggle = slice(data, "export function toggleChannelReaction(", "\n/**");
+  assert.match(toggle, /const before =\s*\n?\s*current === undefined/u);
+  assert.match(toggle, /delete message\.reactions\[emoji\];/u);
+  assert.match(toggle, /message\.reactions\[emoji\] = \{ \.\.\.before \};/u);
+  assert.match(toggle, /rerender\?\.\(\);/u);
+});
+
+test("a message that did not send says so, and can be sent again", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const css = await publicFile("styles.css");
+
+  // `sendChannelMessage` and `postChannelReply` have written this flag all
+  // along and no renderer read it, so a message that never reached the server
+  // looked exactly like one that had. The toast was the only evidence, and it
+  // clears itself.
+  assert.match(chats, /entry\.failed === true \? " cmsg-failed" : ""/u);
+  assert.match(chats, /class="cmsg-failed-mark">\$\{icon\("alert"\)\} Not sent/u);
+  assert.match(chats, /data-act="chan-message-resend"/u);
+  assert.match(app, /case "chan-message-resend":/u);
+  assert.match(app, /resendChannelMessage\(activeChannelId\(\), value, render\)/u);
+  assert.match(css, /\.cmsg-failed-note \{/u);
+
+  // The resend reuses the local id. The optimistic scheme assumes one POST per
+  // id — `isServerChannelId` reads it to decide whether a reply may be
+  // threaded on yet — so a second row would put two copies in the room.
+  const resend = slice(data, "export function resendChannelMessage(", "\nfunction findChannelMessage(");
+  assert.doesNotMatch(resend, /Date\.now\(\)/u, "a resend must not mint a new id");
+  assert.match(resend, /entry\.failed = undefined;/u);
+  assert.match(resend, /entry\.failed = true;/u, "a resend that fails again stays marked");
+});
+
+test("the command picker offers every command it has", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // Ten commands and a cut at six meant `retry`, `cancel`, `stop` and `help`
+  // were invisible on an empty query — which is the query the picker opens on
+  // — including the one command whose whole job is to list the others.
+  const candidates = slice(
+    chats,
+    "function channelSlashCandidates(",
+    "\nfunction slashPopover(",
+  );
+  assert.doesNotMatch(candidates, /\.slice\(0, \d+\)/u);
+  assert.match(candidates, /return matching;/u);
+  // Ten rows is not a scale problem, because the list already scrolls: the
+  // picker has been bounded by the viewport as well as by a ceiling since
+  // before the cut was removed, so nothing about the layout had to change.
+  assert.match(css, /max-height: min\(180px, 30vh\);\s*\n\s*overflow-y: auto;/u);
 });

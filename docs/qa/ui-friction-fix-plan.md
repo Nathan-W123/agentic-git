@@ -540,6 +540,36 @@ of that list get closer here without being done: message permalinks become
 reachable once the `before` cursor is wired in batch 5, and the quick switcher
 is batch 8.
 
+## What has landed
+
+Batches 1 through 9 are implemented, client-side only; no server, route or
+schema changed. Where the code departs from the letter of the plan above, the
+reason is recorded here rather than left for the next reader to reconstruct.
+
+| Finding | State | Note |
+| --- | --- | --- |
+| 1 Notifications unreachable | done | Bell in the topbar, and a second one in the channel sidebar's foot — the Chats screen draws no topbar (`BARE`), so the one screen people are on would otherwise be the one without it. Also a menu row. |
+| 2 My Agents unreachable | done | Unconditional row in the account menu; "Connect an agent first" left as it was. |
+| 3 Notification goes nowhere | done | `notifications()` carries `repositoryId`; `notif-open` opens the channel and the thread whose root carries the same `taskId`. Read-marking stayed unconditional. |
+| 7 Failed message looks sent | done | `cmsg-failed` row, "Not sent", and a resend that reuses the local id. Still local-only: a failed post was never persisted, so it does not survive a reload. A durable outbox remains out of scope. |
+| 8 Reacting to a reply | done | Guarded on `entry.messageId` — the field that says what a row *is* — rather than on `isReply`, which only says how it is drawn. The thread panel renders its own root in the reply style, and that root is a channel message that can be reacted to. Plus an optimistic rollback in `toggleChannelReaction`. Server-side reply reactions remain wanted and unbuilt. |
+| 9 Files-changed disclosure | done | `state.changesOpen`, keyed by message id. |
+| 10 Dismissed question | done | Chip above the composer reading the pre-filter list, with an Answer button. The sidebar badge for other rooms is still out (it needs pending questions for channels that are not open). |
+| 11 Slash picker cap | done | The cut is gone; the picker already scrolled. |
+| 12 Nothing stops an agent | done | D1 taken: a Stop control in the thread header, behind a confirm. My Agents now offers Cancel *or* Retry by status rather than both always, through the same confirm and the same terminal-status set. |
+| 13 Settings push copy | done | D2(a) taken: the card names `/push`. No Publish button. |
+| 5 Transcript window | done | `limit` on the first page, a `before` cursor for earlier ones, deduped by id, kept in `channelEarlier` so the socket reconcile cannot drop them, with the scroll anchored on the `scrollHeight` delta. |
+| 6 Search sees only roots | done | Roots match through their replies, and the empty state names the boundary and offers the way past it. |
+| 14 Diff bound to a run | done | `state.changeSets` keyed by `taskId`, filled by `ensureChangeSetForTask` from the task's own `runId` (falling back to the repository's recent runs). The global stays the Code screen's answer, which is what "latest" means there. |
+| 15 Agent Files tab | done | Scoped to the tasks that belong to the agent on screen; the global is deliberately *not* the fallback, since falling back to it is the bug. |
+| 17 Invisible unread DMs | done | `dmUnreadTotal`, a badge on both account buttons, and a Direct messages row that lists conversations with per-person counts. |
+| 18 DM panel parity | partial | Day separators only — the one item that actively misinforms. Author grouping and the unread line remain. |
+| 22 Keyboard | done | Ctrl/⌘-K quick switcher over channels, people and the four screens; `/` focuses channel search; `?` opens a shortcut sheet. Drawn in `#layer-root`, outside the shell the poll replaces. |
+| 19 Two Settings cards | done | D3(a) taken: one card, one row per provider, saying both whether the deployment offers it and whether *you* have connected it. |
+| 21 Silent attachments | done | D4(a) taken: skipped files are named, with the reason and the accepted list. The allowlist is unchanged. |
+| 4 Notification read state | partial | The cheap half: `markRead` prunes against the ids still derivable from the loaded window instead of blindly keeping the last 400, which could drop an id still on screen. Not re-keyed per user — `forgetOtherAccount` already clears `ag.read` when a different account signs in, and the store is read at module load, before there is a principal to key on. The durable server-side read state is still the only real fix. |
+| 20 Account management | blocked | Unchanged. Needs a profile read/write route with its own authorization rules, and a server-side owner. |
+
 ## Validating this work
 
 The browser surface ships as plain ES modules with no bundler, and the test run

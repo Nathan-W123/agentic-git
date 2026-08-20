@@ -66,6 +66,20 @@ export const state = {
   fileCache: new Map(),
   dirty: new Set(),
   expanded: new Set(["src", "src/routes", "lib", "lib/oauth", "db", "tests"]),
+  /**
+   * Changesets keyed by the task that produced them — see
+   * `ensureChangeSetForTask`.
+   *
+   * `state.changeSet` (assigned by `ensureCodeData`) is one changeset standing
+   * for a whole repository: whichever run happened to be found first. That is
+   * the right answer for the Code screen, which means "latest", and the wrong
+   * one everywhere a reader opened a file *from a particular piece of work* —
+   * an older thread's file list showed either somebody else's diff or "not in
+   * this changeset". This map is the per-task answer those places read.
+   */
+  changeSets: {},
+  /** Tasks already looked up, so a fruitless walk happens once — see above. */
+  changeSetTried: new Set(),
   diffMode: stored("ag.diffMode", "unified"),
   chatOpen: stored("ag.chatOpen", "true") !== "false",
   treeOpen: false,
@@ -147,6 +161,26 @@ export const state = {
   /** Repository ids whose channel has been read from the server at least once. */
   channelLoaded: new Set(),
   channelLoadingId: undefined,
+  /**
+   * Whether the server has older roots than the ones loaded, per repository.
+   *
+   * Set from whether the last page came back full: a short page is the end of
+   * the history, a full one means the cursor has somewhere left to go. The
+   * "Load earlier messages" control is gated on this, so a reader is never
+   * offered a button that can only answer "nothing".
+   */
+  channelHasMore: {},
+  /**
+   * Roots read back through the `before` cursor, per repository, oldest first.
+   *
+   * Kept apart from `channelMessages` because `loadChannel` *replaces* that
+   * array on every reconcile — every socket event re-reads the newest page —
+   * so pages fetched by scrolling back would be dropped by the next thing
+   * anybody said. Held here, they are re-joined on the front after each read.
+   */
+  channelEarlier: {},
+  /** Whether an earlier page is in flight, so the control cannot double-fire. */
+  channelLoadingEarlier: undefined,
   /** Every repository collaborator's connected agents, keyed by repository id
    *  and read from `/channel/agents` — see `ensureChannelRoster`. Starts empty
    *  per repository until the first fetch resolves; `channelAgentsFor` always
@@ -274,10 +308,24 @@ export const state = {
    *
    * Closed by default. Six controls in a header 44 pixels tall is most of a
    * phone's width spent on things a reader wants on one visit in twenty.
+   *
+   * Kept across reloads for the same reason `agentView` is: opening the tools
+   * is a statement about how this reader works, not about this visit, and
+   * re-hiding them on every load made the choice something to make again
+   * every time rather than once.
    */
-  chanToolsOpen: false,
+  chanToolsOpen: stored("ag.chantools") === "true",
   /** Whether a summary is unfolded, keyed by reply id. Absent means open. */
   summaryOpen: {},
+  /**
+   * Whether a changed-files disclosure is unfolded, keyed by message id.
+   *
+   * The same treatment `thinkingOpen` and `summaryOpen` already have, and for
+   * the same reason: `render()` rebuilds the transcript on every poll, so a
+   * `<details>` that remembers nothing folds itself back up under a reader
+   * halfway through the list. Absent means closed.
+   */
+  changesOpen: {},
   /** A simplified rewrite of one summary, once it has been asked for. */
   simplified: {},
   /** Whether the simple version is the one showing, keyed by reply id. */
@@ -320,6 +368,12 @@ export const state = {
   pinsOpen: true,
   /** A one-shot message id the next channel render should scroll to. */
   scrollToMessage: undefined,
+  /**
+   * The task the open file was reached from, if any — see `panelChangeSet`
+   * in screen-chats.js. Absent means "no particular piece of work", which is
+   * what the Code screen's global changeset answers for.
+   */
+  chanFileTaskId: undefined,
   /** A one-shot message id the next thread render should scroll to. */
   scrollToThreadMessage: undefined,
   /** Everyone in each repository's room — org members plus repo grantees. */
@@ -2107,6 +2161,15 @@ export function myAgents() {
       // which is what made the screen keep saying so while every task it was
       // given failed to sign in.
       connected: expired === undefined && provider.connected === true,
+      // The two facts that used to live in two Settings cards a screen apart.
+      // `connected` is true whenever *this machine's* CLI is signed in, which
+      // is somebody else's account for everyone but whoever set the host up —
+      // so a row could read "Connected" while this account had connected
+      // nothing, which is precisely the confusion the second card existed to
+      // clear up. Both are carried here now, and one card says both.
+      mine: provider.ownCredential !== undefined,
+      hostAccount:
+        provider.connected === true && provider.ownCredential === undefined,
       needsReconnect: expired !== undefined,
       presence: expired === undefined ? presence : "offline",
       status:
@@ -2278,6 +2341,12 @@ export function notifications() {
       at: event.occurredAt,
       body: notificationBody(event, task),
       taskId: event.taskId,
+      // Where the thing being reported happened, so the row can be opened
+      // rather than only ticked off. Taken from the same task lookup that
+      // already resolves the body — a notification with no task behind it
+      // (or one that has aged out of the loaded window) simply has no
+      // destination, and `notif-open` falls back to marking it read.
+      repositoryId: task?.repositoryId,
       agentId: task?.agentId,
       // Which agent, where the room can say. `agentId` is the vendor CLI, so
       // the chip read "codex" on every Codex notification in the list no
@@ -2334,10 +2403,27 @@ export function markRead(ids) {
   for (const id of ids) {
     state.readNotifications.add(id);
   }
-  window.localStorage.setItem(
-    "ag.read",
-    JSON.stringify([...state.readNotifications].slice(-400)),
-  );
+  // Pruned against what is still derivable from the loaded audit window
+  // rather than blindly kept to the last 400. The old truncation dropped
+  // whichever ids were oldest in insertion order, which is not the same as
+  // oldest on screen — so a row still visible could lose its read mark and
+  // start nagging again, while ids for events long gone from the window were
+  // kept forever. Anything just marked survives regardless: it is on screen
+  // by definition, even if the window has not caught up with it yet.
+  const window_ = notifications();
+  const live = new Set(ids);
+  for (const row of window_) {
+    live.add(row.id);
+  }
+  // An empty window is "the audit feed has not arrived yet", not "nothing is
+  // outstanding" — pruning against it would throw away every mark this
+  // browser holds on the first click after a cold start.
+  const kept =
+    window_.length === 0
+      ? [...state.readNotifications].slice(-400)
+      : [...state.readNotifications].filter((id) => live.has(id));
+  state.readNotifications = new Set(kept);
+  window.localStorage.setItem("ag.read", JSON.stringify(kept));
 }
 
 /**
@@ -2807,6 +2893,19 @@ export function pendingQuestionFor(repositoryId) {
 }
 
 /**
+ * Everything an agent is still waiting on here, dismissed or not.
+ *
+ * The filter above is what "Not now" does, and it is right that it hides the
+ * prompt — but a wait that has been put aside is still a run holding a
+ * workspace, and the reader was left with nothing on screen saying so. The
+ * chip above the composer reads this list rather than reproducing the
+ * filter, so the two cannot come to disagree about what is outstanding.
+ */
+export function outstandingQuestionsFor(repositoryId) {
+  return state.pendingQuestions[repositoryId] ?? [];
+}
+
+/**
  * Sends one set of answers back to the run that is holding for them.
  *
  * Every question gets an entry, in order, including the skipped ones: the
@@ -3037,6 +3136,21 @@ export function noteDirectMessageDeleted(frame) {
 /** Whether somebody has this project open right now. */
 export function personOnline(userId) {
   return state.presence.includes(userId);
+}
+
+/**
+ * Everything waiting from everybody, as one number.
+ *
+ * `dmUnreadFrom` answers for a person the reader can already see in the
+ * roster beside them. A message from somebody outside this channel had no
+ * number anywhere on screen, which is the whole of finding 17: the count was
+ * loaded and never rendered.
+ */
+export function dmUnreadTotal() {
+  return state.dmConversations.reduce(
+    (total, conversation) => total + Number(conversation.unread ?? 0),
+    0,
+  );
 }
 
 /** Unread messages waiting from one person. */
@@ -3306,8 +3420,29 @@ export function takeReadyPlan(repositoryId) {
   return pending.messageId;
 }
 
+/** The first page's size, and the size of every page read back after it. */
+const CHANNEL_PAGE = 50;
+
+/**
+ * The cursor one root sits at, in the terms the server pages by.
+ *
+ * `listChannelMessages` orders and filters on `bumpedAt ?? createdAt` — a
+ * thread that was replied to today sorts by that reply, not by the day it was
+ * opened — so paging on anything else would step over roots.
+ */
+function channelCursor(entry) {
+  return entry?.bumpedAt ?? entry?.createdAt ?? entry?.at;
+}
+
 async function loadChannel(repositoryId) {
-  const response = await apiOptional(channelPath(repositoryId, "/messages"), undefined);
+  const response = await apiOptional(
+    // An explicit page size rather than the server's default. The route has
+    // read `limit` and `before` all along; the client asked for neither, so
+    // the transcript was permanently the newest fifty roots with no way to
+    // reach anything older.
+    channelPath(repositoryId, `/messages?limit=${CHANNEL_PAGE}`),
+    undefined,
+  );
   if (response === undefined) {
     return false;
   }
@@ -3318,6 +3453,19 @@ async function loadChannel(repositoryId) {
     ? (state.channelMessages[repositoryId] ?? [])
     : undefined;
   state.channelMessages[repositoryId] = (response.messages ?? []).map(withSentTime);
+  const page = state.channelMessages[repositoryId];
+  // A full page means the cursor has somewhere left to go; a short one is the
+  // start of the room.
+  state.channelHasMore[repositoryId] = page.length >= CHANNEL_PAGE;
+  // Pages already read back through the cursor are re-joined on the front,
+  // because the read above replaces the array outright — see `channelEarlier`.
+  const seen = new Set(page.map((message) => message.id));
+  const earlier = (state.channelEarlier[repositoryId] ?? []).filter(
+    (message) => !seen.has(message.id),
+  );
+  if (earlier.length > 0) {
+    state.channelMessages[repositoryId] = [...earlier, ...page];
+  }
   notePromptedThread(repositoryId, before);
   notePlanReady(repositoryId, before);
   state.channelAgentOverrides[repositoryId] = {
@@ -3367,6 +3515,76 @@ export async function ensureChannelMessages(repositoryId, rerender) {
     state.channelLoadingId = undefined;
   }
   rerender();
+}
+
+/**
+ * Reads the page of roots immediately older than the oldest one loaded.
+ *
+ * The server has offered this since the route was written — `before` filters
+ * on the same stamp the list is ordered by, and answers the newest `limit`
+ * roots older than it. Nothing in the client ever sent it, which is what
+ * capped the transcript at its first page.
+ *
+ * Deliberately touches nothing but the messages. The read cursor, the pins
+ * and the command list describe the channel rather than the page, and
+ * replacing them from a page of history would move the unread line to a
+ * boundary in last month's transcript.
+ */
+export async function loadEarlierChannelMessages(repositoryId, rerender) {
+  const loaded = state.channelMessages[repositoryId] ?? [];
+  const cursor = channelCursor(loaded[0]);
+  if (
+    !repositoryId ||
+    !state.projectId ||
+    cursor === undefined ||
+    state.channelLoadingEarlier === repositoryId ||
+    state.channelHasMore[repositoryId] === false
+  ) {
+    return;
+  }
+  state.channelLoadingEarlier = repositoryId;
+  rerender?.();
+  try {
+    const response = await apiOptional(
+      channelPath(
+        repositoryId,
+        `/messages?limit=${CHANNEL_PAGE}&before=${encodeURIComponent(cursor)}`,
+      ),
+      undefined,
+    );
+    if (response === undefined) {
+      return;
+    }
+    const page = (response.messages ?? []).map(withSentTime);
+    // A short page is the beginning of the room. Recorded before the dedupe,
+    // which can empty a page that was not short.
+    state.channelHasMore[repositoryId] = page.length >= CHANNEL_PAGE;
+    const known = new Set(loaded.map((message) => message.id));
+    const fresh = page.filter((message) => !known.has(message.id));
+    if (fresh.length === 0) {
+      // Nothing new behind the cursor: stop offering the control rather than
+      // letting it be pressed forever against the same page.
+      state.channelHasMore[repositoryId] = false;
+      return;
+    }
+    state.channelEarlier[repositoryId] = [
+      ...fresh,
+      ...(state.channelEarlier[repositoryId] ?? []),
+    ];
+    // Re-read rather than reusing the array captured above: a socket
+    // reconcile can have replaced the timeline while this page was in
+    // flight, and writing the stale copy back would undo whatever arrived
+    // during the wait.
+    const current = state.channelMessages[repositoryId] ?? [];
+    const held = new Set(current.map((message) => message.id));
+    state.channelMessages[repositoryId] = [
+      ...fresh.filter((message) => !held.has(message.id)),
+      ...current,
+    ];
+  } finally {
+    state.channelLoadingEarlier = undefined;
+    rerender?.();
+  }
 }
 
 /**
@@ -3480,6 +3698,69 @@ export async function ensureRepositoryGrants(repositoryId, rerender) {
 }
 
 /**
+ * The changeset one task produced, fetched once and kept.
+ *
+ * `state.changeSet` is a single global filled by `ensureCodeData` from
+ * whichever run it found first for the repository — the right answer for the
+ * Code screen, which means "the latest work", and wrong everywhere a reader
+ * opens a file from a particular thread. Every `ChangeSet` already carries
+ * its `taskId`, and a run detail returns all of a run's changesets alongside
+ * its tasks, so scoping is a client-side cache rather than a schema change.
+ *
+ * Resolution goes through the task's own `runId` where the tasks list carries
+ * one, and falls back to the runs already loaded for that repository. Nothing
+ * new is asked of the server either way.
+ */
+export async function ensureChangeSetForTask(taskId, rerender) {
+  if (
+    !taskId ||
+    state.changeSets[taskId] !== undefined ||
+    // Asked and answered "nothing". Without this, a task whose run carries no
+    // changeset — a plan, a cancelled run, work that touched no files — would
+    // re-walk the repository's recent runs on every click that reached here.
+    state.changeSetTried.has(taskId)
+  ) {
+    return state.changeSets[taskId];
+  }
+  state.changeSetTried.add(taskId);
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  const runIds = [
+    ...new Set(
+      [
+        task?.runId,
+        ...state.runs
+          .filter(
+            (run) =>
+              task?.repositoryId === undefined ||
+              run.repositoryId === task.repositoryId,
+          )
+          .slice(0, 5)
+          .map((run) => run.id),
+      ].filter((id) => typeof id === "string" && id !== ""),
+    ),
+  ];
+  for (const runId of runIds) {
+    const detail = await apiOptional(`/runs/${encodeURIComponent(runId)}`, {
+      run: undefined,
+    });
+    const changeSets = detail.run?.changeSets ?? [];
+    // Every changeset the run carries is cached, not only the one asked for:
+    // the fetch has already been paid for, and the next file opened from a
+    // sibling task in the same run is then free.
+    for (const changeSet of changeSets) {
+      if (changeSet?.taskId !== undefined) {
+        state.changeSets[changeSet.taskId] ??= changeSet;
+      }
+    }
+    if (state.changeSets[taskId] !== undefined) {
+      break;
+    }
+  }
+  rerender?.();
+  return state.changeSets[taskId];
+}
+
+/**
  * Re-reads a channel that has already loaded once.
  *
  * This is the reconcile half of every channel write below: `connectSocket`'s
@@ -3559,6 +3840,70 @@ export function sendChannelMessage(repositoryId, text, kind = "user", authorId) 
     });
   }
   return message;
+}
+
+/**
+ * Sends a message or reply that failed to reach the server again.
+ *
+ * Reuses the local id rather than minting a new one. The optimistic scheme
+ * assumes one POST per local id — `isServerChannelId` reads that id to decide
+ * whether a reply or a reaction may be threaded onto a row yet — so a resend
+ * that made a second row would leave the failed one on screen beside it and
+ * put two copies in the room the moment both landed.
+ *
+ * The row is only unmarked once the POST resolves. A resend that fails again
+ * leaves the failure exactly where it was, which is the whole point of
+ * drawing it: the words are still recoverable from the screen.
+ */
+export function resendChannelMessage(repositoryId, entryId, rerender) {
+  const entry = findChannelMessage(repositoryId, entryId);
+  if (entry === undefined || entry.failed !== true || !state.projectId) {
+    return;
+  }
+  const parentId = entry.messageId;
+  if (parentId !== undefined && !isServerChannelId(repositoryId, parentId)) {
+    toast("The thread this answers has not been saved yet.", "error");
+    return;
+  }
+  entry.failed = undefined;
+  entry.sending = true;
+  rerender?.();
+  const request =
+    parentId === undefined
+      ? api(channelPath(repositoryId, "/messages"), {
+          method: "POST",
+          body: { content: entry.content },
+        })
+      : api(
+          channelPath(
+            repositoryId,
+            `/messages/${encodeURIComponent(parentId)}/replies`,
+          ),
+          {
+            method: "POST",
+            body: {
+              content: entry.content,
+              ...(entry.referencedMessageId === undefined
+                ? {}
+                : { referencedMessageId: entry.referencedMessageId }),
+            },
+          },
+        );
+  void request
+    .then(() => {
+      // The server's own copy arrives through the socket reconcile, which
+      // replaces this row wholesale — see `refreshChannelMessages`. Clearing
+      // the flag here is what keeps the row honest in the moment between.
+      entry.sending = undefined;
+      entry.failed = undefined;
+      void refreshChannelMessages(repositoryId).then(() => rerender?.());
+    })
+    .catch((error) => {
+      entry.sending = undefined;
+      entry.failed = true;
+      toast(`Still did not send: ${error.message}`, "error");
+      rerender?.();
+    });
 }
 
 function findChannelMessage(repositoryId, messageId) {
@@ -3685,13 +4030,24 @@ export function toggleChannelMessagePin(repositoryId, messageId, rerender) {
   }
 }
 
-export function toggleChannelReaction(repositoryId, messageId, emoji = "👍") {
+export function toggleChannelReaction(
+  repositoryId,
+  messageId,
+  emoji = "👍",
+  rerender,
+) {
   const message = findChannelMessage(repositoryId, messageId);
   if (message === undefined) {
     return;
   }
   message.reactions ??= {};
   const current = message.reactions[emoji];
+  // What to put back if the server refuses, read before the optimistic write
+  // — the same shape `toggleChannelMessagePin` keeps for the same reason. A
+  // tally left standing after a refusal is a claim the store has no record
+  // of, and nothing re-reads reactions until somebody else posts in the room.
+  const before =
+    current === undefined ? undefined : { count: current.count, mine: current.mine };
   if (current?.mine === true) {
     const count = current.count - 1;
     if (count <= 0) {
@@ -3706,7 +4062,15 @@ export function toggleChannelReaction(repositoryId, messageId, emoji = "👍") {
     void api(channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/reactions`), {
       method: "POST",
       body: { emoji },
-    }).catch((error) => toast(`Reaction did not save: ${error.message}`, "error"));
+    }).catch((error) => {
+      if (before === undefined) {
+        delete message.reactions[emoji];
+      } else {
+        message.reactions[emoji] = { ...before };
+      }
+      rerender?.();
+      toast(`Reaction did not save: ${error.message}`, "error");
+    });
   }
 }
 
@@ -4581,6 +4945,7 @@ export async function moveChannelFile(from, directory) {
 /** Forget an open file, and the draft that went with it. */
 export function closeChannelFile() {
   state.chanFileView = undefined;
+  state.chanFileTaskId = undefined;
   state.chanFileMode = "diff";
   state.chanFileBase = undefined;
   state.chanFileDraft = undefined;

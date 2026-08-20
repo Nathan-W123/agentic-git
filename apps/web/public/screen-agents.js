@@ -26,6 +26,7 @@ import {
   startProviderSignIn,
   state,
   submitProviderSignInCode,
+  taskBelongsToAgent,
   taskProgress,
   taskStarted,
 } from "./data.js";
@@ -50,6 +51,20 @@ import {
   tileCard,
   toast,
 } from "./ui.js";
+
+/**
+ * The statuses a task can be retried from — the ones where it has stopped.
+ *
+ * The rest (`submitted`, `claimed`, `planned`, `open`) all mean the work is
+ * still somebody's, and the server refuses a retry on them. Exported so the
+ * handler in `app.js` guards on the same set this screen draws from: two
+ * copies of this rule is how a button and its refusal come to disagree.
+ */
+export const TERMINAL_TASK_STATUS = new Set([
+  "integrated",
+  "failed",
+  "cancelled",
+]);
 
 function filtered(agents) {
   const query = state.agentQuery.trim().toLowerCase();
@@ -200,13 +215,34 @@ function agentHero(agent) {
 }
 
 /**
+ * The changeset belonging to the agent on screen, or nothing.
+ *
+ * Resolved through the per-task cache (`state.changeSets`, keyed by taskId —
+ * see `ensureChangeSetForTask`) so this answers for *this* agent's work. The
+ * global is deliberately not the fallback: falling back to it is exactly the
+ * behaviour that put another agent's files under this agent's name.
+ */
+function agentChangeSet(agent) {
+  const own = state.tasks.filter((task) =>
+    taskBelongsToAgent(task, agent),
+  );
+  for (const task of own) {
+    const changeSet = state.changeSets[task.id];
+    if (changeSet !== undefined) {
+      return changeSet;
+    }
+  }
+  return undefined;
+}
+
+/**
  * The connection's properties, as labelled rails rather than as a paragraph
  * of dot-separated fragments. Three lines that each answer one question:
  * what it thinks with, what it is on, and what it has touched.
  */
 function agentRails(agent) {
   const task = agent.task;
-  const patches = state.changeSet?.patches ?? [];
+  const patches = agentChangeSet(agent)?.patches ?? [];
   return `<div class="agent-rails">
     ${sectionRail(
       "Model",
@@ -319,17 +355,32 @@ function tabBody(tab, agent) {
           : `<span class="mt-stage">Queued — waiting for a free slot</span>`
       }</div>
       <div class="sum-actions">
-        <button class="btn btn-sm" data-act="task-cancel" data-value="${esc(task.id)}">
-          Cancel task
-        </button>
-        <button class="btn btn-sm" data-act="task-retry" data-value="${esc(task.id)}">
-          Retry
-        </button>
+        ${
+          // Cancel only while there is something to stop, and Retry only once
+          // there is not. The two used to be offered side by side whatever
+          // state the task was in, so one of them was always the one the
+          // server would refuse. Both now go through the same confirm and the
+          // same guard in `app.js`.
+          TERMINAL_TASK_STATUS.has(task.status)
+            ? `<button class="btn btn-sm" data-act="task-retry" data-value="${esc(task.id)}">
+                Retry
+              </button>`
+            : `<button class="btn btn-sm" data-act="task-cancel" data-value="${esc(task.id)}">
+                Cancel task
+              </button>`
+        }
       </div>
     </div>`;
   }
   if (tab === "files") {
-    const files = state.changeSet?.patches ?? [];
+    // Only this agent's work. `state.changeSet` is one global filled from
+    // whichever run `ensureCodeData` found first for the repository, so this
+    // panel showed whatever the Code screen was holding under the heading
+    // "Files this agent changes" — including, routinely, another agent's
+    // files. Until the per-task cache has an entry for work belonging to the
+    // agent on screen, the honest answer is the empty state: an empty panel
+    // is a smaller lie than somebody else's changes.
+    const files = agentChangeSet(agent)?.patches ?? [];
     if (files.length === 0) {
       return `<div style="padding:18px">${emptyState(
         "file",
