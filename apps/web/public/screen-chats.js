@@ -1359,10 +1359,11 @@ function threadSaidCount(said) {
  * words survive for screen readers, and the sentence itself is still in the
  * room, one message down, now pointing back here.
  *
- * A run still going draws its position as a one-pixel ring around the face of
- * the agent running it, which is also lifted to the front of the stack. The
- * bar this replaces sat on its own line under the thread and could only ever
- * say that something was moving, never who was moving it.
+ * A run still going draws its position as a small filling donut in the corner
+ * of the face of the agent running it, where that face's status dot sits; the
+ * face is also lifted to the front of the stack. The bar this replaces sat on
+ * its own line under the thread and could only ever say that something was
+ * moving, never who was moving it.
  */
 function threadSummaryLink(entry, replies, repositoryId, progress) {
   const titled = threadTitleReply(entry);
@@ -1370,10 +1371,10 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
   const participants = threadParticipants(replies, repositoryId);
-  // Whoever the ring belongs to goes first. A stack of faces is in the order
+  // Whoever the badge belongs to goes first. A stack of faces is in the order
   // people happened to speak, which is no help at all when the question the
   // reader has is "who is on this right now" — so the one being measured is
-  // lifted to the front of the stack, where the ring is unobstructed and the
+  // lifted to the front of the stack, where the badge is unobstructed and the
   // answer is the first thing in the row.
   const working =
     progress === undefined
@@ -1502,6 +1503,27 @@ function messageReference(root, repositoryId) {
         line.length > 80 ? `${line.slice(0, 77)}…` : line,
       )}</span>
     </button>`;
+}
+
+/** A reply's address to another message in the currently open thread. */
+function threadMessageReference(entry, repositoryId) {
+  if (entry.messageId === undefined || entry.referencedMessageId === undefined) {
+    return "";
+  }
+  const root = channelMessagesFor(repositoryId).find(
+    (candidate) => candidate.id === entry.messageId,
+  );
+  const target =
+    root?.id === entry.referencedMessageId
+      ? root
+      : (root?.replies ?? []).find(
+          (reply) => reply.id === entry.referencedMessageId,
+        );
+  if (target === undefined) {
+    return "";
+  }
+  return messageReference(target, repositoryId)
+    .replace('data-act="channel-pin-jump"', 'data-act="thread-reference-jump"');
 }
 
 /**
@@ -1955,7 +1977,11 @@ function messageRow(
     // The id is the jump target the pinned banner scrolls to. Gated on the
     // channel copy only: the thread panel renders the same root with
     // isReply, and one message must not put two ids in the document.
-    isReply ? "" : ` id="cmsg-${esc(entry.id)}"`
+    isReply
+      ? entry.messageId === undefined
+        ? ""
+        : ` id="thread-msg-${esc(entry.id)}"`
+      : ` id="cmsg-${esc(entry.id)}"`
   }>
     ${
       // Above the name, the way a reply's reference sits above the reply:
@@ -1975,7 +2001,7 @@ function messageRow(
         : inlineReply
           ? messageReference(inlineReplyTo, repositoryId)
           : isReply
-            ? ""
+            ? threadMessageReference(entry, repositoryId)
             : referencedRoot !== undefined
               ? messageReference(referencedRoot, repositoryId)
               : holdNoticeRef(entry, repositoryId)
@@ -4107,8 +4133,15 @@ function threadPanel(repositoryId) {
   // same reason: an image staged for the next reply, or one still uploading,
   // is something to send with no text at all — and on a phone the idle bar
   // folds its note away unless it is told the box is not idle.
+  const threadReplyTarget =
+    root.id === state.threadReplyMessageId
+      ? root
+      : (root.replies ?? []).find(
+          (reply) => reply.id === state.threadReplyMessageId,
+        );
   const threadPending =
     state.threadAttaching > 0 ||
+    threadReplyTarget !== undefined ||
     draftAttachments(repositoryId, state.threadDraft).length > 0;
   return `<aside class="thread-panel">
     ${panelGrip()}
@@ -4122,9 +4155,9 @@ function threadPanel(repositoryId) {
         title: root.pinnedAt === undefined ? "Pin thread" : "Unpin thread",
       })}
       ${iconButton("reply", {
-        act: "composer-thread-continue",
+        act: "thread-composer-focus",
         value: messageId,
-        title: "Send the next channel message into this thread",
+        title: "Reply in this thread",
       })}
       ${panelClose("channel-thread-close", "Close thread (Esc)")}
     </header>
@@ -4137,6 +4170,7 @@ function threadPanel(repositoryId) {
     </div>
     <div class="thread-composer-wrap${mentionActiveFor("thread") ? " mention-active" : ""}">
       <div data-thread-composer-suggestions>${composerSuggestions(repositoryId, "thread")}</div>
+      ${threadReplyChip(threadReplyTarget, repositoryId)}
       ${draftAttachmentPreviews(repositoryId, {
         draft: state.threadDraft,
         removeAct: "thread-attachment-remove",
@@ -4176,6 +4210,26 @@ function threadPanel(repositoryId) {
       </form>
     </div>
   </aside>`;
+}
+
+/** The selected reply target above the thread composer. */
+function threadReplyChip(target, repositoryId) {
+  if (target === undefined) {
+    return "";
+  }
+  const author = channelAuthor(repositoryId, target);
+  const title = `${author.name}: ${String(target.content ?? "").trim()}`;
+  return `<div class="composer-thread">
+    ${icon("reply")}
+    <span class="ct-label">Replying to</span>
+    <span class="ct-title" title="${esc(title)}">${esc(title.slice(0, 70))}</span>
+    <span class="spacer"></span>
+    ${iconButton("close", {
+      act: "thread-reply-clear",
+      title: "Cancel reply",
+      small: true,
+    })}
+  </div>`;
 }
 
 /**
@@ -5469,10 +5523,26 @@ export function submitThreadReply(rerender) {
   if (state.activeChannelThread === undefined) {
     return;
   }
-  // The whole draft, references included: the reply carries its images the
-  // same way a channel message does, and `messageBody` reads them back out.
-  postChannelReply(activeChannelId(), state.activeChannelThread, state.threadDraft);
+  const root = channelMessagesFor(activeChannelId()).find(
+    (entry) => entry.id === state.activeChannelThread,
+  );
+  const referencedMessageId =
+    root?.id === state.threadReplyMessageId ||
+    (root?.replies ?? []).some(
+      (reply) => reply.id === state.threadReplyMessageId,
+    )
+      ? state.threadReplyMessageId
+      : undefined;
+  // The whole draft carries its images the same way a channel message does;
+  // the reply address is separate so it never becomes editable quote text.
+  postChannelReply(
+    activeChannelId(),
+    state.activeChannelThread,
+    state.threadDraft,
+    referencedMessageId,
+  );
   state.threadDraft = "";
+  state.threadReplyMessageId = undefined;
   closeComposerAutocomplete("thread");
   rerender();
 }

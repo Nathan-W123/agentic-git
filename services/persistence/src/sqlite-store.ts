@@ -3452,6 +3452,17 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A reply must have content");
     }
+    if (input.referencedMessageId !== undefined) {
+      const targetIsRoot = input.referencedMessageId === input.messageId;
+      const targetIsReply = this.db
+        .prepare(
+          "SELECT 1 FROM channel_message_replies WHERE id = ? AND message_id = ?",
+        )
+        .get(input.referencedMessageId, input.messageId);
+      if (!targetIsRoot && targetIsReply === undefined) {
+        throw new Error("A reply reference must target the same thread");
+      }
+    }
     const reply: ChannelReply = {
       id: createId("chanreply"),
       messageId: input.messageId,
@@ -3459,12 +3470,16 @@ export class SqliteCoordinationStore implements CoordinationStore {
       authorId: input.authorId,
       content,
       createdAt: new Date().toISOString(),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     };
     this.db
       .prepare(
         `INSERT INTO channel_message_replies
-           (id, message_id, kind, author_id, content, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (id, message_id, kind, author_id, content, created_at,
+            referenced_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         reply.id,
@@ -3473,6 +3488,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         reply.authorId,
         reply.content,
         reply.createdAt,
+        reply.referencedMessageId ?? null,
       );
     return reply;
   }
@@ -3688,6 +3704,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db
         .prepare("DELETE FROM channel_message_reactions WHERE message_id = ?")
         .run(replyId);
+      this.db
+        .prepare(
+          `UPDATE channel_message_replies SET referenced_message_id = NULL
+           WHERE message_id = ? AND referenced_message_id = ?`,
+        )
+        .run(messageId, replyId);
       this.db
         .prepare("DELETE FROM channel_message_replies WHERE id = ?")
         .run(replyId);
@@ -4027,6 +4049,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   private toChannelReply(row: Row): ChannelReply {
+    const referencedMessageId = optionalText(row, "referenced_message_id");
     return {
       id: text(row, "id"),
       messageId: text(row, "message_id"),
@@ -4034,6 +4057,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       authorId: text(row, "author_id"),
       content: text(row, "content"),
       createdAt: text(row, "created_at"),
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     };
   }
 

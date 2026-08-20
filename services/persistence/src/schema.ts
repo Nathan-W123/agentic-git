@@ -1102,6 +1102,18 @@ export const MIGRATIONS: readonly Migration[] = [
          ON direct_messages(referenced_message_id)`,
     ],
   },
+  {
+    // Thread replies use the same explicit reply address as channel and
+    // direct messages. The target can be either the root or another reply,
+    // so application validation enforces that it belongs to this thread.
+    version: 39,
+    name: "channel-reply-references",
+    statements: [
+      `ALTER TABLE channel_message_replies ADD COLUMN referenced_message_id TEXT`,
+      `CREATE INDEX channel_replies_by_reference
+         ON channel_message_replies(referenced_message_id)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

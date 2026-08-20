@@ -893,4 +893,14 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON direct_messages(referenced_message_id)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 39,
+    name: "channel-reply-references",
+    statements: [
+      `ALTER TABLE channel_message_replies ADD COLUMN referenced_message_id TEXT`,
+      `CREATE INDEX channel_replies_by_reference
+         ON channel_message_replies(referenced_message_id)`,
+    ],
+  },
 ];

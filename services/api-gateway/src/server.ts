@@ -7753,6 +7753,11 @@ export class ApiGateway {
       }
       const body = objectBody(await this.readJson(request));
       const content = stringField(body["content"], "content", { max: 10_000 }) ?? "";
+      const referencedMessageId = stringField(
+        body["referencedMessageId"],
+        "referencedMessageId",
+        { optional: true },
+      );
       let reply;
       try {
         reply = await this.options.store.addChannelReply({
@@ -7761,6 +7766,9 @@ export class ApiGateway {
           kind: "user",
           authorId: principal.user.id,
           content,
+          ...(referencedMessageId === undefined
+            ? {}
+            : { referencedMessageId }),
         });
       } catch (error) {
         throw new HttpError(

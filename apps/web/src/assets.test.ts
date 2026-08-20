@@ -824,6 +824,34 @@ test("the phone drawer is dragged out under the finger, not toggled", async () =
   );
 });
 
+test("the phone drawer closes when a sidebar destination opens", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const action = (start: string, end: string) =>
+    app.slice(app.indexOf(`case "${start}"`), app.indexOf(`case "${end}"`));
+
+  // A channel already owns this behaviour in its screen helper. Keep that
+  // route as the reference while the other destinations use the drawer's
+  // shared setter before their render replaces the shell.
+  assert.match(action("channel-open", "composer-plus"), /openChannel\(value, render\)/u);
+  const channel = chats.slice(
+    chats.indexOf("export function openChannel"),
+    chats.indexOf("export function submitComposerMessage"),
+  );
+  assert.match(channel, /state\.chanSidebarOpen = false;[\s\S]*?rerender\(\);/u);
+
+  const dm = action("dm-open", "mention-agents-insert");
+  assert.match(dm, /state\.dmReplyMessageId = undefined;\s*setChanDrawer\(false\);\s*render\(\);/u);
+  assert.match(
+    action("agent-chat-open", "summary-toggle"),
+    /setChanDrawer\(false\);\s*render\(\);/u,
+  );
+  assert.match(
+    action("agent-panel-open", "agent-panel-tab"),
+    /setChanDrawer\(false\);\s*render\(\);/u,
+  );
+});
+
 test("a reply carries a quiet visual path back to its root", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
@@ -3235,7 +3263,8 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
   // Two pixels of accent, and a full circle so the part still to come is there
-  // to be read against.
+  // to be read against — drawn as the badge in the face's bottom right corner
+  // rather than as a ring around the whole portrait.
   const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
   assert.notEqual(ring, undefined, "the ring should be drawn on the face");
@@ -3248,6 +3277,20 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     ring ?? "",
     /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 2px\)/u,
   );
+  // A status mark, not a frame: it is pinned to one corner and sized in
+  // pixels, so it cannot grow back into a ring around the face.
+  assert.match(ring ?? "", /right: -2px;/u);
+  assert.match(ring ?? "", /bottom: 0;/u);
+  assert.match(ring ?? "", /width: 10px;/u);
+  assert.match(ring ?? "", /height: 10px;/u);
+  assert.doesNotMatch(ring ?? "", /inset:/u);
+
+  // And it sits on the chat's own ground, the way the presence dot does, so
+  // the hollow middle reads as a gauge rather than as a hole in the portrait.
+  const seat = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
+    .exec(css)?.[1];
+  assert.notEqual(seat, undefined, "the badge should be seated on the face");
+  assert.match(seat ?? "", /background: var\(--bg-chat\);/u);
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {

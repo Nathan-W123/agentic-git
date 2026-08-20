@@ -374,6 +374,8 @@ export const state = {
    */
   agentChatDrafts: {},
   threadDraft: "",
+  /** The message the thread composer is replying to, kept outside its text. */
+  threadReplyMessageId: undefined,
   mentionActive: false,
   mentionQuery: "",
   mentionIndex: 0,
@@ -3583,7 +3585,12 @@ function isServerChannelId(repositoryId, id) {
 }
 
 /** A reply, appended to the thread hanging off one channel message. */
-export function postChannelReply(repositoryId, messageId, text) {
+export function postChannelReply(
+  repositoryId,
+  messageId,
+  text,
+  referencedMessageId = undefined,
+) {
   const trimmed = String(text ?? "").trim();
   const message = findChannelMessage(repositoryId, messageId);
   if (message === undefined || trimmed === "") {
@@ -3597,12 +3604,16 @@ export function postChannelReply(repositoryId, messageId, text) {
     authorId: currentUserId() || "you",
     content: trimmed,
     at: new Date().toISOString(),
+    ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
   };
   message.replies.push(reply);
   if (state.projectId && isServerChannelId(repositoryId, messageId)) {
     void api(channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/replies`), {
       method: "POST",
-      body: { content: trimmed },
+      body: {
+        content: trimmed,
+        ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
+      },
     }).catch((error) => {
       reply.failed = true;
       toast(`Reply did not send: ${error.message}`, "error");
@@ -4203,10 +4214,19 @@ export async function deleteChannelReplyEntry(repositoryId, messageId, replyId) 
     entry.id === messageId
       ? {
           ...entry,
-          replies: (entry.replies ?? []).filter((reply) => reply.id !== replyId),
+          replies: (entry.replies ?? [])
+            .filter((reply) => reply.id !== replyId)
+            .map((reply) =>
+              reply.referencedMessageId === replyId
+                ? { ...reply, referencedMessageId: undefined }
+                : reply,
+            ),
         }
       : entry,
   );
+  if (state.threadReplyMessageId === replyId) {
+    state.threadReplyMessageId = undefined;
+  }
 }
 
 export async function deleteAllChannelThreads(repositoryId) {

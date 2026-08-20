@@ -2103,27 +2103,6 @@ async function clearThreadsAction(repositoryId) {
  * the agent actually said, and a reader who finds the short version too short
  * has to be able to get back to it in one click.
  */
-/**
- * The first line of the message being answered, shaped for a composer.
- *
- * A quote rather than a mechanism: replying is typing into the composer the
- * thread already has, and this only saves the reader scrolling back to say
- * which message they meant. Truncated hard because the quote is an address,
- * not a reprint — the full text is right there in the transcript.
- */
-function replyQuote(content) {
-  const line =
-    String(content ?? "")
-      .split(/\n/u)
-      .map((part) => part.trim())
-      .find((part) => part.length > 0) ?? "";
-  if (line === "") {
-    return "";
-  }
-  const excerpt = line.length > 80 ? `${line.slice(0, 77)}…` : line;
-  return `> ${excerpt}\n\n`;
-}
-
 async function simplifySummaryAction(repositoryId, replyId) {
   if (state.simplifying[replyId] === true) {
     return;
@@ -4852,6 +4831,7 @@ document.addEventListener("click", (event) => {
         return;
       }
       state.activeChannelThread = value;
+      state.threadReplyMessageId = undefined;
       // Chosen, so `openPromptedThread` will not choose over it.
       state.autoOpenedThread = undefined;
       // …and puts away an open conversation, for the same reason: they share
@@ -4862,14 +4842,11 @@ document.addEventListener("click", (event) => {
       closeChannelFile();
       render();
       return;
-    case "composer-thread-continue":
-      // Aimed, then the panel gets out of the way: the point is to type in
-      // the channel and have it land here, so leaving the thread open over
-      // the transcript would hide the conversation being added to.
-      state.composerThreadId = value;
-      state.activeChannelThread = undefined;
-      render();
-      $("[data-act='channel-input']")?.focus();
+    case "thread-composer-focus":
+      // The header's reply affordance belongs to the thread already on
+      // screen; it must not close that thread and silently move the draft to
+      // the group-channel composer.
+      $("[data-act='channel-thread-input']")?.focus();
       return;
     case "composer-thread-clear":
       state.composerThreadId = undefined;
@@ -4878,6 +4855,7 @@ document.addEventListener("click", (event) => {
       return;
     case "channel-thread-close":
       state.activeChannelThread = undefined;
+      state.threadReplyMessageId = undefined;
       render();
       return;
     // A plan takes the panel the same way a thread does, and puts away
@@ -4917,11 +4895,9 @@ document.addEventListener("click", (event) => {
       state.autoOpenedThread = undefined;
       render();
       return;
-    // Replying to a message that is already inside a thread: the answer can
-    // only land in that same thread, so "reply" means the composer opens
-    // with the message being answered already named. The quote is plain
-    // text on purpose — the composer stays an ordinary textarea, and the
-    // person deletes it as easily as they got it.
+    // Replying inside a thread uses the same selected-message mechanism as
+    // the group and direct-message composers. The address stays outside the
+    // draft, so choosing a reply never rewrites words already being typed.
     case "thread-reply-quote": {
       const root = channelMessagesFor(activeChannelId()).find(
         (entry) => entry.id === state.activeChannelThread,
@@ -4932,13 +4908,28 @@ document.addEventListener("click", (event) => {
           : root.id === value
             ? root
             : (root.replies ?? []).find((reply) => reply.id === value);
-      state.threadDraft = `${replyQuote(target?.content)}${state.threadDraft}`;
+      state.threadReplyMessageId = target?.id;
       render();
       {
         const input = $("[data-act='channel-thread-input']");
         input?.focus();
         input?.setSelectionRange(input.value.length, input.value.length);
       }
+      return;
+    }
+    case "thread-reply-clear":
+      state.threadReplyMessageId = undefined;
+      render();
+      $("[data-act='channel-thread-input']")?.focus();
+      return;
+    case "thread-reference-jump": {
+      const root = state.activeChannelThread;
+      const selector =
+        value === root ? ".thread-root" : `#thread-msg-${CSS.escape(value)}`;
+      document.querySelector(selector)?.scrollIntoView({
+        block: "center",
+        behavior: "smooth",
+      });
       return;
     }
     case "dm-reply-quote": {
@@ -4972,6 +4963,7 @@ document.addEventListener("click", (event) => {
       state.activeAgentPanel = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
+      setChanDrawer(false);
       render();
       void loadDmThread(value).then(() => render());
       return;
@@ -5039,6 +5031,7 @@ document.addEventListener("click", (event) => {
       state.agentPanelTab = "chat";
       state.activeDm = undefined;
       state.activeChannelThread = undefined;
+      setChanDrawer(false);
       render();
       return;
     }
@@ -5094,6 +5087,7 @@ document.addEventListener("click", (event) => {
       state.agentPanelTab = "spec";
       state.activeDm = undefined;
       state.activeChannelThread = undefined;
+      setChanDrawer(false);
       render();
       // Usage belongs to the signed-in account, so it is only requested for
       // one of this person's own agents. Channel membership is repository
