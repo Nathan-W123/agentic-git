@@ -157,6 +157,19 @@ interface TestRuntime {
    * there was a local pass. A test about the filter says otherwise.
    */
   setLocalChatter: (reads: (text: string) => boolean) => void;
+  /**
+   * Holds every classify call open until the test releases it — a stand-in
+   * for the case this fixture cannot otherwise reach: a real CLI spin-up
+   * contending with another process on the same host for however long that
+   * takes. Undefined answers immediately, which is every other test's
+   * default.
+   */
+  setClassifyGate: () => { release: () => void };
+  /**
+   * Makes the next `count` classify calls answer with nothing, as a timeout
+   * or an unreachable CLI would. Calls after that answer normally again.
+   */
+  setClassifyFailures: (count: number) => void;
   /** Makes the next revert answer with this instead of succeeding. */
   setRollbackOutcome: (
     outcome: { status: string; explanation: string } | undefined,
@@ -379,6 +392,11 @@ async function startRuntime(
   // filter gets one that decides nothing, which is also the honest default:
   // "unsure" is what it answers for anything it is not certain about.
   let localChatter: (text: string) => boolean = () => false;
+  // A gate a test can hold shut, so a classify call takes real, controllable
+  // time rather than always resolving on the same tick every other test
+  // relies on.
+  let classifyGate: Promise<void> | undefined;
+  let classifyFailuresRemaining = 0;
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
   // What `rollbackRepository` answers. Undefined is the ordinary success; a
@@ -421,6 +439,16 @@ async function startRuntime(
     // about dispatch does not have to know the question exists; a test about
     // the decision itself sets `taskClassification`.
     if (/Reply with exactly one of these three lines/u.test(asked)) {
+      if (classifyGate !== undefined) {
+        await classifyGate;
+      }
+      if (classifyFailuresRemaining > 0) {
+        classifyFailuresRemaining -= 1;
+        // Empty, not missing: this is the exact shape `askAgent` sees from a
+        // real provider that answered with nothing, which is what a timeout
+        // or an unreachable CLI looks like once it reaches this layer.
+        return { text: "" };
+      }
       // An acknowledgement is never work, and a fake that answered otherwise
       // would be unfaithful in the one way that matters: with no word list in
       // front of it, every "yes", "ok" and "thanks" in a channel now reaches
@@ -915,6 +943,19 @@ async function startRuntime(
     },
     setLocalChatter: (reads) => {
       localChatter = reads;
+    },
+    setClassifyGate: () => {
+      let release: () => void = () => undefined;
+      classifyGate = new Promise((resolve) => {
+        release = () => {
+          classifyGate = undefined;
+          resolve();
+        };
+      });
+      return { release };
+    },
+    setClassifyFailures: (count) => {
+      classifyFailuresRemaining = count;
     },
     runCalls,
     cancelCalls,
@@ -4039,6 +4080,10 @@ test("a clearly-scoped task message auto-claims to the one obviously-best agent"
     200,
   );
 
+  // Which agent gets it is what this test is about; whether the message is
+  // clear enough to act on outright is a different question, covered where
+  // the classify prompt itself is tested.
+  runtime.setTaskClassification("ACT");
   await autoClaim(owner, base, "please update the settings page layout");
 
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
@@ -4081,6 +4126,7 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
     200,
   );
 
+  runtime.setTaskClassification("ACT");
   await autoClaim(owner, base, "can we clean up the error handling for the api");
 
   // A near-tie used to mean silence, on the reasoning that a coin flip
@@ -4437,6 +4483,7 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
+  runtime.setTaskClassification("ACT");
   await autoClaim(
     owner,
     base,
@@ -4505,6 +4552,7 @@ test("recent activity is one agent's, not its owner's whole roster", async (t) =
     });
   }
 
+  runtime.setTaskClassification("ACT");
   await autoClaim(owner, base, "please deploy the postgres migration");
 
   assert.equal(
@@ -4548,6 +4596,7 @@ test("with no configured agents to join on, activity falls back to its owner", a
     submittedBy: ownerId,
   });
 
+  runtime.setTaskClassification("ACT");
   await autoClaim(owner, base, "please deploy the postgres migration");
   assert.equal(
     runtime.submittedTasks.length,
@@ -11142,268 +11191,6 @@ test("/stop names one agent even with words after the name", async (t) => {
   assert.doesNotMatch(said, /Nobody here answers/u);
 });
 
-test("an unnamed request starts without a proactive assistant response", async (t) => {
-  const runtime = await startRuntime(t);
-  const owner = new TestClient(runtime.origin);
-  const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "offer-first");
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-  runtime.chatConnections.set(bootstrapped.user.id, [
-    { provider: "anthropic", visibility: "org" },
-  ]);
-  await joinAllConnectedAgents(runtime, repositoryId);
-
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "please update the settings page layout" },
-  });
-  assert.equal(posted.status, 201);
-  // Nothing has run. Choosing the agent is a guess, and a wrong guess costs a
-  // checkout, a run and somebody's usage; a slow one costs a word.
-  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
-  const offered = await owner.request(`${base}/messages`);
-  // In the agent's own voice, not the channel's: it is the one being asked,
-  // and the author line is how a reader sees whose usage this would spend.
-  const offer = (offered.data.messages as any[]).find(
-    (message) => message.kind === "agent",
-  );
-  assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
-  assert.match(offer.content, /Want me to take this on\?/u);
-  assert.match(offer.content, /Say "yes"/u);
-  assert.match(offer.content, /@mention someone else/u);
-
-  const agreed = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
-  assert.equal(agreed.status, 201);
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
-  assert.match(
-    String(runtime.submittedTasks[0]?.objective),
-    /settings page layout/u,
-  );
-  // The existing task/question surfaces carry the follow-up. Auto-claim does
-  // not duplicate them with a chat line asking the sender to say "yes".
-  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
-  assert.deepEqual(
-    messages.map((message) => ({ kind: message.kind, content: message.content })),
-    [{ kind: "user", content: "please update the settings page layout" }],
-  );
-});
-
-test("an explicit invitation to the room starts without an assistant offer", async (t) => {
-  const runtime = await startRuntime(t);
-  const owner = new TestClient(runtime.origin);
-  const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "offer-open-room");
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-  runtime.chatConnections.set(bootstrapped.user.id, [
-    { provider: "anthropic", visibility: "org" },
-  ]);
-  await joinAllConnectedAgents(runtime, repositoryId);
-
-  const request = "any takers for the flaky auth ticket?";
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: request },
-  });
-  assert.equal(posted.status, 201, JSON.stringify(posted.data));
-  assert.equal(runtime.submittedTasks.length, 1);
-  // Both halves of what was agreed: the words the person used, and the offer
-  // they said yes to. The remark alone is what was asked; the proposal alone
-  // throws away how they asked it.
-  const objective = String(runtime.submittedTasks[0]?.objective);
-  assert.match(objective, /any takers for the flaky auth ticket/u);
-  assert.match(objective, /Agreed in the channel/u);
-});
-
-test("proactive routing reads lean channel context without replying", async (t) => {
-  const runtime = await startRuntime(t);
-  const owner = new TestClient(runtime.origin);
-  const bootstrapped = await bootstrap(owner);
-  const ownerId = bootstrapped.user.id;
-  const repositoryId = await invitableRepository(owner, "offer-context");
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-  runtime.chatConnections.set(ownerId, [
-    { provider: "anthropic", visibility: "org" },
-  ]);
-  await joinAllConnectedAgents(runtime, repositoryId);
-
-  // More than the bound, so this proves the model gets the nearby exchange
-  // rather than the whole room. Stored directly because these are setup
-  // conversation lines, not requests whose dispatch behaviour is under test.
-  for (let index = 0; index < 10; index += 1) {
-    await runtime.store.appendChannelMessage({
-      repositoryId,
-      projectId: DEFAULT_PROJECT_ID,
-      kind: "user",
-      authorId: ownerId,
-      content: `context marker ${index}: checkout flow detail`,
-    });
-  }
-
-  const request = "please fix that flow";
-  const before = runtime.chatPrompts.length;
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: request },
-  });
-  assert.equal(posted.status, 201, JSON.stringify(posted.data));
-
-  const classification = runtime.chatPrompts.slice(before).at(-1)?.prompt ?? "";
-  assert.match(classification, /Recent channel context before this request/u);
-  assert.match(classification, /Human 1: context marker 2:/u);
-  assert.match(classification, /do not interrupt their conversation/u);
-  assert.doesNotMatch(classification, /context marker 1:/u);
-  assert.match(classification, /context marker 2:/u);
-  assert.match(classification, /context marker 9:/u);
-  assert.ok(
-    classification.indexOf("context marker 9:") <
-      classification.indexOf("Current message:"),
-    classification,
-  );
-  assert.equal(
-    classification.match(/please fix that flow/gu)?.length,
-    1,
-    "the current request should be classified once, outside the background",
-  );
-
-  const offered = await owner.request(`${base}/messages`);
-  const offer = (offered.data.messages as any[]).find((message) =>
-    /^Want me to take this/u.test(String(message.content)),
-  );
-  assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
-  assert.match(String(offer.content), /Want me to take this on\?/u);
-
-  const agreed = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
-  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
-  const task = runtime.submittedTasks[0];
-  assert.match(String(task?.objective), /please fix that flow/u);
-  const context = task?.context ?? "";
-  assert.doesNotMatch(context, /context marker 1:/u);
-  assert.match(context, /context marker 2:/u);
-  assert.match(context, /context marker 9:/u);
-  assert.doesNotMatch(context, /please fix that flow/u);
-  assert.doesNotMatch(context, /Want me to take this/u);
-  const messages = (await owner.request(`${base}/messages`)).data.messages as any[];
-  assert.equal(
-    messages.some((message) => /^Want me to take this/u.test(String(message.content))),
-    false,
-  );
-});
-
-test("a generic proactive follow-up uses recent context to choose its agent", async (t) => {
-  const runtime = await startRuntime(t);
-  const owner = new TestClient(runtime.origin);
-  const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "offer-context-route");
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-  const settings = await addColleague(runtime, "context-settings@example.com");
-  const database = await addColleague(runtime, "context-database@example.com");
-  runtime.chatConnections.set(settings.id, [
-    { provider: "openai", visibility: "org" },
-  ]);
-  runtime.chatConnections.set(database.id, [
-    { provider: "google", visibility: "org" },
-  ]);
-  await joinAllConnectedAgents(runtime, repositoryId);
-
-  // The unrelated agent has the longer name and therefore wins the stable
-  // zero-score fallback. Only the preceding database discussion can make the
-  // database agent the better fit for the deliberately generic request.
-  assert.equal(
-    (await owner.request(`${base}/agents/${settings.id}:openai`, {
-      method: "POST",
-      body: { name: "Settings Page Layout Frontend Accessibility Assistant" },
-    })).status,
-    200,
-  );
-  assert.equal(
-    (await owner.request(`${base}/agents/${database.id}:google`, {
-      method: "POST",
-      body: { name: "Database Migration Agent" },
-    })).status,
-    200,
-  );
-  await runtime.store.appendChannelMessage({
-    repositoryId,
-    projectId: DEFAULT_PROJECT_ID,
-    kind: "user",
-    authorId: bootstrapped.user.id,
-    content: "The billing database migration keeps failing in CI.",
-  });
-
-  await autoClaim(owner, base, "please fix that");
-
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
-  assert.equal(runtime.submittedTasks[0]?.actorId, database.id);
-  assert.equal(runtime.submittedTasks[0]?.vendor, "gemini");
-  assert.match(
-    runtime.submittedTasks[0]?.context ?? "",
-    /billing database migration keeps failing/u,
-  );
-
-  // Context is only the fallback for a generic request. Once the current
-  // message names a lane, its own words win over the database discussion.
-  await autoClaim(owner, base, "please update the settings page layout");
-  assert.equal(runtime.submittedTasks.length, 2);
-  assert.equal(runtime.submittedTasks[1]?.actorId, settings.id);
-  assert.equal(runtime.submittedTasks[1]?.vendor, "codex");
-});
-
-test("a later yes stays ordinary conversation after proactive dispatch", async (t) => {
-  const runtime = await startRuntime(t);
-  const owner = new TestClient(runtime.origin);
-  const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "offer-mine");
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-  runtime.chatConnections.set(bootstrapped.user.id, [
-    { provider: "anthropic", visibility: "org" },
-  ]);
-  const teammate = await runtime.store.createUser({
-    email: "offer-mine-colleague@example.com",
-    displayName: "Colleague Dev",
-    passwordDigest: await hashPassword(PASSWORD),
-  });
-  await runtime.store.saveMembership({
-    organizationId: DEFAULT_ORGANIZATION_ID,
-    userId: teammate.id,
-    role: "developer",
-  });
-  const colleague = new TestClient(runtime.origin);
-  await colleague.request("/api/v1/auth/login", {
-    method: "POST",
-    body: { email: teammate.email, password: PASSWORD },
-  });
-  await joinAllConnectedAgents(runtime, repositoryId);
-
-  await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "please update the settings page layout" },
-  });
-  assert.equal(runtime.submittedTasks.length, 1);
-
-  // "yes" is common conversation, not a second task trigger now that there is
-  // no chat offer to accept.
-  const theirs = await colleague.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
-  assert.equal(theirs.status, 201);
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
-
-  const mine = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "yes" },
-  });
-  assert.equal(mine.status, 201);
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
-});
-
 test("a message the agent reads as chatter is answered with silence", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -13394,4 +13181,170 @@ test("conversation the local pass is sure about never reaches an agent", async (
     1,
     JSON.stringify(runtime.submittedTasks),
   );
+});
+
+/**
+ * A message posts immediately, whatever the agent's decision costs to reach.
+ *
+ * The classify call used to sit inside the request that posted the sender's
+ * own message — nothing was shown until it answered, and it had up to
+ * twenty seconds to. On a slow attempt that read as the feature not firing
+ * at all, because the one place that would have said otherwise was the
+ * response the sender was waiting on. It is a real model call on the
+ * account whose CLI may, at that exact moment, be busy running a coding
+ * task on this same host — contention that can genuinely slow a process
+ * spin-up — so "sometimes slow" was never a corner case here.
+ */
+test("the sender's message posts before the agent has decided anything", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "does-not-block");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const gate = runtime.setClassifyGate();
+  runtime.setTaskClassification("ACT");
+  try {
+    // The gate is held shut for the whole request — a stand-in for the
+    // worst case, a classify call that never comes back at all.
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "there's a lot of lag when loading in from mobile, find a fix" },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+    assert.equal(
+      posted.data.message.content,
+      "there's a lot of lag when loading in from mobile, find a fix",
+      "the sender's own words are in the response — nothing waited on the agent",
+    );
+    // And nothing happened yet, because nothing has been decided yet.
+    assert.equal(runtime.submittedTasks.length, 0);
+  } finally {
+    gate.release();
+  }
+
+  // Once the agent's decision actually lands, the work it describes still
+  // happens — the same outcome as an instant classification, only later.
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the decision never arrived after the gate was released",
+  );
+  assert.match(
+    String(runtime.submittedTasks[0]?.objective),
+    /lag when loading in from mobile/u,
+  );
+});
+
+/**
+ * A classify call that errors is retried once, and the retry can still
+ * answer — a single slow or dropped attempt is not the difference between a
+ * request being read and a request going quiet.
+ */
+test("a failed classify attempt gets a second try before the message goes quiet", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "retries-once");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The first attempt is the one contention would hit: it answers with
+  // nothing, exactly what a timed-out or unreachable CLI looks like from
+  // here. The second is a clean host and a clean answer — the immediate
+  // retry `readAutoClaimVerdict` makes before giving up.
+  runtime.setClassifyFailures(1);
+  runtime.setTaskClassification("ACT");
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "change the background on settings to blue" },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the retry never dispatched the work",
+  );
+  const attempts = runtime.chatPrompts
+    .slice(before)
+    .filter((entry) =>
+      /Reply with exactly one of these three lines/u.test(entry.prompt),
+    );
+  assert.equal(attempts.length, 2, "exactly one retry, not an unbounded loop");
+});
+
+/**
+ * The instruction actually says what the product wants: act on its own
+ * judgment by default, and reserve asking for a real fork in the work.
+ *
+ * A prompt is not code a type checker holds still — nothing stops a later
+ * edit from quietly softening "lean toward acting" back into "when in
+ * doubt, ask," and the softened version would still pass every dispatch
+ * test in this file, because those all set the verdict directly rather than
+ * reading it from a real model. This is the one guard that actually reads
+ * the words the model is given.
+ */
+test("the classify prompt is biased toward acting on its own judgment", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "leans-toward-acting");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("ACT");
+  const before = runtime.chatPrompts.length;
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "it looks like the token usage is wrong" },
+  });
+  await waitFor(
+    async () => runtime.chatPrompts.length > before,
+    "the classify call never ran",
+  );
+  const asked =
+    runtime.chatPrompts
+      .slice(before)
+      .map((entry) => entry.prompt)
+      .find((prompt) =>
+        /Reply with exactly one of these three lines/u.test(prompt),
+      ) ?? "";
+
+  // The framing that sets the default.
+  assert.match(asked, /Lean toward acting/u);
+  assert.match(
+    asked,
+    /fill(?:ing)? in whatever was not spelled out with their own reasonable judgment/u,
+  );
+  // ACT no longer requires the message to spell out what it wants — an
+  // observation is enough, and unspecified detail is not by itself a reason
+  // to offer instead.
+  assert.match(asked, /whether it is phrased as a direct request[\s\S]{0,40}or as an observation/u);
+  assert.match(
+    asked,
+    /not merely when something was left unspecified/u,
+  );
+  // What still offers: real ambiguity between different pieces of work, or
+  // stakes high enough that guessing is the wrong instinct even with a
+  // guess in hand — not "some detail is missing."
+  assert.match(
+    asked,
+    /could mean two or more substantially different pieces of work/u,
+  );
+  assert.match(asked, /costly or hard to undo/u);
+  // The guardrails this replaced nothing about are still here.
+  assert.match(asked, /do not interrupt their conversation/u);
 });
