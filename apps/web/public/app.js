@@ -4963,6 +4963,7 @@ document.addEventListener("click", (event) => {
       state.activeAgentPanel = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
+      setChanDrawer(false);
       render();
       void loadDmThread(value).then(() => render());
       return;
@@ -5030,6 +5031,7 @@ document.addEventListener("click", (event) => {
       state.agentPanelTab = "chat";
       state.activeDm = undefined;
       state.activeChannelThread = undefined;
+      setChanDrawer(false);
       render();
       return;
     }
@@ -5085,6 +5087,7 @@ document.addEventListener("click", (event) => {
       state.agentPanelTab = "spec";
       state.activeDm = undefined;
       state.activeChannelThread = undefined;
+      setChanDrawer(false);
       render();
       // Usage belongs to the signed-in account, so it is only requested for
       // one of this person's own agents. Channel membership is repository

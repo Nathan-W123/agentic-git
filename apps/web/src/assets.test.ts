@@ -824,6 +824,34 @@ test("the phone drawer is dragged out under the finger, not toggled", async () =
   );
 });
 
+test("the phone drawer closes when a sidebar destination opens", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const action = (start: string, end: string) =>
+    app.slice(app.indexOf(`case "${start}"`), app.indexOf(`case "${end}"`));
+
+  // A channel already owns this behaviour in its screen helper. Keep that
+  // route as the reference while the other destinations use the drawer's
+  // shared setter before their render replaces the shell.
+  assert.match(action("channel-open", "composer-plus"), /openChannel\(value, render\)/u);
+  const channel = chats.slice(
+    chats.indexOf("export function openChannel"),
+    chats.indexOf("export function submitComposerMessage"),
+  );
+  assert.match(channel, /state\.chanSidebarOpen = false;[\s\S]*?rerender\(\);/u);
+
+  const dm = action("dm-open", "mention-agents-insert");
+  assert.match(dm, /state\.dmReplyMessageId = undefined;\s*setChanDrawer\(false\);\s*render\(\);/u);
+  assert.match(
+    action("agent-chat-open", "summary-toggle"),
+    /setChanDrawer\(false\);\s*render\(\);/u,
+  );
+  assert.match(
+    action("agent-panel-open", "agent-panel-tab"),
+    /setChanDrawer\(false\);\s*render\(\);/u,
+  );
+});
+
 test("a reply carries a quiet visual path back to its root", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
