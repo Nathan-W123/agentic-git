@@ -572,7 +572,6 @@ export async function loadContext({ defer = false } = {}) {
     return;
   }
 
-  const organizations = await api("/organizations");
   state.organizations = organizations.organizations ?? [];
   if (!state.organizations.some((org) => org.id === state.organizationId)) {
     state.organizationId = state.organizations[0]?.id ?? "";
