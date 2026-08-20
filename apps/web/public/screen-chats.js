@@ -2690,8 +2690,16 @@ function channelMentionCandidates(repositoryId) {
  */
 function channelSlashCandidates(repositoryId, target = "channel") {
   const query = state.slashQuery.trim().toLowerCase();
-  const matching = (state.channelSlashCommands[repositoryId] ?? []).filter(
-    (entry) => String(entry.name ?? "").startsWith(query),
+  // One list, wherever it came from. The server answers with the same set for
+  // every channel, and the private chat is reachable from screens that have
+  // never opened one — so a repository with nothing loaded borrows whichever
+  // channel did load, rather than saying this account has no commands.
+  const known =
+    state.channelSlashCommands[repositoryId] ??
+    Object.values(state.channelSlashCommands)[0] ??
+    [];
+  const matching = known.filter((entry) =>
+    String(entry.name ?? "").startsWith(query),
   );
   if (target === "thread") {
     // The server sends one channel-wide command list, with the general task
@@ -2714,16 +2722,19 @@ function channelSlashCandidates(repositoryId, target = "channel") {
   return matching.slice(0, 6);
 }
 
-function slashPopover(candidates, target) {
+function slashPopover(candidates, target = "channel") {
   if (candidates.length === 0) {
     return `<div class="mention-pop"><div class="mention-item" style="color:var(--text-4)">No commands</div></div>`;
   }
   const index = state.slashIndex % candidates.length;
+  // The composer that opened the list is named on every row, so the click and
+  // the keyboard put the command in the same box. Four of them now: the
+  // channel, a thread, the private chat with an agent, and a direct message.
   return `<div class="mention-pop">${candidates
     .map(
       (entry, position) => `<button type="button" class="mention-item slash-item${
         position === index ? " active" : ""
-      }" data-act="${target === "thread" ? "thread" : "channel"}-slash-pick"
+      }" data-act="${target}-slash-pick"
         data-value="${esc(entry.name)}">
         <span class="slash-name">/${esc(entry.name)}</span>
         <span class="slash-summary">${esc(entry.summary ?? "")}</span>
@@ -2732,7 +2743,7 @@ function slashPopover(candidates, target) {
     .join("")}</div>`;
 }
 
-function mentionPopover(candidates, target) {
+function mentionPopover(candidates, target = "channel") {
   if (candidates.length === 0) {
     return `<div class="mention-pop"><div class="mention-item" style="color:var(--text-4)">No matches</div></div>`;
   }
@@ -2741,7 +2752,7 @@ function mentionPopover(candidates, target) {
     .map(
       (entry, position) => `<button type="button" class="mention-item${
         position === index ? " active" : ""
-      }" data-act="${target === "thread" ? "thread" : "channel"}-mention-pick"
+      }" data-act="${target}-mention-pick"
         data-value="${esc(entry.name)}">
         ${
           entry.kind === "broadcast"
@@ -2782,8 +2793,8 @@ function mentionActiveFor(target) {
   return state.composerAutocompleteTarget === target && state.mentionActive;
 }
 
-/** Repaints only the two small suggestion surfaces, never either transcript. */
-function paintComposerSuggestions(repositoryId) {
+/** Repaints only the small suggestion surfaces, never any transcript. */
+export function paintComposerSuggestions(repositoryId) {
   const channel = document.querySelector("[data-composer-suggestions]");
   if (channel !== null) {
     channel.innerHTML = composerSuggestions(repositoryId, "channel");
@@ -2792,12 +2803,31 @@ function paintComposerSuggestions(repositoryId) {
   if (thread !== null) {
     thread.innerHTML = composerSuggestions(repositoryId, "thread");
   }
+  // The two private composers. The one for an agent is drawn by `chat.js`,
+  // which sits below this module in the import graph and so cannot ask for
+  // this markup itself; it leaves an empty surface behind and every render
+  // fills it here. That is also what keeps a picker open across the render
+  // an arrow key triggers.
+  const chat = document.querySelector("[data-chat-composer-suggestions]");
+  if (chat !== null) {
+    chat.innerHTML = composerSuggestions(repositoryId, "chat");
+  }
+  const direct = document.querySelector("[data-dm-composer-suggestions]");
+  if (direct !== null) {
+    direct.innerHTML = composerSuggestions(repositoryId, "dm");
+  }
   document
     .querySelector(".chan-composer-wrap")
     ?.classList.toggle("mention-active", mentionActiveFor("channel"));
   document
     .querySelector(".thread-composer-wrap")
     ?.classList.toggle("mention-active", mentionActiveFor("thread"));
+  document
+    .querySelector(".chat-composer-wrap")
+    ?.classList.toggle("mention-active", mentionActiveFor("chat"));
+  document
+    .querySelector(".dm-composer-wrap")
+    ?.classList.toggle("mention-active", mentionActiveFor("dm"));
 }
 
 
@@ -3964,7 +3994,14 @@ function dmPanel() {
               .join("")
       }
     </div>
-    <div class="thread-composer-wrap">
+    <div class="thread-composer-wrap dm-composer-wrap${
+      mentionActiveFor("dm") ? " mention-active" : ""
+    }">
+      <!-- The same two pickers the channel has. A private conversation is
+           still a place where a name is written and a command is typed, and
+           having them here is what stops "/" and "@" meaning one thing in the
+           room and nothing in the message beside it. -->
+      <div data-dm-composer-suggestions>${composerSuggestions(repositoryId, "dm")}</div>
       ${draftAttachmentPreviews(repositoryId, {
         draft: state.dmDraft,
         removeAct: "dm-attachment-remove",
@@ -5400,7 +5437,7 @@ export function submitThreadReply(rerender) {
  * would decide what the next `/` offers before a single character of it has
  * been typed.
  */
-function closeComposerAutocomplete(target) {
+export function closeComposerAutocomplete(target) {
   if (state.composerAutocompleteTarget !== target) {
     return;
   }
@@ -5421,7 +5458,7 @@ function autocompleteSnapshot() {
 }
 
 /** Updates the live layers around a composer without rebuilding the screen. */
-function updateComposerPresentation(node, target) {
+export function updateComposerPresentation(node, target) {
   const before = autocompleteSnapshot();
   updateMentionState(node, target);
   paintComposerMirror(node);
@@ -5524,13 +5561,42 @@ export function updateComposerInput(node) {
 function composerTarget(target) {
   return target === "thread"
     ? { selector: "[data-act='channel-thread-input']", draft: "threadDraft" }
-    : { selector: "[data-act='channel-input']", draft: "chatDraft" };
+    : target === "dm"
+      ? { selector: "[data-act='dm-input']", draft: "dmDraft" }
+      : target === "chat"
+        ? // No draft field of its own: the private chat keeps one draft per
+          // agent, so which one is being completed is read off the box.
+          { selector: "[data-act='chat-input']", draft: undefined }
+        : { selector: "[data-act='channel-input']", draft: "chatDraft" };
+}
+
+/** What is half-typed in one composer, wherever that composer keeps it. */
+function composerDraft(target, node) {
+  const { draft } = composerTarget(target);
+  if (draft !== undefined) {
+    return state[draft] ?? "";
+  }
+  const agentId = node?.dataset?.value ?? "";
+  return agentId === "" ? "" : (state.agentChatDrafts?.[agentId] ?? "");
+}
+
+/** The same store, written back to. */
+function writeComposerDraft(target, node, value) {
+  const { draft } = composerTarget(target);
+  if (draft !== undefined) {
+    state[draft] = value;
+    return;
+  }
+  const agentId = node?.dataset?.value ?? "";
+  if (agentId !== "") {
+    state.agentChatDrafts[agentId] = value;
+  }
 }
 
 export function pickSlashCommand(name, rerender, target = "channel") {
-  const { selector, draft } = composerTarget(target);
+  const { selector } = composerTarget(target);
   const node = document.querySelector(selector);
-  const source = state[draft] ?? "";
+  const source = composerDraft(target, node);
   const cursor = node?.selectionStart ?? draftText(source).length;
   const before = source.slice(0, cursor);
   const after = source.slice(cursor);
@@ -5538,7 +5604,7 @@ export function pickSlashCommand(name, rerender, target = "channel") {
   // completed is the word the picker was offering — whatever came before it
   // in the message is kept.
   const replaced = before.replace(/(^|\s)\/([a-z0-9-]*)$/iu, `$1/${name} `);
-  state[draft] = replaced + after;
+  writeComposerDraft(target, node, replaced + after);
   state.composerAutocompleteTarget = target;
   state.slashActive = false;
   state.slashQuery = "";
@@ -5552,14 +5618,14 @@ export function pickSlashCommand(name, rerender, target = "channel") {
 }
 
 export function pickMention(name, rerender, target = "channel") {
-  const { selector, draft } = composerTarget(target);
+  const { selector } = composerTarget(target);
   const node = document.querySelector(selector);
-  const source = state[draft] ?? "";
+  const source = composerDraft(target, node);
   const cursor = node?.selectionStart ?? draftText(source).length;
   const before = source.slice(0, cursor);
   const after = source.slice(cursor);
   const replaced = before.replace(/@([\w.-]*)$/u, `@${name} `);
-  state[draft] = replaced + after;
+  writeComposerDraft(target, node, replaced + after);
   state.composerAutocompleteTarget = target;
   state.mentionActive = false;
   state.mentionQuery = "";
@@ -5595,10 +5661,21 @@ export function handleComposerKeydown(event, rerender) {
   // that Enter sends the message mid-word, and the same press steered the
   // pickers below too. Checked before anything else claims a key.
   if (imeComposing(event)) {
-    return;
+    return false;
   }
+  // Four composers steer the same two pickers: the channel, a thread, the
+  // private chat with an agent and a direct message. What comes back says
+  // whether a picker took the key — the two private composers submit their
+  // own form natively, so a plain Enter is left to them.
+  const act = event.target?.dataset?.act;
   const target =
-    event.target?.dataset?.act === "channel-thread-input" ? "thread" : "channel";
+    act === "channel-thread-input"
+      ? "thread"
+      : act === "chat-input"
+        ? "chat"
+        : act === "dm-input"
+          ? "dm"
+          : "channel";
   const ownsSuggestions = state.composerAutocompleteTarget === target;
   // The same four keys as the mention picker, because they are the same
   // gesture — a list under the cursor that Up/Down move through, Enter or Tab
@@ -5611,14 +5688,14 @@ export function handleComposerKeydown(event, rerender) {
       event.preventDefault();
       state.slashIndex = list.length === 0 ? 0 : (state.slashIndex + 1) % list.length;
       rerender();
-      return;
+      return true;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
       state.slashIndex =
         list.length === 0 ? 0 : (state.slashIndex - 1 + list.length) % list.length;
       rerender();
-      return;
+      return true;
     }
     if ((event.key === "Enter" || event.key === "Tab") && list.length > 0) {
       event.preventDefault();
@@ -5627,13 +5704,13 @@ export function handleComposerKeydown(event, rerender) {
         rerender,
         target,
       );
-      return;
+      return true;
     }
     if (event.key === "Escape") {
       event.preventDefault();
       state.slashActive = false;
       rerender();
-      return;
+      return true;
     }
   }
   if (ownsSuggestions && state.mentionActive) {
@@ -5642,33 +5719,41 @@ export function handleComposerKeydown(event, rerender) {
       event.preventDefault();
       state.mentionIndex = list.length === 0 ? 0 : (state.mentionIndex + 1) % list.length;
       rerender();
-      return;
+      return true;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
       state.mentionIndex =
         list.length === 0 ? 0 : (state.mentionIndex - 1 + list.length) % list.length;
       rerender();
-      return;
+      return true;
     }
     if ((event.key === "Enter" || event.key === "Tab") && list.length > 0) {
       event.preventDefault();
       pickMention(list[state.mentionIndex % list.length].name, rerender, target);
-      return;
+      return true;
     }
     if (event.key === "Escape") {
       event.preventDefault();
       state.mentionActive = false;
       rerender();
-      return;
+      return true;
     }
   }
   if (event.key === "Enter" && !event.shiftKey) {
+    // A private composer sends by submitting the form it is in, which is
+    // where its own send button and its own listener already meet. Saying so
+    // rather than sending here keeps one send path per composer.
+    if (target === "chat" || target === "dm") {
+      return false;
+    }
     event.preventDefault();
     if (target === "thread") {
       submitThreadReply(rerender);
     } else {
       submitComposerMessage(rerender);
     }
+    return true;
   }
+  return false;
 }

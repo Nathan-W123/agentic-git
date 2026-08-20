@@ -243,30 +243,39 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
   // whichever agent happened to be first, or to none at all. The id on the box
   // is also what tells a keystroke which draft it belongs to.
   const agentId = esc(agent?.id ?? "");
-  return `<form class="composer" data-act="chat-submit" data-value="${agentId}">
-    <textarea data-act="chat-input" data-value="${agentId}" rows="1"
-      spellcheck="true" enterkeyhint="send"
-      placeholder="${esc(placeholder)}"${
-        busy || !ready ? " disabled" : ""
-      }>${esc(agentChatDraft(agent?.id))}</textarea>
-    <div class="composer-bar">
-      ${iconButton("plus", {
-        act: "composer-plus",
-        value: "chat",
-        title: "Add to this message",
-        cls: "composer-plus",
-      })}
-      ${contextRing(contextPercentFor(agent?.id), true)}
-      <span class="spacer"></span>
-      ${miniSelect("chat-model", models, agent?.model ?? "", "Model")}
-      ${miniSelect("chat-effort", efforts, agent?.effort ?? "", "Reasoning effort")}
-      <button class="send-btn" type="submit" title="Send"${
-        busy || !ready ? " disabled" : ""
-      }>
-        ${busy ? icon("clock") : icon("send")}
-      </button>
-    </div>
-  </form>`;
+  // Wrapped, because the "/" and "@" pickers open upward out of the box and
+  // need something positioned to open out of — the same wrapper the thread's
+  // reply box uses, so the two look and sit identically. The surface inside
+  // it is left empty here and filled by `paintComposerSuggestions` after
+  // every render: this module is imported by the screens rather than the
+  // other way round, so it cannot ask them for that markup.
+  return `<div class="thread-composer-wrap chat-composer-wrap">
+    <div data-chat-composer-suggestions></div>
+    <form class="composer" data-act="chat-submit" data-value="${agentId}">
+      <textarea data-act="chat-input" data-value="${agentId}" rows="1"
+        spellcheck="true" enterkeyhint="send"
+        placeholder="${esc(placeholder)}"${
+          busy || !ready ? " disabled" : ""
+        }>${esc(agentChatDraft(agent?.id))}</textarea>
+      <div class="composer-bar">
+        ${iconButton("plus", {
+          act: "composer-plus",
+          value: "chat",
+          title: "Add to this message",
+          cls: "composer-plus",
+        })}
+        ${contextRing(contextPercentFor(agent?.id), true)}
+        <span class="spacer"></span>
+        ${miniSelect("chat-model", models, agent?.model ?? "", "Model")}
+        ${miniSelect("chat-effort", efforts, agent?.effort ?? "", "Reasoning effort")}
+        <button class="send-btn" type="submit" title="Send"${
+          busy || !ready ? " disabled" : ""
+        }>
+          ${busy ? icon("clock") : icon("send")}
+        </button>
+      </div>
+    </form>
+  </div>`;
 }
 
 function shortModel(label) {

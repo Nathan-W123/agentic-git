@@ -11,11 +11,19 @@ import { defaultPublicDirectory } from "./assets.js";
  * surface is pinned: by asserting the shape of the source, since the dashboard
  * ships as plain ES modules with no bundler and the test run has no DOM. Each
  * test here stands for one thing that used to be impossible: keeping what you
- * were typing to an agent, sending it at all, and sending a direct message
- * with the keyboard.
+ * were typing to an agent, sending it at all, sending a direct message with
+ * the keyboard, and typing a command or a name in either of them.
  */
 async function publicFile(name: string): Promise<string> {
   return await readFile(path.join(defaultPublicDirectory(), name), "utf8");
+}
+
+/** Enough of a textarea for the pickers: a caret, and the id it carries. */
+interface ComposerBox {
+  dataset?: { value: string };
+  selectionStart: number;
+  focus: () => void;
+  setSelectionRange: () => void;
 }
 
 test("what is typed to an agent survives a render", async () => {
@@ -67,11 +75,193 @@ test("Enter sends a direct message and Shift+Enter does not", async () => {
   // Both private composers: a bare Enter sends, Shift+Enter is left alone to
   // put in a newline, and an IME committing a candidate is not a send.
   for (const composer of ["chat-input", "dm-input"]) {
-    const handler = app.slice(app.indexOf(`node?.dataset?.act !== "${composer}"`));
+    const start = app.indexOf(`node?.dataset?.act !== "${composer}"`);
+    const handler = app.slice(start, app.indexOf("});", start));
     assert.match(
-      handler.slice(0, 400),
+      handler,
       /event\.key === "Enter" && !event\.shiftKey && !imeComposing\(event\)/u,
     );
-    assert.match(handler.slice(0, 400), /closest\("form"\)\?\.requestSubmit\(\)/u);
+    assert.match(handler, /closest\("form"\)\?\.requestSubmit\(\)/u);
+    // And the pickers are asked first, so the Enter that takes a highlighted
+    // command is not also the Enter that sends the message.
+    assert.match(handler, /if \(handleComposerKeydown\(event, render\)\) \{\s*\n\s*return;/u);
   }
+});
+
+test("a private chat keeps the channel's command and name pickers", async () => {
+  const chat = await publicFile("chat.js");
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+
+  // The agent composer is drawn by `chat.js`, which the screens import rather
+  // than the other way round — so it leaves the picker an empty surface and
+  // the painter in `screen-chats.js` fills it after every render.
+  assert.match(chat, /class="thread-composer-wrap chat-composer-wrap"/u);
+  assert.match(chat, /<div data-chat-composer-suggestions><\/div>/u);
+  assert.match(chats, /composerSuggestions\(repositoryId, "chat"\)/u);
+  assert.match(app, /paintComposerSuggestions\(activeChannelId\(\)\)/u);
+
+  // The direct-message composer draws its own, the way the thread panel does.
+  assert.match(chats, /data-dm-composer-suggestions/u);
+  assert.match(chats, /composerSuggestions\(repositoryId, "dm"\)/u);
+
+  // Both boxes report their keystrokes to the shared presentation helper, so
+  // "/" and "@" open the same lists they open in the channel.
+  assert.match(app, /updateComposerPresentation\(node, "chat"\)/u);
+  assert.match(app, /updateComposerPresentation\(node, "dm"\)/u);
+
+  // A row in either list is picked by clicking it too, into the composer it
+  // was opened from.
+  for (const act of [
+    "chat-mention-pick",
+    "chat-slash-pick",
+    "dm-mention-pick",
+    "dm-slash-pick",
+  ]) {
+    assert.match(app, new RegExp(`case "${act}":`, "u"));
+  }
+  // And found without knowing the syntax: the private chat's "+" offers the
+  // command list beside the mention it already offered.
+  const menu = /case "composer-plus": \{([\s\S]*?)\n    \}/u.exec(app)?.[1];
+  assert.match(menu ?? "", /act: "chat-slash-key"/u);
+  assert.match(menu ?? "", /act: "chat-mention"/u);
+});
+
+test("a pick lands in the private composer it was opened from", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function composerTarget");
+  const end = chats.indexOf("\nexport function handleComposerKeydown", start);
+  assert.notEqual(start, -1, "the composer target resolver should exist");
+  assert.notEqual(end, -1, "the picker helpers should have a boundary");
+
+  const state: {
+    chatDraft: string;
+    dmDraft: string;
+    agentChatDrafts: Record<string, string>;
+  } = {
+    chatDraft: "channel stays put",
+    dmDraft: "hi /pl",
+    agentChatDrafts: { zeus: "look at @Mar" },
+  };
+  const boxes: Record<string, ComposerBox> = {
+    "[data-act='chat-input']": {
+      dataset: { value: "zeus" },
+      selectionStart: 12,
+      focus: () => undefined,
+      setSelectionRange: () => undefined,
+    },
+    "[data-act='dm-input']": {
+      selectionStart: 6,
+      focus: () => undefined,
+      setSelectionRange: () => undefined,
+    },
+  };
+  const pickers = new Function(
+    "state",
+    "document",
+    "draftText",
+    `${chats
+      .slice(start, end)
+      .replaceAll("export function", "function")}\nreturn { pickMention, pickSlashCommand };`,
+  )(
+    state,
+    { querySelector: (selector: string) => boxes[selector] ?? null },
+    (value: string) => value,
+  ) as {
+    pickMention: (name: string, rerender: () => void, target: string) => void;
+    pickSlashCommand: (name: string, rerender: () => void, target: string) => void;
+  };
+
+  // The agent's draft is one per agent rather than one field of `state`, so
+  // the completion has to be written back through the box that names it.
+  pickers.pickMention("Mary Jane", () => undefined, "chat");
+  assert.equal(state.agentChatDrafts.zeus, "look at @Mary Jane ");
+  assert.equal(state.chatDraft, "channel stays put");
+
+  pickers.pickSlashCommand("plan", () => undefined, "dm");
+  assert.equal(state.dmDraft, "hi /plan ");
+  assert.equal(state.chatDraft, "channel stays put");
+});
+
+test("an open picker takes Enter in a private chat; a closed one leaves it to send", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const source = chats
+    .slice(chats.indexOf("export function handleComposerKeydown"))
+    .replace("export function", "function");
+
+  const state = {
+    composerAutocompleteTarget: "chat",
+    slashActive: true,
+    slashIndex: 0,
+    mentionActive: false,
+    mentionIndex: 0,
+  };
+  const picks: Array<[string, string]> = [];
+  let sent = 0;
+  const handler = new Function(
+    "state",
+    "imeComposing",
+    "channelSlashCandidates",
+    "activeChannelId",
+    "pickSlashCommand",
+    "channelMentionCandidates",
+    "pickMention",
+    "submitThreadReply",
+    "submitComposerMessage",
+    `${source}\nreturn handleComposerKeydown;`,
+  )(
+    state,
+    () => false,
+    () => [{ name: "plan" }, { name: "ask" }],
+    () => "repository",
+    (name: string, _rerender: () => void, target: string) => {
+      picks.push([name, target]);
+    },
+    () => [{ name: "Mary Jane" }],
+    (name: string, _rerender: () => void, target: string) => {
+      picks.push([name, target]);
+    },
+    () => {
+      sent += 1;
+    },
+    () => {
+      sent += 1;
+    },
+  ) as (
+    event: {
+      key: string;
+      shiftKey?: boolean;
+      target: { dataset: { act: string } };
+      preventDefault: () => void;
+    },
+    rerender: () => void,
+  ) => boolean;
+
+  const press = (act: string, key: string) =>
+    handler(
+      { key, target: { dataset: { act } }, preventDefault: () => undefined },
+      () => undefined,
+    );
+
+  // A list open over the agent's box: the arrows walk it and Enter takes the
+  // row, exactly as in the channel.
+  assert.equal(press("chat-input", "ArrowDown"), true);
+  assert.equal(state.slashIndex, 1);
+  assert.equal(press("chat-input", "Enter"), true);
+  assert.deepEqual(picks.pop(), ["ask", "chat"]);
+  assert.equal(sent, 0, "picking a command is not also sending the message");
+
+  // Nothing open: the handler claims nothing, and the composer's own listener
+  // submits the form it is in.
+  state.slashActive = false;
+  assert.equal(press("chat-input", "Enter"), false);
+  assert.equal(press("dm-input", "Enter"), false);
+  assert.equal(sent, 0, "a private composer sends through its own form");
+
+  // The direct-message box steers its own list rather than the channel's.
+  state.composerAutocompleteTarget = "dm";
+  state.mentionActive = true;
+  state.mentionIndex = 0;
+  assert.equal(press("dm-input", "Tab"), true);
+  assert.deepEqual(picks.pop(), ["Mary Jane", "dm"]);
 });

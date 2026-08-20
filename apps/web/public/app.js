@@ -178,10 +178,12 @@ import {
 import {
   captureChannelScroll,
   channelInfoPopoverHtml,
+  closeComposerAutocomplete,
   copyMessageText,
   handleComposerKeydown,
   jumpToUnreadOrLatest,
   openChannel,
+  paintComposerSuggestions,
   paintJumpToLatest,
   pickMention,
   pickSlashCommand,
@@ -195,6 +197,7 @@ import {
   submitComposerMessage,
   submitThreadReply,
   updateComposerInput,
+  updateComposerPresentation,
   updateThreadComposerInput,
 } from "./screen-chats.js";
 
@@ -4061,6 +4064,11 @@ function renderNow() {
   // Outside the chats branch: a search box on any screen loses focus the same
   // way. After `restoreChannelScroll`, so the refocus does not fight it.
   restoreFocus(focusedField);
+  // The private chat's command and name pickers. Its composer is drawn by
+  // `chat.js`, which sits below the screens in the import graph and so leaves
+  // an empty surface for this to fill; painting on every route is also what
+  // keeps an open list open across the render an arrow key causes.
+  paintComposerSuggestions(activeChannelId());
   void ensureAgentOptions(state.selectedAgent, () => {
     if (state.route === "code" || state.route === "agents") {
       render();
@@ -4247,6 +4255,31 @@ function typeIntoComposer(character, opened) {
   opened();
   render();
   const next = $("[data-act='channel-input']");
+  next?.focus({ preventScroll: true });
+  next?.setSelectionRange(at + 1, at + 1);
+}
+
+/**
+ * The same gesture in the private chat's box.
+ *
+ * Its own function because that draft is kept per agent rather than in one
+ * field of `state`, and because the box is the only copy of it until the
+ * keystroke is written through — see the `chat-input` handler.
+ */
+function typeIntoPrivateComposer(character, opened) {
+  const input = $("[data-act='chat-input']");
+  if (input === null) {
+    return;
+  }
+  const at = input.selectionStart ?? input.value.length;
+  input.value = `${input.value.slice(0, at)}${character}${input.value.slice(at)}`;
+  const agentId = input.dataset.value;
+  if (agentId !== undefined && agentId !== "") {
+    state.agentChatDrafts[agentId] = input.value;
+  }
+  opened();
+  render();
+  const next = $("[data-act='chat-input']");
   next?.focus({ preventScroll: true });
   next?.setSelectionRange(at + 1, at + 1);
 }
@@ -4473,6 +4506,16 @@ document.addEventListener("click", (event) => {
                 iconName: "paperclip",
                 disabled: true,
               },
+              {
+                act: "chat-slash-key",
+                label: "Run a command",
+                // The channel's own list, offered here too. What a command
+                // means in a private chat is an instruction to the agent
+                // reading it rather than something the room carries out, so
+                // the hint says whose list it is rather than promising more.
+                hint: "The same list the channel offers",
+                iconName: "terminal",
+              },
               { act: "chat-mention", label: "Mention a file or agent", iconName: "at" },
             ])
           : showMenu(node, [
@@ -4564,6 +4607,19 @@ document.addEventListener("click", (event) => {
       return;
     case "thread-slash-pick":
       pickSlashCommand(value, render, "thread");
+      return;
+    /* The private conversations pick from the same two lists. */
+    case "chat-mention-pick":
+      pickMention(value, render, "chat");
+      return;
+    case "chat-slash-pick":
+      pickSlashCommand(value, render, "chat");
+      return;
+    case "dm-mention-pick":
+      pickMention(value, render, "dm");
+      return;
+    case "dm-slash-pick":
+      pickSlashCommand(value, render, "dm");
       return;
     case "channel-react": {
       // A tally carries the emoji it counts; the fallback is only for a caller
@@ -5784,24 +5840,27 @@ document.addEventListener("click", (event) => {
     }
 
     /* Composer affordances */
-    case "chat-mention": {
+    case "chat-mention":
       closePopover();
-      const input = $("[data-act='chat-input']");
-      if (input === null) {
-        return;
-      }
-      const at = input.selectionStart ?? input.value.length;
-      input.value = `${input.value.slice(0, at)}@${input.value.slice(at)}`;
-      // Through `state` as well: this writes straight to the box, and the next
-      // render draws the box from the draft.
-      const agentId = input.dataset.value;
-      if (agentId !== undefined && agentId !== "") {
-        state.agentChatDrafts[agentId] = input.value;
-      }
-      input.focus();
-      input.setSelectionRange(at + 1, at + 1);
+      // Typed rather than merely inserted: the "@" opens the name picker the
+      // same way pressing the key does, which is the whole point of reaching
+      // for it from the menu.
+      typeIntoPrivateComposer("@", () => {
+        state.composerAutocompleteTarget = "chat";
+        state.mentionActive = true;
+        state.mentionQuery = "";
+        state.mentionIndex = 0;
+      });
       return;
-    }
+    case "chat-slash-key":
+      closePopover();
+      typeIntoPrivateComposer("/", () => {
+        state.composerAutocompleteTarget = "chat";
+        state.slashActive = true;
+        state.slashQuery = "";
+        state.slashIndex = 0;
+      });
+      return;
     default:
   }
 });
@@ -5856,6 +5915,8 @@ document.addEventListener("submit", (event) => {
       const text = input.value;
       input.value = "";
       delete state.agentChatDrafts[agent.id];
+      // Whatever list was open belonged to the message that just went.
+      closeComposerAutocomplete("chat");
       void sendChat(agent.id, text, render);
       return;
     }
@@ -5870,6 +5931,7 @@ document.addEventListener("submit", (event) => {
         return;
       }
       state.dmDraft = "";
+      closeComposerAutocomplete("dm");
       render();
       void sendDirectMessage(other, draft)
         .then(() => render())
@@ -6153,13 +6215,12 @@ document.addEventListener("input", (event) => {
     if (agentId !== undefined && agentId !== "") {
       state.agentChatDrafts[agentId] = node.value;
     }
-    // Cleared rather than measured once the box is empty: an empty composer
-    // collapses to the lean bar, and a height measured against the open one
-    // would hold the pill open with nothing in it.
-    node.style.height = "auto";
-    if (node.value !== "") {
-      node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
-    }
+    // Then the live layers around the box — the "/" and "@" pickers and the
+    // box's own height — through the same helper the channel composer uses,
+    // so a command list opens here on the same keystroke it opens there. It
+    // is also what keeps the box from growing past the lean bar when empty.
+    updateComposerPresentation(node, "chat");
+    return;
   }
   if (act === "channel-search") {
     state.chatQuery = node.value;
@@ -6221,6 +6282,9 @@ document.addEventListener("input", (event) => {
     state.dmDraft = `${node.value}${
       attachments === null ? "" : `\n${attachments.join("\n")}\n`
     }`;
+    // The pickers and the box's height, without a render — the same live
+    // layers the channel composer updates on each keystroke.
+    updateComposerPresentation(node, "dm");
     return;
   }
   if (act === "channel-thread-input") {
@@ -6264,6 +6328,12 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("keydown", (event) => {
   const node = event.target;
   if (node?.dataset?.act !== "chat-input") {
+    return;
+  }
+  // The command and name pickers steer first, exactly as they do in the
+  // channel: while a list is open, Enter takes the highlighted row and the
+  // arrows move through it. Only a closed list leaves Enter meaning send.
+  if (handleComposerKeydown(event, render)) {
     return;
   }
   // Not when an IME is committing a candidate — that Enter belongs to the
@@ -6331,11 +6401,14 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/* The DM composer has no @mention or slash picker steering its Enter, so the
-   plain send rule is the whole rule here. */
+/* The direct-message composer steers the same two pickers, and sends on the
+   Enter neither of them claimed. */
 document.addEventListener("keydown", (event) => {
   const node = event.target;
   if (node?.dataset?.act !== "dm-input") {
+    return;
+  }
+  if (handleComposerKeydown(event, render)) {
     return;
   }
   if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {
