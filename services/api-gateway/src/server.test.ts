@@ -152,6 +152,19 @@ interface TestRuntime {
    * there was a local pass. A test about the filter says otherwise.
    */
   setLocalChatter: (reads: (text: string) => boolean) => void;
+  /**
+   * Holds every classify call open until the test releases it — a stand-in
+   * for the case this fixture cannot otherwise reach: a real CLI spin-up
+   * contending with another process on the same host for however long that
+   * takes. Undefined answers immediately, which is every other test's
+   * default.
+   */
+  setClassifyGate: () => { release: () => void };
+  /**
+   * Makes the next `count` classify calls answer with nothing, as a timeout
+   * or an unreachable CLI would. Calls after that answer normally again.
+   */
+  setClassifyFailures: (count: number) => void;
   /** Makes the next revert answer with this instead of succeeding. */
   setRollbackOutcome: (
     outcome: { status: string; explanation: string } | undefined,
@@ -335,6 +348,11 @@ async function startRuntime(
   // filter gets one that decides nothing, which is also the honest default:
   // "unsure" is what it answers for anything it is not certain about.
   let localChatter: (text: string) => boolean = () => false;
+  // A gate a test can hold shut, so a classify call takes real, controllable
+  // time rather than always resolving on the same tick every other test
+  // relies on.
+  let classifyGate: Promise<void> | undefined;
+  let classifyFailuresRemaining = 0;
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
   // What `rollbackRepository` answers. Undefined is the ordinary success; a
@@ -377,6 +395,16 @@ async function startRuntime(
     // about dispatch does not have to know the question exists; a test about
     // the decision itself sets `taskClassification`.
     if (/Reply with exactly one of these three lines/u.test(asked)) {
+      if (classifyGate !== undefined) {
+        await classifyGate;
+      }
+      if (classifyFailuresRemaining > 0) {
+        classifyFailuresRemaining -= 1;
+        // Empty, not missing: this is the exact shape `askAgent` sees from a
+        // real provider that answered with nothing, which is what a timeout
+        // or an unreachable CLI looks like once it reaches this layer.
+        return { text: "" };
+      }
       // An acknowledgement is never work, and a fake that answered otherwise
       // would be unfaithful in the one way that matters: with no word list in
       // front of it, every "yes", "ok" and "thanks" in a channel now reaches
@@ -860,6 +888,19 @@ async function startRuntime(
     },
     setLocalChatter: (reads) => {
       localChatter = reads;
+    },
+    setClassifyGate: () => {
+      let release: () => void = () => undefined;
+      classifyGate = new Promise((resolve) => {
+        release = () => {
+          classifyGate = undefined;
+          resolve();
+        };
+      });
+      return { release };
+    },
+    setClassifyFailures: (count) => {
+      classifyFailuresRemaining = count;
     },
     runCalls,
     cancelCalls,
@@ -13382,4 +13423,104 @@ test("conversation the local pass is sure about never reaches an agent", async (
     1,
     JSON.stringify(runtime.submittedTasks),
   );
+});
+
+/**
+ * A message posts immediately, whatever the agent's decision costs to reach.
+ *
+ * The classify call used to sit inside the request that posted the sender's
+ * own message — nothing was shown until it answered, and it had up to
+ * twenty seconds to. On a slow attempt that read as the feature not firing
+ * at all, because the one place that would have said otherwise was the
+ * response the sender was waiting on. It is a real model call on the
+ * account whose CLI may, at that exact moment, be busy running a coding
+ * task on this same host — contention that can genuinely slow a process
+ * spin-up — so "sometimes slow" was never a corner case here.
+ */
+test("the sender's message posts before the agent has decided anything", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "does-not-block");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const gate = runtime.setClassifyGate();
+  runtime.setTaskClassification("ACT");
+  try {
+    // The gate is held shut for the whole request — a stand-in for the
+    // worst case, a classify call that never comes back at all.
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "there's a lot of lag when loading in from mobile, find a fix" },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+    assert.equal(
+      posted.data.message.content,
+      "there's a lot of lag when loading in from mobile, find a fix",
+      "the sender's own words are in the response — nothing waited on the agent",
+    );
+    // And nothing happened yet, because nothing has been decided yet.
+    assert.equal(runtime.submittedTasks.length, 0);
+  } finally {
+    gate.release();
+  }
+
+  // Once the agent's decision actually lands, the work it describes still
+  // happens — the same outcome as an instant classification, only later.
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the decision never arrived after the gate was released",
+  );
+  assert.match(
+    String(runtime.submittedTasks[0]?.objective),
+    /lag when loading in from mobile/u,
+  );
+});
+
+/**
+ * A classify call that errors is retried once, and the retry can still
+ * answer — a single slow or dropped attempt is not the difference between a
+ * request being read and a request going quiet.
+ */
+test("a failed classify attempt gets a second try before the message goes quiet", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "retries-once");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The first attempt is the one contention would hit: it answers with
+  // nothing, exactly what a timed-out or unreachable CLI looks like from
+  // here. The second is a clean host and a clean answer — the immediate
+  // retry `readAutoClaimVerdict` makes before giving up.
+  runtime.setClassifyFailures(1);
+  runtime.setTaskClassification("ACT");
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "change the background on settings to blue" },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "the retry never dispatched the work",
+  );
+  const attempts = runtime.chatPrompts
+    .slice(before)
+    .filter((entry) =>
+      /Reply with exactly one of these three lines/u.test(entry.prompt),
+    );
+  assert.equal(attempts.length, 2, "exactly one retry, not an unbounded loop");
 });

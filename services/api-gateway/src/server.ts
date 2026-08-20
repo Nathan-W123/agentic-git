@@ -15816,9 +15816,60 @@ export class ApiGateway {
     if (chosen === undefined) {
       return;
     }
+    // Everything from here on is a real model call, and — if it decides to
+    // act — the run that call kicks off (already backgrounded on its own).
+    // None of it is needed to answer the sender's request: their message is
+    // durably posted before this method is ever reached. Awaiting it here
+    // held every message sent into a populated channel hostage to it — up to
+    // twenty seconds with nothing to show for the wait, since nothing is
+    // posted until a decision comes back. On a mobile connection that is
+    // exactly the width of window a carrier's idle-connection timeout closes
+    // a request in, so a classify call that was merely slow — contending
+    // with another agent's own CLI process on the same host, say — read from
+    // the sending phone as "it just didn't fire," and left no trace saying
+    // otherwise anywhere: the request that would have carried one never
+    // finished either.
+    void this.decideAutoClaim({
+      projectId,
+      repositoryId,
+      content,
+      senderId,
+      chosen,
+      ...(context === undefined ? {} : { context }),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
+    }).catch((error: unknown) => {
+      process.stderr.write(
+        `[channel] auto-claim decision failed in ${repositoryId}: ${describeError(error)}\n`,
+      );
+    });
+  }
+
+  /**
+   * The model half of an unaddressed message: read it, then act on what was
+   * read. Split out of {@link maybeAutoClaimTask} and run without being
+   * awaited there — see the comment at its one call site for why.
+   */
+  private async decideAutoClaim(input: {
+    projectId: string;
+    repositoryId: string;
+    content: string;
+    senderId: string;
+    chosen: ChannelMentionCandidate;
+    context?: string;
+    referencedMessageId?: string;
+  }): Promise<void> {
+    const { projectId, repositoryId, content, senderId, chosen, context } =
+      input;
     // The agent that would take it reads the message, on the cheap model —
     // see CEREMONIAL_MODELS — and says which of three things to do about it.
-    const decision = await this.readAutoClaimVerdict(chosen, content, context);
+    const decision = await this.readAutoClaimVerdict(
+      chosen,
+      content,
+      repositoryId,
+      context,
+    );
     if (decision.verdict === "ignore") {
       return;
     }
@@ -15854,7 +15905,9 @@ export class ApiGateway {
       kind: "agent",
       authorId: `${chosen.userId}:${chosen.provider}`,
       content: `${decision.proposal}\n\n${AUTO_CLAIM_OFFER_TAIL}`,
-      referencedMessageId: input.referencedMessageId,
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     });
     // And the same prompt `/ask` puts up, so the answer is a tap rather than
     // a word. The message above is not redundant with it: the prompt is a
@@ -15868,7 +15921,12 @@ export class ApiGateway {
       candidate: chosen,
       senderId,
       proposal: decision.proposal,
-      request: { id: input.referencedMessageId, content },
+      request: {
+        content,
+        ...(input.referencedMessageId === undefined
+          ? {}
+          : { id: input.referencedMessageId }),
+      },
       ...(context === undefined ? {} : { context }),
     });
   }
@@ -16019,53 +16077,85 @@ export class ApiGateway {
    * The cost of dropping the list is that this now runs for every message in
    * a channel that has an agent in it, rather than only for messages a list
    * already liked. It runs on the cheap model, asks for one line, and the
-   * account it runs on is the one whose agent would do the work.
+   * account it runs on is the one whose agent would do the work — which may
+   * be the very account whose CLI is busy running a coding task on this same
+   * host right now. Nothing here waits on that task or is blocked by it —
+   * the two are independent processes — but a host under real load can still
+   * make one spin-up genuinely slow, and this is the one call in the whole
+   * dispatch path with a deadline short enough for that to matter.
    *
-   * Any failure is `ignore` — a timeout, an unreachable CLI, an expired
-   * sign-in, a paragraph where a word was asked for. Staying quiet costs a
-   * re-ask, which the sender can always make by @mentioning somebody.
+   * Retried once before giving up, for exactly that reason: a single slow or
+   * contended attempt should not be the difference between a request being
+   * read and a request going quiet, when trying again costs nothing anyone
+   * is waiting on — see `decideAutoClaim`, the one caller, which is itself
+   * never awaited by the request that triggered it.
+   *
+   * Both attempts failing is still `ignore`, and every other failure is too —
+   * an unreachable CLI, an expired sign-in, a paragraph where a word was
+   * asked for. Staying quiet costs a re-ask, which the sender can always make
+   * by @mentioning somebody. What changed is that it no longer costs the
+   * *reason*: an error discarded here used to be indistinguishable from the
+   * model genuinely saying no, and it is now written to the log a run
+   * failure already goes to, naming the candidate and what went wrong.
    */
   private async readAutoClaimVerdict(
     candidate: ChannelMentionCandidate,
     content: string,
+    repositoryId: string,
     context?: string,
   ): Promise<AutoClaimVerdict> {
-    const answer = await this.askAgent(
-      candidate,
+    const prompt =
       "You are an agent in a team chat for a software project. Someone " +
-        "wrote the current message below. Nobody named you in it. Decide " +
-        "what to do about it.\n\n" +
-        "Reply with exactly one of these three lines, and nothing else:\n\n" +
-        "ACT\n" +
-        "  Use this when the message plainly asks for work on the " +
-        "repository and says clearly enough what it wants that you could " +
-        "start now. Acting spends the account's usage, so use it only when " +
-        "there is no real doubt about what was asked for. A request made to " +
-        "someone, anyone, or the room at large is made to you as well, even " +
-        "with no @mention in it.\n\n" +
-        "OFFER: <one short yes/no question>\n" +
-        "  Use this when the message points at work without asking for it, " +
-        "or asks for something too vague to start on. Your question must " +
-        "name the specific thing you would do, so it can be answered with " +
-        "yes. Do not ask for the details you would need to do it — you get " +
-        "to ask those afterwards, once somebody says yes.\n\n" +
-        "IGNORE\n" +
-        "  Use this for everything else: greetings, people talking to each " +
-        "other, opinions with nothing to do, questions about the status of " +
-        "work, remarks about work already finished. If the recent context " +
-        "shows people in conversation and this message could reasonably be " +
-        "meant for one particular person, ignore it — do not interrupt " +
-        "their conversation.\n\n" +
-        "Use recent context only to resolve references such as \"that\" and " +
-        "to see who is speaking to whom; decide about the current message, " +
-        "never about the background.\n\n" +
-        (context === undefined ? "" : `${context}\n\n`) +
-        "Current message: " +
-        content,
-      CLASSIFY_TIMEOUT_MS,
-      true,
-    ).catch(() => ({ text: undefined }));
-    return parseAutoClaimVerdict(answer.text);
+      "wrote the current message below. Nobody named you in it. Decide " +
+      "what to do about it.\n\n" +
+      "Reply with exactly one of these three lines, and nothing else:\n\n" +
+      "ACT\n" +
+      "  Use this when the message plainly asks for work on the " +
+      "repository and says clearly enough what it wants that you could " +
+      "start now. Acting spends the account's usage, so use it only when " +
+      "there is no real doubt about what was asked for. A request made to " +
+      "someone, anyone, or the room at large is made to you as well, even " +
+      "with no @mention in it.\n\n" +
+      "OFFER: <one short yes/no question>\n" +
+      "  Use this when the message points at work without asking for it, " +
+      "or asks for something too vague to start on. Your question must " +
+      "name the specific thing you would do, so it can be answered with " +
+      "yes. Do not ask for the details you would need to do it — you get " +
+      "to ask those afterwards, once somebody says yes.\n\n" +
+      "IGNORE\n" +
+      "  Use this for everything else: greetings, people talking to each " +
+      "other, opinions with nothing to do, questions about the status of " +
+      "work, remarks about work already finished. If the recent context " +
+      "shows people in conversation and this message could reasonably be " +
+      "meant for one particular person, ignore it — do not interrupt " +
+      "their conversation.\n\n" +
+      "Use recent context only to resolve references such as \"that\" and " +
+      "to see who is speaking to whom; decide about the current message, " +
+      "never about the background.\n\n" +
+      (context === undefined ? "" : `${context}\n\n`) +
+      "Current message: " +
+      content;
+    let lastError: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const answer = await this.askAgent(
+        candidate,
+        prompt,
+        CLASSIFY_TIMEOUT_MS,
+        true,
+      ).catch((error: unknown) => ({
+        text: undefined,
+        error: describeError(error),
+      }));
+      if (answer.text !== undefined) {
+        return parseAutoClaimVerdict(answer.text);
+      }
+      lastError = answer.error;
+    }
+    process.stderr.write(
+      `[channel] ${candidate.name} could not read an unaddressed message in ` +
+        `${repositoryId} after two attempts: ${lastError ?? "unknown error"}\n`,
+    );
+    return { verdict: "ignore" };
   }
 
   /**
