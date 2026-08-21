@@ -57,6 +57,8 @@ export const state = {
   selectedAgent: stored("ag.agent", "anthropic"),
   conversations: {},
   sending: {},
+  /** Commands available on every conversation surface, supplied with the session. */
+  slashCommands: [],
 
   /* Code screen */
   workspace: undefined,
@@ -648,6 +650,9 @@ export async function loadContext({ defer = false } = {}) {
     api("/organizations"),
   ]);
   state.principal = principal;
+  state.slashCommands = Array.isArray(principal.slashCommands)
+    ? principal.slashCommands
+    : [];
 
   // Before a single record is read for this account. `state` took its copy of
   // the remembered organization, room, drafts and read markers at import

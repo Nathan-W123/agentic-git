@@ -187,6 +187,24 @@ test("a private chat keeps the channel's command and name pickers", async () => 
   assert.match(menu ?? "", /act: "chat-mention"/u);
 });
 
+test("a private agent chat has commands before any channel is opened", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+
+  // A private chat can be the first conversation opened after sign-in. Its
+  // picker therefore falls back to the catalogue carried by the session,
+  // rather than requiring a channel message request to have happened first.
+  assert.match(data, /slashCommands: \[\],/u);
+  assert.match(
+    data,
+    /state\.slashCommands = Array\.isArray\(principal\.slashCommands\)/u,
+  );
+  assert.match(
+    chats,
+    /Object\.values\(state\.channelSlashCommands\)\[0\] \?\?\s*state\.slashCommands/u,
+  );
+});
+
 test("a pick lands in the private composer it was opened from", async () => {
   const chats = await publicFile("screen-chats.js");
   const start = chats.indexOf("function composerTarget");

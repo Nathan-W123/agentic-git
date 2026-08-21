@@ -1076,6 +1076,21 @@ test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", as
   const me = await client.request("/api/v1/auth/me");
   assert.equal(me.status, 200);
   assert.equal(me.data.user.displayName, "Owner");
+  assert.deepEqual(
+    me.data.slashCommands.map((command: { name: string }) => command.name),
+    [
+      "plan",
+      "queue",
+      "ask",
+      "dnc",
+      "simple",
+      "push",
+      "retry",
+      "cancel",
+      "stop",
+      "help",
+    ],
+  );
 
   const createdRepository = await client.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,

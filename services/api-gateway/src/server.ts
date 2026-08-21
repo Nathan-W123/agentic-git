@@ -4556,7 +4556,15 @@ export class ApiGateway {
       return;
     }
     if (method === "GET" && path === `${API_PREFIX}/auth/me`) {
-      this.sendJson(response, 200, principal);
+      // Commands belong to every authenticated conversation surface, not only
+      // to a channel that happened to have loaded its first page of messages.
+      // Sending the catalogue with the session makes it available to a private
+      // agent chat opened directly from My Agents or Code, while the channel
+      // response continues to carry it for older clients.
+      this.sendJson(response, 200, {
+        ...principal,
+        slashCommands: SLASH_COMMANDS,
+      });
       return;
     }
 

@@ -2844,6 +2844,7 @@ function channelSlashCandidates(repositoryId, target = "channel") {
   const known =
     state.channelSlashCommands[repositoryId] ??
     Object.values(state.channelSlashCommands)[0] ??
+    state.slashCommands ??
     [];
   const matching = known.filter((entry) =>
     String(entry.name ?? "").startsWith(query),
