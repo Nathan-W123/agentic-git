@@ -81,6 +81,7 @@ import {
 import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
   createChatterFilter,
+  createLocalSummariser,
   type ChatterFilter,
 } from "@coord/local-triage";
 import {
@@ -94,6 +95,15 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
+import {
+  buildCatchUpDigest,
+  catchUpSince,
+  emptyCatchUpDigest,
+  summariseCatchUpLines,
+  CATCH_UP_SUMMARY_TIMEOUT_MS,
+  type CatchUpChange,
+  type CatchUpSummariser,
+} from "./catch-up.js";
 import {
   formatSlashHelp,
   parseSlashCommand,
@@ -2000,6 +2010,26 @@ function defaultChatterFilter(): ChatterFilter {
   return createChatterFilter();
 }
 
+/**
+ * The local model that phrases the catch-up, or nothing.
+ *
+ * Shares `COORD_LOCAL_TRIAGE` with the chatter filter: both are the same
+ * bargain — a small model on the machine, no network, no vendor bill — so a
+ * deployment that has turned local models off should not quietly keep one.
+ * Switched off, this returns `undefined` and the digest keeps its
+ * deterministic wording, which is what every failure produces anyway.
+ */
+function defaultCatchUpSummariser(): CatchUpSummariser | undefined {
+  const raw = process.env["COORD_LOCAL_TRIAGE"]?.trim().toLowerCase() ?? "";
+  if (["0", "false", "off", "no"].includes(raw)) {
+    return undefined;
+  }
+  const local = createLocalSummariser({
+    budgetMs: CATCH_UP_SUMMARY_TIMEOUT_MS,
+  });
+  return async (prompt) => await local.write(prompt);
+}
+
 /** The proposal out of an offer message, or nothing if this is not one. */
 export function autoClaimProposal(content: string): string | undefined {
   const at = content.indexOf(AUTO_CLAIM_OFFER_TAIL);
@@ -2976,6 +3006,15 @@ export interface ApiGatewayOptions {
    */
   chatterFilter?: ChatterFilter;
   /**
+   * Writes the catch-up digest's prose, when a local model can.
+   *
+   * Defaults to the local text model, or to nothing when
+   * `COORD_LOCAL_TRIAGE` switches it off. Injected by tests, which must not
+   * load a model to prove what the route does with its answer — and left out
+   * entirely by tests that want the deterministic wording.
+   */
+  catchUpSummariser?: CatchUpSummariser;
+  /**
    * Absolute origin this deployment is reached at, used to build links that
    * travel outside the browser. Defaults to `COORD_PUBLIC_URL`, and failing
    * that to the `Host` of the request that asked for the link.
@@ -3575,6 +3614,8 @@ export class ApiGateway {
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
   private readonly chatterFilter: ChatterFilter;
+  /** The local model that phrases the catch-up, when the deployment has one. */
+  private readonly catchUpSummariser: CatchUpSummariser | undefined;
   /** Configured origin for links that leave the browser, or "" to infer one. */
   private readonly publicUrl: string;
 
@@ -3587,6 +3628,8 @@ export class ApiGateway {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
     this.chatterFilter = options.chatterFilter ?? defaultChatterFilter();
+    this.catchUpSummariser =
+      options.catchUpSummariser ?? defaultCatchUpSummariser();
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
     if (!Number.isSafeInteger(this.bodyLimit) || this.bodyLimit < 1) {
       throw new RangeError("Request body limit must be a positive integer");
@@ -4556,7 +4599,15 @@ export class ApiGateway {
       return;
     }
     if (method === "GET" && path === `${API_PREFIX}/auth/me`) {
-      this.sendJson(response, 200, principal);
+      // Commands belong to every authenticated conversation surface, not only
+      // to a channel that happened to have loaded its first page of messages.
+      // Sending the catalogue with the session makes it available to a private
+      // agent chat opened directly from My Agents or Code, while the channel
+      // response continues to carry it for older clients.
+      this.sendJson(response, 200, {
+        ...principal,
+        slashCommands: SLASH_COMMANDS,
+      });
       return;
     }
 
@@ -9249,6 +9300,149 @@ export class ApiGateway {
           authorized.repositories,
         ),
       });
+      return;
+    }
+
+    // What changed while somebody was away, for the popup on their next
+    // sign-in. Assembled from what the store already knows rather than by
+    // asking an agent to write it, so it is the same document every time,
+    // costs nothing, and still appears when no agent is connected.
+    const catchUpMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/catch-up$`, "u"),
+    );
+    if (catchUpMatch !== undefined && method === "GET") {
+      const projectId = catchUpMatch[0] ?? "";
+      const { repositories } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      const now = new Date().toISOString();
+      const cursor = await this.options.store.getCatchUpCursor(
+        projectId,
+        principal.user.id,
+      );
+      const since = catchUpSince(cursor?.seenAt, now);
+      if (since === undefined) {
+        // Nobody's first visit has a "while you were away" — so it starts the
+        // clock instead of reporting one. Written here rather than left to the
+        // client's "seen" call because a first visit shows no popup to dismiss,
+        // and a mark that only ever appears when somebody dismisses something
+        // would mean the second visit had nothing to measure from either.
+        await this.options.store.markCatchUpSeen(
+          projectId,
+          principal.user.id,
+          now,
+        );
+        this.sendJson(response, 200, {
+          catchUp: emptyCatchUpDigest(now, now),
+        });
+        return;
+      }
+      // The same narrowing the repository list does: a grant holder is caught
+      // up on the repositories they were granted, and told nothing about the
+      // others.
+      const all = await this.options.store.listProjectRepositories(projectId);
+      const visible =
+        repositories === undefined
+          ? all
+          : all.filter((entry) => repositories.has(entry.id));
+      const visibleIds = new Set(visible.map((entry) => entry.id));
+
+      const messages: string[] = [];
+      for (const repository of visible) {
+        const entries = await this.options.store.listChannelMessages(
+          repository.id,
+          principal.user.id,
+          // The same page cap the stats route uses: counting by fetching is
+          // honest about what the channel API can see, and a busier interval
+          // than that reads as "a lot happened" either way.
+          { limit: 200 },
+        );
+        for (const entry of entries) {
+          // Somebody's own messages are not news to them, and neither is
+          // anything they had already seen when they left.
+          if (entry.createdAt > since && entry.authorId !== principal.user.id) {
+            messages.push(entry.createdAt);
+          }
+          for (const reply of entry.replies) {
+            if (
+              reply.createdAt > since &&
+              reply.authorId !== principal.user.id
+            ) {
+              messages.push(reply.createdAt);
+            }
+          }
+        }
+      }
+
+      const tasks = (
+        await this.options.store.listSubmittedTasks({ projectId })
+      ).filter(
+        (task) =>
+          visibleIds.has(task.repositoryId) &&
+          task.completedAt !== undefined &&
+          task.completedAt > since,
+      );
+      const asChange = (task: SubmittedTask): CatchUpChange => ({
+        objective: withoutRoleContext(task.objective),
+        at: task.completedAt ?? since,
+      });
+      const conversations = await this.options.store.listDirectConversations(
+        projectId,
+        principal.user.id,
+      );
+
+      const catchUp = buildCatchUpDigest({
+        since,
+        now,
+        landed: tasks
+          .filter((task) => task.status === "integrated")
+          .map(asChange),
+        // Cancelled work is somebody's own decision, not news; only a task
+        // that stopped on its own is something they have to look at.
+        failed: tasks.filter((task) => task.status === "failed").map(asChange),
+        messages,
+        // Only conversations that moved while they were away. An older
+        // unread message is a badge they have already seen sitting on the
+        // inbox, and repeating it here would make the popup impossible to
+        // clear.
+        direct: conversations
+          .filter((conversation) => conversation.lastMessage.createdAt > since)
+          .reduce((total, conversation) => total + conversation.unread, 0),
+      });
+      // The facts are already right; this only rewrites how they read. A
+      // deployment with no local model, or one whose model is slow or
+      // unhelpful, gets the deterministic wording back unchanged.
+      this.sendJson(response, 200, {
+        catchUp: await summariseCatchUpLines(catchUp, this.catchUpSummariser),
+      });
+      return;
+    }
+    // Marking the catch-up read. Its own call rather than a side effect of
+    // reading it: a request that both reports the news and forgets it loses
+    // the whole document when the response does not arrive.
+    const catchUpSeenMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/catch-up/seen$`, "u"),
+    );
+    if (catchUpSeenMatch !== undefined && method === "POST") {
+      const projectId = catchUpSeenMatch[0] ?? "";
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      await this.options.store.markCatchUpSeen(
+        projectId,
+        principal.user.id,
+        new Date().toISOString(),
+      );
+      // Read back rather than echoed: the write is forward-only, so what the
+      // caller sent is not necessarily what the mark now says.
+      const cursor = await this.options.store.getCatchUpCursor(
+        projectId,
+        principal.user.id,
+      );
+      this.sendJson(response, 200, { seenAt: cursor?.seenAt });
       return;
     }
 

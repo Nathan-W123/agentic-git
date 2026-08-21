@@ -64,6 +64,7 @@ import type {
   AuditEventFilter,
   AuditorCursor,
   AuthSessionRecord,
+  CatchUpCursor,
   CoordinationStore,
   CreateApprovalInput,
   CreateRunInput,
@@ -177,6 +178,11 @@ function matchesAuditFilter(
   );
 }
 
+/** One person's catch-up mark in one project, as a map key. */
+function catchUpKey(projectId: string, userId: string): string {
+  return `${projectId}\0${userId}`;
+}
+
 /**
  * Non-durable store with identical semantics to the SQLite one.
  *
@@ -228,6 +234,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly channelMembershipBackfilled = new Set<string>();
   /** Keyed by `repositoryId\0userId`. */
   private readonly channelReadCursors = new Map<string, string>();
+  /** Keyed by `projectId\0userId`. */
+  private readonly catchUpCursors = new Map<string, string>();
   private readonly auditorCursors = new Map<string, AuditorCursor>();
 
   public constructor() {
@@ -2642,6 +2650,27 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     userId: string,
   ): Promise<string | undefined> {
     return this.channelReadCursors.get(this.channelReadKey(repositoryId, userId));
+  }
+
+  public async getCatchUpCursor(
+    projectId: string,
+    userId: string,
+  ): Promise<CatchUpCursor | undefined> {
+    const seenAt = this.catchUpCursors.get(catchUpKey(projectId, userId));
+    return seenAt === undefined ? undefined : { projectId, userId, seenAt };
+  }
+
+  public async markCatchUpSeen(
+    projectId: string,
+    userId: string,
+    at: string,
+  ): Promise<void> {
+    // Forward-only, matching the SQL stores' conditional upsert.
+    const key = catchUpKey(projectId, userId);
+    const seen = this.catchUpCursors.get(key);
+    if (seen === undefined || seen < at) {
+      this.catchUpCursors.set(key, at);
+    }
   }
 
   public async getAuditorCursor(

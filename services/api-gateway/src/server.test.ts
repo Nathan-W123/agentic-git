@@ -34,6 +34,7 @@ import {
 import { hashPassword } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
 import type { CodexUsageReader } from "./codex-subscription-usage.js";
+import type { CatchUpSummariser } from "./catch-up.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
 const PASSWORD = "RelayPassword123!";
@@ -361,6 +362,14 @@ async function startRuntime(
     withoutListAgents?: boolean;
     /** Drops direct push support, as an older or limited deployment may. */
     withoutPushRepository?: boolean;
+    /**
+     * Writes the catch-up's prose, standing in for the local model.
+     *
+     * Defaults to one that answers nothing, which is both what a machine
+     * without the model does and what keeps every other test in this file
+     * from loading one to prove something unrelated.
+     */
+    catchUpSummariser?: CatchUpSummariser;
     /** The direct push result returned to the channel. */
     pushOutcome?: {
       outcome: "done" | "refused";
@@ -870,6 +879,7 @@ async function startRuntime(
       readsAsChatter: async (text: string) => localChatter(text),
       available: async () => true,
     },
+    catchUpSummariser: options.catchUpSummariser ?? (async () => undefined),
     mailer: async (message) => {
       mail.push(message);
     },
@@ -1076,6 +1086,21 @@ test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", as
   const me = await client.request("/api/v1/auth/me");
   assert.equal(me.status, 200);
   assert.equal(me.data.user.displayName, "Owner");
+  assert.deepEqual(
+    me.data.slashCommands.map((command: { name: string }) => command.name),
+    [
+      "plan",
+      "queue",
+      "ask",
+      "dnc",
+      "simple",
+      "push",
+      "retry",
+      "cancel",
+      "stop",
+      "help",
+    ],
+  );
 
   const createdRepository = await client.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
@@ -2006,6 +2031,263 @@ test("project metrics are served to members and refused across tenants", async (
     "/api/v1/projects/project_local/metrics",
   );
   assert.equal(denied.status, 403);
+});
+
+test("the catch-up says what changed while somebody was away, then clears", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "catch-up-repo");
+  const catchUpPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/catch-up`;
+
+  // Nobody's first sign-in has a "while you were away": handing somebody the
+  // project's whole history the first time they arrive is not catching them
+  // up on anything. It starts their clock instead, or the second visit would
+  // have nothing to measure from either.
+  const first = await owner.request(catchUpPath);
+  assert.equal(first.status, 200);
+  assert.equal(first.data.catchUp.empty, true);
+  assert.deepEqual(first.data.catchUp.lines, []);
+  assert.notEqual(
+    await runtime.store.getCatchUpCursor(DEFAULT_PROJECT_ID, ownerId),
+    undefined,
+  );
+
+  // Somebody who was here yesterday and has been away since.
+  const colleague = await runtime.store.createUser({
+    email: "catch-up-colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  await runtime.store.markCatchUpSeen(
+    DEFAULT_PROJECT_ID,
+    colleague.id,
+    "2026-01-01T00:00:00.000Z",
+  );
+
+  await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: ownerId,
+    content: "pushed the retry fix",
+  });
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "Fix the retry loop",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  await runtime.store.completeSubmittedTask(task.id, "integrated");
+  await runtime.store.appendDirectMessage({
+    projectId: DEFAULT_PROJECT_ID,
+    authorId: ownerId,
+    recipientId: colleague.id,
+    content: "have a look when you are back",
+  });
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: colleague.email, password: PASSWORD },
+  });
+  const caught = await client.request(catchUpPath);
+  assert.equal(caught.status, 200);
+  assert.equal(caught.data.catchUp.empty, false);
+  assert.equal(
+    caught.data.catchUp.headline,
+    "1 change landed while you were away",
+  );
+  // Landed work is named; everything else is counted, which is the whole
+  // difference between this and reading the channel again.
+  assert.deepEqual(
+    caught.data.catchUp.lines.map((line: { text: string }) => line.text),
+    ["Fix the retry loop", "1 new message", "1 unread direct message"],
+  );
+  assert.deepEqual(caught.data.catchUp.counts, {
+    landed: 1,
+    failed: 0,
+    messages: 1,
+    direct: 1,
+  });
+  // No local model answered here, so the prose is the deterministic wording —
+  // the headline and the same lines, which is what a deployment without a
+  // model shows.
+  assert.equal(
+    caught.data.catchUp.summary,
+    [
+      "1 change landed while you were away",
+      "• Fix the retry loop",
+      "• 1 new message",
+      "• 1 unread direct message",
+    ].join("\n"),
+  );
+
+  // Saying it has been read is its own call, so a popup that never rendered
+  // does not silently swallow the news.
+  const seen = await client.request(`${catchUpPath}/seen`, { method: "POST" });
+  assert.equal(seen.status, 200);
+  assert.ok(seen.data.seenAt > caught.data.catchUp.since);
+
+  const again = await client.request(catchUpPath);
+  assert.equal(again.data.catchUp.empty, true);
+});
+
+test("the local model writes the catch-up's prose, and only its prose", async (t) => {
+  const prompts: string[] = [];
+  const runtime = await startRuntime(t, {
+    catchUpSummariser: async (prompt) => {
+      prompts.push(prompt);
+      return "Somebody fixed the retry loop while you were out.";
+    },
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "catch-up-summarised");
+  const catchUpPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/catch-up`;
+
+  const colleague = await runtime.store.createUser({
+    email: "catch-up-reader@example.com",
+    displayName: "Reader",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  await runtime.store.markCatchUpSeen(
+    DEFAULT_PROJECT_ID,
+    colleague.id,
+    "2026-01-01T00:00:00.000Z",
+  );
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "Fix the retry loop",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  await runtime.store.completeSubmittedTask(task.id, "integrated");
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: colleague.email, password: PASSWORD },
+  });
+  const caught = await client.request(catchUpPath);
+  assert.equal(caught.status, 200);
+  assert.equal(
+    caught.data.catchUp.summary,
+    "Somebody fixed the retry loop while you were out.",
+  );
+  // The model was handed the facts, not asked to go and find them.
+  assert.ok((prompts[0] ?? "").includes("Fix the retry loop"), prompts[0]);
+  // And it rewrote only the prose: the list and the counts are still the
+  // measured ones, so a wrong sentence cannot become a wrong catch-up.
+  assert.deepEqual(
+    caught.data.catchUp.lines.map((line: { text: string }) => line.text),
+    ["Fix the retry loop"],
+  );
+  assert.deepEqual(caught.data.catchUp.counts, {
+    landed: 1,
+    failed: 0,
+    messages: 0,
+    direct: 0,
+  });
+  assert.equal(
+    caught.data.catchUp.headline,
+    "1 change landed while you were away",
+  );
+});
+
+test("a catch-up carries only what its reader may see", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const granted = await invitableRepository(owner, "catch-up-granted");
+  const hidden = await invitableRepository(owner, "catch-up-hidden");
+
+  // Reached through a per-repository grant and no organization role: the
+  // catch-up has to narrow the same way the repository list does, or it
+  // becomes a way to read the activity of a repository nobody shared.
+  const guest = await runtime.store.createUser({
+    email: "catch-up-guest@example.com",
+    displayName: "Guest",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: granted,
+    userId: guest.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    createdAt: new Date().toISOString(),
+  });
+  await runtime.store.markCatchUpSeen(
+    DEFAULT_PROJECT_ID,
+    guest.id,
+    "2026-01-01T00:00:00.000Z",
+  );
+  for (const [repositoryId, objective] of [
+    [granted, "Shared work"],
+    [hidden, "Work behind a wall"],
+  ] as const) {
+    const task = await runtime.store.submitTask({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      objective,
+      agentId: "codex",
+      validationCommands: [],
+    });
+    await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+    await runtime.store.completeSubmittedTask(task.id, "integrated");
+  }
+
+  const guestClient = new TestClient(runtime.origin);
+  await guestClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: guest.email, password: PASSWORD },
+  });
+  const caught = await guestClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/catch-up`,
+  );
+  assert.equal(caught.status, 200);
+  assert.deepEqual(
+    caught.data.catchUp.lines.map((line: { text: string }) => line.text),
+    ["Shared work"],
+  );
+
+  // Somebody with no membership and no grant is refused, as they are for
+  // every other project-scoped route.
+  const outsider = await runtime.store.createUser({
+    email: "catch-up-outsider@example.com",
+    displayName: "Outsider",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const stranger = new TestClient(runtime.origin);
+  await stranger.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: outsider.email, password: PASSWORD },
+  });
+  const denied = await stranger.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/catch-up`,
+  );
+  assert.equal(denied.status, 403);
+  const deniedSeen = await stranger.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/catch-up/seen`,
+    { method: "POST" },
+  );
+  assert.equal(deniedSeen.status, 403);
 });
 
 test("project policy is validated, stored, and clearable through the API", async (t) => {

@@ -1114,6 +1114,23 @@ export const MIGRATIONS: readonly Migration[] = [
          ON channel_message_replies(referenced_message_id)`,
     ],
   },
+  {
+    // Where each person's "since you left" catch-up is measured from. Its own
+    // table rather than a column on a membership row: the mark belongs to a
+    // (person, project) pair, which is not a thing any existing row is keyed
+    // by, and a person may be caught up on one project and a week behind on
+    // another.
+    version: 40,
+    name: "catch-up-cursors",
+    statements: [
+      `CREATE TABLE catch_up_cursors (
+        project_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        seen_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, user_id)
+      )`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

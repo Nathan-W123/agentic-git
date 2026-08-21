@@ -903,4 +903,17 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON channel_message_replies(referenced_message_id)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 40,
+    name: "catch-up-cursors",
+    statements: [
+      `CREATE TABLE catch_up_cursors (
+        project_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        seen_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, user_id)
+      )`,
+    ],
+  },
 ];

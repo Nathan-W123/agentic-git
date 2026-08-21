@@ -134,7 +134,6 @@ import {
   ensureAgentOptions,
   scrollThread,
   sendChat,
-  truncateConversationFrom,
 } from "./chat.js";
 import {
   connectRepository,
@@ -2052,42 +2051,6 @@ async function deleteChannelReplyAction(repositoryId, messageId, replyId) {
   }
 }
 
-/**
- * Deleting a message from the private agent conversation, which rewinds it.
- *
- * The confirmation says how many messages go rather than "this one", because
- * that is what happens — see `truncateConversationFrom` for why it cannot be
- * one — and somebody scrolling back to delete an early message would
- * otherwise lose the whole conversation to a dialog that promised one line.
- */
-async function deleteChatMessageAction(index) {
-  const agent = currentAgent();
-  if (agent === undefined || !Number.isInteger(index)) {
-    return;
-  }
-  const following = (state.conversations[agent.id] ?? []).length - index;
-  if (following <= 0) {
-    return;
-  }
-  const confirmed = await showModal({
-    title:
-      following === 1
-        ? "Delete this message?"
-        : `Delete this message and the ${String(following - 1)} after it?`,
-    subtitle:
-      "This conversation is replayed to the agent on every turn, so it is " +
-      "rewound to before this message rather than having one lifted out of " +
-      "the middle. The agent's own session is dropped with it, so nothing " +
-      "here is remembered on its side either.",
-    confirm: "Delete",
-  });
-  if (confirmed === undefined) {
-    return;
-  }
-  truncateConversationFrom(agent.id, index);
-  render();
-}
-
 /** Unsending one direct message, from both sides of the conversation. */
 async function deleteDirectMessageAction(userId, messageId) {
   const confirmed = await showModal({
@@ -2849,6 +2812,15 @@ function restorePanelWidth() {
 
 restorePanelWidth();
 
+const RIGHT_PANEL_DRAG_TYPE = "application/x-coord-right-panel";
+
+/** Forget a pinned panel when that same surface is explicitly closed. */
+function clearSplitRightPanel(kind) {
+  if (state.splitRightPanel === kind) {
+    state.splitRightPanel = undefined;
+  }
+}
+
 /**
  * Dragging the panel edge.
  *
@@ -2904,6 +2876,13 @@ document.addEventListener("dblclick", (event) => {
  * leaves nothing behind to clear.
  */
 document.addEventListener("dragstart", (event) => {
+  const tab = event.target.closest?.("[data-right-panel-kind]");
+  if (tab !== null && tab !== undefined && !phoneLayout()) {
+    event.dataTransfer.setData(RIGHT_PANEL_DRAG_TYPE, tab.dataset.rightPanelKind);
+    event.dataTransfer.effectAllowed = "move";
+    document.querySelector(".chats-shell")?.classList.add("panel-splitting");
+    return;
+  }
   const row = event.target.closest?.("[data-drag-path]");
   if (row === null || row === undefined) {
     return;
@@ -2913,6 +2892,13 @@ document.addEventListener("dragstart", (event) => {
 });
 
 document.addEventListener("dragover", (event) => {
+  const isPanelTab = [...event.dataTransfer.types].includes(RIGHT_PANEL_DRAG_TYPE);
+  const splitTarget = event.target.closest?.(".chan-main, .thread-panel");
+  if (isPanelTab && splitTarget !== null && splitTarget !== undefined) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    return;
+  }
   const directory = event.target.closest?.("[data-drop-dir]");
   if (directory === null || directory === undefined) {
     return;
@@ -2928,7 +2914,32 @@ document.addEventListener("dragleave", (event) => {
   event.target.closest?.("[data-drop-dir]")?.classList.remove("drop-into");
 });
 
+document.addEventListener("dragend", () => {
+  document.querySelector(".chats-shell")?.classList.remove("panel-splitting");
+});
+
 document.addEventListener("drop", (event) => {
+  const panelKind = event.dataTransfer.getData(RIGHT_PANEL_DRAG_TYPE);
+  if (panelKind !== "") {
+    const transcript = event.target.closest?.(".chan-main");
+    const panel = event.target.closest?.(".thread-panel");
+    if (transcript !== null && transcript !== undefined) {
+      event.preventDefault();
+      state.splitRightPanel = panelKind;
+      render();
+      return;
+    }
+    if (
+      panel !== null &&
+      panel !== undefined &&
+      panel.dataset.rightPanelPosition === "right"
+    ) {
+      event.preventDefault();
+      state.splitRightPanel = undefined;
+      render();
+      return;
+    }
+  }
   const directory = event.target.closest?.("[data-drop-dir]");
   if (directory === null || directory === undefined) {
     return;
@@ -3453,14 +3464,17 @@ function setChanDrawer(open) {
  */
 function closeSidePanel() {
   if (state.activePlan !== undefined) {
+    clearSplitRightPanel("plan");
     state.activePlan = undefined;
     return true;
   }
   if (state.activeAgentPanel !== undefined) {
+    clearSplitRightPanel("agent");
     state.activeAgentPanel = undefined;
     return true;
   }
   if (state.activeDm !== undefined) {
+    clearSplitRightPanel("dm");
     state.activeDm = undefined;
     state.dmDraft = "";
     state.dmReplyMessageId = undefined;
@@ -3473,19 +3487,23 @@ function closeSidePanel() {
     if (!confirmDiscardEdit()) {
       return false;
     }
+    clearSplitRightPanel("file");
     closeChannelFile();
     state.chanTree = false;
     return true;
   }
   if (state.chanTree === true) {
+    clearSplitRightPanel("tree");
     state.chanTree = false;
     return true;
   }
   if (state.activeChannelThread !== undefined) {
+    clearSplitRightPanel("thread");
     state.activeChannelThread = undefined;
     return true;
   }
   if (state.chanThreadList === true) {
+    clearSplitRightPanel("threads");
     state.chanThreadList = false;
     return true;
   }
@@ -5309,6 +5327,7 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-input']")?.focus();
       return;
     case "channel-thread-close":
+      clearSplitRightPanel("thread");
       state.activeChannelThread = undefined;
       state.threadReplyMessageId = undefined;
       render();
@@ -5454,6 +5473,7 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "dm-close":
+      clearSplitRightPanel("dm");
       state.activeDm = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
@@ -5578,6 +5598,7 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "agent-panel-close":
+      clearSplitRightPanel("agent");
       state.activeAgentPanel = undefined;
       render();
       return;
@@ -5894,10 +5915,6 @@ document.addEventListener("click", (event) => {
     case "chat-toggle":
       toggleChat(render);
       return;
-    case "chat-msg-delete":
-      void deleteChatMessageAction(Number(value));
-      return;
-
     /* Agents */
     case "agent-pick":
       selectAgent(value, render);
@@ -7320,6 +7337,109 @@ function newsLineForFrame(frame) {
   return bannerLineForAudit(event);
 }
 
+/**
+ * Shows the one document that summarises what changed since this account was
+ * last here. Reading it is deliberately separate from dismissing it: only the
+ * close below advances the server's watermark, so a failed request or a page
+ * closed before the document appears cannot silently lose the catch-up.
+ */
+async function showSinceYouLeft() {
+  const projectId = state.projectId;
+  if (projectId === "") {
+    return;
+  }
+
+  let response;
+  try {
+    response = await api(
+      `/projects/${encodeURIComponent(projectId)}/catch-up`,
+    );
+  } catch {
+    // This is helpful context, not something that should turn a successful
+    // login into an error screen. Leaving the watermark alone makes the next
+    // login another chance to show it.
+    return;
+  }
+
+  // The gateway wraps API records today; accepting the record itself keeps
+  // this client aligned with the endpoint's documented response shape too.
+  const catchUp = response?.catchUp ?? response;
+  if (catchUp?.empty === true) {
+    return;
+  }
+
+  const dialog = $("#modal");
+  if (dialog === null) {
+    return;
+  }
+  const headline = String(catchUp?.headline ?? "").trim() || "Since you left";
+  const summary = String(catchUp?.summary ?? "").trim();
+  const lines = Array.isArray(catchUp?.lines)
+    ? catchUp.lines
+        .map((line) =>
+          typeof line === "string" ? line : String(line?.text ?? ""),
+        )
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+    : [];
+  const body =
+    summary !== ""
+      ? `<p class="catch-up-summary">${esc(summary)}</p>`
+      : `<ul class="catch-up-lines">${lines
+          .map((line) => `<li>${esc(line)}</li>`)
+          .join("")}</ul>`;
+
+  const present = () => {
+    // A local summary can take a few seconds. Do not replace a confirmation
+    // the reader opened while it was being written; wait for that interaction
+    // (and any follow-up dialog it opens) to finish, then take the modal.
+    if (dialog.open) {
+      dialog.addEventListener(
+        "close",
+        () => window.setTimeout(present, 0),
+        { once: true },
+      );
+      return;
+    }
+    if (state.projectId !== projectId || state.principal === undefined) {
+      return;
+    }
+    dialog.innerHTML = `<article class="modal-card catch-up-card" aria-labelledby="catch-up-title">
+      <header class="catch-up-head">
+        <div>
+          <p class="catch-up-kicker">Since you left</p>
+          <h3 id="catch-up-title">${esc(headline)}</h3>
+        </div>
+        <button class="icon-btn catch-up-close" type="button" aria-label="Dismiss catch-up">
+          ${icon("close")}
+        </button>
+      </header>
+      <div class="catch-up-body">${body}</div>
+      <footer class="modal-actions">
+        <button class="btn btn-primary catch-up-dismiss" type="button">Got it</button>
+      </footer>
+    </article>`;
+
+    const dismiss = () => dialog.close();
+    dialog.querySelector(".catch-up-close")?.addEventListener("click", dismiss);
+    dialog.querySelector(".catch-up-dismiss")?.addEventListener("click", dismiss);
+    // Escape closes a native dialog too, so every dismissal path arrives here
+    // exactly once and advances the same watermark.
+    dialog.addEventListener(
+      "close",
+      () => {
+        void api(
+          `/projects/${encodeURIComponent(projectId)}/catch-up/seen`,
+          { method: "POST", body: {} },
+        ).catch(() => undefined);
+      },
+      { once: true },
+    );
+    dialog.showModal();
+  };
+  present();
+}
+
 async function boot() {
   if (await handleInviteLink()) {
     return;
@@ -7370,6 +7490,7 @@ async function boot() {
   showApp();
   applyHash();
   render();
+  void showSinceYouLeft();
 
   // Everything below this line happens with a screen already up. The audit
   // feed, the run history, the metrics tile and the worker fleet are read on

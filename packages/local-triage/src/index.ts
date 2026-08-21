@@ -259,3 +259,13 @@ export function createChatterFilter(
     },
   };
 }
+
+export {
+  createLocalSummariser,
+  DEFAULT_SUMMARY_BUDGET_MS,
+  DEFAULT_SUMMARY_MODEL,
+  DEFAULT_SUMMARY_WARMUP_BUDGET_MS,
+  type Generator,
+  type LocalSummariser,
+  type LocalSummariserOptions,
+} from "./summary.js";

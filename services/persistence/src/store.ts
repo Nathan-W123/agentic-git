@@ -1113,6 +1113,18 @@ export interface DirectConversation {
   unread: number;
 }
 
+/**
+ * The last time a viewer was shown what changed in a project.
+ *
+ * One row per person per project: the catch-up is a personal thing, and
+ * nothing about it is shared with the rest of the team.
+ */
+export interface CatchUpCursor {
+  projectId: ProjectId;
+  userId: UserId;
+  seenAt: string;
+}
+
 export interface DirectMessageFilter {
   /** Exclusive cursor: only messages created strictly before this ISO time. */
   before?: string;
@@ -1860,6 +1872,31 @@ export interface CoordinationStore {
     repositoryId: string,
     userId: UserId,
   ): Promise<string | undefined>;
+
+  /**
+   * How far a viewer has been caught up on one project's news.
+   *
+   * Separate from the channel read cursor rather than derived from it: that
+   * one moves every time somebody glances at a room, while this one is the
+   * mark the login catch-up is measured from, and a person who read one
+   * channel on their phone has not thereby been told what the rest of the
+   * project did.
+   */
+  getCatchUpCursor(
+    projectId: ProjectId,
+    userId: UserId,
+  ): Promise<CatchUpCursor | undefined>;
+  /**
+   * Advances the mark, and only ever forward.
+   *
+   * Two tabs opening at once would otherwise race, and the loser would drag
+   * the mark backwards and show the same news again on the next login.
+   */
+  markCatchUpSeen(
+    projectId: ProjectId,
+    userId: UserId,
+    at: string,
+  ): Promise<void>;
 
   /** How far this repository's auditor has already looked. */
   getAuditorCursor(repositoryId: string): Promise<AuditorCursor | undefined>;

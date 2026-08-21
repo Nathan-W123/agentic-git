@@ -2844,6 +2844,7 @@ function channelSlashCandidates(repositoryId, target = "channel") {
   const known =
     state.channelSlashCommands[repositoryId] ??
     Object.values(state.channelSlashCommands)[0] ??
+    state.slashCommands ??
     [];
   const matching = known.filter((entry) =>
     String(entry.name ?? "").startsWith(query),
@@ -3225,10 +3226,96 @@ function panelGrip() {
  * the plain label because it has no corresponding collection to navigate to.
  */
 function panelKind(label, act) {
+  const kind =
+    label === "Direct"
+      ? "dm"
+      : label === "Thread"
+        ? "thread"
+        : label === "Threads"
+          ? "threads"
+          : label === "Files"
+            ? "tree"
+            : label === "File"
+              ? "file"
+              : label === "Plan"
+                ? "plan"
+                : label.startsWith("Agent")
+                  ? "agent"
+                  : "";
+  const drag = kind === ""
+    ? ""
+    : ` draggable="true" data-right-panel-kind="${kind}"
+        aria-label="${esc(label)} panel; drag left to keep open"`;
   return act === undefined
-    ? `<span class="panel-kind">${esc(label)}</span>`
-    : `<button type="button" class="panel-kind" data-act="${esc(act)}"
+    ? `<span class="panel-kind"${drag}>${esc(label)}</span>`
+    : `<button type="button" class="panel-kind" data-act="${esc(act)}"${drag}
         title="Open ${esc(label.toLowerCase())} library">${esc(label)}</button>`;
+}
+
+/** The open right-hand surfaces, in the same priority order as before split view. */
+function rightPanelKinds() {
+  return [
+    state.activePlan !== undefined && "plan",
+    state.activeAgentPanel !== undefined && "agent",
+    state.activeDm !== undefined && "dm",
+    state.chanFileView !== undefined && "file",
+    state.chanTree === true && "tree",
+    state.activeChannelThread !== undefined && "thread",
+    state.chanThreadList === true && "threads",
+  ].filter(Boolean);
+}
+
+/** Draw one named right-hand surface without changing the state behind it. */
+function rightPanel(repositoryId, kind) {
+  switch (kind) {
+    case "plan":
+      return planPanel(repositoryId);
+    case "agent":
+      return agentPanel();
+    case "dm":
+      return dmPanel();
+    case "file":
+      return filePanel();
+    case "tree":
+      return chanTreePanel(repositoryId);
+    case "thread":
+      return threadPanel(repositoryId);
+    case "threads":
+      return threadListPanel(repositoryId);
+    default:
+      return "";
+  }
+}
+
+function positionedRightPanel(repositoryId, kind, position) {
+  const panel = rightPanel(repositoryId, kind);
+  return panel.replace(
+    '<aside class="thread-panel',
+    `<aside data-right-panel-position="${position}" class="thread-panel`,
+  );
+}
+
+/**
+ * Draw one panel normally, or two after a desktop tab has been dragged left.
+ *
+ * The state for panels deliberately remains independent: a direct message can
+ * sit over an open thread already. Split view exposes both occupants instead
+ * of inventing a second copy of either conversation.
+ */
+function rightPanels(repositoryId) {
+  const kinds = rightPanelKinds();
+  if (kinds.length === 0) {
+    return "";
+  }
+  const split = state.splitRightPanel;
+  if (phoneLayout() || split === undefined || !kinds.includes(split)) {
+    return positionedRightPanel(repositoryId, kinds[0], "right");
+  }
+  const other = kinds.find((kind) => kind !== split);
+  if (other === undefined) {
+    return positionedRightPanel(repositoryId, split, "right");
+  }
+  return `${positionedRightPanel(repositoryId, split, "left")}${positionedRightPanel(repositoryId, other, "right")}`;
 }
 
 /**
@@ -5185,27 +5272,7 @@ export function renderChats() {
       ${dismissedQuestionChip(repositoryId)}
       ${composer(repositoryId)}
     </div>
-    ${
-      // A plan outranks everything else in the panel. It is the one surface
-      // opened by a decision that is waiting on the reader — the work does
-      // not start until they answer it — and it is only ever there because
-      // they asked for it or because their own `/plan` just finished.
-      //
-      // Below it: a conversation opened by tapping somebody takes the panel,
-      // being the most recent thing the reader asked for, and the thread they
-      // were in is still where they left it when they close this.
-      (state.activePlan !== undefined && planPanel(repositoryId)) ||
-      (state.activeAgentPanel !== undefined
-        ? agentPanel()
-        : state.activeDm !== undefined
-        ? dmPanel()
-        : state.chanFileView !== undefined
-        ? filePanel()
-        : state.chanTree === true
-          ? chanTreePanel(repositoryId)
-          : (threadPanel(repositoryId) ||
-           (state.chanThreadList === true ? threadListPanel(repositoryId) : "")))
-    }
+    ${rightPanels(repositoryId)}
   </div>`;
 }
 
