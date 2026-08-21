@@ -153,7 +153,7 @@ export const ICONS = {
   at: S(
     '<circle cx="12" cy="12" r="3.6"/><path d="M15.6 12v1.4a2.6 2.6 0 0 0 5.2 0V12a8.8 8.8 0 1 0-3.5 7"/>',
   ),
-  send: S('<path d="M4.5 12 20 4.5 15.5 20l-3.6-5.6z"/><path d="m11.9 14.4 8.1-9.9"/>'),
+  send: S('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
   sliders: S(
     '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
   ),
