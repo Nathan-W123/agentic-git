@@ -1478,6 +1478,89 @@ test("the execution prompt asks for an ending a person can read", async () => {
   }
 });
 
+test("a task queued behind this one is named in the prompt it reads", async () => {
+  // The trigger the release outcome never had: an agent that is not told
+  // anybody is waiting hands nothing back, whatever the schema offers.
+  const fixture = await createFixture();
+  const executionInputs: string[] = [];
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    if (args[args.indexOf("--sandbox") + 1] === "read-only") {
+      return output(JSON.stringify(PLAN));
+    }
+    executionInputs.push(String(options.input));
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "The fixture value is 2 now.",
+        requestId: "",
+        additionalFiles: [],
+        additionalSymbols: [],
+        additionalApis: [],
+        additionalSchemas: [],
+        additionalConfigKeys: [],
+        additionalTests: [],
+        additionalServices: [],
+        reason: "",
+      }),
+    );
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    const notice = {
+      taskId: "task_waiting",
+      files: ["src/value.js"],
+      reason: "Task task_waiting is waiting for these before it can start",
+      occurredAt: new Date().toISOString(),
+    };
+    await adapter.noteScopeContention(session.id, notice);
+    // Said twice, printed once; and a session nobody knows is not an error.
+    await adapter.noteScopeContention(session.id, notice);
+    await adapter.noteScopeContention("session_gone", notice);
+    await adapter.sendContext(session.id, contextFor(workspace));
+    await adapter.collectChanges(session.id);
+
+    const prompt = executionInputs[0] ?? "";
+    assert.equal(prompt.split("task_waiting").length - 1, 1);
+    assert.match(prompt, /queued behind resources you hold/u);
+    assert.match(prompt, /src\/value\.js/u);
+    // The standing instruction stands whether or not anybody is waiting.
+    assert.match(prompt, /Hand files back as you finish with them/u);
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("an explicit /ask asks its questions first, then implements the answers", async () => {
   // The reported case: "add an orchestrate command, use /ask for
   // clarifications" reached a Codex-backed agent, which had no way to ask —

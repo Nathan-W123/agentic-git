@@ -13,6 +13,7 @@ import {
   type AgentSession,
   type CoordinatorContext,
   type QuestionAnswer,
+  type ScopeContentionNotice,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -2469,6 +2470,215 @@ test("a released file goes to another agent while the task is still running", as
       ),
       true,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** An agent that hands back exactly what it is told somebody is waiting for. */
+class NoticedAgent extends TestAgent {
+  public readonly notices: ScopeContentionNotice[] = [];
+  public readonly decisions: ScopeChangeDecision[] = [];
+
+  public async noteScopeContention(
+    _sessionId: string,
+    notice: ScopeContentionNotice,
+  ): Promise<void> {
+    this.notices.push(structuredClone(notice));
+  }
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    await super.sendContext(sessionId, context);
+    const wanted = [
+      ...new Set(this.notices.flatMap((notice) => notice.files)),
+    ].filter((file) => this.planFor().expectedFiles.includes(file));
+    if (wanted.length === 0) {
+      return;
+    }
+    const released = await new Promise<ScopeChangeDecision>((resolve) => {
+      this.sessionFor(sessionId).scopeResolver = resolve;
+      this.handlerFor(sessionId)?.({
+        event: "scope_release_requested",
+        requestId: `release_${this.planFor().taskId}`,
+        releasedFiles: wanted,
+        reason: "Told somebody is waiting on these, and they are finished with",
+        occurredAt: new Date().toISOString(),
+      });
+    });
+    this.decisions.push(released);
+  }
+}
+
+test("a holder is told which files another task is waiting on, and hands them back", async () => {
+  // The trigger the release path never had. Everything downstream of the
+  // request already worked; nothing ever told an agent there was anybody to
+  // release to, so no agent ever asked.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const holder = new NoticedAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          return { outcome: "admitted", plan: request.plan };
+        },
+        async listWaitingOn(request) {
+          return request.plan.expectedFiles.includes("src/b.txt")
+            ? [
+                {
+                  taskId: "task_waiting",
+                  files: ["src/b.txt"],
+                  symbols: [],
+                  apis: [],
+                  schemas: [],
+                  configKeys: [],
+                  tests: [],
+                  services: [],
+                  explanation: "src/b.txt is held by task_a",
+                },
+              ]
+            : [];
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: holder }],
+    });
+
+    assert.equal(holder.notices[0]?.taskId, "task_waiting");
+    assert.deepEqual(holder.notices[0]?.files, ["src/b.txt"]);
+    assert.match(holder.notices[0]?.reason ?? "", /task_waiting/u);
+    // Announced once per waiting task and resource, however many times the
+    // queue is read while the agent works.
+    assert.equal(
+      holder.notices.filter((notice) => notice.files.includes("src/b.txt"))
+        .length,
+      1,
+    );
+    assert.equal(holder.decisions[0]?.decision, "approved");
+    assert.deepEqual(holder.decisions[0]?.revisedPlan.expectedFiles, [
+      "src/a.txt",
+    ]);
+    assert.equal(
+      result.audit.some(
+        (event) =>
+          event.type === "scope_contention_noticed" &&
+          event.taskId === "task_a" &&
+          (event.data as { waitingTaskId?: string }).waitingTaskId ===
+            "task_waiting",
+      ),
+      true,
+    );
+    assert.equal(result.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a holder nobody is waiting on is told nothing", async () => {
+  // The notice has to be worth reading. An agent told on every poll that
+  // nothing is happening would learn to skip the paragraph that matters.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const holder = new NoticedAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          return { outcome: "admitted", plan: request.plan };
+        },
+        async listWaitingOn() {
+          return [];
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: holder }],
+    });
+
+    assert.deepEqual(holder.notices, []);
+    assert.equal(
+      result.audit.some((event) => event.type === "scope_contention_noticed"),
+      false,
+    );
+    assert.equal(result.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a task sequenced behind another in the same run is named to the holder", async () => {
+  // A queue forms inside one run as well as across them: the second task is
+  // held back by conflict detection, and its decision already says whose work
+  // it is waiting for.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const first = new NoticedAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/ab.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    const second = new NoticedAgent(
+      "agent_b",
+      plan("task_b", ["src/ab.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/b.txt",
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_a"), adapter: first },
+        { task: task("task_b"), adapter: second },
+      ],
+    });
+
+    // Whichever of the two went first was the holder, and it was told which
+    // file the other one is queued behind.
+    const told = [...first.notices, ...second.notices];
+    assert.equal(told.length > 0, true);
+    assert.equal(
+      told.every((notice) => notice.files.includes("src/ab.txt")),
+      true,
+    );
+    assert.equal(result.tasks.every((entry) => entry.status === "integrated"), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

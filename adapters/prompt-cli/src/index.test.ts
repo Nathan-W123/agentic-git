@@ -1293,6 +1293,74 @@ test("claude: a released file is handed back and the next round is prompted with
   assert.equal(changeSet.patches.length, 1);
 });
 
+test("claude: a task queued behind this one is named in the prompt it reads", async () => {
+  // The trigger. The release outcome existed, worked, and was never used,
+  // because nothing ever told an agent that anybody was waiting on anything.
+  const fixture = await createFixture();
+  let executionInput = "";
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(claudeEnvelope(JSON.stringify(PLAN)));
+    }
+    executionInput = String(options.input);
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  const notice = {
+    taskId: "task_waiting",
+    files: ["src/value.js"],
+    reason: "Task task_waiting is waiting for these before it can start",
+    occurredAt: new Date().toISOString(),
+  };
+  await adapter.noteScopeContention?.(session.id, notice);
+  // Said twice, printed once: a queue is re-read while the agent works, and
+  // repeating it would crowd out the work.
+  await adapter.noteScopeContention?.(session.id, notice);
+  // An unknown session is not an error — the notice is advice, and a session
+  // that has already ended cannot act on it.
+  await adapter.noteScopeContention?.("session_gone", notice);
+  await adapter.sendContext(session.id, contextFor(workspace));
+
+  assert.equal(executionInput.split("task_waiting").length - 1, 1);
+  assert.match(executionInput, /queued behind resources you hold/u);
+  assert.match(executionInput, /src\/value\.js/u);
+  // The standing instruction stands whether or not anybody is waiting.
+  assert.match(executionInput, /Hand files back as you finish with them/u);
+});
+
 test("claude: the execution prompt and schema both offer handing scope back", async () => {
   const fixture = await createFixture();
   let executionInput = "";

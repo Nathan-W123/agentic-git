@@ -107,6 +107,36 @@ export interface ConflictRepair {
   reason: string;
 }
 
+/**
+ * Somebody else is waiting on part of what this session holds.
+ *
+ * The other half of `scope_release_requested`: the release exists, works, and
+ * was never used, because nothing ever told an agent that anyone wanted
+ * anything. This is that telling — the coordinator knows who is queued behind
+ * this task and on which resources, and hands it over so the next round's
+ * prompt can name them.
+ *
+ * Advisory, never an instruction the agent must obey. A file it is still
+ * editing is a file it should keep: the release path refuses one with
+ * uncommitted edits in it anyway, and an agent that hands back work in
+ * progress would be worse for everyone than one that makes somebody wait.
+ */
+export interface ScopeContentionNotice {
+  /** The task that is waiting, for the agent to name if it reports on it. */
+  taskId: string;
+  /** What it is waiting for, of what this session holds. */
+  files: string[];
+  symbols?: string[];
+  apis?: string[];
+  schemas?: string[];
+  configKeys?: string[];
+  tests?: string[];
+  services?: string[];
+  /** Why it is waiting, in a form worth putting in front of a model. */
+  reason: string;
+  occurredAt: string;
+}
+
 export type AgentEvent =
   | {
       event: "progress";
@@ -438,6 +468,25 @@ export interface AgentAdapter {
   resolveScopeChange(
     sessionId: string,
     decision: ScopeChangeDecision,
+  ): Promise<void>;
+
+  /**
+   * Tells a running session that another task is queued behind part of what
+   * it holds.
+   *
+   * Delivered while the agent works, and read on its next turn — the CLIs
+   * behind these adapters are re-invoked per round, so a notice becomes a
+   * line in the next prompt rather than an interruption of the current one.
+   * Nothing is required of the agent: it releases what it has finished with
+   * through `scope_release_requested`, or it keeps working and everything is
+   * released at settle as before.
+   *
+   * Optional, and best-effort at every call site. An adapter without it
+   * simply never mentions the queue, which is exactly where this started.
+   */
+  noteScopeContention?(
+    sessionId: string,
+    notice: ScopeContentionNotice,
   ): Promise<void>;
 
   /**

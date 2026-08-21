@@ -1009,6 +1009,14 @@ export type AuditEventType =
   | "scope_release_requested"
   | "scope_release_decided"
   /**
+   * A holder was told that another task is queued behind resources it owns.
+   *
+   * The trigger the release request never had. Recorded because an agent that
+   * is told and hands nothing back is a different failure from one that was
+   * never told at all, and only the trail can tell them apart.
+   */
+  | "scope_contention_noticed"
+  /**
    * A task alone in its repository was handed the whole of it without being
    * asked to describe itself, and — when somebody else turned up — what that
    * claim was narrowed to, read from its worktree at that moment.

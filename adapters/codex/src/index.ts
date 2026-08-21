@@ -13,6 +13,7 @@ import {
   type CoordinatorContext,
   type QuestionAnswer,
   type QuestionChoice,
+  type ScopeContentionNotice,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -457,6 +458,12 @@ interface CodexSession {
   answers: Array<{ question: string; chose: string }>;
   /** What the platform did and said, for the prompt of the round after. */
   actionResults: AgentActionResult[];
+  /**
+   * Who is queued behind resources this session holds, as far as the
+   * coordinator has told it. Read when the next round's prompt is built,
+   * which is the only moment the agent can answer with a release.
+   */
+  contention: ScopeContentionNotice[];
   cancelled: boolean;
 }
 
@@ -965,6 +972,7 @@ export class CodexAdapter implements AgentAdapter {
       answers: [],
       pendingAction: new Map(),
       actionResults: [],
+      contention: [],
       resume: undefined,
       cancelled: false,
     };
@@ -1033,6 +1041,7 @@ export class CodexAdapter implements AgentAdapter {
       answers: [],
       pendingAction: new Map(),
       actionResults: [],
+      contention: [],
       resume,
       cancelled: false,
     };
@@ -1519,6 +1528,49 @@ export class CodexAdapter implements AgentAdapter {
     }
     record.pendingScope.delete(decision.requestId);
     pending.resolve(structuredClone(decision));
+  }
+
+  /**
+   * Records that another task is waiting on part of what this session holds,
+   * for the prompt of the round after.
+   *
+   * Silent about an unknown or cancelled session, and about a notice it has
+   * already been given: this is advice, and repeating it would crowd the
+   * prompt with the queue instead of the work.
+   */
+  public async noteScopeContention(
+    sessionId: string,
+    notice: ScopeContentionNotice,
+  ): Promise<void> {
+    const record = this.sessions.get(sessionId);
+    if (record === undefined || record.cancelled) {
+      return;
+    }
+    const fingerprint = (entry: ScopeContentionNotice): string =>
+      JSON.stringify({
+        taskId: entry.taskId,
+        files: [...entry.files].sort(),
+        symbols: [...(entry.symbols ?? [])].sort(),
+        apis: [...(entry.apis ?? [])].sort(),
+        schemas: [...(entry.schemas ?? [])].sort(),
+        configKeys: [...(entry.configKeys ?? [])].sort(),
+        tests: [...(entry.tests ?? [])].sort(),
+        services: [...(entry.services ?? [])].sort(),
+      });
+    const known = fingerprint(notice);
+    if (record.contention.some((seen) => fingerprint(seen) === known)) {
+      return;
+    }
+    record.contention.push(structuredClone(notice));
+    const waitingOn =
+      notice.files.length > 0
+        ? notice.files.join(", ")
+        : "resources this task holds";
+    this.emit(record, {
+      event: "progress",
+      message: `Another task is waiting on ${waitingOn}`,
+      occurredAt: new Date().toISOString(),
+    });
   }
 
   public async resolveQuestion(
@@ -2149,13 +2201,21 @@ export class CodexAdapter implements AgentAdapter {
       EXPLANATION_STYLE_INSTRUCTIONS,
       "For completed, set outcome=completed and use empty scope-change fields.",
       "When more scope is necessary, stop, set outcome=scope_change_requested, populate every scope field, and wait for the next invocation.",
-      "When you are finished with files in expectedFiles you no longer need " +
-        "to change, hand them back: stop, set " +
-        "outcome=scope_release_requested, name them in the same scope " +
-        "fields, and say why in reason. Other agents are waiting on them, " +
-        "and they stay yours until the task ends otherwise. Release nothing " +
-        "you still have edits in or may still touch — getting one back is a " +
-        "scope change, and it will be refused if somebody else has taken it.",
+      // The standing instruction. Handing scope back was mentioned only in
+      // the schema note before this, as one outcome among five, and no agent
+      // ever volunteered it — so an over-claimed plan held every file it
+      // named until the task settled.
+      "Hand files back as you finish with them, without waiting to be asked. " +
+        "Everything in expectedFiles is yours alone until this task ends, so " +
+        "a file you stopped needing in the first ten minutes blocks whoever " +
+        "wants it for the rest of the run. When you know you will not touch " +
+        "one again, stop, set outcome=scope_release_requested, name it in " +
+        "the same scope fields and say why in reason; you carry on working " +
+        "inside what is left.",
+      "Release nothing you still have edits in or may still touch. A file " +
+        "with uncommitted changes is refused — correctly, it is not finished " +
+        "with — and asking for a released file back is a scope change that " +
+        "is refused if somebody else has taken it by then.",
       // The platform's own verbs. Without this paragraph the actions
       // existed and no Codex agent had any way to learn so — "push to
       // GitHub" was a request it could not satisfy by any route, including
@@ -2189,6 +2249,17 @@ export class CodexAdapter implements AgentAdapter {
         "deployment, granting access. If the work is blocked on something " +
         "like that, finish with outcome=completed and an explanation " +
         "saying exactly what is missing.",
+      ...(record.contention.length === 0
+        ? []
+        : [
+            "Tasks are queued behind resources you hold right now: " +
+              JSON.stringify(record.contention),
+            "Each of them is stopped until you release what it names or this " +
+              "task ends. Release now whatever you have finished with — that " +
+              "is all it takes for the waiting task to start — and keep the " +
+              "rest. If you are still working in every one of them, say so " +
+              "in your explanation and carry on.",
+          ]),
       `Task: ${taskObjective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
       ...(approvedPlan !== undefined && isBlanketClaim(approvedPlan)
