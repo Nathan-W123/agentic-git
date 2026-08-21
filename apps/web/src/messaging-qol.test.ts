@@ -262,6 +262,34 @@ test("the Thread label opens the thread library as the visible side panel", asyn
   assert.match(action, /state\.chanTree = false;/u);
 });
 
+test("desktop panel tabs can be dragged left to keep two conversations open", async () => {
+  const [app, chats, css] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+
+  assert.match(chats, /data-right-panel-kind=/u);
+  assert.match(chats, /draggable="true"/u);
+  assert.match(chats, /function rightPanels\(repositoryId\)/u);
+  assert.match(chats, /phoneLayout\(\) \|\| split === undefined/u);
+  assert.match(chats, /positionedRightPanel\(repositoryId, split, "left"\)/u);
+  assert.match(chats, /positionedRightPanel\(repositoryId, other, "right"\)/u);
+
+  assert.match(app, /RIGHT_PANEL_DRAG_TYPE/u);
+  assert.match(app, /state\.splitRightPanel = panelKind/u);
+  assert.match(app, /state\.splitRightPanel = undefined/u);
+  assert.match(app, /clearSplitRightPanel\("dm"\)/u);
+  assert.match(app, /clearSplitRightPanel\("thread"\)/u);
+
+  assert.match(css, /\.chats-shell\.panel-splitting \.chan-main/u);
+  assert.match(css, /\.thread-panel\[data-right-panel-position="left"\]/u);
+  assert.match(
+    css,
+    /@media[^}]*max-width:\s*600px[\s\S]*?\.chats-shell\.panel-splitting \.chan-main[\s\S]*?box-shadow:\s*none/u,
+  );
+});
+
 test("mobile message actions surface only for the selected message", async () => {
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");

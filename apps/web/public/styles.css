@@ -7291,6 +7291,26 @@ button.chip.lg:hover {
   z-index: 4;
 }
 
+/* A panel kind is the draggable tab for desktop split view. */
+.panel-kind[draggable="true"] {
+  cursor: grab;
+  user-select: none;
+}
+
+.panel-kind[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* Dragging a tab over the conversation pins it as the left of two panels. */
+.chats-shell.panel-splitting .chan-main {
+  box-shadow: inset -3px 0 0 var(--accent);
+}
+
+.thread-panel[data-right-panel-position="left"] {
+  box-shadow: -14px 0 30px -22px rgba(0, 0, 0, 0.9),
+    14px 0 30px -22px rgba(0, 0, 0, 0.9);
+}
+
 /* Opening and closing, driven from `playSurfaceMotion` in app.js rather than
    from the presence of the element itself.
 
@@ -9029,6 +9049,10 @@ dialog.modal[open]::backdrop {
     max-width: 100vw;
     min-width: 0;
     z-index: 72;
+  }
+
+  .chats-shell.panel-splitting .chan-main {
+    box-shadow: none;
   }
 
   /* Nothing to drag full-screen wider than the screen. */

@@ -2849,6 +2849,15 @@ function restorePanelWidth() {
 
 restorePanelWidth();
 
+const RIGHT_PANEL_DRAG_TYPE = "application/x-coord-right-panel";
+
+/** Forget a pinned panel when that same surface is explicitly closed. */
+function clearSplitRightPanel(kind) {
+  if (state.splitRightPanel === kind) {
+    state.splitRightPanel = undefined;
+  }
+}
+
 /**
  * Dragging the panel edge.
  *
@@ -2904,6 +2913,13 @@ document.addEventListener("dblclick", (event) => {
  * leaves nothing behind to clear.
  */
 document.addEventListener("dragstart", (event) => {
+  const tab = event.target.closest?.("[data-right-panel-kind]");
+  if (tab !== null && tab !== undefined && !phoneLayout()) {
+    event.dataTransfer.setData(RIGHT_PANEL_DRAG_TYPE, tab.dataset.rightPanelKind);
+    event.dataTransfer.effectAllowed = "move";
+    document.querySelector(".chats-shell")?.classList.add("panel-splitting");
+    return;
+  }
   const row = event.target.closest?.("[data-drag-path]");
   if (row === null || row === undefined) {
     return;
@@ -2913,6 +2929,13 @@ document.addEventListener("dragstart", (event) => {
 });
 
 document.addEventListener("dragover", (event) => {
+  const isPanelTab = [...event.dataTransfer.types].includes(RIGHT_PANEL_DRAG_TYPE);
+  const splitTarget = event.target.closest?.(".chan-main, .thread-panel");
+  if (isPanelTab && splitTarget !== null && splitTarget !== undefined) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    return;
+  }
   const directory = event.target.closest?.("[data-drop-dir]");
   if (directory === null || directory === undefined) {
     return;
@@ -2928,7 +2951,32 @@ document.addEventListener("dragleave", (event) => {
   event.target.closest?.("[data-drop-dir]")?.classList.remove("drop-into");
 });
 
+document.addEventListener("dragend", () => {
+  document.querySelector(".chats-shell")?.classList.remove("panel-splitting");
+});
+
 document.addEventListener("drop", (event) => {
+  const panelKind = event.dataTransfer.getData(RIGHT_PANEL_DRAG_TYPE);
+  if (panelKind !== "") {
+    const transcript = event.target.closest?.(".chan-main");
+    const panel = event.target.closest?.(".thread-panel");
+    if (transcript !== null && transcript !== undefined) {
+      event.preventDefault();
+      state.splitRightPanel = panelKind;
+      render();
+      return;
+    }
+    if (
+      panel !== null &&
+      panel !== undefined &&
+      panel.dataset.rightPanelPosition === "right"
+    ) {
+      event.preventDefault();
+      state.splitRightPanel = undefined;
+      render();
+      return;
+    }
+  }
   const directory = event.target.closest?.("[data-drop-dir]");
   if (directory === null || directory === undefined) {
     return;
@@ -3453,14 +3501,17 @@ function setChanDrawer(open) {
  */
 function closeSidePanel() {
   if (state.activePlan !== undefined) {
+    clearSplitRightPanel("plan");
     state.activePlan = undefined;
     return true;
   }
   if (state.activeAgentPanel !== undefined) {
+    clearSplitRightPanel("agent");
     state.activeAgentPanel = undefined;
     return true;
   }
   if (state.activeDm !== undefined) {
+    clearSplitRightPanel("dm");
     state.activeDm = undefined;
     state.dmDraft = "";
     state.dmReplyMessageId = undefined;
@@ -3473,19 +3524,23 @@ function closeSidePanel() {
     if (!confirmDiscardEdit()) {
       return false;
     }
+    clearSplitRightPanel("file");
     closeChannelFile();
     state.chanTree = false;
     return true;
   }
   if (state.chanTree === true) {
+    clearSplitRightPanel("tree");
     state.chanTree = false;
     return true;
   }
   if (state.activeChannelThread !== undefined) {
+    clearSplitRightPanel("thread");
     state.activeChannelThread = undefined;
     return true;
   }
   if (state.chanThreadList === true) {
+    clearSplitRightPanel("threads");
     state.chanThreadList = false;
     return true;
   }
@@ -5309,6 +5364,7 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-input']")?.focus();
       return;
     case "channel-thread-close":
+      clearSplitRightPanel("thread");
       state.activeChannelThread = undefined;
       state.threadReplyMessageId = undefined;
       render();
@@ -5454,6 +5510,7 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "dm-close":
+      clearSplitRightPanel("dm");
       state.activeDm = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
@@ -5578,6 +5635,7 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "agent-panel-close":
+      clearSplitRightPanel("agent");
       state.activeAgentPanel = undefined;
       render();
       return;
