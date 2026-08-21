@@ -1716,14 +1716,15 @@ export async function signInForInvitation(email, password) {
 
 /* --------------------------------------------------------- appearance ---- */
 
-export const DEFAULT_ACCENT = "#ff91a4";
+export const DEFAULT_ACCENT = "#d88973";
 /**
  * The second colour, when nobody has chosen one.
  *
- * A lighter pink keeps the untouched-user theme cohesive while remaining
- * distinct from the primary pink wherever both accents appear together.
+ * The palette's muted lilac: the quiet half of the pair, far enough from the
+ * clay primary to stay legible as a second colour wherever both appear
+ * together, and close enough in weight that neither shouts over the other.
  */
-export const DEFAULT_ACCENT_SECONDARY = "#ffa9b8";
+export const DEFAULT_ACCENT_SECONDARY = "#a894b6";
 
 /**
  * The colour an agent is drawn in when nobody has chosen one.
@@ -1736,7 +1737,7 @@ export const DEFAULT_ACCENT_SECONDARY = "#ffa9b8";
  * the accent to mean what it means. Anyone who wants an identity colour still
  * picks one in Appearance.
  */
-export const DEFAULT_AGENT_COLOR = "#f5f6f7";
+export const DEFAULT_AGENT_COLOR = "#f3efe8";
 
 /**
  * The palette offered in settings.
@@ -1749,15 +1750,15 @@ export const DEFAULT_AGENT_COLOR = "#f5f6f7";
  * near-identical blues.
  */
 export const PALETTE = [
-  { value: "#f5f6f7", label: "Off white" },
+  { value: "#f3efe8", label: "Off white" },
   { value: "#8b5cf6", label: "Violet" },
   { value: "#4f8ef7", label: "Blue" },
   { value: "#2fae7f", label: "Green" },
   { value: "#e0663d", label: "Orange" },
-  { value: "#ff91a4", label: "Pink" },
+  { value: "#d88973", label: "Clay" },
   { value: "#3fa8b5", label: "Teal" },
   { value: "#d7a13b", label: "Amber" },
-  { value: "#a06ee0", label: "Lilac" },
+  { value: "#a894b6", label: "Lilac" },
 ];
 
 function validColor(value) {

@@ -1936,14 +1936,14 @@ test("the theme is driven by custom properties rather than per-component colour"
   const app = await browserSource();
   const css = await publicFile("styles.css");
   for (const [token, value] of [
-    ["--bg", "#0E1014"],
-    ["--surface-1", "#14161B"],
-    ["--surface-2", "#1B1E24"],
-    ["--surface-3", "#20242D"],
-    ["--text", "#F5F6F7"],
-    ["--muted", "#A7AAB3"],
-    ["--salmon", "#FF8790"],
-    ["--lavender", "#B59CFF"],
+    ["--bg", "#121110"],
+    ["--surface-1", "#1A1817"],
+    ["--surface-2", "#24211F"],
+    ["--surface-3", "#2C2926"],
+    ["--text", "#F3EFE8"],
+    ["--muted", "#B5AEA5"],
+    ["--salmon", "#D88973"],
+    ["--lavender", "#A894B6"],
   ]) {
     assert.match(css, new RegExp(`${token}: ${value};`, "u"));
   }
@@ -2033,7 +2033,7 @@ test("the user icon defaults to salmon", async () => {
   const start = ui.indexOf("export function avatar");
   const end = ui.indexOf("\n}", start);
   assert.notEqual(start, -1, "the avatar helper was not found in ui.js");
-  assert.match(ui.slice(start, end), /background:#FF8790/u);
+  assert.match(ui.slice(start, end), /background:#D88973/u);
 });
 
 test("the product is named Lattice throughout the browser surface", async () => {

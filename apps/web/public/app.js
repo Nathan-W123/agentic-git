@@ -2485,12 +2485,12 @@ function applyTheme() {
     .getPropertyValue("--bg-chat")
     .trim();
   const ground = mix(
-    neutralGround || (light ? "#ddd7cb" : "#141414"),
+    neutralGround || (light ? "#ddd7cb" : "#121110"),
     accent,
     0.02,
   );
   const roomTint = mix(
-    neutralRoom || (light ? "#f1ede3" : "#262626"),
+    neutralRoom || (light ? "#f1ede3" : "#1a1817"),
     accent,
     0.02,
   );

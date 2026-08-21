@@ -637,7 +637,7 @@ export function avatar(name, size = 26, seed = name, picture) {
       name,
     )}"><img src="${esc(picture)}" alt=""></span>`;
   }
-  return `<span class="avatar sz-${size}" style="${box};background:#FF8790" title="${esc(
+  return `<span class="avatar sz-${size}" style="${box};background:#D88973" title="${esc(
     name,
   )}">${esc(initials(name))}</span>`;
 }

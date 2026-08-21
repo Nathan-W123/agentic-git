@@ -1,9 +1,10 @@
 /*
  * Lattice — control room styling.
  *
- * A cool, restrained surface system with salmon reserved for primary and
- * active states, and lavender for the quieter agent/thread layer. Spacing and
- * surface contrast carry the structure; borders are only a subtle fallback.
+ * A warm, restrained surface system — near-black browns rather than blue
+ * greys — with the clay accent reserved for primary and active states, and
+ * the muted lilac for the quieter agent/thread layer. Spacing and surface
+ * contrast carry the structure; borders are only a subtle fallback.
  */
 
 /* ------------------------------------------------------------- tokens ---- */
@@ -14,14 +15,16 @@
   /* The eight shared design tokens. Compatibility aliases below keep every
      existing component on this ramp while the names stay semantic at the
      call site. */
-  --bg: #0E1014;
-  --surface-1: #14161B;
-  --surface-2: #1B1E24;
-  --surface-3: #20242D;
-  --text: #F5F6F7;
-  --muted: #A7AAB3;
-  --salmon: #FF8790;
-  --lavender: #B59CFF;
+  --bg: #121110;
+  --surface-1: #1A1817;
+  --surface-2: #24211F;
+  /* One step above the second surface and just under the border, so a card
+     lifted off a card still reads as lighter than the line around it. */
+  --surface-3: #2C2926;
+  --text: #F3EFE8;
+  --muted: #B5AEA5;
+  --salmon: #D88973;
+  --lavender: #A894B6;
 
   --bg-panel: var(--surface-1);
   --bg-card: var(--surface-2);
@@ -32,7 +35,11 @@
   --bg-chat: var(--bg);
   --room-tint: var(--bg-chat);
 
-  --border: color-mix(in srgb, var(--muted) 18%, transparent);
+  /* The one border with a value of its own: the palette names a line colour,
+     and 18% of the warm grey landed a shade under it. The soft and strong
+     variants stay translucent so they keep following whatever surface they
+     are drawn on — a rule several components already lean on. */
+  --border: #34302D;
   --border-soft: color-mix(in srgb, var(--muted) 10%, transparent);
   --border-strong: color-mix(in srgb, var(--muted) 28%, transparent);
 
@@ -10187,8 +10194,8 @@ dialog.modal[open]::backdrop {
 
   /* The same semantic pair, deepened only enough to remain readable on the
      cream surfaces. Dark mode keeps the requested source values above. */
-  --salmon: #9E3F4B;
-  --lavender: #6550B8;
+  --salmon: #9A4C33;
+  --lavender: #63527A;
 
   --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
