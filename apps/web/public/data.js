@@ -5204,6 +5204,21 @@ export function setMyAvatar(dataUrl) {
   localStorage.setItem("ag.avatar", dataUrl);
 }
 
+/** A channel picture, kept per repository in this browser. */
+export function channelPicture(repositoryId) {
+  const stored = localStorage.getItem(`ag.channelPicture.${repositoryId}`);
+  return stored === null || stored === "" ? undefined : stored;
+}
+
+export function setChannelPicture(repositoryId, dataUrl) {
+  const key = `ag.channelPicture.${repositoryId}`;
+  if (dataUrl === undefined) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, dataUrl);
+}
+
 /** "dark" or "light". Dark is what every colour here was chosen against. */
 export function myTheme() {
   return localStorage.getItem("ag.theme") === "light" ? "light" : "dark";

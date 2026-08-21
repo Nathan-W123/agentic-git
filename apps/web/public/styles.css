@@ -4100,6 +4100,147 @@ button.chip.lg:hover {
   position: relative;
 }
 
+/* A dedicated channel switcher stays narrow while the adjacent sidebar is
+   free to hold tools and the active channel's roster. */
+.channel-rail {
+  width: 60px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 7px;
+  background: var(--bg);
+  border-right: 1px solid var(--border-soft);
+}
+
+.channel-rail-brand,
+.channel-rail-toggle,
+.channel-rail-new,
+.channel-rail-button {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  color: var(--text-2);
+  transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
+}
+
+.channel-rail-brand:hover,
+.channel-rail-toggle:hover,
+.channel-rail-new:hover,
+.channel-rail-button:hover,
+.channel-rail-entry.active .channel-rail-button {
+  background: var(--accent-wash);
+  color: var(--text);
+  border-radius: 9px;
+}
+
+.channel-rail-toggle,
+.channel-rail-new {
+  height: 34px;
+}
+
+.channel-rail-toggle svg,
+.channel-rail-new svg {
+  width: 17px;
+  height: 17px;
+}
+
+.channel-rail-list {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.channel-rail-list::-webkit-scrollbar {
+  display: none;
+}
+
+.channel-rail-entry {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.channel-rail-entry.active::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  width: 3px;
+  height: 24px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.channel-picture {
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 9px;
+  object-fit: cover;
+}
+
+.channel-picture-fallback {
+  background: linear-gradient(145deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.channel-rail-unread {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--bg);
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.channel-rail-edit {
+  position: absolute;
+  right: -1px;
+  bottom: -2px;
+  display: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--bg-card-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.channel-rail-edit svg {
+  width: 9px;
+  height: 9px;
+}
+
+.channel-rail-entry:hover .channel-rail-edit,
+.channel-rail-entry:focus-within .channel-rail-edit {
+  display: grid;
+}
+
+@media (hover: none) {
+  .channel-rail-edit {
+    display: grid;
+  }
+}
+
 .chan-sidebar {
   width: 256px;
   flex: none;
@@ -4134,6 +4275,40 @@ button.chip.lg:hover {
 
 .chan-sidebar-head .search {
   flex: 1;
+}
+
+.chan-sidebar-head.chan-quick-links {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.chan-quick-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: left;
+}
+
+.chan-quick-link:hover,
+.chan-quick-link.on {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.chan-quick-link.on {
+  color: var(--accent-bright);
+}
+
+.chan-quick-link svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* The one thing that scrolls in this column. */
@@ -8487,7 +8662,7 @@ dialog.modal[open]::backdrop {
    full-width drawer below, so none of these compact-rail rules apply there. */
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
-    width: 64px;
+    width: 0;
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-top {
@@ -8959,6 +9134,22 @@ dialog.modal[open]::backdrop {
    "message composer with two inline mini-selects" are still fine at 820px
    and are not fine at 380px. */
 @media (max-width: 600px) {
+  .channel-rail {
+    width: 52px;
+    gap: 6px;
+    padding: 8px 5px;
+  }
+
+  .channel-rail-toggle {
+    display: none;
+  }
+
+  .channel-rail-brand,
+  .channel-rail-new,
+  .channel-rail-button {
+    width: 40px;
+  }
+
   /*
    * A phone gets the space-efficient bar only while it is idle. Focus,
    * text, an attachment, or a targeted thread opens it into a two-row bar so

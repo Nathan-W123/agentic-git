@@ -43,6 +43,7 @@ import {
   myAgentColor,
   myAvatar,
   setMyAvatar,
+  setChannelPicture,
   myTheme,
   myAgents,
   notifications,
@@ -5082,9 +5083,13 @@ document.addEventListener("click", (event) => {
       shell?.classList.toggle("chan-collapsed", state.chanCollapsed);
       markChanFolding(shell);
       const label = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
-      node.setAttribute("aria-pressed", String(state.chanCollapsed));
-      node.setAttribute("aria-label", label);
-      node.setAttribute("title", label);
+      shell
+        ?.querySelectorAll('[data-act="chan-collapse-toggle"]')
+        .forEach((button) => {
+          button.setAttribute("aria-pressed", String(state.chanCollapsed));
+          button.setAttribute("aria-label", label);
+          button.setAttribute("title", label);
+        });
       return;
     }
     case "chan-sidebar-close":
@@ -6496,8 +6501,46 @@ async function pickAvatarFile(file) {
   }
 }
 
+async function pickChannelPictureFile(repositoryId, file) {
+  if (
+    repositoryId === undefined ||
+    file === undefined ||
+    !file.type.startsWith("image/")
+  ) {
+    return;
+  }
+  try {
+    const bitmap = await createImageBitmap(file);
+    const side = Math.min(bitmap.width, bitmap.height);
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    canvas
+      .getContext("2d")
+      ?.drawImage(
+        bitmap,
+        (bitmap.width - side) / 2,
+        (bitmap.height - side) / 2,
+        side,
+        side,
+        0,
+        0,
+        128,
+        128,
+      );
+    setChannelPicture(repositoryId, canvas.toDataURL("image/jpeg", 0.82));
+    render();
+  } catch (error) {
+    toast(`That image could not be read: ${error.message}`, "error");
+  }
+}
+
 document.addEventListener("change", (event) => {
   const picker = event.target;
+  if (picker?.dataset?.act === "channel-picture-pick") {
+    void pickChannelPictureFile(picker.dataset.repository, picker.files?.[0]);
+    return;
+  }
   if (picker?.dataset?.act === "avatar-pick") {
     void pickAvatarFile(picker.files?.[0]);
     return;

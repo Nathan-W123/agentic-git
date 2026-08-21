@@ -32,6 +32,7 @@ api,
   channelDraft,
   channelNewSince,
   channelParticipants,
+  channelPicture,
   channelUnreadCount,
   channelUnreadMark,
   collaborators,
@@ -107,49 +108,62 @@ function countBadge(count) {
     : `<span class="dot-badge">${esc(String(count > 99 ? "99+" : count))}</span>`;
 }
 
-/**
- * A channel, and the things you can do to it.
- *
- * A div rather than a button because it now contains one: inviting somebody
- * belongs to a channel, not to the account menu, and a button inside a button
- * is not markup a browser will keep. The keyboard is served by `role=button`
- * and the delegated handler in `app.js` that exists for exactly this.
- */
-function chanRow(repo, activeRepositoryId) {
-  const unread = channelUnreadCount(repo.id);
-  const mentions = channelUnreadCount(repo.id, { mentionsOnly: true });
-  const active = repo.id === activeRepositoryId;
-  // A room where something has stopped for a person. Unread says "there are
-  // words you have not read"; this says "nothing here moves until you answer",
-  // which is the one thing a reader cannot discover by not opening the room.
-  const held = channelAwaitsGoAhead(repo.id);
-  return `<div class="chan-row${active ? " active" : ""}${
-    unread > 0 ? " unread" : ""
-  }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}"
-    title="#${esc(repo.id)}" aria-label="Open channel ${esc(repo.id)}"${
-      active ? ' aria-current="page"' : ""
-    }>
-    <span class="cr-hash">${icon("chatBubble")}</span>
-    <span class="cr-name">${esc(repo.id)}</span>
-    ${
-      held
-        ? `<span class="cr-held" title="An agent here is waiting for your go-ahead"><span class="sr-only">Waiting for you</span></span>`
-        : ""
-    }
-    ${
-      unread > 0
-        ? `<span class="cr-badge" title="${
-            mentions > 0 ? `${mentions} unread mention${mentions === 1 ? "" : "s"}` : `${unread} unread`
-          }">${mentions > 0 ? "@" : unread > 99 ? "99+" : unread}</span>`
-        : ""
-    }
-    <span class="cr-more">${iconButton("dots", {
-      act: "channel-menu",
-      value: repo.id,
-      title: `More for #${repo.id}`,
-      small: true,
-    })}</span>
-  </div>`;
+function channelPictureMarkup(repositoryId, size = 34) {
+  const picture = channelPicture(repositoryId);
+  if (picture !== undefined) {
+    return `<img class="channel-picture" src="${esc(picture)}" alt="" width="${size}" height="${size}">`;
+  }
+  const initials =
+    repositoryId
+      .split(/[-_\s]+/u)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? "")
+      .join("") || "#";
+  return `<span class="channel-picture channel-picture-fallback" style="width:${size}px;height:${size}px">${esc(initials)}</span>`;
+}
+
+/** The compact, always-visible channel switcher. */
+function channelRail(activeRepositoryId) {
+  const repositories = [...state.repositories].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+  return `<nav class="channel-rail" aria-label="Channels">
+    <button type="button" class="channel-rail-brand" data-act="nav" data-value="chats"
+      title="Lattice" aria-label="Lattice">${brandMark(28)}</button>
+    <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
+      title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
+      aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
+      aria-pressed="${state.chanCollapsed === true}">${icon("columns")}</button>
+    <div class="channel-rail-list">
+      ${repositories
+        .map((repo) => {
+          const active = repo.id === activeRepositoryId;
+          const unread = channelUnreadCount(repo.id);
+          return `<div class="channel-rail-entry${active ? " active" : ""}">
+            <button type="button" class="channel-rail-button" data-act="channel-open"
+              data-value="${esc(repo.id)}" title="#${esc(repo.id)}"
+              aria-label="Open channel ${esc(repo.id)}"${active ? ' aria-current="page"' : ""}>
+              ${channelPictureMarkup(repo.id, 36)}
+              ${
+                unread > 0
+                  ? `<span class="channel-rail-unread">${unread > 99 ? "99+" : unread}</span>`
+                  : ""
+              }
+            </button>
+            <label class="channel-rail-edit" title="Change picture for ${esc(repo.id)}"
+              aria-label="Change picture for ${esc(repo.id)}">${icon("pencil")}
+              <input type="file" accept="image/*" data-act="channel-picture-pick"
+                data-repository="${esc(repo.id)}" hidden>
+            </label>
+          </div>`;
+        })
+        .join("")}
+    </div>
+    <button type="button" class="channel-rail-new" data-act="channel-new"
+      data-value="${esc(activeRepositoryId ?? "")}" title="New channel"
+      aria-label="New channel">${icon("plus")}</button>
+  </nav>`;
 }
 
 /**
@@ -1004,10 +1018,6 @@ function section(label, act, value, title, cls) {
 }
 
 function chanSidebar(activeRepositoryId) {
-  const query = state.chatQuery.trim().toLowerCase();
-  const channels = [...state.repositories]
-    .filter((repo) => query === "" || repo.id.toLowerCase().includes(query))
-    .sort((left, right) => left.id.localeCompare(right.id));
   const roster = channelAgentsFor(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
   // to names — the role has to come from somewhere, and it is on the record.
@@ -1018,15 +1028,15 @@ function chanSidebar(activeRepositoryId) {
   const user = currentUserName();
 
   const channel = esc(activeRepositoryId ?? "");
-  return `<aside class="chan-sidebar" aria-label="Channels and account">
+  return `<aside class="chan-sidebar" aria-label="Channel tools and account">
     <!-- The collapse control belongs to the surface it changes. It stays in
          this crown when the sidebar becomes an icon rail, so expanding it
          never requires hunting in the conversation header. -->
     <div class="chan-sidebar-top">
-      <button type="button" class="chan-brand" data-act="nav" data-value="chats"
-        title="Lattice chats" aria-label="Lattice chats">
-        ${brandMark(26)}
-        <span class="brand-text"><b>Lattice</b></span>
+      <button type="button" class="chan-brand" data-act="channel-info"
+        data-value="${channel}" title="Channel info" aria-label="Channel info">
+        ${channelPictureMarkup(activeRepositoryId ?? "", 28)}
+        <span class="brand-text"><b>${channel}</b></span>
       </button>
       <button type="button" class="icon-btn desk-only chan-collapse-btn"
         data-act="chan-collapse-toggle"
@@ -1041,8 +1051,15 @@ function chanSidebar(activeRepositoryId) {
         cls: "drawer-close",
       })}
     </div>
-    <div class="chan-sidebar-head">
-      ${searchBox("Search channels...", state.chatQuery, "channel-search")}
+    <div class="chan-sidebar-head chan-quick-links">
+      <button type="button" class="chan-quick-link${state.chanThreadList === true ? " on" : ""}"
+        data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}">
+        ${icon("reply")}<span>Threads</span>
+      </button>
+      <button type="button" class="chan-quick-link${state.chanTree === true ? " on" : ""}"
+        data-act="chan-tree-toggle" aria-pressed="${state.chanTree === true}">
+        ${icon("folder")}<span>Files</span>
+      </button>
     </div>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
@@ -1054,20 +1071,6 @@ function chanSidebar(activeRepositoryId) {
          each heading sticks to the top of the panel while its own section is
          passing so the reader always knows which list they are in. -->
     <div class="chan-scroll">
-      <div class="chan-sec chan-sec-channels">
-        <span class="chan-sec-label">Channels</span>
-        <button type="button" class="chan-sec-add" data-act="channel-new"
-          data-value="${channel}" title="New channel" aria-label="New channel">
-          ${icon("plus")}
-        </button>
-      </div>
-      <div class="chan-list">
-        ${
-          channels.length === 0
-            ? `<div class="util-empty">No channel matches that search.</div>`
-            : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
-        }
-      </div>
       <!-- People and agents fold up under the channel list rather than
            vanishing with it. Each list is a clipping box around one inner
            block, which is the whole of what lets the stylesheet animate a
@@ -1242,12 +1245,6 @@ function chanHeader(repositoryId) {
       state.chanToolsOpen !== true && !phoneLayout()
         ? ""
         : `<span class="chan-tools">
-            <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
-              data-act="chan-tree-toggle" title="Files"
-              aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
-            <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
-              data-act="channel-threads-toggle" title="Threads"
-              aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
             <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
               data-act="channel-msg-search-toggle" title="Search messages"
               aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
@@ -5320,6 +5317,7 @@ export function renderChats() {
   const columns = phoneLayout() ? 1 : keptRightPanels().length;
 
   return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${columns > 1 ? ` panels-${columns}` : ""}">
+    ${channelRail(repositoryId)}
     ${chanSidebar(repositoryId)}
     ${
       // Phone-only scrim over the off-canvas `.chan-sidebar` — see the toggle
