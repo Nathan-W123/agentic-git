@@ -2997,6 +2997,13 @@ test("private-chat messages compact only an uninterrupted run from one speaker",
     css,
     /\.msg\.user \.msg-text \{[^}]*background: var\(--accent\);[^}]*color: #fff;/su,
   );
+  // A short outgoing bubble hugs the right edge below the speaker name. As
+  // the words get longer, the bubble grows back into the available space
+  // instead of stretching a one-word message across the whole metadata row.
+  assert.match(
+    css,
+    /\.msg\.user \.msg-body \{[^}]*display: flex;[^}]*flex-direction: column;[^}]*align-items: flex-end;/su,
+  );
   assert.match(
     css,
     /\.msg\.msg-compact \.msg-body \{\s*margin-left: calc\(var\(--msg-body-x\) - 8px\);/u,

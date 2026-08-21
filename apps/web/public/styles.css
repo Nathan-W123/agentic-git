@@ -2293,6 +2293,12 @@ svg {
   flex-direction: row-reverse;
 }
 
+.msg.user .msg-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
 .msg.user .msg-top {
   flex-direction: row-reverse;
 }
