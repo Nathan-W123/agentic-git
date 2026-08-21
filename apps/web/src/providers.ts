@@ -26,6 +26,7 @@ import {
   captureBrowserSession,
   captureClaudeSession,
   credentialHint,
+  credentialSourcesFor,
   programCacheEnv,
   withCredentialHome,
   type CredentialHome,
@@ -2569,7 +2570,15 @@ export class ProviderChatService {
       const connection = connections[id];
       const cli = await this.detect(id);
       const settings = connection?.settings ?? {};
-      const own = await store.summary(input.userId, PROVIDER_VENDORS[id]);
+      // Copilot is connected when either its own sign-in landed or the user
+      // has a GitHub token for it to borrow, in that order.
+      let own: UserCredentialSummary | undefined;
+      for (const source of credentialSourcesFor(PROVIDER_VENDORS[id])) {
+        own = await store.summary(input.userId, source);
+        if (own !== undefined) {
+          break;
+        }
+      }
       // An own credential authenticates on its own and needs no host login,
       // so it is checked before the shared-login path and outranks it.
       const connected =

@@ -1009,3 +1009,77 @@ test("Copilot unpacks itself outside the home that becomes the credential", asyn
     assert.equal(home.env["COPILOT_AUTO_UPDATE"], "false");
   });
 });
+
+/**
+ * Copilot's own sign-in stores its token "securely in the system credential
+ * store" — a keyring this container does not have — and only falls back to a
+ * file "if a credential store is not found or there is an issue using it".
+ * That is how a sign-in could complete and the CLI still report "No
+ * authentication information found".
+ *
+ * The vendor's own answer is the environment: COPILOT_GITHUB_TOKEN, GH_TOKEN,
+ * GITHUB_TOKEN, "most suitable for headless use such as automation". A GitHub
+ * token is what the GitHub connection already holds, so Copilot borrows it.
+ */
+test("Copilot borrows the user's GitHub token when it has none of its own", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "github", {
+    kind: "oauth_token",
+    secret: "gho-the-users-own-token",
+  });
+
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "copilot",
+    baseEnv: { PATH: "/usr/bin" },
+  });
+  assert.ok(home !== undefined, "a GitHub token is enough to run Copilot");
+  try {
+    assert.equal(home.env["COPILOT_GITHUB_TOKEN"], "gho-the-users-own-token");
+  } finally {
+    await home.close();
+  }
+});
+
+test("Copilot's own sign-in outranks the borrowed GitHub token", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "github", {
+    kind: "oauth_token",
+    secret: "gho-github-only",
+  });
+  await vault.put("user-1", "copilot", {
+    kind: "oauth_token",
+    secret: "gho-copilots-own",
+  });
+
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "copilot",
+    baseEnv: { PATH: "/usr/bin" },
+  });
+  assert.ok(home !== undefined);
+  try {
+    assert.equal(home.env["COPILOT_GITHUB_TOKEN"], "gho-copilots-own");
+  } finally {
+    await home.close();
+  }
+});
+
+test("a vendor with no borrowing still refuses to run on somebody else's token", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "github", {
+    kind: "oauth_token",
+    secret: "gho-the-users-own-token",
+  });
+
+  // Cursor has no GitHub fallback, and a GitHub token would not authenticate
+  // it anyway; "not connected" is the correct answer.
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "cursor",
+  });
+  assert.equal(home, undefined);
+});
