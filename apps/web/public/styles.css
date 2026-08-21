@@ -5288,6 +5288,18 @@ button.chip.lg:hover {
      apart when any of those three numbers moves. */
   --cmsg-body-x: 52px;
   --cmsg-stem-x: 23px;
+  /* And the colour of that line, flattened. The connector is one stroke drawn
+     in several pieces — a stem for each grouped row, a final segment, and the
+     quarter turn into every thread link — and the pieces deliberately overlap
+     by a pixel or two so no hairline of rounding can break the line in half.
+     `--border-strong` is translucent, so each of those overlaps painted the
+     stroke twice and showed as a darker, discoloured tick exactly where the
+     line should read as continuous: at every row join and at every hook.
+     Mixed against the ground it is drawn on, the stroke is the same colour it
+     has always been — `--border-strong` is 28% of `--muted`, and the room's
+     tint is the surface the transcript is painted on — but it can now cross
+     itself as often as the pieces need to without changing shade. */
+  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--room-tint));
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -5318,6 +5330,17 @@ button.chip.lg:hover {
 
 .cmsg-row:hover {
   background: var(--bg-hover);
+  /* An opaque stroke has to follow the surface under it, or the line would
+     stay at the room's shade while the row it crosses lightens. */
+  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--bg-hover));
+}
+
+/* The light theme's `--border-strong` is already opaque — nothing there
+   composites twice — so the connector takes it directly rather than mixing a
+   second version of the same colour. */
+:root[data-theme="light"] .cmsg-row,
+:root[data-theme="light"] .cmsg-row:hover {
+  --cmsg-stem: var(--border-strong);
 }
 
 /* Consecutive lines from one person read as a single message group. Keep the
@@ -5349,7 +5372,7 @@ button.chip.lg:hover {
   left: var(--cmsg-stem-x);
   top: -1px;
   bottom: -1px;
-  border-left: 3px solid var(--border-strong);
+  border-left: 3px solid var(--cmsg-stem);
   border-top-left-radius: 2px;
   pointer-events: none;
 }
@@ -5380,14 +5403,16 @@ button.chip.lg:hover {
    The stroke is dropped two pixels above the wrapper so it overlaps the stem
    of the row above rather than meeting it exactly: a group whose prompts each
    carry a task is one path drawn in several pieces, and a hairline of rounding
-   between two of those pieces is a broken line. */
+   between two of those pieces is a broken line. That overlap is only free
+   because the stroke is opaque — see `--cmsg-stem` on `.cmsg-row`, which is
+   what stops the doubled pixels reading as a darker patch. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before {
   content: "";
   position: absolute;
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
   bottom: 20px;
-  border-left: 3px solid var(--border-strong);
+  border-left: 3px solid var(--cmsg-stem);
   pointer-events: none;
 }
 
@@ -5972,7 +5997,9 @@ button.chip.lg:hover {
 /* Each task turns out of the shared avatar stem at its thread summary. The
    eleven-pixel quarter turn starts at the stem's tangent instead of laying a
    second upright over it; the thirteen-pixel gap keeps the stroke clear of
-   the replier faces.
+   the replier faces. Where the turn does still meet the stem it meets it in
+   the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
+   the rest of the line.
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
@@ -5996,8 +6023,8 @@ button.chip.lg:hover {
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 16px);
   width: 16px;
   height: 11px;
-  border-left: 3px solid var(--border-strong);
-  border-bottom: 3px solid var(--border-strong);
+  border-left: 3px solid var(--cmsg-stem);
+  border-bottom: 3px solid var(--cmsg-stem);
   border-bottom-left-radius: 11px;
   border-bottom-right-radius: 2px;
   pointer-events: none;

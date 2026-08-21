@@ -1091,11 +1091,37 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
   for (const branch of [channelElbow, panelBranch]) {
-    assert.match(branch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
-    assert.match(branch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-left-radius: 11px;/u);
   }
+  // The channel's line is drawn in pieces that overlap on purpose, so it can
+  // only be painted in an opaque colour: `--border-strong` is translucent, and
+  // every doubled pixel — each row join, each hook — showed as a darker patch
+  // in a line that is meant to read as one continuous stroke. The panel's
+  // branch is a single stroke that crosses nothing, so it keeps the token.
+  for (const piece of [channelStem, channelEnd, channelElbow]) {
+    assert.match(piece ?? "", /border-left: 3px solid var\(--cmsg-stem\);/u);
+    assert.doesNotMatch(piece ?? "", /--border-strong/u);
+  }
+  assert.match(channelElbow ?? "", /border-bottom: 3px solid var\(--cmsg-stem\);/u);
+  assert.match(panelBranch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
+  assert.match(panelBranch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
+  // Flattened against the surface the stroke is drawn on rather than given a
+  // new value of its own, so the line keeps the shade `--border-strong` has
+  // always resolved to — and follows the row when hovering lightens it.
+  assert.match(
+    css,
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 28%, var\(--room-tint\)\);/u,
+  );
+  assert.match(
+    css,
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 28%, var\(--bg-hover\)\);/u,
+  );
+  assert.match(
+    css,
+    /:root\[data-theme="light"\] \.cmsg-row,\n:root\[data-theme="light"\] \.cmsg-row:hover \{\n  --cmsg-stem: var\(--border-strong\);/u,
+    "the light theme's strong border is already opaque",
+  );
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
