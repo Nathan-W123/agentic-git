@@ -258,6 +258,15 @@ export const state = {
   // Whether the file tree is pulled out, and which folders are open in it.
   chanTree: false,
   chanTreeOpen: [],
+  /**
+   * The right-hand column's occupants, oldest first — see `keptRightPanels`.
+   *
+   * The column used to draw whichever one surface outranked the rest, so
+   * opening a file to read alongside a thread hid the thread that sent you
+   * looking for it. It holds three now, in the order they were opened: the
+   * newest keeps the right edge and the ones before it are pushed left.
+   */
+  rightPanelStack: [],
   // Whether the channel list + roster drawer is pulled out over the
   // transcript. Only meaningful at phone widths, where `.chan-sidebar` is
   // off-canvas the way the outer app `.sidebar` already is at `navOpen`.
@@ -5038,6 +5047,132 @@ export function closeChannelFile() {
   state.chanFileDraft = undefined;
   state.chanFileError = undefined;
   state.chanFileLoading = false;
+}
+
+/** Whether the open file has been typed into since it was last saved. */
+export function channelFileEdited() {
+  return (
+    state.chanFileMode === "edit" &&
+    state.chanFileDraft !== undefined &&
+    state.chanFileDraft !== state.chanFileBase
+  );
+}
+
+/* ------------------------------------------------ the right-hand column ---- */
+
+/**
+ * How many surfaces the column beside the conversation will hold at once.
+ *
+ * Three, written down here rather than left implied by the drawing code. A
+ * thread, the file it is about and the person who asked for it are three
+ * different things to have open; a fourth column would leave the room they
+ * are all about too narrow to read, so the oldest gives up its place.
+ */
+export const RIGHT_PANEL_MAX = 3;
+
+/** Every surface whose state says it is open, in the order they used to rank. */
+export function openRightPanels() {
+  return [
+    state.catchUp !== undefined && "catch-up",
+    state.activePlan !== undefined && "plan",
+    state.activeAgentPanel !== undefined && "agent",
+    state.activeDm !== undefined && "dm",
+    state.chanFileView !== undefined && "file",
+    state.chanTree === true && "tree",
+    state.activeChannelThread !== undefined && "thread",
+    state.chanThreadList === true && "threads",
+  ].filter(Boolean);
+}
+
+/** Stop keeping a surface in the column, without touching what is behind it. */
+export function clearRightPanel(kind) {
+  state.rightPanelStack = state.rightPanelStack.filter(
+    (open) => open !== kind,
+  );
+}
+
+/**
+ * Put one surface away: out of the column, and closed behind it.
+ *
+ * The close buttons each clear their own state, because each of them has
+ * something extra to do — a draft to drop, a dismissal to post. This is the
+ * plain version the swipe, the Escape key and the ceiling all share, so
+ * "closed" means the same thing however it happened.
+ */
+export function putAwayRightPanel(kind) {
+  clearRightPanel(kind);
+  switch (kind) {
+    case "catch-up":
+      state.catchUp = undefined;
+      return;
+    case "plan":
+      state.activePlan = undefined;
+      return;
+    case "agent":
+      state.activeAgentPanel = undefined;
+      return;
+    case "dm":
+      state.activeDm = undefined;
+      state.dmDraft = "";
+      state.dmReplyMessageId = undefined;
+      return;
+    case "file":
+      closeChannelFile();
+      return;
+    case "tree":
+      state.chanTree = false;
+      return;
+    case "thread":
+      state.activeChannelThread = undefined;
+      state.threadReplyMessageId = undefined;
+      state.autoOpenedThread = undefined;
+      return;
+    case "threads":
+      state.chanThreadList = false;
+      return;
+    default:
+  }
+}
+
+/**
+ * The column's occupants, left to right, reconciled against what is open.
+ *
+ * Nothing announces itself as it opens: a button sets its own piece of state
+ * and renders, and half a dozen of them do it from places that know nothing
+ * about panels. So the order is worked out here instead — surfaces that have
+ * been closed drop out, ones that have appeared since the last render join
+ * the right-hand end, and the newest `RIGHT_PANEL_MAX` of them are what the
+ * column draws.
+ *
+ * Anything pushed past the ceiling is closed rather than left open and
+ * invisible, or a swipe would put away a surface nobody could see. A file
+ * being typed into is the exception: it keeps its place and the surface
+ * before it leaves instead, because a column running out of room is not a
+ * reason to throw somebody's unsaved edit away.
+ */
+export function keptRightPanels() {
+  const open = openRightPanels();
+  const stack = state.rightPanelStack.filter((kind) => open.includes(kind));
+  for (const kind of open) {
+    if (!stack.includes(kind)) {
+      stack.push(kind);
+    }
+  }
+  while (stack.length > RIGHT_PANEL_MAX) {
+    const pushedOut =
+      stack.find((kind) => kind !== "file" || !channelFileEdited()) ??
+      stack[0];
+    stack.splice(stack.indexOf(pushedOut), 1);
+    putAwayRightPanel(pushedOut);
+  }
+  state.rightPanelStack = stack;
+  return stack;
+}
+
+/** The surface holding the right edge — the one a phone shows at all. */
+export function newestRightPanel() {
+  const kept = keptRightPanels();
+  return kept.length === 0 ? undefined : kept[kept.length - 1];
 }
 
 /* -------------------------------------------------------- look and feel ---- */

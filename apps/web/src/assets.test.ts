@@ -4326,12 +4326,13 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(app, /function openReadyPlan\(repositoryId\)/u);
   assert.match(app, /openReadyPlan\(channelRepositoryId\);/u);
   assert.match(app, /state\.activePlan = messageId;/u);
-  // Escape and the swipe close it when it is the panel's visible occupant.
-  // The login catch-up may temporarily sit above it, and is put away first.
+  // Escape and the swipe close it when it is the surface holding the column's
+  // right edge — the newest one, which on a phone is the only one drawn.
   assert.match(
     app,
-    /function closeSidePanel\(\) \{[\s\S]*?if \(state\.activePlan !== undefined\)/u,
+    /function closeSidePanel\(\) \{[\s\S]*?newestRightPanel\(\)/u,
   );
+  assert.match(app, /putAwayRightPanel\(showing\)/u);
 
   assert.match(css, /\n\.plan-link \{/u);
   assert.doesNotMatch(css, /\n\.plan-card \{/u);

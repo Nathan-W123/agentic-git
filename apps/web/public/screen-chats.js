@@ -40,6 +40,7 @@ api,
   dmUnreadFrom,
   dmUnreadTotal,
   flushChannelDrafts,
+  keptRightPanels,
   markChannelRead,
   memberName,
   myAgents,
@@ -3229,25 +3230,11 @@ function panelKind(label, act) {
   const drag = kind === ""
     ? ""
     : ` draggable="true" data-right-panel-kind="${kind}"
-        aria-label="${esc(label)} panel; drag left to keep open"`;
+        aria-label="${esc(label)} panel; drag onto the conversation to move it left"`;
   return act === undefined
     ? `<span class="panel-kind"${drag}>${esc(label)}</span>`
     : `<button type="button" class="panel-kind" data-act="${esc(act)}"${drag}
         title="Open ${esc(label.toLowerCase())} library">${esc(label)}</button>`;
-}
-
-/** The open right-hand surfaces, in the same priority order as before split view. */
-function rightPanelKinds() {
-  return [
-    state.catchUp !== undefined && "catch-up",
-    state.activePlan !== undefined && "plan",
-    state.activeAgentPanel !== undefined && "agent",
-    state.activeDm !== undefined && "dm",
-    state.chanFileView !== undefined && "file",
-    state.chanTree === true && "tree",
-    state.activeChannelThread !== undefined && "thread",
-    state.chanThreadList === true && "threads",
-  ].filter(Boolean);
 }
 
 /** Draw one named right-hand surface without changing the state behind it. */
@@ -3283,26 +3270,31 @@ function positionedRightPanel(repositoryId, kind, position) {
 }
 
 /**
- * Draw one panel normally, or two after a desktop tab has been dragged left.
+ * Everything the column is holding, oldest on the left.
  *
- * The state for panels deliberately remains independent: a direct message can
- * sit over an open thread already. Split view exposes both occupants instead
- * of inventing a second copy of either conversation.
+ * The state behind these surfaces was always independent — a direct message
+ * could sit over an open thread — and only one of them was ever drawn, so
+ * opening the second put the first out of sight rather than out of use.
+ * Pressing anything that opens a surface now moves the others left instead,
+ * up to the three `keptRightPanels` allows; the room takes what is left.
+ *
+ * A phone has no width to push anything into, so there it stays what it was:
+ * the newest surface, over the conversation, the way it arrived.
  */
 function rightPanels(repositoryId) {
-  const kinds = rightPanelKinds();
-  if (kinds.length === 0) {
+  const kept = keptRightPanels();
+  if (kept.length === 0) {
     return "";
   }
-  const split = state.splitRightPanel;
-  if (phoneLayout() || split === undefined || !kinds.includes(split)) {
-    return positionedRightPanel(repositoryId, kinds[0], "right");
+  const newest = kept[kept.length - 1];
+  if (phoneLayout()) {
+    return positionedRightPanel(repositoryId, newest, "right");
   }
-  const other = kinds.find((kind) => kind !== split);
-  if (other === undefined) {
-    return positionedRightPanel(repositoryId, split, "right");
-  }
-  return `${positionedRightPanel(repositoryId, split, "left")}${positionedRightPanel(repositoryId, other, "right")}`;
+  const pushedLeft = kept
+    .slice(0, -1)
+    .map((kind) => positionedRightPanel(repositoryId, kind, "left"))
+    .join("");
+  return `${pushedLeft}${positionedRightPanel(repositoryId, newest, "right")}`;
 }
 
 /**
@@ -3352,7 +3344,6 @@ function catchUpPanel() {
             }</span>`
           : "";
       return `<li class="catch-up-task">
-      <span class="catch-up-check" aria-hidden="true">${icon("check")}</span>
       <div class="catch-up-task-copy">
         <p>${esc(summary)}</p>
         <span>${esc(when)}</span>
@@ -3375,7 +3366,6 @@ function catchUpPanel() {
       <div class="catch-up-intro">
         <p class="catch-up-kicker">Since you left</p>
         <h2>${esc(String(count))} completed ${count === 1 ? "task" : "tasks"}</h2>
-        <p>Implemented in #${esc(repositoryName)} while you were away.</p>
       </div>
       <ul class="catch-up-task-list" aria-label="Completed tasks">${rows}</ul>
     </div>
@@ -5301,8 +5291,17 @@ export function renderChats() {
     </div></div></div>`;
   }
   const repositoryId = activeChannelId();
+  // Before anything else is drawn. Reconciling the column is what closes a
+  // surface pushed past its ceiling, and the header's own buttons — Files,
+  // Thread — read that state to say whether they are lit.
+  //
+  // How many columns end up beside the room is also something the stylesheet
+  // has to know: two or three of them cannot each keep the width a reader
+  // dragged for one, or the conversation they are all about would be squeezed
+  // out of its own screen. A phone draws one however many are being held.
+  const columns = phoneLayout() ? 1 : keptRightPanels().length;
 
-  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}">
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${columns > 1 ? ` panels-${columns}` : ""}">
     ${chanSidebar(repositoryId)}
     ${
       // Phone-only scrim over the off-canvas `.chan-sidebar` — see the toggle
