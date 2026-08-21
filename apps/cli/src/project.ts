@@ -213,9 +213,7 @@ export const DEFAULT_CONFIG: ProjectConfig = {
   agents: {
     codex: { adapter: "codex" },
     claude: { adapter: "claude" },
-    gemini: { adapter: "gemini" },
     cursor: { adapter: "cursor" },
-    copilot: { adapter: "copilot" },
     kiro: { adapter: "kiro" },
   },
 };

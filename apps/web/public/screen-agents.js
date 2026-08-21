@@ -536,7 +536,7 @@ export function renderAgents() {
                 "robot",
                 agents.length === 0 ? "No agents connected" : "No agents match",
                 agents.length === 0
-                  ? "Connect Cursor, Copilot, Kiro, Gemini, Claude, or Codex to give yourself an agent on this project."
+                  ? "Connect Cursor, Kiro, Claude, or Codex to give yourself an agent on this project."
                   : "Try another filter or search term.",
                 agents.length === 0
                   ? `<button class="btn btn-primary" data-act="agent-add">${icon(

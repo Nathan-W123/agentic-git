@@ -277,9 +277,7 @@ test("a fresh project does not inherit another project's edits", async () => {
       assert.deepEqual(Object.keys(second.config.agents).sort(), [
         "claude",
         "codex",
-        "copilot",
         "cursor",
-        "gemini",
         "kiro",
       ]);
     });
