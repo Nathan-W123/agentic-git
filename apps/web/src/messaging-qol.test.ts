@@ -232,34 +232,32 @@ test("the Thread label opens the thread library as the visible side panel", asyn
     /panelKind\("Thread", "channel-threads-toggle"\)/u,
   );
 
-  // A list left open behind one of its threads is not visibly open. Pressing
-  // Thread there navigates back to the list instead of toggling hidden state.
+  // A list marked open with no room left to draw it — or, on a phone, with a
+  // newer surface over it — is not visibly open. Pressing Thread there
+  // navigates back to the library instead of toggling hidden state.
   assert.match(action, /const listVisible =/u);
-  assert.match(action, /state\.activeChannelThread === undefined/u);
+  assert.match(action, /phoneLayout\(\)/u);
+  assert.match(action, /newestRightPanel\(\) === "threads"/u);
+  assert.match(action, /keptRightPanels\(\)\.includes\("threads"\)/u);
   assert.match(
     action,
     /if \(listVisible\) \{\s*state\.chanThreadList = false;\s*render\(\);\s*return;/u,
   );
 
-  // Switching panels remains lossless: the discard question happens before
-  // any state is cleared, then every higher-priority panel is put away before
-  // the library is rendered.
-  const guard = action.indexOf("if (!confirmDiscardEdit())");
-  const firstClear = action.indexOf("state.activePlan = undefined");
-  const open = action.indexOf("state.chanThreadList = true");
-  assert.notEqual(guard, -1);
-  assert.equal(guard < firstClear, true);
-  assert.equal(firstClear < open, true);
+  // Opening it is lossless in the stronger sense the column now allows:
+  // nothing else is put away to make space, so there is no unsaved edit to
+  // ask about and nothing to close before the library is rendered.
+  assert.match(action, /state\.chanThreadList = true;/u);
+  assert.doesNotMatch(action, /confirmDiscardEdit/u);
+  assert.doesNotMatch(action, /closeChannelFile\(\)/u);
   for (const field of [
     "activePlan",
     "activeAgentPanel",
     "activeDm",
     "activeChannelThread",
   ]) {
-    assert.match(action, new RegExp(`state\\.${field} = undefined`, "u"));
+    assert.doesNotMatch(action, new RegExp(`state\\.${field} = undefined`, "u"));
   }
-  assert.match(action, /closeChannelFile\(\);/u);
-  assert.match(action, /state\.chanTree = false;/u);
 });
 
 /*
@@ -313,16 +311,17 @@ test("desktop panel tabs can be dragged left to keep three conversations open", 
 });
 
 test("a fourth kept panel is refused rather than squeezing the room away", async () => {
-  const [app, chats] = await Promise.all([
+  const [app, chats, data] = await Promise.all([
     publicFile("app.js"),
     publicFile("screen-chats.js"),
+    publicFile("data.js"),
   ]);
 
   // Three is the ceiling, and it is written down as a number rather than left
   // implied by the drawing code — a fourth column would leave the transcript
   // it is all about too narrow to read.
   assert.match(
-    `${app}\n${chats}`,
+    `${app}\n${chats}\n${data}`,
     /(?:RIGHT_PANEL_MAX|MAX_RIGHT_PANELS|RIGHT_PANEL_LIMIT|PANEL_STACK_MAX)\s*=\s*3\b|\.slice\(\s*(?:0,\s*)?-?3\s*\)/u,
   );
 });
@@ -460,7 +459,9 @@ test("pinned messages stay available and open at their thread root", async () =>
   assert.match(chats, /data-act="channel-pinned-open"/u);
   assert.match(action, /state\.activeChannelThread = value;/u);
   assert.match(action, /state\.scrollToThreadMessage = value;/u);
-  assert.match(action, /state\.activePlan = undefined;/u);
+  // The thread joins the column rather than emptying it: a plan or a file
+  // open beside it is usually why the pin was worth following.
+  assert.doesNotMatch(action, /state\.activePlan = undefined;/u);
   assert.doesNotMatch(action, /channelPins/u);
   assert.doesNotMatch(action, /entry\.kind|entry\.replies|entry\.taskId/u);
 

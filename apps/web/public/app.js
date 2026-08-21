@@ -168,11 +168,16 @@ import {
   acceptInvitation,
   answerAgentQuestion,
   applyProviderSetting,
+  channelFileEdited,
+  clearRightPanel,
   createInvitation,
   invitationLink,
+  keptRightPanels,
   loadInvitations,
   loadPendingQuestions,
+  newestRightPanel,
   pendingQuestionFor,
+  putAwayRightPanel,
   readInvitation,
   revokeInvitation,
   saveAppearance,
@@ -2792,11 +2797,28 @@ restorePanelWidth();
 
 const RIGHT_PANEL_DRAG_TYPE = "application/x-coord-right-panel";
 
-/** Forget a pinned panel when that same surface is explicitly closed. */
-function clearSplitRightPanel(kind) {
-  if (state.splitRightPanel === kind) {
-    state.splitRightPanel = undefined;
+/**
+ * Move a surface to one end of the column.
+ *
+ * Both ways in use it. Every button that opens something calls it with
+ * `"right"` once it has set its own state: a surface being asked for is what
+ * the right edge means, and one already held further back would otherwise sit
+ * where it was — which on a phone, where only the edge is drawn, looks like
+ * the button did nothing at all. Dragging a panel's own name onto the
+ * conversation is the other direction, and says "keep this one, out of the
+ * way" without closing it.
+ *
+ * A kind that is not open is not moved. `keptRightPanels` is what decides
+ * that, so the press also reconciles the column before joining it.
+ */
+function moveRightPanel(kind, edge) {
+  const kept = keptRightPanels();
+  if (!kept.includes(kind)) {
+    return;
   }
+  const rest = kept.filter((open) => open !== kind);
+  state.rightPanelStack =
+    edge === "left" ? [kind, ...rest] : [...rest, kind];
 }
 
 /**
@@ -2903,7 +2925,7 @@ document.addEventListener("drop", (event) => {
     const panel = event.target.closest?.(".thread-panel");
     if (transcript !== null && transcript !== undefined) {
       event.preventDefault();
-      state.splitRightPanel = panelKind;
+      moveRightPanel(panelKind, "left");
       render();
       return;
     }
@@ -2913,7 +2935,7 @@ document.addEventListener("drop", (event) => {
       panel.dataset.rightPanelPosition === "right"
     ) {
       event.preventDefault();
-      state.splitRightPanel = undefined;
+      moveRightPanel(panelKind, "right");
       render();
       return;
     }
@@ -3443,63 +3465,31 @@ function setChanDrawer(open) {
 /**
  * Whichever side panel is showing, closed the way its own button closes it.
  *
- * The order is `renderChats`'s order, not an order of its own. Eight things can
- * occupy the one panel and only the first of them is on screen, so anything
- * closing by a different precedence closes something invisible. The catch-up
- * temporarily covers every deliberate panel; after it, an agent conversation
- * and a direct message outrank the rest. A swipe must always put away the
- * surface the reader can actually see.
+ * The order is the column's own order, not a precedence of its own: the
+ * newest surface is the one holding the right edge, and on a phone it is the
+ * only one drawn at all. A swipe or an Escape must always put away the
+ * surface the reader can actually see, and anything closing by a different
+ * ranking closes something invisible instead — which is what this did while
+ * eight surfaces were competing for one place.
  */
 function closeSidePanel() {
-  if (state.catchUp !== undefined) {
+  const showing = newestRightPanel();
+  if (showing === undefined) {
+    return false;
+  }
+  // The catch-up is not merely closed: putting it away is how this account
+  // says it has read the work it lists.
+  if (showing === "catch-up") {
     dismissSinceYouLeft();
     return true;
   }
-  if (state.activePlan !== undefined) {
-    clearSplitRightPanel("plan");
-    state.activePlan = undefined;
-    return true;
+  // The same question the close button asks. A swipe is easy to do by
+  // accident, which makes silently discarding an edit worse here, not better.
+  if (showing === "file" && !confirmDiscardEdit()) {
+    return false;
   }
-  if (state.activeAgentPanel !== undefined) {
-    clearSplitRightPanel("agent");
-    state.activeAgentPanel = undefined;
-    return true;
-  }
-  if (state.activeDm !== undefined) {
-    clearSplitRightPanel("dm");
-    state.activeDm = undefined;
-    state.dmDraft = "";
-    state.dmReplyMessageId = undefined;
-    return true;
-  }
-  if (state.chanFileView !== undefined) {
-    // The same question the close button asks. A swipe is easy to do by
-    // accident, which makes silently discarding an edit worse here, not
-    // better.
-    if (!confirmDiscardEdit()) {
-      return false;
-    }
-    clearSplitRightPanel("file");
-    closeChannelFile();
-    state.chanTree = false;
-    return true;
-  }
-  if (state.chanTree === true) {
-    clearSplitRightPanel("tree");
-    state.chanTree = false;
-    return true;
-  }
-  if (state.activeChannelThread !== undefined) {
-    clearSplitRightPanel("thread");
-    state.activeChannelThread = undefined;
-    return true;
-  }
-  if (state.chanThreadList === true) {
-    clearSplitRightPanel("threads");
-    state.chanThreadList = false;
-    return true;
-  }
-  return false;
+  putAwayRightPanel(showing);
+  return true;
 }
 
 function sidePanelOpen() {
@@ -3531,12 +3521,12 @@ function sidePanelOpen() {
  * is a full-screen surface dropped over the room, which is a different and
  * much ruder thing to do to somebody mid-sentence.
  *
- * It also declines rather than interrupts. Anything the reader deliberately
- * put in that panel — a file, the tree, a conversation, another agent, a
- * thread they opened themselves — stays where they put it; the only thing
- * this will replace is a thread it opened the same way a moment ago, so a
- * second task prompted while the first one's thread is still up moves the
- * panel on to the newer work.
+ * A file or a conversation already in the column is no longer a reason to
+ * decline: the column holds three, and a prompted thread takes a free place
+ * in it rather than somebody else's. A thread the reader opened themselves is
+ * still never taken off them — the only thing this will replace is a thread
+ * it opened the same way a moment ago, so a second task prompted while the
+ * first one's thread is still up moves on to the newer work.
  */
 function openPromptedThread(repositoryId) {
   const messageId = takePromptedThread(repositoryId);
@@ -3544,10 +3534,6 @@ function openPromptedThread(repositoryId) {
     messageId === undefined ||
     phoneLayout() ||
     state.route !== "chats" ||
-    state.activeAgentPanel !== undefined ||
-    state.activeDm !== undefined ||
-    state.chanFileView !== undefined ||
-    state.chanTree === true ||
     (state.activeChannelThread !== undefined &&
       state.activeChannelThread !== state.autoOpenedThread)
   ) {
@@ -3568,10 +3554,10 @@ function openPromptedThread(repositoryId) {
  * The same manners `openPromptedThread` has, for the same reasons. Desktop
  * only, because on a phone the panel is the whole window and dropping a page
  * of plan over somebody mid-sentence is rude rather than helpful — the card
- * in the thread is how it is reached there. And it declines rather than
- * interrupts: anything the reader deliberately put in the panel stays, and
- * the only thing it will replace is a thread this app opened itself a moment
- * ago, which for a `/plan` is exactly the thread this plan belongs to.
+ * in the thread is how it is reached there. And it takes a free place in the
+ * column rather than somebody else's: a plan already open stays, and the only
+ * thing it will replace is a thread this app opened itself a moment ago,
+ * which for a `/plan` is exactly the thread this plan belongs to.
  */
 function openReadyPlan(repositoryId) {
   const messageId = takeReadyPlan(repositoryId);
@@ -3580,10 +3566,6 @@ function openReadyPlan(repositoryId) {
     phoneLayout() ||
     state.route !== "chats" ||
     state.activePlan !== undefined ||
-    state.activeAgentPanel !== undefined ||
-    state.activeDm !== undefined ||
-    state.chanFileView !== undefined ||
-    state.chanTree === true ||
     (state.activeChannelThread !== undefined &&
       state.activeChannelThread !== state.autoOpenedThread)
   ) {
@@ -4039,11 +4021,7 @@ function confirmTaskCancel(taskId) {
 }
 
 function confirmDiscardEdit() {
-  if (
-    state.chanFileMode !== "edit" ||
-    state.chanFileDraft === undefined ||
-    state.chanFileDraft === state.chanFileBase
-  ) {
+  if (!channelFileEdited()) {
     return true;
   }
   return window.confirm(
@@ -4110,9 +4088,11 @@ function renameFieldFocused() {
  * anybody knows it closed it is already gone from the new tree.
  */
 const MOTION_SURFACES = [
-  // Thread, thread list, DM, agent profile and the file view are one column
-  // that shows one of them — so this is "the panel is open", not "the thread
-  // is open", and switching between two of them is deliberately not motion.
+  // Thread, thread list, DM, agent profile and the file view share one column
+  // that holds up to three of them — so this is "the column is occupied", not
+  // "the thread is open". A surface joining a column that already has one in
+  // it, or leaving one behind, is deliberately not motion: the arrival that
+  // is worth animating is the column appearing beside the room.
   {
     selector: ".thread-panel",
     parent: ".chats-shell",
@@ -5048,18 +5028,11 @@ document.addEventListener("click", (event) => {
     // root with no replies yet opens in the thread panel, and the one-shot
     // target prevents a previously scrolled thread from opening elsewhere.
     case "channel-pinned-open":
-      if (!confirmDiscardEdit()) {
-        return;
-      }
       state.activeChannelThread = value;
       state.scrollToThreadMessage = value;
       state.threadReplyMessageId = undefined;
       state.autoOpenedThread = undefined;
-      state.activePlan = undefined;
-      state.activeDm = undefined;
-      state.activeAgentPanel = undefined;
-      state.chanTree = false;
-      closeChannelFile();
+      moveRightPanel("thread", "right");
       render();
       return;
     // References to tasks open their thread; references to a person's message
@@ -5075,15 +5048,10 @@ document.addEventListener("click", (event) => {
         entry.kind !== "user" &&
         ((entry.replies ?? []).length > 0 || entry.taskId !== undefined)
       ) {
-        if (!confirmDiscardEdit()) {
-          return;
-        }
         state.activeChannelThread = value;
         // Chosen, so `openPromptedThread` will not choose over it.
         state.autoOpenedThread = undefined;
-        state.activeDm = undefined;
-        state.activeAgentPanel = undefined;
-        closeChannelFile();
+        moveRightPanel("thread", "right");
         render();
         return;
       }
@@ -5091,9 +5059,11 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
+    // The tree and a file opened out of it are two surfaces, and the column
+    // holds both: reading a change is usually reading the next file after it.
     case "chan-tree-toggle":
       state.chanTree = state.chanTree !== true;
-      state.chanFileView = undefined;
+      moveRightPanel("tree", "right");
       render();
       return;
     case "chan-tree-close":
@@ -5226,35 +5196,25 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "channel-threads-toggle": {
-      // The list can still be marked open behind the thread selected from it.
-      // Toggle only when it is the panel actually on screen; from any other
-      // panel this control is navigation back to the library.
-      const listVisible =
-        state.chanThreadList === true &&
-        state.activePlan === undefined &&
-        state.activeAgentPanel === undefined &&
-        state.activeDm === undefined &&
-        state.chanFileView === undefined &&
-        state.chanTree !== true &&
-        state.activeChannelThread === undefined;
+      // The list can still be marked open while the column has no room left
+      // to draw it, and on a phone while a newer surface covers it. Toggle
+      // only when it is the thing the reader is looking at; from anywhere
+      // else this control is navigation back to the library.
+      const listVisible = phoneLayout()
+        ? newestRightPanel() === "threads"
+        : keptRightPanels().includes("threads");
       if (listVisible) {
         state.chanThreadList = false;
         render();
         return;
       }
-      // Opening the library replaces the current panel. An edited file gets
-      // the same chance to refuse that switch as every other panel action.
-      if (!confirmDiscardEdit()) {
-        return;
-      }
-      state.activePlan = undefined;
-      state.activeAgentPanel = undefined;
-      state.activeDm = undefined;
-      state.activeChannelThread = undefined;
-      state.autoOpenedThread = undefined;
-      closeChannelFile();
-      state.chanTree = false;
+      // Opening the library pushes whatever is in the column left rather than
+      // putting it away, so nothing here is being replaced and there is no
+      // unsaved edit to ask about. A library already held further back comes
+      // to the edge, which is what pressing Thread from inside one of its
+      // threads means.
       state.chanThreadList = true;
+      moveRightPanel("threads", "right");
       render();
       return;
     }
@@ -5292,20 +5252,14 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-input']")?.focus();
       return;
     case "channel-thread-open":
-      // One panel, one owner: opening a thread puts away an open file.
-      if (!confirmDiscardEdit()) {
-        return;
-      }
+      // The thread joins the column at its right edge and pushes whatever was
+      // there left: a file or a conversation open beside it is usually the
+      // reason the thread was worth opening at all.
       state.activeChannelThread = value;
       state.threadReplyMessageId = undefined;
       // Chosen, so `openPromptedThread` will not choose over it.
       state.autoOpenedThread = undefined;
-      // …and puts away an open conversation, for the same reason: they share
-      // the one panel, and a direct message left on top of a thread the reader
-      // just asked for would look like the thread failed to open.
-      state.activeDm = undefined;
-      state.activeAgentPanel = undefined;
-      closeChannelFile();
+      moveRightPanel("thread", "right");
       render();
       return;
     case "thread-composer-focus":
@@ -5320,23 +5274,15 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-input']")?.focus();
       return;
     case "channel-thread-close":
-      clearSplitRightPanel("thread");
+      clearRightPanel("thread");
       state.activeChannelThread = undefined;
       state.threadReplyMessageId = undefined;
       render();
       return;
-    // A plan takes the panel the same way a thread does, and puts away
-    // whatever was in it — one column, one occupant.
+    // A plan joins the column the same way a thread does, at the right edge.
     case "plan-open":
-      if (!confirmDiscardEdit()) {
-        return;
-      }
       state.activePlan = value;
-      state.activeChannelThread = undefined;
-      state.autoOpenedThread = undefined;
-      state.activeDm = undefined;
-      state.activeAgentPanel = undefined;
-      closeChannelFile();
+      moveRightPanel("plan", "right");
       render();
       return;
     case "plan-close":
@@ -5352,9 +5298,7 @@ document.addEventListener("click", (event) => {
       state.activePlan = undefined;
       state.activeChannelThread = value;
       state.autoOpenedThread = undefined;
-      state.activeDm = undefined;
-      state.activeAgentPanel = undefined;
-      closeChannelFile();
+      moveRightPanel("thread", "right");
       render();
       return;
     // Approved. The thread opens on the way, because from here on the thing
@@ -5364,6 +5308,7 @@ document.addEventListener("click", (event) => {
       state.activePlan = undefined;
       state.activeChannelThread = value;
       state.autoOpenedThread = undefined;
+      moveRightPanel("thread", "right");
       render();
       return;
     // Replying inside a thread uses the same selected-message mechanism as
@@ -5431,9 +5376,9 @@ document.addEventListener("click", (event) => {
     // anything reads as the message having gone nowhere.
     case "dm-open":
       state.activeDm = value;
-      state.activeAgentPanel = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
+      moveRightPanel("dm", "right");
       setChanDrawer(false);
       render();
       void loadDmThread(value).then(() => render());
@@ -5470,7 +5415,7 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "dm-close":
-      clearSplitRightPanel("dm");
+      clearRightPanel("dm");
       state.activeDm = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
@@ -5501,8 +5446,7 @@ document.addEventListener("click", (event) => {
       // This entry point is "talk to my agent", so it lands on the chat half
       // rather than making somebody who clicked the avatar choose a tab.
       state.agentPanelTab = "chat";
-      state.activeDm = undefined;
-      state.activeChannelThread = undefined;
+      moveRightPanel("agent", "right");
       setChanDrawer(false);
       render();
       return;
@@ -5562,8 +5506,7 @@ document.addEventListener("click", (event) => {
       // "talk to my agent" and lands on the chat tab.
       state.activeAgentPanel = value;
       state.agentPanelTab = "spec";
-      state.activeDm = undefined;
-      state.activeChannelThread = undefined;
+      moveRightPanel("agent", "right");
       setChanDrawer(false);
       render();
       // Usage belongs to the signed-in account, so it is only requested for
@@ -5595,7 +5538,7 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "agent-panel-close":
-      clearSplitRightPanel("agent");
+      clearRightPanel("agent");
       state.activeAgentPanel = undefined;
       render();
       return;
@@ -5616,9 +5559,7 @@ document.addEventListener("click", (event) => {
       if (state.chanFileTaskId !== undefined) {
         void ensureChangeSetForTask(state.chanFileTaskId, render);
       }
-      state.activeChannelThread = undefined;
-      state.activeAgentPanel = undefined;
-      state.activeDm = undefined;
+      moveRightPanel("file", "right");
       // Opening a file opens it editable. Making Edit a second click meant the
       // answer to "can I fix this here" was no until you found a tab, which is
       // the wrong default for a file you are already looking at. The diff is

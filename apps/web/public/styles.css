@@ -7264,7 +7264,8 @@ button.chip.lg:hover {
   z-index: 4;
 }
 
-/* A panel kind is the draggable tab for desktop split view. */
+/* A panel kind is the draggable tab: it names its own surface, and dragging
+   it is how a reader reorders the column. */
 .panel-kind[draggable="true"] {
   cursor: grab;
   user-select: none;
@@ -7274,14 +7275,35 @@ button.chip.lg:hover {
   cursor: grabbing;
 }
 
-/* Dragging a tab over the conversation pins it as the left of two panels. */
+/* Dragging a tab over the conversation sends that surface to the far left. */
 .chats-shell.panel-splitting .chan-main {
   box-shadow: inset -3px 0 0 var(--accent);
 }
 
+/* A surface that has been pushed left is shadowed on both edges, because it
+   now has a neighbour on each side rather than the window. */
 .thread-panel[data-right-panel-position="left"] {
   box-shadow: -14px 0 30px -22px rgba(0, 0, 0, 0.9),
     14px 0 30px -22px rgba(0, 0, 0, 0.9);
+}
+
+/* Two or three surfaces sharing the column, counted onto the shell by
+   `renderChats`.
+
+   `--panel-w` is a width a reader dragged for one panel, and three of it is
+   most of a laptop screen — the conversation the panels are all about would
+   be left as a strip. So they take a share of the window instead, and they
+   are allowed to shrink below it rather than push the room off the edge:
+   `flex: none` is right for a single fixed column and wrong for three. */
+.chats-shell.panels-2 .thread-panel,
+.chats-shell.panels-3 .thread-panel {
+  width: min(var(--panel-w, 340px), 30vw);
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.chats-shell.panels-3 .thread-panel {
+  width: min(var(--panel-w, 340px), 24vw);
 }
 
 /* Opening and closing, driven from `playSurfaceMotion` in app.js rather than
