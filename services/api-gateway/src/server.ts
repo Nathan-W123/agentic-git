@@ -1610,6 +1610,13 @@ export function narrateTaskEvent(
         typeof data["status"] === "string" ? data["status"] : undefined,
       );
     }
+    case "task_cancelled":
+      // A channel-level /stop or /cancel already posts one system summary
+      // describing every task it stopped. Repeating a canned ending from
+      // each affected agent adds noise without telling the room anything new.
+      return data["reason"] === "Stopped from the channel"
+        ? undefined
+        : CHANNEL_TERMINAL_EVENTS[type];
     case "approval_decided":
       return undefined;
     default:
@@ -16001,8 +16008,27 @@ export class ApiGateway {
               resumed: data["status"] === "approved",
             });
           }
+          const terminal =
+            CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined;
           const narrated = narrateTaskEvent(record.event.type, data);
           if (narrated === undefined) {
+            // Some terminal events are intentionally silent. They still have
+            // to retire the task's working state and mark its root complete;
+            // otherwise the recovery sweep would add the very canned ending
+            // that was suppressed here on its next pass.
+            if (terminal) {
+              await this.options.store
+                .markChannelMessageEnded(
+                  watched.repositoryId,
+                  watched.messageId,
+                )
+                .catch(() => undefined);
+              this.watchedChannelTasks.delete(watched.taskId);
+              this.announcedChannelHolds.delete(watched.taskId);
+              await this.withdrawArbitrationNotice(watched);
+              await this.startQueuedTasksAfter(watched);
+              break;
+            }
             continue;
           }
           // An image an agent committed is shown rather than listed. A
@@ -16012,7 +16038,6 @@ export class ApiGateway {
             record.event.type === "canonical_promoted"
               ? narrated + (await this.attachCommittedImages(watched, data))
               : narrated;
-          const terminal = CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined;
           if (!watched.threaded) {
             const routineAdmission =
               record.event.type === "plan_admitted" &&

@@ -5024,6 +5024,21 @@ test("a task that reported rather than changed reads as an ending, not a failure
   );
 });
 
+test("a channel stop is not repeated by every affected agent", () => {
+  assert.equal(
+    narrateTaskEvent("task_cancelled", {
+      reason: "Stopped from the channel",
+    }),
+    undefined,
+  );
+  assert.equal(
+    narrateTaskEvent("task_cancelled", {
+      reason: "Cancelled because a dependency failed",
+    }),
+    "This was cancelled.",
+  );
+});
+
 test("a finished task says what it did, not that the pipeline worked", () => {
   // "Done — the change is in canonical." was the ending of every successful
   // task this system had ever run. It is true of all of them and says nothing
