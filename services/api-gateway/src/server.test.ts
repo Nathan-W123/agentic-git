@@ -9617,9 +9617,9 @@ test("a collision that can run together is one line, and one that cannot say so 
     firstName,
   );
 
-  // Advisory intent overlap admits both tasks untouched, so this one is never
-  // spoken at all — saying "conflict" about work that is running anyway would
-  // teach readers to ignore the times it matters.
+  // A pair with nothing between them is never spoken at all — saying
+  // "conflict" about work that is running anyway would teach readers to
+  // ignore the times it matters.
   await runtime.store.appendAudit(undefined, {
     type: "conflict_detected",
     taskId: tasks.claude,
@@ -9631,6 +9631,14 @@ test("a collision that can run together is one line, and one that cannot say so 
       evidence: [],
     },
   });
+  // Nor is a real file overlap, whatever band it scores in. Nothing in this
+  // system admits two plans onto the same file: the wave scheduler blocks
+  // one behind the other on any structural evidence, and remote admission
+  // sequences or splits the plan. This landed in the notify band and was
+  // announced as "can run together" — and then the agent that had been held
+  // reported it could not touch those files, which is the room contradicting
+  // itself. `announceArbitration` speaks for these, off an event that knows
+  // who was actually held.
   await runtime.store.appendAudit(undefined, {
     type: "conflict_detected",
     taskId: tasks.claude,
@@ -9640,7 +9648,31 @@ test("a collision that can run together is one line, and one that cannot say so 
       taskIds: [tasks.claude, tasks.codex],
       disposition: "concurrent_with_notification",
       evidence: [
-        { kind: "file_overlap", resources: ["apps/web/public/app.js"] },
+        {
+          kind: "file_overlap",
+          resources: ["apps/web/public/app.js"],
+          score: 40,
+        },
+      ],
+    },
+  });
+  // The one collision this line exists for: intent-only evidence, which is
+  // advisory, never scheduled on, and leaves both plans admitted whole.
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "concurrent_with_notification",
+      evidence: [
+        {
+          kind: "intent_conflict",
+          resources: ["mobile sizing"],
+          score: 30,
+          advisory: true,
+        },
       ],
     },
   });
@@ -9658,12 +9690,13 @@ test("a collision that can run together is one line, and one that cannot say so 
   const lines = messages
     .filter((message) => message.authorId === "coordinator")
     .map((message) => String(message.content));
-  // Exactly one: the `concurrent` event above is deliberately not narrated.
+  // Exactly one: the `concurrent` event and the structural overlap above are
+  // both deliberately not narrated here.
   assert.deepEqual(
     lines,
     [
-      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-        `files but can run together.`,
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) are working on ` +
+        `related things but can run together.`,
     ],
     `the advisory collision did not read as one short line: ${JSON.stringify(lines)}`,
   );

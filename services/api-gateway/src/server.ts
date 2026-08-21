@@ -3591,8 +3591,8 @@ export class ApiGateway {
    * Each is true only while its collision is live, so each records what would
    * end it. A `hold` — "starts once that one is done" — ends as soon as either
    * end of it does: the held task stops, or the work it names finishes. An
-   * `advisory` — "conflicting files but can run together" — is about two runs
-   * being in flight, so it ends when both of them have stopped.
+   * `advisory` — "working on related things but can run together" — is about
+   * two runs being in flight, so it ends when both of them have stopped.
    *
    * Memory only, and deliberately not the sole record: a hold routinely
    * outlives the process that announced it, which is why the notice also
@@ -15784,10 +15784,16 @@ export class ApiGateway {
    * invisible in the room where people watch the agents work; the only
    * symptom of an arbitration was one task mysteriously waiting.
    *
-   * Spoken by the room, not by an agent. Structural sequence/block decisions
-   * are deliberately left to `announceArbitration`, whose `plan_admitted`
-   * event identifies the actual held task. Guessing the order from the
-   * detector's pair emitted a second, sometimes reversed sentence.
+   * Spoken by the room, not by an agent. Every collision with structural
+   * evidence behind it — not merely the ones the detector scored as
+   * sequence/block — is deliberately left to `announceArbitration`, whose
+   * `plan_admitted` event identifies the actual held task and what it was
+   * granted. Guessing from the detector's pair emitted a second, sometimes
+   * reversed sentence, and in the notify band it emitted a contradictory one.
+   *
+   * What is left for this path is the collision no admission acts on: two
+   * plans whose only overlap is intent. Both run whole, neither is refused
+   * anything, and the room is told so once.
    */
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
@@ -15825,21 +15831,66 @@ export class ApiGateway {
       ) {
         continue;
       }
+      // The disposition band is not on its own a licence to say "can run
+      // together", and reading it as one is what put a false line in the room.
+      //
+      // Structural evidence — a shared file, symbol, API, schema — is never
+      // admitted concurrently by anything in this system. The wave scheduler
+      // blocks one task behind the other on *any* non-advisory evidence
+      // (`buildBlockers`), and remote admission sequences the plan or
+      // splits it and withholds the contested files. A pair can still score
+      // inside the notify band while all of that happens, so a real file
+      // overlap arrived here as `concurrent_with_notification` and was
+      // announced as two agents happily overlapping — moments before the
+      // agent that had been held reported it could not touch those very
+      // files. Two coordinator lines about one collision, saying opposite
+      // things.
+      //
+      // So the words are decided by the evidence, not the band. Structural
+      // collisions belong to `announceArbitration`, which speaks off
+      // `plan_admitted` and therefore knows which task was actually held,
+      // what it was granted, and what it gets once the holder is done. What
+      // is left here is the case this line was written for: intent-only
+      // evidence, where both plans really were admitted whole and neither
+      // agent will be refused anything.
+      const evidence = Array.isArray(data["evidence"]) ? data["evidence"] : [];
+      const structural = evidence.some((entry) => {
+        if (typeof entry !== "object" || entry === null) {
+          return false;
+        }
+        const item = entry as { advisory?: unknown; score?: unknown };
+        if (item.advisory === true) {
+          return false;
+        }
+        // A scoreless entry is one written before scores were recorded, or by
+        // a caller that omitted them. Structural is the safe reading: the cost
+        // of staying quiet is a line nobody sees, and the cost of guessing the
+        // other way is the contradiction above.
+        return typeof item.score === "number" ? item.score > 0 : true;
+      });
+      if (structural) {
+        continue;
+      }
       // The same resolver `announceArbitration` uses. This path used to quote
       // the first 57 characters of both objectives, so one collision read as a
       // wall of somebody's prompt while the admission event for the very same
       // pair read "@Ares and @Juno" — two voices for one decision.
       const describe = await this.channelAgentNamer(projectId, repositoryId);
       const named = taskIds.map(describe);
-      // The detector's explanation is deliberately not appended, and neither
-      // are the overlapping files. It is the full structural case — every
-      // overlapping file, every shared symbol, every dependency edge, with the
-      // score — and pasting it into the room produced a message thousands of
-      // words long listing variable names, for a reader whose question was
-      // "who is waiting on whom". It is written to the audit record, which is
-      // where an argument that long belongs; the room gets the order.
+      // The detector's explanation is deliberately not appended. It is the
+      // full case — every term the two objectives share, with the score — and
+      // pasting it into the room produced a message thousands of words long
+      // listing variable names, for a reader whose question was "who is
+      // waiting on whom". It is written to the audit record, which is where an
+      // argument that long belongs; the room gets the answer.
+      //
+      // "related things", not "conflicting files": the only collisions that
+      // reach this line are intent overlaps, where the two plans share no file
+      // at all. Claiming files were shared and then that nobody minded was the
+      // sentence a reader took as permission — and the reason a refusal, when
+      // one came, read as the coordinator contradicting itself.
       const line =
-        `⚖️ ${named[0]} and ${named[1]} have conflicting files but ` +
+        `⚖️ ${named[0]} and ${named[1]} are working on related things but ` +
         CHANNEL_ADVISORY_ENDING;
       // Said in the present tense about two runs that are running, so it is
       // withdrawn once neither of them is — a room that has been quiet for a
