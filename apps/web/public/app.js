@@ -30,6 +30,7 @@ import {
   currentUserName,
   DEFAULT_ACCENT,
   DEFAULT_ACCENT_SECONDARY,
+  DEFAULT_AGENT_COLOR,
   disconnectGitHub,
   loadContext,
   loadDeferredContext,
@@ -4060,15 +4061,18 @@ function renameFieldFocused() {
  */
 const MOTION_SURFACES = [
   // Thread, thread list, DM, agent profile and the file view share one column
-  // that holds up to three of them — so this is "the column is occupied", not
-  // "the thread is open". A surface joining a column that already has one in
-  // it, or leaving one behind, is deliberately not motion: the arrival that
-  // is worth animating is the column appearing beside the room.
+  // that holds up to three of them, and each of them is tracked by name
+  // through `key` — so this is "which surfaces are in the column", not "is
+  // the column occupied". Without the key the column was one thing that was
+  // either there or not, and a second tab opening beside the first was
+  // therefore not a change at all: it appeared fully formed, in one frame,
+  // while the tab already open jumped aside to make room for it.
   {
     selector: ".thread-panel",
     parent: ".chats-shell",
     enter: "panel-entering",
     leave: "panel-leaving",
+    key: (node) => node.dataset.panelKey ?? "",
   },
   // The file tree, which is a drawer only below 900px. Above that it is an
   // ordinary grid column and never opens or closes at all — the classes are
@@ -4113,9 +4117,16 @@ const MOTION_SURFACES = [
   },
 ];
 
-/** Whether each surface was on screen, and the element it was, before the swap. */
-const surfaceWasOpen = new Map();
-const surfaceNode = new Map();
+/**
+ * What each surface was showing before the swap: its keys, and the element
+ * each one was.
+ *
+ * A map rather than a flag because a surface can be on screen more than once
+ * — the right-hand column holds up to three panels — and "one of them opened"
+ * is a different event from "the column opened". Surfaces that only ever have
+ * one of themselves file it under the empty key and read exactly as they did.
+ */
+const surfaceNodes = new Map();
 
 /**
  * The live element for a surface, never the one a close is still fading out.
@@ -4136,42 +4147,67 @@ function surfaceIsOpen(root, surface) {
     : surface.isOpen(root);
 }
 
+/**
+ * Every live copy of a surface, by key.
+ *
+ * A surface with no `key` has at most one copy and gets the empty key, which
+ * is the whole of the old behaviour. A surface that decides whether it is
+ * open from something other than its own element — the file tree, which is a
+ * grid column above 900px — keeps answering that question, and files its one
+ * element under the same empty key.
+ */
+function liveNodes(root, surface) {
+  const found = new Map();
+  if (surface.isOpen !== undefined) {
+    if (surfaceIsOpen(root, surface)) {
+      found.set("", liveNode(root, surface));
+    }
+    return found;
+  }
+  for (const node of root.querySelectorAll(
+    `${surface.selector}:not(.${surface.leave})`,
+  )) {
+    found.set(surface.key === undefined ? "" : surface.key(node), node);
+  }
+  return found;
+}
+
 /** Reads the outgoing document. Must run before `innerHTML` throws it away. */
 function captureSurfaceMotion(root) {
   for (const surface of MOTION_SURFACES) {
-    surfaceWasOpen.set(surface.selector, surfaceIsOpen(root, surface));
-    surfaceNode.set(surface.selector, liveNode(root, surface));
+    surfaceNodes.set(surface.selector, liveNodes(root, surface));
   }
 }
 
 /** Plays whatever the swap turned out to be: an opening, a closing, or nothing. */
 function playSurfaceMotion(root) {
   for (const surface of MOTION_SURFACES) {
-    const open = surfaceIsOpen(root, surface);
-    if (open === (surfaceWasOpen.get(surface.selector) === true)) {
-      continue;
-    }
-    if (open) {
-      const node = liveNode(root, surface);
-      if (node !== null) {
-        animateOnce(node, surface.enter, false);
+    const before = surfaceNodes.get(surface.selector) ?? new Map();
+    const now = liveNodes(root, surface);
+    for (const [key, node] of now) {
+      if (before.has(key) || node === null) {
+        continue;
       }
-      continue;
+      animateOnce(node, surface.enter, false);
     }
-    const closed = surfaceNode.get(surface.selector);
-    const parent = root.querySelector(surface.parent);
-    if (closed === null || closed === undefined || parent === null) {
-      continue;
+    for (const [key, closed] of before) {
+      if (now.has(key) || closed === null || closed === undefined) {
+        continue;
+      }
+      const parent = root.querySelector(surface.parent);
+      if (parent === null) {
+        continue;
+      }
+      // Back in the document, but not back in the interface: it answers to
+      // nothing, takes no focus, and is gone before the animation is cold.
+      closed.inert = true;
+      if (surface.place === undefined) {
+        parent.append(closed);
+      } else {
+        surface.place(parent, closed);
+      }
+      animateOnce(closed, surface.leave, true);
     }
-    // Back in the document, but not back in the interface: it answers to
-    // nothing, takes no focus, and is gone before the animation is cold.
-    closed.inert = true;
-    if (surface.place === undefined) {
-      parent.append(closed);
-    } else {
-      surface.place(parent, closed);
-    }
-    animateOnce(closed, surface.leave, true);
   }
 }
 
@@ -6309,7 +6345,7 @@ document.addEventListener("click", (event) => {
       void saveAppearanceChoice({
         accent: DEFAULT_ACCENT,
         accentSecondary: DEFAULT_ACCENT_SECONDARY,
-        agentColor: DEFAULT_ACCENT,
+        agentColor: DEFAULT_AGENT_COLOR,
       });
       return;
     case "avatar-clear":

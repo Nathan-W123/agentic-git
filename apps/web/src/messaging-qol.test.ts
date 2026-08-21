@@ -370,6 +370,40 @@ test("a fourth kept panel is refused rather than squeezing the room away", async
   );
 });
 
+test("a tab opening beside another animates in at that tab's width", async () => {
+  const [app, chats, css] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+
+  // Each panel is told apart from its neighbours across a render, so a second
+  // one opening is an arrival rather than "the column was already occupied".
+  // The attribute is its own, not the draggable tab's: sharing that one would
+  // turn every drag started inside a panel into a drag of the panel.
+  assert.match(chats, /data-panel-key="\$\{esc\(kind\)\}"/u);
+  assert.match(app, /key:\s*\(node\) => node\.dataset\.panelKey/u);
+  assert.match(app, /function liveNodes\(root, surface\)/u);
+  assert.match(app, /querySelectorAll\(\s*`\$\{surface\.selector\}:not\(\.\$\{surface\.leave\}\)`/u);
+  // Arrivals and departures are both decided per key now.
+  assert.match(app, /if \(before\.has\(key\)/u);
+  assert.match(app, /if \(now\.has\(key\)/u);
+
+  // And it arrives the size the tab beside it already is, rather than both of
+  // them splitting the window — the dragged width, growing from nothing over
+  // the length of the animation so the neighbour is not shoved sideways in a
+  // single frame.
+  assert.match(
+    css,
+    /\.chats-shell\.panels-2 \.thread-panel,\s*\.chats-shell\.panels-3 \.thread-panel\s*\{[^}]*width:\s*var\(--panel-w/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.panels-2 \.thread-panel\.panel-entering,\s*\.chats-shell\.panels-3 \.thread-panel\.panel-entering\s*\{[^}]*animation:\s*panel-join var\(--motion-panel\)/u,
+  );
+  assert.match(css, /@keyframes panel-join\s*\{[^}]*\{[^}]*width:\s*0;/u);
+});
+
 test("mobile message actions surface only for the selected message", async () => {
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");

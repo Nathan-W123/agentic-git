@@ -7584,28 +7584,41 @@ button.chip.lg:hover {
 /* Two or three surfaces sharing the column, counted onto the shell by
    `renderChats`.
 
-   `--panel-w` is a width a reader dragged for one panel, and three of it is
-   most of a laptop screen — the conversation the panels are all about would
-   be left as a strip. So they take a share of the window instead, and they
-   are allowed to shrink below it rather than push the room off the edge:
-   `flex: none` is right for a single fixed column and wrong for three. */
+   Every one of them is the width the reader dragged, the same as the first
+   one was on its own. They used to split the window evenly instead, which
+   meant opening a second tab resized the tab already open — the thing being
+   read jumped to half the screen and reflowed under the cursor, and nothing
+   had asked it to. A tab that arrives beside another now arrives its size.
+
+   `min-width: 0` and a shrink factor are what happens when three of them no
+   longer fit: they give ground together rather than pushing the last one off
+   the edge. `flex: none` is right for a single fixed column and wrong here,
+   and the basis stays `auto` so the width above is what actually sizes them —
+   and is therefore something the entry animation can grow from nothing. */
 .chats-shell.panels-2 .thread-panel,
 .chats-shell.panels-3 .thread-panel {
-  width: 0;
+  width: var(--panel-w, 340px);
   min-width: 0;
-  flex: 1 1 0;
+  flex: 0 1 auto;
 }
 
-.chats-shell.panels-3 .thread-panel {
-  width: 0;
-}
+/* Below this the tabs are the workspace: two of them at the dragged width
+   leave the conversation a strip too narrow to read, so it stands aside and
+   they take the room evenly, which is what every width did before.
 
-/* With two or three tabs open, the tabs are the workspace. Splitting the
-   available room evenly keeps every thread usable and removes the obscured
-   group transcript instead of leaving a narrow, accidental-looking strip. */
-.chats-shell.panels-2 .chan-main,
-.chats-shell.panels-3 .chan-main {
-  display: none;
+   Above it there is room for both, and the conversation the tabs are all
+   about keeps whatever they have not claimed. */
+@media (max-width: 1100px) {
+  .chats-shell.panels-2 .chan-main,
+  .chats-shell.panels-3 .chan-main {
+    display: none;
+  }
+
+  .chats-shell.panels-2 .thread-panel,
+  .chats-shell.panels-3 .thread-panel {
+    width: 0;
+    flex: 1 1 0;
+  }
 }
 
 /* Opening and closing, driven from `playSurfaceMotion` in app.js rather than
@@ -7622,6 +7635,24 @@ button.chip.lg:hover {
    all it can still do. */
 .thread-panel.panel-entering {
   animation: panel-in var(--motion-panel) var(--ease-motion);
+}
+
+/* A tab joining a column that already has one in it opens the room for
+   itself rather than appearing in it.
+
+   The first panel slides in over a conversation that was already the full
+   width, so a translate is all it needs. A second has to displace something,
+   and arriving at full width in one frame shoves the tab beside it sideways
+   with no warning — so this one grows from nothing to its width, and the
+   neighbour is pushed over the length of the animation instead of between
+   two frames. */
+.chats-shell.panels-2 .thread-panel.panel-entering,
+.chats-shell.panels-3 .thread-panel.panel-entering {
+  animation: panel-join var(--motion-panel) var(--ease-motion);
+  /* Only for the length of the growth: its contents are laid out for the
+     full width from the first frame, and without this they hang out over the
+     tab beside it while the panel catches up. */
+  overflow: hidden;
 }
 
 .thread-panel.panel-leaving {
@@ -7659,6 +7690,14 @@ button.chip.lg:hover {
   }
 }
 
+@keyframes panel-join {
+  from {
+    opacity: 0;
+    width: 0;
+    transform: translateX(16px);
+  }
+}
+
 @keyframes panel-out {
   to {
     opacity: 0;
@@ -7667,7 +7706,9 @@ button.chip.lg:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .thread-panel.panel-entering {
+  .thread-panel.panel-entering,
+  .chats-shell.panels-2 .thread-panel.panel-entering,
+  .chats-shell.panels-3 .thread-panel.panel-entering {
     animation: none;
   }
 

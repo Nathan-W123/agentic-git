@@ -3276,11 +3276,20 @@ function rightPanel(repositoryId, kind) {
   }
 }
 
+/**
+ * `data-panel-key` is what tells one occupant of the column from another
+ * across a render — see `MOTION_SURFACES` in app.js, which reads it to decide
+ * that a tab has just opened rather than that the column has. It is
+ * deliberately not `data-right-panel-kind`: that attribute is the draggable
+ * tab, and putting it on the whole panel would make every drag begun anywhere
+ * inside one a drag of the panel itself.
+ */
 function positionedRightPanel(repositoryId, kind, position) {
   const panel = rightPanel(repositoryId, kind);
   return panel.replace(
     '<aside class="thread-panel',
-    `<aside data-right-panel-position="${position}" class="thread-panel`,
+    `<aside data-right-panel-position="${position}"
+      data-panel-key="${esc(kind)}" class="thread-panel`,
   );
 }
 
