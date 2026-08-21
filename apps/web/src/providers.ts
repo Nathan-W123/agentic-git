@@ -94,9 +94,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = [
   "anthropic",
   "openai",
   "cursor",
-  "copilot",
   "kiro",
-  "google",
 ];
 
 export interface ChatMessage {

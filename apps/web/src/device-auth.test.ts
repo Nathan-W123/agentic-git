@@ -331,8 +331,6 @@ test("browser-only agents use headless auth and store their isolated session", a
     runner: scriptedRunner({
       agent: (args) =>
         args[0] === "--version" ? output("1.0.0") : output("pong"),
-      copilot: (args) =>
-        args[0] === "--version" ? output("1.0.0") : output("pong"),
       "kiro-cli": (args) =>
         args[0] === "--version" ? output("1.0.0") : output("pong"),
     }),
@@ -341,7 +339,6 @@ test("browser-only agents use headless auth and store their isolated session", a
 
   for (const [provider, command] of [
     ["cursor", "agent"],
-    ["copilot", "copilot"],
     ["kiro", "kiro-cli"],
   ] as const) {
     const started = await service.startDeviceAuth({
@@ -666,10 +663,14 @@ test("Gemini signs in through the paste-a-code path, not a local callback", asyn
   });
   assert.deepEqual(submitted, ["returned-code"]);
   assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
-  const gemini = (
-    await service.list({ userId: "u1", systemAdmin: false })
-  ).find((entry) => entry.id === "google");
-  assert.equal(gemini?.connected, true);
+  // Gemini is no longer offered as an agent to add, so it does not appear in
+  // the provider list even after a successful sign-in flow.
+  assert.equal(
+    (await service.list({ userId: "u1", systemAdmin: false })).some(
+      (entry) => entry.id === "google",
+    ),
+    false,
+  );
 });
 
 test("signing in again after an expired session keeps an org-wide agent org-wide", async () => {
