@@ -11,13 +11,17 @@
 import {
   API_ROOT,
   contextPercentFor,
+  currentUserId,
+  currentUserName,
   loadProviderOptions,
+  myAvatar,
   providerEffortOptions,
   providerModelOptions,
   state,
 } from "./data.js";
 import {
   agentFace,
+  avatar,
   bar,
   clockTime,
   contextRing,
@@ -177,6 +181,18 @@ export function chatThread(agent) {
       entry,
       startsNewDay,
     );
+    // Same shape the channel uses — face, name, time, then the words — so a
+    // private turn reads like the room beside it. The only difference is
+    // whose side the row sits on: yours on the right, the agent's on the left.
+    const speakerName = mine ? currentUserName() : agent.name;
+    const face = mine
+      ? avatar(
+          currentUserName(),
+          32,
+          currentUserId() || currentUserName(),
+          myAvatar(),
+        )
+      : agentFace(agent, 32);
     // Rewind, not erase. This whole transcript is replayed to the provider on
     // every turn, so lifting one message out of the middle would leave the
     // model answering a question that is no longer there — and the reply it
@@ -185,21 +201,31 @@ export function chatThread(agent) {
     // deleting a message here actually wants: to go back and ask differently.
     return `${separator}<div class="msg ${mine ? "user" : "agent"}${
       compact ? " msg-compact" : ""
-    }">${esc(entry.content)}${
+    }">${
+      compact ? "" : `<span class="msg-avatar">${face}</span>`
+    }<div class="msg-body">${
       compact
         ? ""
-        : `<span class="msg-time">${esc(clockTime(entry.at))}${
-            mine ? '<span class="tick">✓✓</span>' : ""
-          }</span>`
-    }${iconButton("trash", {
-      act: "chat-msg-delete",
-      value: String(index),
-      title:
-        index === entries.length - 1
-          ? "Delete this message"
-          : "Delete this message and everything after it",
-      small: true,
-    })}</div>`;
+        : `<div class="msg-top">
+            <span class="msg-name${mine ? "" : " agent-name"}">${esc(
+              speakerName,
+            )}</span>
+            <span class="msg-time">${esc(clockTime(entry.at))}${
+              mine ? '<span class="tick">✓✓</span>' : ""
+            }</span>
+          </div>`
+    }<div class="msg-text">${esc(entry.content)}</div></div>${iconButton(
+      "trash",
+      {
+        act: "chat-msg-delete",
+        value: String(index),
+        title:
+          index === entries.length - 1
+            ? "Delete this message"
+            : "Delete this message and everything after it",
+        small: true,
+      },
+    )}</div>`;
   });
   return `<div class="chat-thread" id="chat-thread">${rows.join("")}</div>`;
 }
