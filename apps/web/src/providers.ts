@@ -382,8 +382,10 @@ export const CREDENTIAL_INSTRUCTIONS: Record<ProviderId, string[]> = {
       "key's account instead of your subscription.",
   ],
   google: [
-    "Sign in with Google in the browser opened by Gemini CLI. Lattice stores " +
-      "only the session issued to this deployment.",
+    "Paste an API key from aistudio.google.com/apikey. It bills per request " +
+      "rather than against a subscription.",
+    "Browser sign-in is still available on a paid Gemini Code Assist plan, " +
+      "but Google has withdrawn it from personal accounts.",
   ],
   cursor: [
     "Sign in to Cursor in the browser opened by Cursor Agent CLI. API keys " +

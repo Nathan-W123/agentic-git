@@ -1061,13 +1061,32 @@ test("a conversation is scoped to one user's own provider connection", async () 
   assert.equal(/projects\/\$\{[^}]*\}\/chat/u.test(source), false);
 });
 
-test("agent settings use browser sign-in codes instead of Gemini credential paste", async () => {
+/**
+ * Browser sign-in stays the first offer, because it beats sending somebody to
+ * find a secret. What changed is that it can no longer be the *only* offer:
+ * Google withdrew the Gemini CLI's sign-in from personal accounts, so a
+ * screen that only ever signed in left Gemini with no route at all — and
+ * looped "Try again" on a refusal that retrying cannot fix.
+ *
+ * Nobody should still be asked for a copied `oauth_creds.json`: that is a
+ * sign-in artefact, not something to go and find.
+ */
+test("agent settings sign in first, but can fall back to a credential", async () => {
   const source = await publicFile("screen-agents.js");
   assert.match(source, /window\.open\("", "_blank"\)/u);
   assert.match(source, /Code from that page/u);
   assert.match(source, /submitProviderSignInCode/u);
   assert.equal(source.includes("oauth_creds.json"), false);
-  assert.equal(source.includes("Google AI Studio"), false);
+  // Which providers take a pasted credential is the server's answer, not a
+  // list here that goes stale when a vendor changes its mind.
+  assert.match(source, /acceptedCredentialKinds/u);
+  assert.equal(
+    /\["google", "cursor", "copilot", "kiro"\]\.includes/u.test(source),
+    false,
+    "a hardcoded browser-only list cannot track a vendor withdrawing a flow",
+  );
+  // And the way out of a permanent refusal is offered on the failure itself.
+  assert.match(source, /Use a credential instead/u);
 });
 
 test("every composer control sits on one row with an icon-sized context dial", async () => {

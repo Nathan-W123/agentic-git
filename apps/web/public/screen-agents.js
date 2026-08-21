@@ -580,6 +580,13 @@ const CREDENTIAL_HELP = {
       ["api_key", "API key from console.anthropic.com"],
     ],
   },
+  google: {
+    // Google retired the Gemini CLI's browser sign-in for personal accounts,
+    // so for most people a key is now the only way in.
+    hint: "Create a key at <a class=\"link\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"https://aistudio.google.com/apikey\">aistudio.google.com/apikey</a>. It bills per request rather than against a subscription. Browser sign-in still works on a paid Gemini Code Assist plan.",
+    placeholder: "AIza…",
+    kinds: [["api_key", "API key from Google AI Studio"]],
+  },
   openai: {
     // Codex has no `setup-token` equivalent, so a ChatGPT subscription can
     // only be brought over as the session file the CLI itself wrote.
@@ -813,9 +820,15 @@ export async function connectAgent(providerId, rerender) {
   // Sign-in first where the vendor supports it, because the alternative is
   // asking somebody to go and find a secret. The server reports which
   // providers can, so this does not have to know.
-  const signInFlow = (state.providers ?? []).find(
-    (entry) => entry.id === providerId,
-  )?.signInFlow;
+  const entry = (state.providers ?? []).find(
+    (item) => item.id === providerId,
+  );
+  const signInFlow = entry?.signInFlow;
+  // What the server says this provider will accept by hand. Asked rather than
+  // assumed: which providers have a paste route changes when a vendor changes
+  // its mind, as Google did when it closed the Gemini CLI's browser sign-in to
+  // personal accounts, and a list hardcoded here goes stale silently.
+  const pasteable = (entry?.acceptedCredentialKinds ?? []).length > 0;
   if (signInFlow !== undefined) {
     // A failed sign-in used to fall through to the paste box, which answered
     // "that did not work" by asking somebody to go and find an OAuth token on
@@ -831,26 +844,37 @@ export async function connectAgent(providerId, rerender) {
       if (outcome === true || outcome === null) {
         return;
       }
+      // Retrying fixes a mistimed tab. It cannot fix a vendor that has
+      // withdrawn the flow — Gemini's refusal for personal accounts is
+      // permanent, and looping "Try again" on it is a trap. So where a
+      // pasted credential is accepted, that is offered as the other way out.
       const again = await showModal({
         title: "Connection failed",
         subtitle: `${agentLabelOf(providerId)} did not finish signing in.`,
         confirm: "Try again",
-        cancel: "Not now",
+        cancel: pasteable ? "Use a credential instead" : "Not now",
         body: `<p class="modal-hint">Nothing was saved, and nothing on your
           account changed. This is usually the sign-in tab being closed or
-          taking too long — starting it again is normally all it needs.</p>`,
+          taking too long — starting it again is normally all it needs.${
+            pasteable
+              ? " If the message above says this account is not eligible, " +
+                "signing in again will not help — connect a credential instead."
+              : ""
+          }</p>`,
       });
       if (again === undefined) {
-        return;
+        if (!pasteable) {
+          return;
+        }
+        break;
       }
     }
   }
-  // Only providers with no sign-in flow of their own reach here. For those a
-  // pasted credential is the only way in, so it stays.
-  if (["google", "cursor", "copilot", "kiro"].includes(providerId)) {
-    // These agents are intentionally browser-only. In particular, Gemini no
-    // longer falls back to the old API-key / copied OAuth-file modal when a
-    // deployment cannot advertise the new flow.
+  // A provider that accepts nothing by hand is browser-only, and saying so is
+  // the whole answer for it. Decided from what the server accepts rather than
+  // from a list here, so a vendor gaining or losing a paste route does not
+  // need this file changed to match.
+  if (!pasteable) {
     toast(`${agentLabelOf(providerId)} browser sign-in is unavailable`, "error");
     return;
   }

@@ -218,6 +218,45 @@ export const DEFAULT_CONFIG: ProjectConfig = {
   },
 };
 
+/**
+ * Adds the default agent for any vendor this config has none for.
+ *
+ * {@link DEFAULT_CONFIG} lists an agent per vendor the connect screen offers,
+ * so a fresh project can run whatever somebody connects. That is only a
+ * default at creation, though: a project created before a vendor was added
+ * has a stored `agents` map without it, and this map is read verbatim. So
+ * every deployment older than a vendor answered a task for it with "No cursor
+ * agent is configured on this deployment" — after the person had connected
+ * Cursor and had every reason to think they were done. The same gap the
+ * defaults were added to close, one level up.
+ *
+ * Only genuinely missing vendors are filled. An agent the project already has
+ * for that adapter wins whatever it is named, and a name already taken is
+ * left alone — this adds what is absent and never redefines what is present.
+ * Entries omit `command`, so an agent whose CLI is not installed costs
+ * nothing until somebody mentions it, and then fails saying the command was
+ * not found rather than denying it exists.
+ */
+function backfillDefaultAgents(agents: Record<string, AgentConfig>): void {
+  const configured = new Set(
+    Object.values(agents).map((agent) => agent.adapter),
+  );
+  // Only a config that already runs vendor CLIs gets more of them. A project
+  // whose agents are all its own commands has been written deliberately, and
+  // filling it with six vendors nobody asked for would be an opinion, not a
+  // repair.
+  if (!Object.values(agents).some((agent) => agent.adapter !== undefined)) {
+    return;
+  }
+  for (const [name, agent] of Object.entries(DEFAULT_CONFIG.agents)) {
+    if (configured.has(agent.adapter) || agents[name] !== undefined) {
+      continue;
+    }
+    agents[name] = structuredClone(agent);
+    configured.add(agent.adapter);
+  }
+}
+
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]*$/iu;
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const MIN_AGENT_TIMEOUT_MS = 1_000;
@@ -581,6 +620,7 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
   for (const [name, entry] of Object.entries(config.agents)) {
     agents[name] = assertAgent(name, entry);
   }
+  backfillDefaultAgents(agents);
 
   const defaultAgent =
     config.defaultAgent === undefined

@@ -303,3 +303,63 @@ test("requireAgent explains what is configured", async () => {
     ]);
   });
 });
+
+/**
+ * A project created before a vendor existed has a stored `agents` map without
+ * it, and that map is read verbatim. So connecting Cursor in the browser and
+ * then asking it to do something answered "No cursor agent is configured on
+ * this deployment" — the same gap the defaults were added to close, except
+ * defaults only apply when the project is created.
+ */
+test("a config written before a vendor existed still gains its agent", () => {
+  const older = assertProjectConfig({
+    version: 1,
+    validationCommands: [],
+    // Exactly what an older deployment holds: the two vendors that existed
+    // when it was created.
+    agents: { codex: { adapter: "codex" }, claude: { adapter: "claude" } },
+  });
+
+  for (const adapter of ["cursor", "copilot", "kiro", "gemini"]) {
+    assert.ok(
+      Object.values(older.agents).some((agent) => agent.adapter === adapter),
+      `${adapter} must be runnable once it is connected`,
+    );
+  }
+  // And the entries that were already there are untouched.
+  assert.deepEqual(older.agents["codex"], { adapter: "codex" });
+  assert.deepEqual(older.agents["claude"], { adapter: "claude" });
+});
+
+test("backfill never redefines an agent the project already configured", () => {
+  const custom = assertProjectConfig({
+    version: 1,
+    validationCommands: [],
+    agents: {
+      // The project's own Cursor agent, named its own way and pinned to a
+      // particular executable. Adding a second one called "cursor" would give
+      // this deployment two, and let the wrong one answer a mention.
+      "cursor-primary": { adapter: "cursor", command: "/opt/cursor/agent" },
+    },
+  });
+
+  const cursors = Object.entries(custom.agents).filter(
+    ([, agent]) => agent.adapter === "cursor",
+  );
+  assert.deepEqual(cursors, [
+    ["cursor-primary", { adapter: "cursor", command: "/opt/cursor/agent" }],
+  ]);
+});
+
+test("a project running only its own commands is left as it was", () => {
+  const curated = assertProjectConfig({
+    version: 1,
+    validationCommands: [],
+    agents: { local: { command: "node", args: ["agent.mjs"] } },
+    defaultAgent: "local",
+  });
+
+  // Backfill repairs a config that has fallen behind the vendors on offer.
+  // It does not have opinions about one that never ran vendors at all.
+  assert.deepEqual(Object.keys(curated.agents), ["local"]);
+});
