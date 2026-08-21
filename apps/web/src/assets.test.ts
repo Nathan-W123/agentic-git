@@ -2948,6 +2948,7 @@ test("channel task branches share the compact group's visible avatar", async () 
 });
 
 test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
+  const app = await browserSource();
   const chat = await publicFile("chat.js");
   const css = await publicFile("styles.css");
 
@@ -2977,20 +2978,25 @@ test("private-chat messages compact only an uninterrupted run from one speaker",
   assert.equal(continues(undefined, { role: "user" }, false), false);
 
   // Continuations lose only repeated chrome (face, name, clock). They remain
-  // individual rows with their original indices, so rewinding from either one
-  // keeps the conversation semantics unchanged.
+  // individual rows and keep the conversation semantics unchanged.
   assert.match(chat, /compact \? " msg-compact" : ""/u);
   assert.match(
     chat,
     /compact\s*\?\s*""\s*:\s*`<div class="msg-top">/u,
   );
-  assert.match(chat, /act: "chat-msg-delete"/u);
-  assert.match(chat, /value: String\(index\)/u);
+  assert.doesNotMatch(chat, /chat-msg-delete/u);
+  assert.doesNotMatch(app, /chat-msg-delete/u);
+  assert.doesNotMatch(css, /chat-msg-delete/u);
+  assert.doesNotMatch(chat, /truncateConversationFrom/u);
   // Yours on the right, the agent's on the left — the one difference from the
   // channel's single-sided transcript.
   assert.match(chat, /mine \? "user" : "agent"/u);
   assert.match(css, /\.msg\.user \{\s*align-self: flex-end;/u);
   assert.match(css, /\.msg\.agent \{\s*align-self: flex-start;/u);
+  assert.match(
+    css,
+    /\.msg\.user \.msg-text \{[^}]*background: var\(--accent\);[^}]*color: #fff;/su,
+  );
   assert.match(
     css,
     /\.msg\.msg-compact \.msg-body \{\s*margin-left: calc\(var\(--msg-body-x\) - 8px\);/u,

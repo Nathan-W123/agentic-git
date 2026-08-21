@@ -134,7 +134,6 @@ import {
   ensureAgentOptions,
   scrollThread,
   sendChat,
-  truncateConversationFrom,
 } from "./chat.js";
 import {
   connectRepository,
@@ -2050,42 +2049,6 @@ async function deleteChannelReplyAction(repositoryId, messageId, replyId) {
   } catch (error) {
     toast(error.message, "error");
   }
-}
-
-/**
- * Deleting a message from the private agent conversation, which rewinds it.
- *
- * The confirmation says how many messages go rather than "this one", because
- * that is what happens — see `truncateConversationFrom` for why it cannot be
- * one — and somebody scrolling back to delete an early message would
- * otherwise lose the whole conversation to a dialog that promised one line.
- */
-async function deleteChatMessageAction(index) {
-  const agent = currentAgent();
-  if (agent === undefined || !Number.isInteger(index)) {
-    return;
-  }
-  const following = (state.conversations[agent.id] ?? []).length - index;
-  if (following <= 0) {
-    return;
-  }
-  const confirmed = await showModal({
-    title:
-      following === 1
-        ? "Delete this message?"
-        : `Delete this message and the ${String(following - 1)} after it?`,
-    subtitle:
-      "This conversation is replayed to the agent on every turn, so it is " +
-      "rewound to before this message rather than having one lifted out of " +
-      "the middle. The agent's own session is dropped with it, so nothing " +
-      "here is remembered on its side either.",
-    confirm: "Delete",
-  });
-  if (confirmed === undefined) {
-    return;
-  }
-  truncateConversationFrom(agent.id, index);
-  render();
 }
 
 /** Unsending one direct message, from both sides of the conversation. */
@@ -5952,10 +5915,6 @@ document.addEventListener("click", (event) => {
     case "chat-toggle":
       toggleChat(render);
       return;
-    case "chat-msg-delete":
-      void deleteChatMessageAction(Number(value));
-      return;
-
     /* Agents */
     case "agent-pick":
       selectAgent(value, render);

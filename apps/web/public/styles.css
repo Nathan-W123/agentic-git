@@ -2220,8 +2220,8 @@ svg {
 
 /* Consecutive lines from one speaker read as a single group, the way the
    channel collapses uninterrupted runs. The first keeps the face and the
-   clock; continuations spend only a narrow gutter, and each line still owns
-   its own rewind action. */
+   clock; continuations spend only a narrow gutter while remaining distinct
+   messages. */
 .msg.msg-compact {
   padding-top: 1px;
   padding-bottom: 1px;
@@ -2277,33 +2277,11 @@ svg {
   white-space: pre-wrap;
 }
 
-/* Rewind, hidden until the row is under the pointer — the same bargain
-   `.cmsg-actions` makes in the channel. It sits above the row rather than
-   inside the words so it never reflows what somebody is reading. */
-.msg .icon-btn[data-act="chat-msg-delete"] {
-  position: absolute;
-  top: -14px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-  background: var(--bg-card-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 2px;
-}
-
-.msg.user .icon-btn[data-act="chat-msg-delete"] {
-  left: 8px;
-}
-
-.msg.agent .icon-btn[data-act="chat-msg-delete"] {
-  right: 8px;
-}
-
-.msg:hover .icon-btn[data-act="chat-msg-delete"],
-.msg:focus-within .icon-btn[data-act="chat-msg-delete"] {
-  opacity: 1;
-  pointer-events: auto;
+.msg.user .msg-text {
+  padding: 7px 11px;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
 }
 
 .msg.agent {
@@ -4255,17 +4233,6 @@ button.chip.lg:hover {
   .dm-msg .dm-msg-actions {
     opacity: 1 !important;
     pointer-events: auto !important;
-  }
-
-  /* And the private panel's rewind, for the same reason. Static rather than
-     hung off the bubble's edge: there is no gutter to hang it in once the
-     panel is the width of a phone. */
-  .msg .icon-btn[data-act="chat-msg-delete"] {
-    position: static !important;
-    opacity: 1 !important;
-    pointer-events: auto !important;
-    margin-left: 6px;
-    vertical-align: middle;
   }
 
   /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
