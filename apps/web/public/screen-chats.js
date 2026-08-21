@@ -1400,6 +1400,16 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
  */
 const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
 
+/**
+ * How a plan nobody started in time is marked, as the gateway writes it.
+ *
+ * Mirrors `CHANNEL_PLAN_LAPSED_PREFIX` in `services/api-gateway/src/server.ts`.
+ * Deliberately a different opening from the hold above: this one says the
+ * wait is over, and the panel reads it to stop offering to start work that
+ * has already been let go.
+ */
+const PLAN_LAPSED_PREFIX = "⌛ Plan expired";
+
 /** Root kinds spoken by an agent rather than a person or the coordinator. */
 const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome"]);
 
@@ -4569,6 +4579,15 @@ function planPanel(repositoryId) {
     root.taskId !== undefined &&
     state.tasks.some((task) => task.id === root.taskId);
   const held = !known || threadAwaitsGoAhead(root);
+  // A plan can also end without ever having been started: the hold has a
+  // deadline, and one that runs out is cancelled and said so in the thread.
+  // Without this the panel fell through to "this plan has been started",
+  // which is the one thing that certainly did not happen.
+  const lapsed =
+    !held &&
+    (root.replies ?? []).some((reply) =>
+      String(reply.content ?? "").startsWith(PLAN_LAPSED_PREFIX),
+    );
   return `<aside class="thread-panel plan-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -4596,7 +4615,11 @@ function planPanel(repositoryId) {
         data-value="${esc(messageId)}">${icon("play")} Start work</button>
     </div>`
         : `<div class="plan-actions">
-      <span class="plan-held">This plan has been started.</span>
+      <span class="plan-held">${
+        lapsed
+          ? "Nobody started this in time, so it was let go."
+          : "This plan has been started."
+      }</span>
       <button type="button" class="btn" data-act="plan-thread-open"
         data-value="${esc(messageId)}">Open thread</button>
     </div>`

@@ -558,6 +558,15 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
 const CHANNEL_HOLD_PREFIX = "⏸ Waiting on you";
 const CHANNEL_RELEASE_PREFIX = "▶ Go-ahead received";
 /**
+ * How a plan that nobody started in time says so.
+ *
+ * Deliberately not {@link CHANNEL_HOLD_PREFIX}: the browser recognises a
+ * room-level hold by that exact opening and walks back to the thread it is
+ * waiting on, so a line announcing that the wait is over would render as one
+ * still running.
+ */
+const CHANNEL_PLAN_LAPSED_PREFIX = "⌛ Plan expired";
+/**
  * How the coordinator's arbitration lines open, and how they are found again.
  *
  * Every one of them describes a condition rather than an event — "starts once
@@ -1961,6 +1970,25 @@ const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
 const AUTO_CLAIM_OFFER_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * How long a `/plan` hold waits for somebody to start it.
+ *
+ * A held plan costs nothing to keep — no lease, no workspace, no clock — but
+ * it is a decision standing over somebody, and until now nothing ever ended
+ * one. A plan nobody answered sat `planned` for the life of the deployment:
+ * the thread kept saying "waiting on you", the room kept its go-ahead badge,
+ * and the panel kept offering to start work that had long since stopped being
+ * what anybody wanted. That is the "it just stalled forever" this bounds.
+ *
+ * Fifteen minutes, the same deadline an agent's own question already waits
+ * out in the coordinator, and overridable with `COORD_PLAN_HOLD_TTL_MINUTES`
+ * for a deployment whose reviewers are slower than that.
+ *
+ * Lapsing cancels rather than starts. Silence is not consent, and a plan is
+ * the one review that happens before the work is paid for.
+ */
+const PLAN_HOLD_TTL_MS = 15 * 60_000;
+
+/**
  * The last line of every offer the reader is asked to answer.
  *
  * The sentence above it is the agent's own — it names the specific thing it
@@ -3032,6 +3060,18 @@ export interface ApiGatewayOptions {
    * for tests, which cannot wait out the production cadence.
    */
   auditorPollIntervalMs?: number;
+  /**
+   * How often finished threads, standing arbitration notices and stale plan
+   * holds are swept. Exposed for tests, which cannot wait out the production
+   * cadence.
+   */
+  threadReconcileIntervalMs?: number;
+  /**
+   * How long a held `/plan` waits for somebody to start it before it lapses.
+   * Defaults to `COORD_PLAN_HOLD_TTL_MINUTES`, and failing that to
+   * {@link PLAN_HOLD_TTL_MS}.
+   */
+  planHoldTtlMs?: number;
 }
 
 interface RequestContext {
@@ -3347,6 +3387,20 @@ function passwordResetTtlMs(configured: string | undefined): number {
   return Number.isSafeInteger(minutes) && minutes > 0
     ? minutes * 60_000
     : 60 * 60_000;
+}
+
+/**
+ * How long a held plan waits, in milliseconds.
+ *
+ * Same shape as {@link passwordResetTtlMs}, and for the same reason: a
+ * mistyped number falls back to the default rather than stopping a control
+ * plane from booting.
+ */
+function planHoldTtlMs(configured: string | undefined): number {
+  const minutes = Number((configured ?? "").trim());
+  return Number.isSafeInteger(minutes) && minutes > 0
+    ? minutes * 60_000
+    : PLAN_HOLD_TTL_MS;
 }
 
 /**
@@ -3795,13 +3849,18 @@ export class ApiGateway {
     // that just died has nobody left to withdraw it, and a notice is a claim
     // about work in flight. Once immediately for exactly that reason.
     void this.reconcileArbitrationNotices().catch(() => undefined);
+    // And the third: a plan held past its deadline by a process that is no
+    // longer here. Its clock is the row's own timestamp rather than a timer
+    // in memory, so the wait ends whether or not anything survived.
+    void this.lapseStalePlanHolds().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
       // Backstop for a conflict recorded moments before a restart killed the
       // fast pump: slow, but nothing stays unsaid.
       void this.narrateConflicts().catch(() => undefined);
       void this.reconcileArbitrationNotices().catch(() => undefined);
-    }, THREAD_RECONCILE_INTERVAL_MS);
+      void this.lapseStalePlanHolds().catch(() => undefined);
+    }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
   }
 
@@ -13279,6 +13338,52 @@ export class ApiGateway {
   }
 
   /**
+   * Tells a late "go ahead" that the plan it answers has already lapsed.
+   *
+   * The sibling of {@link answerLapsedQuestion}, and there for the same
+   * reason: a reply that quietly does nothing is the worst of the three
+   * possible answers. The person said the one word the thread asked them for,
+   * and read the silence as the platform being broken rather than as the
+   * offer having expired while they were away.
+   *
+   * Recognised from the thread rather than from memory, so it still works
+   * after the deploy that a fifteen-minute wait routinely outlives. The lapse
+   * notice is written by {@link lapseStalePlanHolds} and stays in the
+   * transcript, which makes it the durable record of what happened here.
+   *
+   * Returns false when no plan lapsed in this thread, so an ordinary "yes" in
+   * an ordinary thread still falls through to being conversation.
+   */
+  private async answerLapsedPlan(
+    input: {
+      projectId: string;
+      repositoryId: string;
+      messageId: string;
+      responder: ChannelMentionCandidate | undefined;
+    },
+    root: ChannelMessage,
+  ): Promise<boolean> {
+    const responder = input.responder;
+    const lapsed = (root.replies ?? []).some((reply) =>
+      reply.content.startsWith(CHANNEL_PLAN_LAPSED_PREFIX),
+    );
+    if (responder === undefined || !lapsed) {
+      return false;
+    }
+    await this.appendChannelThreadReply({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId: `${responder.userId}:${responder.provider}`,
+      content:
+        "That plan ran out of time before anybody started it, so there is " +
+        "nothing left holding your go-ahead. The plan itself is still in " +
+        "this thread — ask me again and I'll pick it up from there.",
+    }).catch(() => undefined);
+    return true;
+  }
+
+  /**
    * Tells a late answer that it was late.
    *
    * The reply parses as an option of a question this thread was holding, but
@@ -13641,7 +13746,7 @@ export class ApiGateway {
       })
     ).find((entry) => entry.id === root.taskId);
     if (held === undefined) {
-      return false;
+      return await this.answerLapsedPlan(input, root);
     }
     const requester = await this.triggeredByForTask({
       taskId: held.id,
@@ -15002,6 +15107,110 @@ export class ApiGateway {
           authorId,
           content: ending,
           kind: "outcome",
+        }).catch(() => undefined);
+      }
+    }
+  }
+
+  /**
+   * Ends a `/plan` hold that nobody started in time.
+   *
+   * The hold itself is deliberately cheap — a `planned` row, no lease, no
+   * workspace, no clock — and that was the problem: nothing ever ended one.
+   * A plan nobody answered stayed held for the life of the deployment, so the
+   * thread went on saying "waiting on you", the room kept its go-ahead badge,
+   * and the panel kept offering to start work the room had long since moved
+   * past. Bounded here, and said out loud, because a wait that ends in
+   * silence is indistinguishable from one that never ends.
+   *
+   * Read off the row's own `submittedAt` rather than a timer in memory. Every
+   * other deadline in this file is a `setTimeout` held by the process that
+   * created it, which is exactly why they do not survive the deploys this
+   * deployment performs constantly — and the whole point of a hold is that it
+   * outlives them.
+   *
+   * Idempotent by the query: cancelling takes the task out of `planned`, so
+   * the next sweep does not see it and the thread gets one notice.
+   *
+   * The held set is read twice — once to decide whether this room is worth
+   * reading a thread for, and again on the far side of that read, which is
+   * the slow part. The second read is what keeps a "go ahead" arriving in the
+   * same moment safe: `releasePlannedTask` has already taken that task out of
+   * `planned` by then, and cancelling a run that has just started would be
+   * far worse than letting one late plan live.
+   */
+  private async lapseStalePlanHolds(): Promise<void> {
+    const ttl =
+      this.options.planHoldTtlMs ??
+      planHoldTtlMs(process.env["COORD_PLAN_HOLD_TTL_MINUTES"]);
+    const minutes = Math.max(1, Math.round(ttl / 60_000));
+    const cutoff = Date.now() - ttl;
+    const repositories = await this.options.store.listRepositories();
+    for (const repository of repositories) {
+      const held = await this.options.store.listSubmittedTasks({
+        repositoryId: repository.id,
+        status: "planned",
+      });
+      if (!held.some((task) => Date.parse(task.submittedAt) <= cutoff)) {
+        // The common case, and the reason the thread read below is not done
+        // unconditionally: most rooms are holding nothing at all.
+        continue;
+      }
+      const messages = await this.options.store.listChannelMessages(
+        repository.id,
+        "",
+        { limit: 200 },
+      );
+      const stale = (
+        await this.options.store.listSubmittedTasks({
+          repositoryId: repository.id,
+          status: "planned",
+        })
+      ).filter((task) => Date.parse(task.submittedAt) <= cutoff);
+      for (const task of stale) {
+        const cancelled = await this.options.store
+          .cancelSubmittedTask(task.id)
+          .catch(() => undefined);
+        if (cancelled === undefined) {
+          continue;
+        }
+        // The hold is over however it ends, so the marker goes with it: a
+        // later release must not find one still standing and answer it.
+        this.announcedChannelHolds.delete(task.id);
+        const root = messages.find((message) => message.taskId === task.id);
+        if (root === undefined) {
+          continue;
+        }
+        let authorId = AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
+          ? root.authorId
+          : (root.replies ?? []).find(
+              (reply) =>
+                AGENT_AUTHORED_ROOT_KINDS.has(reply.kind) &&
+                reply.authorId.includes(":"),
+            )?.authorId;
+        if (authorId === undefined) {
+          const candidates = await this.resolveChannelMentionCandidates(
+            root.projectId,
+            repository.id,
+          ).catch(() => []);
+          authorId = await this.channelTaskAuthorId(task, candidates);
+        }
+        // Never put this in the requester's own mouth. Better an unexplained
+        // cancellation than the person who asked appearing to withdraw it.
+        if (authorId === undefined) {
+          continue;
+        }
+        await this.appendChannelThreadReply({
+          projectId: root.projectId,
+          repositoryId: repository.id,
+          messageId: root.id,
+          authorId,
+          kind: "outcome",
+          content:
+            `${CHANNEL_PLAN_LAPSED_PREFIX} — nobody started this within ` +
+            `${minutes} minute${minutes === 1 ? "" : "s"}, so I've let it ` +
+            `go. Nothing ran, and the plan is still here to read. Ask again ` +
+            `and I'll pick it back up.`,
         }).catch(() => undefined);
       }
     }
