@@ -92,6 +92,28 @@ test("the unread line is taken before opening the room marks it read", async () 
   assert.match(css, /\.chan-unread \{/u);
 });
 
+test("quiet transcript metadata uses an outlined label on a straight separator", async () => {
+  const [chat, chats, css] = await Promise.all([
+    publicFile("chat.js"),
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+
+  // Dates share one treatment in private agent chats, rooms, and direct
+  // messages, while coordinator-authored notices use it instead of looking
+  // like another participant in the conversation.
+  assert.match(chat, /thread-day transcript-separator/u);
+  assert.match(chat, /msg system transcript-separator/u);
+  assert.match(chats, /chan-day transcript-separator/u);
+  assert.match(chats, /cmsg-system[\s\S]{0,100}transcript-separator/u);
+
+  // The label owns the outline; the two pseudo-elements are the uninterrupted
+  // hairline on either side, so long notices can wrap without drawing through
+  // their words.
+  assert.match(css, /\.transcript-separator::before,[\s\S]{0,80}\.transcript-separator::after/u);
+  assert.match(css, /\.transcript-separator > span \{[\s\S]{0,260}border: 1px solid/u);
+});
+
 test("a reader who has scrolled up is offered the way back down", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");

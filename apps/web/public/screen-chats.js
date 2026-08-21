@@ -1937,7 +1937,7 @@ function messageRow(
   // connect prompt), so a mention refusal or dispatch confirmation reads as
   // the same kind of thing there.
   if (entry.kind === "system") {
-    return `<div class="cmsg-row cmsg-system"><p class="msg system">${esc(entry.content)}</p></div>`;
+    return `<div class="cmsg-row cmsg-system"><p class="msg system transcript-separator"><span>${esc(entry.content)}</span></p></div>`;
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
@@ -2511,7 +2511,9 @@ function messageList(repositoryId) {
     if (startsNewDay) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
-      separator = `<div class="chan-day">${isToday ? "Today" : esc(day)}</div>`;
+      separator = `<div class="chan-day transcript-separator"><span>${
+        isToday ? "Today" : esc(day)
+      }</span></div>`;
     }
     // The first thing somebody else said after the reader last left. Above the
     // day separator rather than below it, so a night's backlog reads "you were
@@ -4346,9 +4348,9 @@ function dmPanel() {
                 const separator =
                   day === lastDay
                     ? ""
-                    : `<div class="chan-day">${
+                    : `<div class="chan-day transcript-separator"><span>${
                         day === new Date().toDateString() ? "Today" : esc(day)
-                      }</div>`;
+                      }</span></div>`;
                 lastDay = day;
                 return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}"
                     id="dm-msg-${esc(message.id)}">
