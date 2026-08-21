@@ -2997,6 +2997,13 @@ test("private-chat messages compact only an uninterrupted run from one speaker",
     css,
     /\.msg\.user \.msg-text \{[^}]*background: var\(--accent\);[^}]*color: #fff;/su,
   );
+  // A short outgoing bubble hugs the right edge below the speaker name. As
+  // the words get longer, the bubble grows back into the available space
+  // instead of stretching a one-word message across the whole metadata row.
+  assert.match(
+    css,
+    /\.msg\.user \.msg-body \{[^}]*display: flex;[^}]*flex-direction: column;[^}]*align-items: flex-end;/su,
+  );
   assert.match(
     css,
     /\.msg\.msg-compact \.msg-body \{\s*margin-left: calc\(var\(--msg-body-x\) - 8px\);/u,
@@ -4366,10 +4373,11 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(app, /function openReadyPlan\(repositoryId\)/u);
   assert.match(app, /openReadyPlan\(channelRepositoryId\);/u);
   assert.match(app, /state\.activePlan = messageId;/u);
-  // Escape and the swipe close it first, because it is the panel's occupant.
+  // Escape and the swipe close it when it is the panel's visible occupant.
+  // The login catch-up may temporarily sit above it, and is put away first.
   assert.match(
     app,
-    /function closeSidePanel\(\) \{\s*if \(state\.activePlan !== undefined\)/u,
+    /function closeSidePanel\(\) \{[\s\S]*?if \(state\.activePlan !== undefined\)/u,
   );
 
   assert.match(css, /\n\.plan-link \{/u);

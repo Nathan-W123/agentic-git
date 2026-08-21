@@ -155,3 +155,33 @@ test("a banner can be closed, and only one is up at a time", async () => {
   // the button is decoration.
   assert.match(styles, /\.toast\.banner \{[^}]*pointer-events: auto;/su);
 });
+
+test("returning users see completed work in the side panel", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const styles = await publicFile("styles.css");
+
+  // Conversational work stays open for follow-ups after it lands, so both
+  // terminal integrations and open landed turns belong in the completed list.
+  assert.match(app, /\["integrated", "open"\]\.includes\(task\.status\)/u);
+  assert.match(app, /task\.completedAt \?\? task\.openedAt/u);
+  assert.match(app, /completedAt > sinceAt/u);
+  assert.match(app, /state\.catchUp = \{\s*projectId,\s*since: catchUp\.since,\s*tasks,/u);
+
+  // It is the same resizable, mobile-aware column as a plan, not a modal that
+  // blocks the channel, and it renders the task objectives as actual rows.
+  assert.match(data, /catchUp: undefined/u);
+  assert.match(chats, /function catchUpPanel\(\)/u);
+  assert.match(chats, /<aside class="thread-panel catch-up-panel"/u);
+  assert.match(chats, /class="catch-up-task-list"/u);
+  assert.match(chats, /withoutRolePreamble\(task\.objective\)/u);
+  assert.doesNotMatch(app, /catch-up-card/u);
+  assert.match(styles, /\.catch-up-task-list \{/u);
+
+  // Closing from the button, Escape, or a swipe advances the same personal
+  // watermark only after the list has actually been shown.
+  assert.match(app, /if \(state\.catchUp !== undefined\) \{\s*dismissSinceYouLeft\(\);/u);
+  assert.match(app, /case "catch-up-close":\s*dismissSinceYouLeft\(\);/u);
+  assert.match(app, /catch-up\/seen/u);
+});

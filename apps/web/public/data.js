@@ -92,6 +92,14 @@ export const state = {
     JSON.parse(window.localStorage.getItem("ag.read") ?? "[]"),
   ),
   notificationFilter: "all",
+  /**
+   * Finished work waiting in the return-to-app panel.
+   *
+   * Kept in render state rather than in a modal's DOM so the panel behaves
+   * like the plan and thread surfaces: live refreshes may rebuild the screen
+   * without losing either the list or its place in the right-hand column.
+   */
+  catchUp: undefined,
 
   /* Favourites are a personal shortcut, not shared state, so they live in
      this browser rather than on the account. */

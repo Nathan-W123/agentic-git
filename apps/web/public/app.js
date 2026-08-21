@@ -3455,14 +3455,18 @@ function setChanDrawer(open) {
 /**
  * Whichever side panel is showing, closed the way its own button closes it.
  *
- * The order is `renderChats`'s order, not an order of its own. Seven things can
+ * The order is `renderChats`'s order, not an order of its own. Eight things can
  * occupy the one panel and only the first of them is on screen, so anything
- * closing by a different precedence closes something invisible. The two this
- * did not know about at all — an agent conversation and a direct message —
- * outrank the rest there, which meant a swipe with one of them open put away
- * the thread behind it and left the panel exactly where it was.
+ * closing by a different precedence closes something invisible. The catch-up
+ * temporarily covers every deliberate panel; after it, an agent conversation
+ * and a direct message outrank the rest. A swipe must always put away the
+ * surface the reader can actually see.
  */
 function closeSidePanel() {
+  if (state.catchUp !== undefined) {
+    dismissSinceYouLeft();
+    return true;
+  }
   if (state.activePlan !== undefined) {
     clearSplitRightPanel("plan");
     state.activePlan = undefined;
@@ -3512,6 +3516,7 @@ function closeSidePanel() {
 
 function sidePanelOpen() {
   return (
+    state.catchUp !== undefined ||
     state.activePlan !== undefined ||
     state.activeAgentPanel !== undefined ||
     state.activeDm !== undefined ||
@@ -5348,6 +5353,10 @@ document.addEventListener("click", (event) => {
       return;
     case "plan-close":
       state.activePlan = undefined;
+      render();
+      return;
+    case "catch-up-close":
+      dismissSinceYouLeft();
       render();
       return;
     // Reading it is done; saying something about it happens in the thread.
@@ -7338,10 +7347,13 @@ function newsLineForFrame(frame) {
 }
 
 /**
- * Shows the one document that summarises what changed since this account was
- * last here. Reading it is deliberately separate from dismissing it: only the
- * close below advances the server's watermark, so a failed request or a page
- * closed before the document appears cannot silently lose the catch-up.
+ * Opens the completed-work list for the time this account was away.
+ *
+ * The endpoint supplies the personal `since` watermark; the already-loaded
+ * task records supply the complete list, including conversational tasks whose
+ * latest turn has landed but whose thread is still open. That distinction is
+ * why this does not render the endpoint's prose: an open task is completed
+ * work to a person even though it is intentionally not terminal in storage.
  */
 async function showSinceYouLeft() {
   const projectId = state.projectId;
@@ -7364,80 +7376,59 @@ async function showSinceYouLeft() {
   // The gateway wraps API records today; accepting the record itself keeps
   // this client aligned with the endpoint's documented response shape too.
   const catchUp = response?.catchUp ?? response;
-  if (catchUp?.empty === true) {
+  const sinceAt = Date.parse(catchUp?.since ?? "");
+  if (!Number.isFinite(sinceAt)) {
     return;
   }
-
-  const dialog = $("#modal");
-  if (dialog === null) {
-    return;
-  }
-  const headline = String(catchUp?.headline ?? "").trim() || "Since you left";
-  const summary = String(catchUp?.summary ?? "").trim();
-  const lines = Array.isArray(catchUp?.lines)
-    ? catchUp.lines
-        .map((line) =>
-          typeof line === "string" ? line : String(line?.text ?? ""),
-        )
-        .map((line) => line.trim())
-        .filter((line) => line !== "")
-    : [];
-  const body =
-    summary !== ""
-      ? `<p class="catch-up-summary">${esc(summary)}</p>`
-      : `<ul class="catch-up-lines">${lines
-          .map((line) => `<li>${esc(line)}</li>`)
-          .join("")}</ul>`;
-
-  const present = () => {
-    // A local summary can take a few seconds. Do not replace a confirmation
-    // the reader opened while it was being written; wait for that interaction
-    // (and any follow-up dialog it opens) to finish, then take the modal.
-    if (dialog.open) {
-      dialog.addEventListener(
-        "close",
-        () => window.setTimeout(present, 0),
-        { once: true },
+  const tasks = state.tasks
+    .filter((task) => {
+      const completedAt = Date.parse(task.completedAt ?? task.openedAt ?? "");
+      return (
+        ["integrated", "open"].includes(task.status) &&
+        Number.isFinite(completedAt) &&
+        completedAt > sinceAt
       );
-      return;
-    }
-    if (state.projectId !== projectId || state.principal === undefined) {
-      return;
-    }
-    dialog.innerHTML = `<article class="modal-card catch-up-card" aria-labelledby="catch-up-title">
-      <header class="catch-up-head">
-        <div>
-          <p class="catch-up-kicker">Since you left</p>
-          <h3 id="catch-up-title">${esc(headline)}</h3>
-        </div>
-        <button class="icon-btn catch-up-close" type="button" aria-label="Dismiss catch-up">
-          ${icon("close")}
-        </button>
-      </header>
-      <div class="catch-up-body">${body}</div>
-      <footer class="modal-actions">
-        <button class="btn btn-primary catch-up-dismiss" type="button">Got it</button>
-      </footer>
-    </article>`;
-
-    const dismiss = () => dialog.close();
-    dialog.querySelector(".catch-up-close")?.addEventListener("click", dismiss);
-    dialog.querySelector(".catch-up-dismiss")?.addEventListener("click", dismiss);
-    // Escape closes a native dialog too, so every dismissal path arrives here
-    // exactly once and advances the same watermark.
-    dialog.addEventListener(
-      "close",
-      () => {
-        void api(
-          `/projects/${encodeURIComponent(projectId)}/catch-up/seen`,
-          { method: "POST", body: {} },
-        ).catch(() => undefined);
-      },
-      { once: true },
-    );
-    dialog.showModal();
+    })
+    .sort(
+      (left, right) =>
+        Date.parse(right.completedAt ?? right.openedAt ?? "") -
+        Date.parse(left.completedAt ?? left.openedAt ?? ""),
+    )
+    .map((task) => ({
+      ...task,
+      completedAt: task.completedAt ?? task.openedAt,
+    }));
+  if (
+    tasks.length === 0 ||
+    state.projectId !== projectId ||
+    state.principal === undefined
+  ) {
+    return;
+  }
+  state.catchUp = {
+    projectId,
+    since: catchUp.since,
+    tasks,
   };
-  present();
+  render();
+}
+
+/**
+ * Puts away exactly the list that was shown and advances its personal mark.
+ * Best-effort like the old modal close: the panel disappears immediately,
+ * while a failed mark leaves the same work eligible on the next visit rather
+ * than silently losing it.
+ */
+function dismissSinceYouLeft() {
+  const projectId = state.catchUp?.projectId;
+  state.catchUp = undefined;
+  if (projectId === undefined) {
+    return;
+  }
+  void api(
+    `/projects/${encodeURIComponent(projectId)}/catch-up/seen`,
+    { method: "POST", body: {} },
+  ).catch(() => undefined);
 }
 
 async function boot() {
