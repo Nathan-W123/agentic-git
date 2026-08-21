@@ -1839,6 +1839,58 @@ function ineligibleTierHint(detail: string): string {
     : "";
 }
 
+/** How long a reported model list is reused before asking the CLI again. */
+const MODEL_LIST_TTL_MS = 10 * 60_000;
+
+/**
+ * Reads `agent --list-models` output into model options.
+ *
+ * The shape it prints, colour codes stripped:
+ *
+ *     Available models
+ *
+ *     gpt-5 - GPT-5 (default)
+ *     sonnet-4-thinking - Claude Sonnet 4 Thinking
+ *
+ *     Tip: use --model <id> ...
+ *
+ * Anything before the header and the closing tip are not models, and the
+ * `(current, default)` marker is a note about the account rather than part of
+ * the name.
+ */
+export function parseCursorModelList(stdout: string): ProviderModelOption[] {
+  const models: ProviderModelOption[] = [];
+  let started = false;
+  for (const raw of stripAnsi(stdout).split(/\r?\n/u)) {
+    const line = raw.trim();
+    if (line.length === 0) {
+      continue;
+    }
+    if (!started) {
+      started = /^available models\b/iu.test(line);
+      continue;
+    }
+    if (/^tip:/iu.test(line)) {
+      break;
+    }
+    // `id - Display Name (current, default)`, where both the name and the
+    // marker are optional.
+    const match = /^(\S+?)(?:\s+-\s+(.*?))?\s*(?:\((?:current|default)(?:,\s*(?:current|default))*\))?$/u.exec(
+      line,
+    );
+    const id = match?.[1];
+    if (id === undefined || !/^[A-Za-z0-9][\w.:\/-]*$/u.test(id)) {
+      continue;
+    }
+    const label = match?.[2]?.trim();
+    models.push({
+      id,
+      label: label === undefined || label.length === 0 ? id : label,
+    });
+  }
+  return models;
+}
+
 /** Whether a URL is on one of the hosts this vendor signs in through. */
 function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
   if (hosts === undefined || hosts.length === 0) {
@@ -1893,6 +1945,8 @@ export class ProviderChatService {
   private readonly streamRunner: StreamRunner;
   private readonly longRunningSpawner: LongRunningSpawner;
   private readonly deviceAuthFlows = new Map<string, DeviceAuthFlow>();
+  /** Cursor's reported model list; see {@link cursorModels}. */
+  private cursorModelCache: { at: number; models: ProviderModelOption[] } | undefined;
   private credentialStorePromise: Promise<UserCredentialStore> | undefined;
   /** Durable home for call signs; absent means file-only, as before. */
   private readonly callSignStore: AgentCallSignStore | undefined;
@@ -3914,6 +3968,64 @@ export class ProviderChatService {
     }
   }
 
+  /**
+   * The models Cursor reports for the signed-in account.
+   *
+   * Asked, not guessed. The connect screen showed "cursor default" and no way
+   * to change it, because `options()` returned no list and the control is a
+   * dropdown — so an empty list is an empty control, whatever
+   * `allowCustomModel` says. Inventing names to fill it is the one thing this
+   * file already refuses to do, and the CLI can simply be asked:
+   * `--list-models` prints "Available models", a blank line, then one line per
+   * model as `id - Display Name` with a dim ` (current, default)` marker, then
+   * a closing tip. There is no JSON mode, so this reads that.
+   *
+   * A failure returns undefined rather than throwing: not knowing the list is
+   * the state this replaces, and it must not also break the settings screen.
+   */
+  private async cursorModels(
+    userId: string,
+  ): Promise<ProviderModelOption[] | undefined> {
+    const cached = this.cursorModelCache;
+    if (cached !== undefined && Date.now() - cached.at < MODEL_LIST_TTL_MS) {
+      return cached.models;
+    }
+    const spec = browserCliSpec("cursor") as BrowserCliSpec;
+    let output: ProcessOutput;
+    try {
+      const store = await this.credentialStore();
+      const home = await store.openCredentialHome({
+        userId,
+        vendor: "cursor",
+        baseEnv: sanitizeChildEnv(process.env),
+        mode: "shared",
+      });
+      if (home === undefined) {
+        return undefined;
+      }
+      try {
+        output = await this.runner(
+          spec.command,
+          [...spec.prefixArgs, "--list-models"],
+          { env: home.env, timeoutMs: 60_000, maxOutputBytes: MAX_OUTPUT_BYTES },
+        );
+      } finally {
+        await home.close();
+      }
+    } catch {
+      return undefined;
+    }
+    if (output.exitCode !== 0) {
+      return undefined;
+    }
+    const models = parseCursorModelList(output.stdout);
+    if (models.length === 0) {
+      return undefined;
+    }
+    this.cursorModelCache = { at: Date.now(), models };
+    return models;
+  }
+
   private async codexModels(): Promise<ProviderModelOption[] | undefined> {
     try {
       const cache = JSON.parse(
@@ -4032,6 +4144,12 @@ export class ProviderChatService {
 
   public async options(input: {
     provider: ProviderId;
+    /**
+     * Whose connection to ask. Cursor reports its models per account, so
+     * without a caller this falls back to "the account's own default" rather
+     * than answering for somebody else.
+     */
+    userId?: string;
   }): Promise<ProviderOptions> {
     if (input.provider === "openai") {
       const models = await this.codexModels();
@@ -4096,6 +4214,39 @@ export class ProviderChatService {
         notes: [
           "Gemini CLI settings become available once the signed-in account is eligible to use it.",
         ],
+      };
+    }
+    if (input.provider === "cursor") {
+      const models =
+        input.userId === undefined
+          ? undefined
+          : await this.cursorModels(input.userId);
+      return {
+        models: models ?? null,
+        // Cursor carries reasoning inside the model string rather than beside
+        // it -- `--model 'claude-opus-4-8[context=1m,effort=high,fast=false]'`
+        // -- so there is no separate level to offer, and a free-typed name is
+        // how somebody reaches one.
+        efforts: null,
+        allowCustomModel: true,
+        notes:
+          models === undefined
+            ? [
+                "Cursor could not be asked for its model list, so it will use " +
+                  "the account's own default. A model id typed here is still " +
+                  "passed through.",
+              ]
+            : [
+                "Reasoning rides on the model for Cursor: a parameterized " +
+                  "model accepts overrides in brackets, such as " +
+                  "claude-opus-4-8[context=1m,effort=high,fast=false].",
+              ],
+        ...(models === undefined
+          ? {}
+          : {
+              modelListSource:
+                "Models reported by the Cursor CLI for the connected account.",
+            }),
       };
     }
     return {

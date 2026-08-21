@@ -17,6 +17,7 @@ import {
   ProviderChatError,
   ProviderChatService,
   parseClaudeStreamJson,
+  parseCursorModelList,
   parseCodexAppServerRateLimits,
   parseCodexJsonl,
   streamProcess,
@@ -2652,4 +2653,46 @@ test("claude chat args carry --allowedTools including Bash and --disallowedTools
     }
   }
   assert.ok(completions.length >= 1 && streams.length >= 1);
+});
+
+/**
+ * Cursor's agent settings showed "cursor default" and no way to change it.
+ * `options()` returned no model list, and the control is a dropdown — so an
+ * empty list is an empty control, whatever `allowCustomModel` says. The CLI
+ * can simply be asked, and this pins the shape it answers in.
+ *
+ * Taken from the CLI's own renderer: a dim "Available models" header, a blank
+ * line, one line per model as `id - Display Name` with a dim
+ * `(current, default)` marker, then a closing tip. Colour codes included,
+ * because the real output carries them.
+ */
+test("Cursor's reported model list is read back, markers and colours and all", () => {
+  const esc = String.fromCharCode(27);
+  const dim = (text: string) => `${esc}[2m${text}${esc}[0m`;
+  const cyan = (text: string) => `${esc}[36m${text}${esc}[0m`;
+  const stdout = [
+    dim("Available models"),
+    "",
+    `${cyan("gpt-5")} ${dim("- GPT-5")}${dim(" (default)")}`,
+    `${cyan("sonnet-4-thinking")} ${dim("- Claude Sonnet 4 Thinking")}${dim(" (current)")}`,
+    `${cyan("claude-opus-4-8")} ${dim("- Claude Opus 4.8")}`,
+    // A model the CLI lists with no display name at all.
+    cyan("composer-1"),
+    "",
+    dim("Tip: use --model <id> (or /model <id> in interactive mode) to switch."),
+  ].join("\n");
+
+  assert.deepEqual(parseCursorModelList(stdout), [
+    { id: "gpt-5", label: "GPT-5" },
+    { id: "sonnet-4-thinking", label: "Claude Sonnet 4 Thinking" },
+    { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
+    { id: "composer-1", label: "composer-1" },
+  ]);
+});
+
+test("an account with no models reads as no list rather than a bad one", () => {
+  assert.deepEqual(parseCursorModelList("No models available for this account."), []);
+  assert.deepEqual(parseCursorModelList(""), []);
+  // The tip alone, with no header, is not a model list either.
+  assert.deepEqual(parseCursorModelList("Tip: use --model <id> to switch."), []);
 });
