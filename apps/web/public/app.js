@@ -7337,6 +7337,109 @@ function newsLineForFrame(frame) {
   return bannerLineForAudit(event);
 }
 
+/**
+ * Shows the one document that summarises what changed since this account was
+ * last here. Reading it is deliberately separate from dismissing it: only the
+ * close below advances the server's watermark, so a failed request or a page
+ * closed before the document appears cannot silently lose the catch-up.
+ */
+async function showSinceYouLeft() {
+  const projectId = state.projectId;
+  if (projectId === "") {
+    return;
+  }
+
+  let response;
+  try {
+    response = await api(
+      `/projects/${encodeURIComponent(projectId)}/catch-up`,
+    );
+  } catch {
+    // This is helpful context, not something that should turn a successful
+    // login into an error screen. Leaving the watermark alone makes the next
+    // login another chance to show it.
+    return;
+  }
+
+  // The gateway wraps API records today; accepting the record itself keeps
+  // this client aligned with the endpoint's documented response shape too.
+  const catchUp = response?.catchUp ?? response;
+  if (catchUp?.empty === true) {
+    return;
+  }
+
+  const dialog = $("#modal");
+  if (dialog === null) {
+    return;
+  }
+  const headline = String(catchUp?.headline ?? "").trim() || "Since you left";
+  const summary = String(catchUp?.summary ?? "").trim();
+  const lines = Array.isArray(catchUp?.lines)
+    ? catchUp.lines
+        .map((line) =>
+          typeof line === "string" ? line : String(line?.text ?? ""),
+        )
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+    : [];
+  const body =
+    summary !== ""
+      ? `<p class="catch-up-summary">${esc(summary)}</p>`
+      : `<ul class="catch-up-lines">${lines
+          .map((line) => `<li>${esc(line)}</li>`)
+          .join("")}</ul>`;
+
+  const present = () => {
+    // A local summary can take a few seconds. Do not replace a confirmation
+    // the reader opened while it was being written; wait for that interaction
+    // (and any follow-up dialog it opens) to finish, then take the modal.
+    if (dialog.open) {
+      dialog.addEventListener(
+        "close",
+        () => window.setTimeout(present, 0),
+        { once: true },
+      );
+      return;
+    }
+    if (state.projectId !== projectId || state.principal === undefined) {
+      return;
+    }
+    dialog.innerHTML = `<article class="modal-card catch-up-card" aria-labelledby="catch-up-title">
+      <header class="catch-up-head">
+        <div>
+          <p class="catch-up-kicker">Since you left</p>
+          <h3 id="catch-up-title">${esc(headline)}</h3>
+        </div>
+        <button class="icon-btn catch-up-close" type="button" aria-label="Dismiss catch-up">
+          ${icon("close")}
+        </button>
+      </header>
+      <div class="catch-up-body">${body}</div>
+      <footer class="modal-actions">
+        <button class="btn btn-primary catch-up-dismiss" type="button">Got it</button>
+      </footer>
+    </article>`;
+
+    const dismiss = () => dialog.close();
+    dialog.querySelector(".catch-up-close")?.addEventListener("click", dismiss);
+    dialog.querySelector(".catch-up-dismiss")?.addEventListener("click", dismiss);
+    // Escape closes a native dialog too, so every dismissal path arrives here
+    // exactly once and advances the same watermark.
+    dialog.addEventListener(
+      "close",
+      () => {
+        void api(
+          `/projects/${encodeURIComponent(projectId)}/catch-up/seen`,
+          { method: "POST", body: {} },
+        ).catch(() => undefined);
+      },
+      { once: true },
+    );
+    dialog.showModal();
+  };
+  present();
+}
+
 async function boot() {
   if (await handleInviteLink()) {
     return;
@@ -7387,6 +7490,7 @@ async function boot() {
   showApp();
   applyHash();
   render();
+  void showSinceYouLeft();
 
   // Everything below this line happens with a screen already up. The audit
   // feed, the run history, the metrics tile and the worker fleet are read on
