@@ -35,7 +35,9 @@ test("the thread composer can take an image at all", async () => {
   );
   // And a control that clicks it, since a bare file input cannot be styled
   // into the bar and a label would swallow the click before the delegated
-  // handler ever saw it.
+  // handler ever saw it. Its icon matches the group-channel composer while
+  // retaining the thread's direct attachment action.
+  assert.match(composer, /iconButton\("plus", \{\s*act: "thread-attach"/u);
   assert.match(composer, /act: "thread-attach"/u);
   // Staged images are shown above the box, each with its own remove button.
   assert.match(composer, /removeAct: "thread-attachment-remove"/u);
