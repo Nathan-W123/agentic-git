@@ -2820,7 +2820,7 @@ export interface ChatProviderOperations {
   }): Promise<void>;
   disconnect(input: { userId: string; provider: string }): Promise<void>;
   /** Model/effort choices the connected account actually reports. */
-  options(input: { provider: string }): Promise<unknown>;
+  options(input: { provider: string; userId?: string }): Promise<unknown>;
   /** Consumption the provider's own CLI publishes, when it publishes any. */
   usage(input: { provider: string; userId?: string }): Promise<unknown>;
   setSettings(input: {
@@ -8839,7 +8839,7 @@ export class ApiGateway {
         if (action === "options" && method === "GET") {
           this.sendJson(response, 200, {
             options: await performChat(() =>
-              chatOperations.options({ provider }),
+              chatOperations.options({ provider, userId: identity.userId }),
             ),
           });
           return;
