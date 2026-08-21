@@ -544,7 +544,15 @@ export class UserCredentialStore {
       input.mode ?? "exclusive",
     );
     try {
-      const credential = await this.get(input.userId, input.vendor);
+      // Copilot's own sign-in first, then the user's GitHub token; every
+      // other vendor has only itself to read.
+      let credential: UserCredential | undefined;
+      for (const source of credentialSourcesFor(input.vendor)) {
+        credential = await this.get(input.userId, source);
+        if (credential !== undefined) {
+          break;
+        }
+      }
       if (credential === undefined) {
         release();
         return undefined;
@@ -845,9 +853,58 @@ const DELIVERY: Record<
   // These CLIs intentionally accept no pasted API key here. A connection is
   // the browser session their own login command issued to this deployment.
   cursor: { session_file: { via: "files" } },
-  copilot: { session_file: { via: "files" } },
+  // Copilot authenticates from a GitHub token, and nothing else: its own
+  // words when it has none are "Copilot can be authenticated with GitHub
+  // using an OAuth Token or a Fine-Grained Personal Access Token". There is
+  // no `copilot login` for this to have used instead — the CLI's login is a
+  // `/login` slash command inside its interactive session, so the sign-in
+  // built on `copilot login` never authenticated anything. The token comes
+  // from the user's own GitHub connection; see COPILOT_CREDENTIAL_SOURCE.
+  copilot: {
+    oauth_token: { via: "env", variable: "COPILOT_GITHUB_TOKEN" },
+    api_key: { via: "env", variable: "COPILOT_GITHUB_TOKEN" },
+    session_file: { via: "files" },
+  },
   kiro: { session_file: { via: "files" } },
 };
+
+/**
+ * Where a CLI's credential may come from, best first.
+ *
+ * Only Copilot has more than one source, and it needs one. Its own sign-in
+ * stores the token "securely in the system credential store" — a keyring
+ * that does not exist in this container — falling back to a plain file under
+ * `~/.copilot/` only "if a credential store is not found or there is an issue
+ * using it". That is a thin thing to hang a connection on, which is why a
+ * sign-in could complete and still leave the CLI reporting "No authentication
+ * information found".
+ *
+ * The vendor's own answer for this case is the environment: "Copilot CLI will
+ * use an authentication token found in environment variables. This method is
+ * most suitable for headless use such as automation", checking
+ * COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN in that order. A GitHub token
+ * is exactly what the GitHub connection already holds per user, so Copilot
+ * falls back to it and most people never need a separate sign-in at all.
+ */
+const CREDENTIAL_SOURCES: Partial<
+  Record<VendorCliKind, readonly CredentialService[]>
+> = {
+  copilot: ["copilot", "github"],
+};
+
+/** The services whose stored credential can authenticate this CLI, best first. */
+export function credentialSourcesFor(
+  vendor: VendorCliKind,
+): readonly CredentialService[] {
+  return CREDENTIAL_SOURCES[vendor] ?? [vendor];
+}
+
+/** The service a connect screen should point at for this CLI. */
+export function credentialSourceFor(
+  vendor: VendorCliKind,
+): CredentialService {
+  return vendor;
+}
 
 /**
  * Writes the API-key credential file the Codex CLI actually reads.
@@ -1294,12 +1351,15 @@ const CAPTURE_ONLY_KINDS: Partial<
   Record<VendorCliKind, readonly UserCredentialKind[]>
 > = {
   claude: ["session_file"],
-  // New Gemini connections are browser-only. Delivery remains capable of
-  // opening older API-key/session records so this does not strand an existing
-  // deployment, but the connection API no longer offers or accepts them.
-  gemini: ["api_key", "session_file"],
+  // Gemini's browser sign-in is no longer open to individuals -- Google now
+  // answers it with "IneligibleTierError: This client is no longer supported
+  // for Gemini Code Assist for individuals" -- so an API key is the route
+  // most people have, and the connect screen offers it again. The session
+  // file stays capture-only: it is what a sign-in produces, not something to
+  // type in.
+  gemini: ["session_file"],
   cursor: ["session_file"],
-  copilot: ["session_file"],
+  copilot: ["session_file", "oauth_token", "api_key"],
   kiro: ["session_file"],
 };
 
@@ -1483,6 +1543,21 @@ export async function openCredentialHome(input: {
         path.join(geminiDirectory, "settings.json"),
         `${JSON.stringify({
           security: { auth: { selectedType: "oauth-personal" } },
+        })}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    } else if (vendor === "gemini" && credential.kind === "api_key") {
+      // Same reason the session-file branch above writes this: without a
+      // declared auth method the CLI refuses to start and names its settings
+      // file instead of using the credential sitting next to it. The key
+      // itself travels in the environment, and `validateAuthMethod` checks
+      // GEMINI_API_KEY for exactly this type.
+      const geminiDirectory = path.join(directory, ".gemini");
+      await mkdir(geminiDirectory, { recursive: true });
+      await writeFile(
+        path.join(geminiDirectory, "settings.json"),
+        `${JSON.stringify({
+          security: { auth: { selectedType: "gemini-api-key" } },
         })}\n`,
         { encoding: "utf8", mode: 0o600 },
       );

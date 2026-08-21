@@ -26,6 +26,7 @@ import {
   captureBrowserSession,
   captureClaudeSession,
   credentialHint,
+  credentialSourcesFor,
   programCacheEnv,
   withCredentialHome,
   type CredentialHome,
@@ -1816,6 +1817,26 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
   return undefined;
 }
 
+/**
+ * Turns Google's tier refusal into something a person can act on.
+ *
+ * Google retired the Gemini CLI's browser sign-in for personal accounts, and
+ * says so in a message that reads like a fault in this deployment: "This
+ * client is no longer supported for Gemini Code Assist for individuals."
+ * Nothing here can fix it, and there is no point in the user trying the
+ * sign-in again — but an API key still works, and that is a route the connect
+ * screen offers.
+ */
+function ineligibleTierHint(detail: string): string {
+  return /ineligibletiererror|no longer supported for gemini code assist/iu.test(
+    detail,
+  )
+    ? " — Google has retired browser sign-in for personal accounts, so this " +
+      "cannot be fixed by signing in again. Connect an API key from Google " +
+      "AI Studio instead, or use a paid Gemini Code Assist plan."
+    : "";
+}
+
 /** Whether a URL is on one of the hosts this vendor signs in through. */
 function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
   if (hosts === undefined || hosts.length === 0) {
@@ -2569,7 +2590,15 @@ export class ProviderChatService {
       const connection = connections[id];
       const cli = await this.detect(id);
       const settings = connection?.settings ?? {};
-      const own = await store.summary(input.userId, PROVIDER_VENDORS[id]);
+      // Copilot is connected when either its own sign-in landed or the user
+      // has a GitHub token for it to borrow, in that order.
+      let own: UserCredentialSummary | undefined;
+      for (const source of credentialSourcesFor(PROVIDER_VENDORS[id])) {
+        own = await store.summary(input.userId, source);
+        if (own !== undefined) {
+          break;
+        }
+      }
       // An own credential authenticates on its own and needs no host login,
       // so it is checked before the shared-login path and outranks it.
       const connected =
@@ -3587,7 +3616,7 @@ export class ProviderChatService {
         throw new ProviderChatError(
           409,
           "credential_rejected",
-          `${PROVIDER_NAMES[provider]} rejected that credential: ${probe.detail}`,
+          `${PROVIDER_NAMES[provider]} rejected that credential: ${probe.detail}${ineligibleTierHint(probe.detail)}`,
         );
       },
     );

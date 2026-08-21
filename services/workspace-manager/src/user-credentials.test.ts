@@ -426,11 +426,13 @@ test("the wrong JSON file is rejected with the name of the right one", async (t)
 });
 
 test("a session file records the recommended kind ordering", async () => {
-  // Codex still accepts a deliberately supplied credential. Gemini and the
-  // new coding-agent connections are browser-only, so there is nothing to
-  // paste into their connect screen.
+  // Codex still accepts a deliberately supplied credential. The coding-agent
+  // connections are browser-only, so there is nothing to paste into their
+  // connect screen.
   assert.deepEqual(supportedCredentialKinds("codex"), ["api_key", "session_file"]);
-  assert.deepEqual(supportedCredentialKinds("gemini"), []);
+  // Gemini was browser-only too, until Google closed that door to personal
+  // accounts. An API key is what most people have left, so it is offered.
+  assert.deepEqual(supportedCredentialKinds("gemini"), ["api_key"]);
   assert.deepEqual(supportedCredentialKinds("cursor"), []);
   assert.deepEqual(supportedCredentialKinds("copilot"), []);
   assert.deepEqual(supportedCredentialKinds("kiro"), []);
@@ -1008,4 +1010,117 @@ test("Copilot unpacks itself outside the home that becomes the credential", asyn
     // A version bump downloading mid-probe races the extraction being read.
     assert.equal(home.env["COPILOT_AUTO_UPDATE"], "false");
   });
+});
+
+/**
+ * Copilot's own sign-in stores its token "securely in the system credential
+ * store" — a keyring this container does not have — and only falls back to a
+ * file "if a credential store is not found or there is an issue using it".
+ * That is how a sign-in could complete and the CLI still report "No
+ * authentication information found".
+ *
+ * The vendor's own answer is the environment: COPILOT_GITHUB_TOKEN, GH_TOKEN,
+ * GITHUB_TOKEN, "most suitable for headless use such as automation". A GitHub
+ * token is what the GitHub connection already holds, so Copilot borrows it.
+ */
+test("Copilot borrows the user's GitHub token when it has none of its own", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "github", {
+    kind: "oauth_token",
+    secret: "gho-the-users-own-token",
+  });
+
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "copilot",
+    baseEnv: { PATH: "/usr/bin" },
+  });
+  assert.ok(home !== undefined, "a GitHub token is enough to run Copilot");
+  try {
+    assert.equal(home.env["COPILOT_GITHUB_TOKEN"], "gho-the-users-own-token");
+  } finally {
+    await home.close();
+  }
+});
+
+test("Copilot's own sign-in outranks the borrowed GitHub token", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "github", {
+    kind: "oauth_token",
+    secret: "gho-github-only",
+  });
+  await vault.put("user-1", "copilot", {
+    kind: "oauth_token",
+    secret: "gho-copilots-own",
+  });
+
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "copilot",
+    baseEnv: { PATH: "/usr/bin" },
+  });
+  assert.ok(home !== undefined);
+  try {
+    assert.equal(home.env["COPILOT_GITHUB_TOKEN"], "gho-copilots-own");
+  } finally {
+    await home.close();
+  }
+});
+
+test("a vendor with no borrowing still refuses to run on somebody else's token", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "github", {
+    kind: "oauth_token",
+    secret: "gho-the-users-own-token",
+  });
+
+  // Cursor has no GitHub fallback, and a GitHub token would not authenticate
+  // it anyway; "not connected" is the correct answer.
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "cursor",
+  });
+  assert.equal(home, undefined);
+});
+
+/**
+ * Google retired the Gemini CLI's browser sign-in for personal accounts
+ * ("IneligibleTierError: This client is no longer supported for Gemini Code
+ * Assist for individuals"), which left Gemini with no way in at all: the
+ * connect screen had stopped offering the API key on the assumption that the
+ * sign-in would always be there.
+ */
+test("a Gemini API key is offered again, and arrives ready to use", async (t) => {
+  assert.ok(
+    supportedCredentialKinds("gemini").includes("api_key"),
+    "the connect screen must offer the route that still works",
+  );
+
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "gemini", {
+    kind: "api_key",
+    secret: "AIza-the-users-own-key",
+  });
+
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "gemini",
+    baseEnv: { PATH: "/usr/bin" },
+  });
+  assert.ok(home !== undefined);
+  try {
+    assert.equal(home.env["GEMINI_API_KEY"], "AIza-the-users-own-key");
+    // Without a declared auth method the CLI refuses to start and names its
+    // settings file rather than using the key beside it.
+    const settings = JSON.parse(
+      await readFile(path.join(home.path, ".gemini", "settings.json"), "utf8"),
+    ) as { security?: { auth?: { selectedType?: string } } };
+    assert.equal(settings.security?.auth?.selectedType, "gemini-api-key");
+  } finally {
+    await home.close();
+  }
 });
