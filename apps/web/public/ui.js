@@ -51,12 +51,17 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * A single stroked icon set at 24×24, so every glyph shares one weight and
- * optical size. Mixing icon families is the fastest way to make a dark UI
- * look assembled rather than designed.
+ * The local subset of the rounded outline set selected for Lattice's design
+ * system. The source library lives in the team's Figma file; keeping the
+ * product's used glyphs here makes them instant, colourable with
+ * `currentColor`, and available when the control plane is offline.
+ *
+ * Every mark keeps the source set's 24×24 grid, round joins and one optical
+ * weight. Product-only concepts (agents and the Lattice network) use the same
+ * construction so they do not introduce a second visual language.
  */
 const S = (body, extra = "") =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"${extra}>${body}</svg>`;
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"${extra}>${body}</svg>`;
 
 export const ICONS = {
   home: S('<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>'),
@@ -122,6 +127,9 @@ export const ICONS = {
   dots: S(
     '<circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"/>',
   ),
+  dotsHorizontal: S(
+    '<circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/>',
+  ),
   filter: S('<path d="M3 5h18l-7 8v6l-4 2v-8z"/>'),
   grid: S(
     '<rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/>',
@@ -150,7 +158,13 @@ export const ICONS = {
     '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
   ),
   check: S('<path d="m5 12.5 4.5 4.5L19 7"/>'),
+  doubleCheck: S(
+    '<path d="m3.5 12.5 3.8 3.8 7.9-8.1"/><path d="m11.2 14.8 2 2 7.3-8.6"/>',
+  ),
   checkCircle: S('<circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-4.9"/>'),
+  closeCircle: S('<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/>'),
+  minusCircle: S('<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>'),
+  helpCircle: S('<circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.5 2.5 0 1 1 3.6 2.25c-.9.48-1.3 1-1.3 2"/><circle cx="12" cy="16.8" r=".85" fill="currentColor" stroke="none"/>'),
   alert: S(
     '<path d="M12 4.5 21 20H3z"/><path d="M12 10v4"/><circle cx="12" cy="17" r="0.9" fill="currentColor" stroke="none"/>',
   ),
@@ -226,8 +240,12 @@ export const ICONS = {
 };
 
 export function icon(name, extra = "") {
-  const glyph = ICONS[name] ?? ICONS.info;
-  return extra === "" ? glyph : glyph.replace("<svg ", `<svg ${extra} `);
+  const resolvedName = Object.hasOwn(ICONS, name) ? name : "info";
+  const glyph = ICONS[resolvedName];
+  const className = /\bclass="([^"]*)"/u.exec(extra)?.[1]?.trim() ?? "";
+  const attributes = extra.replace(/\s*\bclass="[^"]*"/u, "").trim();
+  const shared = `class="ui-icon${className === "" ? "" : ` ${className}`}" data-icon="${resolvedName}"${attributes === "" ? "" : ` ${attributes}`} `;
+  return glyph.replace("<svg ", `<svg ${shared}`);
 }
 
 /**
@@ -1051,9 +1069,16 @@ export function miniSelect(act, options, current, title = "") {
 export function segmented(act, options, current) {
   return `<span class="seg">${options
     .map(
-      (option) =>
-        `<button type="button" data-act="${act}" data-value="${esc(option.value)}"
-          class="${option.value === current ? "active" : ""}">${esc(option.label)}</button>`,
+      (option) => {
+        const iconOnly = option.iconName !== undefined;
+        return `<button type="button" data-act="${act}" data-value="${esc(option.value)}"
+          class="${option.value === current ? "active" : ""}"
+          aria-pressed="${option.value === current}"${
+            iconOnly
+              ? ` title="${esc(option.label)}" aria-label="${esc(option.label)}"`
+              : ""
+          }>${iconOnly ? icon(option.iconName) : esc(option.label)}</button>`;
+      },
     )
     .join("")}</span>`;
 }
@@ -1296,7 +1321,7 @@ export function toast(message, tone = "") {
     const dismiss = document.createElement("button");
     dismiss.className = "toast-close";
     dismiss.setAttribute("aria-label", "Dismiss");
-    dismiss.textContent = "×";
+    dismiss.innerHTML = icon("close");
     dismiss.addEventListener("click", () => node.remove());
     node.append(dismiss);
   } else {

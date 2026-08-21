@@ -397,7 +397,9 @@ function breadcrumb() {
     .map((part, index) =>
       index === parts.length - 1
         ? `<span class="crumb-last">${esc(part)}</span>`
-        : `<span>${esc(part)}</span><span class="crumb-sep">›</span>`,
+        : `<span>${esc(part)}</span><span class="crumb-sep">${icon(
+            "chevronRight",
+          )}</span>`,
     )
     .join("");
   return `<div class="code-crumb">

@@ -198,6 +198,14 @@ svg {
   display: block;
 }
 
+/* Every product glyph comes through the shared icon renderer. This class is
+   deliberately light-touch: each control still owns the icon's optical size,
+   while the pack owns alignment and rendering consistently everywhere. */
+svg.ui-icon {
+  flex: none;
+  shape-rendering: geometricPrecision;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -1316,10 +1324,19 @@ svg {
 }
 
 .seg button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  min-height: 26px;
   padding: 5px 11px;
   border-radius: 7px;
   font-size: 12px;
   color: var(--text-3);
+}
+
+.seg button .ui-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .seg button.active {
@@ -1977,7 +1994,14 @@ svg {
 }
 
 .code-crumb .crumb-sep {
+  display: grid;
+  place-items: center;
   color: var(--text-4);
+}
+
+.code-crumb .crumb-sep .ui-icon {
+  width: 11px;
+  height: 11px;
 }
 
 .code-crumb .crumb-last {
@@ -2320,9 +2344,15 @@ svg {
 }
 
 .msg .tick {
-  display: inline-block;
+  display: inline-flex;
+  vertical-align: -2px;
   margin-left: 6px;
   color: var(--accent-bright);
+}
+
+.msg .tick .ui-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .thread-day {
@@ -6526,9 +6556,17 @@ button.chip.lg:hover {
 }
 
 .agent-history-row .ah-glyph {
+  display: grid;
+  place-items: center;
+  align-self: center;
   width: 12px;
   flex: none;
   color: var(--text-3);
+}
+
+.agent-history-row .ah-glyph .ui-icon {
+  width: 12px;
+  height: 12px;
 }
 
 .agent-history-row.integrated .ah-glyph {
@@ -6537,6 +6575,14 @@ button.chip.lg:hover {
 
 .agent-history-row.failed .ah-glyph {
   color: var(--red);
+}
+
+.agent-history-row.awaiting_approval .ah-glyph {
+  color: var(--orange);
+}
+
+.agent-history-row.open .ah-glyph {
+  color: var(--accent-bright);
 }
 
 .agent-history-row .ah-objective {
@@ -8065,6 +8111,8 @@ body.resizing-panel {
 
 .toast-close {
   position: absolute;
+  display: grid;
+  place-items: center;
   top: 5px;
   right: 7px;
   width: 22px;
@@ -8073,6 +8121,11 @@ body.resizing-panel {
   color: inherit;
   font-size: 15px;
   line-height: 1;
+}
+
+.toast-close .ui-icon {
+  width: 13px;
+  height: 13px;
 }
 
 .toast-close:hover {

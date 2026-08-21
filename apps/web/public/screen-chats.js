@@ -3781,13 +3781,13 @@ function taskSummaryLine(task, message) {
   );
 }
 
-const TASK_GLYPH = {
-  integrated: "✓",
-  failed: "✕",
-  cancelled: "–",
-  awaiting_approval: "?",
+const TASK_ICON = {
+  integrated: "checkCircle",
+  failed: "closeCircle",
+  cancelled: "minusCircle",
+  awaiting_approval: "helpCircle",
   // A conversation between turns: the last turn landed, more may come.
-  open: "…",
+  open: "dotsHorizontal",
 };
 
 function agentHistory(agent, repositoryId) {
@@ -3801,7 +3801,7 @@ function agentHistory(agent, repositoryId) {
   }
   return `<div class="agent-history scroll">${rows
     .map(({ task, message }) => {
-      const glyph = TASK_GLYPH[task.status] ?? "•";
+      const iconName = TASK_ICON[task.status] ?? "info";
       // A description of the work, not the words that asked for it. The
       // request is still here — on the row's tooltip, with its role preamble
       // taken off, for the reader who wants to know exactly what was said.
@@ -3814,7 +3814,7 @@ function agentHistory(agent, repositoryId) {
               data-value="${esc(message.id)}"`;
       return `<div class="agent-history-row ${esc(task.status)}"${open}
         title="${esc(full)}">
-        <span class="ah-glyph">${glyph}</span>
+        <span class="ah-glyph">${icon(iconName)}</span>
         <span class="ah-objective">${esc(line)}</span>
         <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
       </div>`;
