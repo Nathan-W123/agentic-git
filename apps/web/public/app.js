@@ -20,11 +20,7 @@ import {
   noteDirectMessageDeleted,
   ensureDirectMessages,
   loadChannelStats,
-  bannerLineForAudit,
-  announcedThrough,
-  noteAnnounced,
   noteEventSequence,
-  notificationSeen,
   loadDmThread,
   sendDirectMessage,
   noteTyping,
@@ -48,7 +44,6 @@ import {
   myAvatar,
   setMyAvatar,
   myTheme,
-  setMyTheme,
   myAgents,
   notifications,
   persist,
@@ -128,7 +123,6 @@ import {
   relativeTime,
   showModal,
   toast,
-  banner as popupBanner,
 } from "./ui.js";
 import {
   ensureAgentOptions,
@@ -1209,6 +1203,8 @@ function settingsScreen() {
     <div class="settings-grid">
       ${agentsCard()}
 
+      ${githubCard()}
+
       ${invitationsCard()}
 
       ${appearanceCard()}
@@ -1311,8 +1307,6 @@ function settingsScreen() {
           <span class="sr-ctl">${esc(repository?.branch ?? "—")}</span>
         </div>
       </section>
-
-      ${githubCard()}
 
       <section class="card">
         <div class="panel-head"><div><h3>Account</h3></div></div>
@@ -1596,27 +1590,6 @@ function appearanceCard() {
   return `<section class="card">
     <div class="panel-head"><div><h3>Appearance</h3>
       <p>How Lattice looks to you, and how your agents look to everyone</p></div></div>
-
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Theme</div>
-        <div class="sr-sub">Light inverts the surfaces and keeps your accent.
-          Stored in this browser.</div>
-      </span>
-      <span class="sr-ctl">
-        ${
-          // `switch`, not `toggle`. There has never been a `.toggle` rule in
-          // the stylesheet, so this button had no size, no track and no knob —
-          // it rendered as an empty inline element and the only way to reach
-          // light mode was to guess where to click. Every other switch on this
-          // screen already used the styled class.
-          `<button type="button" class="switch${myTheme() === "light" ? " on" : ""}"
-            data-act="theme-toggle" role="switch"
-            aria-checked="${myTheme() === "light"}"
-            aria-label="Light theme"></button>`
-        }
-      </span>
-    </div>
 
     <div class="set-row">
       <span class="sr-body">
@@ -2445,9 +2418,14 @@ async function revokeRepositoryGrantAction(repositoryId, userId) {
   }
 }
 
-/** Pending and spent invitations, for the Settings screen. */
+/** Pending invitations, for the Settings screen. */
 function invitationsCard() {
-  const rows = state.invitations ?? [];
+  // Accepted, revoked, and expired offers are historical records rather than
+  // people still waiting to join. Keep this surface focused on invitations
+  // that can still be acted on.
+  const rows = (state.invitations ?? []).filter(
+    (invitation) => invitation.status === "pending",
+  );
   return `<section class="card">
     <div class="panel-head">
       <div><h3>People</h3><p>Invitations into ${esc(
@@ -2462,7 +2440,7 @@ function invitationsCard() {
     ${
       rows.length === 0
         ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
-            No invitations yet. An invitation grants one repository by
+            No pending invitations. An invitation grants one repository by
             default, so sharing something does not hand over everything.
             </div></span></div>`
         : rows
@@ -6392,10 +6370,6 @@ document.addEventListener("click", (event) => {
       return;
 
     /* Settings */
-    case "theme-toggle":
-      setMyTheme(myTheme() === "light" ? "dark" : "light");
-      render();
-      return;
     case "colours-reset":
       state.openWheel = undefined;
       void saveAppearanceChoice({
@@ -7214,14 +7188,6 @@ function showInvite() {
 }
 
 /**
- * How long news waits to see whether more of it is arriving.
- *
- * Long enough to swallow a backlog, short enough that a single event still
- * reads as immediate.
- */
-const NEWS_COALESCE_MS = 350;
-
-/**
  * The same idea for the channel reconcile, and deliberately shorter: this one
  * is what puts a message on screen, so it is the delay somebody notices when
  * a teammate is typing to them.
@@ -7238,29 +7204,15 @@ const CHANNEL_FRAME_COALESCE_MS = 120;
 const CONTEXT_REFRESH_MS = 400;
 
 /**
- * How long news waits while the stream is still handing over a backlog.
+ * How long the stream can stay quiet before a replay is considered complete.
  *
  * The hub drains from the cursor in batches of five hundred, one poll apart,
- * so a reconnect's history does not arrive as one burst — it arrives as
- * bursts half a second apart. That gap is wider than the live window above,
- * which is why a night's worth of events used to produce a banner per batch
- * rather than a banner. Wider than the hub's poll, so the whole replay
- * settles into one sentence.
+ * so a reconnect's history does not arrive as one burst. This delay is wider
+ * than the hub's poll so channel and context refreshes wait for the whole
+ * replay instead of rebuilding the screen between batches.
  */
 const BACKLOG_SETTLE_MS = 1_200;
 
-/**
- * How old an event can be and still be worth interrupting somebody for.
- *
- * News is news for about as long as it is still happening. Anything older
- * than this is history the notifications tab already holds, and announcing it
- * on arrival is how a reader gets told at breakfast about a task that
- * finished before midnight.
- */
-const BANNER_STALE_MS = 15 * 60 * 1_000;
-
-let pendingNews = [];
-let newsTimer;
 let channelFrameTimer;
 let catchUpTimer;
 
@@ -7269,7 +7221,8 @@ let catchUpTimer;
  *
  * Set by the hub's `connected` frame and cleared once the stream goes quiet,
  * so a replay is told apart from the events that arrive while somebody is
- * watching. It changes only how long news waits before it speaks.
+ * watching. It keeps replay-driven refreshes and presence bookkeeping from
+ * being mistaken for live activity.
  */
 let catchingUp = false;
 
@@ -7297,121 +7250,12 @@ function extendCatchUp() {
 }
 
 /**
- * One line of news, or one line about several.
- *
- * The socket opens with a cursor, so reconnecting delivers everything that
- * happened while it was closed — which on a phone opened the next morning is
- * every task that finished or was stopped overnight. Each of those raised its
- * own banner, five seconds each, stacked down the screen: the reader could
- * not read them, could not dismiss them, and the app appeared to hang while
- * it rendered them.
- *
- * The backlog is not less interesting than one event, but it is not more
- * interesting a hundred times over. Anything arriving inside the window
- * collapses into a count plus the most recent line, and the notifications tab
- * still has all of it in full. `banner` shows one at a time, so even a flush
- * that lands mid-replay replaces its predecessor instead of stacking on it.
- */
-function announceNews(line) {
-  pendingNews.push(line);
-  window.clearTimeout(newsTimer);
-  newsTimer = window.setTimeout(
-    () => {
-      const lines = pendingNews;
-      pendingNews = [];
-      const latest = lines.at(-1);
-      if (latest === undefined) {
-        return;
-      }
-      popupBanner(
-        lines.length === 1 ? latest : `${lines.length} updates — latest: ${latest}`,
-      );
-    },
-    catchingUp ? BACKLOG_SETTLE_MS : NEWS_COALESCE_MS,
-  );
-}
-
-/**
- * The sentence this frame deserves in the corner, or nothing.
- *
- * Three things disqualify a frame, and all three are the same complaint: news
- * somebody has already had. A sequence at or below the announcement watermark
- * was announced in an earlier session; an event already marked read was read
- * on the notifications screen; an event from hours ago is not an
- * interruption. What is left is what actually just happened.
- */
-function newsLineForFrame(frame) {
-  const sequence = frame?.sequence;
-  if (Number.isSafeInteger(sequence) && sequence <= announcedThrough()) {
-    return undefined;
-  }
-  const event = frame?.event;
-  const at = Date.parse(event?.occurredAt ?? "");
-  if (Number.isFinite(at) && Date.now() - at > BANNER_STALE_MS) {
-    return undefined;
-  }
-  if (notificationSeen(event ?? {})) {
-    return undefined;
-  }
-  return bannerLineForAudit(event);
-}
-
-const CATCH_UP_SUMMARY_MAX = 360;
-
-/**
- * What one completed task actually changed, in at most two short sentences.
- *
- * The completion event carries the agent's own explanation and changed files.
- * Older events do not, so the objective remains a last-resort description —
- * still useful context instead of the same generic success line for each row.
- */
-function catchUpTaskOutcome(task) {
-  const event = [...state.audit]
-    .reverse()
-    .map((entry) => entry.event ?? entry)
-    .find(
-      (candidate) =>
-        candidate.taskId === task.id &&
-        ["canonical_promoted", "task_reported"].includes(candidate.type),
-    );
-  const written =
-    event?.type === "canonical_promoted"
-      ? event.data?.agentExplanation
-      : event?.data?.explanation;
-  const cleaned =
-    typeof written === "string" ? written.replace(/\s+/gu, " ").trim() : "";
-  const adapterFallback =
-    /^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\b/iu.test(cleaned);
-  const objective = String(task.objective ?? "the requested change")
-    .trim()
-    .replace(/[.!?]+$/u, "");
-  const useful =
-    cleaned !== "" && !adapterFallback
-      ? cleaned
-      : `Implemented: ${objective}.`;
-  const quick = useful.split(/(?<=[.!?])\s+/u).slice(0, 2).join(" ");
-  const files = Array.isArray(event?.data?.files)
-    ? event.data.files.filter((file) => typeof file === "string")
-    : [];
-  if (quick.length <= CATCH_UP_SUMMARY_MAX) {
-    return { summary: quick, changedFiles: files };
-  }
-  const cut = quick.slice(0, CATCH_UP_SUMMARY_MAX);
-  const lastSpace = cut.lastIndexOf(" ");
-  return {
-    summary: `${(lastSpace > CATCH_UP_SUMMARY_MAX / 2 ? cut.slice(0, lastSpace) : cut)
-      .replace(/[\s,;:.]+$/u, "")}…`,
-    changedFiles: files,
-  };
-}
-
-/**
  * Opens the completed-work list for the time this account was away.
  *
- * The endpoint supplies the personal `since` watermark; the already-loaded
- * task records supply the complete list, including conversational tasks whose
- * latest turn has landed but whose thread is still open. Audit is loaded
- * before this runs so each row can carry the outcome instead of the request.
+ * The endpoint supplies the personal `since` watermark and generated outcome;
+ * the already-loaded task records supply the complete list, including
+ * conversational tasks whose latest turn has landed but whose thread is still
+ * open. Joining by task id keeps those outcomes with the right repository.
  */
 async function showSinceYouLeft() {
   const projectId = state.projectId;
@@ -7445,6 +7289,10 @@ async function showSinceYouLeft() {
   // document. Never let that project's parked repository reports survive it.
   state.catchUps = {};
   state.catchUp = undefined;
+  const serverOutcomes = new Map(
+    (Array.isArray(catchUp?.tasks) ? catchUp.tasks : [])
+      .map((task) => [task.id, task]),
+  );
   const tasks = state.tasks
     .filter((task) => {
       const completedAt = Date.parse(task.completedAt ?? task.openedAt ?? "");
@@ -7459,11 +7307,19 @@ async function showSinceYouLeft() {
         Date.parse(right.completedAt ?? right.openedAt ?? "") -
         Date.parse(left.completedAt ?? left.openedAt ?? ""),
     )
-    .map((task) => ({
-      ...task,
-      completedAt: task.completedAt ?? task.openedAt,
-      ...catchUpTaskOutcome(task),
-    }));
+    .map((task) => {
+      const outcome = serverOutcomes.get(task.id);
+      return {
+        ...task,
+        completedAt: outcome?.completedAt ?? task.completedAt ?? task.openedAt,
+        summary:
+          String(outcome?.summary ?? "").trim() ||
+          "Completed the requested work.",
+        changedFiles: Array.isArray(outcome?.changedFiles)
+          ? outcome.changedFiles
+          : [],
+      };
+    });
   if (tasks.length === 0) {
     render();
     return;
@@ -7710,8 +7566,8 @@ async function boot() {
       channelRepositoryId === activeChannelId() &&
       state.route === "chats"
     ) {
-      // Coalesced for the same reason the banners above are. A reconnect
-      // delivers every channel event this browser missed, and each one used
+      // Coalesced because a reconnect delivers every channel event this
+      // browser missed, and each one used
       // to re-read the channel and rebuild the whole app — a backlog of forty
       // meant forty full renders back to back, which is the few seconds the
       // screen spent refusing to respond to a tap. The reconcile is
@@ -7743,20 +7599,13 @@ async function boot() {
         }
       });
     }
-    // News gets a banner before the store gets re-read: an ending or a
-    // question is worth a sentence in the corner wherever the reader is,
-    // which is the notifications tab's job done at the moment it matters.
     if (frame?.type === "audit") {
-      // Remembered before anything else: the next connection starts here, and
-      // that is what stops the same backlog being replayed — and re-announced
-      // — every time a phone comes back to the foreground.
+      // Remembered before anything else so the next connection starts here
+      // instead of replaying the same backlog every time a phone returns to
+      // the foreground. Notifications remain available in their dedicated
+      // history without interrupting the current screen.
       noteEventSequence(frame.sequence);
       extendCatchUp();
-      const line = newsLineForFrame(frame);
-      if (line !== undefined) {
-        noteAnnounced(frame.sequence);
-        announceNews(line);
-      }
       // A terminal event delivered live was already seen during this visit.
       // Record that immediately instead of relying only on the later tab-close
       // request: a hard reload can begin its catch-up read while that final

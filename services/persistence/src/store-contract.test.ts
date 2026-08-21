@@ -3787,6 +3787,110 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a channel counts every root and reply it holds`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_counted",
+        path: "/counted.git",
+        branch: "main",
+      });
+      await store.saveRepository({
+        id: "repo_other",
+        path: "/other.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+
+      assert.deepEqual(await store.countChannelMessages("repo_counted"), {
+        messages: 0,
+        replies: 0,
+      });
+
+      // Past `listChannelMessages`'s 200-row page, which is what the count
+      // exists to see beyond: measuring the page reported the cap, not the room.
+      const threaded = await store.appendChannelMessage({
+        repositoryId: "repo_counted",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "The thread everything hangs off.",
+      });
+      const redacted = await store.appendChannelMessage({
+        repositoryId: "repo_counted",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Said and then taken back.",
+      });
+      for (let index = 0; index < 203; index += 1) {
+        await store.appendChannelMessage({
+          repositoryId: "repo_counted",
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: alice.id,
+          content: `Line ${index}`,
+        });
+      }
+      const firstReply = await store.addChannelReply({
+        repositoryId: "repo_counted",
+        messageId: threaded.id,
+        authorId: alice.id,
+        content: "First reply.",
+      });
+      await store.addChannelReply({
+        repositoryId: "repo_counted",
+        messageId: threaded.id,
+        authorId: alice.id,
+        content: "Second reply.",
+      });
+      // Another room's traffic is not this room's.
+      await store.appendChannelMessage({
+        repositoryId: "repo_other",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Elsewhere.",
+      });
+
+      const listed = await store.listChannelMessages("repo_counted", alice.id, {
+        limit: 200,
+      });
+      assert.equal(listed.length, 200);
+      assert.deepEqual(await store.countChannelMessages("repo_counted"), {
+        messages: 205,
+        replies: 2,
+      });
+      assert.deepEqual(await store.countChannelMessages("repo_other"), {
+        messages: 1,
+        replies: 0,
+      });
+
+      // A redacted root still stands in the room — its thread and its replies
+      // are still there — so it is still counted.
+      await store.redactChannelMessage("repo_counted", redacted.id, {
+        deletedAt: new Date().toISOString(),
+        deletedBy: alice.id,
+      });
+      assert.deepEqual(await store.countChannelMessages("repo_counted"), {
+        messages: 205,
+        replies: 2,
+      });
+
+      // What is actually removed stops counting, and a deleted root takes its
+      // remaining replies with it.
+      await store.deleteChannelReply("repo_counted", threaded.id, firstReply.id);
+      await store.deleteChannelMessage("repo_counted", threaded.id);
+      assert.deepEqual(await store.countChannelMessages("repo_counted"), {
+        messages: 204,
+        replies: 0,
+      });
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a repository channel threads, reacts, and tracks per-viewer state`, async () => {
     const { store, cleanup } = await backend.open();
     try {

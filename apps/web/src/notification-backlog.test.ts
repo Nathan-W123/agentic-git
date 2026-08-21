@@ -5,15 +5,8 @@ import test from "node:test";
 
 import { defaultPublicDirectory } from "./assets.js";
 
-/**
- * What is being protected here is one bug: opening the app on a phone and
- * being handed a column of banners about work that finished hours ago, none
- * of which could be dismissed.
- *
- * The dashboard is served as plain ES modules with no bundler and no DOM in
- * the test run, so — as with the transcript scroll — the behaviour is pinned
- * by asserting the shape of the source.
- */
+/** The dashboard ships as plain ES modules, so these behaviours are pinned by
+ * asserting the shape of the source. */
 async function publicFile(name: string): Promise<string> {
   return await readFile(path.join(defaultPublicDirectory(), name), "utf8");
 }
@@ -36,23 +29,12 @@ test("the replay cursor survives a reload", async () => {
   assert.match(data, /raw\?\.projectId === state\.projectId/u);
 });
 
-test("news already seen does not get announced again", async () => {
+test("audit updates do not interrupt the current screen with a popup", async () => {
   const app = await publicFile("app.js");
-  const data = await publicFile("data.js");
-  // Three disqualifications, all of them the same complaint: news somebody
-  // has already had.
-  assert.match(app, /sequence <= announcedThrough\(\)/u);
-  assert.match(app, /Date\.now\(\) - at > BANNER_STALE_MS/u);
-  assert.match(app, /notificationSeen\(event \?\? \{\}\)/u);
-  // The watermark outlives the tab, or a reload is a fresh start and the
-  // whole backlog is news again.
-  assert.match(data, /export function announcedThrough\(\)/u);
-  assert.match(data, /"ag\.newsThrough"/u);
-  // "Already read" has to mean the same thing to the banner as it does to
-  // the notifications list, so both name an event the same way.
-  assert.match(data, /function notificationId\(event\)/u);
-  assert.match(data, /export function notificationSeen\(event\)/u);
-  assert.match(data, /id: notificationId\(event\),/u);
+  const ui = await publicFile("ui.js");
+
+  assert.doesNotMatch(app, /popupBanner|announceNews|newsLineForFrame/u);
+  assert.doesNotMatch(ui, /export function banner\(message\)/u);
 });
 
 test("marking every notification read survives a rebuilt audit window", async () => {
@@ -67,48 +49,13 @@ test("marking every notification read survives a rebuilt audit window", async ()
   assert.match(screen, /!notificationIsRead\(row\)/u);
 });
 
-test("a frame is recorded before it is judged", async () => {
+test("every audit frame advances the replay cursor", async () => {
   const app = await publicFile("app.js");
-  const audit = app.indexOf('if (frame?.type === "audit") {\n      // Remembered');
+  const audit = app.indexOf('if (frame?.type === "audit") {');
   assert.notEqual(audit, -1, "the audit branch should still exist");
   const record = app.indexOf("noteEventSequence(frame.sequence)", audit);
-  const judge = app.indexOf("newsLineForFrame(frame)", audit);
   assert.notEqual(record, -1, "the arriving sequence should be recorded");
-  // Recording is what moves the next connection's cursor past this event.
-  // Doing it only for the frames that banner would leave the cursor behind
-  // on every event the filter drops, which is most of a backlog.
-  assert.equal(
-    record < judge,
-    true,
-    "the sequence is remembered whether or not it is worth announcing",
-  );
-});
-
-test("a backlog collapses into one banner", async () => {
-  const app = await publicFile("app.js");
-  // The hub drains from the cursor in batches of five hundred, one poll —
-  // 500ms — apart. A coalesce window shorter than that gap flushes between
-  // batches, which is one banner per batch rather than one banner.
-  const settle = /const BACKLOG_SETTLE_MS = ([\d_]+);/u.exec(app);
-  const live = /const NEWS_COALESCE_MS = ([\d_]+);/u.exec(app);
-  assert.notEqual(settle, null, "the backlog window should be named");
-  assert.notEqual(live, null, "the live window should be named");
-  const settleMs = Number((settle?.[1] ?? "0").replaceAll("_", ""));
-  const liveMs = Number((live?.[1] ?? "0").replaceAll("_", ""));
-  assert.equal(
-    settleMs > 500,
-    true,
-    "the backlog window has to outlast the hub's poll interval",
-  );
-  assert.equal(
-    settleMs > liveMs,
-    true,
-    "a live event should still read as immediate",
-  );
-  // Which window applies is decided by whether the stream is still catching
-  // up, and the hub's handshake is what says a replay is starting.
-  assert.match(app, /catchingUp \? BACKLOG_SETTLE_MS : NEWS_COALESCE_MS/u);
-  assert.match(app, /if \(frame\?\.type === "connected"\) \{\s*beginCatchUp\(\);/u);
+  assert.match(app.slice(record, record + 100), /extendCatchUp\(\)/u);
 });
 
 test("a replay settles before it redraws the screen", async () => {
@@ -138,24 +85,6 @@ test("a replay settles before it redraws the screen", async () => {
   );
 });
 
-test("a banner can be closed, and only one is up at a time", async () => {
-  const ui = await publicFile("ui.js");
-  const styles = await publicFile("styles.css");
-  // Whatever gets through, it replaces the banner before it rather than
-  // stacking under it.
-  assert.match(
-    ui,
-    /for \(const previous of host\.querySelectorAll\("\.toast\.banner"\)\) \{\s*previous\.remove\(\);/u,
-  );
-  // And it takes a tap to close, the same dismiss the error toast has.
-  assert.match(ui, /dismiss\.className = "toast-close";/u);
-  assert.match(ui, /dismiss\.setAttribute\("aria-label", "Dismiss"\);/u);
-  // The toast host is click-through so it never swallows a tap meant for the
-  // page — a banner with a button in it has to take its own taps back, or
-  // the button is decoration.
-  assert.match(styles, /\.toast\.banner \{[^}]*pointer-events: auto;/su);
-});
-
 test("returning users see completed work in the side panel", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
@@ -172,18 +101,17 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(app, /state\.catchUp = state\.catchUps\[activeChannelId\(\)\]/u);
 
   // It is the same resizable, mobile-aware column as a plan, not a modal that
-  // blocks the channel. Each row reads the agent's completion explanation —
-  // at most two sentences — rather than echoing the request that started it.
+  // blocks the channel. Each row reads the local model's short outcome built
+  // from the request and completion explanation, rather than echoing either.
   assert.match(data, /catchUp: undefined/u);
   assert.match(chats, /function catchUpPanel\(\)/u);
   assert.match(chats, /<aside class="thread-panel catch-up-panel"/u);
   assert.match(chats, /class="catch-up-task-list"/u);
   assert.match(data, /catchUps: \{\}/u);
-  assert.match(app, /function catchUpTaskOutcome\(task\)/u);
-  assert.match(app, /event\.data\?\.agentExplanation/u);
-  assert.ok(app.includes('cleaned.split(/(?<=[.!?])\\s+/u).slice(0, 2)'));
-  assert.match(app, /\.\.\.catchUpTaskOutcome\(task\),/u);
-  assert.match(app, /Implemented: \$\{objective\}/u);
+  assert.match(app, /const serverOutcomes = new Map/u);
+  assert.match(app, /outcome\?\.summary/u);
+  assert.doesNotMatch(app, /function catchUpTaskOutcome\(task\)/u);
+  assert.doesNotMatch(app, /Implemented: \$\{objective\}/u);
   assert.match(chats, /task\.changedFiles\.slice\(0, 3\)/u);
   assert.match(chats, /state\.catchUp = state\.catchUps\?\.\[repositoryId\]/u);
   assert.match(chats, /String\(task\.summary \?\? ""\)/u);

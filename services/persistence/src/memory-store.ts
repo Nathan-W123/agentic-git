@@ -53,6 +53,7 @@ import type {
   ChannelEntryKind,
   ChannelMessage,
   ChannelChangedFile,
+  ChannelMessageCounts,
   ChannelMessageFilter,
   AppendDirectMessageInput,
   DirectConversation,
@@ -2139,6 +2140,21 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return rows
       .slice(-limit)
       .map((message) => this.toPublicChannelMessage(message, viewerId));
+  }
+
+  public async countChannelMessages(
+    repositoryId: string,
+  ): Promise<ChannelMessageCounts> {
+    let messages = 0;
+    let replies = 0;
+    for (const message of this.channelMessages.values()) {
+      if (message.repositoryId !== repositoryId) {
+        continue;
+      }
+      messages += 1;
+      replies += message.replies.length;
+    }
+    return { messages, replies };
   }
 
   public async bumpChannelMessage(

@@ -1338,49 +1338,9 @@ test("motion is restrained, reducible, and off when an agent is not there", asyn
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/u);
 });
 
-test("agent news is one compact banner, not a stack of cards", async () => {
-  const ui = await publicFile("ui.js");
-  const css = await publicFile("styles.css");
-  const start = ui.indexOf("export function banner");
-  const end = ui.indexOf("\nexport function toast", start);
-  assert.notEqual(start, -1, "the agent-news banner was not found");
-  assert.notEqual(end, -1, "the toast function no longer follows the banner");
-  const banner = ui.slice(start, end);
-
-  // New news replaces the old line instead of building an alert stack, and
-  // the only chrome left beside that line is its accessible dismiss button.
-  assert.match(banner, /querySelectorAll\("\.toast\.banner"\)/u);
-  assert.match(banner, /previous\.remove\(\)/u);
-  assert.match(banner, /dismiss\.setAttribute\("aria-label", "Dismiss"\)/u);
-
-  const bannerRule = /\.toast\.banner \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
-  assert.match(bannerRule, /max-width: min\(320px, calc\(100vw - 24px\)\)/u);
-  // Restyled by request: the glow went, and the accent moved to a left edge
-  // — the quiet "this is news" marker — instead of a border all round.
-  assert.match(bannerRule, /border-left-color: var\(--accent\)/u);
-  assert.doesNotMatch(bannerRule, /box-shadow/u);
-  assert.match(bannerRule, /overflow-wrap: anywhere/u);
-  assert.match(bannerRule, /animation: none/u);
-  assert.equal(/accent-line/u.test(bannerRule), false, "news should not look selected");
-
-  const exitRule = /\.toast\.banner\.banner-out \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
-  assert.match(exitRule, /opacity: 0/u);
-  assert.equal(/transform/u.test(exitRule), false, "dismissal should not move the banner");
-
-  assert.match(
-    css,
-    /@media \(max-width: 600px\)[\s\S]*?\.toast\.banner \{\s*width: calc\(100vw - 24px\);/u,
-  );
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{\s*\.toast\.banner \{\s*transition: none;/u,
-  );
-});
-
 /**
  * The bug: two people each with a Codex connected opened two agent panels and
- * saw one identical history, down to the timestamp — and the news banner named
- * whichever of them the roster happened to list first.
+ * saw one identical history, down to the timestamp.
  *
  * The cause is that `task.agentId` is the *vendor* CLI. Every Codex in the
  * deployment submits under the same configured agent id, so a filter written
@@ -1392,8 +1352,7 @@ test("one agent's work is not every agent of that vendor's work", async () => {
   const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
 
-  // Both halves in one place, so the panel, the banner and the dot cannot
-  // drift into three different answers about who did what.
+  // Both halves live in one place so every caller agrees about who did what.
   assert.match(data, /export function taskBelongsToAgent\(task, agent\)/u);
   assert.match(data, /String\(task\.agentId \?\? ""\)\.toLowerCase\(\)\.includes\(vendor\)/u);
   assert.match(
@@ -1419,14 +1378,6 @@ test("one agent's work is not every agent of that vendor's work", async () => {
     /VENDOR_FOR_PROVIDER/u.test(chats),
     false,
     "the vendor map is an implementation detail of the matcher now",
-  );
-
-  // The banner picks out of a list holding every agent in the room, so an
-  // unqualified `find` there is what named the wrong person's agent.
-  const banner = data.slice(data.indexOf("export function bannerLineForAudit"));
-  assert.match(
-    banner.slice(0, banner.indexOf("\n}")),
-    /channelAgentsFor\(repositoryId\)\.find\(\(agent\) =>\s*taskBelongsToAgent\(task, agent\),?\s*\)/u,
   );
 });
 
@@ -3048,6 +2999,14 @@ test("the invite screen lets an existing account sign in instead", async () => {
   assert.match(app, /account_exists/u);
 });
 
+test("settings only lists invitations that are still pending", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function invitationsCard");
+  const body = app.slice(start, app.indexOf("\nasync function savePolicy", start));
+  assert.match(body, /\.filter\(\s*\(invitation\) => invitation\.status === "pending"/u);
+  assert.match(body, /No pending invitations/u);
+});
+
 /**
  * A call sign has one job: to be the only thing it could refer to.
  *
@@ -3626,15 +3585,9 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   );
 
   // Reconnecting delivers everything that happened while the browser was
-  // closed. One banner each, five seconds each, was a wall of them; one
-  // reconcile each was a full app rebuild each.
-  assert.match(app, /function announceNews/u);
-  assert.match(app, /announceNews\(line\)/u);
-  assert.match(app, /lines\.length === 1 \? latest :/u);
+  // closed. One reconcile per event used to cause a full app rebuild each.
   assert.match(app, /clearTimeout\(channelFrameTimer\)/u);
   assert.match(app, /CHANNEL_FRAME_COALESCE_MS/u);
-  // The burst collapses, it is not dropped: the count is still reported.
-  assert.match(app, /\$\{lines\.length\} updates/u);
 });
 
 test("a channel transcript reads down one side at every width", async () => {

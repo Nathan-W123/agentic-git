@@ -1075,6 +1075,19 @@ export interface ChannelMessageFilter {
 }
 
 /**
+ * How much has been said in one channel, counted rather than paged.
+ *
+ * `messages` is roots, `replies` is every line under them. Both are the whole
+ * room's totals: a stat that stopped at whatever one page can hold would be a
+ * different number from the one the room actually has, and the popover reads
+ * as an exact figure.
+ */
+export interface ChannelMessageCounts {
+  messages: number;
+  replies: number;
+}
+
+/**
  * One message from one person to one other person, private to the two of them.
  *
  * The counterpart to `ChannelMessage`, and deliberately not a variant of it: a
@@ -1601,6 +1614,15 @@ export interface CoordinationStore {
     viewerId: UserId,
     filter?: ChannelMessageFilter,
   ): Promise<ChannelMessage[]>;
+  /**
+   * Exact root and reply totals for one channel.
+   *
+   * Counted in the store rather than derived from {@link listChannelMessages},
+   * whose 200-row page is a read cap and would silently turn any busier room's
+   * figure into "200+". A count is cheap where the rows already are; carrying
+   * them all into the gateway to measure their length is not.
+   */
+  countChannelMessages(repositoryId: string): Promise<ChannelMessageCounts>;
   appendChannelMessage(
     input: AppendChannelMessageInput,
   ): Promise<ChannelMessage>;

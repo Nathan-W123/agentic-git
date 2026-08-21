@@ -81,7 +81,7 @@ test("the channel reconcile is what takes the timeline before it replaces it", a
   assert.match(load, /notePromptedThread\(repositoryId, before\);/u);
 });
 
-test("the thread opens itself on desktop, and only into a free panel", async () => {
+test("the thread opens itself on desktop, and only into a free place in the column", async () => {
   const app = await publicFile("app.js");
   const open = app.slice(
     app.indexOf("function openPromptedThread("),
@@ -94,14 +94,13 @@ test("the thread opens itself on desktop, and only into a free panel", async () 
   // a full-screen surface dropped over the room mid-sentence.
   assert.match(open, /phoneLayout\(\)/u);
   assert.match(open, /state\.route !== "chats"/u);
-  // Anything the reader deliberately put in that one panel stays there.
-  assert.match(open, /state\.activeAgentPanel !== undefined/u);
-  assert.match(open, /state\.activeDm !== undefined/u);
-  assert.match(open, /state\.chanFileView !== undefined/u);
-  assert.match(open, /state\.chanTree === true/u);
-  // …including a thread they opened themselves. The only thing this replaces
-  // is a thread it opened the same way, so a second task prompted while the
-  // first one's thread is up moves the panel on to the newer work.
+  // A file tree or a direct message no longer means there is nowhere to put a
+  // prompted thread — the right-hand column keeps up to three surfaces, and
+  // this one takes a free place in it rather than somebody else's.
+  //
+  // A thread the reader opened themselves is never taken off them. The only
+  // thing this replaces is a thread it opened the same way, so a second task
+  // prompted while the first one's thread is up moves on to the newer work.
   assert.match(
     open,
     /state\.activeChannelThread !== undefined &&\s*state\.activeChannelThread !== state\.autoOpenedThread/u,

@@ -262,31 +262,68 @@ test("the Thread label opens the thread library as the visible side panel", asyn
   assert.match(action, /state\.chanTree = false;/u);
 });
 
-test("desktop panel tabs can be dragged left to keep two conversations open", async () => {
+/*
+ * The right-hand column holds up to three surfaces at once.
+ *
+ * It used to hold one, then — once a tab could be dragged left — two. A thread
+ * and the file it is about and the person who asked for it are three different
+ * things to have open, and closing one of them to read another lost the place
+ * in it. So the kept surfaces stack: the older ones are pushed left, the newest
+ * keeps the right edge, and the room takes whatever width is left over.
+ *
+ * The regular expressions below name the browser modules loosely on purpose.
+ * The pinned thing is the arrangement — a ceiling of three, both positions
+ * drawn from the one helper, a closed surface stopping being kept — not the
+ * particular identifiers the client chose to spell it with.
+ */
+test("desktop panel tabs can be dragged left to keep three conversations open", async () => {
   const [app, chats, css] = await Promise.all([
     publicFile("app.js"),
     publicFile("screen-chats.js"),
     publicFile("styles.css"),
   ]);
 
+  // A tab names its own surface and can be picked up: that is what a second
+  // and a third occupant of the column are made from.
   assert.match(chats, /data-right-panel-kind=/u);
   assert.match(chats, /draggable="true"/u);
   assert.match(chats, /function rightPanels\(repositoryId\)/u);
-  assert.match(chats, /phoneLayout\(\) \|\| split === undefined/u);
-  assert.match(chats, /positionedRightPanel\(repositoryId, split, "left"\)/u);
-  assert.match(chats, /positionedRightPanel\(repositoryId, other, "right"\)/u);
+  // A phone has no column to push anything into — one surface over the room.
+  assert.match(chats, /phoneLayout\(\)/u);
+  // Kept surfaces are drawn to the left of the newest one, which holds the
+  // edge, and both go through the one positioning helper so the two sides
+  // cannot drift apart.
+  assert.match(chats, /positionedRightPanel\([^)]*"left"\)/u);
+  assert.match(chats, /positionedRightPanel\([^)]*"right"\)/u);
 
   assert.match(app, /RIGHT_PANEL_DRAG_TYPE/u);
-  assert.match(app, /state\.splitRightPanel = panelKind/u);
-  assert.match(app, /state\.splitRightPanel = undefined/u);
-  assert.match(app, /clearSplitRightPanel\("dm"\)/u);
-  assert.match(app, /clearSplitRightPanel\("thread"\)/u);
+  // What is kept open is a list of surfaces, not a single one.
+  assert.match(app, /state\.(?:rightPanelStack|splitRightPanels|pinnedRightPanels)\b/u);
+  // Closing a surface also stops it being kept, or the column would hold a
+  // name with nothing behind it.
+  assert.match(app, /(?:clearSplitRightPanel|clearRightPanel|unpinRightPanel)\("dm"\)/u);
+  assert.match(app, /(?:clearSplitRightPanel|clearRightPanel|unpinRightPanel)\("thread"\)/u);
 
   assert.match(css, /\.chats-shell\.panel-splitting \.chan-main/u);
-  assert.match(css, /\.thread-panel\[data-right-panel-position="left"\]/u);
+  assert.match(css, /\.thread-panel\[data-right-panel-position=/u);
   assert.match(
     css,
     /@media[^}]*max-width:\s*600px[\s\S]*?\.chats-shell\.panel-splitting \.chan-main[\s\S]*?box-shadow:\s*none/u,
+  );
+});
+
+test("a fourth kept panel is refused rather than squeezing the room away", async () => {
+  const [app, chats] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+  ]);
+
+  // Three is the ceiling, and it is written down as a number rather than left
+  // implied by the drawing code — a fourth column would leave the transcript
+  // it is all about too narrow to read.
+  assert.match(
+    `${app}\n${chats}`,
+    /(?:RIGHT_PANEL_MAX|MAX_RIGHT_PANELS|RIGHT_PANEL_LIMIT|PANEL_STACK_MAX)\s*=\s*3\b|\.slice\(\s*(?:0,\s*)?-?3\s*\)/u,
   );
 });
 

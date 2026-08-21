@@ -2146,7 +2146,9 @@ test("the local model writes the catch-up's prose, and only its prose", async (t
   const runtime = await startRuntime(t, {
     catchUpSummariser: async (prompt) => {
       prompts.push(prompt);
-      return "Somebody fixed the retry loop while you were out.";
+      return prompt.includes("User request:")
+        ? "Fixed the retry loop and verified the recovery path."
+        : "Somebody fixed the retry loop while you were out.";
     },
   });
   const owner = new TestClient(runtime.origin);
@@ -2179,6 +2181,14 @@ test("the local model writes the catch-up's prose, and only its prose", async (t
   });
   await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
   await runtime.store.completeSubmittedTask(task.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: task.id,
+    data: {
+      agentExplanation: "Raised the retry limit and added recovery coverage.",
+      files: ["retry.ts", "retry.test.ts"],
+    },
+  });
 
   const client = new TestClient(runtime.origin);
   await client.request("/api/v1/auth/login", {
@@ -2193,6 +2203,20 @@ test("the local model writes the catch-up's prose, and only its prose", async (t
   );
   // The model was handed the facts, not asked to go and find them.
   assert.ok((prompts[0] ?? "").includes("Fix the retry loop"), prompts[0]);
+  const taskPrompt =
+    prompts.find((prompt) => prompt.includes("User request:")) ?? "";
+  assert.match(taskPrompt, /Fix the retry loop/u);
+  assert.match(taskPrompt, /Raised the retry limit and added recovery coverage/u);
+  assert.equal(caught.data.catchUp.tasks[0]?.id, task.id);
+  assert.equal(caught.data.catchUp.tasks[0]?.repositoryId, repositoryId);
+  assert.equal(
+    caught.data.catchUp.tasks[0]?.summary,
+    "Fixed the retry loop and verified the recovery path.",
+  );
+  assert.deepEqual(
+    caught.data.catchUp.tasks[0]?.changedFiles,
+    ["retry.ts", "retry.test.ts"],
+  );
   // And it rewrote only the prose: the list and the counts are still the
   // measured ones, so a wrong sentence cannot become a wrong catch-up.
   assert.deepEqual(
@@ -8708,6 +8732,43 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
     ).status,
     400,
   );
+});
+
+test("channel stats count every root and reply, past the read page", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "counted-room");
+
+  // Past the 200-row page the channel read is capped at. The stats line used
+  // to be the length of that page, so a room this size reported "200+" — a
+  // figure that stops being true the moment the room gets busy.
+  for (let index = 0; index < 205; index += 1) {
+    const root = await runtime.store.appendChannelMessage({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      authorId: ownerId,
+      content: `Line ${index}`,
+    });
+    if (index % 5 === 0) {
+      await runtime.store.addChannelReply({
+        repositoryId,
+        messageId: root.id,
+        authorId: ownerId,
+        content: `Reply to ${index}`,
+      });
+    }
+  }
+
+  const response = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/stats`,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.data.messages, 205);
+  assert.equal(response.data.replies, 41);
+  // Nothing is approximated any more, so there is no "and more" flag left.
+  assert.equal(response.data.capped, undefined);
 });
 
 test("channel stats exclude cached context from the token activity total", async (t) => {

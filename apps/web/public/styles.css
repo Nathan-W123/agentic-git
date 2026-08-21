@@ -8026,26 +8026,6 @@ body.resizing-panel {
   max-width: 340px;
 }
 
-.toast.banner {
-  width: fit-content;
-  max-width: min(320px, calc(100vw - 24px));
-  padding: 9px 34px 9px 12px;
-  border-left-color: var(--accent);
-  border-radius: var(--radius-sm);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-  animation: none;
-  transition: opacity 0.16s ease;
-  /* The host is click-through so toasts never swallow a tap meant for the
-     page; a banner that can be dismissed has to take its own taps back. */
-  pointer-events: auto;
-  position: relative;
-}
-
-.toast.banner.banner-out {
-  opacity: 0;
-}
-
 .toast.error {
   border-left-color: var(--red);
   pointer-events: auto;
@@ -8069,22 +8049,6 @@ body.resizing-panel {
   background: var(--bg-hover);
 }
 
-.toast.banner .toast-close {
-  top: 50%;
-  right: 5px;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-sm);
-  color: var(--text-3);
-  font-size: 14px;
-  transform: translateY(-50%);
-}
-
-.toast.banner .toast-close:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
 .toast.ok {
   border-left-color: var(--green);
 }
@@ -8100,17 +8064,6 @@ body.resizing-panel {
   .toasts-alert {
     right: 12px;
     top: calc(10px + env(safe-area-inset-top, 0px));
-  }
-
-  .toast.banner {
-    width: calc(100vw - 24px);
-    max-width: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .toast.banner {
-    transition: none;
   }
 }
 
@@ -8632,13 +8585,6 @@ dialog.modal[open]::backdrop {
     width: 40px;
     height: 40px;
     padding: 0;
-  }
-
-  /* Collapsed there is no room for two side by side, so they stack — the
-     bell keeps its badge, which is the part that has to stay visible. */
-  .chats-shell.chan-collapsed .chan-foot-row {
-    flex-direction: column;
-    gap: 6px;
   }
 
   .chats-shell.chan-collapsed .sys-line {
@@ -10735,23 +10681,4 @@ dialog.modal[open]::backdrop {
   font-size: 11.5px;
   color: var(--text-3);
   text-align: center;
-}
-
-/* The account button and the bell share the sidebar's foot. The Chats screen
-   draws no topbar, so this is where the two account-level controls live —
-   and the bell has to be beside the profile rather than under it, or the
-   sidebar grows a row every time somebody has an unread failure. */
-.chan-foot-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-
-.chan-foot-row .chan-account {
-  min-width: 0;
-}
-
-.chan-bell {
-  flex: none;
 }

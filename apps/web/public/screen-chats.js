@@ -39,7 +39,6 @@ api,
   currentUserName,
   dmUnreadFrom,
   dmUnreadTotal,
-  unreadCount,
   flushChannelDrafts,
   markChannelRead,
   memberName,
@@ -99,10 +98,7 @@ import {
 /**
  * A count in the corner of a button, or nothing.
  *
- * Two of these live in the sidebar's foot. The Chats screen draws no topbar —
- * see `BARE` in app.js — so the bell and the account badge that sit up there
- * on every other screen are absent on the one screen people are actually on,
- * and this is where they go instead.
+ * The account button uses this for its direct-message total.
  */
 function countBadge(count) {
   return count === 0
@@ -1112,24 +1108,12 @@ function chanSidebar(activeRepositoryId) {
           ? `<div class="sys-line" title="Control plane unreachable"><span class="dot grey"></span>Control plane unreachable</div>`
           : ""
       }
-      <div class="chan-foot-row">
-        <button type="button" class="chan-account" data-act="user-menu"
-          title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
-          ${avatar(user, 32, user, myAvatar())}
-          <span class="chan-account-copy"><b>${esc(user)}</b></span>
-          ${countBadge(dmUnreadTotal())}
-        </button>
-        ${(() => {
-          // Asked once. `unreadCount()` walks the audit feed to answer, and
-          // this button asks for it twice — the label and the badge.
-          const unread = unreadCount();
-          return `<button type="button" class="icon-btn bell chan-bell"
-          data-act="go-notifications" title="Notifications"
-          aria-label="${
-            unread === 0 ? "Notifications" : `Notifications, ${unread} unread`
-          }">${icon("bell")}${countBadge(unread)}</button>`;
-        })()}
-      </div>
+      <button type="button" class="chan-account" data-act="user-menu"
+        title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
+        ${avatar(user, 32, user, myAvatar())}
+        <span class="chan-account-copy"><b>${esc(user)}</b></span>
+        ${countBadge(dmUnreadTotal())}
+      </button>
     </div>
   </aside>`;
 }
@@ -5229,13 +5213,11 @@ export function channelInfoPopoverHtml(repositoryId) {
         if (stats === undefined) {
           return "Counting…";
         }
-        const fmt = (value) =>
-          value >= 1_000_000
-            ? `${(value / 1_000_000).toFixed(1)}M`
-            : value >= 1_000
-              ? `${(value / 1_000).toFixed(1)}k`
-              : String(value);
-        return `${stats.messages}${stats.capped ? "+" : ""} messages · ` +
+        // Exact, grouped figures rather than "1.2k": these are counts of a
+        // room's own work, and rounding them made a busy afternoon and a busy
+        // month read the same. Only the token lower bound still carries a "+".
+        const fmt = (value) => value.toLocaleString();
+        return `${fmt(stats.messages)} messages · ` +
           `${fmt(stats.replies)} replies · ${fmt(stats.tokens)}` +
           `${stats.tokensIncomplete ? "+" : ""} tokens`;
       })()}</p>

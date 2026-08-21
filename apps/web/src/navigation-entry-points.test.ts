@@ -70,28 +70,23 @@ test("the account menu is the door into every screen that had none", async () =>
   assert.doesNotMatch(agentMenu, /value: "agents"/u);
 });
 
-test("the notifications bell is on screen wherever the reader is", async () => {
+test("the Chats sidebar has no notification shortcut", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
-  const css = await publicFile("styles.css");
 
-  // The route, the screen, the filters, `unreadCount()` and even the
-  // `go-notifications` case all existed; the button did not.
+  // Notifications remain reachable from the account menu and from the
+  // topbar on secondary screens.
   assert.match(app, /function notificationBell\(\)/u);
-  assert.match(app, /data-act="go-notifications"/u);
   assert.match(app, /case "go-notifications":/u);
-  assert.match(app, /const unread = unreadCount\(\);/u);
 
-  // The Chats screen draws no topbar — see `BARE` — so the one screen people
-  // are actually on would otherwise be the one screen with no bell.
-  assert.match(app, /const BARE = new Set\(\["code", "coordinator", "chats"\]\)/u);
-  assert.match(chats, /class="icon-btn bell chan-bell"/u);
-  assert.match(chats, /data-act="go-notifications"/u);
-
-  // The badge is a count, and it is drawn only when there is something to
-  // count.
-  assert.match(app, /unread === 0\s*\n?\s*\? ""/u);
-  assert.match(css, /\.bell \.dot-badge,/u);
+  // The always-visible control at the lower left is deliberately gone.
+  const sidebar = slice(
+    chats,
+    "function chanSidebar(",
+    "/* ---------------------------------------------------------- chan main",
+  );
+  assert.doesNotMatch(sidebar, /chan-bell/u);
+  assert.doesNotMatch(sidebar, /data-act="go-notifications"/u);
 });
 
 test("an unread direct message has a number somewhere on screen", async () => {
