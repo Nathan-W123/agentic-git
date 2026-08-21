@@ -1131,9 +1131,8 @@ function chanSidebar(activeRepositoryId) {
         </div>
       </div>
     </div>
-    <!-- The profile is the one account control at the foot. Its menu already
-         contains Settings, so a second Settings row here would only make the
-         same destination compete with the account that owns it. -->
+    <!-- Account destinations stay with the profile; the app-wide Settings
+         destination is visible beside it instead of hidden in that menu. -->
     <div class="chan-sidebar-foot">
       ${
         state.health === undefined
@@ -1145,6 +1144,10 @@ function chanSidebar(activeRepositoryId) {
         ${avatar(user, 32, user, myAvatar())}
         <span class="chan-account-copy"><b>${esc(user)}</b></span>
         ${countBadge(dmUnreadTotal())}
+      </button>
+      <button type="button" class="icon-btn chan-settings" data-act="nav"
+        data-value="settings" title="Settings" aria-label="Settings">
+        ${icon("gear")}
       </button>
     </div>
   </aside>`;

@@ -1084,9 +1084,9 @@ async function submitInviteSignIn(form) {
  * The outer rail — brand, repository switcher, Chats/Settings links, account
  * card, plan card — stopped being rendered when the channel sidebar became the
  * navigation, and then sat in this file for a while as markup nothing could
- * reach. Everything it held has somewhere else to be: the brand and Settings
- * are the crown of `chanSidebar` (screen-chats.js), the account is the topbar
- * avatar's menu, and the failure-only health line is at that sidebar's foot.
+ * reach. Everything it held has somewhere else to be: the brand is the crown
+ * of `chanSidebar` (screen-chats.js), Settings and the account are at its foot,
+ * and the failure-only health line is there with them.
  * Its stylesheet block, its phone drawer, the `nav-scrim` and the hamburger
  * that opened it went with it — a menu button that opens a panel which is no
  * longer rendered is worse than no button at all.
@@ -4729,7 +4729,6 @@ document.addEventListener("click", (event) => {
     case "user-menu":
       showMenu(node, [
         ...accountDestinations(),
-        { act: "nav", value: "settings", label: "Settings", iconName: "gear" },
         { separator: true },
         { act: "logout", label: "Sign out", iconName: "logout" },
       ]);

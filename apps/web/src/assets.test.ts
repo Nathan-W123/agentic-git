@@ -639,18 +639,23 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
-  // The account is the sole footer action. Its existing menu is the route to
-  // Settings, so the sidebar does not duplicate that destination with a gear.
+  // Account actions stay behind the avatar, while Settings is always visible
+  // at the bottom-right of the sidebar.
   assert.match(sidebar, /class="chan-sidebar-foot"/u);
-  assert.doesNotMatch(
-    sidebar,
-    /class="chan-foot-action" data-act="nav"\s*data-value="settings"/u,
-  );
-  assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
   assert.match(
-    app,
-    /case "user-menu":[\s\S]{0,180}value: "settings", label: "Settings"/u,
+    sidebar,
+    /class="icon-btn chan-settings" data-act="nav"\s*data-value="settings"/u,
   );
+  assert.match(sidebar, /class="icon-btn chan-settings"[\s\S]{0,160}icon\("gear"\)/u);
+  assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
+  const userMenu = app.slice(
+    app.indexOf('case "user-menu":'),
+    app.indexOf('case "switch-close":'),
+  );
+  assert.doesNotMatch(userMenu, /value: "settings"|label: "Settings"/u);
+  assert.match(css, /\.chan-sidebar-foot \{[\s\S]{0,180}grid-template-columns: minmax\(0, 1fr\) auto;/u);
+  assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
+  assert.match(css, /@media \(max-width: 600px\)[\s\S]*\.chan-settings \{\s*width: 44px;\s*height: 44px;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
     sidebar,

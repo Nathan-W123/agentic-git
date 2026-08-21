@@ -612,8 +612,15 @@ svg.ui-icon {
 
 .chan-sidebar-foot {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
   align-self: end;
   padding: 10px;
+}
+
+.chan-sidebar-foot > .sys-line {
+  grid-column: 1 / -1;
 }
 
 .chan-account {
@@ -651,6 +658,12 @@ svg.ui-icon {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chan-settings {
+  width: 40px;
+  height: 40px;
+  flex: none;
 }
 
 /* ------------------------------------------------------------- brand ---- */
@@ -8959,6 +8972,7 @@ dialog.modal[open]::backdrop {
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-foot {
+    grid-template-columns: 40px;
     justify-items: center;
     padding: 8px 0;
   }
@@ -9495,6 +9509,11 @@ dialog.modal[open]::backdrop {
 
   .chan-account {
     min-height: 44px;
+  }
+
+  .chan-settings {
+    width: 44px;
+    height: 44px;
   }
 
   .send-btn {
