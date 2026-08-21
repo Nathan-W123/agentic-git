@@ -3852,6 +3852,21 @@ test("the role field offers the two reserved roles without stopping anyone typin
   );
 });
 
+test("a typed role survives the redraw that commits it", async () => {
+  // Once the roster has resolved, `channelAgentsFor` used to take role only
+  // from that answer. Committing a typed role writes the local override and
+  // redraws before the roster is fetched again — so the field went blank
+  // on Enter unless the override is read here the same way model and effort
+  // already are.
+  const data = await publicFile("data.js");
+  const body = data.slice(
+    data.indexOf("export function channelAgentsFor"),
+    data.indexOf("/** Agents and people who can be @mentioned"),
+  );
+  assert.match(body, /role: local\?\.role \?\? server\.role/u);
+  assert.match(body, /model: local\?\.model \?\? agent\.model/u);
+});
+
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");

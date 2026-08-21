@@ -2768,13 +2768,15 @@ export function channelAgentsFor(repositoryId) {
         : raw;
     const server = resolved.get(`${agent.userId}:${agent.provider}`);
     if (server !== undefined) {
-      // Model and effort are not part of the roster's answer, so they still
-      // come from the local override.
+      // Name stays the roster's answer — it is what @mention matching uses.
+      // Role, model, and effort still honour a local override: typing a role
+      // writes the override and redraws before the roster is fetched again,
+      // and reading only `server.role` here wiped the field on that redraw.
       const local = overrideFor(overrides, agent);
       return {
         ...agent,
         name: server.name,
-        role: server.role,
+        role: local?.role ?? server.role,
         model: local?.model ?? agent.model,
         effort: local?.effort ?? agent.effort,
       };
