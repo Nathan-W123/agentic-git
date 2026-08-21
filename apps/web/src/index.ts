@@ -293,7 +293,10 @@ async function serve(
           provider: input.provider as ProviderId,
         }),
       options: (input) =>
-        providerChat.options({ provider: input.provider as ProviderId }),
+        providerChat.options({
+          provider: input.provider as ProviderId,
+          ...(input.userId === undefined ? {} : { userId: input.userId }),
+        }),
       usage: (input) =>
         providerChat.usage({
           ...input,
