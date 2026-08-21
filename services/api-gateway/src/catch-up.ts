@@ -47,6 +47,16 @@ export interface CatchUpDigest {
   /** Nothing to show. The client opens no popup at all for one of these. */
   empty: boolean;
   headline: string;
+  /**
+   * The document as one short piece of prose, for the popup to show.
+   *
+   * Written by the local model when there is one, and by
+   * {@link formatCatchUpDocument} when there is not — so this is always
+   * readable text for a non-empty digest, and always `""` for an empty one.
+   * It is presentation only: {@link CatchUpDigest.lines} stays the contract,
+   * and a client that would rather render the facts itself should.
+   */
+  summary: string;
   lines: CatchUpLine[];
   counts: {
     landed: number;
@@ -112,6 +122,7 @@ export function emptyCatchUpDigest(
     generatedAt: now,
     empty: true,
     headline: "",
+    summary: "",
     lines: [],
     counts: { landed: 0, failed: 0, messages: 0, direct: 0 },
   };
@@ -208,14 +219,20 @@ export function buildCatchUpDigest(input: CatchUpInput): CatchUpDigest {
     });
   }
 
-  return {
+  const kept = lines.slice(0, CATCH_UP_MAX_LINES);
+  const digest: CatchUpDigest = {
     since: input.since,
     generatedAt: input.now,
     empty: false,
     headline: headlineFor(counts),
-    lines: lines.slice(0, CATCH_UP_MAX_LINES),
+    // The deterministic wording, which is what a deployment with no local
+    // model shows and what one with a model falls back to. Filled in here
+    // rather than left blank so every digest is readable on its own.
+    summary: "",
+    lines: kept,
     counts,
   };
+  return { ...digest, summary: formatCatchUpDocument(digest) };
 }
 
 /** The one fact that matters most, which is the only line everybody reads. */
@@ -244,4 +261,117 @@ export function formatCatchUpDocument(digest: CatchUpDigest): string {
   }
   return [digest.headline, ...digest.lines.map((line) => `• ${line.text}`)]
     .join("\n");
+}
+
+/**
+ * The local model's seam.
+ *
+ * A prompt in, a sentence or two out, or nothing. `undefined` and `null` both
+ * mean "no model wrote anything", which is what a machine without the model,
+ * a wedged session, a timeout and a blank reply all produce — every one of
+ * them leaves {@link CatchUpDigest.summary} as the deterministic wording.
+ *
+ * Narrow on purpose: the digest is built without it, tested without it, and
+ * correct without it, so a test stubs one function rather than a model.
+ */
+export type CatchUpSummariser = (
+  prompt: string,
+) => Promise<string | null | undefined>;
+
+/**
+ * The most prose the popup will show.
+ *
+ * The deterministic lines already fit on a phone; a model given free rein
+ * writes three paragraphs about how exciting the changes are, which is worse
+ * than the bullet list it replaced. Anything past this is clipped.
+ */
+export const CATCH_UP_SUMMARY_MAX_CHARS = 240;
+
+/** How long the whole summary attempt may take before the lines win. */
+export const CATCH_UP_SUMMARY_TIMEOUT_MS = 6_000;
+
+/**
+ * What the local model is asked for.
+ *
+ * Written for a small instruction model, so it is blunt: say the size of the
+ * instruction in the instruction, forbid the two things such a model reliably
+ * does wrong — inventing detail it was not given, and padding with greetings
+ * — and give it the facts as a plain list rather than as JSON it will try to
+ * echo back.
+ */
+export const CATCH_UP_SUMMARY_PROMPT = [
+  "Rewrite these notes as one or two short sentences telling a developer what",
+  "changed in their project while they were away. Be specific and factual.",
+  "Use only the facts listed. Do not invent details, do not add a greeting,",
+  "and do not use bullet points.",
+].join(" ");
+
+/**
+ * Cleans up whatever the model returned, or rejects it.
+ *
+ * Small models fence their answers, restate the prompt, and run on. This
+ * takes the fencing off, collapses the whitespace, and clips to a whole word
+ * — the same treatment an objective gets — so a rambling reply becomes a
+ * short one rather than being thrown away. A reply with nothing left in it
+ * comes back `undefined`, which the caller reads as "no summary".
+ */
+export function sanitiseSummary(
+  raw: string | null | undefined,
+): string | undefined {
+  if (raw === null || raw === undefined) {
+    return undefined;
+  }
+  const unfenced = raw
+    // ```text fences, opening and closing, wherever the model put them.
+    .replace(/```[a-z]*\n?/giu, " ")
+    // Leading bullets and numbering, which the prompt asked it not to use.
+    .replace(/^[\s>*\-•]+/u, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (unfenced.length === 0) {
+    return undefined;
+  }
+  if (unfenced.length <= CATCH_UP_SUMMARY_MAX_CHARS) {
+    return unfenced;
+  }
+  const cut = unfenced.slice(0, CATCH_UP_SUMMARY_MAX_CHARS);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > 40 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+/**
+ * The digest with its summary written by the local model, where one answers.
+ *
+ * The facts are never touched: `lines` and `counts` come back exactly as they
+ * went in, and only `summary` can change. That is the whole safety argument
+ * for putting a small model on this path — the worst it can do is phrase the
+ * headline badly, next to a list that is still right.
+ *
+ * A quiet interval never reaches the model at all: there is nothing to say,
+ * and waking a model to say it would make the cheapest case the slowest.
+ */
+export async function summariseCatchUpLines(
+  digest: CatchUpDigest,
+  summariser: CatchUpSummariser | undefined,
+): Promise<CatchUpDigest> {
+  if (digest.empty || summariser === undefined) {
+    return digest;
+  }
+  const fallbackSummary = digest.summary;
+  const prompt = [
+    CATCH_UP_SUMMARY_PROMPT,
+    "",
+    "Notes:",
+    ...digest.lines.map((line) => `- ${line.text}`),
+  ].join("\n");
+  let written: string | null | undefined;
+  try {
+    written = await summariser(prompt);
+  } catch {
+    // A summariser that throws is a summariser that did not answer. The
+    // deterministic wording is already in hand, so this is not a failure the
+    // caller needs to hear about.
+    return { ...digest, summary: fallbackSummary };
+  }
+  return { ...digest, summary: sanitiseSummary(written) ?? fallbackSummary };
 }

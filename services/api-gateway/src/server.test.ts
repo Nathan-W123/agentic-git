@@ -34,6 +34,7 @@ import {
 import { hashPassword } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
 import type { CodexUsageReader } from "./codex-subscription-usage.js";
+import type { CatchUpSummariser } from "./catch-up.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
 const PASSWORD = "RelayPassword123!";
@@ -361,6 +362,14 @@ async function startRuntime(
     withoutListAgents?: boolean;
     /** Drops direct push support, as an older or limited deployment may. */
     withoutPushRepository?: boolean;
+    /**
+     * Writes the catch-up's prose, standing in for the local model.
+     *
+     * Defaults to one that answers nothing, which is both what a machine
+     * without the model does and what keeps every other test in this file
+     * from loading one to prove something unrelated.
+     */
+    catchUpSummariser?: CatchUpSummariser;
     /** The direct push result returned to the channel. */
     pushOutcome?: {
       outcome: "done" | "refused";
@@ -870,6 +879,7 @@ async function startRuntime(
       readsAsChatter: async (text: string) => localChatter(text),
       available: async () => true,
     },
+    catchUpSummariser: options.catchUpSummariser ?? (async () => undefined),
     mailer: async (message) => {
       mail.push(message);
     },
@@ -2108,6 +2118,18 @@ test("the catch-up says what changed while somebody was away, then clears", asyn
     messages: 1,
     direct: 1,
   });
+  // No local model answered here, so the prose is the deterministic wording —
+  // the headline and the same lines, which is what a deployment without a
+  // model shows.
+  assert.equal(
+    caught.data.catchUp.summary,
+    [
+      "1 change landed while you were away",
+      "• Fix the retry loop",
+      "• 1 new message",
+      "• 1 unread direct message",
+    ].join("\n"),
+  );
 
   // Saying it has been read is its own call, so a popup that never rendered
   // does not silently swallow the news.
@@ -2117,6 +2139,76 @@ test("the catch-up says what changed while somebody was away, then clears", asyn
 
   const again = await client.request(catchUpPath);
   assert.equal(again.data.catchUp.empty, true);
+});
+
+test("the local model writes the catch-up's prose, and only its prose", async (t) => {
+  const prompts: string[] = [];
+  const runtime = await startRuntime(t, {
+    catchUpSummariser: async (prompt) => {
+      prompts.push(prompt);
+      return "Somebody fixed the retry loop while you were out.";
+    },
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "catch-up-summarised");
+  const catchUpPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/catch-up`;
+
+  const colleague = await runtime.store.createUser({
+    email: "catch-up-reader@example.com",
+    displayName: "Reader",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  await runtime.store.markCatchUpSeen(
+    DEFAULT_PROJECT_ID,
+    colleague.id,
+    "2026-01-01T00:00:00.000Z",
+  );
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "Fix the retry loop",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  await runtime.store.completeSubmittedTask(task.id, "integrated");
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: colleague.email, password: PASSWORD },
+  });
+  const caught = await client.request(catchUpPath);
+  assert.equal(caught.status, 200);
+  assert.equal(
+    caught.data.catchUp.summary,
+    "Somebody fixed the retry loop while you were out.",
+  );
+  // The model was handed the facts, not asked to go and find them.
+  assert.ok((prompts[0] ?? "").includes("Fix the retry loop"), prompts[0]);
+  // And it rewrote only the prose: the list and the counts are still the
+  // measured ones, so a wrong sentence cannot become a wrong catch-up.
+  assert.deepEqual(
+    caught.data.catchUp.lines.map((line: { text: string }) => line.text),
+    ["Fix the retry loop"],
+  );
+  assert.deepEqual(caught.data.catchUp.counts, {
+    landed: 1,
+    failed: 0,
+    messages: 0,
+    direct: 0,
+  });
+  assert.equal(
+    caught.data.catchUp.headline,
+    "1 change landed while you were away",
+  );
 });
 
 test("a catch-up carries only what its reader may see", async (t) => {

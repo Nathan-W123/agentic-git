@@ -5,8 +5,11 @@ import {
   buildCatchUpDigest,
   catchUpSince,
   formatCatchUpDocument,
+  sanitiseSummary,
+  summariseCatchUpLines,
   CATCH_UP_MAX_LINES,
   CATCH_UP_MAX_LOOKBACK_MS,
+  CATCH_UP_SUMMARY_MAX_CHARS,
   type CatchUpInput,
 } from "./catch-up.js";
 
@@ -147,4 +150,103 @@ test("the headline says the most important thing that happened", () => {
     "1 new message while you were away",
   );
   assert.equal(digest({ direct: 2 }).headline, "2 unread direct messages");
+});
+
+/** One landed change, which is the smallest digest worth summarising. */
+function oneChange() {
+  return digest({
+    landed: [{ objective: "Add a preview button", at: NOW }],
+  });
+}
+
+test("without a local model the digest still reads as prose", async () => {
+  const built = oneChange();
+  // The deterministic wording is present before any model is consulted, so a
+  // deployment without one shows the same document it always did.
+  assert.equal(built.summary, formatCatchUpDocument(built));
+  assert.ok(built.summary.includes("Add a preview button"));
+  const unchanged = await summariseCatchUpLines(built, undefined);
+  assert.equal(unchanged.summary, built.summary);
+});
+
+test("the local model's sentence replaces the wording, not the facts", async () => {
+  const built = digest({
+    landed: [{ objective: "Add a preview button", at: NOW }],
+    direct: 2,
+  });
+  const summarised = await summariseCatchUpLines(
+    built,
+    async () => "A preview button landed, and two direct messages are waiting.",
+  );
+  assert.equal(
+    summarised.summary,
+    "A preview button landed, and two direct messages are waiting.",
+  );
+  // Presentation only: the list and the counts are exactly what was measured.
+  assert.deepEqual(summarised.lines, built.lines);
+  assert.deepEqual(summarised.counts, built.counts);
+  assert.equal(summarised.headline, built.headline);
+});
+
+test("the model is given the facts it is meant to rewrite", async () => {
+  const prompts: string[] = [];
+  await summariseCatchUpLines(oneChange(), async (prompt) => {
+    prompts.push(prompt);
+    return "ok";
+  });
+  const prompt = prompts[0] ?? "";
+  assert.ok(prompt.includes("Add a preview button"), prompt);
+  // Told not to invent, because a small model asked for prose about six
+  // bullet points will otherwise supply detail nobody measured.
+  assert.ok(prompt.includes("Do not invent details"), prompt);
+});
+
+test("a quiet interval never reaches the model at all", async () => {
+  let asked = 0;
+  const quiet = await summariseCatchUpLines(digest(), async () => {
+    asked += 1;
+    return "there is nothing to say but here is a sentence anyway";
+  });
+  assert.equal(asked, 0);
+  assert.equal(quiet.summary, "");
+  assert.equal(quiet.empty, true);
+});
+
+test("a reply with nothing usable in it leaves the wording alone", async () => {
+  const built = oneChange();
+  for (const answer of [undefined, null, "", "   ", "```\n```"]) {
+    const summarised = await summariseCatchUpLines(built, async () => answer);
+    assert.equal(summarised.summary, built.summary, JSON.stringify(answer));
+  }
+});
+
+test("a model that throws is not a failed request", async () => {
+  const built = oneChange();
+  const threw = await summariseCatchUpLines(built, async () => {
+    throw new Error("no onnx binary for this platform");
+  });
+  assert.equal(threw.summary, built.summary);
+});
+
+test("a rambling reply is clipped on a whole word", () => {
+  const rambling = `${"a readable sentence ".repeat(40)}`;
+  const clipped = sanitiseSummary(rambling) ?? "";
+  assert.ok(clipped.length <= CATCH_UP_SUMMARY_MAX_CHARS + 1, clipped);
+  assert.ok(clipped.endsWith("…"), clipped);
+  assert.ok(!clipped.includes(" …"), clipped);
+});
+
+test("fencing and bullets the prompt asked against are taken off", () => {
+  assert.equal(
+    sanitiseSummary("```text\nThree changes landed.\n```"),
+    "Three changes landed.",
+  );
+  assert.equal(
+    sanitiseSummary("- Three changes landed."),
+    "Three changes landed.",
+  );
+  assert.equal(
+    sanitiseSummary("Three   changes\nlanded."),
+    "Three changes landed.",
+  );
 });

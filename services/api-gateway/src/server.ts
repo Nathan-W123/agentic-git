@@ -81,6 +81,7 @@ import {
 import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
   createChatterFilter,
+  createLocalSummariser,
   type ChatterFilter,
 } from "@coord/local-triage";
 import {
@@ -98,7 +99,10 @@ import {
   buildCatchUpDigest,
   catchUpSince,
   emptyCatchUpDigest,
+  summariseCatchUpLines,
+  CATCH_UP_SUMMARY_TIMEOUT_MS,
   type CatchUpChange,
+  type CatchUpSummariser,
 } from "./catch-up.js";
 import {
   formatSlashHelp,
@@ -2006,6 +2010,26 @@ function defaultChatterFilter(): ChatterFilter {
   return createChatterFilter();
 }
 
+/**
+ * The local model that phrases the catch-up, or nothing.
+ *
+ * Shares `COORD_LOCAL_TRIAGE` with the chatter filter: both are the same
+ * bargain — a small model on the machine, no network, no vendor bill — so a
+ * deployment that has turned local models off should not quietly keep one.
+ * Switched off, this returns `undefined` and the digest keeps its
+ * deterministic wording, which is what every failure produces anyway.
+ */
+function defaultCatchUpSummariser(): CatchUpSummariser | undefined {
+  const raw = process.env["COORD_LOCAL_TRIAGE"]?.trim().toLowerCase() ?? "";
+  if (["0", "false", "off", "no"].includes(raw)) {
+    return undefined;
+  }
+  const local = createLocalSummariser({
+    budgetMs: CATCH_UP_SUMMARY_TIMEOUT_MS,
+  });
+  return async (prompt) => await local.write(prompt);
+}
+
 /** The proposal out of an offer message, or nothing if this is not one. */
 export function autoClaimProposal(content: string): string | undefined {
   const at = content.indexOf(AUTO_CLAIM_OFFER_TAIL);
@@ -2982,6 +3006,15 @@ export interface ApiGatewayOptions {
    */
   chatterFilter?: ChatterFilter;
   /**
+   * Writes the catch-up digest's prose, when a local model can.
+   *
+   * Defaults to the local text model, or to nothing when
+   * `COORD_LOCAL_TRIAGE` switches it off. Injected by tests, which must not
+   * load a model to prove what the route does with its answer — and left out
+   * entirely by tests that want the deterministic wording.
+   */
+  catchUpSummariser?: CatchUpSummariser;
+  /**
    * Absolute origin this deployment is reached at, used to build links that
    * travel outside the browser. Defaults to `COORD_PUBLIC_URL`, and failing
    * that to the `Host` of the request that asked for the link.
@@ -3581,6 +3614,8 @@ export class ApiGateway {
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
   private readonly chatterFilter: ChatterFilter;
+  /** The local model that phrases the catch-up, when the deployment has one. */
+  private readonly catchUpSummariser: CatchUpSummariser | undefined;
   /** Configured origin for links that leave the browser, or "" to infer one. */
   private readonly publicUrl: string;
 
@@ -3593,6 +3628,8 @@ export class ApiGateway {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
     this.chatterFilter = options.chatterFilter ?? defaultChatterFilter();
+    this.catchUpSummariser =
+      options.catchUpSummariser ?? defaultCatchUpSummariser();
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
     if (!Number.isSafeInteger(this.bodyLimit) || this.bodyLimit < 1) {
       throw new RangeError("Request body limit must be a positive integer");
@@ -9358,27 +9395,29 @@ export class ApiGateway {
         principal.user.id,
       );
 
+      const catchUp = buildCatchUpDigest({
+        since,
+        now,
+        landed: tasks
+          .filter((task) => task.status === "integrated")
+          .map(asChange),
+        // Cancelled work is somebody's own decision, not news; only a task
+        // that stopped on its own is something they have to look at.
+        failed: tasks.filter((task) => task.status === "failed").map(asChange),
+        messages,
+        // Only conversations that moved while they were away. An older
+        // unread message is a badge they have already seen sitting on the
+        // inbox, and repeating it here would make the popup impossible to
+        // clear.
+        direct: conversations
+          .filter((conversation) => conversation.lastMessage.createdAt > since)
+          .reduce((total, conversation) => total + conversation.unread, 0),
+      });
+      // The facts are already right; this only rewrites how they read. A
+      // deployment with no local model, or one whose model is slow or
+      // unhelpful, gets the deterministic wording back unchanged.
       this.sendJson(response, 200, {
-        catchUp: buildCatchUpDigest({
-          since,
-          now,
-          landed: tasks
-            .filter((task) => task.status === "integrated")
-            .map(asChange),
-          // Cancelled work is somebody's own decision, not news; only a task
-          // that stopped on its own is something they have to look at.
-          failed: tasks
-            .filter((task) => task.status === "failed")
-            .map(asChange),
-          messages,
-          // Only conversations that moved while they were away. An older
-          // unread message is a badge they have already seen sitting on the
-          // inbox, and repeating it here would make the popup impossible to
-          // clear.
-          direct: conversations
-            .filter((conversation) => conversation.lastMessage.createdAt > since)
-            .reduce((total, conversation) => total + conversation.unread, 0),
-        }),
+        catchUp: await summariseCatchUpLines(catchUp, this.catchUpSummariser),
       });
       return;
     }

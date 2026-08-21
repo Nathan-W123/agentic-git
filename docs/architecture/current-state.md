@@ -59,11 +59,19 @@ The local Phase 1 product surface is complete:
   commands inside the configured Docker sandbox, and pipeline submission.
 - A sign-in catch-up: `GET /projects/{id}/catch-up` answers with the changes
   that landed, the work that stopped, and the messages waiting since the
-  viewer's own mark, assembled from the store rather than written by a model
-  so it is the same short document every time and costs nothing. The mark is
-  per person per project and moves only forward, advanced by
+  viewer's own mark. The facts are counted from the store, so the list and
+  the counts are the same every time and cost nothing; a small local model
+  then rewrites them into a sentence or two, which is what the popup shows.
+  That model runs in-process on CPU through `@coord/local-triage` — no
+  network, no vendor bill — and is strictly presentation: it is time-boxed,
+  it never sees anything the reader could not already see, and a deployment
+  where it is missing, slow, switched off through `COORD_LOCAL_TRIAGE`, or
+  simply unhelpful falls back to the deterministic wording, so a badly phrased
+  sentence can never become a wrong catch-up. The mark is per person per
+  project and moves only forward, advanced by
   `POST /projects/{id}/catch-up/seen`; a first visit and a quiet interval both
-  answer with nothing, so the popup only appears when there is news.
+  answer with nothing, so the popup only appears when there is news and the
+  model is never woken to say there is none.
 
 The web product is still a control room rather than a collaborative IDE.
 Presence, shared cursors, PTY terminal streams, and projection of agents'
