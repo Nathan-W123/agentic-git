@@ -4364,6 +4364,39 @@ button.chip.lg:hover {
     visibility 0s linear;
 }
 
+/* The heading is also the switch that rolls its own list up. Two lists share
+   one scroller, so a long roster of agents pushes the people off the top and
+   the other way about; closing the one you are not reading is what lets both
+   ends be seen at once. The "+" stays outside this button, so adding to a
+   list never doubles as folding it away. */
+.chan-sec-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  text-align: left;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.chan-sec-toggle svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--text-3);
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.chan-sec-toggle:hover svg {
+  color: var(--accent-bright);
+}
+
+/* Rolled up: the chevron points along the list it would bring back. */
+.chan-sec-closed .chan-sec-toggle svg {
+  transform: rotate(-90deg);
+}
+
 .chan-sec-label {
   flex: 1;
   min-width: 0;
@@ -4663,6 +4696,19 @@ button.chip.lg:hover {
   padding: 0 8px;
 }
 
+/* One list closed on its own heading, folded by the same `1fr` -> `0fr` the
+   whole-panel collapse uses. Clipped only here, never at rest: an agent's
+   usage card opens below its row and reaches past the bottom of the list, so
+   a list that cropped while open would swallow it (see `.rr-usage`). */
+.chan-roster.chan-roster-closed {
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s;
+}
+
 .roster-row {
   border-radius: 9px;
   transition: background 0.13s ease;
@@ -4901,15 +4947,27 @@ button.chip.lg:hover {
   color: var(--text-2);
 }
 
+/* Scaled to the roster's own face rather than in `.status-dot` itself, which
+   the profile card and the agent panel draw at their full size. */
+.roster-row .status-dot {
+  width: 6px;
+  height: 6px;
+  border-width: 1.25px;
+}
+
 .roster-row:hover {
   background: var(--bg-hover);
 }
 
+/* Compact on purpose. These two lists are the only thing in the panel now
+   that the channels have moved to the rail, and at a 30px face with 7px of
+   padding a room of a dozen people and agents ran past the bottom of the
+   screen before either list had finished. */
 .roster-row-main {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
+  gap: 8px;
+  padding: 4px 8px;
 }
 
 .roster-row .rr-body {
@@ -4918,7 +4976,7 @@ button.chip.lg:hover {
 }
 
 .roster-row .rr-name {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4926,13 +4984,8 @@ button.chip.lg:hover {
 }
 
 .roster-row .rr-role {
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--text-3);
-}
-
-.roster-row .rr-role.rr-role-empty {
-  font-style: italic;
-  opacity: 0.7;
 }
 
 /* One button, revealed the same way a channel row's is — see `.chan-row

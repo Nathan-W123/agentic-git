@@ -740,7 +740,7 @@ function personRow(person) {
         : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}"`
     }>
       <span class="rr-avatar">
-        ${avatar(name, 30, name, me ? myAvatar() : undefined)}
+        ${avatar(name, 22, name, me ? myAvatar() : undefined)}
         ${
           // Your own dot is green whenever you can see it: the page being
           // open is what "here" means, and a roster where everyone else has
@@ -882,7 +882,7 @@ function rosterRow(agent) {
         data-hover-value="${esc(agent.id)}" tabindex="0"
         aria-label="Open details for ${esc(agent.name)}">
         ${usageTip(agent)}
-        ${agentFace(agent, 30)}
+        ${agentFace(agent, 22)}
         ${statusDot(status, AGENT_STATUS_TITLE[status])}
       </span>
       <span class="rr-body">
@@ -897,15 +897,18 @@ function rosterRow(agent) {
               </form>`
             : `<div class="rr-name">${esc(agent.name)}</div>`
         }
-        <div class="rr-role${agent.role ? "" : " rr-role-empty"}">${
+        ${
+          // Only when there is one, exactly as `personRow` does it. An agent
+          // without a role said "No role set" under its name — a second line
+          // of grey text on most rows, stating that nothing had been stated,
+          // and costing the row twice the height to say it. The "…" beside
+          // the row is still where a role is written.
           agent.role
-            ? `${esc(agent.role)}${auditor && paused ? " · paused" : ""}${
-                agent.mine ? " · Your agent" : ""
-              }`
-            : agent.mine
-              ? "Your agent · no role set"
-              : "No role set"
-        }</div>
+            ? `<div class="rr-role">${esc(agent.role)}${
+                auditor && paused ? " · paused" : ""
+              }${agent.mine ? " · Your agent" : ""}</div>`
+            : ""
+        }
       </span>
       <span class="rr-more">${iconButton("dots", {
         act: "roster-agent-menu",
@@ -1006,10 +1009,23 @@ export function rosterMenuItems(agentId) {
  * headings fold up into the channel list when the sidebar collapses, one just
  * behind the other, and a rule cannot stagger two elements it cannot tell
  * apart.
+ *
+ * The label is also the control that rolls its own list up. Two lists share
+ * one scroller, so a long roster of agents pushes the people out of sight and
+ * the other way about; closing the one you are not reading is the only way to
+ * see both ends at once. `key` is what the handler and the stored preference
+ * both name the section by — the class is the stylesheet's, not the state's.
  */
-function section(label, act, value, title, cls) {
-  return `<div class="chan-sec ${cls}">
-    <span class="chan-sec-label">${esc(label)}</span>
+function section(label, act, value, title, cls, key) {
+  const open = state.rosterSectionsOpen[key] !== false;
+  const fold = open ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`;
+  return `<div class="chan-sec ${cls}${open ? "" : " chan-sec-closed"}">
+    <button type="button" class="chan-sec-toggle"
+      data-act="roster-section-toggle" data-value="${key}"
+      aria-expanded="${open}" title="${esc(fold)}" aria-label="${esc(fold)}">
+      ${icon("chevronDown")}
+      <span class="chan-sec-label">${esc(label)}</span>
+    </button>
     <button type="button" class="chan-sec-add" data-act="${act}"
       data-value="${value}" title="${esc(title)}" aria-label="${esc(title)}">
       ${icon("plus")}
@@ -1077,8 +1093,10 @@ function chanSidebar(activeRepositoryId) {
            height nobody has measured: the row of the grid goes to zero, the
            block inside it keeps its own height, and the box crops the
            difference. -->
-      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people")}
-      <div class="chan-roster chan-roster-people">
+      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people", "people")}
+      <div class="chan-roster chan-roster-people${
+        state.rosterSectionsOpen.people === false ? " chan-roster-closed" : ""
+      }">
         <div class="chan-roster-inner">
           ${
             // People first, then agents. The channel header already names the
@@ -1091,8 +1109,10 @@ function chanSidebar(activeRepositoryId) {
           }
         </div>
       </div>
-      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents")}
-      <div class="chan-roster chan-roster-agents">
+      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents", "agents")}
+      <div class="chan-roster chan-roster-agents${
+        state.rosterSectionsOpen.agents === false ? " chan-roster-closed" : ""
+      }">
         <div class="chan-roster-inner">
           ${
             // No empty state. The "+" on the heading directly above is both the

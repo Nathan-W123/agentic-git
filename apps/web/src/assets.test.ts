@@ -614,7 +614,7 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   // this action must not replace the app with render().
   const collapseAction = app.slice(
     app.indexOf('case "chan-collapse-toggle"'),
-    app.indexOf('case "chan-sidebar-close"'),
+    app.indexOf('case "roster-section-toggle"'),
   );
   assert.match(collapseAction, /classList\.toggle\(\s*"chan-collapsed"/u);
   assert.match(collapseAction, /persist\("ag\.chanCollapsed"/u);
@@ -634,11 +634,11 @@ test("people and agents only animate downward when the sidebar expands", async (
   // Each list is a clipping box around one block. Without the inner block
   // there is no height for the row to shrink away from, and the fold becomes
   // the cut it used to be.
-  assert.match(chats, /class="chan-roster chan-roster-people"/u);
-  assert.match(chats, /class="chan-roster chan-roster-agents"/u);
+  assert.match(chats, /class="chan-roster chan-roster-people/u);
+  assert.match(chats, /class="chan-roster chan-roster-agents/u);
   assert.match(chats, /class="chan-roster-inner"/u);
-  assert.match(chats, /section\("People",[^)]*"chan-sec-people"\)/u);
-  assert.match(chats, /section\("Agents",[^)]*"chan-sec-agents"\)/u);
+  assert.match(chats, /section\("People",[^)]*"chan-sec-people"/u);
+  assert.match(chats, /section\("Agents",[^)]*"chan-sec-agents"/u);
 
   // Folded, not switched off: the collapsed rail must no longer name the two
   // lists in its `display: none` set, and must give them somewhere to travel.
@@ -677,11 +677,60 @@ test("people and agents only animate downward when the sidebar expands", async (
   );
   const collapseAction = app.slice(
     app.indexOf('case "chan-collapse-toggle"'),
-    app.indexOf('case "chan-sidebar-close"'),
+    app.indexOf('case "roster-section-toggle"'),
   );
   assert.match(collapseAction, /markChanFolding\(shell\)/u);
   assert.match(app, /function markChanFolding\(/u);
   assert.match(app, /classList\.remove\("chan-folding"\)/u);
+});
+
+test("each roster is compact, unlabelled when empty, and folds on its heading", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const css = await publicFile("styles.css");
+
+  // People and agents are drawn at the same, smaller face — the two rosters
+  // must not disagree about how big somebody in the room is.
+  assert.match(chats, /avatar\(name, 22, name, me \? myAvatar\(\) : undefined\)/u);
+  assert.match(chats, /agentFace\(agent, 22\)/u);
+  assert.match(css, /\.roster-row \.status-dot \{[\s\S]{0,80}width: 6px;/u);
+  assert.match(css, /\.roster-row-main \{[\s\S]{0,120}padding: 4px 8px;/u);
+
+  // A role is shown when there is one and nothing is shown when there is
+  // not: no row says that nothing has been said about it.
+  assert.doesNotMatch(chats, /: "No role set"/u);
+  assert.doesNotMatch(chats, /Your agent · no role set/u);
+  assert.doesNotMatch(chats, /rr-role-empty/u);
+  assert.doesNotMatch(css, /rr-role-empty/u);
+  assert.match(chats, /agent\.role[\s\S]{0,80}<div class="rr-role">/u);
+
+  // The heading is the control, the "+" beside it is still the one that adds,
+  // and the fold reuses the collapse's own grid-row animation.
+  assert.match(chats, /class="chan-sec-toggle"\s*\n?\s*data-act="roster-section-toggle"/u);
+  assert.match(chats, /aria-expanded="\$\{open\}"/u);
+  assert.match(chats, /class="chan-sec-add" data-act="\$\{act\}"/u);
+  assert.match(
+    css,
+    /\.chan-roster\.chan-roster-closed \{[\s\S]{0,160}grid-template-rows: 0fr;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-sec-closed \.chan-sec-toggle svg \{\s*transform: rotate\(-90deg\);/u,
+  );
+
+  // Remembered in this browser, and applied in place so the fold has a
+  // before and an after to animate between.
+  assert.match(data, /rosterSectionsOpen: rememberedRosterSections\(\)/u);
+  assert.match(data, /stored\("ag\.rosterSectionsOpen", "\{\}"\)/u);
+  const foldAction = app.slice(
+    app.indexOf('case "roster-section-toggle"'),
+    app.indexOf('case "chan-sidebar-close"'),
+  );
+  assert.match(foldAction, /persist\("ag\.rosterSectionsOpen"/u);
+  assert.match(foldAction, /classList\.toggle\("chan-roster-closed"/u);
+  assert.match(foldAction, /setAttribute\("aria-expanded"/u);
+  assert.doesNotMatch(foldAction, /\brender\(\)/u);
 });
 
 test("the pink tools toggle animates without replacing its node", async () => {

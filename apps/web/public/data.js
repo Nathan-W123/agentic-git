@@ -18,6 +18,22 @@ export const API_ROOT = "/api/v1";
 const stored = (key, fallback = "") =>
   window.localStorage.getItem(key) ?? fallback;
 
+/**
+ * Which of the sidebar's two rosters this browser last left unrolled.
+ *
+ * Absent, or unreadable, means both: a first visit should show the room, and
+ * a value somebody's other tab half-wrote must not be the reason a list is
+ * missing with no way to tell why.
+ */
+function rememberedRosterSections() {
+  try {
+    const saved = JSON.parse(stored("ag.rosterSectionsOpen", "{}"));
+    return { people: saved?.people !== false, agents: saved?.agents !== false };
+  } catch {
+    return { people: true, agents: true };
+  }
+}
+
 export const state = {
   /* Session */
   principal: undefined,
@@ -287,6 +303,15 @@ export const state = {
    */
   navCollapsed: stored("ag.navCollapsed", "false") === "true",
   chanCollapsed: stored("ag.chanCollapsed", "false") === "true",
+  /**
+   * The people and agent lists, each open or rolled up on its own heading.
+   *
+   * Separate from `chanCollapsed`, which folds the whole panel away: this is
+   * "I know who is in here, give the other list the room", and it is
+   * remembered for the same reason the collapse is — a list that unrolls
+   * itself on every reload was never closed.
+   */
+  rosterSectionsOpen: rememberedRosterSections(),
   // Per-provider usage reports, filled lazily by the roster's hover.
   providerUsage: {},
   // Who is typing, keyed `repositoryId|threadId` so the main channel and
@@ -538,6 +563,7 @@ export function forgetOtherAccount(storage, userId) {
     "ag.favourites",
     "ag.notificationReadThrough",
     "ag.read",
+    "ag.rosterSectionsOpen",
   ];
   if (storage.getItem("ag.user") === userId) {
     return false;

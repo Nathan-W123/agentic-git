@@ -5092,6 +5092,25 @@ document.addEventListener("click", (event) => {
         });
       return;
     }
+    // One list rolled up or unrolled, and nothing else on the screen touched.
+    // The classes go on in place for the same reason the collapse above does
+    // it that way: a whole-screen render replaces the roster outright, which
+    // gives the new element its final height and leaves the fold nothing to
+    // animate between.
+    case "roster-section-toggle": {
+      const open = state.rosterSectionsOpen[value] === false;
+      state.rosterSectionsOpen[value] = open;
+      persist("ag.rosterSectionsOpen", JSON.stringify(state.rosterSectionsOpen));
+      const heading = node.closest(".chan-sec");
+      heading?.classList.toggle("chan-sec-closed", !open);
+      heading?.nextElementSibling?.classList.toggle("chan-roster-closed", !open);
+      const label = heading?.querySelector(".chan-sec-label")?.textContent ?? "";
+      const fold = `${open ? "Hide" : "Show"} ${label.trim().toLowerCase()}`;
+      node.setAttribute("aria-expanded", String(open));
+      node.setAttribute("aria-label", fold);
+      node.setAttribute("title", fold);
+      return;
+    }
     case "chan-sidebar-close":
       setChanDrawer(false);
       return;
