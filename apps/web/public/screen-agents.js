@@ -10,6 +10,7 @@
  */
 
 import {
+  addAgentToAllRepositories,
   api,
   cancelGitHubSignIn,
   cancelProviderSignIn,
@@ -765,10 +766,14 @@ async function signInAgent(providerId, mode, rerender) {
       );
       return false;
     }
-    toast(
-      `${agentLabelOf(providerId)} connected as ${settled?.account ?? "your account"}`,
-    );
     await loadProviders();
+    const failedRepositories = await addAgentToAllRepositories(providerId);
+    toast(
+      failedRepositories.length === 0
+        ? `${agentLabelOf(providerId)} connected as ${settled?.account ?? "your account"}`
+        : `${agentLabelOf(providerId)} connected, but could not be added to every repository`,
+      failedRepositories.length === 0 ? "ok" : "error",
+    );
     rerender();
     return true;
   }
@@ -788,7 +793,6 @@ async function signInAgent(providerId, mode, rerender) {
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const state_ = await providerSignInStatus(providerId, flow.flowId);
       if (state_.status === "completed") {
-        toast(`${agentLabelOf(providerId)} connected as ${state_.account ?? "your account"}`);
         // `loadProviders`, not `loadContext`: the context call reads
         // organizations, projects and repositories and never touches
         // `state.providers`. Refreshing the wrong thing is why a sign-in
@@ -798,6 +802,13 @@ async function signInAgent(providerId, mode, rerender) {
         // fault because storing a credential returns the new provider list
         // in its own response.
         await loadProviders();
+        const failedRepositories = await addAgentToAllRepositories(providerId);
+        toast(
+          failedRepositories.length === 0
+            ? `${agentLabelOf(providerId)} connected as ${state_.account ?? "your account"}`
+            : `${agentLabelOf(providerId)} connected, but could not be added to every repository`,
+          failedRepositories.length === 0 ? "ok" : "error",
+        );
         rerender();
         return true;
       }
@@ -921,6 +932,9 @@ export async function connectAgent(providerId, rerender) {
           <option value="org">Org-wide — anyone with access to a repository
             it works in can @mention it there</option>
         </select></label>
+      <p class="modal-hint">This agent will be added to every repository you
+        can currently access and to repositories you create or import later.
+        You can still remove or add it for any individual repository.</p>
       ${
         help.kinds.some(([id]) => id === "session_file")
           ? `<p class="modal-hint">${esc(SESSION_FILE_WARNING)}</p>`
@@ -947,7 +961,13 @@ export async function connectAgent(providerId, rerender) {
       String(values.label ?? "").trim(),
       values.visibility === "org" ? "org" : "personal",
     );
-    toast(`${providerId} connected`, "ok");
+    const failedRepositories = await addAgentToAllRepositories(providerId);
+    toast(
+      failedRepositories.length === 0
+        ? `${providerId} connected`
+        : `${providerId} connected, but could not be added to every repository`,
+      failedRepositories.length === 0 ? "ok" : "error",
+    );
     rerender();
   } catch (error) {
     toast(error.message, "error");

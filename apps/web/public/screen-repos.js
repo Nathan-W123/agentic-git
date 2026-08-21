@@ -12,6 +12,7 @@
  */
 
 import {
+  addConnectedAgentsToRepository,
   api,
   collaborators,
   currentUserName,
@@ -268,13 +269,18 @@ export async function createRepository(rerender) {
     // registers a numbered variant rather than refusing. Report the id that
     // actually exists, because that is what every other screen addresses it by.
     const id = created?.repository?.id ?? asked;
-    toast(
+    const createdMessage =
       id === asked
         ? `Created ${asked}`
-        : `Created ${id} — the name ${asked} was already taken`,
-      "ok",
-    );
+        : `Created ${id} — the name ${asked} was already taken`;
     await loadContext();
+    const failedAgents = await addConnectedAgentsToRepository(id);
+    toast(
+      failedAgents.length === 0
+        ? createdMessage
+        : `${createdMessage}, but some agents could not be added`,
+      failedAgents.length === 0 ? "ok" : "error",
+    );
     rerender();
   } catch (error) {
     toast(error.message, "error");
@@ -321,13 +327,21 @@ export async function connectRepository(rerender) {
       },
     );
     const importedId = imported?.repository?.id;
-    toast(
+    const importedMessage =
       importedId === undefined
         ? "Repository imported"
-        : `Repository imported as ${importedId}`,
-      "ok",
-    );
+        : `Repository imported as ${importedId}`;
     await loadContext();
+    const failedAgents =
+      importedId === undefined
+        ? []
+        : await addConnectedAgentsToRepository(importedId);
+    toast(
+      failedAgents.length === 0
+        ? importedMessage
+        : `${importedMessage}, but some agents could not be added`,
+      failedAgents.length === 0 ? "ok" : "error",
+    );
     rerender();
   } catch (error) {
     toast(error.message, "error");

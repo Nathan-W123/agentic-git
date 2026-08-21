@@ -4367,6 +4367,92 @@ export function addChannelAgent(repositoryId, agentId) {
   }
 }
 
+/**
+ * Gives a newly connected agent its useful default: present in every
+ * repository this account can currently reach.
+ *
+ * Membership stays explicit on the server. That matters because removing an
+ * agent from one repository must keep working; this writes the default once,
+ * at connection time, instead of deriving membership on every read and
+ * silently undoing a later removal.
+ */
+export async function addAgentToAllRepositories(agentId) {
+  if (!agentId || !state.projectId) {
+    return [];
+  }
+  const results = await Promise.allSettled(
+    state.repositories.map(async (repository) => {
+      await api(
+        channelPath(
+          repository.id,
+          `/agents/${encodeURIComponent(agentId)}/membership`,
+        ),
+        { method: "POST" },
+      );
+      // Keep a roster that has already loaded in agreement with the write.
+      // An unopened channel has no local roster to update and will read the
+      // membership normally when it is first visited.
+      if (state.channelRosterLoaded.has(repository.id)) {
+        const myId = currentUserId();
+        const roster = state.channelRoster[repository.id] ?? [];
+        if (
+          !roster.some(
+            (entry) => entry.userId === myId && entry.provider === agentId,
+          )
+        ) {
+          const agent = myAgents().find((candidate) => candidate.id === agentId);
+          state.channelRoster[repository.id] = [
+            ...roster,
+            {
+              userId: myId,
+              userName: currentUserName(),
+              provider: agentId,
+              visibility: agent?.visibility ?? "personal",
+              connected: true,
+            },
+          ];
+        }
+      }
+    }),
+  );
+  return state.repositories
+    .filter((_, index) => results[index]?.status === "rejected")
+    .map((repository) => repository.id);
+}
+
+/**
+ * Adds every agent this account has connected to a repository created or
+ * imported after those connections were made. Together with
+ * {@link addAgentToAllRepositories}, this covers both orders without turning
+ * membership into a derived value, so repository-level remove/add controls
+ * remain authoritative.
+ */
+export async function addConnectedAgentsToRepository(repositoryId) {
+  if (!repositoryId || !state.projectId) {
+    return [];
+  }
+  if (!state.providersLoaded) {
+    await loadProviders();
+  }
+  const connected = myAgents().filter(
+    (agent) => agent.mine === true && agent.connected,
+  );
+  const results = await Promise.allSettled(
+    connected.map((agent) =>
+      api(
+        channelPath(
+          repositoryId,
+          `/agents/${encodeURIComponent(agent.id)}/membership`,
+        ),
+        { method: "POST" },
+      ),
+    ),
+  );
+  return connected
+    .filter((_, index) => results[index]?.status === "rejected")
+    .map((agent) => agent.id);
+}
+
 /** The membership-removing counterpart to {@link addChannelAgent}. */
 export function removeChannelAgent(repositoryId, agentId) {
   if (!repositoryId || !agentId) {
