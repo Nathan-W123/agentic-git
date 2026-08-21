@@ -62,6 +62,7 @@ class TestAgent implements AgentAdapter {
   public readonly executionVersions: number[] = [];
   public readonly scopeDecisions: ScopeChangeDecision[] = [];
   public readonly actionResults: AgentActionResult[] = [];
+  public readonly replanRequests: ReplanRequest[] = [];
   public cancelCount = 0;
 
   public constructor(
@@ -118,9 +119,10 @@ class TestAgent implements AgentAdapter {
 
   public async requestReplan(
     sessionId: string,
-    _request: ReplanRequest,
+    request: ReplanRequest,
   ): Promise<AgentPlan> {
     this.requireSession(sessionId);
+    this.replanRequests.push(structuredClone(request));
     return structuredClone(this.plan);
   }
 
@@ -2809,6 +2811,108 @@ test("a narrowing the authority will not record releases nothing", async () => {
     assert.equal(result.tasks[0]?.status, "integrated");
     assert.equal(
       result.tasks[0]?.plan.expectedFiles.includes("src/b.txt"),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a deferred waiter plans against the holder's in-progress edits", async () => {
+  // While admit keeps saying "come back later", the wait used to sleep and
+  // produce nothing. Now it plans against the holder's WIP so that when the
+  // holder lands, assessReplay can treat the advance as already accounted for.
+  // Speculation must not acquire leases — admit is never asked to revise.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-speculate-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const version = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const holderWorkspace = await fixture.workspaces.create({
+      taskId: "task_holder",
+      rootPath: path.join(root, "holder-workspaces"),
+      repository: fixture.repository,
+      baseVersion: version,
+    });
+    await writeFile(
+      path.join(holderWorkspace.path, "src", "a.txt"),
+      "holder wip\n",
+      "utf8",
+    );
+    const holderRun = await store.createRun({
+      repository: fixture.repository,
+      mode: "coordinated",
+      baseVersion: version,
+    });
+    await store.saveWorkspace(holderRun.id, {
+      id: holderWorkspace.id,
+      runId: holderRun.id,
+      taskId: "task_holder",
+      path: holderWorkspace.path,
+      isolation: holderWorkspace.isolation,
+      baseRevision: version.revision,
+      createdAt: holderWorkspace.createdAt,
+    });
+
+    const agent = new TestAgent(
+      "agent_waiter",
+      plan("task_waiter", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    let admits = 0;
+    let revisingAdmits = 0;
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+      planAuthority: {
+        async admit(request) {
+          if (request.revising === true) {
+            revisingAdmits += 1;
+          }
+          admits += 1;
+          if (admits <= 2) {
+            return {
+              outcome: "deferred",
+              retryAfterMs: 5,
+              blockedBy: ["task_holder"],
+              explanation: "src/a.txt is leased to task_holder",
+            };
+          }
+          return { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_waiter"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(revisingAdmits, 0);
+    const speculative = agent.replanRequests.filter(
+      (request) =>
+        request.canonicalChange.reason.includes("in progress") &&
+        (request.holderWorkingChanges ?? []).some(
+          (change) => change.path === "src/a.txt",
+        ),
+    );
+    assert.ok(
+      speculative.length >= 1,
+      "expected at least one speculative replan against holder WIP",
+    );
+    assert.equal(
+      result.audit.some(
+        (event) =>
+          event.type === "replan_requested" &&
+          event.data["speculative"] === true,
+      ),
       true,
     );
   } finally {

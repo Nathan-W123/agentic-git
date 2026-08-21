@@ -138,3 +138,63 @@ export function assessReplay(
     textual: [...new Set(textual)].sort(),
   };
 }
+
+/**
+ * What an actual advance still has that speculation did not already cover.
+ *
+ * Used when a waiting task planned against a holder's in-progress edits: on
+ * wake, only the residual can disturb the plan. Empty means the speculation
+ * already accounted for what landed, so the task can start without another
+ * planning round.
+ */
+export function residualAdvance(
+  actual: CanonicalAdvance,
+  speculated: CanonicalAdvance,
+): CanonicalAdvance {
+  const notSpeculated = (
+    changed: readonly string[],
+    covered: readonly string[],
+  ): string[] => {
+    const set = new Set(covered.map(key));
+    return changed.filter((value) => !set.has(key(value)));
+  };
+  return {
+    changedFiles: notSpeculated(actual.changedFiles, speculated.changedFiles),
+    changedSymbols: notSpeculated(
+      actual.changedSymbols,
+      speculated.changedSymbols,
+    ),
+    changedApis: notSpeculated(actual.changedApis, speculated.changedApis),
+    changedSchemas: notSpeculated(
+      actual.changedSchemas,
+      speculated.changedSchemas,
+    ),
+    changedConfigKeys: notSpeculated(
+      actual.changedConfigKeys,
+      speculated.changedConfigKeys,
+    ),
+    changedTests: notSpeculated(actual.changedTests, speculated.changedTests),
+    changedServices: notSpeculated(
+      actual.changedServices,
+      speculated.changedServices,
+    ),
+  };
+}
+
+/**
+ * Whether every file speculation predicted actually appears in the advance.
+ *
+ * A holder that fails or lands a different set leaves the speculative plan
+ * assuming edits that never happened; that is invalid on wake and falls back
+ * to today's replan.
+ */
+export function speculationLanded(
+  speculated: CanonicalAdvance,
+  actual: CanonicalAdvance,
+): boolean {
+  if (speculated.changedFiles.length === 0) {
+    return true;
+  }
+  const landed = new Set(actual.changedFiles.map(key));
+  return speculated.changedFiles.every((file) => landed.has(key(file)));
+}

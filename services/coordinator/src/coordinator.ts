@@ -50,6 +50,7 @@ import {
   type CoordinationRunResult,
   type CoordinatorDecision,
   type FilePatchStatus,
+  type HolderWorkingChange,
   type ReplanRequest,
   type ResourceType,
   type ScopeChangeDecision,
@@ -84,7 +85,12 @@ import {
   approvedSchemaResources,
   structuralConflict,
 } from "./plan-admission.js";
-import { assessReplay } from "./replay.js";
+import {
+  assessReplay,
+  residualAdvance,
+  speculationLanded,
+  type CanonicalAdvance,
+} from "./replay.js";
 import { RunRecorder } from "./run-recorder.js";
 import { TaskCancellationRegistry } from "./task-cancellation.js";
 import {
@@ -351,6 +357,15 @@ interface PlannedTask extends CoordinatedTask {
   resumed?: OpenConversation;
   /** Set when admission granted less than this task planned. */
   admission?: PlanAdmission;
+  /**
+   * Holder WIP this task already planned against while deferred.
+   *
+   * Present only after a speculative replan. On wake, {@link assessReplay}
+   * grades the residual advance; when speculation covers what landed the
+   * task starts without another planning round. Never an admission — the
+   * holders still own the files.
+   */
+  speculatedAdvance?: CanonicalAdvance;
 }
 
 interface PreparedTask extends PlannedTask {
@@ -367,6 +382,18 @@ interface PreparedTask extends PlannedTask {
  * ends up reporting a wrapper the other end would have expanded.
  */
 const errorMessage = describeError;
+
+function emptyAdvance(): CanonicalAdvance {
+  return {
+    changedFiles: [],
+    changedSymbols: [],
+    changedApis: [],
+    changedSchemas: [],
+    changedConfigKeys: [],
+    changedTests: [],
+    changedServices: [],
+  };
+}
 
 /**
  * Every resource a plan claims, as the plan itself spells it.
@@ -802,6 +829,11 @@ export class Coordinator {
   private readonly cancellations: TaskCancellationRegistry | undefined;
   /** Where each task is working, for an action that needs to reach it. */
   private readonly taskWorkspacePaths = new Map<string, string>();
+  /**
+   * Live worktrees keyed by task id — the in-process half of looking up a
+   * holder's edits while a waiter is deferred. Cleared on cleanup.
+   */
+  private readonly taskWorkspaces = new Map<string, TaskWorkspace>();
   /** Actions each task has spent, for the cap. */
   private readonly actionsUsed = new Map<string, number>();
   public constructor(dependencies: CoordinatorDependencies = {}) {
@@ -1026,6 +1058,19 @@ export class Coordinator {
                 waveVersion,
                 index,
               );
+        // Speculation that covered this advance is why a moved task skipped
+        // replan. Advance plannedVersion so the next wave does not re-grade
+        // the holder's files as a fresh disturbance.
+        if (index !== undefined) {
+          const required = new Set(needsReplan);
+          for (const entry of moved) {
+            if (required.has(entry) || entry.speculatedAdvance === undefined) {
+              continue;
+            }
+            entry.plannedVersion = waveVersion;
+            entry.speculatedAdvance = undefined;
+          }
+        }
         // Every task still queued has to see the canonical state the previous
         // wave produced, and each of those replans is a full round trip to an
         // agent. Issued one at a time they dominate a real run: a fully
@@ -1052,6 +1097,7 @@ export class Coordinator {
               recorder,
               runAudit,
             );
+            entry.speculatedAdvance = undefined;
           }),
         );
 
@@ -1175,7 +1221,37 @@ export class Coordinator {
             // for. Executing what was granted rather than what was submitted
             // is what keeps scope enforcement, the ownership grants and the
             // change set all describing the same piece of work.
-            entry.plan = answer.plan;
+            //
+            // A speculative plan written against holder WIP that never landed
+            // is invalid on wake: fall back to today's replan against bare
+            // canonical before treating this as ready to execute. The
+            // replanned plan replaces `answer.plan` — speculation was never
+            // an admission of that overlay.
+            if (
+              entry.speculatedAdvance !== undefined &&
+              entry.plannedVersion.revision === waveVersion.revision
+            ) {
+              const index = await this.intelligence.index(
+                input.repository,
+                waveVersion.revision,
+              );
+              await this.replanTask(
+                input,
+                entry,
+                waveVersion,
+                index,
+                recorder,
+                runAudit,
+                {
+                  reason:
+                    "Speculative plan was against holder work that did not land",
+                  changedFiles: [],
+                },
+              );
+              entry.speculatedAdvance = undefined;
+            } else {
+              entry.plan = answer.plan;
+            }
             // Kept because `plan` alone cannot say why a file is missing from
             // it. Collection needs to tell "withheld, and somebody else is
             // writing it" from "never arbitrated", and only the decision knows.
@@ -1200,10 +1276,10 @@ export class Coordinator {
         }
 
         if (admittedWave.length === 0) {
-          // Nothing may start yet. Waiting beats spinning: the next pass
-          // re-reads canonical and replans anything the holder moved
-          // underneath, so the retry is made against the winner's result
-          // rather than against a base that no longer exists.
+          // Nothing may start yet. While we wait, plan against what the
+          // holders are already editing — so when they land, assessReplay
+          // finds the advance unsurprising and the waiter starts without a
+          // cold planning round. Speculation never admits or takes leases.
           deferredWaves += 1;
           if (deferredWaves > MAX_CONSECUTIVE_DEFERRED_WAVES) {
             throw new Error(
@@ -1211,6 +1287,13 @@ export class Coordinator {
                 "consecutive waves; the plan authority is not making progress",
             );
           }
+          await this.speculateDuringDeferredWait(
+            input,
+            pending,
+            waveVersion,
+            recorder,
+            runAudit,
+          );
           await new Promise((resolve) =>
             setTimeout(
               resolve,
@@ -2067,6 +2150,17 @@ export class Coordinator {
         required.push(entry);
         continue;
       }
+      // Speculation is a head start, not a guarantee. If the holder landed a
+      // different set than we planned against, fall back to today's replan.
+      // When speculation covers the advance, only the residual can disturb.
+      let graded: CanonicalAdvance = advance;
+      if (entry.speculatedAdvance !== undefined) {
+        if (!speculationLanded(entry.speculatedAdvance, advance)) {
+          required.push(entry);
+          continue;
+        }
+        graded = residualAdvance(advance, entry.speculatedAdvance);
+      }
       const assessment = assessReplay(
         entry.plan,
         {
@@ -2083,7 +2177,7 @@ export class Coordinator {
           agentExplanation: "",
           createdAt: new Date().toISOString(),
         },
-        advance,
+        graded,
       );
       if (assessment.semantic.length > 0 || assessment.textual.length > 0) {
         required.push(entry);
@@ -2099,19 +2193,50 @@ export class Coordinator {
     index: RepositoryIndex,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
+    /** Override when the caller already knows the notice (speculation, stale). */
+    noticeOverride?: Pick<CanonicalChangeNotice, "reason" | "changedFiles"> &
+      Partial<
+        Pick<
+          CanonicalChangeNotice,
+          | "changedSymbols"
+          | "changedApis"
+          | "changedSchemas"
+          | "changedConfigKeys"
+          | "changedTests"
+          | "changedServices"
+        >
+      >,
+    holderWorkingChanges?: readonly HolderWorkingChange[],
   ): Promise<void> {
-    const notice = await this.describeCanonicalAdvance(
-      input.repository,
-      entry.plannedVersion,
-      version,
-      "Blocking work changed canonical state before this task started",
-      index,
-    );
+    const notice: CanonicalChangeNotice =
+      noticeOverride === undefined
+        ? await this.describeCanonicalAdvance(
+            input.repository,
+            entry.plannedVersion,
+            version,
+            "Blocking work changed canonical state before this task started",
+            index,
+          )
+        : {
+            previousVersion: entry.plannedVersion,
+            canonicalVersion: version,
+            changedFiles: noticeOverride.changedFiles,
+            changedSymbols: noticeOverride.changedSymbols ?? [],
+            changedApis: noticeOverride.changedApis ?? [],
+            changedSchemas: noticeOverride.changedSchemas ?? [],
+            changedConfigKeys: noticeOverride.changedConfigKeys ?? [],
+            changedTests: noticeOverride.changedTests ?? [],
+            changedServices: noticeOverride.changedServices ?? [],
+            reason: noticeOverride.reason,
+          };
     const request: ReplanRequest = {
       taskId: entry.task.id,
       previousPlan: entry.plan,
       canonicalChange: notice,
       constraints: [...entry.decision.constraints],
+      ...(holderWorkingChanges === undefined || holderWorkingChanges.length === 0
+        ? {}
+        : { holderWorkingChanges: [...holderWorkingChanges] }),
     };
     await recorder?.status(entry.task.id, "replanning", notice.reason);
     await this.trace(recorder, runAudit, "canonical_changed", entry.task.id, {
@@ -2124,11 +2249,15 @@ export class Coordinator {
       changedConfigKeys: notice.changedConfigKeys,
       changedTests: notice.changedTests,
       changedServices: notice.changedServices,
+      ...(holderWorkingChanges === undefined
+        ? {}
+        : { speculative: true, holderWorkingChanges: holderWorkingChanges.length }),
     });
     await this.trace(recorder, runAudit, "replan_requested", entry.task.id, {
       previousPlanRevision: entry.planRevision,
       canonicalRevision: version.revision,
       changedFiles: notice.changedFiles,
+      ...(holderWorkingChanges === undefined ? {} : { speculative: true }),
     });
 
     const submitted = await entry.adapter.requestReplan(entry.session.id, request);
@@ -2160,7 +2289,176 @@ export class Coordinator {
       // name, and without them the record only shows half the declaration.
       expectedSymbols: entry.plan.expectedSymbols,
       grounding: entry.plan.grounding,
+      ...(holderWorkingChanges === undefined ? {} : { speculative: true }),
     });
+  }
+
+  /**
+   * While every ready task is deferred behind holders, plan against those
+   * holders' in-progress edits — without acquiring leases.
+   *
+   * Skipped when working changes cannot be read. Failures never disturb the
+   * wait: the next wave still falls back to today's cold replan on wake.
+   */
+  private async speculateDuringDeferredWait(
+    input: CoordinatorRunInput,
+    pending: readonly PlannedTask[],
+    version: CanonicalVersion,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    if (this.workspaces.listWorkingChanges === undefined) {
+      return;
+    }
+    const waiters = pending.filter((entry) => entry.decision.blockedBy.length > 0);
+    if (waiters.length === 0) {
+      return;
+    }
+    let index: RepositoryIndex | undefined;
+    for (const entry of waiters) {
+      try {
+        const overlay = await this.collectHolderWorkingChanges(
+          input,
+          entry.decision.blockedBy,
+          version,
+        );
+        if (overlay.changes.length === 0) {
+          continue;
+        }
+        index =
+          index ??
+          (await this.intelligence.index(input.repository, version.revision));
+        await this.replanTask(
+          input,
+          entry,
+          version,
+          index,
+          recorder,
+          runAudit,
+          {
+            reason:
+              "Blocking work is in progress; plan against its current edits",
+            changedFiles: overlay.advance.changedFiles,
+            changedSymbols: overlay.advance.changedSymbols,
+            changedApis: overlay.advance.changedApis,
+            changedSchemas: overlay.advance.changedSchemas,
+            changedConfigKeys: overlay.advance.changedConfigKeys,
+            changedTests: overlay.advance.changedTests,
+            changedServices: overlay.advance.changedServices,
+          },
+          overlay.changes,
+        );
+        entry.speculatedAdvance = overlay.advance;
+      } catch {
+        // Speculation is a head start. A failure leaves the waiter on today's
+        // path: sleep, then replan cold if canonical moved.
+      }
+    }
+  }
+
+  /**
+   * Holder WIP readable from in-process worktrees or co-located store paths.
+   */
+  private async collectHolderWorkingChanges(
+    input: CoordinatorRunInput,
+    holderTaskIds: readonly string[],
+    version: CanonicalVersion,
+  ): Promise<{
+    changes: HolderWorkingChange[];
+    advance: CanonicalAdvance;
+  }> {
+    const list = this.workspaces.listWorkingChanges?.bind(this.workspaces);
+    if (list === undefined) {
+      return {
+        changes: [],
+        advance: emptyAdvance(),
+      };
+    }
+    const changes: HolderWorkingChange[] = [];
+    const files = new Set<string>();
+    for (const holderId of holderTaskIds) {
+      const workspace = await this.resolveHolderWorkspace(
+        input,
+        holderId,
+        version,
+      );
+      if (workspace === undefined) {
+        continue;
+      }
+      let working: Array<{ path: string; status: FilePatchStatus }>;
+      try {
+        working = await list(workspace);
+      } catch {
+        continue;
+      }
+      for (const change of working) {
+        files.add(change.path);
+        changes.push({
+          path: change.path,
+          status: change.status,
+          ...(change.status === "deleted"
+            ? {}
+            : { absolutePath: path.join(workspace.path, change.path) }),
+        });
+      }
+    }
+    const changedFiles = [...files].sort((left, right) =>
+      left.localeCompare(right),
+    );
+    let advance: CanonicalAdvance = {
+      ...emptyAdvance(),
+      changedFiles,
+    };
+    try {
+      const index = await this.intelligence.index(
+        input.repository,
+        version.revision,
+      );
+      const resources = this.intelligence.changedResources(changedFiles, index);
+      advance = {
+        changedFiles,
+        changedSymbols: resources.symbols,
+        changedApis: resources.apis,
+        changedSchemas: resources.schemas,
+        changedConfigKeys: resources.configKeys,
+        changedTests: resources.tests,
+        changedServices: resources.services,
+      };
+    } catch {
+      // File list alone is still enough for assessReplay residual credit.
+    }
+    return { changes, advance };
+  }
+
+  private async resolveHolderWorkspace(
+    input: CoordinatorRunInput,
+    holderTaskId: string,
+    version: CanonicalVersion,
+  ): Promise<TaskWorkspace | undefined> {
+    const live = this.taskWorkspaces.get(holderTaskId);
+    if (live !== undefined) {
+      return live;
+    }
+    const stored = await this.store?.findWorkspaceByTaskId(holderTaskId);
+    if (stored === undefined) {
+      return undefined;
+    }
+    return {
+      id: stored.id,
+      taskId: stored.taskId,
+      path: stored.path,
+      rootPath: stored.path,
+      repository: input.repository,
+      baseVersion: {
+        sequence: version.sequence,
+        revision: stored.baseRevision,
+        branch: version.branch,
+        createdAt: stored.createdAt,
+      },
+      isolation:
+        stored.isolation === "docker" ? "docker" : "git-worktree",
+      createdAt: stored.createdAt,
+    };
   }
 
   private buildBlockers(
@@ -2632,6 +2930,7 @@ export class Coordinator {
             });
       entry.decision.workspaceId = workspace.id;
       this.taskWorkspacePaths.set(entry.task.id, workspace.path);
+      this.taskWorkspaces.set(entry.task.id, workspace);
       await recorder?.decision(entry.decision);
       await recorder?.workspace({
         id: workspace.id,
@@ -4284,6 +4583,8 @@ export class Coordinator {
     // Only the handler goes; any recorded stop reason stays readable, since
     // the paths that ran this cleanup still consult it to name the ending.
     this.cancellations?.release(taskId);
+    this.taskWorkspacePaths.delete(taskId);
+    this.taskWorkspaces.delete(taskId);
     // Closed, not dropped. Settlement is the one moment the coordinator
     // knows the session has no further use — the change set is collected,
     // and any conflict repair that wanted the agent again has already run.

@@ -2377,6 +2377,31 @@ export class PostgresCoordinationStore implements CoordinationStore {
     );
   }
 
+  public async findWorkspaceByTaskId(
+    taskId: TaskId,
+  ): Promise<StoredWorkspace | undefined> {
+    const row = await this.row(
+      `SELECT id, run_id, task_id, path, isolation, base_revision, created_at
+       FROM workspaces
+       WHERE task_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [taskId],
+    );
+    if (row === undefined) {
+      return undefined;
+    }
+    return {
+      id: text(row, "id"),
+      runId: text(row, "run_id"),
+      taskId: text(row, "task_id"),
+      path: text(row, "path"),
+      isolation: text(row, "isolation"),
+      baseRevision: text(row, "base_revision"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
   public async saveChangeSet(
     runId: string,
     changeSet: ChangeSet,

@@ -1540,6 +1540,13 @@ export interface CoordinationStore {
   saveLeases(runId: string, leases: readonly ResourceLease[]): Promise<void>;
   releaseLeases(runId: string, taskId: TaskId): Promise<void>;
   saveWorkspace(runId: string, workspace: StoredWorkspace): Promise<void>;
+  /**
+   * The workspace a task is editing, if one is recorded.
+   *
+   * Used to read a holder's in-progress edits while another task waits on it.
+   * When several rows exist for the same task, the newest by `createdAt` wins.
+   */
+  findWorkspaceByTaskId(taskId: TaskId): Promise<StoredWorkspace | undefined>;
   saveChangeSet(runId: string, changeSet: ChangeSet): Promise<void>;
   addChangesetComment(
     input: AddChangesetCommentInput,

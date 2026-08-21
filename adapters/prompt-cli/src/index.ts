@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -22,6 +23,7 @@ import {
   scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
+  type HolderWorkingChange,
   type ReplanRequest,
   type ScopeChangeDecision,
 } from "@coord/shared-types";
@@ -1506,6 +1508,10 @@ export class PromptCliAdapter implements AgentAdapter {
       baseVersion: request.canonicalChange.canonicalVersion,
     });
     try {
+      await applyHolderWorkingOverlay(
+        record.planningWorkspace.path,
+        request.holderWorkingChanges,
+      );
       const plan = await this.runPlanning(
         record,
         record.planningWorkspace.path,
@@ -2393,6 +2399,15 @@ export class PromptCliAdapter implements AgentAdapter {
       `Objective: ${record.input.task.objective}`,
       `Previous plan: ${JSON.stringify(request.previousPlan)}`,
       `Canonical change: ${JSON.stringify(request.canonicalChange)}`,
+      ...(request.holderWorkingChanges === undefined ||
+      request.holderWorkingChanges.length === 0
+        ? []
+        : [
+            "Holder working changes (in-progress edits from tasks you are " +
+              "waiting on — already overlaid into this planning workspace; " +
+              "treat them as the likely result of those tasks, not as fact):",
+            JSON.stringify(request.holderWorkingChanges),
+          ]),
       `Coordinator constraints: ${JSON.stringify(request.constraints)}`,
       "Account for changed dependencies and remove stale file assumptions.",
       PLAN_SHAPE_INSTRUCTIONS,
@@ -2641,4 +2656,29 @@ export function createKiroAdapter(
   options: NamedPromptCliOptions,
 ): PromptCliAdapter {
   return new PromptCliAdapter({ ...options, profile: KIRO_PROFILE });
+}
+
+/**
+ * Overlay a holder's in-progress edits onto a planning worktree built from
+ * canonical. Speculative only — the holder still owns the files.
+ */
+async function applyHolderWorkingOverlay(
+  workspacePath: string,
+  changes: readonly HolderWorkingChange[] | undefined,
+): Promise<void> {
+  if (changes === undefined || changes.length === 0) {
+    return;
+  }
+  for (const change of changes) {
+    const target = path.join(workspacePath, change.path);
+    if (change.status === "deleted") {
+      await rm(target, { force: true });
+      continue;
+    }
+    if (change.absolutePath === undefined) {
+      continue;
+    }
+    await mkdir(path.dirname(target), { recursive: true });
+    await copyFile(change.absolutePath, target);
+  }
 }

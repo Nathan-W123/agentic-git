@@ -510,11 +510,34 @@ export interface CanonicalChangeNotice {
   reason: string;
 }
 
+/**
+ * One uncommitted edit from a holder a waiting task is planning against.
+ *
+ * Speculative only: the holder still owns the file. `absolutePath` is where
+ * the holder's worktree has the bytes, so a planning workspace can overlay
+ * them onto canonical; absent when the holder deleted the file.
+ */
+export interface HolderWorkingChange {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  absolutePath?: string;
+}
+
 export interface ReplanRequest {
   taskId: TaskId;
   previousPlan: AgentPlan;
   canonicalChange: CanonicalChangeNotice;
   constraints: string[];
+  /**
+   * In-progress edits from holders this task is deferred behind.
+   *
+   * Present only for speculative replans during a deferred wait: plan against
+   * canonical plus these overlays. Not an admission — leases stay with the
+   * holders. When they land, {@link CanonicalChangeNotice} amend covers any
+   * residual mismatch; when speculation is invalid on wake, fall back to a
+   * cold replan.
+   */
+  holderWorkingChanges?: HolderWorkingChange[];
 }
 
 export interface ScopeChangeRequest {
