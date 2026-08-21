@@ -5685,11 +5685,16 @@ button.chip.lg:hover {
 }
 
 .cmsg-file-mark {
+  display: inline-grid;
+  place-items: center;
   flex: none;
-  width: 1ch;
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: 11.5px;
+  width: 12px;
   direction: ltr;
+}
+
+.cmsg-file-mark .ui-icon {
+  width: 12px;
+  height: 12px;
 }
 
 .cmsg-file.added .cmsg-file-mark {
@@ -5945,12 +5950,17 @@ button.chip.lg:hover {
 }
 
 .composer-attachment-remove {
+  display: grid;
+  place-items: center;
   width: 22px;
   height: 22px;
   border-radius: 50%;
   color: var(--text-3);
-  font-size: 17px;
-  line-height: 1;
+}
+
+.composer-attachment-remove .ui-icon {
+  width: 13px;
+  height: 13px;
 }
 
 .composer-attachment-remove:hover {
@@ -6041,6 +6051,20 @@ button.chip.lg:hover {
 
 .cmsg-text p + p {
   margin-top: 7px;
+}
+
+.cmsg-library-notice {
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+}
+
+.cmsg-library-notice > .ui-icon {
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  color: var(--accent-bright);
 }
 
 .cmsg-text .rt-list {
@@ -6251,20 +6275,21 @@ button.chip.lg:hover {
   display: none;
 }
 
-/* The same caret the thinking block turns, for the same reason: open and
-   closed have to be distinguishable without reading the label. */
-.thread-summary > summary::before {
-  content: "";
-  width: 0;
-  height: 0;
-  border-left: 5px solid currentColor;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  transition: transform 0.15s ease;
+/* The same library caret the thinking block turns, for the same reason: open
+   and closed have to be distinguishable without reading the label. */
+.tt-caret {
+  display: inline-flex;
   flex: none;
+  transition: transform 0.15s ease;
 }
 
-.thread-summary[open] > summary::before {
+.tt-caret .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.thread-summary[open] > summary .tt-caret,
+.thread-thinking[open] > summary .tt-caret {
   transform: rotate(90deg);
 }
 
@@ -9504,23 +9529,6 @@ dialog.modal[open]::backdrop {
   display: none;
 }
 
-/* A caret that turns, so open and closed are distinguishable at a glance
-   without reading the label. */
-.thread-thinking > summary::before {
-  content: "";
-  width: 0;
-  height: 0;
-  border-left: 5px solid currentColor;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  transition: transform 0.15s ease;
-  flex: none;
-}
-
-.thread-thinking[open] > summary::before {
-  transform: rotate(90deg);
-}
-
 .thread-thinking > summary:hover {
   color: var(--text-2, #b6bdd0);
 }
@@ -9537,7 +9545,7 @@ dialog.modal[open]::backdrop {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .thread-thinking > summary::before {
+  .tt-caret {
     transition: none;
   }
 }

@@ -464,7 +464,7 @@ function draftAttachmentPreviews(
         <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
         <button type="button" class="composer-attachment-remove"
           data-act="${esc(removeAct)}" data-value="${esc(attachment.id)}"
-          aria-label="Remove ${esc(attachment.alt)}">&times;</button>
+          aria-label="Remove ${esc(attachment.alt)}">${icon("close")}</button>
       </div>`,
     )
     .join("")}</div>`;
@@ -1410,6 +1410,30 @@ const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
  */
 const PLAN_LAPSED_PREFIX = "⌛ Plan expired";
 
+/**
+ * Protocol notices still carry their legacy symbol so older clients can
+ * recognise them. The symbol is not shown: Lattice renders the matching mark
+ * from the shared icon set, just like every other interface glyph.
+ */
+const NOTICE_ICONS = [
+  { prefix: HOLD_NOTICE_PREFIX, marker: "⏸ ", iconName: "pause" },
+  { prefix: PLAN_LAPSED_PREFIX, marker: "⌛ ", iconName: "clock" },
+];
+
+function messageBodyWithIcons(entry, repositoryId) {
+  const content = String(entry.content ?? "");
+  const notice = NOTICE_ICONS.find(({ prefix }) => content.startsWith(prefix));
+  if (notice === undefined) {
+    return messageBody(content, repositoryId, entry.mentions);
+  }
+  return `<div class="cmsg-library-notice">${icon(notice.iconName)}
+    <div>${messageBody(
+      content.slice(notice.marker.length),
+      repositoryId,
+      entry.mentions,
+    )}</div></div>`;
+}
+
 /** Root kinds spoken by an agent rather than a person or the coordinator. */
 const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome"]);
 
@@ -1525,7 +1549,11 @@ function threadMessageReference(entry, repositoryId) {
  * edits, then deletions — since that is the order somebody reviewing a change
  * reads it in.
  */
-const CHANGED_FILE_MARK = { added: "+", modified: "~", deleted: "−" };
+const CHANGED_FILE_ICON = {
+  added: "plus",
+  modified: "pencil",
+  deleted: "trash",
+};
 const CHANGED_FILE_ORDER = { added: 0, modified: 1, deleted: 2 };
 
 function changedFilesBlock(entry, repositoryId) {
@@ -1585,9 +1613,9 @@ function changedFilesBlock(entry, repositoryId) {
                     : ` data-task="${esc(entry.taskId)}"`
                 }
                 title="Open ${esc(file.path)}"`
-        }><span class="cmsg-file-mark">${
-          CHANGED_FILE_MARK[file.status] ?? "~"
-        }</span><span class="cmsg-file-path">${esc(file.path)}</span>${counts(
+        }><span class="cmsg-file-mark">${icon(
+          CHANGED_FILE_ICON[file.status] ?? "pencil",
+        )}</span><span class="cmsg-file-path">${esc(file.path)}</span>${counts(
           num(file.added),
           num(file.removed),
         )}</li>`,
@@ -2040,11 +2068,7 @@ function messageRow(
       <div class="cmsg-text">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
-          : messageBody(
-              entry.content,
-              repositoryId,
-              entry.mentions,
-            )
+          : messageBodyWithIcons(entry, repositoryId)
       }</div>
       ${
         // Said plainly, beside a way to try again. The resend re-posts the
@@ -4781,6 +4805,7 @@ function threadThinkingBlock(rootId, turn, index) {
     state.thinkingOpen[key] === true ? " open" : ""
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
+      <span class="tt-caret">${icon("chevronRight")}</span>
       <span class="tt-label">Thinking</span>
       <span class="tt-count">${esc(count)}</span></summary>
     <div class="tt-body">${
@@ -4935,6 +4960,7 @@ function summaryBlock(reply, repositoryId) {
     state.summaryOpen[reply.id] === false ? "" : " open"
   }>
     <summary data-act="summary-toggle" data-value="${esc(reply.id)}">
+      <span class="tt-caret">${icon("chevronRight")}</span>
       <span class="tt-label">Summary</span>
       <span class="ts-peek">${esc(
         firstLine.length > 90 ? `${firstLine.slice(0, 87)}…` : firstLine,
