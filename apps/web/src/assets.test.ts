@@ -2999,6 +2999,14 @@ test("the invite screen lets an existing account sign in instead", async () => {
   assert.match(app, /account_exists/u);
 });
 
+test("settings only lists invitations that are still pending", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function invitationsCard");
+  const body = app.slice(start, app.indexOf("\nasync function savePolicy", start));
+  assert.match(body, /\.filter\(\s*\(invitation\) => invitation\.status === "pending"/u);
+  assert.match(body, /No pending invitations/u);
+});
+
 /**
  * A call sign has one job: to be the only thing it could refer to.
  *

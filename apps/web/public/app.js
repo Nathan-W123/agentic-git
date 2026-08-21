@@ -2440,9 +2440,14 @@ async function revokeRepositoryGrantAction(repositoryId, userId) {
   }
 }
 
-/** Pending and spent invitations, for the Settings screen. */
+/** Pending invitations, for the Settings screen. */
 function invitationsCard() {
-  const rows = state.invitations ?? [];
+  // Accepted, revoked, and expired offers are historical records rather than
+  // people still waiting to join. Keep this surface focused on invitations
+  // that can still be acted on.
+  const rows = (state.invitations ?? []).filter(
+    (invitation) => invitation.status === "pending",
+  );
   return `<section class="card">
     <div class="panel-head">
       <div><h3>People</h3><p>Invitations into ${esc(
@@ -2457,7 +2462,7 @@ function invitationsCard() {
     ${
       rows.length === 0
         ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
-            No invitations yet. An invitation grants one repository by
+            No pending invitations. An invitation grants one repository by
             default, so sharing something does not hand over everything.
             </div></span></div>`
         : rows
