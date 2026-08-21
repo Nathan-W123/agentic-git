@@ -20,6 +20,7 @@ import {
   activeChannelId,
   activeTasks,
   agentStatus,
+  agentWorkingProgress,
   agentsThinkingIn,
 api,
   canDeleteChannelEntry,
@@ -293,6 +294,15 @@ function usageTip(agent) {
  */
 function statusDot(status, title) {
   return `<span class="status-dot status-${status}" title="${esc(title)}"></span>`;
+}
+
+/** One agent icon with either its status dot or its live progress pie. */
+function statusAgentFace(agent, size, repositoryId) {
+  const status = agentStatus(agent, repositoryId);
+  return agentFace(agent, size, {
+    status,
+    progress: agentWorkingProgress(agent, repositoryId),
+  });
 }
 
 /**
@@ -874,7 +884,6 @@ function rosterRow(agent) {
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
-  const status = agentStatus(agent, activeChannelId());
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
@@ -882,8 +891,7 @@ function rosterRow(agent) {
         data-hover-value="${esc(agent.id)}" tabindex="0"
         aria-label="Open details for ${esc(agent.name)}">
         ${usageTip(agent)}
-        ${agentFace(agent, 22)}
-        ${statusDot(status, AGENT_STATUS_TITLE[status])}
+        ${statusAgentFace(agent, 22, activeChannelId())}
       </span>
       <span class="rr-body">
         ${
@@ -1817,7 +1825,7 @@ function authorIdentity(repositoryId, entry, author) {
       act: "agent-panel-open",
       value: String(author.agent.id ?? ""),
       name: author.name,
-      face: agentFace(author.agent, 38),
+      face: statusAgentFace(author.agent, 38, repositoryId),
       // What the agent is here for, which is the line its roster row leads
       // with too. "Your agent" is worth saying on a shared transcript: whose
       // an agent is decides who may task it.
@@ -1903,13 +1911,16 @@ function profileCard(identity) {
   }
   return `<span class="profile-card" role="tooltip">
     <span class="profile-card-head">
-      <span class="profile-card-face">${identity.face}${statusDot(
-        identity.status,
-        // No tooltip on the dot: the line under it already says this in
-        // words, and a native tooltip opening on top of a card that is
-        // itself a tooltip is one hover producing two answers.
-        "",
-      )}</span>
+      <span class="profile-card-face">${identity.face}${
+        identity.kind === "agent"
+          ? ""
+          : statusDot(
+              identity.status,
+              // No tooltip on the dot: the line under it already says this
+              // in words, and nested native tooltips obscure the card.
+              "",
+            )
+      }</span>
       <span class="profile-card-id">
         <span class="profile-card-name">${esc(identity.name)}</span>
         ${
@@ -1925,9 +1936,9 @@ function profileCard(identity) {
 }
 
 /** The face a message is drawn with, at whatever size is asked for. */
-function authorFace(author, size) {
+function authorFace(author, size, repositoryId) {
   return author.agent !== undefined
-    ? agentFace(author.agent, size)
+    ? statusAgentFace(author.agent, size, repositoryId)
     : avatar(
         author.name,
         size,
@@ -2006,7 +2017,10 @@ function messageRow(
   // `threadSummaryLink`. It used to be a bar on its own line under the route,
   // which spent a full line of the room saying something no reader could
   // attribute to anybody in a thread with more than one participant.
-  const progress = channelThread ? threadProgress(entry) : undefined;
+  const progress =
+    channelThread && threadIsWorking(entry)
+      ? (threadProgress(entry) ?? 0)
+      : undefined;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
@@ -2066,7 +2080,7 @@ function messageRow(
         ? ""
         : `<span class="cmsg-avatar">${identityWrap(
             identity,
-            authorFace(author, 32),
+            authorFace(author, 32, repositoryId),
           )}</span>`
     }
     <div class="cmsg-body">
@@ -4091,8 +4105,7 @@ function agentSpec(agent, repositoryId) {
     <div class="aspec-content">
       <section class="aspec-head">
         <span class="aspec-face">
-          ${agentFace(agent, 68)}
-          ${statusDot(status, AGENT_STATUS_TITLE[status])}
+          ${statusAgentFace(agent, 68, repositoryId)}
         </span>
         <h2>${esc(agent.name)}</h2>
         <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
@@ -4233,7 +4246,7 @@ function agentPanel() {
         tab === "history" ? "Agent history" : tab === "chat" ? "Agent chat" : "Agent",
       )}
       <span class="dm-head-name">
-        ${agentFace(agent, 20)}
+        ${statusAgentFace(agent, 20, repositoryId)}
         ${esc(agent.name)}
       </span>
       <span class="spacer"></span>

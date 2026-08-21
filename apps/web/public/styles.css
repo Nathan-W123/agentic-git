@@ -949,6 +949,20 @@ svg.ui-icon {
   border: 2px solid var(--bg-card);
 }
 
+/* One status treatment per agent face. While work is live, the progress pie
+   replaces the corner presence dot and begins fully dark at pickup. */
+.agent-face .agent-run {
+  position: absolute;
+  inset: -1px;
+  z-index: 1;
+  border-radius: 50%;
+  background: conic-gradient(
+    color-mix(in srgb, var(--accent) 42%, transparent) calc(var(--run, 0) * 1%),
+    rgba(0, 0, 0, 0.62) 0
+  );
+  pointer-events: none;
+}
+
 /* Working, so it breathes — see `.status-working`, which this is the smaller
    sibling of. `online` here means running a task, not merely connected. */
 .presence-online {

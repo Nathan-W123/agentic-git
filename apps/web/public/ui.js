@@ -964,9 +964,17 @@ export function agentDoodle(kind) {
  * `agent.color` is the owner's identity colour; callers pass the colour of
  * whoever the agent belongs to, which is what makes a shared view legible.
  */
-export function agentFace(agent, size = 34) {
+export function agentFace(agent, size = 34, indicator = {}) {
   const kind = agentKindOf(agent?.provider ?? agent?.id);
-  const presence = agent?.presence ?? "offline";
+  const status = indicator.status ?? agent?.presence ?? "offline";
+  const presence =
+    status === "working" || status === "online"
+      ? "online"
+      : status === "idle"
+        ? "idle"
+        : "offline";
+  const progress = Number(indicator.progress);
+  const working = Number.isFinite(progress);
   const color = safeColor(agent?.color) ?? "var(--accent)";
   // The vendor's own mark rather than a drawn character: an agent running on
   // Claude shows Claude's, one running on Codex shows Codex's, and a reader
@@ -981,11 +989,17 @@ export function agentFace(agent, size = 34) {
   // fill its container: a 30px face rendered 300px wide and made the chats
   // roster unnavigable. A number that has to be mirrored in a stylesheet to
   // mean anything is not a size argument, it is a trap.
-  return `<span class="agent-face" data-kind="${kind}"
-    data-presence="${presence}" style="color:${color};--face-size:${Number(size)}px"
+  return `<span class="agent-face${working ? " agent-face-working" : ""}" data-kind="${kind}"
+    data-presence="${presence}" style="color:${color};--face-size:${Number(size)}px${
+      working ? `;--run:${Math.max(0, Math.min(100, progress))}` : ""
+    }"
     title="${esc(
       agent?.name ?? AGENTS[kind].label,
-    )}">${vendorMark(kind)}<i class="presence presence-${presence}"></i></span>`;
+    )}">${vendorMark(kind)}${
+      working
+        ? '<i class="agent-run" aria-label="Working"></i>'
+        : `<i class="presence presence-${presence}"></i>`
+    }</span>`;
 }
 
 /**

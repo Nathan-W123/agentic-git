@@ -3224,6 +3224,22 @@ export function agentStatus(agent, repositoryId) {
   return agent.visibility === "personal" ? "personal" : "idle";
 }
 
+/** Progress for the task this agent has picked up, including the pre-task frame. */
+export function agentWorkingProgress(agent, repositoryId) {
+  if (!agentIsWorking(agent, repositoryId)) {
+    return undefined;
+  }
+  const task = state.tasks.find(
+    (candidate) =>
+      candidate.repositoryId === repositoryId &&
+      taskIsWorking(candidate) &&
+      taskBelongsToAgent(candidate, agent),
+  );
+  // A busy frame arrives before its task. Zero intentionally paints the face
+  // dark immediately; the pie begins filling once the task record follows.
+  return task === undefined ? 0 : taskProgress(task);
+}
+
 function agentIsWorking(agent, repositoryId) {
   const now = Date.now();
   for (const [taskId, entry] of Object.entries(state.agentBusy)) {

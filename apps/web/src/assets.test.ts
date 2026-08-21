@@ -1775,18 +1775,18 @@ test("a connected agent is not painted as a working one", async () => {
     "presence must be derived, not asserted",
   );
 
-  // Both places that write the word beside a dot must agree with it: green is
-  // working, amber is connected and doing nothing.
-  for (const [name, source] of [
-    ["chat.js", chat],
-    ["screen-agents.js", agents],
-  ] as const) {
-    assert.match(
-      source,
-      /agent\.presence === "idle"\s*\?\s*"orange"/u,
-      `${name} should mark an idle agent amber, not green`,
-    );
-  }
+  // The private chat uses the avatar's single indicator; it must not add a
+  // second coloured dot beside the status word.
+  const chatHeader = chat.slice(
+    chat.indexOf("export function chatHeader"),
+    chat.indexOf("export function chatProgress"),
+  );
+  assert.match(chatHeader, /agentFace\(agent, 34, \{ status: agent\.status, progress \}\)/u);
+  assert.doesNotMatch(chatHeader, /<span class="dot/u);
+
+  // The full agents screen still writes a separate status word and dot, and
+  // an idle connection remains amber there rather than green.
+  assert.match(agents, /agent\.presence === "idle"\s*\?\s*"orange"/u);
 
   // And the count that opens the agents screen says what it counts.
   assert.match(agents, /label: "Connected agents",/u);
@@ -1795,6 +1795,28 @@ test("a connected agent is not painted as a working one", async () => {
     false,
     "a stored credential is not an active agent",
   );
+});
+
+test("working agent faces replace duplicate dots with a progress pie", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+  const row = chats.slice(
+    chats.indexOf("function rosterRow(agent)"),
+    chats.indexOf('/**\n * What the "..." on a roster row offers'),
+  );
+
+  assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
+  assert.doesNotMatch(row, /statusDot\(/u);
+  assert.match(ui, /working\s*\? '<i class="agent-run" aria-label="Working"><\/i>'/u);
+  assert.match(css, /\.agent-face \.agent-run \{[\s\S]*?conic-gradient/u);
+
+  const progress = data.slice(
+    data.indexOf("export function agentWorkingProgress"),
+    data.indexOf("function agentIsWorking"),
+  );
+  assert.match(progress, /return task === undefined \? 0 : taskProgress\(task\);/u);
 });
 
 test("an account's own agent is seen running at all", async () => {
@@ -3893,7 +3915,7 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.doesNotMatch(open, /notifications/u);
   assert.match(panel, /const requestedTab = state\.agentPanelTab \?\? "spec";/u);
   assert.match(panel, /: agentSpec\(agent, repositoryId\)/u);
-  assert.match(panel, /\$\{agentFace\(agent, 20\)\}/u);
+  assert.match(panel, /\$\{statusAgentFace\(agent, 20, repositoryId\)\}/u);
   assert.doesNotMatch(panel, /statusDot\(/u);
 
   // The alternate destinations still exist, but only behind controls that
