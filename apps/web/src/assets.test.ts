@@ -105,6 +105,41 @@ test("index.html names the digested build and is itself never cached", async () 
   assert.equal(html.includes('href="/styles.css"'), false);
 });
 
+test("the initial document paints an accessible loading shell", async () => {
+  const html = await publicFile("index.html");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  assert.match(html, /id="app-root" aria-busy="true"/u);
+  assert.doesNotMatch(html, /id="app-root"[^>]* hidden/u);
+  assert.match(
+    html,
+    /class="boot-shell" role="status" aria-live="polite"[\s\S]{0,100}aria-label="Loading Lattice"/u,
+  );
+  assert.match(html, /class="sr-only">Loading Lattice…<\/span>/u);
+
+  // The script owns the same shape after the document paint, then clears the
+  // busy state only when it has a real application or signed-out surface.
+  assert.match(app, /function renderLoadingShell\(root = \$\("#app-root"\)\) \{/u);
+  assert.match(app, /root\.setAttribute\("aria-busy", "true"\);/u);
+  assert.match(app, /root\.removeAttribute\("aria-busy"\);/u);
+  assert.match(app, /appRoot\.removeAttribute\("aria-busy"\);/u);
+
+  assert.match(css, /\.boot-shell \{/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.skeleton \{\s*animation: none;/u,
+  );
+
+  // Rewriting module and stylesheet names for immutable delivery must leave
+  // the immediate document body intact.
+  const assets = await loadStaticAssets();
+  const served = assets.get("/index.html")?.body.toString("utf8") ?? "";
+  assert.match(served, /id="app-root" aria-busy="true"/u);
+  assert.match(served, /class="boot-shell" role="status"/u);
+  assert.match(served, /src="\/app\.[0-9a-f]{12}\.js"/u);
+});
+
 test("a digested module imports its dependencies by their digested names", async () => {
   const assets = await loadStaticAssets();
   const app = [...assets.keys()].find((url) =>
@@ -2565,7 +2600,10 @@ test("channel @mentions include repository guests and surface directed unread pi
 
   const participants = data.slice(
     data.indexOf("export function channelParticipants"),
-    data.indexOf("\nfunction seedMessages", data.indexOf("export function channelParticipants")),
+    data.indexOf(
+      "\nexport function channelMessagesFor",
+      data.indexOf("export function channelParticipants"),
+    ),
   );
   assert.match(participants, /state\.channelPeople\[repositoryId\]/u);
   assert.match(participants, /member\.user\?\.displayName/u);
@@ -2590,7 +2628,10 @@ test("mention suggestions narrow agents and people by name or email", async () =
   const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
   const participantStart = data.indexOf("export function channelParticipants");
-  const participantEnd = data.indexOf("\nfunction seedMessages", participantStart);
+  const participantEnd = data.indexOf(
+    "\nexport function channelMessagesFor",
+    participantStart,
+  );
   assert.notEqual(participantStart, -1, "the participant resolver should exist");
   assert.notEqual(participantEnd, -1, "the participant resolver should have a boundary");
 

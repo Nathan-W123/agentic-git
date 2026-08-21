@@ -2449,7 +2449,32 @@ function matchesQuery(entry, query) {
   );
 }
 
+/** The transcript's shape while its first server page is unresolved. */
+function channelMessageSkeleton(repositoryId) {
+  return `<div class="chan-messages chan-messages-loading" id="chan-messages"
+    role="status" aria-live="polite" aria-busy="true"
+    aria-label="Loading channel messages"
+    data-scroll-key="channel:${esc(repositoryId)}">
+    <span class="sr-only">Loading channel messages…</span>
+    <div class="channel-skeleton-row" aria-hidden="true">
+      <span class="skeleton channel-skeleton-avatar"></span>
+      <span class="channel-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span>
+    </div>
+    <div class="channel-skeleton-row" aria-hidden="true">
+      <span class="skeleton channel-skeleton-avatar"></span>
+      <span class="channel-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span>
+    </div>
+    <div class="channel-skeleton-row" aria-hidden="true">
+      <span class="skeleton channel-skeleton-avatar"></span>
+      <span class="channel-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span>
+    </div>
+  </div>`;
+}
+
 function messageList(repositoryId) {
+  if (!state.channelLoaded.has(repositoryId)) {
+    return channelMessageSkeleton(repositoryId);
+  }
   const query = state.chanMsgQuery.trim().toLowerCase();
   const entries = channelMessagesFor(repositoryId).filter((entry) =>
     matchesQuery(entry, query),

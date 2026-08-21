@@ -1423,6 +1423,225 @@ svg.ui-icon {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------ loading shell ---- */
+
+#app-root[aria-busy="true"] {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+/* The same three panes as the chat screen, present in the document before a
+   module or API response can arrive. Nothing here is a pretend control: the
+   quiet blocks only reserve the geometry the real rail, room list and
+   transcript will occupy. */
+.boot-shell {
+  display: grid;
+  grid-template-columns: 60px 256px minmax(0, 1fr);
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 420px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.boot-skeleton-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg);
+}
+
+.boot-skeleton-mark,
+.boot-skeleton-rail-button {
+  display: block;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: var(--radius-lg);
+}
+
+.boot-skeleton-mark {
+  margin-bottom: 6px;
+}
+
+.boot-skeleton-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px 14px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+}
+
+.boot-skeleton-title,
+.boot-skeleton-search,
+.boot-skeleton-heading,
+.boot-skeleton-action {
+  display: block;
+}
+
+.boot-skeleton-title {
+  width: 44%;
+  height: 16px;
+}
+
+.boot-skeleton-search {
+  width: 100%;
+  height: 34px;
+}
+
+.boot-skeleton-nav {
+  display: grid;
+  gap: 13px;
+  padding-top: 5px;
+}
+
+.boot-skeleton-nav .skeleton {
+  display: block;
+  width: 82%;
+  height: 11px;
+}
+
+.boot-skeleton-nav .skeleton:nth-child(2),
+.boot-skeleton-nav .skeleton:nth-child(5) {
+  width: 62%;
+}
+
+.boot-skeleton-nav .skeleton:nth-child(4) {
+  width: 72%;
+}
+
+.boot-skeleton-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 59px minmax(0, 1fr) auto;
+  background: var(--room-tint);
+}
+
+.boot-skeleton-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.boot-skeleton-heading {
+  width: min(210px, 34%);
+  height: 16px;
+}
+
+.boot-skeleton-action {
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+}
+
+.boot-skeleton-messages {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 34px 28px;
+  overflow: hidden;
+}
+
+.boot-skeleton-message {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 560px);
+  gap: 12px;
+  align-items: start;
+}
+
+.boot-skeleton-avatar {
+  display: block;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+}
+
+.boot-skeleton-copy {
+  display: grid;
+  gap: 9px;
+  padding-top: 2px;
+}
+
+.boot-skeleton-copy .skeleton {
+  display: block;
+  width: 32%;
+  height: 11px;
+}
+
+.boot-skeleton-copy .skeleton:last-child {
+  width: 84%;
+  height: 13px;
+}
+
+.boot-skeleton-message:nth-child(2) .boot-skeleton-copy .skeleton:last-child {
+  width: 66%;
+}
+
+.boot-skeleton-message:nth-child(3) .boot-skeleton-copy .skeleton:last-child {
+  width: 76%;
+}
+
+.boot-skeleton-composer {
+  display: block;
+  height: 96px;
+  margin: 0 24px 20px;
+  border-radius: var(--radius-lg);
+}
+
+@media (max-width: 600px) {
+  .boot-shell {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .boot-skeleton-sidebar {
+    display: none;
+  }
+
+  .boot-skeleton-rail {
+    gap: 8px;
+    padding: 8px 6px;
+  }
+
+  .boot-skeleton-mark,
+  .boot-skeleton-rail-button {
+    width: 40px;
+  }
+
+  .boot-skeleton-head {
+    padding: 0 14px;
+  }
+
+  .boot-skeleton-messages {
+    gap: 24px;
+    padding: 26px 16px;
+  }
+
+  .boot-skeleton-copy .skeleton:last-child {
+    width: 92%;
+  }
+
+  .boot-skeleton-composer {
+    height: 104px;
+    margin: 0 10px 10px;
+  }
+}
+
 /* -------------------------------------------------------- repositories ---- */
 
 .repo-actions {
@@ -5223,6 +5442,53 @@ button.chip.lg:hover {
   overflow-y: auto;
   min-height: 0;
   padding: 12px 24px 20px;
+}
+
+.chan-messages-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  padding-top: 30px;
+  overflow: hidden;
+}
+
+.channel-skeleton-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 540px);
+  align-items: start;
+  gap: 11px;
+}
+
+.channel-skeleton-avatar {
+  display: block;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+
+.channel-skeleton-copy {
+  display: grid;
+  gap: 9px;
+  padding-top: 2px;
+}
+
+.channel-skeleton-copy .skeleton {
+  display: block;
+  width: 30%;
+  height: 10px;
+}
+
+.channel-skeleton-copy .skeleton:last-child {
+  width: 82%;
+  height: 12px;
+}
+
+.channel-skeleton-row:nth-child(3) .channel-skeleton-copy .skeleton:last-child {
+  width: 64%;
+}
+
+.channel-skeleton-row:nth-child(4) .channel-skeleton-copy .skeleton:last-child {
+  width: 74%;
 }
 
 .chan-day {
@@ -9665,6 +9931,11 @@ dialog.modal[open]::backdrop {
 
   .chan-messages {
     padding: 6px 12px 14px;
+  }
+
+  .chan-messages-loading {
+    gap: 22px;
+    padding-top: 24px;
   }
 
   .chan-composer-wrap {

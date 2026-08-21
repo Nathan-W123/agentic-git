@@ -4264,9 +4264,52 @@ export function render() {
   }
 }
 
+/**
+ * The first useful paint while session and project context are still in flight.
+ *
+ * Kept in the app as well as `index.html`: the document covers a cold start,
+ * while a later context refresh can return to the same stable, accessible
+ * shape without inventing a second loading screen.
+ */
+function renderLoadingShell(root = $("#app-root")) {
+  root.hidden = false;
+  root.setAttribute("aria-busy", "true");
+  root.innerHTML = `<div class="boot-shell" role="status" aria-live="polite"
+    aria-label="Loading Lattice">
+    <span class="sr-only">Loading Lattice…</span>
+    <div class="boot-skeleton-rail" aria-hidden="true">
+      <span class="skeleton boot-skeleton-mark"></span>
+      <span class="skeleton boot-skeleton-rail-button"></span>
+      <span class="skeleton boot-skeleton-rail-button"></span>
+      <span class="skeleton boot-skeleton-rail-button"></span>
+    </div>
+    <div class="boot-skeleton-sidebar" aria-hidden="true">
+      <span class="skeleton boot-skeleton-title"></span>
+      <span class="skeleton boot-skeleton-search"></span>
+      <div class="boot-skeleton-nav">
+        <span class="skeleton"></span><span class="skeleton"></span>
+        <span class="skeleton"></span><span class="skeleton"></span>
+        <span class="skeleton"></span>
+      </div>
+    </div>
+    <main class="boot-skeleton-main" aria-hidden="true">
+      <header class="boot-skeleton-head">
+        <span class="skeleton boot-skeleton-heading"></span>
+        <span class="skeleton boot-skeleton-action"></span>
+      </header>
+      <div class="boot-skeleton-messages">
+        <div class="boot-skeleton-message"><span class="skeleton boot-skeleton-avatar"></span><span class="boot-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span></div>
+        <div class="boot-skeleton-message"><span class="skeleton boot-skeleton-avatar"></span><span class="boot-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span></div>
+        <div class="boot-skeleton-message"><span class="skeleton boot-skeleton-avatar"></span><span class="boot-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span></div>
+      </div>
+      <div class="skeleton boot-skeleton-composer"></div>
+    </main>
+  </div>`;
+}
+
 function renderNow() {
   const root = $("#app-root");
-  if (state.principal === undefined) {
+  if (state.principal === undefined && state.loadError === undefined) {
     return;
   }
   applyTheme();
@@ -4274,15 +4317,21 @@ function renderNow() {
   // read off the outgoing document, and one line below this they stop
   // existing. See `MOTION_SURFACES`.
   captureSurfaceMotion(root);
-  if (!state.loaded) {
+  if (!state.loaded && state.loadError !== undefined) {
+    root.removeAttribute("aria-busy");
     root.innerHTML = `<div class="app"><div class="main">
-      <div class="page">${emptyState(
+      <div class="page" role="alert">${emptyState(
         "cloud",
-        "Loading your control room",
-        "Fetching projects, repositories, and the coordination stream.",
+        "Lattice could not load",
+        state.loadError,
       )}</div></div></div>`;
     return;
   }
+  if (!state.loaded) {
+    renderLoadingShell(root);
+    return;
+  }
+  root.removeAttribute("aria-busy");
   if (state.projectId === "") {
     root.innerHTML = `<div class="app"><div class="main">
       <div class="scroll"><div class="page">${emptyState(
@@ -7112,7 +7161,10 @@ function showAuth() {
   if (hash !== undefined && !window.location.hash.startsWith(`#${hash}`)) {
     window.location.hash = `#${hash}`;
   }
-  $("#app-root").hidden = true;
+  const appRoot = $("#app-root");
+  appRoot.hidden = true;
+  appRoot.removeAttribute("aria-busy");
+  appRoot.innerHTML = "";
   $("#auth-root").hidden = false;
   $("#auth-root").innerHTML = renderAuth();
   if (authMode === "reset" && resetState === undefined) {
@@ -7140,7 +7192,9 @@ async function signOutForAuthLink(mode) {
 
 function showApp() {
   $("#auth-root").hidden = true;
-  $("#app-root").hidden = false;
+  const appRoot = $("#app-root");
+  appRoot.hidden = false;
+  appRoot.removeAttribute("aria-busy");
 }
 
 /** Refreshes context, then re-renders whatever screen is showing. */
@@ -7200,7 +7254,10 @@ async function handleInviteLink() {
 
 function showInvite() {
   closeSocket();
-  $("#app-root").hidden = true;
+  const appRoot = $("#app-root");
+  appRoot.hidden = true;
+  appRoot.removeAttribute("aria-busy");
+  appRoot.innerHTML = "";
   $("#auth-root").hidden = false;
   $("#auth-root").innerHTML = renderInvite();
 }
@@ -7409,6 +7466,7 @@ function dismissSinceYouLeft() {
 }
 
 async function boot() {
+  renderLoadingShell();
   if (await handleInviteLink()) {
     return;
   }
@@ -7424,7 +7482,11 @@ async function boot() {
     () => undefined,
     (error) => error,
   );
-  await loadHealth();
+  const healthFailure = loadHealth().then(
+    () => undefined,
+    (error) => error,
+  );
+  const healthError = await healthFailure;
   if (state.health?.setupRequired === true && signedOut) {
     // First-time setup outranks the link: neither signing in nor registering
     // can succeed against a control plane that has no owner yet.
@@ -7435,7 +7497,7 @@ async function boot() {
       authMode = mode;
     }
   }
-  const failure = await contextFailure;
+  const failure = (await contextFailure) ?? healthError;
   if (failure !== undefined) {
     if (failure.status === 401) {
       state.principal = undefined;

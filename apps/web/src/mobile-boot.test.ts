@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -32,6 +33,53 @@ async function bootPlan(): Promise<BootPlan> {
     pathToFileURL(path.join(packageRoot, "public", "boot-plan.js")).href
   )) as unknown as BootPlan;
 }
+
+test("the loading shell is painted before boot waits and leaves on every outcome", async () => {
+  const publicRoot = path.join(packageRoot, "public");
+  const [html, app] = await Promise.all([
+    readFile(path.join(publicRoot, "index.html"), "utf8"),
+    readFile(path.join(publicRoot, "app.js"), "utf8"),
+  ]);
+
+  const shell = html.indexOf('class="boot-shell" role="status"');
+  const module = html.indexOf('<script type="module" src="/app.js">');
+  assert.notEqual(shell, -1);
+  assert.equal(shell < module, true, "the shell exists before app.js can request context");
+  assert.match(html, /id="app-root" aria-busy="true"/u);
+
+  const boot = app.slice(
+    app.indexOf("async function boot() {"),
+    app.indexOf("\nvoid boot();"),
+  );
+  assert.equal(
+    boot.indexOf("renderLoadingShell();") < boot.indexOf("loadContext({ defer: true })"),
+    true,
+    "the script reinforces the shell before starting boot requests",
+  );
+  assert.match(boot, /const contextFailure = loadContext\(\{ defer: true \}\)/u);
+  assert.match(boot, /const healthFailure = loadHealth\(\)\.then/u);
+  assert.match(boot, /const failure = \(await contextFailure\) \?\? healthError;/u);
+  assert.match(boot, /if \(failure\.status === 401\) \{[\s\S]{0,120}showAuth\(\);/u);
+  assert.match(boot, /state\.loadError = failure\.message;/u);
+  assert.match(boot, /showApp\(\);\s*applyHash\(\);\s*render\(\);/u);
+  assert.match(app, /"Lattice could not load",\s*state\.loadError/u);
+
+  // Both destinations replace the status surface rather than leaving a busy
+  // region hidden beside the authenticated or signed-out UI. This is DOM-only
+  // work and therefore adds no request to the cold-start count below.
+  const showAuth = app.slice(
+    app.indexOf("function showAuth() {"),
+    app.indexOf("\n/**\n * Ends the session", app.indexOf("function showAuth() {")),
+  );
+  assert.match(showAuth, /appRoot\.removeAttribute\("aria-busy"\);/u);
+  assert.match(showAuth, /appRoot\.innerHTML = "";/u);
+  const showApp = app.slice(
+    app.indexOf("function showApp() {"),
+    app.indexOf("\n/** Refreshes context", app.indexOf("function showApp() {")),
+  );
+  assert.match(showApp, /appRoot\.removeAttribute\("aria-busy"\);/u);
+  assert.match(app, /root\.removeAttribute\("aria-busy"\);/u);
+});
 
 /**
  * The answers a control plane with one organization and one project gives.

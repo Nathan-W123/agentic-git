@@ -29,6 +29,49 @@ function slice(source: string, from: string, to: string): string {
   return source.slice(start, end);
 }
 
+test("channel history distinguishes loading, empty, and loaded transcripts", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  const skeleton = slice(
+    chats,
+    "function channelMessageSkeleton(repositoryId) {",
+    "\nfunction messageList(repositoryId) {",
+  );
+  assert.match(skeleton, /role="status" aria-live="polite" aria-busy="true"/u);
+  assert.match(skeleton, /class="sr-only">Loading channel messages…/u);
+  assert.equal((skeleton.match(/class="channel-skeleton-row"/gu) ?? []).length, 3);
+
+  const list = slice(
+    chats,
+    "function messageList(repositoryId) {",
+    "\n/**\n * The emoji the picker offers",
+  );
+  const loadingGuard = list.indexOf("!state.channelLoaded.has(repositoryId)");
+  const historyRead = list.indexOf("channelMessagesFor(repositoryId)");
+  assert.notEqual(loadingGuard, -1);
+  assert.equal(loadingGuard < historyRead, true, "loading wins before an empty array");
+  assert.match(list, /return channelMessageSkeleton\(repositoryId\);/u);
+
+  // Once the request settles, zero rows is a real empty state and non-zero
+  // rows continue through the ordinary message renderer.
+  assert.match(list, /entries\.length === 0/u);
+  assert.match(list, /query === "" \? "No messages yet"/u);
+  assert.match(list, /messageRow\(entry, repositoryId/u);
+  assert.match(list, /role="log"[\s\S]{0,120}aria-label="Channel messages"/u);
+
+  const messages = slice(
+    data,
+    "export function channelMessagesFor(repositoryId) {",
+    "\n/**\n * The reply that names a thread",
+  );
+  assert.match(messages, /state\.channelMessages\[repositoryId\] = \[\];/u);
+  assert.doesNotMatch(data, /seedMessages|-seed-1|-seed-2|Reviewed the last changeset/u);
+  assert.match(css, /\.chan-messages-loading \{/u);
+  assert.match(css, /\.channel-skeleton-row \{/u);
+});
+
 test("the first page asks for a size, and records whether there is more", async () => {
   const data = await publicFile("data.js");
   const load = slice(
