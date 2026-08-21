@@ -3352,7 +3352,6 @@ function catchUpPanel() {
             }</span>`
           : "";
       return `<li class="catch-up-task">
-      <span class="catch-up-check" aria-hidden="true">${icon("check")}</span>
       <div class="catch-up-task-copy">
         <p>${esc(summary)}</p>
         <span>${esc(when)}</span>
@@ -3375,7 +3374,6 @@ function catchUpPanel() {
       <div class="catch-up-intro">
         <p class="catch-up-kicker">Since you left</p>
         <h2>${esc(String(count))} completed ${count === 1 ? "task" : "tasks"}</h2>
-        <p>Implemented in #${esc(repositoryName)} while you were away.</p>
       </div>
       <ul class="catch-up-task-list" aria-label="Completed tasks">${rows}</ul>
     </div>
