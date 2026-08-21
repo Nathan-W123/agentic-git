@@ -300,13 +300,35 @@ test("desktop panel tabs can be dragged left to keep three conversations open", 
   // Closing a surface also stops it being kept, or the column would hold a
   // name with nothing behind it.
   assert.match(app, /(?:clearSplitRightPanel|clearRightPanel|unpinRightPanel)\("dm"\)/u);
-  assert.match(app, /(?:clearSplitRightPanel|clearRightPanel|unpinRightPanel)\("thread"\)/u);
+  assert.match(
+    app,
+    /(?:clearSplitRightPanel|clearRightPanel|unpinRightPanel)\("thread"\)|putAwayRightPanel\(`thread:\$\{/u,
+  );
 
   assert.match(css, /\.chats-shell\.panel-splitting \.chan-main/u);
   assert.match(css, /\.thread-panel\[data-right-panel-position=/u);
   assert.match(
     css,
     /@media[^}]*max-width:\s*600px[\s\S]*?\.chats-shell\.panel-splitting \.chan-main[\s\S]*?box-shadow:\s*none/u,
+  );
+});
+
+test("separate thread tabs replace the group transcript when two are open", async () => {
+  const [app, chats, data, css] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+    publicFile("data.js"),
+    publicFile("styles.css"),
+  ]);
+
+  assert.match(data, /activeChannelThreads:\s*\[\]/u);
+  assert.match(data, /map\(\(id\) => `thread:\$\{id\}`\)/u);
+  assert.match(app, /openThreadPanel\(value\)/u);
+  assert.match(chats, /threadPanel\(repositoryId, kind\.slice\("thread:"\.length\)\)/u);
+  assert.match(chats, /data-thread-id=/u);
+  assert.match(
+    css,
+    /\.chats-shell\.panels-2 \.chan-main,[\s\S]*?\.chats-shell\.panels-3 \.chan-main\s*\{\s*display:\s*none;/u,
   );
 });
 

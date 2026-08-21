@@ -3210,8 +3210,8 @@ function panelGrip() {
  * that form as a breadcrumb into the thread library; every other panel keeps
  * the plain label because it has no corresponding collection to navigate to.
  */
-function panelKind(label, act) {
-  const kind =
+function panelKind(label, act, panelId) {
+  const kind = panelId ?? (
     label === "Direct"
       ? "dm"
       : label === "Thread"
@@ -3226,7 +3226,8 @@ function panelKind(label, act) {
                 ? "plan"
                 : label.startsWith("Agent")
                   ? "agent"
-                  : "";
+                  : ""
+  );
   const drag = kind === ""
     ? ""
     : ` draggable="true" data-right-panel-kind="${kind}"
@@ -3239,6 +3240,9 @@ function panelKind(label, act) {
 
 /** Draw one named right-hand surface without changing the state behind it. */
 function rightPanel(repositoryId, kind) {
+  if (kind.startsWith("thread:")) {
+    return threadPanel(repositoryId, kind.slice("thread:".length));
+  }
   switch (kind) {
     case "catch-up":
       return catchUpPanel();
@@ -4422,8 +4426,8 @@ function dmPanel() {
   </aside>`;
 }
 
-function threadPanel(repositoryId) {
-  const messageId = state.activeChannelThread;
+function threadPanel(repositoryId, selectedMessageId) {
+  const messageId = selectedMessageId ?? state.activeChannelThread;
   if (messageId === undefined) {
     return "";
   }
@@ -4456,10 +4460,10 @@ function threadPanel(repositoryId) {
     state.threadAttaching > 0 ||
     threadReplyTarget !== undefined ||
     draftAttachments(repositoryId, state.threadDraft).length > 0;
-  return `<aside class="thread-panel">
+  return `<aside class="thread-panel" data-thread-id="${esc(messageId)}">
     ${panelGrip()}
     <header class="thread-head">
-      ${panelKind("Thread", "channel-threads-toggle")}
+      ${panelKind("Thread", "channel-threads-toggle", `thread:${messageId}`)}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
       ${
@@ -4486,7 +4490,12 @@ function threadPanel(repositoryId) {
         value: messageId,
         title: "Reply in this thread",
       })}
-      ${panelClose("channel-thread-close", "Close thread (Esc)")}
+      ${iconButton("close", {
+        act: "channel-thread-close",
+        value: messageId,
+        title: "Close thread (Esc)",
+        cls: "panel-close",
+      })}
     </header>
     <div class="thread-body"
       data-scroll-key="thread:${esc(repositoryId)}:${esc(messageId)}">
@@ -4502,7 +4511,7 @@ function threadPanel(repositoryId) {
         draft: state.threadDraft,
         removeAct: "thread-attachment-remove",
       })}
-      <form class="composer${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit">
+      <form class="composer${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit" data-value="${esc(messageId)}">
         <div class="composer-field">
           <div class="composer-mirror" data-composer-mirror aria-hidden="true"
             >${composerMirror(
@@ -5692,6 +5701,7 @@ export function openChannel(repositoryId, rerender) {
   // dismissal, and "you just navigated somewhere" is itself a close.
   state.chanSidebarOpen = false;
   state.activeChannelThread = undefined;
+  state.activeChannelThreads = [];
   // A plan hangs off one thread in one room, so it leaves with the room.
   state.activePlan = undefined;
   // A thread belongs to the channel it hangs in, so an aim taken in one

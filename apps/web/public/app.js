@@ -1941,8 +1941,11 @@ async function deleteThreadAction(repositoryId, messageId) {
   }
   try {
     await deleteChannelThread(repositoryId, messageId);
+    state.activeChannelThreads = (state.activeChannelThreads ?? []).filter(
+      (id) => id !== messageId,
+    );
     if (state.activeChannelThread === messageId) {
-      state.activeChannelThread = undefined;
+      state.activeChannelThread = state.activeChannelThreads.at(-1);
     }
     toast("Thread deleted", "ok");
     render();
@@ -1997,7 +2000,10 @@ async function deleteChannelMessageAction(repositoryId, messageId) {
       messageId,
     );
     if (state.activeChannelThread === messageId && !hasThread) {
-      state.activeChannelThread = undefined;
+      state.activeChannelThreads = (state.activeChannelThreads ?? []).filter(
+        (id) => id !== messageId,
+      );
+      state.activeChannelThread = state.activeChannelThreads.at(-1);
     }
     toast(
       cancelledTask ? "Message deleted, and its task stopped" : "Message deleted",
@@ -2065,6 +2071,7 @@ async function clearThreadsAction(repositoryId) {
   try {
     const removed = await deleteAllChannelThreads(repositoryId);
     state.activeChannelThread = undefined;
+    state.activeChannelThreads = [];
     toast(`Deleted ${String(removed)} message${removed === 1 ? "" : "s"}`, "ok");
     render();
   } catch (error) {
@@ -2819,6 +2826,20 @@ function moveRightPanel(kind, edge) {
   const rest = kept.filter((open) => open !== kind);
   state.rightPanelStack =
     edge === "left" ? [kind, ...rest] : [...rest, kind];
+}
+
+/** Add a thread as its own side tab and make it the active composer target. */
+function openThreadPanel(messageId) {
+  const current = state.activeChannelThread;
+  const open = state.activeChannelThreads ?? [];
+  const withCurrent =
+    open.length === 0 && current !== undefined ? [current] : open;
+  state.activeChannelThread = messageId;
+  state.activeChannelThreads = [
+    ...withCurrent.filter((id) => id !== messageId),
+    messageId,
+  ];
+  moveRightPanel(`thread:${messageId}`, "right");
 }
 
 /**
@@ -4649,6 +4670,10 @@ document.addEventListener("click", (event) => {
   // This runs before action lookup because an ordinary message body has no
   // `data-act`: selecting it is still a complete interaction on touch.
   selectMobileChannelMessage(event);
+  const owningThread = event.target.closest?.("[data-thread-id]")?.dataset.threadId;
+  if (owningThread !== undefined) {
+    state.activeChannelThread = owningThread;
+  }
   const found = actionOf(event);
   if (found === undefined) {
     return;
@@ -5028,11 +5053,11 @@ document.addEventListener("click", (event) => {
     // root with no replies yet opens in the thread panel, and the one-shot
     // target prevents a previously scrolled thread from opening elsewhere.
     case "channel-pinned-open":
+      openThreadPanel(value);
       state.activeChannelThread = value;
       state.scrollToThreadMessage = value;
       state.threadReplyMessageId = undefined;
       state.autoOpenedThread = undefined;
-      moveRightPanel("thread", "right");
       render();
       return;
     // References to tasks open their thread; references to a person's message
@@ -5048,10 +5073,10 @@ document.addEventListener("click", (event) => {
         entry.kind !== "user" &&
         ((entry.replies ?? []).length > 0 || entry.taskId !== undefined)
       ) {
+        openThreadPanel(value);
         state.activeChannelThread = value;
         // Chosen, so `openPromptedThread` will not choose over it.
         state.autoOpenedThread = undefined;
-        moveRightPanel("thread", "right");
         render();
         return;
       }
@@ -5255,18 +5280,20 @@ document.addEventListener("click", (event) => {
       // The thread joins the column at its right edge and pushes whatever was
       // there left: a file or a conversation open beside it is usually the
       // reason the thread was worth opening at all.
+      openThreadPanel(value);
       state.activeChannelThread = value;
       state.threadReplyMessageId = undefined;
       // Chosen, so `openPromptedThread` will not choose over it.
       state.autoOpenedThread = undefined;
-      moveRightPanel("thread", "right");
       render();
       return;
     case "thread-composer-focus":
       // The header's reply affordance belongs to the thread already on
       // screen; it must not close that thread and silently move the draft to
       // the group-channel composer.
-      $("[data-act='channel-thread-input']")?.focus();
+      node.closest("[data-thread-id]")
+        ?.querySelector("[data-act='channel-thread-input']")
+        ?.focus();
       return;
     case "composer-thread-clear":
       state.composerThreadId = undefined;
@@ -5274,8 +5301,7 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-input']")?.focus();
       return;
     case "channel-thread-close":
-      clearRightPanel("thread");
-      state.activeChannelThread = undefined;
+      putAwayRightPanel(`thread:${value ?? state.activeChannelThread}`);
       state.threadReplyMessageId = undefined;
       render();
       return;
@@ -5296,9 +5322,9 @@ document.addEventListener("click", (event) => {
     // Reading it is done; saying something about it happens in the thread.
     case "plan-thread-open":
       state.activePlan = undefined;
+      openThreadPanel(value);
       state.activeChannelThread = value;
       state.autoOpenedThread = undefined;
-      moveRightPanel("thread", "right");
       render();
       return;
     // Approved. The thread opens on the way, because from here on the thing
@@ -5306,9 +5332,9 @@ document.addEventListener("click", (event) => {
     case "plan-approve":
       startPlannedWork(activeChannelId(), value);
       state.activePlan = undefined;
+      openThreadPanel(value);
       state.activeChannelThread = value;
       state.autoOpenedThread = undefined;
-      moveRightPanel("thread", "right");
       render();
       return;
     // Replying inside a thread uses the same selected-message mechanism as
@@ -6454,6 +6480,9 @@ document.addEventListener("submit", (event) => {
       submitComposerMessage(render);
       return;
     case "channel-thread-submit":
+      if (form.dataset.value !== undefined) {
+        state.activeChannelThread = form.dataset.value;
+      }
       submitThreadReply(render);
       return;
     case "agent-rename-form": {
@@ -6555,6 +6584,10 @@ document.addEventListener("change", (event) => {
     return;
   }
   const { node, act } = found;
+  const owningThread = node.closest?.("[data-thread-id]")?.dataset.threadId;
+  if (owningThread !== undefined) {
+    state.activeChannelThread = owningThread;
+  }
   switch (act) {
     case "set-accent-light":
     case "set-accent-secondary-light":
@@ -6668,6 +6701,10 @@ document.addEventListener("input", (event) => {
     return;
   }
   const { node, act } = found;
+  const owningThread = node.closest?.("[data-thread-id]")?.dataset.threadId;
+  if (owningThread !== undefined) {
+    state.activeChannelThread = owningThread;
+  }
   if (act === "question-text") {
     // No render: this is the one control on the prompt whose value is being
     // typed into, and rebuilding the screen under a caret loses it.
