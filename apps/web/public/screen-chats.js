@@ -3347,21 +3347,32 @@ function catchUpPanel() {
     return "";
   }
   const count = catchUp.tasks.length;
+  const repository = state.repositories.find(
+    (entry) => entry.id === catchUp.repositoryId,
+  );
+  const repositoryName = repository?.name ?? catchUp.repositoryId;
   const rows = catchUp.tasks
     .map((task) => {
       const summary =
         String(task.summary ?? "").trim() ||
         "Completed and landed successfully.";
-      const repository = state.repositories.find(
-        (entry) => entry.id === task.repositoryId,
-      );
-      const where = repository?.name ?? repository?.id ?? task.repositoryId;
       const when = relativeTime(task.completedAt);
+      const files =
+        Array.isArray(task.changedFiles) && task.changedFiles.length > 0
+          ? `<span class="catch-up-task-files">${icon("file")} ${esc(
+              task.changedFiles.slice(0, 3).join(", "),
+            )}${
+              task.changedFiles.length > 3
+                ? ` and ${esc(String(task.changedFiles.length - 3))} more`
+                : ""
+            }</span>`
+          : "";
       return `<li class="catch-up-task">
       <span class="catch-up-check" aria-hidden="true">${icon("check")}</span>
       <div class="catch-up-task-copy">
         <p>${esc(summary)}</p>
-        <span>${where ? `#${esc(where)} · ` : ""}${esc(when)}</span>
+        <span>${esc(when)}</span>
+        ${files}
       </div>
     </li>`;
     })
@@ -3371,7 +3382,7 @@ function catchUpPanel() {
     ${panelGrip()}
     <header class="thread-head">
       ${panelKind("Since you left")}
-      <span class="thread-title" id="catch-up-title">Completed tasks</span>
+      <span class="thread-title" id="catch-up-title">#${esc(repositoryName)}</span>
       <span class="spacer"></span>
       ${panelClose("catch-up-close", "Close completed tasks (Esc)")}
     </header>
@@ -3380,7 +3391,7 @@ function catchUpPanel() {
       <div class="catch-up-intro">
         <p class="catch-up-kicker">Since you left</p>
         <h2>${esc(String(count))} completed ${count === 1 ? "task" : "tasks"}</h2>
-        <p>These tasks finished while you were away.</p>
+        <p>Implemented in #${esc(repositoryName)} while you were away.</p>
       </div>
       <ul class="catch-up-task-list" aria-label="Completed tasks">${rows}</ul>
     </div>
@@ -5677,6 +5688,9 @@ export function openChannel(repositoryId, rerender) {
     flushChannelDrafts();
   }
   state.repositoryId = repositoryId;
+  // A catch-up is a repository tab, just like the channel beneath it. Keep
+  // the unread reports parked when changing rooms and reveal only this one.
+  state.catchUp = state.catchUps?.[repositoryId];
   persist("ag.repo", repositoryId);
   // Only when the room actually changed. Re-opening the one already on screen
   // — which is what tapping the current channel in the sidebar does — must not
