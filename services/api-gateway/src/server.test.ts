@@ -8710,6 +8710,43 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
   );
 });
 
+test("channel stats count every root and reply, past the read page", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "counted-room");
+
+  // Past the 200-row page the channel read is capped at. The stats line used
+  // to be the length of that page, so a room this size reported "200+" — a
+  // figure that stops being true the moment the room gets busy.
+  for (let index = 0; index < 205; index += 1) {
+    const root = await runtime.store.appendChannelMessage({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      authorId: ownerId,
+      content: `Line ${index}`,
+    });
+    if (index % 5 === 0) {
+      await runtime.store.addChannelReply({
+        repositoryId,
+        messageId: root.id,
+        authorId: ownerId,
+        content: `Reply to ${index}`,
+      });
+    }
+  }
+
+  const response = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/stats`,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.data.messages, 205);
+  assert.equal(response.data.replies, 41);
+  // Nothing is approximated any more, so there is no "and more" flag left.
+  assert.equal(response.data.capped, undefined);
+});
+
 test("channel stats exclude cached context from the token activity total", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

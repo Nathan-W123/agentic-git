@@ -59,6 +59,7 @@ import type {
   ChannelAgentOverride,
   ChannelEntryKind,
   ChannelMessage,
+  ChannelMessageCounts,
   ChannelMessageFilter,
   AppendDirectMessageInput,
   DirectConversation,
@@ -3158,6 +3159,31 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .all(...values, limit) as Row[];
     const bases = rows.reverse().map((row) => this.toChannelMessageBase(row));
     return this.hydrateChannelMessages(bases, viewerId);
+  }
+
+  public async countChannelMessages(
+    repositoryId: string,
+  ): Promise<ChannelMessageCounts> {
+    // Two counts rather than a join: a LEFT JOIN would have to count DISTINCT
+    // roots to avoid multiplying them by their own replies, and this reads as
+    // what it is.
+    const roots = this.db
+      .prepare(
+        "SELECT COUNT(*) AS total FROM channel_messages WHERE repository_id = ?",
+      )
+      .get(repositoryId) as Row;
+    const replies = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total FROM channel_message_replies
+          WHERE message_id IN (
+            SELECT id FROM channel_messages WHERE repository_id = ?
+          )`,
+      )
+      .get(repositoryId) as Row;
+    return {
+      messages: integer(roots, "total"),
+      replies: integer(replies, "total"),
+    };
   }
 
   public async appendChannelMessage(

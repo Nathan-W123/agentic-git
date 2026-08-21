@@ -58,6 +58,7 @@ import type {
   ChannelEntryKind,
   ChannelMessage,
   ChannelChangedFile,
+  ChannelMessageCounts,
   ChannelMessageFilter,
   AppendDirectMessageInput,
   DirectConversation,
@@ -3112,6 +3113,29 @@ export class PostgresCoordinationStore implements CoordinationStore {
     );
     const bases = rows.reverse().map((row) => this.toChannelMessageBase(row));
     return await this.hydrateChannelMessages(bases, viewerId);
+  }
+
+  public async countChannelMessages(
+    repositoryId: string,
+  ): Promise<ChannelMessageCounts> {
+    // Two counts rather than a join: a LEFT JOIN would have to count DISTINCT
+    // roots to avoid multiplying them by their own replies, and this reads as
+    // what it is. Both int8 results are parsed to numbers by `queryTypes`.
+    const roots = await this.row(
+      "SELECT COUNT(*) AS total FROM channel_messages WHERE repository_id = $1",
+      [repositoryId],
+    );
+    const replies = await this.row(
+      `SELECT COUNT(*) AS total FROM channel_message_replies
+        WHERE message_id IN (
+          SELECT id FROM channel_messages WHERE repository_id = $1
+        )`,
+      [repositoryId],
+    );
+    return {
+      messages: roots === undefined ? 0 : integer(roots, "total"),
+      replies: replies === undefined ? 0 : integer(replies, "total"),
+    };
   }
 
   public async bumpChannelMessage(

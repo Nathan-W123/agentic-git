@@ -7271,18 +7271,11 @@ export class ApiGateway {
         repositoryId,
         "view",
       );
-      // The page cap is the read cap: counting by fetching is honest about
-      // what the channel API can see, and a room past two hundred roots is
-      // reported as "200+" rather than paid for with a table scan.
-      const messages = await this.options.store.listChannelMessages(
-        repositoryId,
-        principal.user.id,
-        { limit: 200 },
-      );
-      const replies = messages.reduce(
-        (sum, message) => sum + (message.replies?.length ?? 0),
-        0,
-      );
+      // Counted in the store, not measured off a page. Reading the newest
+      // two hundred roots and taking their length reported "200+" for every
+      // busier room, which is the one number a stats line must not guess at.
+      const counts =
+        await this.options.store.countChannelMessages(repositoryId);
       // Fresh tokens, not the billed total. A cached prompt prefix is re-read
       // every turn, so summing `totalTokens` counted the same context once per
       // turn of every task in the room and the line read in the millions
@@ -7302,9 +7295,8 @@ export class ApiGateway {
           entry.totalTokens > entry.outputTokens,
       );
       this.sendJson(response, 200, {
-        messages: messages.length,
-        replies,
-        capped: messages.length >= 200,
+        messages: counts.messages,
+        replies: counts.replies,
         tokens,
         tokensIncomplete,
       });

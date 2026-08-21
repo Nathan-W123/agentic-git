@@ -5213,13 +5213,11 @@ export function channelInfoPopoverHtml(repositoryId) {
         if (stats === undefined) {
           return "Counting…";
         }
-        const fmt = (value) =>
-          value >= 1_000_000
-            ? `${(value / 1_000_000).toFixed(1)}M`
-            : value >= 1_000
-              ? `${(value / 1_000).toFixed(1)}k`
-              : String(value);
-        return `${stats.messages}${stats.capped ? "+" : ""} messages · ` +
+        // Exact, grouped figures rather than "1.2k": these are counts of a
+        // room's own work, and rounding them made a busy afternoon and a busy
+        // month read the same. Only the token lower bound still carries a "+".
+        const fmt = (value) => value.toLocaleString();
+        return `${fmt(stats.messages)} messages · ` +
           `${fmt(stats.replies)} replies · ${fmt(stats.tokens)}` +
           `${stats.tokensIncomplete ? "+" : ""} tokens`;
       })()}</p>
