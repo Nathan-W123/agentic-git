@@ -175,3 +175,33 @@ test("a frozen claim admits the arriving task to everything outside it", () => {
   assert.equal(inside.status, "sequenced");
   assert.deepEqual(inside.blockedBy, [TASK.id]);
 });
+
+test("a frozen claim partially admits a plan with work outside its directories", () => {
+  const frozen = freezePlanFromWorkingChanges(blanketPlan(TASK), [
+    { path: "src/render/canvas.ts", status: "modified" },
+  ]);
+  const controller = new PlanAdmissionController();
+  const decided = controller.admit({
+    plan: plan("task_second", [
+      "src/render/mesh.ts",
+      "src/audio/mixer.ts",
+    ]),
+    agentId: "agent-b",
+    baseRevision: "a".repeat(40),
+    baseVersion: 1,
+    active: [{ taskId: TASK.id, agentId: "agent-a", plan: frozen }],
+  });
+
+  assert.equal(decided.status, "approved_with_constraints");
+  assert.deepEqual(decided.blockedBy, []);
+  assert.deepEqual(
+    decided.deferredResources?.map((resource) => resource.resourceId),
+    ["src/render/mesh.ts"],
+  );
+  assert.deepEqual(
+    decided.ownershipGrants
+      .filter((grant) => grant.resourceType === "file")
+      .map((grant) => grant.resourceId),
+    ["src/audio/mixer.ts"],
+  );
+});

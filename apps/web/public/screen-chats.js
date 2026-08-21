@@ -4627,13 +4627,12 @@ function threadPanel(repositoryId, selectedMessageId) {
           <!-- Same arrangement as the channel bar: the input is the control
                and the button only clicks it, because a bare file input cannot
                be styled into the bar and a label would swallow the click
-               before the delegated handler saw it. One paperclip rather than
-               the channel's "+" menu — attaching is the only thing this
-               composer adds to a message, and a menu holding one item is a
-               click asking to be skipped. -->
+               before the delegated handler saw it. The matching "+" opens
+               the image picker directly because attaching is the only thing
+               this composer adds to a message. -->
           <input type="file" data-act="channel-thread-attach-input" accept="image/png,
             image/jpeg,image/gif,image/webp" multiple hidden>
-          ${iconButton("paperclip", {
+          ${iconButton("plus", {
             act: "thread-attach",
             title: "Attach images",
             small: true,

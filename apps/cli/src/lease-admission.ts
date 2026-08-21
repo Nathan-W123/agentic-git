@@ -9,6 +9,7 @@ import {
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
   blanketPlan,
+  contestedPlanResources,
   deferredScopeObjective,
   freezePlanFromWorkingChanges,
   isDeferredScopeFollowUp,
@@ -19,6 +20,8 @@ import {
   type PlanAdmissionRequest,
   type PlanAuthority,
   type PlanAuthorityDecision,
+  type WaitingWork,
+  type WaitingWorkRequest,
 } from "@coord/coordinator";
 import type { CoordinationStore, WorkLease } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
@@ -570,6 +573,75 @@ export class LeasePlanAuthority implements PlanAuthority {
       },
     });
     return frozen;
+  }
+
+  /**
+   * Who is queued behind this task, and on which of the resources it holds.
+   *
+   * Read from the same durable state `admit` writes: a task that was refused
+   * still has its plan and its non-approved admission saved on its own lease,
+   * and that admission names the holders it is waiting for. So the queue is
+   * already recorded — it was simply never read from the holder's side, which
+   * is why an agent was never told it had anything worth handing back.
+   *
+   * Lapsed leases are reaped first. A waiter whose process died is not
+   * waiting, and telling a working agent to hurry up for it would be a lie.
+   */
+  public async listWaitingOn(
+    request: WaitingWorkRequest,
+  ): Promise<readonly WaitingWork[]> {
+    const leaseId = this.leaseIdForTask.get(request.task.id);
+    if (leaseId === undefined) {
+      // Nothing durable holds this task's plan, so nothing was ever decided
+      // against it and nobody can be queued behind it.
+      return [];
+    }
+    await this.store.expireWorkLeases(new Date().toISOString());
+    const lease = await this.store.getWorkLease(leaseId);
+    if (lease === undefined || lease.status !== "active") {
+      return [];
+    }
+    const others = (
+      await this.store.listWorkLeases({
+        status: "active",
+        repositoryId: lease.repositoryId,
+      })
+    ).filter((candidate) => candidate.id !== lease.id);
+    const waiting: WaitingWork[] = [];
+    for (const candidate of others) {
+      const submission = candidate.plan;
+      if (
+        submission === undefined ||
+        planAdmissionApproved(submission.admission)
+      ) {
+        // An approved contract is a peer, not a waiter: it is executing
+        // alongside this task on resources nobody contended for.
+        continue;
+      }
+      if (!submission.admission.blockedBy.includes(request.task.id)) {
+        continue;
+      }
+      const contested = contestedPlanResources(request.plan, submission.plan);
+      const total =
+        contested.files.length +
+        contested.symbols.length +
+        contested.apis.length +
+        contested.schemas.length +
+        contested.configKeys.length +
+        contested.tests.length +
+        contested.services.length;
+      if (total === 0) {
+        // Blocked by this task for something it no longer claims — a plan
+        // narrowed since the refusal, most likely. The next retry admits it.
+        continue;
+      }
+      waiting.push({
+        taskId: candidate.taskId,
+        ...contested,
+        explanation: submission.admission.explanation,
+      });
+    }
+    return waiting;
   }
 
   /**

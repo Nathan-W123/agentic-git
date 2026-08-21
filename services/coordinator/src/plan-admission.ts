@@ -398,10 +398,19 @@ export class PlanAdmissionController {
     // are refusals of overlap rather than judgements about it, and both leave
     // everything outside them to be decided exactly as it always was.
     const claimed = this.claimBlocked(input);
-    if (claimed !== undefined) {
+    const blanketClaimed = input.active.some(
+      (entry) =>
+        entry.taskId !== input.plan.taskId && isBlanketClaim(entry.plan),
+    );
+    // A blanket claim has no free portion to identify: until it is frozen,
+    // every candidate path is held. A frozen claim is different. Its covered
+    // directories can be withheld just like overlapping planned files while
+    // the candidate's paths outside those directories are admitted.
+    if (claimed !== undefined && blanketClaimed) {
       return claimed;
     }
-    const whole = this.decide(input.plan, input, this.occupancy(input));
+    const whole =
+      claimed ?? this.decide(input.plan, input, this.occupancy(input));
     if (planAdmissionApproved(whole) || input.partialAdmission === false) {
       return whole;
     }
@@ -914,7 +923,7 @@ export class PlanAdmissionController {
     input: PlanAdmissionInput,
     occupancy: FileOccupancy,
   ): DeferredResource[] {
-    return this.contested(
+    const contested = this.contested(
       input,
       input.plan,
       {
@@ -923,6 +932,45 @@ export class PlanAdmissionController {
         declared: uniqueRepositoryPaths(input.plan.expectedFiles),
       },
       occupancy,
+    );
+    const byFile = new Map(
+      contested.map((entry) => [entry.resourceId, entry]),
+    );
+
+    // Frozen claims deliberately widen touched files to their directories.
+    // Those paths do not appear as ordinary plan declarations, so conflict
+    // scoring and ownership cannot discover them. Add them explicitly to the
+    // same contested-resource set partial admission already knows how to
+    // reduce and enforce.
+    for (const file of uniqueRepositoryPaths(input.plan.expectedFiles)) {
+      for (const holder of input.active) {
+        if (
+          holder.taskId === input.plan.taskId ||
+          holder.plan.claim?.kind !== "frozen" ||
+          !claimCoversPath(holder.plan, file)
+        ) {
+          continue;
+        }
+        const existing = byFile.get(file);
+        const heldBy = new Set(existing?.heldBy ?? []);
+        heldBy.add(holder.taskId);
+        byFile.set(file, {
+          resourceType: "file",
+          resourceId: file,
+          heldBy: [...heldBy].sort(),
+          reason: [
+            ...(existing === undefined ? [] : [existing.reason]),
+            `covered by frozen claim held by ${holder.taskId}`,
+          ]
+            .filter((reason, index, all) => all.indexOf(reason) === index)
+            .sort()
+            .join("; "),
+        });
+      }
+    }
+
+    return [...byFile.values()].sort((left, right) =>
+      left.resourceId.localeCompare(right.resourceId),
     );
   }
 

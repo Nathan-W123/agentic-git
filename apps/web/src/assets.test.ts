@@ -1875,7 +1875,12 @@ test("working agent faces replace duplicate dots with a progress pie", async () 
   assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
   assert.doesNotMatch(row, /statusDot\(/u);
   assert.match(ui, /working\s*\? '<i class="agent-run" aria-label="Working"><\/i>'/u);
-  assert.match(css, /\.agent-face \.agent-run \{[\s\S]*?conic-gradient/u);
+  const facePie = /\.agent-face \.agent-run \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(
+    facePie ?? "",
+    /conic-gradient\(\s*#f3efe8 calc\(var\(--run, 0\) \* 1%\)/u,
+  );
+  assert.doesNotMatch(facePie ?? "", /var\(--accent\)/u);
 
   const progress = data.slice(
     data.indexOf("export function agentWorkingProgress"),
@@ -3597,8 +3602,9 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.match(ring ?? "", /border-radius: 50%;/u);
   assert.match(
     ring ?? "",
-    /conic-gradient\(\s*color-mix\(in srgb, var\(--accent\) 42%, transparent\) calc\(var\(--run, 0\) \* 1%\)/u,
+    /conic-gradient\(\s*#f3efe8 calc\(var\(--run, 0\) \* 1%\)/u,
   );
+  assert.doesNotMatch(ring ?? "", /var\(--accent\)/u);
   // Undone is the darker of the two, and it is what the rest of the circle is
   // filled with.
   assert.match(ring ?? "", /rgba\(0, 0, 0, 0\.55\) 0\s*\);/u);

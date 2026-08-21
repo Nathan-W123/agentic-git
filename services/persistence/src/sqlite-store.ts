@@ -2383,6 +2383,42 @@ export class SqliteCoordinationStore implements CoordinationStore {
       );
   }
 
+  public async findWorkspaceByTaskId(
+    taskId: TaskId,
+  ): Promise<StoredWorkspace | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT id, run_id, task_id, path, isolation, base_revision, created_at
+         FROM workspaces
+         WHERE task_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(taskId) as
+      | {
+          id: string;
+          run_id: string;
+          task_id: string;
+          path: string;
+          isolation: string;
+          base_revision: string;
+          created_at: string;
+        }
+      | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    return {
+      id: row.id,
+      runId: row.run_id,
+      taskId: row.task_id,
+      path: row.path,
+      isolation: row.isolation,
+      baseRevision: row.base_revision,
+      createdAt: row.created_at,
+    };
+  }
+
   public async saveChangeSet(runId: string, changeSet: ChangeSet): Promise<void> {
     this.db.exec("BEGIN");
     try {

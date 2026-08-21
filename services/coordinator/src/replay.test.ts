@@ -3,7 +3,13 @@ import test from "node:test";
 
 import type { AgentPlan, ChangeSet } from "@coord/shared-types";
 
-import { replayBlockers, type CanonicalAdvance } from "./replay.js";
+import {
+  assessReplay,
+  residualAdvance,
+  speculationLanded,
+  replayBlockers,
+  type CanonicalAdvance,
+} from "./replay.js";
 
 /**
  * Whether a finished result survives canonical moving under it. Exact-base
@@ -174,4 +180,54 @@ test("several collisions are all reported, deduplicated and ordered", () => {
     ),
     ["file:src/a.ts", "symbol:alpha"],
   );
+});
+
+test("residual advance drops what speculation already covered", () => {
+  assert.deepEqual(
+    residualAdvance(
+      advance({
+        changedFiles: ["src/a.ts", "src/b.ts"],
+        changedSymbols: ["alpha", "beta"],
+      }),
+      advance({ changedFiles: ["src/a.ts"], changedSymbols: ["alpha"] }),
+    ),
+    advance({ changedFiles: ["src/b.ts"], changedSymbols: ["beta"] }),
+  );
+});
+
+test("a fully covered advance leaves an empty residual", () => {
+  const landed = advance({
+    changedFiles: ["src/a.ts"],
+    changedSymbols: ["alpha"],
+  });
+  assert.deepEqual(residualAdvance(landed, landed), advance());
+  assert.equal(speculationLanded(landed, landed), true);
+});
+
+test("speculation that predicted a file the advance omitted is invalid", () => {
+  assert.equal(
+    speculationLanded(
+      advance({ changedFiles: ["src/a.ts", "src/b.ts"] }),
+      advance({ changedFiles: ["src/a.ts"] }),
+    ),
+    false,
+  );
+});
+
+test("assessReplay against a residual treats a covered holder landing as unsurprising", () => {
+  const waiting = plan({
+    expectedFiles: ["src/a.ts", "src/shared.ts"],
+    dependencies: ["file:src/shared.ts"],
+  });
+  const landed = advance({ changedFiles: ["src/shared.ts"] });
+  const speculated = advance({ changedFiles: ["src/shared.ts"] });
+  const full = assessReplay(waiting, changeSet(["src/a.ts"]), landed);
+  assert.deepEqual(full.semantic, ["file:src/shared.ts"]);
+  const residual = assessReplay(
+    waiting,
+    changeSet(["src/a.ts"]),
+    residualAdvance(landed, speculated),
+  );
+  assert.deepEqual(residual.semantic, []);
+  assert.deepEqual(residual.textual, []);
 });

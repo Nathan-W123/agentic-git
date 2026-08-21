@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { copyFile, mkdir, rm } from "node:fs/promises";
+import path from "node:path";
 
 import {
   type AgentActionResult,
@@ -15,6 +17,7 @@ import {
   scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
+  type HolderWorkingChange,
   type ReplanRequest,
   type ScopeChangeDecision,
 } from "@coord/shared-types";
@@ -496,6 +499,10 @@ export class GenericCliAdapter implements AgentAdapter {
           repository: this.options.repository,
           baseVersion: request.canonicalChange.canonicalVersion,
         });
+        await applyHolderWorkingOverlay(
+          record.planningWorkspace.path,
+          request.holderWorkingChanges,
+        );
       }
       record.process = this.spawnAgent(record, record.planningWorkspace);
       const agent = this.requireProcess(record);
@@ -824,5 +831,30 @@ export class GenericCliAdapter implements AgentAdapter {
       throw new Error(`Unknown generic CLI session: ${sessionId}`);
     }
     return session;
+  }
+}
+
+/**
+ * Overlay a holder's in-progress edits onto a planning worktree built from
+ * canonical. Speculative only — the holder still owns the files.
+ */
+async function applyHolderWorkingOverlay(
+  workspacePath: string,
+  changes: readonly HolderWorkingChange[] | undefined,
+): Promise<void> {
+  if (changes === undefined || changes.length === 0) {
+    return;
+  }
+  for (const change of changes) {
+    const target = path.join(workspacePath, change.path);
+    if (change.status === "deleted") {
+      await rm(target, { force: true });
+      continue;
+    }
+    if (change.absolutePath === undefined) {
+      continue;
+    }
+    await mkdir(path.dirname(target), { recursive: true });
+    await copyFile(change.absolutePath, target);
   }
 }

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -12,6 +13,7 @@ import {
   type CoordinatorContext,
   type QuestionAnswer,
   type QuestionChoice,
+  type ScopeContentionNotice,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -22,6 +24,7 @@ import {
   scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
+  type HolderWorkingChange,
   type ReplanRequest,
   type ScopeChangeDecision,
 } from "@coord/shared-types";
@@ -735,6 +738,16 @@ interface PromptCliSession {
   >;
   /** What the platform did and said, for the prompt of the round after. */
   actionResults: AgentActionResult[];
+  /**
+   * Who is queued behind resources this session holds, as the coordinator has
+   * told it so far.
+   *
+   * Kept on the record rather than answered on arrival because the CLI is a
+   * process per round: a notice that lands mid-round has nowhere to go until
+   * the next prompt is built, and that prompt is where an agent can act on it
+   * by handing the files back.
+   */
+  contention: ScopeContentionNotice[];
   cancelled: boolean;
 }
 
@@ -987,7 +1000,7 @@ const COMPLETION_SHAPE_INSTRUCTIONS = [
   "  additionalConfigKeys, additionalTests, additionalServices, reason,",
   "  question, options, recommended, questions, action",
   "For completed, use empty scope fields. For scope_change_requested, fill every scope field.",
-  "For scope_release_requested, put the resources you are handing back in the same scope fields and say why in reason.",
+  "For scope_release_requested, put the resources you are handing back in the same scope fields and say why in reason. Use it the moment you are finished with something: it is what lets a waiting agent start.",
   'For question_asked, set requestId and either question plus options (at least two), or questions: a list of up to ' +
     String(MAX_AGENT_QUESTIONS) +
     ' objects, each with its own question, options (at least two) and recommended (the index of the one you would pick). Leave the scope fields empty.',
@@ -1346,6 +1359,7 @@ export class PromptCliAdapter implements AgentAdapter {
       answers: [],
       pendingAction: new Map(),
       actionResults: [],
+      contention: [],
       resume: undefined,
       cancelled: false,
     });
@@ -1416,6 +1430,7 @@ export class PromptCliAdapter implements AgentAdapter {
       answers: [],
       pendingAction: new Map(),
       actionResults: [],
+      contention: [],
       resume,
       cancelled: false,
     });
@@ -1506,6 +1521,10 @@ export class PromptCliAdapter implements AgentAdapter {
       baseVersion: request.canonicalChange.canonicalVersion,
     });
     try {
+      await applyHolderWorkingOverlay(
+        record.planningWorkspace.path,
+        request.holderWorkingChanges,
+      );
       const plan = await this.runPlanning(
         record,
         record.planningWorkspace.path,
@@ -1786,6 +1805,54 @@ export class PromptCliAdapter implements AgentAdapter {
     }
     record.pendingScope.delete(decision.requestId);
     pending.resolve(structuredClone(decision));
+  }
+
+  /**
+   * Records that another task is waiting on part of what this session holds.
+   *
+   * Kept for the next round's prompt rather than pushed at the running
+   * process: there is nothing to push to — each round is its own CLI
+   * invocation — and the round boundary is the only moment an agent can
+   * actually answer with a release.
+   *
+   * Silent about a session it does not know or has already cancelled. This is
+   * advice, and advice that arrives late is not a failure of the run that
+   * sent it. The same notice twice is dropped: repeating it would fill the
+   * prompt with the queue rather than with the work.
+   */
+  public async noteScopeContention(
+    sessionId: string,
+    notice: ScopeContentionNotice,
+  ): Promise<void> {
+    const record = this.sessions.get(sessionId);
+    if (record === undefined || record.cancelled) {
+      return;
+    }
+    const fingerprint = (entry: ScopeContentionNotice): string =>
+      JSON.stringify({
+        taskId: entry.taskId,
+        files: [...entry.files].sort(),
+        symbols: [...(entry.symbols ?? [])].sort(),
+        apis: [...(entry.apis ?? [])].sort(),
+        schemas: [...(entry.schemas ?? [])].sort(),
+        configKeys: [...(entry.configKeys ?? [])].sort(),
+        tests: [...(entry.tests ?? [])].sort(),
+        services: [...(entry.services ?? [])].sort(),
+      });
+    const known = fingerprint(notice);
+    if (record.contention.some((seen) => fingerprint(seen) === known)) {
+      return;
+    }
+    record.contention.push(structuredClone(notice));
+    const waitingOn =
+      notice.files.length > 0
+        ? notice.files.join(", ")
+        : "resources this task holds";
+    this.emit(record, {
+      event: "progress",
+      message: `Another task is waiting on ${waitingOn}`,
+      occurredAt: new Date().toISOString(),
+    });
   }
 
   public async cancel(sessionId: string): Promise<void> {
@@ -2393,6 +2460,15 @@ export class PromptCliAdapter implements AgentAdapter {
       `Objective: ${record.input.task.objective}`,
       `Previous plan: ${JSON.stringify(request.previousPlan)}`,
       `Canonical change: ${JSON.stringify(request.canonicalChange)}`,
+      ...(request.holderWorkingChanges === undefined ||
+      request.holderWorkingChanges.length === 0
+        ? []
+        : [
+            "Holder working changes (in-progress edits from tasks you are " +
+              "waiting on — already overlaid into this planning workspace; " +
+              "treat them as the likely result of those tasks, not as fact):",
+            JSON.stringify(request.holderWorkingChanges),
+          ]),
       `Coordinator constraints: ${JSON.stringify(request.constraints)}`,
       "Account for changed dependencies and remove stale file assumptions.",
       PLAN_SHAPE_INSTRUCTIONS,
@@ -2510,13 +2586,32 @@ export class PromptCliAdapter implements AgentAdapter {
         "you changed no files. Changing files is not the goal of such a " +
         "task; the action was.",
       "Do not modify files outside expectedFiles without first answering with a scope_change_requested outcome.",
-      "When you are finished with files in expectedFiles you no longer need " +
-        "to change, hand them back: answer with a scope_release_requested " +
-        "outcome naming them in the same scope fields, with a reason. Other " +
-        "agents are waiting on them, and they stay yours until the task " +
-        "ends otherwise. Release nothing you still have edits in or may " +
-        "still touch — getting one back is a scope change, and it will be " +
-        "refused if somebody else has taken it by then.",
+      // The standing instruction. Handing scope back used to be mentioned
+      // only in the schema note — mechanically, as one of five outcomes — and
+      // no agent ever volunteered it, so an over-claimed plan held every file
+      // it named until the task settled.
+      "Hand files back as you finish with them, without waiting to be asked. " +
+        "Everything in expectedFiles is yours alone until this task ends, so " +
+        "a file you stopped needing in the first ten minutes blocks whoever " +
+        "wants it for the rest of the run. When you know you will not touch " +
+        "one again, answer with a scope_release_requested outcome naming it " +
+        "in the same scope fields, with a reason; you carry on working " +
+        "inside what is left.",
+      "Release nothing you still have edits in or may still touch. A file " +
+        "with uncommitted changes is refused — correctly, it is not finished " +
+        "with — and asking for a released file back is a scope change that " +
+        "is refused if somebody else has taken it by then.",
+      ...(record.contention.length === 0
+        ? []
+        : [
+            "Tasks are queued behind resources you hold right now: " +
+              JSON.stringify(record.contention),
+            "Each of them is stopped until you release what it names or this " +
+              "task ends. Release now whatever you have finished with — that " +
+              "is all it takes for the waiting task to start — and keep the " +
+              "rest. If you are still working in every one of them, say so " +
+              "in your explanation and carry on.",
+          ]),
       "Do not change Git metadata.",
       `Task: ${taskObjective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
@@ -2641,4 +2736,29 @@ export function createKiroAdapter(
   options: NamedPromptCliOptions,
 ): PromptCliAdapter {
   return new PromptCliAdapter({ ...options, profile: KIRO_PROFILE });
+}
+
+/**
+ * Overlay a holder's in-progress edits onto a planning worktree built from
+ * canonical. Speculative only — the holder still owns the files.
+ */
+async function applyHolderWorkingOverlay(
+  workspacePath: string,
+  changes: readonly HolderWorkingChange[] | undefined,
+): Promise<void> {
+  if (changes === undefined || changes.length === 0) {
+    return;
+  }
+  for (const change of changes) {
+    const target = path.join(workspacePath, change.path);
+    if (change.status === "deleted") {
+      await rm(target, { force: true });
+      continue;
+    }
+    if (change.absolutePath === undefined) {
+      continue;
+    }
+    await mkdir(path.dirname(target), { recursive: true });
+    await copyFile(change.absolutePath, target);
+  }
 }

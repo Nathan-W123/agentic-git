@@ -9,6 +9,7 @@ import {
   type AgentSession,
   type QuestionAnswer,
   type QuestionChoice,
+  type ScopeContentionNotice,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -25,6 +26,7 @@ import {
 } from "@coord/repository-service";
 import {
   assertAgentPlan,
+  claimCoversPath,
   createId,
   describeError,
   mergePlanScope,
@@ -50,6 +52,7 @@ import {
   type CoordinationRunResult,
   type CoordinatorDecision,
   type FilePatchStatus,
+  type HolderWorkingChange,
   type ReplanRequest,
   type ResourceType,
   type ScopeChangeDecision,
@@ -84,7 +87,12 @@ import {
   approvedSchemaResources,
   structuralConflict,
 } from "./plan-admission.js";
-import { assessReplay } from "./replay.js";
+import {
+  assessReplay,
+  residualAdvance,
+  speculationLanded,
+  type CanonicalAdvance,
+} from "./replay.js";
 import { RunRecorder } from "./run-recorder.js";
 import { TaskCancellationRegistry } from "./task-cancellation.js";
 import {
@@ -351,6 +359,15 @@ interface PlannedTask extends CoordinatedTask {
   resumed?: OpenConversation;
   /** Set when admission granted less than this task planned. */
   admission?: PlanAdmission;
+  /**
+   * Holder WIP this task already planned against while deferred.
+   *
+   * Present only after a speculative replan. On wake, {@link assessReplay}
+   * grades the residual advance; when speculation covers what landed the
+   * task starts without another planning round. Never an admission — the
+   * holders still own the files.
+   */
+  speculatedAdvance?: CanonicalAdvance;
 }
 
 interface PreparedTask extends PlannedTask {
@@ -367,6 +384,18 @@ interface PreparedTask extends PlannedTask {
  * ends up reporting a wrapper the other end would have expanded.
  */
 const errorMessage = describeError;
+
+function emptyAdvance(): CanonicalAdvance {
+  return {
+    changedFiles: [],
+    changedSymbols: [],
+    changedApis: [],
+    changedSchemas: [],
+    changedConfigKeys: [],
+    changedTests: [],
+    changedServices: [],
+  };
+}
 
 /**
  * Every resource a plan claims, as the plan itself spells it.
@@ -401,6 +430,72 @@ function planClaimedResources(plan: AgentPlan): Map<string, PlanResourceRef> {
   add("test", plan.expectedTests);
   add("service", plan.expectedServices);
   return claimed;
+}
+
+/**
+ * What one plan wants that another plan already holds.
+ *
+ * The sentence a contention notice is built from: the waiter declared these,
+ * the holder claims them, and only the holder can hand them back. Symbols and
+ * every other axis are compared the same way files are — a task queued behind
+ * a symbol is waiting just as long as one queued behind a file.
+ *
+ * A frozen or blanket claim is read through {@link claimCoversPath} as well as
+ * through its file list: a claim covers directories the holder has not named
+ * file by file, and those are exactly the paths a waiter is refused for.
+ */
+export function contestedPlanResources(
+  holder: AgentPlan,
+  waiter: AgentPlan,
+): {
+  files: string[];
+  symbols: string[];
+  apis: string[];
+  schemas: string[];
+  configKeys: string[];
+  tests: string[];
+  services: string[];
+} {
+  const held = planClaimedResources(holder);
+  const contested = {
+    files: [] as string[],
+    symbols: [] as string[],
+    apis: [] as string[],
+    schemas: [] as string[],
+    configKeys: [] as string[],
+    tests: [] as string[],
+    services: [] as string[],
+  };
+  const axes: ReadonlyArray<
+    [ResourceType, readonly string[] | undefined, keyof typeof contested]
+  > = [
+    ["file", waiter.expectedFiles, "files"],
+    ["symbol", waiter.expectedSymbols, "symbols"],
+    ["api", waiter.expectedApis, "apis"],
+    ["schema", waiter.expectedSchemas, "schemas"],
+    ["configuration", waiter.expectedConfigKeys, "configKeys"],
+    ["test", waiter.expectedTests, "tests"],
+    ["service", waiter.expectedServices, "services"],
+  ];
+  for (const [resourceType, wanted, bucket] of axes) {
+    for (const resourceId of wanted ?? []) {
+      const covered =
+        held.has(planResourceKey(resourceType, resourceId)) ||
+        (resourceType === "file" && claimCoversPath(holder, resourceId));
+      if (covered) {
+        contested[bucket].push(resourceId);
+      }
+    }
+  }
+  return {
+    files: uniqueStrings(contested.files),
+    symbols: uniqueStrings(contested.symbols),
+    apis: uniqueStrings(contested.apis),
+    schemas: uniqueStrings(contested.schemas),
+    configKeys: uniqueStrings(contested.configKeys),
+    tests: uniqueStrings(contested.tests),
+    services: uniqueStrings(contested.services),
+  };
 }
 
 function pairKey(taskIds: readonly [string, string]): string {
@@ -684,6 +779,47 @@ export interface PlanAuthority {
    * complete, and nobody ever writes the rest.
    */
   deferRemainder?(request: DeferredScopeRequest): Promise<void>;
+  /**
+   * Who is queued behind this task right now, and on what.
+   *
+   * The mirror of `admit`: that one tells an arriving task it must wait, this
+   * one tells the holder that somebody is waiting. Both answers come out of
+   * the same durable state — the arriving task's own non-approved contract
+   * names its blockers — which is why this lives on the authority rather than
+   * in the coordinator, whose view stops at its own run.
+   *
+   * Answers only what the holder could actually hand back: resources in the
+   * plan it is executing. A waiter blocked on something this task never
+   * claimed is somebody else's queue.
+   *
+   * Optional. An authority without it simply never tells anyone, which is the
+   * behaviour every release request had before this existed.
+   */
+  listWaitingOn?(
+    request: WaitingWorkRequest,
+  ): Promise<readonly WaitingWork[]>;
+}
+
+/** The holder, and the plan whose resources a queue could form behind. */
+export interface WaitingWorkRequest {
+  task: TaskDefinition;
+  plan: AgentPlan;
+  repository: CanonicalRepository;
+  projectId?: string;
+}
+
+/** One task waiting, and the part of the holder's plan it is waiting for. */
+export interface WaitingWork {
+  taskId: string;
+  files: readonly string[];
+  symbols?: readonly string[];
+  apis?: readonly string[];
+  schemas?: readonly string[];
+  configKeys?: readonly string[];
+  tests?: readonly string[];
+  services?: readonly string[];
+  /** What the authority told the waiter, for the holder to read. */
+  explanation?: string;
 }
 
 /** What an authority needs to decide whether a task is alone in a repository. */
@@ -802,6 +938,11 @@ export class Coordinator {
   private readonly cancellations: TaskCancellationRegistry | undefined;
   /** Where each task is working, for an action that needs to reach it. */
   private readonly taskWorkspacePaths = new Map<string, string>();
+  /**
+   * Live worktrees keyed by task id — the in-process half of looking up a
+   * holder's edits while a waiter is deferred. Cleared on cleanup.
+   */
+  private readonly taskWorkspaces = new Map<string, TaskWorkspace>();
   /** Actions each task has spent, for the cap. */
   private readonly actionsUsed = new Map<string, number>();
   public constructor(dependencies: CoordinatorDependencies = {}) {
@@ -1026,6 +1167,19 @@ export class Coordinator {
                 waveVersion,
                 index,
               );
+        // Speculation that covered this advance is why a moved task skipped
+        // replan. Advance plannedVersion so the next wave does not re-grade
+        // the holder's files as a fresh disturbance.
+        if (index !== undefined) {
+          const required = new Set(needsReplan);
+          for (const entry of moved) {
+            if (required.has(entry) || entry.speculatedAdvance === undefined) {
+              continue;
+            }
+            entry.plannedVersion = waveVersion;
+            entry.speculatedAdvance = undefined;
+          }
+        }
         // Every task still queued has to see the canonical state the previous
         // wave produced, and each of those replans is a full round trip to an
         // agent. Issued one at a time they dominate a real run: a fully
@@ -1052,6 +1206,7 @@ export class Coordinator {
               recorder,
               runAudit,
             );
+            entry.speculatedAdvance = undefined;
           }),
         );
 
@@ -1175,7 +1330,37 @@ export class Coordinator {
             // for. Executing what was granted rather than what was submitted
             // is what keeps scope enforcement, the ownership grants and the
             // change set all describing the same piece of work.
-            entry.plan = answer.plan;
+            //
+            // A speculative plan written against holder WIP that never landed
+            // is invalid on wake: fall back to today's replan against bare
+            // canonical before treating this as ready to execute. The
+            // replanned plan replaces `answer.plan` — speculation was never
+            // an admission of that overlay.
+            if (
+              entry.speculatedAdvance !== undefined &&
+              entry.plannedVersion.revision === waveVersion.revision
+            ) {
+              const index = await this.intelligence.index(
+                input.repository,
+                waveVersion.revision,
+              );
+              await this.replanTask(
+                input,
+                entry,
+                waveVersion,
+                index,
+                recorder,
+                runAudit,
+                {
+                  reason:
+                    "Speculative plan was against holder work that did not land",
+                  changedFiles: [],
+                },
+              );
+              entry.speculatedAdvance = undefined;
+            } else {
+              entry.plan = answer.plan;
+            }
             // Kept because `plan` alone cannot say why a file is missing from
             // it. Collection needs to tell "withheld, and somebody else is
             // writing it" from "never arbitrated", and only the decision knows.
@@ -1200,10 +1385,10 @@ export class Coordinator {
         }
 
         if (admittedWave.length === 0) {
-          // Nothing may start yet. Waiting beats spinning: the next pass
-          // re-reads canonical and replans anything the holder moved
-          // underneath, so the retry is made against the winner's result
-          // rather than against a base that no longer exists.
+          // Nothing may start yet. While we wait, plan against what the
+          // holders are already editing — so when they land, assessReplay
+          // finds the advance unsurprising and the waiter starts without a
+          // cold planning round. Speculation never admits or takes leases.
           deferredWaves += 1;
           if (deferredWaves > MAX_CONSECUTIVE_DEFERRED_WAVES) {
             throw new Error(
@@ -1211,6 +1396,13 @@ export class Coordinator {
                 "consecutive waves; the plan authority is not making progress",
             );
           }
+          await this.speculateDuringDeferredWait(
+            input,
+            pending,
+            waveVersion,
+            recorder,
+            runAudit,
+          );
           await new Promise((resolve) =>
             setTimeout(
               resolve,
@@ -1234,6 +1426,7 @@ export class Coordinator {
               waveVersion,
               recorder,
               runAudit,
+              pending,
             ),
           ),
         );
@@ -2067,6 +2260,17 @@ export class Coordinator {
         required.push(entry);
         continue;
       }
+      // Speculation is a head start, not a guarantee. If the holder landed a
+      // different set than we planned against, fall back to today's replan.
+      // When speculation covers the advance, only the residual can disturb.
+      let graded: CanonicalAdvance = advance;
+      if (entry.speculatedAdvance !== undefined) {
+        if (!speculationLanded(entry.speculatedAdvance, advance)) {
+          required.push(entry);
+          continue;
+        }
+        graded = residualAdvance(advance, entry.speculatedAdvance);
+      }
       const assessment = assessReplay(
         entry.plan,
         {
@@ -2083,7 +2287,7 @@ export class Coordinator {
           agentExplanation: "",
           createdAt: new Date().toISOString(),
         },
-        advance,
+        graded,
       );
       if (assessment.semantic.length > 0 || assessment.textual.length > 0) {
         required.push(entry);
@@ -2099,19 +2303,50 @@ export class Coordinator {
     index: RepositoryIndex,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
+    /** Override when the caller already knows the notice (speculation, stale). */
+    noticeOverride?: Pick<CanonicalChangeNotice, "reason" | "changedFiles"> &
+      Partial<
+        Pick<
+          CanonicalChangeNotice,
+          | "changedSymbols"
+          | "changedApis"
+          | "changedSchemas"
+          | "changedConfigKeys"
+          | "changedTests"
+          | "changedServices"
+        >
+      >,
+    holderWorkingChanges?: readonly HolderWorkingChange[],
   ): Promise<void> {
-    const notice = await this.describeCanonicalAdvance(
-      input.repository,
-      entry.plannedVersion,
-      version,
-      "Blocking work changed canonical state before this task started",
-      index,
-    );
+    const notice: CanonicalChangeNotice =
+      noticeOverride === undefined
+        ? await this.describeCanonicalAdvance(
+            input.repository,
+            entry.plannedVersion,
+            version,
+            "Blocking work changed canonical state before this task started",
+            index,
+          )
+        : {
+            previousVersion: entry.plannedVersion,
+            canonicalVersion: version,
+            changedFiles: noticeOverride.changedFiles,
+            changedSymbols: noticeOverride.changedSymbols ?? [],
+            changedApis: noticeOverride.changedApis ?? [],
+            changedSchemas: noticeOverride.changedSchemas ?? [],
+            changedConfigKeys: noticeOverride.changedConfigKeys ?? [],
+            changedTests: noticeOverride.changedTests ?? [],
+            changedServices: noticeOverride.changedServices ?? [],
+            reason: noticeOverride.reason,
+          };
     const request: ReplanRequest = {
       taskId: entry.task.id,
       previousPlan: entry.plan,
       canonicalChange: notice,
       constraints: [...entry.decision.constraints],
+      ...(holderWorkingChanges === undefined || holderWorkingChanges.length === 0
+        ? {}
+        : { holderWorkingChanges: [...holderWorkingChanges] }),
     };
     await recorder?.status(entry.task.id, "replanning", notice.reason);
     await this.trace(recorder, runAudit, "canonical_changed", entry.task.id, {
@@ -2124,11 +2359,15 @@ export class Coordinator {
       changedConfigKeys: notice.changedConfigKeys,
       changedTests: notice.changedTests,
       changedServices: notice.changedServices,
+      ...(holderWorkingChanges === undefined
+        ? {}
+        : { speculative: true, holderWorkingChanges: holderWorkingChanges.length }),
     });
     await this.trace(recorder, runAudit, "replan_requested", entry.task.id, {
       previousPlanRevision: entry.planRevision,
       canonicalRevision: version.revision,
       changedFiles: notice.changedFiles,
+      ...(holderWorkingChanges === undefined ? {} : { speculative: true }),
     });
 
     const submitted = await entry.adapter.requestReplan(entry.session.id, request);
@@ -2160,7 +2399,176 @@ export class Coordinator {
       // name, and without them the record only shows half the declaration.
       expectedSymbols: entry.plan.expectedSymbols,
       grounding: entry.plan.grounding,
+      ...(holderWorkingChanges === undefined ? {} : { speculative: true }),
     });
+  }
+
+  /**
+   * While every ready task is deferred behind holders, plan against those
+   * holders' in-progress edits — without acquiring leases.
+   *
+   * Skipped when working changes cannot be read. Failures never disturb the
+   * wait: the next wave still falls back to today's cold replan on wake.
+   */
+  private async speculateDuringDeferredWait(
+    input: CoordinatorRunInput,
+    pending: readonly PlannedTask[],
+    version: CanonicalVersion,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    if (this.workspaces.listWorkingChanges === undefined) {
+      return;
+    }
+    const waiters = pending.filter((entry) => entry.decision.blockedBy.length > 0);
+    if (waiters.length === 0) {
+      return;
+    }
+    let index: RepositoryIndex | undefined;
+    for (const entry of waiters) {
+      try {
+        const overlay = await this.collectHolderWorkingChanges(
+          input,
+          entry.decision.blockedBy,
+          version,
+        );
+        if (overlay.changes.length === 0) {
+          continue;
+        }
+        index =
+          index ??
+          (await this.intelligence.index(input.repository, version.revision));
+        await this.replanTask(
+          input,
+          entry,
+          version,
+          index,
+          recorder,
+          runAudit,
+          {
+            reason:
+              "Blocking work is in progress; plan against its current edits",
+            changedFiles: overlay.advance.changedFiles,
+            changedSymbols: overlay.advance.changedSymbols,
+            changedApis: overlay.advance.changedApis,
+            changedSchemas: overlay.advance.changedSchemas,
+            changedConfigKeys: overlay.advance.changedConfigKeys,
+            changedTests: overlay.advance.changedTests,
+            changedServices: overlay.advance.changedServices,
+          },
+          overlay.changes,
+        );
+        entry.speculatedAdvance = overlay.advance;
+      } catch {
+        // Speculation is a head start. A failure leaves the waiter on today's
+        // path: sleep, then replan cold if canonical moved.
+      }
+    }
+  }
+
+  /**
+   * Holder WIP readable from in-process worktrees or co-located store paths.
+   */
+  private async collectHolderWorkingChanges(
+    input: CoordinatorRunInput,
+    holderTaskIds: readonly string[],
+    version: CanonicalVersion,
+  ): Promise<{
+    changes: HolderWorkingChange[];
+    advance: CanonicalAdvance;
+  }> {
+    const list = this.workspaces.listWorkingChanges?.bind(this.workspaces);
+    if (list === undefined) {
+      return {
+        changes: [],
+        advance: emptyAdvance(),
+      };
+    }
+    const changes: HolderWorkingChange[] = [];
+    const files = new Set<string>();
+    for (const holderId of holderTaskIds) {
+      const workspace = await this.resolveHolderWorkspace(
+        input,
+        holderId,
+        version,
+      );
+      if (workspace === undefined) {
+        continue;
+      }
+      let working: Array<{ path: string; status: FilePatchStatus }>;
+      try {
+        working = await list(workspace);
+      } catch {
+        continue;
+      }
+      for (const change of working) {
+        files.add(change.path);
+        changes.push({
+          path: change.path,
+          status: change.status,
+          ...(change.status === "deleted"
+            ? {}
+            : { absolutePath: path.join(workspace.path, change.path) }),
+        });
+      }
+    }
+    const changedFiles = [...files].sort((left, right) =>
+      left.localeCompare(right),
+    );
+    let advance: CanonicalAdvance = {
+      ...emptyAdvance(),
+      changedFiles,
+    };
+    try {
+      const index = await this.intelligence.index(
+        input.repository,
+        version.revision,
+      );
+      const resources = this.intelligence.changedResources(changedFiles, index);
+      advance = {
+        changedFiles,
+        changedSymbols: resources.symbols,
+        changedApis: resources.apis,
+        changedSchemas: resources.schemas,
+        changedConfigKeys: resources.configKeys,
+        changedTests: resources.tests,
+        changedServices: resources.services,
+      };
+    } catch {
+      // File list alone is still enough for assessReplay residual credit.
+    }
+    return { changes, advance };
+  }
+
+  private async resolveHolderWorkspace(
+    input: CoordinatorRunInput,
+    holderTaskId: string,
+    version: CanonicalVersion,
+  ): Promise<TaskWorkspace | undefined> {
+    const live = this.taskWorkspaces.get(holderTaskId);
+    if (live !== undefined) {
+      return live;
+    }
+    const stored = await this.store?.findWorkspaceByTaskId(holderTaskId);
+    if (stored === undefined) {
+      return undefined;
+    }
+    return {
+      id: stored.id,
+      taskId: stored.taskId,
+      path: stored.path,
+      rootPath: stored.path,
+      repository: input.repository,
+      baseVersion: {
+        sequence: version.sequence,
+        revision: stored.baseRevision,
+        branch: version.branch,
+        createdAt: stored.createdAt,
+      },
+      isolation:
+        stored.isolation === "docker" ? "docker" : "git-worktree",
+      createdAt: stored.createdAt,
+    };
   }
 
   private buildBlockers(
@@ -2569,6 +2977,8 @@ export class Coordinator {
     waveVersion: CanonicalVersion,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
+    /** This run's own queue: tasks held back, some of them behind this one. */
+    waiting: readonly PlannedTask[],
   ): Promise<PreparedTask | TaskExecutionResult> {
     let workspace: TaskWorkspace | undefined;
     try {
@@ -2632,6 +3042,7 @@ export class Coordinator {
             });
       entry.decision.workspaceId = workspace.id;
       this.taskWorkspacePaths.set(entry.task.id, workspace.path);
+      this.taskWorkspaces.set(entry.task.id, workspace);
       await recorder?.decision(entry.decision);
       await recorder?.workspace({
         id: workspace.id,
@@ -2709,6 +3120,18 @@ export class Coordinator {
         recorder,
         runAudit,
       );
+      // What the release path was always missing: whoever is queued behind
+      // this task's plan, told to this agent while it still holds it. The
+      // first pass is awaited so a queue that already exists reaches the
+      // prompt of the round the agent starts on.
+      const contending = this.watchScopeContention(
+        input,
+        entry,
+        waiting,
+        recorder,
+        runAudit,
+      );
+      await contending.first;
       // Held rather than thrown: when an event handler fails, its catch
       // cancels this session, and what rejects out of `sendContext` is the
       // echo of that teardown — "Session … was cancelled" — not the cause.
@@ -2730,6 +3153,7 @@ export class Coordinator {
       } finally {
         await watching.stop();
         await freezing.stop();
+        await contending.stop();
       }
       await eventChain;
       if (eventErrors.length > 0) {
@@ -4177,6 +4601,200 @@ export class Coordinator {
   }
 
   /**
+   * Tells a working agent that somebody is queued behind what it holds.
+   *
+   * The release path has always worked and never fired, because nothing told
+   * an agent there was anyone to release *to*: a plan that claims twenty-two
+   * files and touches eight holds the other fourteen until the task settles,
+   * and every task queued behind one of them waits for work that finished
+   * long ago. This is the missing half — the coordinator already knows who is
+   * waiting, on the waiting task's own decision, and now says so.
+   *
+   * Two sources, because a queue forms in two places. Tasks in this run are
+   * read straight off their decisions; tasks in other runs — the common case,
+   * since a channel dispatch is its own run — come from the plan authority,
+   * which is the only thing that can see across them.
+   *
+   * A timer for the same reason the blanket-claim freeze uses one: the
+   * arrival happens elsewhere, and the durable record is all both sides
+   * share. Each resource is announced once per waiting task; repeating it
+   * every tick would fill the next prompt with the same sentence rather than
+   * with the work.
+   *
+   * Advisory throughout, and never allowed to disturb the run: an authority
+   * that cannot answer, or an adapter that cannot be told, leaves the holder
+   * working exactly as it did before. Nothing here releases anything — only
+   * the agent can do that, and only for files it has finished with.
+   */
+  private watchScopeContention(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    waiting: readonly PlannedTask[],
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): { first: Promise<void>; stop: () => Promise<void> } {
+    const note = entry.adapter.noteScopeContention?.bind(entry.adapter);
+    if (note === undefined) {
+      return { first: Promise.resolve(), stop: async () => undefined };
+    }
+    const ask = this.planAuthority?.listWaitingOn?.bind(this.planAuthority);
+    const announced = new Set<string>();
+    let inFlight: Promise<void> = Promise.resolve();
+    let stopped = false;
+
+    const inRun = (): WaitingWork[] =>
+      waiting
+        .filter(
+          (candidate) =>
+            candidate.task.id !== entry.task.id &&
+            candidate.decision.blockedBy.includes(entry.task.id),
+        )
+        .map((candidate) => ({
+          taskId: candidate.task.id,
+          ...contestedPlanResources(entry.plan, candidate.plan),
+          explanation: candidate.decision.explanation,
+        }));
+
+    const tick = async (): Promise<void> => {
+      if (stopped) {
+        return;
+      }
+      const queued = [...inRun()];
+      if (ask !== undefined) {
+        try {
+          queued.push(
+            ...(await ask({
+              task: entry.task,
+              plan: entry.plan,
+              repository: input.repository,
+              ...(input.projectId === undefined
+                ? {}
+                : { projectId: input.projectId }),
+            })),
+          );
+        } catch {
+          // A queue that cannot be read is one nobody is told about, which is
+          // where this started. It is not a reason to stop the holder.
+        }
+      }
+      for (const waiter of queued) {
+        if (stopped) {
+          return;
+        }
+        // Only what this waiter has not already been announced for. The same
+        // pair stays contended for as long as both are alive, and the wait is
+        // re-read every tick.
+        const unseen = (
+          resourceType: ResourceType,
+          ids: readonly string[] | undefined,
+        ): string[] =>
+          (ids ?? []).filter(
+            (id) =>
+              !announced.has(
+                `${waiter.taskId}\0${planResourceKey(resourceType, id)}`,
+              ),
+          );
+        const fresh = {
+          files: unseen("file", waiter.files),
+          symbols: unseen("symbol", waiter.symbols),
+          apis: unseen("api", waiter.apis),
+          schemas: unseen("schema", waiter.schemas),
+          configKeys: unseen("configuration", waiter.configKeys),
+          tests: unseen("test", waiter.tests),
+          services: unseen("service", waiter.services),
+        };
+        const total = Object.values(fresh).reduce(
+          (count, ids) => count + ids.length,
+          0,
+        );
+        if (total === 0) {
+          continue;
+        }
+        const notice: ScopeContentionNotice = {
+          taskId: waiter.taskId,
+          files: fresh.files,
+          ...(fresh.symbols.length === 0 ? {} : { symbols: fresh.symbols }),
+          ...(fresh.apis.length === 0 ? {} : { apis: fresh.apis }),
+          ...(fresh.schemas.length === 0 ? {} : { schemas: fresh.schemas }),
+          ...(fresh.configKeys.length === 0
+            ? {}
+            : { configKeys: fresh.configKeys }),
+          ...(fresh.tests.length === 0 ? {} : { tests: fresh.tests }),
+          ...(fresh.services.length === 0 ? {} : { services: fresh.services }),
+          reason:
+            waiter.explanation === undefined || waiter.explanation.length === 0
+              ? `Task ${waiter.taskId} is waiting for these before it can start`
+              : `Task ${waiter.taskId} is waiting for these before it can ` +
+                `start: ${waiter.explanation}`,
+          occurredAt: new Date().toISOString(),
+        };
+        try {
+          await note(entry.session.id, notice);
+        } catch {
+          // A session that cannot be told — cancelled, already finished — is
+          // not a failure of the run that told it.
+          continue;
+        }
+        const told: ReadonlyArray<[ResourceType, readonly string[]]> = [
+          ["file", fresh.files],
+          ["symbol", fresh.symbols],
+          ["api", fresh.apis],
+          ["schema", fresh.schemas],
+          ["configuration", fresh.configKeys],
+          ["test", fresh.tests],
+          ["service", fresh.services],
+        ];
+        for (const [resourceType, ids] of told) {
+          for (const id of ids) {
+            announced.add(
+              `${waiter.taskId}\0${planResourceKey(resourceType, id)}`,
+            );
+          }
+        }
+        await this.trace(
+          recorder,
+          runAudit,
+          "scope_contention_noticed",
+          entry.task.id,
+          {
+            repositoryId: input.repository.id,
+            ...(input.projectId === undefined
+              ? {}
+              : { projectId: input.projectId }),
+            waitingTaskId: waiter.taskId,
+            files: notice.files,
+            symbols: notice.symbols ?? [],
+            apis: notice.apis ?? [],
+            schemas: notice.schemas ?? [],
+            configKeys: notice.configKeys ?? [],
+            tests: notice.tests ?? [],
+            services: notice.services ?? [],
+          },
+        ).catch(() => undefined);
+      }
+    };
+
+    // The first pass before the agent is handed its context, so a queue that
+    // already exists is in the prompt of the round it starts on rather than
+    // one poll interval later.
+    inFlight = tick().catch(() => undefined);
+    const first = inFlight;
+    const timer = setInterval(() => {
+      inFlight = inFlight.then(tick).catch(() => undefined);
+    }, this.workingChangePollMs);
+    timer.unref?.();
+
+    return {
+      first,
+      stop: async () => {
+        stopped = true;
+        clearInterval(timer);
+        await inFlight.catch(() => undefined);
+      },
+    };
+  }
+
+  /**
    * Reports what the agent is touching, on a timer, while it edits.
    *
    * Only differences are written. A run that spends twenty minutes reading
@@ -4284,6 +4902,8 @@ export class Coordinator {
     // Only the handler goes; any recorded stop reason stays readable, since
     // the paths that ran this cleanup still consult it to name the ending.
     this.cancellations?.release(taskId);
+    this.taskWorkspacePaths.delete(taskId);
+    this.taskWorkspaces.delete(taskId);
     // Closed, not dropped. Settlement is the one moment the coordinator
     // knows the session has no further use — the change set is collected,
     // and any conflict repair that wanted the agent again has already run.

@@ -1593,6 +1593,28 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     this.requireRun(runId).workspaces.push(copy(workspace));
   }
 
+  public async findWorkspaceByTaskId(
+    taskId: TaskId,
+  ): Promise<StoredWorkspace | undefined> {
+    let newest: StoredWorkspace | undefined;
+    for (const state of this.runs.values()) {
+      for (const workspace of state.workspaces) {
+        if (workspace.taskId !== taskId) {
+          continue;
+        }
+        if (
+          newest === undefined ||
+          workspace.createdAt > newest.createdAt ||
+          (workspace.createdAt === newest.createdAt &&
+            workspace.id > newest.id)
+        ) {
+          newest = workspace;
+        }
+      }
+    }
+    return newest === undefined ? undefined : copy(newest);
+  }
+
   public async saveChangeSet(runId: string, changeSet: ChangeSet): Promise<void> {
     const state = this.requireRun(runId);
     if (!state.changeSets.some((entry) => entry.id === changeSet.id)) {
