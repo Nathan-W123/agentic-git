@@ -1351,10 +1351,13 @@ const CAPTURE_ONLY_KINDS: Partial<
   Record<VendorCliKind, readonly UserCredentialKind[]>
 > = {
   claude: ["session_file"],
-  // New Gemini connections are browser-only. Delivery remains capable of
-  // opening older API-key/session records so this does not strand an existing
-  // deployment, but the connection API no longer offers or accepts them.
-  gemini: ["api_key", "session_file"],
+  // Gemini's browser sign-in is no longer open to individuals -- Google now
+  // answers it with "IneligibleTierError: This client is no longer supported
+  // for Gemini Code Assist for individuals" -- so an API key is the route
+  // most people have, and the connect screen offers it again. The session
+  // file stays capture-only: it is what a sign-in produces, not something to
+  // type in.
+  gemini: ["session_file"],
   cursor: ["session_file"],
   copilot: ["session_file", "oauth_token", "api_key"],
   kiro: ["session_file"],
@@ -1540,6 +1543,21 @@ export async function openCredentialHome(input: {
         path.join(geminiDirectory, "settings.json"),
         `${JSON.stringify({
           security: { auth: { selectedType: "oauth-personal" } },
+        })}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    } else if (vendor === "gemini" && credential.kind === "api_key") {
+      // Same reason the session-file branch above writes this: without a
+      // declared auth method the CLI refuses to start and names its settings
+      // file instead of using the credential sitting next to it. The key
+      // itself travels in the environment, and `validateAuthMethod` checks
+      // GEMINI_API_KEY for exactly this type.
+      const geminiDirectory = path.join(directory, ".gemini");
+      await mkdir(geminiDirectory, { recursive: true });
+      await writeFile(
+        path.join(geminiDirectory, "settings.json"),
+        `${JSON.stringify({
+          security: { auth: { selectedType: "gemini-api-key" } },
         })}\n`,
         { encoding: "utf8", mode: 0o600 },
       );

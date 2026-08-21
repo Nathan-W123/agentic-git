@@ -426,11 +426,13 @@ test("the wrong JSON file is rejected with the name of the right one", async (t)
 });
 
 test("a session file records the recommended kind ordering", async () => {
-  // Codex still accepts a deliberately supplied credential. Gemini and the
-  // new coding-agent connections are browser-only, so there is nothing to
-  // paste into their connect screen.
+  // Codex still accepts a deliberately supplied credential. The coding-agent
+  // connections are browser-only, so there is nothing to paste into their
+  // connect screen.
   assert.deepEqual(supportedCredentialKinds("codex"), ["api_key", "session_file"]);
-  assert.deepEqual(supportedCredentialKinds("gemini"), []);
+  // Gemini was browser-only too, until Google closed that door to personal
+  // accounts. An API key is what most people have left, so it is offered.
+  assert.deepEqual(supportedCredentialKinds("gemini"), ["api_key"]);
   assert.deepEqual(supportedCredentialKinds("cursor"), []);
   assert.deepEqual(supportedCredentialKinds("copilot"), []);
   assert.deepEqual(supportedCredentialKinds("kiro"), []);
@@ -1082,4 +1084,43 @@ test("a vendor with no borrowing still refuses to run on somebody else's token",
     vendor: "cursor",
   });
   assert.equal(home, undefined);
+});
+
+/**
+ * Google retired the Gemini CLI's browser sign-in for personal accounts
+ * ("IneligibleTierError: This client is no longer supported for Gemini Code
+ * Assist for individuals"), which left Gemini with no way in at all: the
+ * connect screen had stopped offering the API key on the assumption that the
+ * sign-in would always be there.
+ */
+test("a Gemini API key is offered again, and arrives ready to use", async (t) => {
+  assert.ok(
+    supportedCredentialKinds("gemini").includes("api_key"),
+    "the connect screen must offer the route that still works",
+  );
+
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "gemini", {
+    kind: "api_key",
+    secret: "AIza-the-users-own-key",
+  });
+
+  const home = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "gemini",
+    baseEnv: { PATH: "/usr/bin" },
+  });
+  assert.ok(home !== undefined);
+  try {
+    assert.equal(home.env["GEMINI_API_KEY"], "AIza-the-users-own-key");
+    // Without a declared auth method the CLI refuses to start and names its
+    // settings file rather than using the key beside it.
+    const settings = JSON.parse(
+      await readFile(path.join(home.path, ".gemini", "settings.json"), "utf8"),
+    ) as { security?: { auth?: { selectedType?: string } } };
+    assert.equal(settings.security?.auth?.selectedType, "gemini-api-key");
+  } finally {
+    await home.close();
+  }
 });
