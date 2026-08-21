@@ -32,6 +32,7 @@ api,
   channelDraft,
   channelNewSince,
   channelParticipants,
+  channelPicture,
   channelUnreadCount,
   channelUnreadMark,
   collaborators,
@@ -107,49 +108,62 @@ function countBadge(count) {
     : `<span class="dot-badge">${esc(String(count > 99 ? "99+" : count))}</span>`;
 }
 
-/**
- * A channel, and the things you can do to it.
- *
- * A div rather than a button because it now contains one: inviting somebody
- * belongs to a channel, not to the account menu, and a button inside a button
- * is not markup a browser will keep. The keyboard is served by `role=button`
- * and the delegated handler in `app.js` that exists for exactly this.
- */
-function chanRow(repo, activeRepositoryId) {
-  const unread = channelUnreadCount(repo.id);
-  const mentions = channelUnreadCount(repo.id, { mentionsOnly: true });
-  const active = repo.id === activeRepositoryId;
-  // A room where something has stopped for a person. Unread says "there are
-  // words you have not read"; this says "nothing here moves until you answer",
-  // which is the one thing a reader cannot discover by not opening the room.
-  const held = channelAwaitsGoAhead(repo.id);
-  return `<div class="chan-row${active ? " active" : ""}${
-    unread > 0 ? " unread" : ""
-  }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}"
-    title="#${esc(repo.id)}" aria-label="Open channel ${esc(repo.id)}"${
-      active ? ' aria-current="page"' : ""
-    }>
-    <span class="cr-hash">${icon("chatBubble")}</span>
-    <span class="cr-name">${esc(repo.id)}</span>
-    ${
-      held
-        ? `<span class="cr-held" title="An agent here is waiting for your go-ahead"><span class="sr-only">Waiting for you</span></span>`
-        : ""
-    }
-    ${
-      unread > 0
-        ? `<span class="cr-badge" title="${
-            mentions > 0 ? `${mentions} unread mention${mentions === 1 ? "" : "s"}` : `${unread} unread`
-          }">${mentions > 0 ? "@" : unread > 99 ? "99+" : unread}</span>`
-        : ""
-    }
-    <span class="cr-more">${iconButton("dots", {
-      act: "channel-menu",
-      value: repo.id,
-      title: `More for #${repo.id}`,
-      small: true,
-    })}</span>
-  </div>`;
+function channelPictureMarkup(repositoryId, size = 34) {
+  const picture = channelPicture(repositoryId);
+  if (picture !== undefined) {
+    return `<img class="channel-picture" src="${esc(picture)}" alt="" width="${size}" height="${size}">`;
+  }
+  const initials =
+    repositoryId
+      .split(/[-_\s]+/u)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? "")
+      .join("") || "#";
+  return `<span class="channel-picture channel-picture-fallback" style="width:${size}px;height:${size}px">${esc(initials)}</span>`;
+}
+
+/** The compact, always-visible channel switcher. */
+function channelRail(activeRepositoryId) {
+  const repositories = [...state.repositories].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+  return `<nav class="channel-rail" aria-label="Channels">
+    <button type="button" class="channel-rail-brand" data-act="nav" data-value="chats"
+      title="Lattice" aria-label="Lattice">${brandMark(28)}</button>
+    <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
+      title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
+      aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
+      aria-pressed="${state.chanCollapsed === true}">${icon("columns")}</button>
+    <div class="channel-rail-list">
+      ${repositories
+        .map((repo) => {
+          const active = repo.id === activeRepositoryId;
+          const unread = channelUnreadCount(repo.id);
+          return `<div class="channel-rail-entry${active ? " active" : ""}">
+            <button type="button" class="channel-rail-button" data-act="channel-open"
+              data-value="${esc(repo.id)}" title="#${esc(repo.id)}"
+              aria-label="Open channel ${esc(repo.id)}"${active ? ' aria-current="page"' : ""}>
+              ${channelPictureMarkup(repo.id, 36)}
+              ${
+                unread > 0
+                  ? `<span class="channel-rail-unread">${unread > 99 ? "99+" : unread}</span>`
+                  : ""
+              }
+            </button>
+            <label class="channel-rail-edit" title="Change picture for ${esc(repo.id)}"
+              aria-label="Change picture for ${esc(repo.id)}">${icon("pencil")}
+              <input type="file" accept="image/*" data-act="channel-picture-pick"
+                data-repository="${esc(repo.id)}" hidden>
+            </label>
+          </div>`;
+        })
+        .join("")}
+    </div>
+    <button type="button" class="channel-rail-new" data-act="channel-new"
+      data-value="${esc(activeRepositoryId ?? "")}" title="New channel"
+      aria-label="New channel">${icon("plus")}</button>
+  </nav>`;
 }
 
 /**
@@ -726,7 +740,7 @@ function personRow(person) {
         : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}"`
     }>
       <span class="rr-avatar">
-        ${avatar(name, 30, name, me ? myAvatar() : undefined)}
+        ${avatar(name, 22, name, me ? myAvatar() : undefined)}
         ${
           // Your own dot is green whenever you can see it: the page being
           // open is what "here" means, and a roster where everyone else has
@@ -868,7 +882,7 @@ function rosterRow(agent) {
         data-hover-value="${esc(agent.id)}" tabindex="0"
         aria-label="Open details for ${esc(agent.name)}">
         ${usageTip(agent)}
-        ${agentFace(agent, 30)}
+        ${agentFace(agent, 22)}
         ${statusDot(status, AGENT_STATUS_TITLE[status])}
       </span>
       <span class="rr-body">
@@ -883,15 +897,18 @@ function rosterRow(agent) {
               </form>`
             : `<div class="rr-name">${esc(agent.name)}</div>`
         }
-        <div class="rr-role${agent.role ? "" : " rr-role-empty"}">${
+        ${
+          // Only when there is one, exactly as `personRow` does it. An agent
+          // without a role said "No role set" under its name — a second line
+          // of grey text on most rows, stating that nothing had been stated,
+          // and costing the row twice the height to say it. The "…" beside
+          // the row is still where a role is written.
           agent.role
-            ? `${esc(agent.role)}${auditor && paused ? " · paused" : ""}${
-                agent.mine ? " · Your agent" : ""
-              }`
-            : agent.mine
-              ? "Your agent · no role set"
-              : "No role set"
-        }</div>
+            ? `<div class="rr-role">${esc(agent.role)}${
+                auditor && paused ? " · paused" : ""
+              }${agent.mine ? " · Your agent" : ""}</div>`
+            : ""
+        }
       </span>
       <span class="rr-more">${iconButton("dots", {
         act: "roster-agent-menu",
@@ -992,10 +1009,23 @@ export function rosterMenuItems(agentId) {
  * headings fold up into the channel list when the sidebar collapses, one just
  * behind the other, and a rule cannot stagger two elements it cannot tell
  * apart.
+ *
+ * The label is also the control that rolls its own list up. Two lists share
+ * one scroller, so a long roster of agents pushes the people out of sight and
+ * the other way about; closing the one you are not reading is the only way to
+ * see both ends at once. `key` is what the handler and the stored preference
+ * both name the section by — the class is the stylesheet's, not the state's.
  */
-function section(label, act, value, title, cls) {
-  return `<div class="chan-sec ${cls}">
-    <span class="chan-sec-label">${esc(label)}</span>
+function section(label, act, value, title, cls, key) {
+  const open = state.rosterSectionsOpen[key] !== false;
+  const fold = open ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`;
+  return `<div class="chan-sec ${cls}${open ? "" : " chan-sec-closed"}">
+    <button type="button" class="chan-sec-toggle"
+      data-act="roster-section-toggle" data-value="${key}"
+      aria-expanded="${open}" title="${esc(fold)}" aria-label="${esc(fold)}">
+      ${icon("chevronDown")}
+      <span class="chan-sec-label">${esc(label)}</span>
+    </button>
     <button type="button" class="chan-sec-add" data-act="${act}"
       data-value="${value}" title="${esc(title)}" aria-label="${esc(title)}">
       ${icon("plus")}
@@ -1004,10 +1034,6 @@ function section(label, act, value, title, cls) {
 }
 
 function chanSidebar(activeRepositoryId) {
-  const query = state.chatQuery.trim().toLowerCase();
-  const channels = [...state.repositories]
-    .filter((repo) => query === "" || repo.id.toLowerCase().includes(query))
-    .sort((left, right) => left.id.localeCompare(right.id));
   const roster = channelAgentsFor(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
   // to names — the role has to come from somewhere, and it is on the record.
@@ -1018,15 +1044,15 @@ function chanSidebar(activeRepositoryId) {
   const user = currentUserName();
 
   const channel = esc(activeRepositoryId ?? "");
-  return `<aside class="chan-sidebar" aria-label="Channels and account">
+  return `<aside class="chan-sidebar" aria-label="Channel tools and account">
     <!-- The collapse control belongs to the surface it changes. It stays in
          this crown when the sidebar becomes an icon rail, so expanding it
          never requires hunting in the conversation header. -->
     <div class="chan-sidebar-top">
-      <button type="button" class="chan-brand" data-act="nav" data-value="chats"
-        title="Lattice chats" aria-label="Lattice chats">
-        ${brandMark(26)}
-        <span class="brand-text"><b>Lattice</b></span>
+      <button type="button" class="chan-brand" data-act="channel-info"
+        data-value="${channel}" title="Channel info" aria-label="Channel info">
+        ${channelPictureMarkup(activeRepositoryId ?? "", 28)}
+        <span class="brand-text"><b>${channel}</b></span>
       </button>
       <button type="button" class="icon-btn desk-only chan-collapse-btn"
         data-act="chan-collapse-toggle"
@@ -1041,8 +1067,15 @@ function chanSidebar(activeRepositoryId) {
         cls: "drawer-close",
       })}
     </div>
-    <div class="chan-sidebar-head">
-      ${searchBox("Search channels...", state.chatQuery, "channel-search")}
+    <div class="chan-sidebar-head chan-quick-links">
+      <button type="button" class="chan-quick-link${state.chanThreadList === true ? " on" : ""}"
+        data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}">
+        ${icon("reply")}<span>Threads</span>
+      </button>
+      <button type="button" class="chan-quick-link${state.chanTree === true ? " on" : ""}"
+        data-act="chan-tree-toggle" aria-pressed="${state.chanTree === true}">
+        ${icon("folder")}<span>Files</span>
+      </button>
     </div>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
@@ -1054,28 +1087,16 @@ function chanSidebar(activeRepositoryId) {
          each heading sticks to the top of the panel while its own section is
          passing so the reader always knows which list they are in. -->
     <div class="chan-scroll">
-      <div class="chan-sec chan-sec-channels">
-        <span class="chan-sec-label">Channels</span>
-        <button type="button" class="chan-sec-add" data-act="channel-new"
-          data-value="${channel}" title="New channel" aria-label="New channel">
-          ${icon("plus")}
-        </button>
-      </div>
-      <div class="chan-list">
-        ${
-          channels.length === 0
-            ? `<div class="util-empty">No channel matches that search.</div>`
-            : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
-        }
-      </div>
       <!-- People and agents fold up under the channel list rather than
            vanishing with it. Each list is a clipping box around one inner
            block, which is the whole of what lets the stylesheet animate a
            height nobody has measured: the row of the grid goes to zero, the
            block inside it keeps its own height, and the box crops the
            difference. -->
-      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people")}
-      <div class="chan-roster chan-roster-people">
+      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people", "people")}
+      <div class="chan-roster chan-roster-people${
+        state.rosterSectionsOpen.people === false ? " chan-roster-closed" : ""
+      }">
         <div class="chan-roster-inner">
           ${
             // People first, then agents. The channel header already names the
@@ -1088,8 +1109,10 @@ function chanSidebar(activeRepositoryId) {
           }
         </div>
       </div>
-      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents")}
-      <div class="chan-roster chan-roster-agents">
+      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents", "agents")}
+      <div class="chan-roster chan-roster-agents${
+        state.rosterSectionsOpen.agents === false ? " chan-roster-closed" : ""
+      }">
         <div class="chan-roster-inner">
           ${
             // No empty state. The "+" on the heading directly above is both the
@@ -1242,12 +1265,6 @@ function chanHeader(repositoryId) {
       state.chanToolsOpen !== true && !phoneLayout()
         ? ""
         : `<span class="chan-tools">
-            <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
-              data-act="chan-tree-toggle" title="Files"
-              aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
-            <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
-              data-act="channel-threads-toggle" title="Threads"
-              aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
             <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
               data-act="channel-msg-search-toggle" title="Search messages"
               aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
@@ -1937,7 +1954,7 @@ function messageRow(
   // connect prompt), so a mention refusal or dispatch confirmation reads as
   // the same kind of thing there.
   if (entry.kind === "system") {
-    return `<div class="cmsg-row cmsg-system"><p class="msg system">${esc(entry.content)}</p></div>`;
+    return `<div class="cmsg-row cmsg-system"><p class="msg system transcript-separator"><span>${esc(entry.content)}</span></p></div>`;
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
@@ -2511,7 +2528,9 @@ function messageList(repositoryId) {
     if (startsNewDay) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
-      separator = `<div class="chan-day">${isToday ? "Today" : esc(day)}</div>`;
+      separator = `<div class="chan-day transcript-separator"><span>${
+        isToday ? "Today" : esc(day)
+      }</span></div>`;
     }
     // The first thing somebody else said after the reader last left. Above the
     // day separator rather than below it, so a night's backlog reads "you were
@@ -3257,11 +3276,20 @@ function rightPanel(repositoryId, kind) {
   }
 }
 
+/**
+ * `data-panel-key` is what tells one occupant of the column from another
+ * across a render — see `MOTION_SURFACES` in app.js, which reads it to decide
+ * that a tab has just opened rather than that the column has. It is
+ * deliberately not `data-right-panel-kind`: that attribute is the draggable
+ * tab, and putting it on the whole panel would make every drag begun anywhere
+ * inside one a drag of the panel itself.
+ */
 function positionedRightPanel(repositoryId, kind, position) {
   const panel = rightPanel(repositoryId, kind);
   return panel.replace(
     '<aside class="thread-panel',
-    `<aside data-right-panel-position="${position}" class="thread-panel`,
+    `<aside data-right-panel-position="${position}"
+      data-panel-key="${esc(kind)}" class="thread-panel`,
   );
 }
 
@@ -4346,9 +4374,9 @@ function dmPanel() {
                 const separator =
                   day === lastDay
                     ? ""
-                    : `<div class="chan-day">${
+                    : `<div class="chan-day transcript-separator"><span>${
                         day === new Date().toDateString() ? "Today" : esc(day)
-                      }</div>`;
+                      }</span></div>`;
                 lastDay = day;
                 return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}"
                     id="dm-msg-${esc(message.id)}">
@@ -5318,6 +5346,7 @@ export function renderChats() {
   const columns = phoneLayout() ? 1 : keptRightPanels().length;
 
   return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${columns > 1 ? ` panels-${columns}` : ""}">
+    ${channelRail(repositoryId)}
     ${chanSidebar(repositoryId)}
     ${
       // Phone-only scrim over the off-canvas `.chan-sidebar` — see the toggle

@@ -51,17 +51,22 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * The local subset of the rounded outline set selected for Lattice's design
- * system. The source library lives in the team's Figma file; keeping the
- * product's used glyphs here makes them instant, colourable with
- * `currentColor`, and available when the control plane is offline.
+ * The local subset of the thick filled/duotone Lets Icons family selected for
+ * Lattice's design system. Lets Icons is by Leonid Tsvetkov and licensed under
+ * CC BY 4.0:
+ * https://github.com/BoogieMonsta/lets-icons/tree/1feb56542e189feded296891fe8837a748c5b8d6
+ * https://creativecommons.org/licenses/by/4.0/
  *
- * Every mark keeps the source set's 24×24 grid, round joins and one optical
- * weight. Product-only concepts (agents and the Lattice network) use the same
- * construction so they do not introduce a second visual language.
+ * Only the geometry the product uses is kept inline, so the marks stay instant
+ * and available when the control plane is offline. It has been normalized to
+ * `currentColor`, the shared decorative accessibility contract, and a slightly
+ * offset translucent fill beneath the heavy rounded ink. That imperfect second
+ * pass gives the whole set its chunky, semi-doodled character. Product-only
+ * concepts (agents and the Lattice network) receive the same treatment rather
+ * than introducing a second visual language.
  */
 const S = (body, extra = "") =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"${extra}>${body}</svg>`;
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="chunky-duotone"${extra}><g class="ui-icon-underlay" fill="currentColor" stroke-width="3.15" opacity=".2" transform="translate(.3 .35)">${body}</g><g class="ui-icon-ink">${body}</g></svg>`;
 
 export const ICONS = {
   home: S('<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>'),
@@ -153,7 +158,7 @@ export const ICONS = {
   at: S(
     '<circle cx="12" cy="12" r="3.6"/><path d="M15.6 12v1.4a2.6 2.6 0 0 0 5.2 0V12a8.8 8.8 0 1 0-3.5 7"/>',
   ),
-  send: S('<path d="M4.5 12 20 4.5 15.5 20l-3.6-5.6z"/><path d="m11.9 14.4 8.1-9.9"/>'),
+  send: S('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
   sliders: S(
     '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
   ),
@@ -246,6 +251,53 @@ export function icon(name, extra = "") {
   const attributes = extra.replace(/\s*\bclass="[^"]*"/u, "").trim();
   const shared = `class="ui-icon${className === "" ? "" : ` ${className}`}" data-icon="${resolvedName}"${attributes === "" ? "" : ` ${attributes}`} `;
   return glyph.replace("<svg ", `<svg ${shared}`);
+}
+
+/**
+ * Adds the pinned-message shortcut beside the channel's people and agent
+ * counts. The channel header is redrawn as live room state arrives, so this
+ * small shared enhancement follows those redraws rather than owning a second
+ * copy of the header.
+ *
+ * The button deliberately emits the banner's existing delegated action. A
+ * pin remains a pin when its shelf is hidden; this control changes only
+ * whether that shelf is open.
+ */
+S.showPinnedMessages = (root = document) => {
+  const sync = () => {
+    const counts = root.querySelector(".chan-head .ch-desc");
+    if (counts === null || counts.querySelector(".ch-pins-toggle") !== null) {
+      return;
+    }
+    const open =
+      root.querySelector('.chan-pins-head[aria-expanded="true"]') !== null;
+    const separator = root.createElement("span");
+    separator.className = "ch-pins-separator";
+    separator.setAttribute("aria-hidden", "true");
+    separator.textContent = "|";
+
+    const button = root.createElement("button");
+    button.type = "button";
+    button.className = `ch-count ch-pins-toggle${open ? " on" : ""}`;
+    button.dataset.act = "channel-pins-toggle";
+    button.title = open ? "Hide pinned messages" : "Show pinned messages";
+    button.setAttribute("aria-label", button.title);
+    button.setAttribute("aria-pressed", String(open));
+    button.setAttribute(
+      "style",
+      "border:0;background:none;padding:0;color:inherit;font:inherit;cursor:pointer",
+    );
+    button.innerHTML = icon("pin");
+    counts.append(separator, button);
+  };
+
+  sync();
+  const observer = new MutationObserver(sync);
+  observer.observe(root.documentElement, { childList: true, subtree: true });
+};
+
+if (typeof document !== "undefined") {
+  S.showPinnedMessages();
 }
 
 /**
@@ -585,7 +637,7 @@ export function avatar(name, size = 26, seed = name, picture) {
       name,
     )}"><img src="${esc(picture)}" alt=""></span>`;
   }
-  return `<span class="avatar sz-${size}" style="${box};background:${hueFor(seed)}" title="${esc(
+  return `<span class="avatar sz-${size}" style="${box};background:#FF8790" title="${esc(
     name,
   )}">${esc(initials(name))}</span>`;
 }

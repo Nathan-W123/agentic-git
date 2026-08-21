@@ -18,6 +18,22 @@ export const API_ROOT = "/api/v1";
 const stored = (key, fallback = "") =>
   window.localStorage.getItem(key) ?? fallback;
 
+/**
+ * Which of the sidebar's two rosters this browser last left unrolled.
+ *
+ * Absent, or unreadable, means both: a first visit should show the room, and
+ * a value somebody's other tab half-wrote must not be the reason a list is
+ * missing with no way to tell why.
+ */
+function rememberedRosterSections() {
+  try {
+    const saved = JSON.parse(stored("ag.rosterSectionsOpen", "{}"));
+    return { people: saved?.people !== false, agents: saved?.agents !== false };
+  } catch {
+    return { people: true, agents: true };
+  }
+}
+
 export const state = {
   /* Session */
   principal: undefined,
@@ -287,6 +303,15 @@ export const state = {
    */
   navCollapsed: stored("ag.navCollapsed", "false") === "true",
   chanCollapsed: stored("ag.chanCollapsed", "false") === "true",
+  /**
+   * The people and agent lists, each open or rolled up on its own heading.
+   *
+   * Separate from `chanCollapsed`, which folds the whole panel away: this is
+   * "I know who is in here, give the other list the room", and it is
+   * remembered for the same reason the collapse is — a list that unrolls
+   * itself on every reload was never closed.
+   */
+  rosterSectionsOpen: rememberedRosterSections(),
   // Per-provider usage reports, filled lazily by the roster's hover.
   providerUsage: {},
   // Who is typing, keyed `repositoryId|threadId` so the main channel and
@@ -538,6 +563,7 @@ export function forgetOtherAccount(storage, userId) {
     "ag.favourites",
     "ag.notificationReadThrough",
     "ag.read",
+    "ag.rosterSectionsOpen",
   ];
   if (storage.getItem("ag.user") === userId) {
     return false;
@@ -1700,14 +1726,30 @@ export const DEFAULT_ACCENT = "#ff91a4";
 export const DEFAULT_ACCENT_SECONDARY = "#ffa9b8";
 
 /**
+ * The colour an agent is drawn in when nobody has chosen one.
+ *
+ * Off white rather than the interface accent. An agent is not a person's
+ * preference — it is a thing in a shared room, and the accent is already
+ * spoken for by mentions, active rows and primary buttons. Painting agents in
+ * it meant every unconfigured team read as one salmon wash where nothing
+ * stood out; a near-white agent sits quietly beside all of that and leaves
+ * the accent to mean what it means. Anyone who wants an identity colour still
+ * picks one in Appearance.
+ */
+export const DEFAULT_AGENT_COLOR = "#f5f6f7";
+
+/**
  * The palette offered in settings.
  *
- * Eight widely separated hues, all legible on the dark ground. Kept short on
- * purpose: an agent colour is only useful as an identity if a team's choices
- * are easy to tell apart, and a continuous picker guarantees two people
- * eventually land on near-identical blues.
+ * Widely separated hues, all legible on the dark ground, led by the off white
+ * an agent wears until somebody chooses otherwise — the default belongs among
+ * the choices rather than only behind them. Kept short on purpose: an agent
+ * colour is only useful as an identity if a team's choices are easy to tell
+ * apart, and a continuous picker guarantees two people eventually land on
+ * near-identical blues.
  */
 export const PALETTE = [
+  { value: "#f5f6f7", label: "Off white" },
   { value: "#8b5cf6", label: "Violet" },
   { value: "#4f8ef7", label: "Blue" },
   { value: "#2fae7f", label: "Green" },
@@ -1727,9 +1769,8 @@ function validColor(value) {
 /**
  * The colour a user's agents are drawn in.
  *
- * Falls back to a stable colour derived from the user id rather than to one
- * shared default, so two people who never opened settings still read as two
- * people. Chosen values always win.
+ * One shared default for everybody who has not chosen, and a chosen value
+ * always wins.
  */
 export function agentColorFor(userId) {
   const appearance = appearanceFor(userId);
@@ -1737,19 +1778,15 @@ export function agentColorFor(userId) {
   if (chosen !== undefined) {
     return chosen;
   }
-  // Their accent before a hash of their id. Both are "a colour for this
-  // person", and one of them they actually picked — falling to the hash first
-  // meant somebody whose interface was pink had an orange agent, and the two
-  // colours sat next to each other in the same list looking like a mistake.
-  //
-  // And the shared default when they have chosen neither, rather than a hash
-  // of their id. The hash gave everybody a different colour for free, which
-  // sounds useful and reads as decoration: nothing in the interface means
-  // "orange", so an orange agent beside a pink highlight is just two colours
-  // disagreeing. Distinct colours are still available — they are one click in
-  // Appearance — but they are now something somebody chose rather than
-  // something their user id happened to hash to.
-  return validColor(appearance?.accent) ?? DEFAULT_ACCENT;
+  // The shared off white, rather than their interface accent (`DEFAULT_ACCENT`
+  // and whatever they have set over it) or a hash of their id. Both of those
+  // gave people an agent colour they never asked for: the hash was decoration
+  // nothing in the interface agreed with, and the accent made every agent the
+  // same salmon as the mentions and the buttons, so the one thing the colour
+  // is for — telling whose agent this is — was exactly what it could not say.
+  // Off white says nothing until somebody chooses, which is one click away in
+  // Appearance.
+  return DEFAULT_AGENT_COLOR;
 }
 
 function appearanceFor(userId) {
@@ -5202,6 +5239,21 @@ export function setMyAvatar(dataUrl) {
     return;
   }
   localStorage.setItem("ag.avatar", dataUrl);
+}
+
+/** A channel picture, kept per repository in this browser. */
+export function channelPicture(repositoryId) {
+  const stored = localStorage.getItem(`ag.channelPicture.${repositoryId}`);
+  return stored === null || stored === "" ? undefined : stored;
+}
+
+export function setChannelPicture(repositoryId, dataUrl) {
+  const key = `ag.channelPicture.${repositoryId}`;
+  if (dataUrl === undefined) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, dataUrl);
 }
 
 /** "dark" or "light". Dark is what every colour here was chosen against. */

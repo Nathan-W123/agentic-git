@@ -126,11 +126,11 @@ export function chatThread(agent) {
   const entries = conversationFor(agent.id);
   if (entries.length === 0) {
     return `<div class="chat-thread">
-      <p class="msg system">${
+      <p class="msg system transcript-separator"><span>${
         agent.connected
           ? "This conversation is private to you."
           : `${esc(agent.name)} is not connected yet. Connect it from My Agents to start talking.`
-      }</p>
+      }</span></p>
     </div>`;
   }
   let lastDay = "";
@@ -141,10 +141,12 @@ export function chatThread(agent) {
     if (startsNewDay) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
-      separator = `<div class="thread-day">${isToday ? "Today" : esc(day)}</div>`;
+      separator = `<div class="thread-day transcript-separator"><span>${
+        isToday ? "Today" : esc(day)
+      }</span></div>`;
     }
     if (entry.role === "system") {
-      return `${separator}<p class="msg system">${esc(entry.content)}</p>`;
+      return `${separator}<p class="msg system transcript-separator"><span>${esc(entry.content)}</span></p>`;
     }
     const mine = entry.role === "user";
     const compact = continuesPrivateChatMessageGroup(

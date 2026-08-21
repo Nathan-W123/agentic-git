@@ -92,6 +92,28 @@ test("the unread line is taken before opening the room marks it read", async () 
   assert.match(css, /\.chan-unread \{/u);
 });
 
+test("quiet transcript metadata uses an outlined label on a straight separator", async () => {
+  const [chat, chats, css] = await Promise.all([
+    publicFile("chat.js"),
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+
+  // Dates share one treatment in private agent chats, rooms, and direct
+  // messages, while coordinator-authored notices use it instead of looking
+  // like another participant in the conversation.
+  assert.match(chat, /thread-day transcript-separator/u);
+  assert.match(chat, /msg system transcript-separator/u);
+  assert.match(chats, /chan-day transcript-separator/u);
+  assert.match(chats, /cmsg-system[\s\S]{0,100}transcript-separator/u);
+
+  // The label owns the outline; the two pseudo-elements are the uninterrupted
+  // hairline on either side, so long notices can wrap without drawing through
+  // their words.
+  assert.match(css, /\.transcript-separator::before,[\s\S]{0,80}\.transcript-separator::after/u);
+  assert.match(css, /\.transcript-separator > span \{[\s\S]{0,260}border: 1px solid/u);
+});
+
 test("a reader who has scrolled up is offered the way back down", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
@@ -346,6 +368,40 @@ test("a fourth kept panel is refused rather than squeezing the room away", async
     `${app}\n${chats}\n${data}`,
     /(?:RIGHT_PANEL_MAX|MAX_RIGHT_PANELS|RIGHT_PANEL_LIMIT|PANEL_STACK_MAX)\s*=\s*3\b|\.slice\(\s*(?:0,\s*)?-?3\s*\)/u,
   );
+});
+
+test("a tab opening beside another animates in at that tab's width", async () => {
+  const [app, chats, css] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+
+  // Each panel is told apart from its neighbours across a render, so a second
+  // one opening is an arrival rather than "the column was already occupied".
+  // The attribute is its own, not the draggable tab's: sharing that one would
+  // turn every drag started inside a panel into a drag of the panel.
+  assert.match(chats, /data-panel-key="\$\{esc\(kind\)\}"/u);
+  assert.match(app, /key:\s*\(node\) => node\.dataset\.panelKey/u);
+  assert.match(app, /function liveNodes\(root, surface\)/u);
+  assert.match(app, /querySelectorAll\(\s*`\$\{surface\.selector\}:not\(\.\$\{surface\.leave\}\)`/u);
+  // Arrivals and departures are both decided per key now.
+  assert.match(app, /if \(before\.has\(key\)/u);
+  assert.match(app, /if \(now\.has\(key\)/u);
+
+  // And it arrives the size the tab beside it already is, rather than both of
+  // them splitting the window — the dragged width, growing from nothing over
+  // the length of the animation so the neighbour is not shoved sideways in a
+  // single frame.
+  assert.match(
+    css,
+    /\.chats-shell\.panels-2 \.thread-panel,\s*\.chats-shell\.panels-3 \.thread-panel\s*\{[^}]*width:\s*var\(--panel-w/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.panels-2 \.thread-panel\.panel-entering,\s*\.chats-shell\.panels-3 \.thread-panel\.panel-entering\s*\{[^}]*animation:\s*panel-join var\(--motion-panel\)/u,
+  );
+  assert.match(css, /@keyframes panel-join\s*\{[^}]*\{[^}]*width:\s*0;/u);
 });
 
 test("mobile message actions surface only for the selected message", async () => {

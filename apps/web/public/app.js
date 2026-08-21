@@ -30,6 +30,7 @@ import {
   currentUserName,
   DEFAULT_ACCENT,
   DEFAULT_ACCENT_SECONDARY,
+  DEFAULT_AGENT_COLOR,
   disconnectGitHub,
   loadContext,
   loadDeferredContext,
@@ -43,6 +44,7 @@ import {
   myAgentColor,
   myAvatar,
   setMyAvatar,
+  setChannelPicture,
   myTheme,
   myAgents,
   notifications,
@@ -4059,15 +4061,18 @@ function renameFieldFocused() {
  */
 const MOTION_SURFACES = [
   // Thread, thread list, DM, agent profile and the file view share one column
-  // that holds up to three of them — so this is "the column is occupied", not
-  // "the thread is open". A surface joining a column that already has one in
-  // it, or leaving one behind, is deliberately not motion: the arrival that
-  // is worth animating is the column appearing beside the room.
+  // that holds up to three of them, and each of them is tracked by name
+  // through `key` — so this is "which surfaces are in the column", not "is
+  // the column occupied". Without the key the column was one thing that was
+  // either there or not, and a second tab opening beside the first was
+  // therefore not a change at all: it appeared fully formed, in one frame,
+  // while the tab already open jumped aside to make room for it.
   {
     selector: ".thread-panel",
     parent: ".chats-shell",
     enter: "panel-entering",
     leave: "panel-leaving",
+    key: (node) => node.dataset.panelKey ?? "",
   },
   // The file tree, which is a drawer only below 900px. Above that it is an
   // ordinary grid column and never opens or closes at all — the classes are
@@ -4112,9 +4117,16 @@ const MOTION_SURFACES = [
   },
 ];
 
-/** Whether each surface was on screen, and the element it was, before the swap. */
-const surfaceWasOpen = new Map();
-const surfaceNode = new Map();
+/**
+ * What each surface was showing before the swap: its keys, and the element
+ * each one was.
+ *
+ * A map rather than a flag because a surface can be on screen more than once
+ * — the right-hand column holds up to three panels — and "one of them opened"
+ * is a different event from "the column opened". Surfaces that only ever have
+ * one of themselves file it under the empty key and read exactly as they did.
+ */
+const surfaceNodes = new Map();
 
 /**
  * The live element for a surface, never the one a close is still fading out.
@@ -4135,42 +4147,67 @@ function surfaceIsOpen(root, surface) {
     : surface.isOpen(root);
 }
 
+/**
+ * Every live copy of a surface, by key.
+ *
+ * A surface with no `key` has at most one copy and gets the empty key, which
+ * is the whole of the old behaviour. A surface that decides whether it is
+ * open from something other than its own element — the file tree, which is a
+ * grid column above 900px — keeps answering that question, and files its one
+ * element under the same empty key.
+ */
+function liveNodes(root, surface) {
+  const found = new Map();
+  if (surface.isOpen !== undefined) {
+    if (surfaceIsOpen(root, surface)) {
+      found.set("", liveNode(root, surface));
+    }
+    return found;
+  }
+  for (const node of root.querySelectorAll(
+    `${surface.selector}:not(.${surface.leave})`,
+  )) {
+    found.set(surface.key === undefined ? "" : surface.key(node), node);
+  }
+  return found;
+}
+
 /** Reads the outgoing document. Must run before `innerHTML` throws it away. */
 function captureSurfaceMotion(root) {
   for (const surface of MOTION_SURFACES) {
-    surfaceWasOpen.set(surface.selector, surfaceIsOpen(root, surface));
-    surfaceNode.set(surface.selector, liveNode(root, surface));
+    surfaceNodes.set(surface.selector, liveNodes(root, surface));
   }
 }
 
 /** Plays whatever the swap turned out to be: an opening, a closing, or nothing. */
 function playSurfaceMotion(root) {
   for (const surface of MOTION_SURFACES) {
-    const open = surfaceIsOpen(root, surface);
-    if (open === (surfaceWasOpen.get(surface.selector) === true)) {
-      continue;
-    }
-    if (open) {
-      const node = liveNode(root, surface);
-      if (node !== null) {
-        animateOnce(node, surface.enter, false);
+    const before = surfaceNodes.get(surface.selector) ?? new Map();
+    const now = liveNodes(root, surface);
+    for (const [key, node] of now) {
+      if (before.has(key) || node === null) {
+        continue;
       }
-      continue;
+      animateOnce(node, surface.enter, false);
     }
-    const closed = surfaceNode.get(surface.selector);
-    const parent = root.querySelector(surface.parent);
-    if (closed === null || closed === undefined || parent === null) {
-      continue;
+    for (const [key, closed] of before) {
+      if (now.has(key) || closed === null || closed === undefined) {
+        continue;
+      }
+      const parent = root.querySelector(surface.parent);
+      if (parent === null) {
+        continue;
+      }
+      // Back in the document, but not back in the interface: it answers to
+      // nothing, takes no focus, and is gone before the animation is cold.
+      closed.inert = true;
+      if (surface.place === undefined) {
+        parent.append(closed);
+      } else {
+        surface.place(parent, closed);
+      }
+      animateOnce(closed, surface.leave, true);
     }
-    // Back in the document, but not back in the interface: it answers to
-    // nothing, takes no focus, and is gone before the animation is cold.
-    closed.inert = true;
-    if (surface.place === undefined) {
-      parent.append(closed);
-    } else {
-      surface.place(parent, closed);
-    }
-    animateOnce(closed, surface.leave, true);
   }
 }
 
@@ -5082,9 +5119,32 @@ document.addEventListener("click", (event) => {
       shell?.classList.toggle("chan-collapsed", state.chanCollapsed);
       markChanFolding(shell);
       const label = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
-      node.setAttribute("aria-pressed", String(state.chanCollapsed));
-      node.setAttribute("aria-label", label);
-      node.setAttribute("title", label);
+      shell
+        ?.querySelectorAll('[data-act="chan-collapse-toggle"]')
+        .forEach((button) => {
+          button.setAttribute("aria-pressed", String(state.chanCollapsed));
+          button.setAttribute("aria-label", label);
+          button.setAttribute("title", label);
+        });
+      return;
+    }
+    // One list rolled up or unrolled, and nothing else on the screen touched.
+    // The classes go on in place for the same reason the collapse above does
+    // it that way: a whole-screen render replaces the roster outright, which
+    // gives the new element its final height and leaves the fold nothing to
+    // animate between.
+    case "roster-section-toggle": {
+      const open = state.rosterSectionsOpen[value] === false;
+      state.rosterSectionsOpen[value] = open;
+      persist("ag.rosterSectionsOpen", JSON.stringify(state.rosterSectionsOpen));
+      const heading = node.closest(".chan-sec");
+      heading?.classList.toggle("chan-sec-closed", !open);
+      heading?.nextElementSibling?.classList.toggle("chan-roster-closed", !open);
+      const label = heading?.querySelector(".chan-sec-label")?.textContent ?? "";
+      const fold = `${open ? "Hide" : "Show"} ${label.trim().toLowerCase()}`;
+      node.setAttribute("aria-expanded", String(open));
+      node.setAttribute("aria-label", fold);
+      node.setAttribute("title", fold);
       return;
     }
     case "chan-sidebar-close":
@@ -6285,7 +6345,7 @@ document.addEventListener("click", (event) => {
       void saveAppearanceChoice({
         accent: DEFAULT_ACCENT,
         accentSecondary: DEFAULT_ACCENT_SECONDARY,
-        agentColor: DEFAULT_ACCENT,
+        agentColor: DEFAULT_AGENT_COLOR,
       });
       return;
     case "avatar-clear":
@@ -6496,8 +6556,46 @@ async function pickAvatarFile(file) {
   }
 }
 
+async function pickChannelPictureFile(repositoryId, file) {
+  if (
+    repositoryId === undefined ||
+    file === undefined ||
+    !file.type.startsWith("image/")
+  ) {
+    return;
+  }
+  try {
+    const bitmap = await createImageBitmap(file);
+    const side = Math.min(bitmap.width, bitmap.height);
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    canvas
+      .getContext("2d")
+      ?.drawImage(
+        bitmap,
+        (bitmap.width - side) / 2,
+        (bitmap.height - side) / 2,
+        side,
+        side,
+        0,
+        0,
+        128,
+        128,
+      );
+    setChannelPicture(repositoryId, canvas.toDataURL("image/jpeg", 0.82));
+    render();
+  } catch (error) {
+    toast(`That image could not be read: ${error.message}`, "error");
+  }
+}
+
 document.addEventListener("change", (event) => {
   const picker = event.target;
+  if (picker?.dataset?.act === "channel-picture-pick") {
+    void pickChannelPictureFile(picker.dataset.repository, picker.files?.[0]);
+    return;
+  }
   if (picker?.dataset?.act === "avatar-pick") {
     void pickAvatarFile(picker.files?.[0]);
     return;

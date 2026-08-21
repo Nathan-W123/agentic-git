@@ -1,15 +1,9 @@
 /*
  * Lattice — control room styling.
  *
- * One dark theme, deliberately restrained: neutral grey ground, a single accent,
- * and semantic colour used only where it carries meaning (green for healthy
- * and added, red for failed and deleted, orange for waiting, blue for
- * secondary task state). Thin borders and generous negative space do the
- * structural work that heavy panels and gradients would otherwise do.
- *
- * The accent tokens below are defaults. Every accent-coloured surface reads
- * them through `--accent`, so the interface re-themes from one assignment when
- * a user picks a different primary colour.
+ * A cool, restrained surface system with salmon reserved for primary and
+ * active states, and lavender for the quieter agent/thread layer. Spacing and
+ * surface contrast carry the structure; borders are only a subtle fallback.
  */
 
 /* ------------------------------------------------------------- tokens ---- */
@@ -17,60 +11,51 @@
 :root {
   color-scheme: dark;
 
-  /* Neutral grey, not blue-black. The surfaces were tinted toward navy, which
-     read as a colour choice competing with the accent rather than as a
-     background behind it. The ramp below starts from true grey — equal parts,
-     no hue at all — so nothing competes with the accent or the status dots.
-     `applyTheme` gives the page and conversation grounds a two-percent nudge
-     toward the chosen accent; every other raised surface stays on this neutral
-     ramp.
+  /* The eight shared design tokens. Compatibility aliases below keep every
+     existing component on this ramp while the names stay semantic at the
+     call site. */
+  --bg: #0E1014;
+  --surface-1: #14161B;
+  --surface-2: #1B1E24;
+  --surface-3: #20242D;
+  --text: #F5F6F7;
+  --muted: #A7AAB3;
+  --salmon: #FF8790;
+  --lavender: #B59CFF;
 
-     The conversation is the lightest surface and everything else steps down
-     away from it. This is the inverse of what the ramp used to do: the panels
-     were lighter than the room they framed, which put the eye on the chrome
-     and left the thing being read sitting in the darkest part of the screen.
-     Lightness is the cheapest way to say "look here", and there is only one
-     place worth spending it. */
-  --bg: #141414;
-  --bg-panel: #1a1a1a;
-  --bg-card: #202020;
-  --bg-card-2: #252525;
-  --bg-inset: #101010;
-  --bg-hover: #2c2c2c;
-  --bg-active: #343434;
-  /* The conversation column itself. Named separately rather than reusing
-     `--bg-card`, because a card is a thing drawn on a surface and this is the
-     surface — they move in opposite directions when either is adjusted.
-     `--room-tint` is replaced at runtime with the same slight chosen-colour
-     tint as the page ground; this reference is the neutral pre-JS fallback. */
-  --bg-chat: #262626;
+  --bg-panel: var(--surface-1);
+  --bg-card: var(--surface-2);
+  --bg-card-2: var(--surface-3);
+  --bg-inset: var(--bg);
+  --bg-hover: color-mix(in srgb, var(--surface-3) 94%, var(--text));
+  --bg-active: color-mix(in srgb, var(--surface-3) 89%, var(--text));
+  --bg-chat: var(--bg);
   --room-tint: var(--bg-chat);
 
-  --border: #333333;
-  --border-soft: #2a2a2a;
-  --border-strong: #454545;
+  --border: color-mix(in srgb, var(--muted) 18%, transparent);
+  --border-soft: color-mix(in srgb, var(--muted) 10%, transparent);
+  --border-strong: color-mix(in srgb, var(--muted) 28%, transparent);
 
-  --text: #ededed;
-  --text-2: #a6a6a6;
-  --text-3: #7a7a7a;
-  --text-4: #5c5c5c;
+  --text-2: var(--muted);
+  --text-3: color-mix(in srgb, var(--muted) 74%, var(--bg));
+  --text-4: color-mix(in srgb, var(--muted) 56%, var(--bg));
 
-  --accent: #8b5cf6;
-  --accent-bright: #a78bfa;
-  --accent-dim: #6d40e0;
-  --accent-wash: rgba(139, 92, 246, 0.12);
-  --accent-wash-strong: rgba(139, 92, 246, 0.2);
-  --accent-line: rgba(139, 92, 246, 0.38);
+  --accent: var(--salmon);
+  --accent-bright: var(--salmon);
+  --accent-dim: color-mix(in srgb, var(--salmon) 82%, var(--bg));
+  --accent-wash: color-mix(in srgb, var(--salmon) 12%, transparent);
+  --accent-wash-strong: color-mix(in srgb, var(--salmon) 20%, transparent);
+  --accent-line: color-mix(in srgb, var(--salmon) 38%, transparent);
 
   /* The second colour, for the other half of a pair. Overwritten by
      `applyTheme` from the account, like the primary above it; these are the
      values the stylesheet stands up with on its own. Not a semantic colour —
      green still means running and amber still means waiting, and neither of
      those follows anybody's taste. */
-  --accent-2: #3fa8b5;
-  --accent-2-bright: #6fc7d2;
-  --accent-2-wash: rgba(63, 168, 181, 0.12);
-  --accent-2-line: rgba(63, 168, 181, 0.38);
+  --accent-2: var(--lavender);
+  --accent-2-bright: var(--lavender);
+  --accent-2-wash: color-mix(in srgb, var(--lavender) 12%, transparent);
+  --accent-2-line: color-mix(in srgb, var(--lavender) 38%, transparent);
 
   --green: #4ade80;
   --green-wash: rgba(74, 222, 128, 0.12);
@@ -88,16 +73,16 @@
   --diff-del: rgba(210, 60, 70, 0.16);
   --diff-del-strong: rgba(210, 60, 70, 0.3);
 
-  --radius-sm: 6px;
+  --radius-sm: 10px;
   --radius: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 18px;
+  --radius-lg: 12px;
+  --radius-xl: 12px;
 
   --tree-w: 232px;
   --chat-w: 380px;
 
-  --shadow-pop: 0 6px 16px rgba(0, 0, 0, 0.44);
-  --shadow-card: 0 1px 1px rgba(0, 0, 0, 0.28);
+  --shadow-pop: 0 12px 30px rgb(0 0 0 / 28%);
+  --shadow-card: 0 1px 1px rgb(0 0 0 / 20%);
 
   /* Motion. Three durations and one curve, named because a surface arriving
      and the same surface leaving have to take the same time to read as one
@@ -628,8 +613,7 @@ svg.ui-icon {
 .chan-sidebar-foot {
   display: grid;
   align-self: end;
-  padding: 8px;
-  border-top: 1px solid var(--border-soft);
+  padding: 10px;
 }
 
 .chan-account {
@@ -2178,7 +2162,6 @@ svg.ui-icon {
   align-items: center;
   gap: 11px;
   padding: 13px 12px 13px 16px;
-  border-bottom: 1px solid var(--border-soft);
 }
 
 .chat-head .ch-name {
@@ -2215,10 +2198,10 @@ svg.ui-icon {
 .chat-thread {
   overflow-y: auto;
   min-height: 0;
-  padding: 14px 16px 8px;
+  padding: 20px 18px 12px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   align-content: start;
 }
 
@@ -2234,8 +2217,8 @@ svg.ui-icon {
   gap: 0 12px;
   width: fit-content;
   max-width: 88%;
-  padding: 7px 8px;
-  border-radius: 8px;
+  padding: 9px 8px;
+  border-radius: var(--radius-sm);
 }
 
 .msg:hover {
@@ -2284,28 +2267,29 @@ svg.ui-icon {
 }
 
 .msg-name.agent-name {
-  color: var(--accent-bright);
+  color: var(--lavender);
 }
 
 .msg-time {
   font-size: 11px;
-  color: var(--text-4);
+  color: var(--muted);
+  opacity: 0.62;
 }
 
 .msg-text {
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--text-2);
-  margin-top: 2px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text);
+  margin-top: 3px;
   word-break: break-word;
   white-space: pre-wrap;
 }
 
 .msg.user .msg-text {
-  padding: 7px 11px;
-  border-radius: 14px;
-  background: var(--accent);
-  color: #fff;
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
 }
 
 .msg.agent {
@@ -2327,16 +2311,50 @@ svg.ui-icon {
   flex-direction: row-reverse;
 }
 
-.msg.system {
-  align-self: center;
-  display: block;
+/* Dates and small system notices sit on the transcript rather than joining
+   either side of the conversation. The outlined label interrupts one straight
+   hairline, matching the compact separator shape used for quiet chat metadata. */
+.transcript-separator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
   max-width: 100%;
+  color: var(--muted);
+  opacity: 0.72;
+  font-size: 10.5px;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.transcript-separator::before,
+.transcript-separator::after {
+  content: "";
+  flex: 1 1 24px;
+  min-width: 12px;
+  height: 1px;
+  background: var(--border-soft);
+}
+
+.transcript-separator > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 18px;
+  max-width: calc(100% - 40px);
+  padding: 1px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  overflow-wrap: anywhere;
+}
+
+.msg.system {
+  align-self: stretch;
+  padding: 2px 0;
   background: transparent;
   border: none;
-  color: var(--text-4);
-  font-size: 11px;
-  text-align: center;
-  padding: 2px;
 }
 
 .msg.system:hover {
@@ -2356,78 +2374,52 @@ svg.ui-icon {
 }
 
 .thread-day {
-  align-self: center;
-  font-size: 11px;
-  color: var(--text-4);
+  align-self: stretch;
   padding: 4px 0;
 }
 
-/*
- * The desktop composer is deliberately one steady, lean row: "+" on the left,
- * the sentence, send on the right, and nothing else asking to be read. Its
- * controls and text remain in the same places when it receives focus, matching
- * the compact prompt bar people use with a pointer and a wide viewport. Phones
- * override these variables below: they begin with a short bar, then open into
- * a roomier composer when somebody starts writing.
- *
- * It reads as floating over the conversation rather than as a panel bolted to
- * the bottom of it — a lifted, softly rounded box with a shadow under it, so
- * the transcript looks like it continues underneath. That is the whole trick
- * behind the bars this one is modelled on: one shape, raised, with the message
- * in it.
- *
- * Every metric is a variable because the textarea and the mirror painted
- * underneath it cannot afford to disagree about padding by a pixel: they are
- * the same string drawn twice, and the moment their metrics drift the
- * highlight slides off the name it belongs to.
- */
+/* One clean card at every width: writing has the open top of the card and the
+   persistent utility row sits at its foot. Every text metric remains a
+   variable because the textarea and the mirror painted underneath it cannot
+   disagree by a pixel without moving the caret away from its letters. */
 .composer {
-  --composer-pad-top: 8px;
-  --composer-pad-bottom: 8px;
-  --composer-pad-x: 6px;
+  --composer-pad-top: 14px;
+  --composer-pad-bottom: 9px;
+  --composer-pad-x: 16px;
   --composer-shape: var(--radius-lg);
-  --composer-layout: flex;
-  --composer-bar-layout: contents;
-  --composer-inset: 0 6px;
-  --composer-send-shape: 9px;
-  /* The gap that pushes send to the far edge is only wanted on the two-row
-     phone bar. While every control is on the compact bar itself, an elastic gap
-     between the text and the send button steals half the width of the box
-     somebody is writing in. */
-  --composer-spacer-layout: none;
+  --composer-layout: block;
+  --composer-bar-layout: flex;
+  --composer-inset: 0;
+  --composer-send-shape: var(--radius-sm);
+  --composer-spacer-layout: block;
 
   margin: 0 12px 12px;
   display: var(--composer-layout);
-  align-items: center;
-  gap: 4px;
   padding: var(--composer-inset);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  background: var(--surface-3);
+  border: 1px solid var(--border-soft);
   border-radius: var(--composer-shape);
-  box-shadow: var(--shadow-pop);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-/* Focus lifts it rather than repainting it: the same shadow with a soft ring
-   of the accent around it, which is the one moment this bar is the subject. */
+/* Focus stays quiet enough that the card does not turn into an alert. */
 .composer:focus-within {
   border-color: var(--accent-line);
-  box-shadow: var(--shadow-pop), 0 0 0 3px var(--accent-wash);
+  box-shadow: 0 0 0 2px var(--accent-wash);
 }
 
-/* "+" leads, text follows, send closes. A no-op in the expanded bar, where
-   the "+" is already the first thing on the row. */
+/* Utilities lead and send closes the bottom row. */
 .composer-bar > .icon-btn:first-of-type {
-  order: -1;
+  order: 0;
 }
 
-/* The one control on the left, and the only thing standing in for what used to
-   be a row of icons. Round, like the send button facing it across the bar. */
 .composer-bar .composer-plus {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
-  color: var(--text-2);
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
 }
 
 .composer-bar .composer-plus:hover {
@@ -2467,9 +2459,9 @@ svg.ui-icon {
 .composer-field textarea,
 .composer-mirror {
   padding: var(--composer-pad-top) var(--composer-pad-x) var(--composer-pad-bottom);
-  font-size: 12.5px;
+  font-size: 14px;
   font-family: inherit;
-  line-height: 1.5;
+  line-height: 1.55;
   letter-spacing: inherit;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -2511,9 +2503,10 @@ svg.ui-icon {
      cannot make this shared control's characters disappear in WebKit. */
   color: var(--text);
   -webkit-text-fill-color: var(--text);
-  font-size: 12.5px;
-  line-height: 1.5;
-  max-height: 148px;
+  font-size: 14px;
+  line-height: 1.55;
+  min-height: 58px;
+  max-height: 164px;
 }
 
 /* Only the composer that actually has a mirror under it.
@@ -2540,21 +2533,22 @@ svg.ui-icon {
 /* Selection is drawn above the mirror, so a solid highlight would hide the
    very text being selected. A washed one lets it read through. */
 .composer textarea::selection {
-  background: var(--accent-wash-strong, rgba(139, 92, 246, 0.28));
+  background: var(--accent-wash-strong);
 }
 
-/* Every composer control sits on one row — and while the composer is lean,
-   that row is the box itself rather than a second one under the text. */
+/* Every composer control sits on the persistent utility row. */
 .composer-bar {
   display: var(--composer-bar-layout);
   align-items: center;
-  gap: 6px;
-  padding: 4px 7px 7px;
+  gap: 5px;
+  min-height: 42px;
+  padding: 0 11px 10px;
 }
 
 .composer-bar .spacer {
   display: var(--composer-spacer-layout, block);
   flex: 1;
+  order: 1;
 }
 
 .composer-bar .icon-btn {
@@ -2571,16 +2565,17 @@ svg.ui-icon {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 7px;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.04);
+  order: 2;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
   font-size: 11.5px;
   color: var(--text-2);
   max-width: 132px;
 }
 
 .mini-select:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--bg-hover);
 }
 
 .mini-select select {
@@ -2609,18 +2604,18 @@ svg.ui-icon {
 .send-btn {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  /* Softly squared in both composer states. The fallback is
-     for the send buttons that live outside a composer entirely. */
-  border-radius: var(--composer-send-shape, 8px);
-  background: var(--accent);
-  color: #fff;
+  order: 3;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--composer-send-shape, var(--radius-sm));
+  background: transparent;
+  color: var(--salmon);
   flex: none;
 }
 
 .send-btn:hover:not(:disabled) {
-  background: var(--accent-dim);
+  background: color-mix(in srgb, var(--salmon) 12%, transparent);
+  color: var(--salmon);
 }
 
 .send-btn:disabled {
@@ -2628,18 +2623,16 @@ svg.ui-icon {
   cursor: not-allowed;
 }
 
-/* Nothing written yet, so nothing to send. The button keeps its place — it is
-   what makes the right end of the bar read as an end — but it waits in grey
-   instead of sitting lit beside an empty box. `.is-expanded` is excluded
-   because a staged image is something to send with no text at all. */
+/* Nothing written yet, so nothing to send. The arrow keeps its place but waits
+   in the shared muted tone. `.is-expanded` covers an image-only send. */
 .composer:not(.is-expanded):has(textarea:placeholder-shown) .send-btn {
-  background: var(--bg-hover);
-  color: var(--text-3);
+  background: transparent;
+  color: var(--text-4);
 }
 
 .send-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 18px;
+  height: 18px;
 }
 
 /* --------------------------------------------------------- summary pop ---- */
@@ -4070,6 +4063,151 @@ button.chip.lg:hover {
   position: relative;
 }
 
+/* A dedicated channel switcher stays narrow while the adjacent sidebar is
+   free to hold tools and the active channel's roster. */
+.channel-rail {
+  width: 60px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 7px;
+  background: var(--bg);
+}
+
+.channel-rail-brand,
+.channel-rail-toggle,
+.channel-rail-new,
+.channel-rail-button {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-lg);
+  color: var(--text-3);
+  transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
+}
+
+.channel-rail-brand:hover,
+.channel-rail-toggle:hover,
+.channel-rail-new:hover,
+.channel-rail-button:hover {
+  background: var(--surface-3);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+}
+
+.channel-rail-entry.active .channel-rail-button {
+  background: color-mix(in srgb, var(--salmon) 10%, transparent);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+}
+
+.channel-rail-toggle,
+.channel-rail-new {
+  height: 34px;
+}
+
+.channel-rail-toggle svg,
+.channel-rail-new svg {
+  width: 17px;
+  height: 17px;
+}
+
+.channel-rail-list {
+  display: grid;
+  gap: 9px;
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.channel-rail-list::-webkit-scrollbar {
+  display: none;
+}
+
+.channel-rail-entry {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.channel-rail-entry.active::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  width: 2px;
+  height: 24px;
+  border-radius: 0 2px 2px 0;
+  background: var(--salmon);
+}
+
+.channel-picture {
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
+.channel-picture-fallback {
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.channel-rail-unread {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--bg);
+  border-radius: 9px;
+  background: var(--salmon);
+  color: var(--bg);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.channel-rail-edit {
+  position: absolute;
+  right: -1px;
+  bottom: -2px;
+  display: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--bg-card-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.channel-rail-edit svg {
+  width: 9px;
+  height: 9px;
+}
+
+.channel-rail-entry:hover .channel-rail-edit,
+.channel-rail-entry:focus-within .channel-rail-edit {
+  display: grid;
+}
+
+@media (hover: none) {
+  .channel-rail-edit {
+    display: grid;
+  }
+}
+
 .chan-sidebar {
   width: 256px;
   flex: none;
@@ -4106,11 +4244,46 @@ button.chip.lg:hover {
   flex: 1;
 }
 
+.chan-sidebar-head.chan-quick-links {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+}
+
+.chan-quick-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: left;
+}
+
+.chan-quick-link:hover,
+.chan-quick-link.on {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.chan-quick-link.on {
+  background: color-mix(in srgb, var(--salmon) 9%, transparent);
+  color: var(--text);
+}
+
+.chan-quick-link svg {
+  width: 15px;
+  height: 15px;
+  color: var(--text-3);
+}
+
 /* The one thing that scrolls in this column. */
 .chan-scroll {
   overflow-y: auto;
   min-height: 0;
-  padding-bottom: 10px;
+  padding: 4px 0 14px;
 }
 
 /* A section heading, and the "+" that adds to the list under it — the single
@@ -4124,17 +4297,17 @@ button.chip.lg:hover {
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 12px 9px 6px;
+  gap: 7px;
+  padding: 18px 12px 7px;
   background: var(--bg-panel);
-  font-size: 10.5px;
+  font-size: 10px;
   /* Headings rather than captions: they name the three lists in the panel,
      and at `--text-4` they read as the faintest thing in it, which is the
      wrong end of the hierarchy for the only labels there are. */
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text);
+  color: var(--muted);
 }
 
 /* The two headings below the channel list travel with the lists they name.
@@ -4159,6 +4332,39 @@ button.chip.lg:hover {
     visibility 0s linear;
 }
 
+/* The heading is also the switch that rolls its own list up. Two lists share
+   one scroller, so a long roster of agents pushes the people off the top and
+   the other way about; closing the one you are not reading is what lets both
+   ends be seen at once. The "+" stays outside this button, so adding to a
+   list never doubles as folding it away. */
+.chan-sec-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  text-align: left;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.chan-sec-toggle svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--text-3);
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.chan-sec-toggle:hover svg {
+  color: var(--text);
+}
+
+/* Rolled up: the chevron points along the list it would bring back. */
+.chan-sec-closed .chan-sec-toggle svg {
+  transform: rotate(-90deg);
+}
+
 .chan-sec-label {
   flex: 1;
   min-width: 0;
@@ -4173,14 +4379,14 @@ button.chip.lg:hover {
   width: 20px;
   height: 20px;
   flex: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-3);
   transition: background 0.13s ease, color 0.13s ease;
 }
 
 .chan-sec-add:hover {
   background: var(--bg-hover);
-  color: var(--accent-bright);
+  color: var(--salmon);
 }
 
 .chan-sec-add svg {
@@ -4189,9 +4395,9 @@ button.chip.lg:hover {
 }
 
 .chan-list {
-  padding: 0 8px;
+  padding: 0 10px;
   display: grid;
-  gap: 2px;
+  gap: 3px;
   align-content: start;
 }
 
@@ -4201,8 +4407,8 @@ button.chip.lg:hover {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 7px 9px;
-  border-radius: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
   text-align: left;
   color: var(--text-2);
   transition: background 0.13s ease, color 0.13s ease;
@@ -4338,7 +4544,7 @@ button.chip.lg:hover {
 }
 
 .chan-row.active {
-  background: var(--accent-wash);
+  background: color-mix(in srgb, var(--salmon) 9%, transparent);
   /* The wash is 12% alpha, so the page shows through it — the text
      sits on the theme's own background, not on the accent. White was
      right only by coincidence of the dark theme; on light it read as
@@ -4357,7 +4563,7 @@ button.chip.lg:hover {
   width: 2px;
   height: 18px;
   border-radius: 2px;
-  background: linear-gradient(var(--accent), var(--accent-2));
+  background: var(--salmon);
   transform: translateY(-50%);
 }
 
@@ -4369,7 +4575,7 @@ button.chip.lg:hover {
 }
 
 .chan-row.active .cr-hash {
-  color: var(--accent-bright);
+  color: var(--salmon);
 }
 
 .chan-row .cr-name {
@@ -4406,8 +4612,8 @@ button.chip.lg:hover {
   height: 18px;
   padding: 0 5px;
   border-radius: 9px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--salmon);
+  color: var(--bg);
   font-size: 10.5px;
   font-weight: 600;
   display: grid;
@@ -4455,11 +4661,24 @@ button.chip.lg:hover {
 
 .chan-roster-inner {
   min-height: 0;
-  padding: 0 8px;
+  padding: 0 10px;
+}
+
+/* One list closed on its own heading, folded by the same `1fr` -> `0fr` the
+   whole-panel collapse uses. Clipped only here, never at rest: an agent's
+   usage card opens below its row and reaches past the bottom of the list, so
+   a list that cropped while open would swallow it (see `.rr-usage`). */
+.chan-roster.chan-roster-closed {
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s;
 }
 
 .roster-row {
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   transition: background 0.13s ease;
 }
 
@@ -4576,9 +4795,9 @@ button.chip.lg:hover {
 }
 
 .dm-bubble {
-  padding: 7px 11px;
-  border-radius: 14px;
-  background: var(--panel-2, rgba(127, 127, 127, 0.14));
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
   font-size: 14px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -4586,14 +4805,15 @@ button.chip.lg:hover {
 }
 
 .dm-mine .dm-bubble {
-  background: var(--accent, #6366f1);
-  color: #fff;
+  background: var(--surface-3);
+  color: var(--text);
 }
 
 .dm-time {
   margin-top: 2px;
   font-size: 11px;
   color: var(--muted);
+  opacity: 0.62;
 }
 
 /* The reply affordance on a private message: revealed on hover the way the
@@ -4696,15 +4916,27 @@ button.chip.lg:hover {
   color: var(--text-2);
 }
 
+/* Scaled to the roster's own face rather than in `.status-dot` itself, which
+   the profile card and the agent panel draw at their full size. */
+.roster-row .status-dot {
+  width: 6px;
+  height: 6px;
+  border-width: 1.25px;
+}
+
 .roster-row:hover {
   background: var(--bg-hover);
 }
 
+/* Compact on purpose. These two lists are the only thing in the panel now
+   that the channels have moved to the rail, and at a 30px face with 7px of
+   padding a room of a dozen people and agents ran past the bottom of the
+   screen before either list had finished. */
 .roster-row-main {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
+  gap: 8px;
+  padding: 4px 8px;
 }
 
 .roster-row .rr-body {
@@ -4713,7 +4945,7 @@ button.chip.lg:hover {
 }
 
 .roster-row .rr-name {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4721,13 +4953,8 @@ button.chip.lg:hover {
 }
 
 .roster-row .rr-role {
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--text-3);
-}
-
-.roster-row .rr-role.rr-role-empty {
-  font-style: italic;
-  opacity: 0.7;
 }
 
 /* One button, revealed the same way a channel row's is — see `.chan-row
@@ -4894,7 +5121,6 @@ button.chip.lg:hover {
   align-items: center;
   gap: 12px;
   padding: 13px 18px;
-  border-bottom: 1px solid var(--border-soft);
 }
 
 .chan-head .ch-hash {
@@ -4934,13 +5160,10 @@ button.chip.lg:hover {
 .chan-messages {
   overflow-y: auto;
   min-height: 0;
-  padding: 6px 18px 14px;
+  padding: 12px 24px 20px;
 }
 
 .chan-day {
-  text-align: center;
-  font-size: 11px;
-  color: var(--text-4);
   padding: 14px 0 10px;
 }
 
@@ -4961,7 +5184,7 @@ button.chip.lg:hover {
   align-items: center;
   gap: 10px;
   padding: 12px 0 6px;
-  color: var(--accent-bright);
+  color: var(--salmon);
   font-size: 10.5px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -4972,7 +5195,7 @@ button.chip.lg:hover {
   content: "";
   flex: 1;
   height: 1px;
-  background: var(--accent-line);
+  background: color-mix(in srgb, var(--salmon) 38%, transparent);
 }
 
 /* The label reads left-of-centre, the way every chat draws this: the words are
@@ -4997,7 +5220,7 @@ button.chip.lg:hover {
 .chan-jump {
   position: absolute;
   /* Clear of the composer, which is the last thing in the column. */
-  bottom: 92px;
+  bottom: 126px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 4;
@@ -5061,9 +5284,9 @@ button.chip.lg:hover {
   /* Column gap only: the wrapped reference line carries its own 2px of
      breathing room, and a 12px row gap would open a hole above every reply. */
   gap: 0 12px;
-  padding: 7px 8px;
+  padding: 9px 8px;
   margin: 0 -8px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   position: relative;
   /* The transcript is not windowed — every message a channel has loaded is a
      real row in the document, and the scroll restore walks all of them
@@ -5258,7 +5481,7 @@ button.chip.lg:hover {
 }
 
 .cmsg-row .cmsg-name.agent-name {
-  color: var(--accent-bright);
+  color: var(--lavender);
 }
 
 /* The face and the name at the top of a message, once they lead somewhere.
@@ -5392,14 +5615,15 @@ button.chip.lg:hover {
 
 .cmsg-row .cmsg-time {
   font-size: 11px;
-  color: var(--text-4);
+  color: var(--muted);
+  opacity: 0.62;
 }
 
 .cmsg-row .cmsg-text {
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--text-2);
-  margin-top: 2px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text);
+  margin-top: 3px;
   word-break: break-word;
   white-space: pre-wrap;
 }
@@ -5456,6 +5680,7 @@ button.chip.lg:hover {
    avatar and a name. */
 .cmsg-row.cmsg-system {
   justify-content: center;
+  color: var(--muted);
 }
 
 .cmsg-row.cmsg-system:hover {
@@ -5702,7 +5927,7 @@ button.chip.lg:hover {
 }
 
 .cmsg-file.modified .cmsg-file-mark {
-  color: var(--accent-bright);
+  color: var(--text-2);
 }
 
 .cmsg-file.deleted .cmsg-file-mark {
@@ -5776,7 +6001,7 @@ button.chip.lg:hover {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
-  color: var(--accent-bright);
+  color: var(--lavender);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5874,15 +6099,15 @@ button.chip.lg:hover {
   position: absolute;
   inset: -7px;
   border-radius: calc(var(--radius) + 5px);
-  background: var(--accent-wash);
-  border: 1px solid color-mix(in srgb, var(--accent-bright) 45%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-bright) 10%, transparent);
+  background: color-mix(in srgb, var(--salmon) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--salmon) 40%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--salmon) 9%, transparent);
   pointer-events: none;
 }
 
 .chan-composer-wrap.mention-active .composer {
   position: relative;
-  border-color: var(--accent-bright);
+  border-color: var(--salmon);
 }
 
 .composer-attachments {
@@ -5910,10 +6135,8 @@ button.chip.lg:hover {
 }
 
 .thread-composer-wrap.mention-active .composer {
-  border-color: var(--accent-bright);
-  box-shadow:
-    var(--shadow-pop),
-    0 0 0 3px color-mix(in srgb, var(--accent-bright) 10%, transparent);
+  border-color: var(--salmon);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--salmon) 9%, transparent);
 }
 
 .thread-composer-wrap .composer-attachments {
@@ -5995,7 +6218,7 @@ button.chip.lg:hover {
   gap: 8px;
   width: 100%;
   padding: 5px 8px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   font-size: 12.5px;
   color: var(--text-2);
   text-align: left;
@@ -6003,7 +6226,7 @@ button.chip.lg:hover {
 
 .mention-item.active,
 .mention-item:hover {
-  background: var(--accent-wash);
+  background: color-mix(in srgb, var(--salmon) 10%, transparent);
   color: var(--text);
 }
 
@@ -6019,7 +6242,7 @@ button.chip.lg:hover {
 .slash-name {
   flex: none;
   font-family: var(--mono, ui-monospace, monospace);
-  color: var(--accent-bright);
+  color: var(--lavender);
 }
 
 .slash-summary {
@@ -6064,7 +6287,7 @@ button.chip.lg:hover {
   width: 15px;
   height: 15px;
   margin-top: 2px;
-  color: var(--accent-bright);
+  color: var(--lavender);
 }
 
 .cmsg-text .rt-list {
@@ -6090,8 +6313,8 @@ button.chip.lg:hover {
    mirror and the posted transcript, keeping the two states visually aligned. */
 .cmsg-text .mention-ping {
   font-weight: 650;
-  color: var(--accent-bright);
-  background: var(--accent-wash);
+  color: var(--salmon);
+  background: color-mix(in srgb, var(--salmon) 12%, transparent);
   border-radius: 4px;
   padding: 1px 4px;
 }
@@ -6102,10 +6325,10 @@ button.chip.lg:hover {
    textarea glyphs underneath. A paint-only halo supplies emphasis without
    changing inline layout or typography. */
 .composer-mirror .mention-ping {
-  color: var(--accent-bright);
-  background: var(--accent-wash);
+  color: var(--salmon);
+  background: color-mix(in srgb, var(--salmon) 12%, transparent);
   border-radius: 4px;
-  box-shadow: 0 0 0 2px var(--accent-wash);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--salmon) 12%, transparent);
 }
 
 /* A command is the same kind of token as a ping and gets the same treatment,
@@ -6115,8 +6338,8 @@ button.chip.lg:hover {
    the message is posted. */
 .cmsg-text .slash-ping {
   font-weight: 650;
-  color: var(--accent-2-bright);
-  background: var(--accent-2-wash);
+  color: var(--lavender);
+  background: color-mix(in srgb, var(--lavender) 12%, transparent);
   border-radius: 4px;
   padding: 1px 4px;
 }
@@ -6124,10 +6347,10 @@ button.chip.lg:hover {
 /* Paint only, for the same reason as the mention above it: padding or heavier
    glyphs here would move every following character away from the caret. */
 .composer-mirror .slash-ping {
-  color: var(--accent-2-bright);
-  background: var(--accent-2-wash);
+  color: var(--lavender);
+  background: color-mix(in srgb, var(--lavender) 12%, transparent);
   border-radius: 4px;
-  box-shadow: 0 0 0 2px var(--accent-2-wash);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lavender) 12%, transparent);
 }
 
 /* The request itself, at the top of the thinking it produced. Set apart from
@@ -6136,7 +6359,7 @@ button.chip.lg:hover {
    surface beside the channel, and the pair marks where one ends. */
 .tt-body .tt-task {
   color: var(--text-2, #a6a6a6);
-  border-left: 2px solid var(--accent-2-line);
+  border-left: 2px solid color-mix(in srgb, var(--lavender) 38%, transparent);
   padding-left: 8px;
   margin-bottom: 8px;
 }
@@ -7330,8 +7553,8 @@ button.chip.lg:hover {
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border-strong);
-  box-shadow: -14px 0 30px -22px rgba(0, 0, 0, 0.9);
+  border-left: 1px solid var(--border-soft);
+  box-shadow: -14px 0 30px -24px rgb(0 0 0 / 60%);
   z-index: 4;
 }
 
@@ -7361,28 +7584,41 @@ button.chip.lg:hover {
 /* Two or three surfaces sharing the column, counted onto the shell by
    `renderChats`.
 
-   `--panel-w` is a width a reader dragged for one panel, and three of it is
-   most of a laptop screen — the conversation the panels are all about would
-   be left as a strip. So they take a share of the window instead, and they
-   are allowed to shrink below it rather than push the room off the edge:
-   `flex: none` is right for a single fixed column and wrong for three. */
+   Every one of them is the width the reader dragged, the same as the first
+   one was on its own. They used to split the window evenly instead, which
+   meant opening a second tab resized the tab already open — the thing being
+   read jumped to half the screen and reflowed under the cursor, and nothing
+   had asked it to. A tab that arrives beside another now arrives its size.
+
+   `min-width: 0` and a shrink factor are what happens when three of them no
+   longer fit: they give ground together rather than pushing the last one off
+   the edge. `flex: none` is right for a single fixed column and wrong here,
+   and the basis stays `auto` so the width above is what actually sizes them —
+   and is therefore something the entry animation can grow from nothing. */
 .chats-shell.panels-2 .thread-panel,
 .chats-shell.panels-3 .thread-panel {
-  width: 0;
+  width: var(--panel-w, 340px);
   min-width: 0;
-  flex: 1 1 0;
+  flex: 0 1 auto;
 }
 
-.chats-shell.panels-3 .thread-panel {
-  width: 0;
-}
+/* Below this the tabs are the workspace: two of them at the dragged width
+   leave the conversation a strip too narrow to read, so it stands aside and
+   they take the room evenly, which is what every width did before.
 
-/* With two or three tabs open, the tabs are the workspace. Splitting the
-   available room evenly keeps every thread usable and removes the obscured
-   group transcript instead of leaving a narrow, accidental-looking strip. */
-.chats-shell.panels-2 .chan-main,
-.chats-shell.panels-3 .chan-main {
-  display: none;
+   Above it there is room for both, and the conversation the tabs are all
+   about keeps whatever they have not claimed. */
+@media (max-width: 1100px) {
+  .chats-shell.panels-2 .chan-main,
+  .chats-shell.panels-3 .chan-main {
+    display: none;
+  }
+
+  .chats-shell.panels-2 .thread-panel,
+  .chats-shell.panels-3 .thread-panel {
+    width: 0;
+    flex: 1 1 0;
+  }
 }
 
 /* Opening and closing, driven from `playSurfaceMotion` in app.js rather than
@@ -7399,6 +7635,24 @@ button.chip.lg:hover {
    all it can still do. */
 .thread-panel.panel-entering {
   animation: panel-in var(--motion-panel) var(--ease-motion);
+}
+
+/* A tab joining a column that already has one in it opens the room for
+   itself rather than appearing in it.
+
+   The first panel slides in over a conversation that was already the full
+   width, so a translate is all it needs. A second has to displace something,
+   and arriving at full width in one frame shoves the tab beside it sideways
+   with no warning — so this one grows from nothing to its width, and the
+   neighbour is pushed over the length of the animation instead of between
+   two frames. */
+.chats-shell.panels-2 .thread-panel.panel-entering,
+.chats-shell.panels-3 .thread-panel.panel-entering {
+  animation: panel-join var(--motion-panel) var(--ease-motion);
+  /* Only for the length of the growth: its contents are laid out for the
+     full width from the first frame, and without this they hang out over the
+     tab beside it while the panel catches up. */
+  overflow: hidden;
 }
 
 .thread-panel.panel-leaving {
@@ -7436,6 +7690,14 @@ button.chip.lg:hover {
   }
 }
 
+@keyframes panel-join {
+  from {
+    opacity: 0;
+    width: 0;
+    transform: translateX(16px);
+  }
+}
+
 @keyframes panel-out {
   to {
     opacity: 0;
@@ -7444,7 +7706,9 @@ button.chip.lg:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .thread-panel.panel-entering {
+  .thread-panel.panel-entering,
+  .chats-shell.panels-2 .thread-panel.panel-entering,
+  .chats-shell.panels-3 .thread-panel.panel-entering {
     animation: none;
   }
 
@@ -8460,7 +8724,7 @@ dialog.modal[open]::backdrop {
    full-width drawer below, so none of these compact-rail rules apply there. */
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
-    width: 64px;
+    width: 0;
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-top {
@@ -8932,91 +9196,39 @@ dialog.modal[open]::backdrop {
    "message composer with two inline mini-selects" are still fine at 820px
    and are not fine at 380px. */
 @media (max-width: 600px) {
-  /*
-   * A phone gets the space-efficient bar only while it is idle. Focus,
-   * text, an attachment, or a targeted thread opens it into a two-row bar so
-   * the textarea and touch controls each have room. `max-height` supplies the
-   * visible expansion while the layout changes underneath it; the global
-   * reduced-motion rule later in this file reduces that transition to an
-   * effectively immediate state change when requested.
-   *
-   * `:placeholder-shown` is the live emptiness test. It opens on the first
-   * character without waiting for the app's full `innerHTML` render cycle,
-   * and `.is-expanded` covers pending state that lives outside the textarea.
-   */
+  .channel-rail {
+    width: 52px;
+    gap: 6px;
+    padding: 8px 5px;
+  }
+
+  .channel-rail-toggle {
+    display: none;
+  }
+
+  .channel-rail-brand,
+  .channel-rail-new,
+  .channel-rail-button {
+    width: 40px;
+  }
+
+  /* The card keeps one layout at phone widths. Text grows upward while the
+     utilities stay on the bottom row, so focus never moves the caret or the
+     controls under somebody's fingers. */
   .composer {
-    --composer-pad-top: 11px;
-    --composer-pad-bottom: 6px;
-    --composer-pad-x: 13px;
+    --composer-pad-top: 14px;
+    --composer-pad-bottom: 9px;
+    --composer-pad-x: 14px;
     --composer-shape: var(--radius-lg);
     --composer-layout: block;
     --composer-bar-layout: flex;
     --composer-inset: 0;
-    --composer-send-shape: 8px;
-    /* The two-row bar is the one shape that wants the elastic gap: the text is
-       on its own line, so pushing send to the far edge costs it nothing. */
+    --composer-send-shape: var(--radius-sm);
     --composer-spacer-layout: block;
-
-    max-height: 240px;
-    overflow: hidden;
-    transition:
-      border-color 0.15s ease,
-      border-radius 0.2s ease,
-      max-height 0.22s ease;
   }
 
-  .composer textarea,
-  .composer-mirror {
-    transition: padding 0.2s ease;
-  }
-
-  .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
-    --composer-pad-top: 8px;
-    --composer-pad-bottom: 8px;
-    --composer-pad-x: 6px;
-    --composer-shape: var(--radius-lg);
-    --composer-layout: flex;
-    /* Lift the two edge controls into the bar until it is opened. */
-    --composer-bar-layout: contents;
-    --composer-inset: 0 6px;
-    --composer-send-shape: 9px;
-    --composer-spacer-layout: none;
-
-    max-height: 52px;
-  }
-
-  /* The fuller toolbar is already in the markup. Keep it out of the idle
-     bar, then reveal it as part of the focus expansion without a render.
-     What survives the fold is what the bar is for: the "+" and send. */
-  .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
-    :is(.mini-select, .ctx, .composer-note, .composer-bar .spacer) {
-    display: none;
-  }
-
-  /* The channel composer has only the two edge controls, so it can keep one
-     flex layout in both states instead of jumping from flex to block as focus
-     lands. The textarea's minimum height is the animated dimension: the bar
-     grows around the caret while + and send stay under the same fingers. */
-  .chan-composer-wrap .composer {
-    --composer-layout: flex;
-    --composer-bar-layout: contents;
-    --composer-inset: 0 6px;
-    --composer-send-shape: 9px;
-    --composer-spacer-layout: none;
-
-    align-items: flex-end;
-  }
-
-  .chan-composer-wrap .composer-field textarea {
-    min-height: 64px;
-    transition: min-height 0.22s ease, padding 0.2s ease;
-  }
-
-  .chan-composer-wrap
-    .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
-    .composer-field
-    textarea {
-    min-height: 36px;
+  .composer textarea {
+    min-height: 60px;
   }
 
   /* `.chan-sidebar` (channel list + roster) goes off-canvas below this
@@ -9201,15 +9413,19 @@ dialog.modal[open]::backdrop {
     width: auto !important;
   }
 
-  /* The message composer's mention button and send button always fit on one
-     row; the private-agent composer (`chatComposer` in chat.js) additionally
-     carries a context ring and two mini-selects for model and effort, which
-     do not. Wrapping lets those two drop to a row of their own rather than
-     overflowing the panel — no call site needs to change, `.composer-bar`
-     already has nothing after the last mini-select but the send button. */
+  /* Keep the utility row steady under the text. The private composer has two
+     selects, so they trim their labels instead of moving the send arrow onto
+     a different row. */
   .composer-bar {
-    flex-wrap: wrap;
-    row-gap: 6px;
+    flex-wrap: nowrap;
+  }
+
+  .mini-select {
+    max-width: 92px;
+  }
+
+  .mini-select select {
+    max-width: 68px;
   }
 
   /* Touch targets, per standard mobile guidance (44px minimum). These stay
@@ -9886,9 +10102,12 @@ dialog.modal[open]::backdrop {
      Everything steps down a shade so the chat column has somewhere to be the
      lightest thing, which is the same rule the dark theme follows. */
   --bg: #ddd7cb;
-  --bg-panel: #e4dfd3;
-  --bg-card: #ebe6da;
-  --bg-card-2: #e0dbcf;
+  --surface-1: #e4dfd3;
+  --surface-2: #ebe6da;
+  --surface-3: #e0dbcf;
+  --bg-panel: var(--surface-1);
+  --bg-card: var(--surface-2);
+  --bg-card-2: var(--surface-3);
   --bg-inset: #d5cfc2;
   --bg-hover: #d6d0c1;
   --bg-active: #cbc4b3;
@@ -9906,9 +10125,15 @@ dialog.modal[open]::backdrop {
      the floor of what is readable, and they carry the timestamps, the file
      paths and the role lines — the text most often squinted at. */
   --text: #211e19;
-  --text-2: #4a453c;
+  --muted: #4a453c;
+  --text-2: var(--muted);
   --text-3: #6b6458;
   --text-4: #8a8274;
+
+  /* The same semantic pair, deepened only enough to remain readable on the
+     cream surfaces. Dark mode keeps the requested source values above. */
+  --salmon: #9E3F4B;
+  --lavender: #6550B8;
 
   --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
@@ -9929,9 +10154,9 @@ dialog.modal[open]::backdrop {
   gap: 8px;
   margin: 0 12px 6px;
   padding: 6px 8px 6px 10px;
-  border: 1px solid var(--accent-line);
-  border-radius: 8px;
-  background: var(--accent-wash);
+  border: 1px solid color-mix(in srgb, var(--lavender) 38%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--lavender) 10%, transparent);
   font-size: 0.78rem;
   color: var(--text-2);
 }
@@ -9940,7 +10165,7 @@ dialog.modal[open]::backdrop {
   flex: none;
   width: 14px;
   height: 14px;
-  color: var(--accent-bright);
+  color: var(--lavender);
 }
 
 .composer-thread .ct-label {
