@@ -1895,6 +1895,14 @@ test("a colour that reaches a style attribute is validated first", async () => {
   assert.match(ui.slice(start, ui.indexOf("\n}", start)), /safeColor\(/u);
 });
 
+test("the user icon defaults to salmon", async () => {
+  const ui = await publicFile("ui.js");
+  const start = ui.indexOf("export function avatar");
+  const end = ui.indexOf("\n}", start);
+  assert.notEqual(start, -1, "the avatar helper was not found in ui.js");
+  assert.match(ui.slice(start, end), /background:#FF8790/u);
+});
+
 test("the product is named Lattice throughout the browser surface", async () => {
   // The wordmark sits in the chat sidebar's crown, which is rendered by the
   // chats screen rather than the shell.
