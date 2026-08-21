@@ -7361,11 +7361,11 @@ const CATCH_UP_SUMMARY_MAX = 360;
 /**
  * What one completed task actually changed, in at most two short sentences.
  *
- * The completion event carries the agent's own explanation. The task record
- * only carries its objective, which is the request and was what made this
- * panel read like a verbatim copy of everything the person had typed.
+ * The completion event carries the agent's own explanation and changed files.
+ * Older events do not, so the objective remains a last-resort description —
+ * still useful context instead of the same generic success line for each row.
  */
-function catchUpTaskSummary(task) {
+function catchUpTaskOutcome(task) {
   const event = [...state.audit]
     .reverse()
     .map((entry) => entry.event ?? entry)
@@ -7382,17 +7382,27 @@ function catchUpTaskSummary(task) {
     typeof written === "string" ? written.replace(/\s+/gu, " ").trim() : "";
   const adapterFallback =
     /^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\b/iu.test(cleaned);
-  if (cleaned === "" || adapterFallback) {
-    return "Completed and landed successfully.";
-  }
-  const quick = cleaned.split(/(?<=[.!?])\s+/u).slice(0, 2).join(" ");
+  const objective = String(task.objective ?? "the requested change")
+    .trim()
+    .replace(/[.!?]+$/u, "");
+  const useful =
+    cleaned !== "" && !adapterFallback
+      ? cleaned
+      : `Implemented: ${objective}.`;
+  const quick = useful.split(/(?<=[.!?])\s+/u).slice(0, 2).join(" ");
+  const files = Array.isArray(event?.data?.files)
+    ? event.data.files.filter((file) => typeof file === "string")
+    : [];
   if (quick.length <= CATCH_UP_SUMMARY_MAX) {
-    return quick;
+    return { summary: quick, changedFiles: files };
   }
   const cut = quick.slice(0, CATCH_UP_SUMMARY_MAX);
   const lastSpace = cut.lastIndexOf(" ");
-  return `${(lastSpace > CATCH_UP_SUMMARY_MAX / 2 ? cut.slice(0, lastSpace) : cut)
-    .replace(/[\s,;:.]+$/u, "")}…`;
+  return {
+    summary: `${(lastSpace > CATCH_UP_SUMMARY_MAX / 2 ? cut.slice(0, lastSpace) : cut)
+      .replace(/[\s,;:.]+$/u, "")}…`,
+    changedFiles: files,
+  };
 }
 
 /**
@@ -7428,6 +7438,13 @@ async function showSinceYouLeft() {
   if (!Number.isFinite(sinceAt)) {
     return;
   }
+  if (state.projectId !== projectId || state.principal === undefined) {
+    return;
+  }
+  // A context refresh may have selected another project without reloading the
+  // document. Never let that project's parked repository reports survive it.
+  state.catchUps = {};
+  state.catchUp = undefined;
   const tasks = state.tasks
     .filter((task) => {
       const completedAt = Date.parse(task.completedAt ?? task.openedAt ?? "");
@@ -7445,20 +7462,28 @@ async function showSinceYouLeft() {
     .map((task) => ({
       ...task,
       completedAt: task.completedAt ?? task.openedAt,
-      summary: catchUpTaskSummary(task),
+      ...catchUpTaskOutcome(task),
     }));
-  if (
-    tasks.length === 0 ||
-    state.projectId !== projectId ||
-    state.principal === undefined
-  ) {
+  if (tasks.length === 0) {
+    render();
     return;
   }
-  state.catchUp = {
-    projectId,
-    since: catchUp.since,
-    tasks,
-  };
+  state.catchUps = Object.fromEntries(
+    state.repositories
+      .map((repository) => {
+        const repositoryTasks = tasks.filter(
+          (task) => task.repositoryId === repository.id,
+        );
+        return [repository.id, {
+          projectId,
+          repositoryId: repository.id,
+          since: catchUp.since,
+          tasks: repositoryTasks,
+        }];
+      })
+      .filter(([, report]) => report.tasks.length > 0),
+  );
+  state.catchUp = state.catchUps[activeChannelId()];
   render();
 }
 
@@ -7474,7 +7499,7 @@ function markCatchUpSeenWhilePresent() {
   if (
     projectId === "" ||
     state.principal === undefined ||
-    state.catchUp !== undefined
+    Object.keys(state.catchUps ?? {}).length > 0
   ) {
     return;
   }
@@ -7492,8 +7517,15 @@ function markCatchUpSeenWhilePresent() {
  */
 function dismissSinceYouLeft() {
   const projectId = state.catchUp?.projectId;
+  const repositoryId = state.catchUp?.repositoryId;
+  if (repositoryId !== undefined) {
+    delete state.catchUps[repositoryId];
+  }
   state.catchUp = undefined;
-  if (projectId === undefined) {
+  if (
+    projectId === undefined ||
+    Object.keys(state.catchUps ?? {}).length > 0
+  ) {
     return;
   }
   void api(
@@ -7558,9 +7590,9 @@ async function boot() {
   // tapping the icon and seeing the app.
   void loadDeferredContext().then(() => {
     render();
-    // Completion summaries live in the audit slice loaded above. Opening the
-    // panel before it arrives can only fall back to the request text, which is
-    // exactly the transcript-like list this panel must not be.
+    // Completion summaries and changed files live in the audit slice loaded
+    // above. Older records can still fall back to the request, but current
+    // work should lead with the agent's account of what was implemented.
     void showSinceYouLeft();
   });
   void loadProviders().then(() => render());

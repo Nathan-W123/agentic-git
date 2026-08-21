@@ -167,7 +167,9 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(app, /\["integrated", "open"\]\.includes\(task\.status\)/u);
   assert.match(app, /task\.completedAt \?\? task\.openedAt/u);
   assert.match(app, /completedAt > sinceAt/u);
-  assert.match(app, /state\.catchUp = \{\s*projectId,\s*since: catchUp\.since,\s*tasks,/u);
+  assert.match(app, /state\.catchUps = Object\.fromEntries/u);
+  assert.match(app, /task\.repositoryId === repository\.id/u);
+  assert.match(app, /state\.catchUp = state\.catchUps\[activeChannelId\(\)\]/u);
 
   // It is the same resizable, mobile-aware column as a plan, not a modal that
   // blocks the channel. Each row reads the agent's completion explanation —
@@ -176,10 +178,14 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(chats, /function catchUpPanel\(\)/u);
   assert.match(chats, /<aside class="thread-panel catch-up-panel"/u);
   assert.match(chats, /class="catch-up-task-list"/u);
-  assert.match(app, /function catchUpTaskSummary\(task\)/u);
+  assert.match(data, /catchUps: \{\}/u);
+  assert.match(app, /function catchUpTaskOutcome\(task\)/u);
   assert.match(app, /event\.data\?\.agentExplanation/u);
   assert.ok(app.includes('cleaned.split(/(?<=[.!?])\\s+/u).slice(0, 2)'));
-  assert.match(app, /summary: catchUpTaskSummary\(task\),/u);
+  assert.match(app, /\.\.\.catchUpTaskOutcome\(task\),/u);
+  assert.match(app, /Implemented: \$\{objective\}/u);
+  assert.match(chats, /task\.changedFiles\.slice\(0, 3\)/u);
+  assert.match(chats, /state\.catchUp = state\.catchUps\?\.\[repositoryId\]/u);
   assert.match(chats, /String\(task\.summary \?\? ""\)/u);
   assert.doesNotMatch(
     chats.slice(
@@ -205,7 +211,7 @@ test("work seen live is not reported again as an away notification", async () =>
   // The away window begins when the visible visit actually ends, including a
   // tab close. A still-open catch-up is not consumed behind the reader's back.
   assert.match(app, /function markCatchUpSeenWhilePresent\(\)/u);
-  assert.match(app, /state\.catchUp !== undefined/u);
+  assert.match(app, /Object\.keys\(state\.catchUps \?\? \{\}\)\.length > 0/u);
   assert.match(
     app,
     /document\.visibilityState === "visible"[\s\S]*?markCatchUpSeenWhilePresent\(\);/u,

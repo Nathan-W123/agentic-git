@@ -100,6 +100,9 @@ export const state = {
    * without losing either the list or its place in the right-hand column.
    */
   catchUp: undefined,
+  /** Completed-work reports keyed by repository, so changing rooms changes
+   *  the report with it instead of showing one project-wide list everywhere. */
+  catchUps: {},
 
   /* Favourites are a personal shortcut, not shared state, so they live in
      this browser rather than on the account. */

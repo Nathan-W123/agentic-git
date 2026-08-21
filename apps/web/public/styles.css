@@ -8328,6 +8328,20 @@ dialog.modal[open]::backdrop {
   font-size: 11px;
 }
 
+.catch-up-task-copy .catch-up-task-files {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
+.catch-up-task-files svg {
+  flex: 0 0 auto;
+  height: 13px;
+  width: 13px;
+}
+
 .catch-up-actions {
   display: flex;
   align-items: center;
