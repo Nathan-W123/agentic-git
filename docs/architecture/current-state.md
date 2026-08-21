@@ -57,6 +57,13 @@ The local Phase 1 product surface is complete:
   coordination metrics, and diff-anchored review comments.
 - Per-user Git overlay workspaces with Monaco editing, bounded one-shot
   commands inside the configured Docker sandbox, and pipeline submission.
+- A sign-in catch-up: `GET /projects/{id}/catch-up` answers with the changes
+  that landed, the work that stopped, and the messages waiting since the
+  viewer's own mark, assembled from the store rather than written by a model
+  so it is the same short document every time and costs nothing. The mark is
+  per person per project and moves only forward, advanced by
+  `POST /projects/{id}/catch-up/seen`; a first visit and a quiet interval both
+  answer with nothing, so the popup only appears when there is news.
 
 The web product is still a control room rather than a collaborative IDE.
 Presence, shared cursors, PTY terminal streams, and projection of agents'

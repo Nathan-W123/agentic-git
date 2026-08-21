@@ -4096,4 +4096,70 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+
+  test(`${backend.name}: a catch-up mark is personal and only moves forward`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const alice = await store.createUser({
+        email: "catchup-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "catchup-bob@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+
+      // Somebody who has never been shown a catch-up has no mark, which is
+      // what makes their first visit report nothing.
+      assert.equal(
+        await store.getCatchUpCursor(DEFAULT_PROJECT_ID, alice.id),
+        undefined,
+      );
+
+      await store.markCatchUpSeen(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        "2026-02-01T10:00:00.000Z",
+      );
+      assert.deepEqual(
+        await store.getCatchUpCursor(DEFAULT_PROJECT_ID, alice.id),
+        {
+          projectId: DEFAULT_PROJECT_ID,
+          userId: alice.id,
+          seenAt: "2026-02-01T10:00:00.000Z",
+        },
+      );
+      // One person's catch-up says nothing about anybody else's.
+      assert.equal(
+        await store.getCatchUpCursor(DEFAULT_PROJECT_ID, bob.id),
+        undefined,
+      );
+
+      await store.markCatchUpSeen(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        "2026-02-01T12:00:00.000Z",
+      );
+      assert.equal(
+        (await store.getCatchUpCursor(DEFAULT_PROJECT_ID, alice.id))?.seenAt,
+        "2026-02-01T12:00:00.000Z",
+      );
+      // A second tab finishing late must not drag the mark backwards, or the
+      // same news is announced again on the next sign-in.
+      await store.markCatchUpSeen(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        "2026-02-01T11:00:00.000Z",
+      );
+      assert.equal(
+        (await store.getCatchUpCursor(DEFAULT_PROJECT_ID, alice.id))?.seenAt,
+        "2026-02-01T12:00:00.000Z",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
 }

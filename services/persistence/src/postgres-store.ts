@@ -69,6 +69,7 @@ import type {
   AuditEventFilter,
   AuditorCursor,
   AuthSessionRecord,
+  CatchUpCursor,
   CoordinationStore,
   CreateApprovalInput,
   CreateRunInput,
@@ -3823,6 +3824,39 @@ export class PostgresCoordinationStore implements CoordinationStore {
       [repositoryId, userId],
     );
     return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  public async getCatchUpCursor(
+    projectId: string,
+    userId: string,
+  ): Promise<CatchUpCursor | undefined> {
+    const row = await this.row(
+      `SELECT project_id, user_id, seen_at FROM catch_up_cursors
+        WHERE project_id = $1 AND user_id = $2`,
+      [projectId, userId],
+    );
+    return row === undefined
+      ? undefined
+      : {
+          projectId: text(row, "project_id"),
+          userId: text(row, "user_id"),
+          seenAt: text(row, "seen_at"),
+        };
+  }
+
+  public async markCatchUpSeen(
+    projectId: string,
+    userId: string,
+    at: string,
+  ): Promise<void> {
+    // Forward-only, for the reason the SQLite copy gives.
+    await this.query(
+      `INSERT INTO catch_up_cursors (project_id, user_id, seen_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (project_id, user_id) DO UPDATE SET seen_at = excluded.seen_at
+         WHERE catch_up_cursors.seen_at < excluded.seen_at`,
+      [projectId, userId, at],
+    );
   }
 
   public async getAuditorCursor(

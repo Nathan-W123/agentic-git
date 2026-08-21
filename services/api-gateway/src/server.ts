@@ -95,6 +95,12 @@ import {
   type Permission,
 } from "./authorization.js";
 import {
+  buildCatchUpDigest,
+  catchUpSince,
+  emptyCatchUpDigest,
+  type CatchUpChange,
+} from "./catch-up.js";
+import {
   formatSlashHelp,
   parseSlashCommand,
   SLASH_COMMANDS,
@@ -9257,6 +9263,147 @@ export class ApiGateway {
           authorized.repositories,
         ),
       });
+      return;
+    }
+
+    // What changed while somebody was away, for the popup on their next
+    // sign-in. Assembled from what the store already knows rather than by
+    // asking an agent to write it, so it is the same document every time,
+    // costs nothing, and still appears when no agent is connected.
+    const catchUpMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/catch-up$`, "u"),
+    );
+    if (catchUpMatch !== undefined && method === "GET") {
+      const projectId = catchUpMatch[0] ?? "";
+      const { repositories } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      const now = new Date().toISOString();
+      const cursor = await this.options.store.getCatchUpCursor(
+        projectId,
+        principal.user.id,
+      );
+      const since = catchUpSince(cursor?.seenAt, now);
+      if (since === undefined) {
+        // Nobody's first visit has a "while you were away" — so it starts the
+        // clock instead of reporting one. Written here rather than left to the
+        // client's "seen" call because a first visit shows no popup to dismiss,
+        // and a mark that only ever appears when somebody dismisses something
+        // would mean the second visit had nothing to measure from either.
+        await this.options.store.markCatchUpSeen(
+          projectId,
+          principal.user.id,
+          now,
+        );
+        this.sendJson(response, 200, {
+          catchUp: emptyCatchUpDigest(now, now),
+        });
+        return;
+      }
+      // The same narrowing the repository list does: a grant holder is caught
+      // up on the repositories they were granted, and told nothing about the
+      // others.
+      const all = await this.options.store.listProjectRepositories(projectId);
+      const visible =
+        repositories === undefined
+          ? all
+          : all.filter((entry) => repositories.has(entry.id));
+      const visibleIds = new Set(visible.map((entry) => entry.id));
+
+      const messages: string[] = [];
+      for (const repository of visible) {
+        const entries = await this.options.store.listChannelMessages(
+          repository.id,
+          principal.user.id,
+          // The same page cap the stats route uses: counting by fetching is
+          // honest about what the channel API can see, and a busier interval
+          // than that reads as "a lot happened" either way.
+          { limit: 200 },
+        );
+        for (const entry of entries) {
+          // Somebody's own messages are not news to them, and neither is
+          // anything they had already seen when they left.
+          if (entry.createdAt > since && entry.authorId !== principal.user.id) {
+            messages.push(entry.createdAt);
+          }
+          for (const reply of entry.replies) {
+            if (
+              reply.createdAt > since &&
+              reply.authorId !== principal.user.id
+            ) {
+              messages.push(reply.createdAt);
+            }
+          }
+        }
+      }
+
+      const tasks = (
+        await this.options.store.listSubmittedTasks({ projectId })
+      ).filter(
+        (task) =>
+          visibleIds.has(task.repositoryId) &&
+          task.completedAt !== undefined &&
+          task.completedAt > since,
+      );
+      const asChange = (task: SubmittedTask): CatchUpChange => ({
+        objective: withoutRoleContext(task.objective),
+        at: task.completedAt ?? since,
+      });
+      const conversations = await this.options.store.listDirectConversations(
+        projectId,
+        principal.user.id,
+      );
+
+      this.sendJson(response, 200, {
+        catchUp: buildCatchUpDigest({
+          since,
+          now,
+          landed: tasks
+            .filter((task) => task.status === "integrated")
+            .map(asChange),
+          // Cancelled work is somebody's own decision, not news; only a task
+          // that stopped on its own is something they have to look at.
+          failed: tasks
+            .filter((task) => task.status === "failed")
+            .map(asChange),
+          messages,
+          // Only conversations that moved while they were away. An older
+          // unread message is a badge they have already seen sitting on the
+          // inbox, and repeating it here would make the popup impossible to
+          // clear.
+          direct: conversations
+            .filter((conversation) => conversation.lastMessage.createdAt > since)
+            .reduce((total, conversation) => total + conversation.unread, 0),
+        }),
+      });
+      return;
+    }
+    // Marking the catch-up read. Its own call rather than a side effect of
+    // reading it: a request that both reports the news and forgets it loses
+    // the whole document when the response does not arrive.
+    const catchUpSeenMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/catch-up/seen$`, "u"),
+    );
+    if (catchUpSeenMatch !== undefined && method === "POST") {
+      const projectId = catchUpSeenMatch[0] ?? "";
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      await this.options.store.markCatchUpSeen(
+        projectId,
+        principal.user.id,
+        new Date().toISOString(),
+      );
+      // Read back rather than echoed: the write is forward-only, so what the
+      // caller sent is not necessarily what the mark now says.
+      const cursor = await this.options.store.getCatchUpCursor(
+        projectId,
+        principal.user.id,
+      );
+      this.sendJson(response, 200, { seenAt: cursor?.seenAt });
       return;
     }
 

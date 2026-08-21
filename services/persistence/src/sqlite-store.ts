@@ -70,6 +70,7 @@ import type {
   AuditEventFilter,
   AuditorCursor,
   AuthSessionRecord,
+  CatchUpCursor,
   CoordinationStore,
   CreateApprovalInput,
   CreateRunInput,
@@ -3966,6 +3967,43 @@ export class SqliteCoordinationStore implements CoordinationStore {
       )
       .get(repositoryId, userId) as Row | undefined;
     return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  public async getCatchUpCursor(
+    projectId: string,
+    userId: string,
+  ): Promise<CatchUpCursor | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT project_id, user_id, seen_at FROM catch_up_cursors
+          WHERE project_id = ? AND user_id = ?`,
+      )
+      .get(projectId, userId) as Row | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          projectId: text(row, "project_id"),
+          userId: text(row, "user_id"),
+          seenAt: text(row, "seen_at"),
+        };
+  }
+
+  public async markCatchUpSeen(
+    projectId: string,
+    userId: string,
+    at: string,
+  ): Promise<void> {
+    // The `WHERE` on the upsert is what makes the mark forward-only: an
+    // older stamp arriving late leaves the row alone rather than replaying
+    // news the person has already been shown.
+    this.db
+      .prepare(
+        `INSERT INTO catch_up_cursors (project_id, user_id, seen_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(project_id, user_id) DO UPDATE SET seen_at = excluded.seen_at
+           WHERE catch_up_cursors.seen_at < excluded.seen_at`,
+      )
+      .run(projectId, userId, at);
   }
 
   public async getAuditorCursor(
