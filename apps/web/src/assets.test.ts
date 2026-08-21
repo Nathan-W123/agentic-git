@@ -2976,19 +2976,24 @@ test("private-chat messages compact only an uninterrupted run from one speaker",
   assert.equal(continues({ role: "user" }, { role: "user" }, true), false);
   assert.equal(continues(undefined, { role: "user" }, false), false);
 
-  // Continuations lose only repeated time chrome. They remain individual
-  // bubbles with their original indices, so rewinding from either one keeps
-  // the conversation semantics unchanged.
+  // Continuations lose only repeated chrome (face, name, clock). They remain
+  // individual rows with their original indices, so rewinding from either one
+  // keeps the conversation semantics unchanged.
   assert.match(chat, /compact \? " msg-compact" : ""/u);
   assert.match(
     chat,
-    /compact\s*\?\s*""\s*:\s*`<span class="msg-time">/u,
+    /compact\s*\?\s*""\s*:\s*`<div class="msg-top">/u,
   );
   assert.match(chat, /act: "chat-msg-delete"/u);
   assert.match(chat, /value: String\(index\)/u);
+  // Yours on the right, the agent's on the left — the one difference from the
+  // channel's single-sided transcript.
+  assert.match(chat, /mine \? "user" : "agent"/u);
+  assert.match(css, /\.msg\.user \{\s*align-self: flex-end;/u);
+  assert.match(css, /\.msg\.agent \{\s*align-self: flex-start;/u);
   assert.match(
     css,
-    /\.msg\.msg-compact \{\s*margin-top: -8px;\s*\}/u,
+    /\.msg\.msg-compact \.msg-body \{\s*margin-left: calc\(var\(--msg-body-x\) - 8px\);/u,
   );
 });
 
