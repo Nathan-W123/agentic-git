@@ -300,6 +300,42 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
   assert.match(styles, /\.tt-caret \.ui-icon/u);
 });
 
+test("pinned messages can be hidden and shown without being unpinned", async () => {
+  const ui = await publicFile("ui.js");
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const enhancement = ui.slice(
+    ui.indexOf("S.showPinnedMessages ="),
+    ui.indexOf("/**\n * The product mark"),
+  );
+
+  // The shortcut belongs after both channel counts and is visually separated
+  // from them. It uses the shared pin glyph and exposes the state in words as
+  // well as through the pressed state.
+  assert.match(enhancement, /querySelector\("\.chan-head \.ch-desc"\)/u);
+  assert.match(enhancement, /textContent = "\|"/u);
+  assert.match(enhancement, /className = `ch-count ch-pins-toggle/u);
+  assert.match(enhancement, /button\.innerHTML = icon\("pin"\)/u);
+  assert.match(enhancement, /Hide pinned messages/u);
+  assert.match(enhancement, /Show pinned messages/u);
+  assert.match(enhancement, /"aria-pressed", String\(open\)/u);
+
+  // Header redraws must not duplicate the control. The observer puts it back
+  // after a redraw, while the existing delegated action changes only the
+  // banner's visibility state and never calls the pin/unpin operation.
+  assert.match(enhancement, /querySelector\("\.ch-pins-toggle"\)/u);
+  assert.match(enhancement, /new MutationObserver\(sync\)/u);
+  assert.match(enhancement, /dataset\.act = "channel-pins-toggle"/u);
+  const toggle = app.slice(
+    app.indexOf('case "channel-pins-toggle"'),
+    app.indexOf('case "channel-pinned-open"'),
+  );
+  assert.match(toggle, /state\.pinsOpen = state\.pinsOpen !== true/u);
+  assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
+  assert.match(chats, /const open = state\.pinsOpen === true/u);
+  assert.match(chats, /!open[\s\S]{0,80}\? ""[\s\S]{0,80}chan-pins-list/u);
+});
+
 test("serves the vendored Monaco build same-origin under /vendor", async () => {
   const assets = await loadStaticAssets();
   // CSP allows no CDN, so a deployment that wants a full editor must have

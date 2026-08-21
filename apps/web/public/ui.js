@@ -254,6 +254,53 @@ export function icon(name, extra = "") {
 }
 
 /**
+ * Adds the pinned-message shortcut beside the channel's people and agent
+ * counts. The channel header is redrawn as live room state arrives, so this
+ * small shared enhancement follows those redraws rather than owning a second
+ * copy of the header.
+ *
+ * The button deliberately emits the banner's existing delegated action. A
+ * pin remains a pin when its shelf is hidden; this control changes only
+ * whether that shelf is open.
+ */
+S.showPinnedMessages = (root = document) => {
+  const sync = () => {
+    const counts = root.querySelector(".chan-head .ch-desc");
+    if (counts === null || counts.querySelector(".ch-pins-toggle") !== null) {
+      return;
+    }
+    const open =
+      root.querySelector('.chan-pins-head[aria-expanded="true"]') !== null;
+    const separator = root.createElement("span");
+    separator.className = "ch-pins-separator";
+    separator.setAttribute("aria-hidden", "true");
+    separator.textContent = "|";
+
+    const button = root.createElement("button");
+    button.type = "button";
+    button.className = `ch-count ch-pins-toggle${open ? " on" : ""}`;
+    button.dataset.act = "channel-pins-toggle";
+    button.title = open ? "Hide pinned messages" : "Show pinned messages";
+    button.setAttribute("aria-label", button.title);
+    button.setAttribute("aria-pressed", String(open));
+    button.setAttribute(
+      "style",
+      "border:0;background:none;padding:0;color:inherit;font:inherit;cursor:pointer",
+    );
+    button.innerHTML = icon("pin");
+    counts.append(separator, button);
+  };
+
+  sync();
+  const observer = new MutationObserver(sync);
+  observer.observe(root.documentElement, { childList: true, subtree: true });
+};
+
+if (typeof document !== "undefined") {
+  S.showPinnedMessages();
+}
+
+/**
  * The product mark: two loops woven through each other.
  *
  * A lattice is the interlocking, so the mark is the interlocking and nothing
