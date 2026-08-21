@@ -44,7 +44,6 @@ import {
   myAvatar,
   setMyAvatar,
   myTheme,
-  setMyTheme,
   myAgents,
   notifications,
   persist,
@@ -1591,27 +1590,6 @@ function appearanceCard() {
   return `<section class="card">
     <div class="panel-head"><div><h3>Appearance</h3>
       <p>How Lattice looks to you, and how your agents look to everyone</p></div></div>
-
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Theme</div>
-        <div class="sr-sub">Light inverts the surfaces and keeps your accent.
-          Stored in this browser.</div>
-      </span>
-      <span class="sr-ctl">
-        ${
-          // `switch`, not `toggle`. There has never been a `.toggle` rule in
-          // the stylesheet, so this button had no size, no track and no knob —
-          // it rendered as an empty inline element and the only way to reach
-          // light mode was to guess where to click. Every other switch on this
-          // screen already used the styled class.
-          `<button type="button" class="switch${myTheme() === "light" ? " on" : ""}"
-            data-act="theme-toggle" role="switch"
-            aria-checked="${myTheme() === "light"}"
-            aria-label="Light theme"></button>`
-        }
-      </span>
-    </div>
 
     <div class="set-row">
       <span class="sr-body">
@@ -6392,10 +6370,6 @@ document.addEventListener("click", (event) => {
       return;
 
     /* Settings */
-    case "theme-toggle":
-      setMyTheme(myTheme() === "light" ? "dark" : "light");
-      render();
-      return;
     case "colours-reset":
       state.openWheel = undefined;
       void saveAppearanceChoice({
