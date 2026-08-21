@@ -1204,6 +1204,8 @@ function settingsScreen() {
     <div class="settings-grid">
       ${agentsCard()}
 
+      ${githubCard()}
+
       ${invitationsCard()}
 
       ${appearanceCard()}
@@ -1306,8 +1308,6 @@ function settingsScreen() {
           <span class="sr-ctl">${esc(repository?.branch ?? "—")}</span>
         </div>
       </section>
-
-      ${githubCard()}
 
       <section class="card">
         <div class="panel-head"><div><h3>Account</h3></div></div>
