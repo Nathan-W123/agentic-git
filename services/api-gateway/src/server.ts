@@ -626,6 +626,16 @@ function arbitrationNoticeKind(content: string): "hold" | "advisory" {
 const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome", "progress"]);
 
 /**
+ * Marks the one agent reply that points at work which already landed.
+ *
+ * The reference itself is persisted in `referencedMessageId`; this prefix is
+ * only the presentation discriminator the browser needs in order to draw
+ * that reference as an inline completed-work link instead of the ordinary
+ * quiet reply address above a message.
+ */
+const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
+
+/**
  * An image in a message, in the one form the channel writes and reads.
  *
  * The id shape is checked here as well as in the store, because this match is
@@ -10946,6 +10956,104 @@ export class ApiGateway {
   }
 
   /**
+   * Previously integrated work that is unmistakably the request being made.
+   *
+   * Only successful tasks qualify. An open, failed, cancelled, queued or
+   * planned task still needs an agent, and a request made inside a thread is
+   * an explicit continuation rather than a duplicate. The overlap bar is
+   * intentionally higher than automatic thread merging: a second task is
+   * cheaper than incorrectly claiming that a change already exists.
+   */
+  private async findCompletedWorkReference(input: {
+    projectId: string;
+    repositoryId: string;
+    viewerId: string;
+    content: string;
+  }): Promise<{ messageId: string; agentName: string } | undefined> {
+    const [tasks, messages, candidates] = await Promise.all([
+      this.options.store
+        .listSubmittedTasks({ repositoryId: input.repositoryId })
+        .catch(() => []),
+      this.options.store
+        .listChannelMessages(input.repositoryId, input.viewerId, { limit: 200 })
+        .catch(() => []),
+      this.resolveChannelMentionCandidates(input.projectId, input.repositoryId)
+        .catch(() => []),
+    ]);
+    const request = withoutMentions(input.content);
+    const reversesWork = (text: string): boolean =>
+      /\b(?:undo(?:ne|ing)?|revert(?:s|ed|ing)?|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|disabl(?:e|es|ed|ing))\b/iu.test(
+        text,
+      );
+    let best:
+      | { task: SubmittedTask; root: ChannelMessage | undefined; score: number }
+      | undefined;
+    for (const task of recentFirst(tasks)) {
+      if (task.status !== "integrated") {
+        continue;
+      }
+      const root =
+        (task.conversationId === undefined
+          ? undefined
+          : messages.find((message) => message.id === task.conversationId)) ??
+        messages.find((message) => message.taskId === task.id);
+      const messageId = task.conversationId ?? root?.id;
+      if (messageId === undefined) {
+        continue;
+      }
+      const objective = withoutRoleContext(task.objective);
+      const rootRequest =
+        root === undefined ? "" : withoutMentions(root.content);
+      // A request to undo, remove or disable work is new work even when every
+      // noun is identical to the task that introduced it.
+      const directionalSubject =
+        root?.kind === "user" && rootRequest !== "" ? rootRequest : objective;
+      if (reversesWork(request) !== reversesWork(directionalSubject)) {
+        continue;
+      }
+      const score = Math.max(
+        textOverlap(request, objective),
+        rootRequest === "" ? 0 : textOverlap(request, rootRequest),
+      );
+      if (score < 0.6 || (best !== undefined && score <= best.score)) {
+        continue;
+      }
+      best = { task, root, score };
+    }
+    if (best === undefined) {
+      return undefined;
+    }
+    const messageId = best.task.conversationId ?? best.root?.id;
+    if (messageId === undefined) {
+      return undefined;
+    }
+    const root =
+      best.root ??
+      (await this.options.store
+        .getChannelMessage(input.repositoryId, messageId, input.viewerId)
+        .catch(() => undefined));
+    if (root === undefined) {
+      return undefined;
+    }
+    const taskAuthorId = await this.channelTaskAuthorId(best.task, candidates);
+    const recordedAuthorId =
+      AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
+        ? root.authorId
+        : [...root.replies]
+            .reverse()
+            .find((reply) => AGENT_AUTHORED_ROOT_KINDS.has(reply.kind))
+            ?.authorId;
+    const authorId = taskAuthorId ?? recordedAuthorId;
+    const priorAgent = candidates.find(
+      (candidate) =>
+        `${candidate.userId}:${candidate.provider}` === authorId,
+    );
+    return priorAgent === undefined
+      ? undefined
+      : { messageId, agentName: priorAgent.name };
+  }
+
+  /**
    * The thread a request names out loud, as against one it merely resembles.
    *
    * "look at the codebase improvement review thread and implement number 3" is
@@ -11088,6 +11196,36 @@ export class ApiGateway {
           `org-wide, or mention an org-wide agent instead.`,
       );
       return;
+    }
+    if (
+      trigger === "mention" &&
+      input.threadMessageId === undefined &&
+      input.planOnly !== true &&
+      input.queueAfterCurrent !== true &&
+      input.forceQuestion !== true &&
+      !readsAsQuestion(content) &&
+      !asksAboutWork(withoutMentions(content)) &&
+      !SYSTEM_PACKAGE_INSTALL_RE.test(content)
+    ) {
+      const completed = await this.findCompletedWorkReference({
+        projectId,
+        repositoryId,
+        viewerId: senderId,
+        content,
+      });
+      if (completed !== undefined) {
+        await this.appendChannelEntry({
+          projectId,
+          repositoryId,
+          kind: "agent",
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content:
+            `${CHANNEL_COMPLETED_WORK_PREFIX} @${completed.agentName} ` +
+            "already took care of that.",
+          referencedMessageId: completed.messageId,
+        });
+        return;
+      }
     }
     // Typing starts here, at the moment the agent is chosen, rather than once
     // there is a task to hang it on.

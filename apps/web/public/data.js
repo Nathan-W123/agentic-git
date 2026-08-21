@@ -3953,6 +3953,34 @@ function findChannelMessage(repositoryId, messageId) {
 }
 
 /**
+ * Finds one channel entry, paging backwards until it is loaded or history
+ * has been exhausted.
+ *
+ * References are durable while the transcript is paged. A completed-work
+ * reply can therefore point at a task far older than the first page; making
+ * the click responsible for walking the existing cursor keeps the ordinary
+ * channel load fast without turning old references into dead controls.
+ */
+export async function loadChannelMessage(repositoryId, messageId, rerender) {
+  let found = findChannelMessage(repositoryId, messageId);
+  const visited = new Set();
+  while (
+    found === undefined &&
+    state.channelHasMore[repositoryId] !== false
+  ) {
+    const loaded = state.channelMessages[repositoryId] ?? [];
+    const cursor = channelCursor(loaded[0]);
+    if (cursor === undefined || visited.has(cursor)) {
+      break;
+    }
+    visited.add(cursor);
+    await loadEarlierChannelMessages(repositoryId, rerender);
+    found = findChannelMessage(repositoryId, messageId);
+  }
+  return found;
+}
+
+/**
  * A server-assigned message id never starts with its own repository id —
  * `sendChannelMessage` mints local ones as `${repositoryId}-...` precisely so
  * this is a cheap, reliable check. A local id belongs to an optimistic post

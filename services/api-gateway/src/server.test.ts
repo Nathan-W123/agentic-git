@@ -4150,6 +4150,149 @@ test("automatic continuation matches an existing user-rooted task thread", async
   );
 });
 
+test("matching integrated work names its agent and points back without submitting a duplicate", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "completed-work-reference");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org", callSign: "Alpha" },
+    { provider: "openai", visibility: "org", callSign: "Beta" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const objective = "implement the token refresh retry circuit breaker guard";
+
+  const first = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@Alpha ${objective}` },
+  });
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.ok(task !== undefined);
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  await runtime.store.completeSubmittedTask(task.id, "integrated");
+
+  const submittedBefore = runtime.submittedTasks.length;
+  const repeated = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Beta update the token refresh retry circuit breaker guard",
+    },
+  });
+  assert.equal(repeated.status, 201, JSON.stringify(repeated.data));
+  assert.equal(runtime.submittedTasks.length, submittedBefore);
+
+  const after = await owner.request(`${base}/messages?limit=50`);
+  const reference = (after.data.messages as any[]).find(
+    (message) =>
+      message.kind === "agent" &&
+      message.referencedMessageId === first.data.message.id,
+  );
+  assert.ok(reference !== undefined, JSON.stringify(after.data.messages));
+  assert.equal(reference.authorId, `${bootstrapped.user.id}:openai`);
+  assert.match(reference.content, /@Alpha already took care of that\.$/u);
+});
+
+test("duplicate recognition leaves unfinished, unsuccessful, opposed, uncertain, and thread work dispatchable", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org", callSign: "Alpha" },
+    { provider: "openai", visibility: "org", callSign: "Beta" },
+  ]);
+
+  const scenarios: Array<{
+    name: string;
+    status: "submitted" | "integrated" | "failed" | "cancelled";
+    first: string;
+    second: string;
+    inThread?: boolean;
+  }> = [
+    {
+      name: "unfinished",
+      status: "submitted",
+      first: "implement the unfinished token refresh retry guard",
+      second: "implement the unfinished token refresh retry guard",
+    },
+    {
+      name: "failed",
+      status: "failed",
+      first: "implement the failed token refresh retry guard",
+      second: "implement the failed token refresh retry guard",
+    },
+    {
+      name: "cancelled",
+      status: "cancelled",
+      first: "implement the cancelled token refresh retry guard",
+      second: "implement the cancelled token refresh retry guard",
+    },
+    {
+      name: "opposed",
+      status: "integrated",
+      first: "add the opposed token refresh retry policy circuit breaker guard",
+      second: "remove the opposed token refresh retry policy circuit breaker guard",
+    },
+    {
+      name: "low-confidence",
+      status: "integrated",
+      first: "implement the uncertain cache retry policy",
+      second: "implement retry dashboard metrics",
+    },
+    {
+      name: "thread-follow-up",
+      status: "integrated",
+      first: "implement the threaded token refresh retry guard",
+      second: "implement the threaded token refresh retry guard",
+      inThread: true,
+    },
+  ];
+
+  for (const [index, scenario] of scenarios.entries()) {
+    const repositoryId = await invitableRepository(
+      owner,
+      `completed-work-${String(index)}`,
+    );
+    await joinAllConnectedAgents(runtime, repositoryId);
+    const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+    const first = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: `@Alpha ${scenario.first}` },
+    });
+    assert.equal(first.status, 201, scenario.name);
+    const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+    assert.ok(task !== undefined, scenario.name);
+    if (scenario.status !== "submitted") {
+      await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+      await runtime.store.completeSubmittedTask(task.id, scenario.status);
+    }
+
+    const submittedBefore = runtime.submittedTasks.length;
+    const second = scenario.inThread === true
+      ? await owner.request(
+          `${base}/messages/${encodeURIComponent(first.data.message.id)}/replies`,
+          { method: "POST", body: { content: `@Beta ${scenario.second}` } },
+        )
+      : await owner.request(`${base}/messages`, {
+          method: "POST",
+          body: { content: `@Beta ${scenario.second}` },
+        });
+    assert.equal(second.status, 201, scenario.name);
+    if (scenario.inThread === true) {
+      await waitFor(
+        async () => runtime.submittedTasks.length === submittedBefore + 1,
+        `${scenario.name} did not dispatch`,
+      );
+    }
+    assert.equal(
+      runtime.submittedTasks.length,
+      submittedBefore + 1,
+      `${scenario.name} was mistaken for completed work`,
+    );
+  }
+});
+
 test("an agent's own owner can always @mention it, personal or org-wide", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

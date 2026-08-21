@@ -97,6 +97,7 @@ import {
   memberName,
   personOnline,
   loadEarlierChannelMessages,
+  loadChannelMessage,
   resendChannelMessage,
   ensureChangeSetForTask,
 } from "./data.js";
@@ -5096,26 +5097,35 @@ document.addEventListener("click", (event) => {
       return;
     // References to tasks open their thread; references to a person's message
     // (including one with inline replies) scroll the channel into view. The
-    // pin list is still a fallback for references older than loaded history.
+    // pin list is still a fallback after paginated history is exhausted.
     case "channel-pin-jump": {
       const repositoryId = activeChannelId();
-      const entry =
-        channelMessagesFor(repositoryId).find((m) => m.id === value) ??
-        (state.channelPins[repositoryId] ?? []).find((m) => m.id === value);
-      if (
-        entry !== undefined &&
-        entry.kind !== "user" &&
-        ((entry.replies ?? []).length > 0 || entry.taskId !== undefined)
-      ) {
-        openThreadPanel(value);
-        state.activeChannelThread = value;
-        // Chosen, so `openPromptedThread` will not choose over it.
-        state.autoOpenedThread = undefined;
-        render();
-        return;
-      }
-      state.scrollToMessage = value;
-      render();
+      void loadChannelMessage(repositoryId, value, render)
+        .then((loaded) => {
+          const entry =
+            loaded ??
+            (state.channelPins[repositoryId] ?? []).find(
+              (message) => message.id === value,
+            );
+          if (
+            entry !== undefined &&
+            (entry.taskId !== undefined ||
+              (entry.kind !== "user" && (entry.replies ?? []).length > 0))
+          ) {
+            openThreadPanel(value);
+            state.activeChannelThread = value;
+            state.scrollToThreadMessage = value;
+            // Chosen, so `openPromptedThread` will not choose over it.
+            state.autoOpenedThread = undefined;
+            render();
+            return;
+          }
+          state.scrollToMessage = value;
+          render();
+        })
+        .catch((error) => {
+          toast(`Could not open that message: ${error.message}`, "error");
+        });
       return;
     }
     // The tree and a file opened out of it are two surfaces, and the column

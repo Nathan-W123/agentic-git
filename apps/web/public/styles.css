@@ -5807,6 +5807,41 @@ button.chip.lg:hover {
   white-space: nowrap;
 }
 
+/* Completed-work references are part of the answer, not reply metadata. The
+   compact pill keeps that distinction visible while using the same durable
+   jump action as pins and ordinary references. */
+.cmsg-completed-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  margin: 6px 0 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-card-2);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cmsg-completed-ref:hover {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+.cmsg-completed-ref .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.cmsg-completed-ref .ui-icon:first-child {
+  color: var(--green);
+}
+
 .cmsg-row .cmsg-avatar {
   flex: none;
   margin-top: 1px;

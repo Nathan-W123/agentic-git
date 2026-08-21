@@ -135,6 +135,33 @@ test("earlier pages are read through the cursor, deduped, and survive a reconcil
   assert.match(load, /state\.channelMessages\[repositoryId\] = \[\.\.\.earlier, \.\.\.page\];/u);
 });
 
+test("reference navigation pages backward until its thread is found or history ends", async () => {
+  const data = await publicFile("data.js");
+  const app = await publicFile("app.js");
+  const loader = slice(
+    data,
+    "export async function loadChannelMessage(",
+    "\n/**",
+  );
+
+  assert.match(loader, /let found = findChannelMessage\(repositoryId, messageId\);/u);
+  assert.match(loader, /while \(/u);
+  assert.match(loader, /state\.channelHasMore\[repositoryId\] !== false/u);
+  assert.match(loader, /const cursor = channelCursor\(loaded\[0\]\);/u);
+  assert.match(loader, /await loadEarlierChannelMessages\(repositoryId, rerender\);/u);
+  assert.match(loader, /found = findChannelMessage\(repositoryId, messageId\);/u);
+  // A repeated cursor is a malformed or exhausted page, and must not turn a
+  // reference click into an infinite request loop.
+  assert.match(loader, /const visited = new Set\(\);/u);
+  assert.match(loader, /visited\.has\(cursor\)/u);
+
+  const action = slice(app, 'case "channel-pin-jump": {', "\n    case ");
+  assert.match(action, /loadChannelMessage\(repositoryId, value, render\)/u);
+  assert.match(action, /entry\.taskId !== undefined/u);
+  assert.match(action, /state\.scrollToThreadMessage = value;/u);
+  assert.match(action, /state\.scrollToMessage = value;/u);
+});
+
 test("the control is offered only when there is more, and holds the reader's place", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");

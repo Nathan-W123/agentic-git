@@ -4369,6 +4369,35 @@ test("the room's hold line carries a way back to the thread it is about", async 
   assert.match(elbow ?? "", /border-top: 2px solid/u);
 });
 
+test("completed-work responses use an accessible inline pill while ordinary references stay quiet", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("\nfunction typingIndicator", chats.indexOf("function messageRow(")),
+  );
+
+  assert.match(chats, /const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —"/u);
+  assert.match(chats, /function completedWorkReference\(entry, repositoryId\)/u);
+  assert.match(chats, /class="cmsg-completed-ref"/u);
+  assert.match(chats, /aria-label="\$\{esc\(/u);
+  assert.match(chats, /data-act="channel-pin-jump" data-value="\$\{esc\(entry\.referencedMessageId\)\}"/u);
+  assert.match(row, /const completedReference =/u);
+  assert.match(row, /completedReference === ""/u);
+  assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
+  assert.match(row, /messageBodyWithIcons\(entry, repositoryId\)\}\$\{completedReference\}/u);
+
+  const pill = /\n\.cmsg-completed-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(pill, undefined, "completed work has its own inline treatment");
+  assert.match(pill ?? "", /display: inline-flex/u);
+  assert.match(pill ?? "", /border-radius: 999px/u);
+  // The existing reply reference remains its own full-width, low-emphasis
+  // path above the message instead of inheriting the completed-work pill.
+  const ordinary = /\n\.cmsg-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(ordinary ?? "", /flex: 0 0 100%/u);
+  assert.doesNotMatch(ordinary ?? "", /border-radius: 999px/u);
+});
+
 test("a message's face and name open the person and describe them on hover", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");

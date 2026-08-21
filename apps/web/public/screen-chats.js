@@ -1438,6 +1438,9 @@ const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
  */
 const PLAN_LAPSED_PREFIX = "⌛ Plan expired";
 
+/** Mirrors `CHANNEL_COMPLETED_WORK_PREFIX` in the gateway. */
+const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
+
 /**
  * Protocol notices still carry their legacy symbol so older clients can
  * recognise them. The symbol is not shown: Lattice renders the matching mark
@@ -1538,6 +1541,40 @@ function messageReference(root, repositoryId) {
       <span class="cmsg-ref-text">${esc(
         line.length > 80 ? `${line.slice(0, 77)}…` : line,
       )}</span>
+    </button>`;
+}
+
+/**
+ * The inline doorway attached to a response about work that already landed.
+ *
+ * Unlike an ordinary reply reference this stays visible even before its old
+ * target has been paged in: the durable id is enough for `channel-pin-jump`
+ * to load history and open the task thread on demand.
+ */
+function completedWorkReference(entry, repositoryId) {
+  const content = String(entry.content ?? "");
+  if (
+    entry.kind !== "agent" ||
+    entry.referencedMessageId === undefined ||
+    !content.startsWith(CHANNEL_COMPLETED_WORK_PREFIX)
+  ) {
+    return "";
+  }
+  const known = channelMessagesFor(repositoryId).some(
+    (message) => message.id === entry.referencedMessageId,
+  );
+  const named = /^Already handled —\s+@(.+?)\s+already took care/iu.exec(
+    content,
+  )?.[1];
+  const label = named === undefined ? "View completed work" : `View @${named}'s work`;
+  return `<button type="button" class="cmsg-completed-ref"
+      data-act="channel-pin-jump" data-value="${esc(entry.referencedMessageId)}"
+      aria-label="${esc(
+        named === undefined
+          ? "Open the completed work thread"
+          : `Open the completed work thread from ${named}`,
+      )}" data-reference-loaded="${known ? "true" : "false"}">
+      ${icon("check")}<span>${esc(label)}</span>${icon("arrowRight")}
     </button>`;
 }
 
@@ -1977,6 +2014,8 @@ function messageRow(
   const inlineReply = inlineReplyTo !== undefined;
   const hasTaskThread = channelMessageHasTaskThread(entry);
   const channelThread = hasTaskThread && !isReply;
+  const completedReference =
+    isReply ? "" : completedWorkReference(entry, repositoryId);
   // Agent answers and legacy acknowledgements remain ordinary roots in the
   // room's chronological transcript. Their stored reference is the address
   // back to the request that prompted them; it does not replace a task thread
@@ -1985,6 +2024,7 @@ function messageRow(
   // the answer does not make its address disappear.
   const referencedRoot =
     !isReply &&
+    completedReference === "" &&
     AGENT_AUTHORED_ROOT_KINDS.has(entry.kind) &&
     entry.referencedMessageId !== undefined
       ? channelMessagesFor(repositoryId).find(
@@ -2102,7 +2142,7 @@ function messageRow(
       <div class="cmsg-text">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
-          : messageBodyWithIcons(entry, repositoryId)
+          : `${messageBodyWithIcons(entry, repositoryId)}${completedReference}`
       }</div>
       ${
         // Said plainly, beside a way to try again. The resend re-posts the
