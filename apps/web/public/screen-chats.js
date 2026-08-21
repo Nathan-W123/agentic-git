@@ -3214,7 +3214,7 @@ function panelGrip() {
 /**
  * What kind of thing this panel is, said in one word above what it is called.
  *
- * Six different surfaces share the one column and each of them used to open
+ * The different side surfaces share one column, and each of them used to open
  * with nothing but a name in it — a repository path, a person, a thread's
  * first sentence — which are all things the transcript underneath is also full
  * of. So the panel arriving read as the conversation changing rather than as a
@@ -3255,6 +3255,7 @@ function panelKind(label, act) {
 /** The open right-hand surfaces, in the same priority order as before split view. */
 function rightPanelKinds() {
   return [
+    state.catchUp !== undefined && "catch-up",
     state.activePlan !== undefined && "plan",
     state.activeAgentPanel !== undefined && "agent",
     state.activeDm !== undefined && "dm",
@@ -3268,6 +3269,8 @@ function rightPanelKinds() {
 /** Draw one named right-hand surface without changing the state behind it. */
 function rightPanel(repositoryId, kind) {
   switch (kind) {
+    case "catch-up":
+      return catchUpPanel();
     case "plan":
       return planPanel(repositoryId);
     case "agent":
@@ -3319,14 +3322,73 @@ function rightPanels(repositoryId) {
 }
 
 /**
- * The control every one of those six surfaces is looked for first.
+ * The control every one of those surfaces is looked for first.
  *
- * One call rather than six spellings of the same `iconButton`, so the close
+ * One call rather than several spellings of the same `iconButton`, so the close
  * cannot drift apart from panel to panel — it was already three different
  * tooltips for the identical act.
  */
 function panelClose(act, title) {
   return iconButton("close", { act, title, cls: "panel-close" });
+}
+
+/**
+ * Work that finished while this person was away, in the same side surface a
+ * plan uses rather than in a blocking modal over the whole room.
+ *
+ * The task records are captured when the catch-up endpoint answers. Rendering
+ * them from that snapshot keeps the list stable while polls update the main
+ * task collection behind it, and lets a reader dismiss exactly what they were
+ * shown before the server advances their catch-up mark.
+ */
+function catchUpPanel() {
+  const catchUp = state.catchUp;
+  if (catchUp === undefined || catchUp.tasks.length === 0) {
+    return "";
+  }
+  const count = catchUp.tasks.length;
+  const rows = catchUp.tasks
+    .map((task) => {
+      const objective =
+        withoutRolePreamble(task.objective).replace(/\s+/gu, " ").trim() ||
+        "Completed task";
+      const repository = state.repositories.find(
+        (entry) => entry.id === task.repositoryId,
+      );
+      const where = repository?.name ?? repository?.id ?? task.repositoryId;
+      const when = relativeTime(task.completedAt);
+      return `<li class="catch-up-task">
+      <span class="catch-up-check" aria-hidden="true">${icon("check")}</span>
+      <div class="catch-up-task-copy">
+        <p>${esc(objective)}</p>
+        <span>${where ? `#${esc(where)} · ` : ""}${esc(when)}</span>
+      </div>
+    </li>`;
+    })
+    .join("");
+
+  return `<aside class="thread-panel catch-up-panel" aria-labelledby="catch-up-title">
+    ${panelGrip()}
+    <header class="thread-head">
+      ${panelKind("Since you left")}
+      <span class="thread-title" id="catch-up-title">Completed tasks</span>
+      <span class="spacer"></span>
+      ${panelClose("catch-up-close", "Close completed tasks (Esc)")}
+    </header>
+    <div class="thread-body catch-up-body"
+      data-scroll-key="catch-up:${esc(catchUp.projectId)}:${esc(catchUp.since)}">
+      <div class="catch-up-intro">
+        <p class="catch-up-kicker">Since you left</p>
+        <h2>${esc(String(count))} completed ${count === 1 ? "task" : "tasks"}</h2>
+        <p>These tasks finished while you were away.</p>
+      </div>
+      <ul class="catch-up-task-list" aria-label="Completed tasks">${rows}</ul>
+    </div>
+    <div class="catch-up-actions">
+      <span>You're all caught up.</span>
+      <button class="btn btn-primary" type="button" data-act="catch-up-close">Done</button>
+    </div>
+  </aside>`;
 }
 
 /**

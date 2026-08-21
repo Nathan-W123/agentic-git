@@ -4373,10 +4373,11 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(app, /function openReadyPlan\(repositoryId\)/u);
   assert.match(app, /openReadyPlan\(channelRepositoryId\);/u);
   assert.match(app, /state\.activePlan = messageId;/u);
-  // Escape and the swipe close it first, because it is the panel's occupant.
+  // Escape and the swipe close it when it is the panel's visible occupant.
+  // The login catch-up may temporarily sit above it, and is put away first.
   assert.match(
     app,
-    /function closeSidePanel\(\) \{\s*if \(state\.activePlan !== undefined\)/u,
+    /function closeSidePanel\(\) \{[\s\S]*?if \(state\.activePlan !== undefined\)/u,
   );
 
   assert.match(css, /\n\.plan-link \{/u);
