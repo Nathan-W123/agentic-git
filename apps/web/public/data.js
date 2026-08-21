@@ -525,7 +525,6 @@ export function forgetOtherAccount(storage, userId) {
     "ag.chatOpen",
     "ag.eventCursor",
     "ag.favourites",
-    "ag.newsThrough",
     "ag.notificationReadThrough",
     "ag.read",
   ];
@@ -1098,7 +1097,7 @@ export function eventCursor() {
   return Math.max(remembered, state.audit.at(-1)?.sequence ?? 0);
 }
 
-/** Records that a sequence has been delivered here, if it is news. */
+/** Records that a sequence has been delivered here. */
 export function noteEventSequence(sequence) {
   if (!Number.isSafeInteger(sequence) || sequence <= eventCursor()) {
     return;
@@ -2302,9 +2301,7 @@ const NOTIFY = {
 /**
  * How the notifications list names one event.
  *
- * Shared with the banner so that "already read" means the same thing in both
- * places: marking the list read and then being told the same news in the
- * corner a moment later is the same event announced twice.
+ * Kept stable so a row stays read as the notification list is rebuilt.
  */
 function notificationId(event) {
   return event.id ?? `${event.type}-${event.occurredAt}-${event.taskId ?? ""}`;
@@ -2328,11 +2325,6 @@ export function notificationIsRead(row) {
     (Number.isSafeInteger(row.sequence) &&
       row.sequence <= notificationReadThrough())
   );
-}
-
-/** Whether this event has already been read on the notifications screen. */
-export function notificationSeen(event) {
-  return state.readNotifications.has(notificationId(event));
 }
 
 /**
@@ -2499,37 +2491,6 @@ export function markRead(ids) {
       : [...state.readNotifications].filter((id) => live.has(id));
   state.readNotifications = new Set(kept);
   window.localStorage.setItem("ag.read", JSON.stringify(kept));
-}
-
-/**
- * The last sequence that has already had its say in the corner of the screen.
- *
- * The delivery cursor above is about what arrived; this is about what was
- * announced, and they are not the same guarantee. A second tab, a cursor
- * reset, a replay this browser asked for on purpose — all of them can hand
- * over an event twice, and the second time is not news. Kept per project for
- * the same reason the cursor is.
- */
-export function announcedThrough() {
-  try {
-    const raw = JSON.parse(stored("ag.newsThrough", "{}"));
-    return raw?.projectId === state.projectId && Number.isSafeInteger(raw?.sequence)
-      ? raw.sequence
-      : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/** Moves the announcement watermark forward, never back. */
-export function noteAnnounced(sequence) {
-  if (!Number.isSafeInteger(sequence) || sequence <= announcedThrough()) {
-    return;
-  }
-  persist(
-    "ag.newsThrough",
-    JSON.stringify({ projectId: state.projectId, sequence }),
-  );
 }
 
 /* --------------------------------------------------- coordinator feed ---- */
@@ -3011,46 +2972,6 @@ export async function loadChannelStats(repositoryId) {
   const stats = await apiOptional(channelPath(repositoryId, "/stats"), undefined);
   if (stats !== undefined) {
     state.channelStats[repositoryId] = stats;
-  }
-}
-
-/**
- * The banner sentence for one audit event, or nothing.
- *
- * Named after the agent as this channel knows it, because "Zeus's task
- * failed" is the sentence a person acts on and "task_failed" is not. Only
- * endings and questions banner — starts and progress are what the room
- * itself is for.
- */
-export function bannerLineForAudit(event) {
-  const type = event?.type;
-  const data = event?.data ?? {};
-  const repositoryId = data.repositoryId;
-  if (typeof repositoryId !== "string") {
-    return undefined;
-  }
-  const task = state.tasks.find((candidate) => candidate.id === event.taskId);
-  // Owner-qualified, because this list holds every agent in the room and not
-  // only this account's. Matched on the vendor alone, `find` returned whoever
-  // happened to be first: with two people's Codex connected, both banners
-  // named the same agent, and half of them named the wrong one.
-  const named = channelAgentsFor(repositoryId).find((agent) =>
-    taskBelongsToAgent(task, agent),
-  );
-  const name = named?.name?.split(" (")[0] ?? "An agent";
-  switch (type) {
-    case "canonical_promoted":
-      return `${name} completed a task in #${repositoryId}`;
-    case "task_reported":
-      return `${name} finished a report in #${repositoryId}`;
-    case "task_failed":
-      return `${name}'s task failed in #${repositoryId}`;
-    case "task_cancelled":
-      return `${name}'s task was cancelled in #${repositoryId}`;
-    case "question_asked":
-      return `${name} is waiting on an answer in #${repositoryId}`;
-    default:
-      return undefined;
   }
 }
 
