@@ -1098,7 +1098,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   }
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
-  assert.match(channelEnd ?? "", /bottom: 23px;/u);
+  assert.match(channelEnd ?? "", /bottom: 20px;/u);
   // Written from the column variables rather than as the 13px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
   // drifting apart when any of those three numbers moves.
@@ -1122,21 +1122,27 @@ test("a reply carries a quiet visual path back to its root", async () => {
     -stemLeft,
     "the elbow's upright should sit in the stem's own column",
   );
-  // And it has to stop *inside* that upright. The route's foot sits fourteen
-  // pixels below the middle of the link, so `bottom` minus fourteen is how far
-  // above that middle the stem ends; the elbow's upright runs straight from
-  // its own top down to where the corner's arc begins, and an end below the
-  // arc leaves a tail poking past the swoosh while an end above the upright
-  // breaks the line in two.
-  const stemEnd = Number(/bottom: (\d+)px;/u.exec(channelEnd ?? "")?.[1]) - 14;
+  // The hook is only the quarter turn: a straight upright here would be
+  // painted on top of the shared stem and make every branch visibly thicker.
+  // The 20px face and two pixels of vertical padding put the link's midpoint
+  // twelve pixels above the route's foot.
+  const stemEnd = Number(/bottom: (\d+)px;/u.exec(channelEnd ?? "")?.[1]) - 12;
   const elbowTop = Number(
     /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
   );
   const elbowHeight = Number(/height: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
-  const arcStart = 11 - (elbowHeight - elbowTop);
-  assert.ok(
-    stemEnd >= arcStart && stemEnd <= elbowTop,
-    `the stem should end within the elbow's straight upright (${arcStart}..${elbowTop}), not at ${stemEnd}`,
+  const elbowRadius = Number(
+    /border-bottom-left-radius: (\d+)px;/u.exec(channelElbow ?? "")?.[1],
+  );
+  assert.equal(
+    elbowHeight,
+    elbowRadius,
+    "the hook should have no overlapping upright",
+  );
+  assert.equal(
+    stemEnd,
+    elbowTop,
+    "the final stem should stop at the hook's tangent",
   );
   assert.equal(
     elbowHeight - elbowTop,

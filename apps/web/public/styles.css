@@ -5353,20 +5353,15 @@ button.chip.lg:hover {
   position: relative;
 }
 
-/* Where the stem stops is the whole of whether the turn reads as one line.
-   The route's foot is the foot of the thread link itself — see the
-   `vertical-align` on `.cmsg-thread-link`, which is what takes the line
-   box's descent out of this sum — so `bottom: 23px` ends the stroke eleven
-   pixels above the middle of that 24px link, which is where the elbow's own
-   upright stands. It used to stop at `bottom: 11px`, level with the *outer
-   bottom* of the elbow — but by that point the elbow has curved away to the
-   right, so the last pixels of the stem stood alone beside the corner as a
-   tail poking past the swoosh. The stem now finishes inside the straight
-   part of that upright, four pixels below its top and three above where the
-   curve begins, so the two strokes overlap in the same column and no join is
-   visible. Any change here has to keep the end within that upright (see the
-   height and top of `.cmsg-row.cmsg-threaded .cmsg-thread-link::before`) —
-   too low and the tail comes back, too high and the line breaks in two.
+/* Where the stem stops is the whole of whether the turn reads as one clean
+   line. The route's foot is the foot of the thread link itself — see the
+   `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
+   out of this sum. `bottom: 20px` ends the stem at the top tangent of the
+   eleven-pixel quarter turn below. The old hook carried a seven-pixel upright
+   over this stem and the final segment deliberately ended inside it; that
+   double-painted the connector at every branch and left a dark, swollen join.
+   The stem and turn now meet once, edge to edge, so the stroke keeps one
+   weight all the way around the corner.
 
    The stroke is dropped two pixels above the wrapper so it overlaps the stem
    of the row above rather than meeting it exactly: a group whose prompts each
@@ -5377,7 +5372,7 @@ button.chip.lg:hover {
   position: absolute;
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
-  bottom: 23px;
+  bottom: 20px;
   border-left: 3px solid var(--border-strong);
   pointer-events: none;
 }
@@ -5961,8 +5956,9 @@ button.chip.lg:hover {
 }
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
-   short vertical overlap makes consecutive elbows read as branches of one
-   path; the thirteen-pixel gap keeps the stroke clear of the replier faces.
+   eleven-pixel quarter turn starts at the stem's tangent instead of laying a
+   second upright over it; the thirteen-pixel gap keeps the stroke clear of
+   the replier faces.
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
@@ -5974,19 +5970,18 @@ button.chip.lg:hover {
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
 
-   Top and height are read together: the difference between them (18 - 15) is
+   Top and height are read together: the difference between them (11 - 8) is
    what puts the horizontal run three pixels below the link's middle, where it
-   has always sat. The height is spent upwards, giving the upright seven
-   straight pixels above the corner's arc for the stem to finish inside —
-   enough overlap that neither stroke can end short of the other. */
+   has always sat. Matching the height to the radius removes the straight
+   upright entirely, leaving only the turn that branches from the stem. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
   box-sizing: border-box;
-  top: calc(50% - 15px);
+  top: calc(50% - 8px);
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 16px);
   width: 16px;
-  height: 18px;
+  height: 11px;
   border-left: 3px solid var(--border-strong);
   border-bottom: 3px solid var(--border-strong);
   border-bottom-left-radius: 11px;
