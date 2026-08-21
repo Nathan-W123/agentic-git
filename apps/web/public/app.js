@@ -82,11 +82,8 @@ import {
   loadPreview,
   rollbackTask,
   setAuditorPaused,
-  setPreviewCommand,
   simplifySummary,
-  startPreview,
   uploadAttachment,
-  stopPreview,
   setRepositoryGrant,
   revokeRepositoryGrant,
   state,
@@ -2236,54 +2233,6 @@ async function attachChannelImages(files, target = "channel") {
   $(`[data-act='${where.input}']`)?.focus();
 }
 
-async function startPreviewAction(repositoryId, asked = false) {
-  toast("Starting…", "ok");
-  try {
-    const preview = await startPreview(repositoryId);
-    toast(
-      preview === null
-        ? "Started"
-        : `Running at ${preview.url} — ${preview.label}`,
-      "ok",
-    );
-    render();
-  } catch (error) {
-    // Detection knows Node and it knows a page. Everything else is a question
-    // with exactly one right answer, held by whoever built the repository —
-    // so it is asked once and remembered, rather than guessed at forever.
-    //
-    // `asked` stops the loop: a command that was just supplied and still did
-    // not work is reported, not re-requested.
-    if (!asked && /could not be started/u.test(error.message ?? "")) {
-      const command = window.prompt(
-        `${error.message}\n\nHow is this app started? For example: npm run dev, ` +
-          `python3 serve.py, go run .`,
-        "",
-      );
-      if (command !== null && command.trim().length > 0) {
-        try {
-          await setPreviewCommand(repositoryId, command.trim());
-        } catch (saveError) {
-          toast(saveError.message, "error");
-          return;
-        }
-        await startPreviewAction(repositoryId, true);
-        return;
-      }
-    }
-    toast(error.message, "error");
-  }
-}
-
-async function stopPreviewAction(repositoryId) {
-  try {
-    await stopPreview(repositoryId);
-    render();
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
 async function revertTaskAction(repositoryId, taskId) {
   if (
     !window.confirm(
@@ -4391,9 +4340,9 @@ function renderNow() {
       });
     }
     // Asked once per channel, not on every render: the preview outlives the
-    // page, so a reload has to find the one already running rather than offer
-    // to start a second. `undefined` is "not asked yet"; `null` is "asked,
-    // there is none", which is why this tests for the former.
+    // page, so a reload has to find the address of the one already running.
+    // `undefined` is "not asked yet"; `null` is "asked, there is none", which
+    // is why this tests for the former.
     if (state.previews[activeChannelId()] === undefined) {
       const channel = activeChannelId();
       // Claimed before the request so a second render in the same tick does
@@ -5520,12 +5469,6 @@ document.addEventListener("click", (event) => {
       }
       return;
     }
-    case "preview-start":
-      void startPreviewAction(value);
-      return;
-    case "preview-stop":
-      void stopPreviewAction(value);
-      return;
     case "agent-panel-open":
       // Any agent in the room, not only your own, and its specification first. The
       // private-chat entry above stays as it was: that one is a deliberate

@@ -1122,60 +1122,19 @@ function chanSidebar(activeRepositoryId) {
 /* ---------------------------------------------------------- chan main ---- */
 
 /**
- * Start this repository's app, or go and look at the one already running.
+ * The repository's running app, if one is up.
  *
- * The link is a plain anchor to a loopback address, which works only on the
- * machine running the control plane. That is the whole design of the preview
- * and not an oversight — see `PreviewService` — so on a hosted deployment this
- * offers a link that will not open, and it says where it points rather than
- * pretending otherwise.
+ * Nothing in the page starts one any more: the play control that used to sit
+ * in the tool tray launched a server on the machine running the control plane,
+ * which is a loopback address only that machine can reach. What is left is
+ * read-only — an address for a preview started outside the page, and nothing
+ * at all when there is none.
  */
 function previewRunning(repositoryId) {
   const preview = state.previews[repositoryId];
   return preview !== null && preview !== undefined && preview.exited === undefined
     ? preview
     : undefined;
-}
-
-/**
- * Why the last preview of this repository stopped, if it stopped on its own.
- *
- * A preview that fails to come up at all is reported as an error the moment it
- * is asked for. This is the other case: one that ran, was watched, and then
- * died — which the control cannot show by flipping back to "play", because that
- * is also what it looks like before anything was ever started.
- */
-function previewStopped(repositoryId) {
-  const preview = state.previews[repositoryId];
-  return preview !== null && preview !== undefined && preview.exited !== undefined
-    ? preview
-    : undefined;
-}
-
-/** The control, which lives in the tool tray with its siblings. */
-function previewControl(repositoryId) {
-  if (!repositoryId) {
-    return "";
-  }
-  if (previewRunning(repositoryId) !== undefined) {
-    return `<button type="button" class="icon-btn on" data-act="preview-stop"
-        data-value="${esc(repositoryId)}" title="Stop the running app">
-        ${icon("close")}</button>`;
-  }
-  const stopped = previewStopped(repositoryId);
-  // The output is the diagnosis and it is the only copy: nothing else in the
-  // page renders it, so a dead preview used to be indistinguishable from one
-  // that was never started.
-  const why =
-    stopped === undefined
-      ? "Run this app and open it"
-      : `${stopped.label} stopped — ${
-          (stopped.recentOutput ?? []).slice(-3).join(" ").trim() ||
-          "it printed nothing"
-        }. Press to run it again.`;
-  return `<button type="button" class="icon-btn${stopped === undefined ? "" : " warn"}"
-      data-act="preview-start" data-value="${esc(repositoryId)}"
-      title="${esc(why)}">${icon("play")}</button>`;
 }
 
 /** The address, which stays in the header because it is state, not a control. */
@@ -1283,7 +1242,6 @@ function chanHeader(repositoryId) {
       state.chanToolsOpen !== true && !phoneLayout()
         ? ""
         : `<span class="chan-tools">
-            ${previewControl(repositoryId)}
             <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
               data-act="chan-tree-toggle" title="Files"
               aria-pressed="${state.chanTree === true}">${icon("folder")}</button>

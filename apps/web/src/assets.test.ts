@@ -638,7 +638,7 @@ test("the pink tools toggle animates without replacing its node", async () => {
   const css = await publicFile("styles.css");
   const action = app.slice(
     app.indexOf('case "chan-tools-toggle"'),
-    app.indexOf('case "preview-start"'),
+    app.indexOf('case "agent-panel-open"'),
   );
 
   assert.match(
@@ -2517,7 +2517,7 @@ test(
     const app = await browserSource();
     const attachStart = app.indexOf("async function attachChannelImages");
     const attachEnd = app.indexOf(
-      "\nasync function startPreviewAction",
+      "\nasync function revertTaskAction",
       attachStart,
     );
     const attach = app.slice(attachStart, attachEnd);
