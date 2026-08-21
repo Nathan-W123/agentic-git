@@ -571,6 +571,10 @@ export async function api(path, options = {}) {
     method,
     credentials: "same-origin",
     headers,
+    // A last "seen" write made as the tab is being backgrounded must be
+    // allowed to outlive the page. Kept opt-in because ordinary requests are
+    // easier for the browser to cancel when their screen has gone away.
+    ...(options.keepalive === true ? { keepalive: true } : {}),
     ...(options.body === undefined
       ? {}
       : { body: raw ? options.body : JSON.stringify(options.body) }),

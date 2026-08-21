@@ -170,12 +170,24 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(app, /state\.catchUp = \{\s*projectId,\s*since: catchUp\.since,\s*tasks,/u);
 
   // It is the same resizable, mobile-aware column as a plan, not a modal that
-  // blocks the channel, and it renders the task objectives as actual rows.
+  // blocks the channel. Each row reads the agent's completion explanation —
+  // at most two sentences — rather than echoing the request that started it.
   assert.match(data, /catchUp: undefined/u);
   assert.match(chats, /function catchUpPanel\(\)/u);
   assert.match(chats, /<aside class="thread-panel catch-up-panel"/u);
   assert.match(chats, /class="catch-up-task-list"/u);
-  assert.match(chats, /withoutRolePreamble\(task\.objective\)/u);
+  assert.match(app, /function catchUpTaskSummary\(task\)/u);
+  assert.match(app, /event\.data\?\.agentExplanation/u);
+  assert.ok(app.includes('cleaned.split(/(?<=[.!?])\\s+/u).slice(0, 2)'));
+  assert.match(app, /summary: catchUpTaskSummary\(task\),/u);
+  assert.match(chats, /String\(task\.summary \?\? ""\)/u);
+  assert.doesNotMatch(
+    chats.slice(
+      chats.indexOf("function catchUpPanel()"),
+      chats.indexOf("function chanTreeNode("),
+    ),
+    /task\.objective/u,
+  );
   assert.doesNotMatch(app, /catch-up-card/u);
   assert.match(styles, /\.catch-up-task-list \{/u);
 
@@ -184,4 +196,30 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(app, /if \(state\.catchUp !== undefined\) \{\s*dismissSinceYouLeft\(\);/u);
   assert.match(app, /case "catch-up-close":\s*dismissSinceYouLeft\(\);/u);
   assert.match(app, /catch-up\/seen/u);
+});
+
+test("work seen live is not reported again as an away notification", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+
+  // The away window begins when the visible visit actually ends, including a
+  // tab close. A still-open catch-up is not consumed behind the reader's back.
+  assert.match(app, /function markCatchUpSeenWhilePresent\(\)/u);
+  assert.match(app, /state\.catchUp !== undefined/u);
+  assert.match(
+    app,
+    /document\.visibilityState === "visible"[\s\S]*?markCatchUpSeenWhilePresent\(\);/u,
+  );
+  assert.match(
+    app,
+    /addEventListener\("pagehide", \(\) => markCatchUpSeenWhilePresent\(\)\)/u,
+  );
+  assert.match(
+    app,
+    /!catchingUp[\s\S]*?document\.visibilityState === "visible"[\s\S]*?"canonical_promoted"[\s\S]*?markCatchUpSeenWhilePresent\(\);/u,
+  );
+  // A normal request is liable to be cancelled as the page is frozen; this
+  // one explicitly survives long enough to advance the personal cursor.
+  assert.match(app, /method: "POST", body: \{\}, keepalive: true/u);
+  assert.match(data, /options\.keepalive === true \? \{ keepalive: true \} : \{\}/u);
 });

@@ -3284,6 +3284,12 @@ document.addEventListener("visibilitychange", () => {
     resumeLiveUpdates();
     return;
   }
+  // This is the real edge of "while you were away". Advancing the personal
+  // catch-up mark here means work already completed in front of this person
+  // is not handed back as news on their next visit. A panel they have not yet
+  // dismissed is deliberately exempt, so leaving does not silently consume
+  // a list they never read.
+  markCatchUpSeenWhilePresent();
   // Going away is the last moment a draft can be written where a reload will
   // find it. `saveChannelDraft` holds its own writes behind a short timer to
   // keep typing cheap, and a tab that closes inside that window would take the
@@ -3297,6 +3303,10 @@ window.addEventListener("pageshow", (event) => {
     resumeLiveUpdates();
   }
 });
+// `visibilitychange` is the usual phone path; `pagehide` covers a navigation
+// or tab close that skips it. The store's cursor is forward-only, so the two
+// signals arriving together are harmless.
+window.addEventListener("pagehide", () => markCatchUpSeenWhilePresent());
 window.addEventListener("online", () => {
   resumeLiveUpdates();
 });
@@ -7346,14 +7356,52 @@ function newsLineForFrame(frame) {
   return bannerLineForAudit(event);
 }
 
+const CATCH_UP_SUMMARY_MAX = 360;
+
+/**
+ * What one completed task actually changed, in at most two short sentences.
+ *
+ * The completion event carries the agent's own explanation. The task record
+ * only carries its objective, which is the request and was what made this
+ * panel read like a verbatim copy of everything the person had typed.
+ */
+function catchUpTaskSummary(task) {
+  const event = [...state.audit]
+    .reverse()
+    .map((entry) => entry.event ?? entry)
+    .find(
+      (candidate) =>
+        candidate.taskId === task.id &&
+        ["canonical_promoted", "task_reported"].includes(candidate.type),
+    );
+  const written =
+    event?.type === "canonical_promoted"
+      ? event.data?.agentExplanation
+      : event?.data?.explanation;
+  const cleaned =
+    typeof written === "string" ? written.replace(/\s+/gu, " ").trim() : "";
+  const adapterFallback =
+    /^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\b/iu.test(cleaned);
+  if (cleaned === "" || adapterFallback) {
+    return "Completed and landed successfully.";
+  }
+  const quick = cleaned.split(/(?<=[.!?])\s+/u).slice(0, 2).join(" ");
+  if (quick.length <= CATCH_UP_SUMMARY_MAX) {
+    return quick;
+  }
+  const cut = quick.slice(0, CATCH_UP_SUMMARY_MAX);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > CATCH_UP_SUMMARY_MAX / 2 ? cut.slice(0, lastSpace) : cut)
+    .replace(/[\s,;:.]+$/u, "")}…`;
+}
+
 /**
  * Opens the completed-work list for the time this account was away.
  *
  * The endpoint supplies the personal `since` watermark; the already-loaded
  * task records supply the complete list, including conversational tasks whose
- * latest turn has landed but whose thread is still open. That distinction is
- * why this does not render the endpoint's prose: an open task is completed
- * work to a person even though it is intentionally not terminal in storage.
+ * latest turn has landed but whose thread is still open. Audit is loaded
+ * before this runs so each row can carry the outcome instead of the request.
  */
 async function showSinceYouLeft() {
   const projectId = state.projectId;
@@ -7397,6 +7445,7 @@ async function showSinceYouLeft() {
     .map((task) => ({
       ...task,
       completedAt: task.completedAt ?? task.openedAt,
+      summary: catchUpTaskSummary(task),
     }));
   if (
     tasks.length === 0 ||
@@ -7411,6 +7460,28 @@ async function showSinceYouLeft() {
     tasks,
   };
   render();
+}
+
+/**
+ * Advances the away-window cursor as the visible visit ends.
+ *
+ * `keepalive` is the important part: mobile browsers commonly freeze or tear
+ * down the page immediately after this signal. The request has no useful
+ * response for the departing page, but the next visit needs its server time.
+ */
+function markCatchUpSeenWhilePresent() {
+  const projectId = state.projectId;
+  if (
+    projectId === "" ||
+    state.principal === undefined ||
+    state.catchUp !== undefined
+  ) {
+    return;
+  }
+  void api(
+    `/projects/${encodeURIComponent(projectId)}/catch-up/seen`,
+    { method: "POST", body: {}, keepalive: true },
+  ).catch(() => undefined);
 }
 
 /**
@@ -7481,13 +7552,17 @@ async function boot() {
   showApp();
   applyHash();
   render();
-  void showSinceYouLeft();
-
   // Everything below this line happens with a screen already up. The audit
   // feed, the run history, the metrics tile and the worker fleet are read on
   // screens somebody has to navigate to first, so they no longer stand between
   // tapping the icon and seeing the app.
-  void loadDeferredContext().then(() => render());
+  void loadDeferredContext().then(() => {
+    render();
+    // Completion summaries live in the audit slice loaded above. Opening the
+    // panel before it arrives can only fall back to the request text, which is
+    // exactly the transcript-like list this panel must not be.
+    void showSinceYouLeft();
+  });
   void loadProviders().then(() => render());
   void loadGitHub().then(() => {
     if (state.route === "settings") {
@@ -7649,6 +7724,19 @@ async function boot() {
       if (line !== undefined) {
         noteAnnounced(frame.sequence);
         announceNews(line);
+      }
+      // A terminal event delivered live was already seen during this visit.
+      // Record that immediately instead of relying only on the later tab-close
+      // request: a hard reload can begin its catch-up read while that final
+      // keepalive write is still in flight and hand the same ending back.
+      if (
+        !catchingUp &&
+        document.visibilityState === "visible" &&
+        ["canonical_promoted", "task_reported", "task_failed"].includes(
+          frame.event?.type,
+        )
+      ) {
+        markCatchUpSeenWhilePresent();
       }
     }
     // Canonical moved, so the file tree on screen is history now.
