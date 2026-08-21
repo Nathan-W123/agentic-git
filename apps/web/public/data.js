@@ -212,6 +212,8 @@ export const state = {
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
   activeChannelThread: undefined,
+  /** Thread roots currently open as side tabs, oldest first. */
+  activeChannelThreads: [],
   /**
    * A thread that has just come into existence under something this account
    * asked for, waiting to be opened — see `notePromptedThread`.
@@ -5079,13 +5081,22 @@ export function openRightPanels() {
     state.activeDm !== undefined && "dm",
     state.chanFileView !== undefined && "file",
     state.chanTree === true && "tree",
-    state.activeChannelThread !== undefined && "thread",
+    ...(state.activeChannelThreads ?? []).map((id) => `thread:${id}`),
+    state.activeChannelThread !== undefined &&
+      !(state.activeChannelThreads ?? []).includes(state.activeChannelThread) &&
+      `thread:${state.activeChannelThread}`,
     state.chanThreadList === true && "threads",
   ].filter(Boolean);
 }
 
 /** Stop keeping a surface in the column, without touching what is behind it. */
 export function clearRightPanel(kind) {
+  if (kind === "thread") {
+    state.rightPanelStack = state.rightPanelStack.filter(
+      (open) => !open.startsWith("thread:"),
+    );
+    return;
+  }
   state.rightPanelStack = state.rightPanelStack.filter(
     (open) => open !== kind,
   );
@@ -5101,6 +5112,20 @@ export function clearRightPanel(kind) {
  */
 export function putAwayRightPanel(kind) {
   clearRightPanel(kind);
+  if (kind.startsWith("thread:")) {
+    const messageId = kind.slice("thread:".length);
+    state.activeChannelThreads = (state.activeChannelThreads ?? []).filter(
+      (id) => id !== messageId,
+    );
+    if (state.activeChannelThread === messageId) {
+      state.activeChannelThread = state.activeChannelThreads.at(-1);
+      state.threadReplyMessageId = undefined;
+    }
+    if (state.autoOpenedThread === messageId) {
+      state.autoOpenedThread = undefined;
+    }
+    return;
+  }
   switch (kind) {
     case "catch-up":
       state.catchUp = undefined;
@@ -5123,6 +5148,7 @@ export function putAwayRightPanel(kind) {
       state.chanTree = false;
       return;
     case "thread":
+      state.activeChannelThreads = [];
       state.activeChannelThread = undefined;
       state.threadReplyMessageId = undefined;
       state.autoOpenedThread = undefined;

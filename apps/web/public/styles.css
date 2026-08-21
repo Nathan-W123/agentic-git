@@ -7297,13 +7297,21 @@ button.chip.lg:hover {
    `flex: none` is right for a single fixed column and wrong for three. */
 .chats-shell.panels-2 .thread-panel,
 .chats-shell.panels-3 .thread-panel {
-  width: min(var(--panel-w, 340px), 30vw);
+  width: 0;
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 0;
 }
 
 .chats-shell.panels-3 .thread-panel {
-  width: min(var(--panel-w, 340px), 24vw);
+  width: 0;
+}
+
+/* With two or three tabs open, the tabs are the workspace. Splitting the
+   available room evenly keeps every thread usable and removes the obscured
+   group transcript instead of leaving a narrow, accidental-looking strip. */
+.chats-shell.panels-2 .chan-main,
+.chats-shell.panels-3 .chan-main {
+  display: none;
 }
 
 /* Opening and closing, driven from `playSurfaceMotion` in app.js rather than
