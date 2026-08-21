@@ -247,10 +247,10 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
   }
 
-  // The set is deliberately the heavy filled/duotone Lets Icons treatment,
-  // not the similarly named thin line family. Pin the shared wrapper here so
-  // adding a glyph cannot quietly introduce a second optical weight, lose its
-  // theme colour, or become visible to a screen reader as meaningless content.
+  // Coolicons uses one clean rounded line on a 24px grid. Pin the shared
+  // wrapper here so adding a glyph cannot quietly introduce a second optical
+  // weight, lose its theme colour, or become visible to a screen reader as
+  // meaningless content.
   for (const [name, glyph] of Object.entries(ui.ICONS)) {
     assert.match(
       glyph,
@@ -262,27 +262,26 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
       /stroke="currentColor"/u,
       `${name} follows text colour`,
     );
-    assert.match(glyph, /stroke-width="2\.35"/u, `${name} uses the heavy ink`);
+    assert.match(glyph, /stroke-width="2"/u, `${name} uses Coolicons' stroke`);
     assert.match(glyph, /stroke-linecap="round"/u, `${name} has rounded ends`);
     assert.match(glyph, /stroke-linejoin="round"/u, `${name} has rounded joins`);
     assert.match(glyph, /aria-hidden="true"/u, `${name} is decorative`);
     assert.match(glyph, /focusable="false"/u, `${name} cannot take focus`);
     assert.match(
       glyph,
-      /data-icon-style="chunky-duotone"/u,
+      /data-icon-style="coolicons"/u,
       `${name} identifies the selected icon treatment`,
     );
     assert.match(
       glyph,
-      /<g class="ui-icon-underlay" fill="currentColor" stroke-width="3\.15" opacity="\.2" transform="translate\(\.3 \.35\)">/u,
-      `${name} has the offset translucent fill`,
+      /data-icon-source="coolicons-v4\.1"/u,
+      `${name} keeps the source attribution`,
     );
-    assert.match(
+    assert.doesNotMatch(
       glyph,
-      /<g class="ui-icon-ink">/u,
-      `${name} has the solid ink layer`,
+      /ui-icon-(?:underlay|ink)|stroke-width="(?:2\.35|3\.15)"|translate\(\.3 \.35\)/u,
+      `${name} has one clean geometry pass`,
     );
-    assert.doesNotMatch(glyph, /stroke-width="1\.7"/u, `${name} is not thin`);
   }
 
   const chats = assets.get("/screen-chats.js")?.body.toString("utf8") ?? "";

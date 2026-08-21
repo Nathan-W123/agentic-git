@@ -51,22 +51,20 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * The local subset of the thick filled/duotone Lets Icons family selected for
- * Lattice's design system. Lets Icons is by Leonid Tsvetkov and licensed under
- * CC BY 4.0:
- * https://github.com/BoogieMonsta/lets-icons/tree/1feb56542e189feded296891fe8837a748c5b8d6
+ * The local subset of Coolicons v4.1 selected for Lattice's interface.
+ * Coolicons is by Kryston Schwarze and licensed under CC BY 4.0:
+ * https://github.com/krystonschwarze/coolicons/tree/v4.1
  * https://creativecommons.org/licenses/by/4.0/
  *
  * Only the geometry the product uses is kept inline, so the marks stay instant
- * and available when the control plane is offline. It has been normalized to
- * `currentColor`, the shared decorative accessibility contract, and a slightly
- * offset translucent fill beneath the heavy rounded ink. That imperfect second
- * pass gives the whole set its chunky, semi-doodled character. Product-only
- * concepts (agents and the Lattice network) receive the same treatment rather
- * than introducing a second visual language.
+ * and available when the control plane is offline. The shared wrapper preserves
+ * Coolicons' 24px grid, two-pixel rounded stroke and `currentColor` behaviour,
+ * while keeping every interface mark decorative to assistive technology.
+ * Product-only concepts (agents and the Lattice network) use that same grid and
+ * optical weight rather than introducing a second visual language.
  */
 const S = (body, extra = "") =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="chunky-duotone"${extra}><g class="ui-icon-underlay" fill="currentColor" stroke-width="3.15" opacity=".2" transform="translate(.3 .35)">${body}</g><g class="ui-icon-ink">${body}</g></svg>`;
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="coolicons" data-icon-source="coolicons-v4.1"${extra}>${body}</svg>`;
 
 export const ICONS = {
   home: S('<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>'),

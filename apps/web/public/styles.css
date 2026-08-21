@@ -88,8 +88,8 @@
   --tree-w: 232px;
   --chat-w: 380px;
 
-  --shadow-pop: 0 12px 30px rgb(0 0 0 / 28%);
-  --shadow-card: 0 1px 1px rgb(0 0 0 / 20%);
+  --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 2%), 0 8px 24px rgb(0 0 0 / 12%);
 
   /* Motion. Three durations and one curve, named because a surface arriving
      and the same surface leaving have to take the same time to read as one
@@ -195,6 +195,7 @@ svg {
    while the pack owns alignment and rendering consistently everywhere. */
 svg.ui-icon {
   flex: none;
+  overflow: visible;
   shape-rendering: geometricPrecision;
 }
 
@@ -536,6 +537,7 @@ svg.ui-icon {
   place-items: center;
   width: 30px;
   height: 30px;
+  border: 1px solid transparent;
   border-radius: 8px;
   color: var(--text-3);
   transition: background 0.15s ease, color 0.15s ease;
@@ -543,7 +545,20 @@ svg.ui-icon {
 
 .icon-btn:hover {
   background: var(--bg-hover);
+  border-color: var(--border-soft);
   color: var(--text);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+  color: var(--text);
+}
+
+.icon-btn:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-4);
 }
 
 .icon-btn svg {
@@ -778,6 +793,7 @@ svg.ui-icon {
   gap: 14px;
   height: 58px;
   padding: 0 26px;
+  background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg));
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -827,8 +843,8 @@ svg.ui-icon {
 }
 
 .page {
-  padding: 34px 40px 48px;
-  max-width: 1320px;
+  padding: 32px 36px 48px;
+  max-width: 1260px;
   /* Centered. The cap used to lean against the rail; with the rail gone it
      hugged the left edge of a full-width main. */
   margin: 0 auto;
@@ -1187,6 +1203,7 @@ svg.ui-icon {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
 }
 
 .stat-tile {
@@ -4089,6 +4106,7 @@ button.chip.lg:hover {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  background: var(--bg);
   /* The ground a closing side panel is pinned against while it leaves — see
      `.thread-panel.panel-leaving`. Everything else positioned in here already
      has a nearer relative ancestor of its own (`.chan-main` for the jump
@@ -4108,6 +4126,7 @@ button.chip.lg:hover {
   gap: 9px;
   padding: 12px 7px;
   background: var(--bg);
+  border-right: 1px solid var(--border-soft);
 }
 
 .channel-rail-brand,
@@ -4130,6 +4149,15 @@ button.chip.lg:hover {
   background: var(--surface-3);
   color: var(--text);
   border-radius: var(--radius-sm);
+}
+
+.channel-rail-brand:focus-visible,
+.channel-rail-toggle:focus-visible,
+.channel-rail-new:focus-visible,
+.channel-rail-button:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+  color: var(--text);
 }
 
 .channel-rail-entry.active .channel-rail-button {
@@ -4255,16 +4283,13 @@ button.chip.lg:hover {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
+  border-right: 1px solid var(--border-soft);
   overflow-x: hidden;
   transition: width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
-  /* No border. This column is a shade off the conversation in both themes
-     (`--bg-panel` against `--bg-chat`), and a whole page-height rule on top
-     of that difference is one line of chrome doing a job the ground has
-     already done. The right-hand `.thread-panel` keeps its border and gains a
-     shadow for the opposite reason: it comes and goes, so it has to announce
-     itself as something laid over the conversation rather than beside it.
-     Off-canvas on a phone it carries `--shadow-pop` instead, which is the
-     same argument — a drawer is over the page, a column is the page. */
+  /* The quiet edge matches the reference's nested panes and remains subtle
+     because the neighbouring surfaces already provide most of the separation.
+     Off-canvas on a phone the drawer also carries `--shadow-pop`, where the
+     edge becomes a crisp boundary between the drawer and its scrim. */
 }
 
 .chan-sidebar-head {
@@ -5057,6 +5082,7 @@ button.chip.lg:hover {
      conversation too, instead of the transcript reading as a panel floating
      inside a darker frame. */
   background: var(--room-tint);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
      stay reachable while it is open. */
@@ -5155,6 +5181,8 @@ button.chip.lg:hover {
   align-items: center;
   gap: 12px;
   padding: 13px 18px;
+  background: color-mix(in srgb, var(--room-tint) 94%, var(--surface-1));
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .chan-head .ch-hash {
