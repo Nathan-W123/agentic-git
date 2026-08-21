@@ -993,7 +993,7 @@ svg.ui-icon {
   z-index: 1;
   border-radius: 50%;
   background: conic-gradient(
-    color-mix(in srgb, var(--accent) 42%, transparent) calc(var(--run, 0) * 1%),
+    #f3efe8 calc(var(--run, 0) * 1%),
     rgba(0, 0, 0, 0.62) 0
   );
   pointer-events: none;
@@ -6421,16 +6421,14 @@ button.chip.lg:hover {
 
 /* The run's position, drawn as a pie over the whole face of the agent running
    it: the part still to come lies over the portrait as a dark wedge, and the
-   part already travelled as a light wash of the reader's accent, so the icon
+   part already travelled uses the off-white default agent colour, so the icon
    visibly fills up clockwise as the narration below it advances. Dark for
    undone and light for done is the whole read — nothing to parse, just how
    much of the face has brightened.
 
-   Both wedges are translucent, which is what lets this cover the entire icon
-   rather than sit in a corner: the mark underneath still says which agent it
-   is while the sweep says how far along it is. A hollow badge in the corner
-   said the same thing at a twelfth of the size, and at that size the sweep
-   was a guess.
+   The dark wedge remains translucent, which lets the unfinished portion keep
+   the mark underneath legible. A hollow badge in the corner said the same
+   thing at a twelfth of the size, and at that size the sweep was a guess.
 
    `z-index` keeps the pie whole: the faces in a stack overlap leftwards, and
    the next one along would otherwise cut into it. */
@@ -6447,7 +6445,7 @@ button.chip.lg:hover {
   inset: -1px;
   border-radius: 50%;
   background: conic-gradient(
-    color-mix(in srgb, var(--accent) 42%, transparent) calc(var(--run, 0) * 1%),
+    #f3efe8 calc(var(--run, 0) * 1%),
     rgba(0, 0, 0, 0.55) 0
   );
   pointer-events: none;
