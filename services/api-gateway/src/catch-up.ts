@@ -27,6 +27,20 @@ export interface CatchUpLine {
 export interface CatchUpChange {
   objective: string;
   at: string;
+  /** Stable task identity and repository ownership for the client report. */
+  id?: string;
+  repositoryId?: string;
+  /** The agent's own final account of the work, when it supplied one. */
+  agentResponse?: string;
+  changedFiles?: string[];
+}
+
+export interface CatchUpTaskSummary {
+  id: string;
+  repositoryId: string;
+  completedAt: string;
+  summary: string;
+  changedFiles: string[];
 }
 
 export interface CatchUpInput {
@@ -57,6 +71,8 @@ export interface CatchUpDigest {
    * and a client that would rather render the facts itself should.
    */
   summary: string;
+  /** Completed work, already phrased for the per-repository side panel. */
+  tasks: CatchUpTaskSummary[];
   lines: CatchUpLine[];
   counts: {
     landed: number;
@@ -123,6 +139,7 @@ export function emptyCatchUpDigest(
     empty: true,
     headline: "",
     summary: "",
+    tasks: [],
     lines: [],
     counts: { landed: 0, failed: 0, messages: 0, direct: 0 },
   };
@@ -229,6 +246,18 @@ export function buildCatchUpDigest(input: CatchUpInput): CatchUpDigest {
     // model shows and what one with a model falls back to. Filled in here
     // rather than left blank so every digest is readable on its own.
     summary: "",
+    tasks: landed.flatMap((change) => {
+      if (change.id === undefined || change.repositoryId === undefined) {
+        return [];
+      }
+      return [{
+        id: change.id,
+        repositoryId: change.repositoryId,
+        completedAt: change.at,
+        summary: fallbackTaskSummary(change.agentResponse),
+        changedFiles: change.changedFiles ?? [],
+      }];
+    }),
     lines: kept,
     counts,
   };
@@ -306,6 +335,41 @@ export const CATCH_UP_SUMMARY_PROMPT = [
   "and do not use bullet points.",
 ].join(" ");
 
+export const CATCH_UP_TASK_PROMPT = [
+  "Write one short sentence saying what this completed coding task did.",
+  "Use both the user's request and the agent's result to identify the outcome.",
+  "Do not quote the request, mention roles, say merely that it was implemented,",
+  "or add a greeting. Use only the supplied facts.",
+].join(" ");
+
+function fallbackTaskSummary(agentResponse: string | undefined): string {
+  const cleaned = sanitiseSummary(agentResponse);
+  if (
+    cleaned === undefined ||
+    /^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\b/iu.test(cleaned) ||
+    /^implemented(?::)?\s+your role\b/iu.test(cleaned)
+  ) {
+    return "Completed the requested work.";
+  }
+  return cleaned;
+}
+
+function sanitiseTaskSummary(
+  raw: string | null | undefined,
+  objective: string,
+): string | undefined {
+  const cleaned = sanitiseSummary(raw);
+  if (
+    cleaned === undefined ||
+    /^implemented(?::)?\s+(?:your role\b|the user(?:'s)? request\b)/iu.test(cleaned) ||
+    cleaned.replace(/[.!?]+$/u, "").toLocaleLowerCase() ===
+      objective.trim().replace(/[.!?]+$/u, "").toLocaleLowerCase()
+  ) {
+    return undefined;
+  }
+  return cleaned;
+}
+
 /**
  * Cleans up whatever the model returned, or rejects it.
  *
@@ -342,10 +406,9 @@ export function sanitiseSummary(
 /**
  * The digest with its summary written by the local model, where one answers.
  *
- * The facts are never touched: `lines` and `counts` come back exactly as they
- * went in, and only `summary` can change. That is the whole safety argument
- * for putting a small model on this path — the worst it can do is phrase the
- * headline badly, next to a list that is still right.
+ * The measured facts are never touched: lines, counts, task identity and file
+ * lists come back exactly as they went in. Only the aggregate prose and each
+ * task's display sentence can change.
  *
  * A quiet interval never reaches the model at all: there is nothing to say,
  * and waking a model to say it would make the cheapest case the slowest.
@@ -353,6 +416,7 @@ export function sanitiseSummary(
 export async function summariseCatchUpLines(
   digest: CatchUpDigest,
   summariser: CatchUpSummariser | undefined,
+  taskInputs: readonly CatchUpChange[] = [],
 ): Promise<CatchUpDigest> {
   if (digest.empty || summariser === undefined) {
     return digest;
@@ -365,13 +429,36 @@ export async function summariseCatchUpLines(
     ...digest.lines.map((line) => `- ${line.text}`),
   ].join("\n");
   let written: string | null | undefined;
+  let tasks = digest.tasks;
   try {
-    written = await summariser(prompt);
+    [written, tasks] = await Promise.all([
+      summariser(prompt),
+      Promise.all(
+        digest.tasks.map(async (task) => {
+          const input = taskInputs.find((entry) => entry.id === task.id);
+          const taskPrompt = [
+            CATCH_UP_TASK_PROMPT,
+            "",
+            `User request: ${input?.objective ?? ""}`,
+            `Agent result: ${input?.agentResponse ?? task.summary}`,
+          ].join("\n");
+          const answer = sanitiseTaskSummary(
+            await summariser(taskPrompt),
+            input?.objective ?? "",
+          );
+          return { ...task, summary: answer ?? task.summary };
+        }),
+      ),
+    ]);
   } catch {
     // A summariser that throws is a summariser that did not answer. The
     // deterministic wording is already in hand, so this is not a failure the
     // caller needs to hear about.
     return { ...digest, summary: fallbackSummary };
   }
-  return { ...digest, summary: sanitiseSummary(written) ?? fallbackSummary };
+  return {
+    ...digest,
+    summary: sanitiseSummary(written) ?? fallbackSummary,
+    tasks,
+  };
 }

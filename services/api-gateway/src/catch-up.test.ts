@@ -201,6 +201,72 @@ test("the model is given the facts it is meant to rewrite", async () => {
   assert.ok(prompt.includes("Do not invent details"), prompt);
 });
 
+test("each completed task is named from the request and the agent result", async () => {
+  const change = {
+    id: "task-1",
+    repositoryId: "repo-1",
+    objective: "Move GitHub settings below agent settings",
+    agentResponse:
+      "Reordered the settings sections and kept their controls intact.",
+    changedFiles: ["settings.js"],
+    at: NOW,
+  };
+  const prompts: string[] = [];
+  const built = digest({ landed: [change] });
+  const summarised = await summariseCatchUpLines(
+    built,
+    async (prompt) => {
+      prompts.push(prompt);
+      return prompt.includes("User request:")
+        ? "Moved GitHub settings directly below agent settings."
+        : "One settings change landed.";
+    },
+    [change],
+  );
+  assert.equal(
+    summarised.tasks[0]?.summary,
+    "Moved GitHub settings directly below agent settings.",
+  );
+  assert.equal(summarised.tasks[0]?.repositoryId, "repo-1");
+  assert.deepEqual(summarised.tasks[0]?.changedFiles, ["settings.js"]);
+  const taskPrompt =
+    prompts.find((prompt) => prompt.includes("User request:")) ?? "";
+  assert.match(taskPrompt, /Move GitHub settings below agent settings/u);
+  assert.match(taskPrompt, /Reordered the settings sections/u);
+});
+
+test("an unusable task rewrite falls back to the agent result, not the prompt", async () => {
+  const change = {
+    id: "task-1",
+    repositoryId: "repo-1",
+    objective: "A very long user request that should not become the title",
+    agentResponse: "Moved the connection panel beneath the agent controls.",
+    at: NOW,
+  };
+  const built = digest({ landed: [change] });
+  const summarised = await summariseCatchUpLines(
+    built,
+    async (prompt) =>
+      prompt.includes("User request:")
+        ? "Implemented your role in this repo"
+        : "One change landed.",
+    [change],
+  );
+  assert.equal(
+    summarised.tasks[0]?.summary,
+    "Moved the connection panel beneath the agent controls.",
+  );
+
+  const legacy = digest({
+    landed: [{
+      ...change,
+      agentResponse:
+        "Implemented: Your role in this repository: Backend. Move the panel.",
+    }],
+  });
+  assert.equal(legacy.tasks[0]?.summary, "Completed the requested work.");
+});
+
 test("a quiet interval never reaches the model at all", async () => {
   let asked = 0;
   const quiet = await summariseCatchUpLines(digest(), async () => {

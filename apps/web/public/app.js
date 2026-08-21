@@ -7275,62 +7275,13 @@ function extendCatchUp() {
   }, BACKLOG_SETTLE_MS);
 }
 
-const CATCH_UP_SUMMARY_MAX = 360;
-
-/**
- * What one completed task actually changed, in at most two short sentences.
- *
- * The completion event carries the agent's own explanation and changed files.
- * Older events do not, so the objective remains a last-resort description —
- * still useful context instead of the same generic success line for each row.
- */
-function catchUpTaskOutcome(task) {
-  const event = [...state.audit]
-    .reverse()
-    .map((entry) => entry.event ?? entry)
-    .find(
-      (candidate) =>
-        candidate.taskId === task.id &&
-        ["canonical_promoted", "task_reported"].includes(candidate.type),
-    );
-  const written =
-    event?.type === "canonical_promoted"
-      ? event.data?.agentExplanation
-      : event?.data?.explanation;
-  const cleaned =
-    typeof written === "string" ? written.replace(/\s+/gu, " ").trim() : "";
-  const adapterFallback =
-    /^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\b/iu.test(cleaned);
-  const objective = String(task.objective ?? "the requested change")
-    .trim()
-    .replace(/[.!?]+$/u, "");
-  const useful =
-    cleaned !== "" && !adapterFallback
-      ? cleaned
-      : `Implemented: ${objective}.`;
-  const quick = useful.split(/(?<=[.!?])\s+/u).slice(0, 2).join(" ");
-  const files = Array.isArray(event?.data?.files)
-    ? event.data.files.filter((file) => typeof file === "string")
-    : [];
-  if (quick.length <= CATCH_UP_SUMMARY_MAX) {
-    return { summary: quick, changedFiles: files };
-  }
-  const cut = quick.slice(0, CATCH_UP_SUMMARY_MAX);
-  const lastSpace = cut.lastIndexOf(" ");
-  return {
-    summary: `${(lastSpace > CATCH_UP_SUMMARY_MAX / 2 ? cut.slice(0, lastSpace) : cut)
-      .replace(/[\s,;:.]+$/u, "")}…`,
-    changedFiles: files,
-  };
-}
-
 /**
  * Opens the completed-work list for the time this account was away.
  *
- * The endpoint supplies the personal `since` watermark; the already-loaded
- * task records supply the complete list, including conversational tasks whose
- * latest turn has landed but whose thread is still open. Audit is loaded
- * before this runs so each row can carry the outcome instead of the request.
+ * The endpoint supplies the personal `since` watermark and generated outcome;
+ * the already-loaded task records supply the complete list, including
+ * conversational tasks whose latest turn has landed but whose thread is still
+ * open. Joining by task id keeps those outcomes with the right repository.
  */
 async function showSinceYouLeft() {
   const projectId = state.projectId;
@@ -7364,6 +7315,10 @@ async function showSinceYouLeft() {
   // document. Never let that project's parked repository reports survive it.
   state.catchUps = {};
   state.catchUp = undefined;
+  const serverOutcomes = new Map(
+    (Array.isArray(catchUp?.tasks) ? catchUp.tasks : [])
+      .map((task) => [task.id, task]),
+  );
   const tasks = state.tasks
     .filter((task) => {
       const completedAt = Date.parse(task.completedAt ?? task.openedAt ?? "");
@@ -7378,11 +7333,19 @@ async function showSinceYouLeft() {
         Date.parse(right.completedAt ?? right.openedAt ?? "") -
         Date.parse(left.completedAt ?? left.openedAt ?? ""),
     )
-    .map((task) => ({
-      ...task,
-      completedAt: task.completedAt ?? task.openedAt,
-      ...catchUpTaskOutcome(task),
-    }));
+    .map((task) => {
+      const outcome = serverOutcomes.get(task.id);
+      return {
+        ...task,
+        completedAt: outcome?.completedAt ?? task.completedAt ?? task.openedAt,
+        summary:
+          String(outcome?.summary ?? "").trim() ||
+          "Completed the requested work.",
+        changedFiles: Array.isArray(outcome?.changedFiles)
+          ? outcome.changedFiles
+          : [],
+      };
+    });
   if (tasks.length === 0) {
     render();
     return;

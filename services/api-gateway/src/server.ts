@@ -9378,10 +9378,40 @@ export class ApiGateway {
           task.completedAt !== undefined &&
           task.completedAt > since,
       );
-      const asChange = (task: SubmittedTask): CatchUpChange => ({
-        objective: withoutRoleContext(task.objective),
-        at: task.completedAt ?? since,
-      });
+      const completedChanges = await Promise.all(
+        tasks.map(async (task) => {
+          const filter: AuditEventFilter = {
+            taskId: task.id,
+            types: ["canonical_promoted", "task_reported"],
+          };
+          const [archived, live] = await Promise.all([
+            this.options.store.listArchivedAuditEvents(filter).catch(() => []),
+            this.options.store.listAuditEvents(filter),
+          ]);
+          const outcome = [...archived, ...live].at(-1)?.event;
+          const data = (outcome?.data ?? {}) as Record<string, unknown>;
+          const agentResponse =
+            outcome?.type === "task_reported"
+              ? data["explanation"]
+              : data["agentExplanation"];
+          const changedFiles = Array.isArray(data["files"])
+            ? data["files"].filter(
+                (file): file is string => typeof file === "string",
+              )
+            : [];
+          return {
+            task,
+            change: {
+              id: task.id,
+              repositoryId: task.repositoryId,
+              objective: withoutRoleContext(task.objective),
+              at: task.completedAt ?? since,
+              ...(typeof agentResponse === "string" ? { agentResponse } : {}),
+              changedFiles,
+            } satisfies CatchUpChange,
+          };
+        }),
+      );
       const conversations = await this.options.store.listDirectConversations(
         projectId,
         principal.user.id,
@@ -9390,12 +9420,14 @@ export class ApiGateway {
       const catchUp = buildCatchUpDigest({
         since,
         now,
-        landed: tasks
-          .filter((task) => task.status === "integrated")
-          .map(asChange),
+        landed: completedChanges
+          .filter(({ task }) => ["integrated", "open"].includes(task.status))
+          .map(({ change }) => change),
         // Cancelled work is somebody's own decision, not news; only a task
         // that stopped on its own is something they have to look at.
-        failed: tasks.filter((task) => task.status === "failed").map(asChange),
+        failed: completedChanges
+          .filter(({ task }) => task.status === "failed")
+          .map(({ change }) => change),
         messages,
         // Only conversations that moved while they were away. An older
         // unread message is a badge they have already seen sitting on the
@@ -9409,7 +9441,11 @@ export class ApiGateway {
       // deployment with no local model, or one whose model is slow or
       // unhelpful, gets the deterministic wording back unchanged.
       this.sendJson(response, 200, {
-        catchUp: await summariseCatchUpLines(catchUp, this.catchUpSummariser),
+        catchUp: await summariseCatchUpLines(
+          catchUp,
+          this.catchUpSummariser,
+          completedChanges.map(({ change }) => change),
+        ),
       });
       return;
     }

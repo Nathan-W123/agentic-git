@@ -101,18 +101,17 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(app, /state\.catchUp = state\.catchUps\[activeChannelId\(\)\]/u);
 
   // It is the same resizable, mobile-aware column as a plan, not a modal that
-  // blocks the channel. Each row reads the agent's completion explanation —
-  // at most two sentences — rather than echoing the request that started it.
+  // blocks the channel. Each row reads the local model's short outcome built
+  // from the request and completion explanation, rather than echoing either.
   assert.match(data, /catchUp: undefined/u);
   assert.match(chats, /function catchUpPanel\(\)/u);
   assert.match(chats, /<aside class="thread-panel catch-up-panel"/u);
   assert.match(chats, /class="catch-up-task-list"/u);
   assert.match(data, /catchUps: \{\}/u);
-  assert.match(app, /function catchUpTaskOutcome\(task\)/u);
-  assert.match(app, /event\.data\?\.agentExplanation/u);
-  assert.ok(app.includes('cleaned.split(/(?<=[.!?])\\s+/u).slice(0, 2)'));
-  assert.match(app, /\.\.\.catchUpTaskOutcome\(task\),/u);
-  assert.match(app, /Implemented: \$\{objective\}/u);
+  assert.match(app, /const serverOutcomes = new Map/u);
+  assert.match(app, /outcome\?\.summary/u);
+  assert.doesNotMatch(app, /function catchUpTaskOutcome\(task\)/u);
+  assert.doesNotMatch(app, /Implemented: \$\{objective\}/u);
   assert.match(chats, /task\.changedFiles\.slice\(0, 3\)/u);
   assert.match(chats, /state\.catchUp = state\.catchUps\?\.\[repositoryId\]/u);
   assert.match(chats, /String\(task\.summary \?\? ""\)/u);
