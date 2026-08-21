@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { StaticAsset } from "@coord/api-gateway";
 
-import { loadStaticAssets } from "./assets.js";
+import { defaultPublicDirectory, loadStaticAssets } from "./assets.js";
 import { AGENT_CALL_SIGNS } from "./providers.js";
 
 /* ------------------------------------------------------------- assets ---- */
@@ -208,6 +208,58 @@ test("the dashboard modules are browser-safe", async () => {
     );
     assert.equal(/\brequire\(/u.test(source), false, `${url} is not an ES module`);
   }
+});
+
+test("dashboard interface glyphs all use the shared icon set", async () => {
+  const assets = await loadStaticAssets();
+  const uiPath = path.join(defaultPublicDirectory(), "ui.js");
+  const ui = (await import(pathToFileURL(uiPath).href)) as {
+    ICONS: Record<string, string>;
+  };
+  const iconNames = new Set<string>();
+
+  for (const [url, asset] of assets) {
+    if (!/^\/[a-z-]+\.js$/u.test(url) || url === "/ui.js") {
+      continue;
+    }
+    const source = asset.body.toString("utf8");
+    // Product glyphs belong in ui.js. Logos, vendor marks, agent portraits and
+    // the context meter live there too, where their deliberate exceptions are
+    // documented instead of becoming one-off drawings in a screen module.
+    assert.doesNotMatch(source, /<svg\b/u, `${url} draws an icon outside ui.js`);
+    for (const match of source.matchAll(
+      /\bicon(?:Button)?\(\s*"([A-Za-z][A-Za-z0-9]*)"/gu,
+    )) {
+      iconNames.add(match[1] ?? "");
+    }
+    for (const match of source.matchAll(
+      /\biconName:\s*"([A-Za-z][A-Za-z0-9]*)"/gu,
+    )) {
+      iconNames.add(match[1] ?? "");
+    }
+  }
+
+  for (const name of iconNames) {
+    assert.equal(
+      Object.hasOwn(ui.ICONS, name),
+      true,
+      `${name} should exist in the shared icon set`,
+    );
+  }
+
+  const chats = assets.get("/screen-chats.js")?.body.toString("utf8") ?? "";
+  const styles = assets.get("/styles.css")?.body.toString("utf8") ?? "";
+  assert.doesNotMatch(
+    chats,
+    /&times;/u,
+    "remove controls use the shared close icon",
+  );
+  assert.match(chats, /const CHANGED_FILE_ICON/u);
+  assert.doesNotMatch(
+    styles,
+    /\.thread-(?:summary|thinking)\s*>\s*summary::before/u,
+  );
+  assert.match(styles, /\.tt-caret \.ui-icon/u);
 });
 
 test("serves the vendored Monaco build same-origin under /vendor", async () => {
