@@ -1460,9 +1460,14 @@ export function narrateTaskEvent(
         );
       }
       if (status === "blocked") {
+        // Not "so I'm narrowing the plan". What narrows is the *claim* on the
+        // repository, never the ask — but a reader watching their own request
+        // go by has no way to tell those apart, and took the line as notice
+        // that the thing they asked for was being cut down. The decision this
+        // announces is an order of work, so that is what it says.
         return (
-          "⚖️ Held back — this plan overlaps work in flight too heavily to " +
-          "run alongside it, so I'm narrowing the plan." + why
+          "⚖️ Waiting for the work in flight — it holds files this plan " +
+          "needs, so it goes first and I pick this up after it lands." + why
         );
       }
       if (data["partial"] === true) {
@@ -15380,9 +15385,14 @@ export class ApiGateway {
         `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
         `${blocker} is done.`;
     } else if (status === "blocked") {
+      // The same order the sequenced line reports, said the same way. It used
+      // to read "${held} is narrowing its plan", which describes an internal
+      // retry the room cannot see and which the person who submitted the work
+      // read as their own request being trimmed. Who goes first is the part
+      // that is true and the part they wanted.
       line =
-        `⚖️ ${held} and ${blocker} have conflicting files — ${held} is ` +
-        `narrowing its plan.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} will ` +
+        `wait for ${blocker} to go first.`;
     } else {
       line =
         `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +

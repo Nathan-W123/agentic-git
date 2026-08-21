@@ -9786,6 +9786,77 @@ test("a sequenced admission is removed silently when the held task can start", a
   );
 });
 
+test("a blocked admission says who waits for whom, not that a plan is shrinking", async (t) => {
+  // In the words of the person who hit it: "narrowing its plan makes it sound
+  // like some of your specifications may be changed, which will off-put the
+  // user if that actually isn't happening". What narrows on this path is the
+  // claim on the repository, not the ask — but the room cannot tell those
+  // apart, so the line has to report the one thing it knows: the order.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "blockedroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "blocked",
+      blockedBy: [tasks.codex],
+      explanation:
+        "Plan collides with executing work beyond the sequencing threshold",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the block was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  assert.equal(
+    line,
+    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+      `files — @Claude (${firstName}) will wait for @Codex (${firstName}) ` +
+      `to go first.`,
+    `the block did not read as two names and an order: ${line}`,
+  );
+  assert.doesNotMatch(
+    line,
+    /narrow/iu,
+    "the block still described the held task's plan as shrinking",
+  );
+  // A hold, not an advisory: it retires when either end of the collision does,
+  // which is only true while the line does not end the way the together line
+  // ends.
+  assert.equal(
+    line.endsWith("can run together."),
+    false,
+    "a block was classified as a line about work that can run together",
+  );
+});
+
 test("a hold is taken back when the held task stops instead of starting", async (t) => {
   // An approved re-admission was the only thing that ever withdrew one of
   // these. Every other way out of a hold — the run failed, somebody cancelled
