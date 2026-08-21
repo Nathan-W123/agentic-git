@@ -150,10 +150,9 @@ export const state = {
   coordinatorTab: "overview",
 
   /* Chats screen — one group channel per repository, backed by
-     `/channel/messages` on the server. `channelMessages` and
-     `channelAgentOverrides` are seeded locally so a freshly opened channel is
-     never blank, then overwritten once `ensureChannelMessages` reads the real
-     ones back. See the comment on `sendChannelMessage`. */
+     `/channel/messages` on the server. `channelMessages` starts empty and the
+     screen keeps that unresolved state distinct from a channel whose real
+     history has loaded and happens to contain no messages. */
   chatQuery: "",
   channelMessages: {},
   channelAgentOverrides: {},
@@ -1716,14 +1715,15 @@ export async function signInForInvitation(email, password) {
 
 /* --------------------------------------------------------- appearance ---- */
 
-export const DEFAULT_ACCENT = "#ff91a4";
+export const DEFAULT_ACCENT = "#d88973";
 /**
  * The second colour, when nobody has chosen one.
  *
- * A lighter pink keeps the untouched-user theme cohesive while remaining
- * distinct from the primary pink wherever both accents appear together.
+ * The palette's muted lilac: the quiet half of the pair, far enough from the
+ * clay primary to stay legible as a second colour wherever both appear
+ * together, and close enough in weight that neither shouts over the other.
  */
-export const DEFAULT_ACCENT_SECONDARY = "#ffa9b8";
+export const DEFAULT_ACCENT_SECONDARY = "#a894b6";
 
 /**
  * The colour an agent is drawn in when nobody has chosen one.
@@ -1736,7 +1736,7 @@ export const DEFAULT_ACCENT_SECONDARY = "#ffa9b8";
  * the accent to mean what it means. Anyone who wants an identity colour still
  * picks one in Appearance.
  */
-export const DEFAULT_AGENT_COLOR = "#f5f6f7";
+export const DEFAULT_AGENT_COLOR = "#f3efe8";
 
 /**
  * The palette offered in settings.
@@ -1749,15 +1749,15 @@ export const DEFAULT_AGENT_COLOR = "#f5f6f7";
  * near-identical blues.
  */
 export const PALETTE = [
-  { value: "#f5f6f7", label: "Off white" },
+  { value: "#f3efe8", label: "Off white" },
   { value: "#8b5cf6", label: "Violet" },
   { value: "#4f8ef7", label: "Blue" },
   { value: "#2fae7f", label: "Green" },
   { value: "#e0663d", label: "Orange" },
-  { value: "#ff91a4", label: "Pink" },
+  { value: "#d88973", label: "Clay" },
   { value: "#3fa8b5", label: "Teal" },
   { value: "#d7a13b", label: "Amber" },
-  { value: "#a06ee0", label: "Lilac" },
+  { value: "#a894b6", label: "Lilac" },
 ];
 
 function validColor(value) {
@@ -2848,38 +2848,13 @@ export function channelParticipants(repositoryId) {
   return [...agents, ...humans];
 }
 
-function seedMessages(repositoryId) {
-  const agents = channelAgentsFor(repositoryId);
-  const now = Date.now();
-  const rows = [
-    {
-      id: `${repositoryId}-seed-1`,
-      kind: "user",
-      authorId: currentUserId() || "you",
-      content: `Opened #${repositoryId} as a channel — everyone working this repository, human or agent, is in here now.`,
-      at: new Date(now - 1000 * 60 * 60 * 26).toISOString(),
-    },
-  ];
-  if (agents[0] !== undefined) {
-    rows.push({
-      id: `${repositoryId}-seed-2`,
-      kind: "agent",
-      authorId: agents[0].id,
-      content:
-        "Reviewed the last changeset — looks clean. Flagged one file that might need a second pass on error handling.",
-      at: new Date(now - 1000 * 60 * 60 * 3).toISOString(),
-    });
-  }
-  return rows;
-}
-
-/** This channel's timeline, seeded once on first visit so it is never blank. */
+/** This channel's real timeline, or an empty list while its first read is pending. */
 export function channelMessagesFor(repositoryId) {
   if (!repositoryId) {
     return [];
   }
   if (state.channelMessages[repositoryId] === undefined) {
-    state.channelMessages[repositoryId] = seedMessages(repositoryId);
+    state.channelMessages[repositoryId] = [];
   }
   return state.channelMessages[repositoryId];
 }
@@ -3224,6 +3199,22 @@ export function agentStatus(agent, repositoryId) {
   return agent.visibility === "personal" ? "personal" : "idle";
 }
 
+/** Progress for the task this agent has picked up, including the pre-task frame. */
+export function agentWorkingProgress(agent, repositoryId) {
+  if (!agentIsWorking(agent, repositoryId)) {
+    return undefined;
+  }
+  const task = state.tasks.find(
+    (candidate) =>
+      candidate.repositoryId === repositoryId &&
+      taskIsWorking(candidate) &&
+      taskBelongsToAgent(candidate, agent),
+  );
+  // A busy frame arrives before its task. Zero intentionally paints the face
+  // dark immediately; the pie begins filling once the task record follows.
+  return task === undefined ? 0 : taskProgress(task);
+}
+
 function agentIsWorking(agent, repositoryId) {
   const now = Date.now();
   for (const [taskId, entry] of Object.entries(state.agentBusy)) {
@@ -3332,11 +3323,6 @@ export function taskBelongsToAgent(task, agent) {
   return task.submittedBy === undefined || task.submittedBy === agentOwnerId(agent);
 }
 
-/**
- * Reads one channel back from the server, replacing whatever local or seeded
- * content was showing. Returns `false` without throwing when this deployment
- * has no channel endpoint yet, so the seeded demo content keeps working.
- */
 /**
  * A stored message in the shape the screens read.
  *
@@ -3496,8 +3482,8 @@ async function loadChannel(repositoryId) {
     return false;
   }
   // Taken before the replacement, and only for a channel that has been read
-  // once already — the local seed `channelMessagesFor` falls back to is not a
-  // timeline anything happened in.
+  // once already. An unresolved empty list is loading state, not a timeline
+  // anything happened in.
   const before = state.channelLoaded.has(repositoryId)
     ? (state.channelMessages[repositoryId] ?? [])
     : undefined;
@@ -3540,11 +3526,9 @@ async function loadChannel(repositoryId) {
 /**
  * Loads a channel's real messages once per repository visit.
  *
- * The channel already reads as non-empty on the very first render, from the
- * local seed `channelMessagesFor` falls back to — this call is what replaces
- * that seed with the server's actual history, the same "paint something
- * immediately, then reconcile with the network" shape `ensureCodeData` and
- * `ensureAgentOptions` use for the Code and My Agents screens.
+ * The first render paints a transcript-shaped loading shell. This call swaps
+ * it for the server's actual history, including the genuine empty state when
+ * the first successful response contains no messages.
  */
 export async function ensureChannelMessages(repositoryId, rerender) {
   if (
@@ -3969,12 +3953,40 @@ function findChannelMessage(repositoryId, messageId) {
 }
 
 /**
+ * Finds one channel entry, paging backwards until it is loaded or history
+ * has been exhausted.
+ *
+ * References are durable while the transcript is paged. A completed-work
+ * reply can therefore point at a task far older than the first page; making
+ * the click responsible for walking the existing cursor keeps the ordinary
+ * channel load fast without turning old references into dead controls.
+ */
+export async function loadChannelMessage(repositoryId, messageId, rerender) {
+  let found = findChannelMessage(repositoryId, messageId);
+  const visited = new Set();
+  while (
+    found === undefined &&
+    state.channelHasMore[repositoryId] !== false
+  ) {
+    const loaded = state.channelMessages[repositoryId] ?? [];
+    const cursor = channelCursor(loaded[0]);
+    if (cursor === undefined || visited.has(cursor)) {
+      break;
+    }
+    visited.add(cursor);
+    await loadEarlierChannelMessages(repositoryId, rerender);
+    found = findChannelMessage(repositoryId, messageId);
+  }
+  return found;
+}
+
+/**
  * A server-assigned message id never starts with its own repository id —
  * `sendChannelMessage` mints local ones as `${repositoryId}-...` precisely so
- * this is a cheap, reliable check. A local id belongs to the demo seed or to
- * an optimistic post whose POST has not resolved yet; threading a reply or a
- * reaction onto one would 404, so those wait for the next reconcile instead
- * of racing the network.
+ * this is a cheap, reliable check. A local id belongs to an optimistic post
+ * whose POST has not resolved yet; threading a reply or a reaction onto one
+ * would 404, so those wait for the next reconcile instead of racing the
+ * network.
  */
 function isServerChannelId(repositoryId, id) {
   return typeof id === "string" && !id.startsWith(`${repositoryId}-`);

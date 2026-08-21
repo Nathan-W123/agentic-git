@@ -105,6 +105,41 @@ test("index.html names the digested build and is itself never cached", async () 
   assert.equal(html.includes('href="/styles.css"'), false);
 });
 
+test("the initial document paints an accessible loading shell", async () => {
+  const html = await publicFile("index.html");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  assert.match(html, /id="app-root" aria-busy="true"/u);
+  assert.doesNotMatch(html, /id="app-root"[^>]* hidden/u);
+  assert.match(
+    html,
+    /class="boot-shell" role="status" aria-live="polite"[\s\S]{0,100}aria-label="Loading Lattice"/u,
+  );
+  assert.match(html, /class="sr-only">Loading Lattice…<\/span>/u);
+
+  // The script owns the same shape after the document paint, then clears the
+  // busy state only when it has a real application or signed-out surface.
+  assert.match(app, /function renderLoadingShell\(root = \$\("#app-root"\)\) \{/u);
+  assert.match(app, /root\.setAttribute\("aria-busy", "true"\);/u);
+  assert.match(app, /root\.removeAttribute\("aria-busy"\);/u);
+  assert.match(app, /appRoot\.removeAttribute\("aria-busy"\);/u);
+
+  assert.match(css, /\.boot-shell \{/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.skeleton \{\s*animation: none;/u,
+  );
+
+  // Rewriting module and stylesheet names for immutable delivery must leave
+  // the immediate document body intact.
+  const assets = await loadStaticAssets();
+  const served = assets.get("/index.html")?.body.toString("utf8") ?? "";
+  assert.match(served, /id="app-root" aria-busy="true"/u);
+  assert.match(served, /class="boot-shell" role="status"/u);
+  assert.match(served, /src="\/app\.[0-9a-f]{12}\.js"/u);
+});
+
 test("a digested module imports its dependencies by their digested names", async () => {
   const assets = await loadStaticAssets();
   const app = [...assets.keys()].find((url) =>
@@ -247,10 +282,10 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
   }
 
-  // The set is deliberately the heavy filled/duotone Lets Icons treatment,
-  // not the similarly named thin line family. Pin the shared wrapper here so
-  // adding a glyph cannot quietly introduce a second optical weight, lose its
-  // theme colour, or become visible to a screen reader as meaningless content.
+  // Coolicons uses one clean rounded line on a 24px grid. Pin the shared
+  // wrapper here so adding a glyph cannot quietly introduce a second optical
+  // weight, lose its theme colour, or become visible to a screen reader as
+  // meaningless content.
   for (const [name, glyph] of Object.entries(ui.ICONS)) {
     assert.match(
       glyph,
@@ -262,27 +297,26 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
       /stroke="currentColor"/u,
       `${name} follows text colour`,
     );
-    assert.match(glyph, /stroke-width="2\.35"/u, `${name} uses the heavy ink`);
+    assert.match(glyph, /stroke-width="2"/u, `${name} uses Coolicons' stroke`);
     assert.match(glyph, /stroke-linecap="round"/u, `${name} has rounded ends`);
     assert.match(glyph, /stroke-linejoin="round"/u, `${name} has rounded joins`);
     assert.match(glyph, /aria-hidden="true"/u, `${name} is decorative`);
     assert.match(glyph, /focusable="false"/u, `${name} cannot take focus`);
     assert.match(
       glyph,
-      /data-icon-style="chunky-duotone"/u,
+      /data-icon-style="coolicons"/u,
       `${name} identifies the selected icon treatment`,
     );
     assert.match(
       glyph,
-      /<g class="ui-icon-underlay" fill="currentColor" stroke-width="3\.15" opacity="\.2" transform="translate\(\.3 \.35\)">/u,
-      `${name} has the offset translucent fill`,
+      /data-icon-source="coolicons-v4\.1"/u,
+      `${name} keeps the source attribution`,
     );
-    assert.match(
+    assert.doesNotMatch(
       glyph,
-      /<g class="ui-icon-ink">/u,
-      `${name} has the solid ink layer`,
+      /ui-icon-(?:underlay|ink)|stroke-width="(?:2\.35|3\.15)"|translate\(\.3 \.35\)/u,
+      `${name} has one clean geometry pass`,
     );
-    assert.doesNotMatch(glyph, /stroke-width="1\.7"/u, `${name} is not thin`);
   }
 
   const chats = assets.get("/screen-chats.js")?.body.toString("utf8") ?? "";
@@ -639,18 +673,23 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
-  // The account is the sole footer action. Its existing menu is the route to
-  // Settings, so the sidebar does not duplicate that destination with a gear.
+  // Account actions stay behind the avatar, while Settings is always visible
+  // at the bottom-right of the sidebar.
   assert.match(sidebar, /class="chan-sidebar-foot"/u);
-  assert.doesNotMatch(
-    sidebar,
-    /class="chan-foot-action" data-act="nav"\s*data-value="settings"/u,
-  );
-  assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
   assert.match(
-    app,
-    /case "user-menu":[\s\S]{0,180}value: "settings", label: "Settings"/u,
+    sidebar,
+    /class="icon-btn chan-settings" data-act="nav"\s*data-value="settings"/u,
   );
+  assert.match(sidebar, /class="icon-btn chan-settings"[\s\S]{0,160}icon\("gear"\)/u);
+  assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
+  const userMenu = app.slice(
+    app.indexOf('case "user-menu":'),
+    app.indexOf('case "switch-close":'),
+  );
+  assert.doesNotMatch(userMenu, /value: "settings"|label: "Settings"/u);
+  assert.match(css, /\.chan-sidebar-foot \{[\s\S]{0,180}grid-template-columns: minmax\(0, 1fr\) auto;/u);
+  assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
+  assert.match(css, /@media \(max-width: 600px\)[\s\S]*\.chan-settings \{\s*width: 44px;\s*height: 44px;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
     sidebar,
@@ -1091,11 +1130,37 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
   for (const branch of [channelElbow, panelBranch]) {
-    assert.match(branch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
-    assert.match(branch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-left-radius: 11px;/u);
   }
+  // The channel's line is drawn in pieces that overlap on purpose, so it can
+  // only be painted in an opaque colour: `--border-strong` is translucent, and
+  // every doubled pixel — each row join, each hook — showed as a darker patch
+  // in a line that is meant to read as one continuous stroke. The panel's
+  // branch is a single stroke that crosses nothing, so it keeps the token.
+  for (const piece of [channelStem, channelEnd, channelElbow]) {
+    assert.match(piece ?? "", /border-left: 3px solid var\(--cmsg-stem\);/u);
+    assert.doesNotMatch(piece ?? "", /--border-strong/u);
+  }
+  assert.match(channelElbow ?? "", /border-bottom: 3px solid var\(--cmsg-stem\);/u);
+  assert.match(panelBranch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
+  assert.match(panelBranch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
+  // Flattened against the surface the stroke is drawn on rather than given a
+  // new value of its own, so the line keeps the shade `--border-strong` has
+  // always resolved to — and follows the row when hovering lightens it.
+  assert.match(
+    css,
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 28%, var\(--room-tint\)\);/u,
+  );
+  assert.match(
+    css,
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 28%, var\(--bg-hover\)\);/u,
+  );
+  assert.match(
+    css,
+    /:root\[data-theme="light"\] \.cmsg-row,\n:root\[data-theme="light"\] \.cmsg-row:hover \{\n  --cmsg-stem: var\(--border-strong\);/u,
+    "the light theme's strong border is already opaque",
+  );
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
@@ -1775,18 +1840,18 @@ test("a connected agent is not painted as a working one", async () => {
     "presence must be derived, not asserted",
   );
 
-  // Both places that write the word beside a dot must agree with it: green is
-  // working, amber is connected and doing nothing.
-  for (const [name, source] of [
-    ["chat.js", chat],
-    ["screen-agents.js", agents],
-  ] as const) {
-    assert.match(
-      source,
-      /agent\.presence === "idle"\s*\?\s*"orange"/u,
-      `${name} should mark an idle agent amber, not green`,
-    );
-  }
+  // The private chat uses the avatar's single indicator; it must not add a
+  // second coloured dot beside the status word.
+  const chatHeader = chat.slice(
+    chat.indexOf("export function chatHeader"),
+    chat.indexOf("export function chatProgress"),
+  );
+  assert.match(chatHeader, /agentFace\(agent, 34, \{ status: agent\.status, progress \}\)/u);
+  assert.doesNotMatch(chatHeader, /<span class="dot/u);
+
+  // The full agents screen still writes a separate status word and dot, and
+  // an idle connection remains amber there rather than green.
+  assert.match(agents, /agent\.presence === "idle"\s*\?\s*"orange"/u);
 
   // And the count that opens the agents screen says what it counts.
   assert.match(agents, /label: "Connected agents",/u);
@@ -1795,6 +1860,28 @@ test("a connected agent is not painted as a working one", async () => {
     false,
     "a stored credential is not an active agent",
   );
+});
+
+test("working agent faces replace duplicate dots with a progress pie", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+  const row = chats.slice(
+    chats.indexOf("function rosterRow(agent)"),
+    chats.indexOf('/**\n * What the "..." on a roster row offers'),
+  );
+
+  assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
+  assert.doesNotMatch(row, /statusDot\(/u);
+  assert.match(ui, /working\s*\? '<i class="agent-run" aria-label="Working"><\/i>'/u);
+  assert.match(css, /\.agent-face \.agent-run \{[\s\S]*?conic-gradient/u);
+
+  const progress = data.slice(
+    data.indexOf("export function agentWorkingProgress"),
+    data.indexOf("function agentIsWorking"),
+  );
+  assert.match(progress, /return task === undefined \? 0 : taskProgress\(task\);/u);
 });
 
 test("an account's own agent is seen running at all", async () => {
@@ -1883,14 +1970,14 @@ test("the theme is driven by custom properties rather than per-component colour"
   const app = await browserSource();
   const css = await publicFile("styles.css");
   for (const [token, value] of [
-    ["--bg", "#0E1014"],
-    ["--surface-1", "#14161B"],
-    ["--surface-2", "#1B1E24"],
-    ["--surface-3", "#20242D"],
-    ["--text", "#F5F6F7"],
-    ["--muted", "#A7AAB3"],
-    ["--salmon", "#FF8790"],
-    ["--lavender", "#B59CFF"],
+    ["--bg", "#121110"],
+    ["--surface-1", "#1A1817"],
+    ["--surface-2", "#24211F"],
+    ["--surface-3", "#2C2926"],
+    ["--text", "#F3EFE8"],
+    ["--muted", "#B5AEA5"],
+    ["--salmon", "#D88973"],
+    ["--lavender", "#A894B6"],
   ]) {
     assert.match(css, new RegExp(`${token}: ${value};`, "u"));
   }
@@ -1980,7 +2067,7 @@ test("the user icon defaults to salmon", async () => {
   const start = ui.indexOf("export function avatar");
   const end = ui.indexOf("\n}", start);
   assert.notEqual(start, -1, "the avatar helper was not found in ui.js");
-  assert.match(ui.slice(start, end), /background:#FF8790/u);
+  assert.match(ui.slice(start, end), /background:#D88973/u);
 });
 
 test("the product is named Lattice throughout the browser surface", async () => {
@@ -2513,7 +2600,10 @@ test("channel @mentions include repository guests and surface directed unread pi
 
   const participants = data.slice(
     data.indexOf("export function channelParticipants"),
-    data.indexOf("\nfunction seedMessages", data.indexOf("export function channelParticipants")),
+    data.indexOf(
+      "\nexport function channelMessagesFor",
+      data.indexOf("export function channelParticipants"),
+    ),
   );
   assert.match(participants, /state\.channelPeople\[repositoryId\]/u);
   assert.match(participants, /member\.user\?\.displayName/u);
@@ -2538,7 +2628,10 @@ test("mention suggestions narrow agents and people by name or email", async () =
   const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
   const participantStart = data.indexOf("export function channelParticipants");
-  const participantEnd = data.indexOf("\nfunction seedMessages", participantStart);
+  const participantEnd = data.indexOf(
+    "\nexport function channelMessagesFor",
+    participantStart,
+  );
   assert.notEqual(participantStart, -1, "the participant resolver should exist");
   assert.notEqual(participantEnd, -1, "the participant resolver should have a boundary");
 
@@ -3893,7 +3986,7 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.doesNotMatch(open, /notifications/u);
   assert.match(panel, /const requestedTab = state\.agentPanelTab \?\? "spec";/u);
   assert.match(panel, /: agentSpec\(agent, repositoryId\)/u);
-  assert.match(panel, /\$\{agentFace\(agent, 20\)\}/u);
+  assert.match(panel, /\$\{statusAgentFace\(agent, 20, repositoryId\)\}/u);
   assert.doesNotMatch(panel, /statusDot\(/u);
 
   // The alternate destinations still exist, but only behind controls that
@@ -4274,6 +4367,35 @@ test("the room's hold line carries a way back to the thread it is about", async 
   assert.match(elbow ?? "", /border-top-left-radius/u);
   assert.match(elbow ?? "", /border-left: 2px solid/u);
   assert.match(elbow ?? "", /border-top: 2px solid/u);
+});
+
+test("completed-work responses use an accessible inline pill while ordinary references stay quiet", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("\nfunction typingIndicator", chats.indexOf("function messageRow(")),
+  );
+
+  assert.match(chats, /const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —"/u);
+  assert.match(chats, /function completedWorkReference\(entry, repositoryId\)/u);
+  assert.match(chats, /class="cmsg-completed-ref"/u);
+  assert.match(chats, /aria-label="\$\{esc\(/u);
+  assert.match(chats, /data-act="channel-pin-jump" data-value="\$\{esc\(entry\.referencedMessageId\)\}"/u);
+  assert.match(row, /const completedReference =/u);
+  assert.match(row, /completedReference === ""/u);
+  assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
+  assert.match(row, /messageBodyWithIcons\(entry, repositoryId\)\}\$\{completedReference\}/u);
+
+  const pill = /\n\.cmsg-completed-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(pill, undefined, "completed work has its own inline treatment");
+  assert.match(pill ?? "", /display: inline-flex/u);
+  assert.match(pill ?? "", /border-radius: 999px/u);
+  // The existing reply reference remains its own full-width, low-emphasis
+  // path above the message instead of inheriting the completed-work pill.
+  const ordinary = /\n\.cmsg-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(ordinary ?? "", /flex: 0 0 100%/u);
+  assert.doesNotMatch(ordinary ?? "", /border-radius: 999px/u);
 });
 
 test("a message's face and name open the person and describe them on hover", async () => {

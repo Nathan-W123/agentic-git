@@ -18,7 +18,7 @@
          everyone (`:root` is dark until a theme attribute lands), so this
          matches it; `applyTheme` re-reads the resolved ground on every
          theme change so the chrome can never disagree with the page. -->
-    <meta name="theme-color" content="#0E1014">
+    <meta name="theme-color" content="#121110">
     <meta
       name="description"
       content="Coordination for humans and coding agents on one live codebase."
@@ -42,10 +42,43 @@
     <title>Lattice</title>
   </head>
   <body>
-    <!-- Both shells are written by the router; the markup here is only the
-         mount point, so a screen's structure lives with its module. -->
+    <!-- Auth is written by the router. The app mount starts with a real first
+         paint so a slow session or project read is a shaped wait, not a blank
+         page; app.js replaces this whole region when the answer arrives. -->
     <div id="auth-root" hidden></div>
-    <div id="app-root" hidden></div>
+    <div id="app-root" aria-busy="true">
+      <div class="boot-shell" role="status" aria-live="polite"
+        aria-label="Loading Lattice">
+        <span class="sr-only">Loading Lattice…</span>
+        <div class="boot-skeleton-rail" aria-hidden="true">
+          <span class="skeleton boot-skeleton-mark"></span>
+          <span class="skeleton boot-skeleton-rail-button"></span>
+          <span class="skeleton boot-skeleton-rail-button"></span>
+          <span class="skeleton boot-skeleton-rail-button"></span>
+        </div>
+        <div class="boot-skeleton-sidebar" aria-hidden="true">
+          <span class="skeleton boot-skeleton-title"></span>
+          <span class="skeleton boot-skeleton-search"></span>
+          <div class="boot-skeleton-nav">
+            <span class="skeleton"></span><span class="skeleton"></span>
+            <span class="skeleton"></span><span class="skeleton"></span>
+            <span class="skeleton"></span>
+          </div>
+        </div>
+        <main class="boot-skeleton-main" aria-hidden="true">
+          <header class="boot-skeleton-head">
+            <span class="skeleton boot-skeleton-heading"></span>
+            <span class="skeleton boot-skeleton-action"></span>
+          </header>
+          <div class="boot-skeleton-messages">
+            <div class="boot-skeleton-message"><span class="skeleton boot-skeleton-avatar"></span><span class="boot-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span></div>
+            <div class="boot-skeleton-message"><span class="skeleton boot-skeleton-avatar"></span><span class="boot-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span></div>
+            <div class="boot-skeleton-message"><span class="skeleton boot-skeleton-avatar"></span><span class="boot-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span></div>
+          </div>
+          <div class="skeleton boot-skeleton-composer"></div>
+        </main>
+      </div>
+    </div>
 
     <!-- Two regions, because a failure and a confirmation do not deserve the
          same urgency: errors interrupt, everything else waits its turn. -->

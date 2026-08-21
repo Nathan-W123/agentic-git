@@ -20,6 +20,7 @@ import {
   activeChannelId,
   activeTasks,
   agentStatus,
+  agentWorkingProgress,
   agentsThinkingIn,
 api,
   canDeleteChannelEntry,
@@ -293,6 +294,15 @@ function usageTip(agent) {
  */
 function statusDot(status, title) {
   return `<span class="status-dot status-${status}" title="${esc(title)}"></span>`;
+}
+
+/** One agent icon with either its status dot or its live progress pie. */
+function statusAgentFace(agent, size, repositoryId) {
+  const status = agentStatus(agent, repositoryId);
+  return agentFace(agent, size, {
+    status,
+    progress: agentWorkingProgress(agent, repositoryId),
+  });
 }
 
 /**
@@ -874,7 +884,6 @@ function rosterRow(agent) {
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
-  const status = agentStatus(agent, activeChannelId());
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
@@ -882,8 +891,7 @@ function rosterRow(agent) {
         data-hover-value="${esc(agent.id)}" tabindex="0"
         aria-label="Open details for ${esc(agent.name)}">
         ${usageTip(agent)}
-        ${agentFace(agent, 22)}
-        ${statusDot(status, AGENT_STATUS_TITLE[status])}
+        ${statusAgentFace(agent, 22, activeChannelId())}
       </span>
       <span class="rr-body">
         ${
@@ -1123,9 +1131,8 @@ function chanSidebar(activeRepositoryId) {
         </div>
       </div>
     </div>
-    <!-- The profile is the one account control at the foot. Its menu already
-         contains Settings, so a second Settings row here would only make the
-         same destination compete with the account that owns it. -->
+    <!-- Account destinations stay with the profile; the app-wide Settings
+         destination is visible beside it instead of hidden in that menu. -->
     <div class="chan-sidebar-foot">
       ${
         state.health === undefined
@@ -1137,6 +1144,10 @@ function chanSidebar(activeRepositoryId) {
         ${avatar(user, 32, user, myAvatar())}
         <span class="chan-account-copy"><b>${esc(user)}</b></span>
         ${countBadge(dmUnreadTotal())}
+      </button>
+      <button type="button" class="icon-btn chan-settings" data-act="nav"
+        data-value="settings" title="Settings" aria-label="Settings">
+        ${icon("gear")}
       </button>
     </div>
   </aside>`;
@@ -1427,6 +1438,9 @@ const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
  */
 const PLAN_LAPSED_PREFIX = "⌛ Plan expired";
 
+/** Mirrors `CHANNEL_COMPLETED_WORK_PREFIX` in the gateway. */
+const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
+
 /**
  * Protocol notices still carry their legacy symbol so older clients can
  * recognise them. The symbol is not shown: Lattice renders the matching mark
@@ -1527,6 +1541,40 @@ function messageReference(root, repositoryId) {
       <span class="cmsg-ref-text">${esc(
         line.length > 80 ? `${line.slice(0, 77)}…` : line,
       )}</span>
+    </button>`;
+}
+
+/**
+ * The inline doorway attached to a response about work that already landed.
+ *
+ * Unlike an ordinary reply reference this stays visible even before its old
+ * target has been paged in: the durable id is enough for `channel-pin-jump`
+ * to load history and open the task thread on demand.
+ */
+function completedWorkReference(entry, repositoryId) {
+  const content = String(entry.content ?? "");
+  if (
+    entry.kind !== "agent" ||
+    entry.referencedMessageId === undefined ||
+    !content.startsWith(CHANNEL_COMPLETED_WORK_PREFIX)
+  ) {
+    return "";
+  }
+  const known = channelMessagesFor(repositoryId).some(
+    (message) => message.id === entry.referencedMessageId,
+  );
+  const named = /^Already handled —\s+@(.+?)\s+already took care/iu.exec(
+    content,
+  )?.[1];
+  const label = named === undefined ? "View completed work" : `View @${named}'s work`;
+  return `<button type="button" class="cmsg-completed-ref"
+      data-act="channel-pin-jump" data-value="${esc(entry.referencedMessageId)}"
+      aria-label="${esc(
+        named === undefined
+          ? "Open the completed work thread"
+          : `Open the completed work thread from ${named}`,
+      )}" data-reference-loaded="${known ? "true" : "false"}">
+      ${icon("check")}<span>${esc(label)}</span>${icon("arrowRight")}
     </button>`;
 }
 
@@ -1817,7 +1865,7 @@ function authorIdentity(repositoryId, entry, author) {
       act: "agent-panel-open",
       value: String(author.agent.id ?? ""),
       name: author.name,
-      face: agentFace(author.agent, 38),
+      face: statusAgentFace(author.agent, 38, repositoryId),
       // What the agent is here for, which is the line its roster row leads
       // with too. "Your agent" is worth saying on a shared transcript: whose
       // an agent is decides who may task it.
@@ -1903,13 +1951,16 @@ function profileCard(identity) {
   }
   return `<span class="profile-card" role="tooltip">
     <span class="profile-card-head">
-      <span class="profile-card-face">${identity.face}${statusDot(
-        identity.status,
-        // No tooltip on the dot: the line under it already says this in
-        // words, and a native tooltip opening on top of a card that is
-        // itself a tooltip is one hover producing two answers.
-        "",
-      )}</span>
+      <span class="profile-card-face">${identity.face}${
+        identity.kind === "agent"
+          ? ""
+          : statusDot(
+              identity.status,
+              // No tooltip on the dot: the line under it already says this
+              // in words, and nested native tooltips obscure the card.
+              "",
+            )
+      }</span>
       <span class="profile-card-id">
         <span class="profile-card-name">${esc(identity.name)}</span>
         ${
@@ -1925,9 +1976,9 @@ function profileCard(identity) {
 }
 
 /** The face a message is drawn with, at whatever size is asked for. */
-function authorFace(author, size) {
+function authorFace(author, size, repositoryId) {
   return author.agent !== undefined
-    ? agentFace(author.agent, size)
+    ? statusAgentFace(author.agent, size, repositoryId)
     : avatar(
         author.name,
         size,
@@ -1963,6 +2014,8 @@ function messageRow(
   const inlineReply = inlineReplyTo !== undefined;
   const hasTaskThread = channelMessageHasTaskThread(entry);
   const channelThread = hasTaskThread && !isReply;
+  const completedReference =
+    isReply ? "" : completedWorkReference(entry, repositoryId);
   // Agent answers and legacy acknowledgements remain ordinary roots in the
   // room's chronological transcript. Their stored reference is the address
   // back to the request that prompted them; it does not replace a task thread
@@ -1971,6 +2024,7 @@ function messageRow(
   // the answer does not make its address disappear.
   const referencedRoot =
     !isReply &&
+    completedReference === "" &&
     AGENT_AUTHORED_ROOT_KINDS.has(entry.kind) &&
     entry.referencedMessageId !== undefined
       ? channelMessagesFor(repositoryId).find(
@@ -2006,7 +2060,10 @@ function messageRow(
   // `threadSummaryLink`. It used to be a bar on its own line under the route,
   // which spent a full line of the room saying something no reader could
   // attribute to anybody in a thread with more than one participant.
-  const progress = channelThread ? threadProgress(entry) : undefined;
+  const progress =
+    channelThread && threadIsWorking(entry)
+      ? (threadProgress(entry) ?? 0)
+      : undefined;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
@@ -2066,7 +2123,7 @@ function messageRow(
         ? ""
         : `<span class="cmsg-avatar">${identityWrap(
             identity,
-            authorFace(author, 32),
+            authorFace(author, 32, repositoryId),
           )}</span>`
     }
     <div class="cmsg-body">
@@ -2085,7 +2142,7 @@ function messageRow(
       <div class="cmsg-text">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
-          : messageBodyWithIcons(entry, repositoryId)
+          : `${messageBodyWithIcons(entry, repositoryId)}${completedReference}`
       }</div>
       ${
         // Said plainly, beside a way to try again. The resend re-posts the
@@ -2432,7 +2489,32 @@ function matchesQuery(entry, query) {
   );
 }
 
+/** The transcript's shape while its first server page is unresolved. */
+function channelMessageSkeleton(repositoryId) {
+  return `<div class="chan-messages chan-messages-loading" id="chan-messages"
+    role="status" aria-live="polite" aria-busy="true"
+    aria-label="Loading channel messages"
+    data-scroll-key="channel:${esc(repositoryId)}">
+    <span class="sr-only">Loading channel messages…</span>
+    <div class="channel-skeleton-row" aria-hidden="true">
+      <span class="skeleton channel-skeleton-avatar"></span>
+      <span class="channel-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span>
+    </div>
+    <div class="channel-skeleton-row" aria-hidden="true">
+      <span class="skeleton channel-skeleton-avatar"></span>
+      <span class="channel-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span>
+    </div>
+    <div class="channel-skeleton-row" aria-hidden="true">
+      <span class="skeleton channel-skeleton-avatar"></span>
+      <span class="channel-skeleton-copy"><span class="skeleton"></span><span class="skeleton"></span></span>
+    </div>
+  </div>`;
+}
+
 function messageList(repositoryId) {
+  if (!state.channelLoaded.has(repositoryId)) {
+    return channelMessageSkeleton(repositoryId);
+  }
   const query = state.chanMsgQuery.trim().toLowerCase();
   const entries = channelMessagesFor(repositoryId).filter((entry) =>
     matchesQuery(entry, query),
@@ -4091,8 +4173,7 @@ function agentSpec(agent, repositoryId) {
     <div class="aspec-content">
       <section class="aspec-head">
         <span class="aspec-face">
-          ${agentFace(agent, 68)}
-          ${statusDot(status, AGENT_STATUS_TITLE[status])}
+          ${statusAgentFace(agent, 68, repositoryId)}
         </span>
         <h2>${esc(agent.name)}</h2>
         <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
@@ -4233,7 +4314,7 @@ function agentPanel() {
         tab === "history" ? "Agent history" : tab === "chat" ? "Agent chat" : "Agent",
       )}
       <span class="dm-head-name">
-        ${agentFace(agent, 20)}
+        ${statusAgentFace(agent, 20, repositoryId)}
         ${esc(agent.name)}
       </span>
       <span class="spacer"></span>

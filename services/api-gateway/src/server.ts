@@ -626,6 +626,16 @@ function arbitrationNoticeKind(content: string): "hold" | "advisory" {
 const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome", "progress"]);
 
 /**
+ * Marks the one agent reply that points at work which already landed.
+ *
+ * The reference itself is persisted in `referencedMessageId`; this prefix is
+ * only the presentation discriminator the browser needs in order to draw
+ * that reference as an inline completed-work link instead of the ordinary
+ * quiet reply address above a message.
+ */
+const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
+
+/**
  * An image in a message, in the one form the channel writes and reads.
  *
  * The id shape is checked here as well as in the store, because this match is
@@ -1460,9 +1470,14 @@ export function narrateTaskEvent(
         );
       }
       if (status === "blocked") {
+        // Not "so I'm narrowing the plan". What narrows is the *claim* on the
+        // repository, never the ask — but a reader watching their own request
+        // go by has no way to tell those apart, and took the line as notice
+        // that the thing they asked for was being cut down. The decision this
+        // announces is an order of work, so that is what it says.
         return (
-          "⚖️ Held back — this plan overlaps work in flight too heavily to " +
-          "run alongside it, so I'm narrowing the plan." + why
+          "⚖️ Waiting for the work in flight — it holds files this plan " +
+          "needs, so it goes first and I pick this up after it lands." + why
         );
       }
       if (data["partial"] === true) {
@@ -3591,8 +3606,8 @@ export class ApiGateway {
    * Each is true only while its collision is live, so each records what would
    * end it. A `hold` — "starts once that one is done" — ends as soon as either
    * end of it does: the held task stops, or the work it names finishes. An
-   * `advisory` — "conflicting files but can run together" — is about two runs
-   * being in flight, so it ends when both of them have stopped.
+   * `advisory` — "working on related things but can run together" — is about
+   * two runs being in flight, so it ends when both of them have stopped.
    *
    * Memory only, and deliberately not the sole record: a hold routinely
    * outlives the process that announced it, which is why the notice also
@@ -10941,6 +10956,104 @@ export class ApiGateway {
   }
 
   /**
+   * Previously integrated work that is unmistakably the request being made.
+   *
+   * Only successful tasks qualify. An open, failed, cancelled, queued or
+   * planned task still needs an agent, and a request made inside a thread is
+   * an explicit continuation rather than a duplicate. The overlap bar is
+   * intentionally higher than automatic thread merging: a second task is
+   * cheaper than incorrectly claiming that a change already exists.
+   */
+  private async findCompletedWorkReference(input: {
+    projectId: string;
+    repositoryId: string;
+    viewerId: string;
+    content: string;
+  }): Promise<{ messageId: string; agentName: string } | undefined> {
+    const [tasks, messages, candidates] = await Promise.all([
+      this.options.store
+        .listSubmittedTasks({ repositoryId: input.repositoryId })
+        .catch(() => []),
+      this.options.store
+        .listChannelMessages(input.repositoryId, input.viewerId, { limit: 200 })
+        .catch(() => []),
+      this.resolveChannelMentionCandidates(input.projectId, input.repositoryId)
+        .catch(() => []),
+    ]);
+    const request = withoutMentions(input.content);
+    const reversesWork = (text: string): boolean =>
+      /\b(?:undo(?:ne|ing)?|revert(?:s|ed|ing)?|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|disabl(?:e|es|ed|ing))\b/iu.test(
+        text,
+      );
+    let best:
+      | { task: SubmittedTask; root: ChannelMessage | undefined; score: number }
+      | undefined;
+    for (const task of recentFirst(tasks)) {
+      if (task.status !== "integrated") {
+        continue;
+      }
+      const root =
+        (task.conversationId === undefined
+          ? undefined
+          : messages.find((message) => message.id === task.conversationId)) ??
+        messages.find((message) => message.taskId === task.id);
+      const messageId = task.conversationId ?? root?.id;
+      if (messageId === undefined) {
+        continue;
+      }
+      const objective = withoutRoleContext(task.objective);
+      const rootRequest =
+        root === undefined ? "" : withoutMentions(root.content);
+      // A request to undo, remove or disable work is new work even when every
+      // noun is identical to the task that introduced it.
+      const directionalSubject =
+        root?.kind === "user" && rootRequest !== "" ? rootRequest : objective;
+      if (reversesWork(request) !== reversesWork(directionalSubject)) {
+        continue;
+      }
+      const score = Math.max(
+        textOverlap(request, objective),
+        rootRequest === "" ? 0 : textOverlap(request, rootRequest),
+      );
+      if (score < 0.6 || (best !== undefined && score <= best.score)) {
+        continue;
+      }
+      best = { task, root, score };
+    }
+    if (best === undefined) {
+      return undefined;
+    }
+    const messageId = best.task.conversationId ?? best.root?.id;
+    if (messageId === undefined) {
+      return undefined;
+    }
+    const root =
+      best.root ??
+      (await this.options.store
+        .getChannelMessage(input.repositoryId, messageId, input.viewerId)
+        .catch(() => undefined));
+    if (root === undefined) {
+      return undefined;
+    }
+    const taskAuthorId = await this.channelTaskAuthorId(best.task, candidates);
+    const recordedAuthorId =
+      AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
+        ? root.authorId
+        : [...root.replies]
+            .reverse()
+            .find((reply) => AGENT_AUTHORED_ROOT_KINDS.has(reply.kind))
+            ?.authorId;
+    const authorId = taskAuthorId ?? recordedAuthorId;
+    const priorAgent = candidates.find(
+      (candidate) =>
+        `${candidate.userId}:${candidate.provider}` === authorId,
+    );
+    return priorAgent === undefined
+      ? undefined
+      : { messageId, agentName: priorAgent.name };
+  }
+
+  /**
    * The thread a request names out loud, as against one it merely resembles.
    *
    * "look at the codebase improvement review thread and implement number 3" is
@@ -11083,6 +11196,36 @@ export class ApiGateway {
           `org-wide, or mention an org-wide agent instead.`,
       );
       return;
+    }
+    if (
+      trigger === "mention" &&
+      input.threadMessageId === undefined &&
+      input.planOnly !== true &&
+      input.queueAfterCurrent !== true &&
+      input.forceQuestion !== true &&
+      !readsAsQuestion(content) &&
+      !asksAboutWork(withoutMentions(content)) &&
+      !SYSTEM_PACKAGE_INSTALL_RE.test(content)
+    ) {
+      const completed = await this.findCompletedWorkReference({
+        projectId,
+        repositoryId,
+        viewerId: senderId,
+        content,
+      });
+      if (completed !== undefined) {
+        await this.appendChannelEntry({
+          projectId,
+          repositoryId,
+          kind: "agent",
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content:
+            `${CHANNEL_COMPLETED_WORK_PREFIX} @${completed.agentName} ` +
+            "already took care of that.",
+          referencedMessageId: completed.messageId,
+        });
+        return;
+      }
     }
     // Typing starts here, at the moment the agent is chosen, rather than once
     // there is a task to hang it on.
@@ -15380,9 +15523,14 @@ export class ApiGateway {
         `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
         `${blocker} is done.`;
     } else if (status === "blocked") {
+      // The same order the sequenced line reports, said the same way. It used
+      // to read "${held} is narrowing its plan", which describes an internal
+      // retry the room cannot see and which the person who submitted the work
+      // read as their own request being trimmed. Who goes first is the part
+      // that is true and the part they wanted.
       line =
-        `⚖️ ${held} and ${blocker} have conflicting files — ${held} is ` +
-        `narrowing its plan.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} will ` +
+        `wait for ${blocker} to go first.`;
     } else {
       line =
         `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
@@ -15784,10 +15932,16 @@ export class ApiGateway {
    * invisible in the room where people watch the agents work; the only
    * symptom of an arbitration was one task mysteriously waiting.
    *
-   * Spoken by the room, not by an agent. Structural sequence/block decisions
-   * are deliberately left to `announceArbitration`, whose `plan_admitted`
-   * event identifies the actual held task. Guessing the order from the
-   * detector's pair emitted a second, sometimes reversed sentence.
+   * Spoken by the room, not by an agent. Every collision with structural
+   * evidence behind it — not merely the ones the detector scored as
+   * sequence/block — is deliberately left to `announceArbitration`, whose
+   * `plan_admitted` event identifies the actual held task and what it was
+   * granted. Guessing from the detector's pair emitted a second, sometimes
+   * reversed sentence, and in the notify band it emitted a contradictory one.
+   *
+   * What is left for this path is the collision no admission acts on: two
+   * plans whose only overlap is intent. Both run whole, neither is refused
+   * anything, and the room is told so once.
    */
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
@@ -15825,21 +15979,66 @@ export class ApiGateway {
       ) {
         continue;
       }
+      // The disposition band is not on its own a licence to say "can run
+      // together", and reading it as one is what put a false line in the room.
+      //
+      // Structural evidence — a shared file, symbol, API, schema — is never
+      // admitted concurrently by anything in this system. The wave scheduler
+      // blocks one task behind the other on *any* non-advisory evidence
+      // (`buildBlockers`), and remote admission sequences the plan or
+      // splits it and withholds the contested files. A pair can still score
+      // inside the notify band while all of that happens, so a real file
+      // overlap arrived here as `concurrent_with_notification` and was
+      // announced as two agents happily overlapping — moments before the
+      // agent that had been held reported it could not touch those very
+      // files. Two coordinator lines about one collision, saying opposite
+      // things.
+      //
+      // So the words are decided by the evidence, not the band. Structural
+      // collisions belong to `announceArbitration`, which speaks off
+      // `plan_admitted` and therefore knows which task was actually held,
+      // what it was granted, and what it gets once the holder is done. What
+      // is left here is the case this line was written for: intent-only
+      // evidence, where both plans really were admitted whole and neither
+      // agent will be refused anything.
+      const evidence = Array.isArray(data["evidence"]) ? data["evidence"] : [];
+      const structural = evidence.some((entry) => {
+        if (typeof entry !== "object" || entry === null) {
+          return false;
+        }
+        const item = entry as { advisory?: unknown; score?: unknown };
+        if (item.advisory === true) {
+          return false;
+        }
+        // A scoreless entry is one written before scores were recorded, or by
+        // a caller that omitted them. Structural is the safe reading: the cost
+        // of staying quiet is a line nobody sees, and the cost of guessing the
+        // other way is the contradiction above.
+        return typeof item.score === "number" ? item.score > 0 : true;
+      });
+      if (structural) {
+        continue;
+      }
       // The same resolver `announceArbitration` uses. This path used to quote
       // the first 57 characters of both objectives, so one collision read as a
       // wall of somebody's prompt while the admission event for the very same
       // pair read "@Ares and @Juno" — two voices for one decision.
       const describe = await this.channelAgentNamer(projectId, repositoryId);
       const named = taskIds.map(describe);
-      // The detector's explanation is deliberately not appended, and neither
-      // are the overlapping files. It is the full structural case — every
-      // overlapping file, every shared symbol, every dependency edge, with the
-      // score — and pasting it into the room produced a message thousands of
-      // words long listing variable names, for a reader whose question was
-      // "who is waiting on whom". It is written to the audit record, which is
-      // where an argument that long belongs; the room gets the order.
+      // The detector's explanation is deliberately not appended. It is the
+      // full case — every term the two objectives share, with the score — and
+      // pasting it into the room produced a message thousands of words long
+      // listing variable names, for a reader whose question was "who is
+      // waiting on whom". It is written to the audit record, which is where an
+      // argument that long belongs; the room gets the answer.
+      //
+      // "related things", not "conflicting files": the only collisions that
+      // reach this line are intent overlaps, where the two plans share no file
+      // at all. Claiming files were shared and then that nobody minded was the
+      // sentence a reader took as permission — and the reason a refusal, when
+      // one came, read as the coordinator contradicting itself.
       const line =
-        `⚖️ ${named[0]} and ${named[1]} have conflicting files but ` +
+        `⚖️ ${named[0]} and ${named[1]} are working on related things but ` +
         CHANNEL_ADVISORY_ENDING;
       // Said in the present tense about two runs that are running, so it is
       // withdrawn once neither of them is — a room that has been quiet for a

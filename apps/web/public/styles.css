@@ -1,9 +1,10 @@
 /*
  * Lattice — control room styling.
  *
- * A cool, restrained surface system with salmon reserved for primary and
- * active states, and lavender for the quieter agent/thread layer. Spacing and
- * surface contrast carry the structure; borders are only a subtle fallback.
+ * A warm, restrained surface system — near-black browns rather than blue
+ * greys — with the clay accent reserved for primary and active states, and
+ * the muted lilac for the quieter agent/thread layer. Spacing and surface
+ * contrast carry the structure; borders are only a subtle fallback.
  */
 
 /* ------------------------------------------------------------- tokens ---- */
@@ -14,14 +15,16 @@
   /* The eight shared design tokens. Compatibility aliases below keep every
      existing component on this ramp while the names stay semantic at the
      call site. */
-  --bg: #0E1014;
-  --surface-1: #14161B;
-  --surface-2: #1B1E24;
-  --surface-3: #20242D;
-  --text: #F5F6F7;
-  --muted: #A7AAB3;
-  --salmon: #FF8790;
-  --lavender: #B59CFF;
+  --bg: #121110;
+  --surface-1: #1A1817;
+  --surface-2: #24211F;
+  /* One step above the second surface and just under the border, so a card
+     lifted off a card still reads as lighter than the line around it. */
+  --surface-3: #2C2926;
+  --text: #F3EFE8;
+  --muted: #B5AEA5;
+  --salmon: #D88973;
+  --lavender: #A894B6;
 
   --bg-panel: var(--surface-1);
   --bg-card: var(--surface-2);
@@ -32,7 +35,11 @@
   --bg-chat: var(--bg);
   --room-tint: var(--bg-chat);
 
-  --border: color-mix(in srgb, var(--muted) 18%, transparent);
+  /* The one border with a value of its own: the palette names a line colour,
+     and 18% of the warm grey landed a shade under it. The soft and strong
+     variants stay translucent so they keep following whatever surface they
+     are drawn on — a rule several components already lean on. */
+  --border: #34302D;
   --border-soft: color-mix(in srgb, var(--muted) 10%, transparent);
   --border-strong: color-mix(in srgb, var(--muted) 28%, transparent);
 
@@ -81,8 +88,8 @@
   --tree-w: 232px;
   --chat-w: 380px;
 
-  --shadow-pop: 0 12px 30px rgb(0 0 0 / 28%);
-  --shadow-card: 0 1px 1px rgb(0 0 0 / 20%);
+  --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 2%), 0 8px 24px rgb(0 0 0 / 12%);
 
   /* Motion. Three durations and one curve, named because a surface arriving
      and the same surface leaving have to take the same time to read as one
@@ -188,6 +195,7 @@ svg {
    while the pack owns alignment and rendering consistently everywhere. */
 svg.ui-icon {
   flex: none;
+  overflow: visible;
   shape-rendering: geometricPrecision;
 }
 
@@ -529,6 +537,7 @@ svg.ui-icon {
   place-items: center;
   width: 30px;
   height: 30px;
+  border: 1px solid transparent;
   border-radius: 8px;
   color: var(--text-3);
   transition: background 0.15s ease, color 0.15s ease;
@@ -536,7 +545,20 @@ svg.ui-icon {
 
 .icon-btn:hover {
   background: var(--bg-hover);
+  border-color: var(--border-soft);
   color: var(--text);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+  color: var(--text);
+}
+
+.icon-btn:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-4);
 }
 
 .icon-btn svg {
@@ -612,8 +634,15 @@ svg.ui-icon {
 
 .chan-sidebar-foot {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
   align-self: end;
   padding: 10px;
+}
+
+.chan-sidebar-foot > .sys-line {
+  grid-column: 1 / -1;
 }
 
 .chan-account {
@@ -651,6 +680,12 @@ svg.ui-icon {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chan-settings {
+  width: 40px;
+  height: 40px;
+  flex: none;
 }
 
 /* ------------------------------------------------------------- brand ---- */
@@ -758,6 +793,7 @@ svg.ui-icon {
   gap: 14px;
   height: 58px;
   padding: 0 26px;
+  background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg));
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -807,8 +843,8 @@ svg.ui-icon {
 }
 
 .page {
-  padding: 34px 40px 48px;
-  max-width: 1320px;
+  padding: 32px 36px 48px;
+  max-width: 1260px;
   /* Centered. The cap used to lean against the rail; with the rail gone it
      hugged the left edge of a full-width main. */
   margin: 0 auto;
@@ -947,6 +983,20 @@ svg.ui-icon {
   height: 9px;
   border-radius: 50%;
   border: 2px solid var(--bg-card);
+}
+
+/* One status treatment per agent face. While work is live, the progress pie
+   replaces the corner presence dot and begins fully dark at pickup. */
+.agent-face .agent-run {
+  position: absolute;
+  inset: -1px;
+  z-index: 1;
+  border-radius: 50%;
+  background: conic-gradient(
+    color-mix(in srgb, var(--accent) 42%, transparent) calc(var(--run, 0) * 1%),
+    rgba(0, 0, 0, 0.62) 0
+  );
+  pointer-events: none;
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -1153,6 +1203,7 @@ svg.ui-icon {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
 }
 
 .stat-tile {
@@ -1369,6 +1420,225 @@ svg.ui-icon {
 @keyframes shimmer {
   to {
     background-position: -400% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------ loading shell ---- */
+
+#app-root[aria-busy="true"] {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+/* The same three panes as the chat screen, present in the document before a
+   module or API response can arrive. Nothing here is a pretend control: the
+   quiet blocks only reserve the geometry the real rail, room list and
+   transcript will occupy. */
+.boot-shell {
+  display: grid;
+  grid-template-columns: 60px 256px minmax(0, 1fr);
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 420px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.boot-skeleton-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg);
+}
+
+.boot-skeleton-mark,
+.boot-skeleton-rail-button {
+  display: block;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: var(--radius-lg);
+}
+
+.boot-skeleton-mark {
+  margin-bottom: 6px;
+}
+
+.boot-skeleton-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px 14px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+}
+
+.boot-skeleton-title,
+.boot-skeleton-search,
+.boot-skeleton-heading,
+.boot-skeleton-action {
+  display: block;
+}
+
+.boot-skeleton-title {
+  width: 44%;
+  height: 16px;
+}
+
+.boot-skeleton-search {
+  width: 100%;
+  height: 34px;
+}
+
+.boot-skeleton-nav {
+  display: grid;
+  gap: 13px;
+  padding-top: 5px;
+}
+
+.boot-skeleton-nav .skeleton {
+  display: block;
+  width: 82%;
+  height: 11px;
+}
+
+.boot-skeleton-nav .skeleton:nth-child(2),
+.boot-skeleton-nav .skeleton:nth-child(5) {
+  width: 62%;
+}
+
+.boot-skeleton-nav .skeleton:nth-child(4) {
+  width: 72%;
+}
+
+.boot-skeleton-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 59px minmax(0, 1fr) auto;
+  background: var(--room-tint);
+}
+
+.boot-skeleton-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.boot-skeleton-heading {
+  width: min(210px, 34%);
+  height: 16px;
+}
+
+.boot-skeleton-action {
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+}
+
+.boot-skeleton-messages {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 34px 28px;
+  overflow: hidden;
+}
+
+.boot-skeleton-message {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 560px);
+  gap: 12px;
+  align-items: start;
+}
+
+.boot-skeleton-avatar {
+  display: block;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+}
+
+.boot-skeleton-copy {
+  display: grid;
+  gap: 9px;
+  padding-top: 2px;
+}
+
+.boot-skeleton-copy .skeleton {
+  display: block;
+  width: 32%;
+  height: 11px;
+}
+
+.boot-skeleton-copy .skeleton:last-child {
+  width: 84%;
+  height: 13px;
+}
+
+.boot-skeleton-message:nth-child(2) .boot-skeleton-copy .skeleton:last-child {
+  width: 66%;
+}
+
+.boot-skeleton-message:nth-child(3) .boot-skeleton-copy .skeleton:last-child {
+  width: 76%;
+}
+
+.boot-skeleton-composer {
+  display: block;
+  height: 96px;
+  margin: 0 24px 20px;
+  border-radius: var(--radius-lg);
+}
+
+@media (max-width: 600px) {
+  .boot-shell {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .boot-skeleton-sidebar {
+    display: none;
+  }
+
+  .boot-skeleton-rail {
+    gap: 8px;
+    padding: 8px 6px;
+  }
+
+  .boot-skeleton-mark,
+  .boot-skeleton-rail-button {
+    width: 40px;
+  }
+
+  .boot-skeleton-head {
+    padding: 0 14px;
+  }
+
+  .boot-skeleton-messages {
+    gap: 24px;
+    padding: 26px 16px;
+  }
+
+  .boot-skeleton-copy .skeleton:last-child {
+    width: 92%;
+  }
+
+  .boot-skeleton-composer {
+    height: 104px;
+    margin: 0 10px 10px;
   }
 }
 
@@ -4055,6 +4325,7 @@ button.chip.lg:hover {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  background: var(--bg);
   /* The ground a closing side panel is pinned against while it leaves — see
      `.thread-panel.panel-leaving`. Everything else positioned in here already
      has a nearer relative ancestor of its own (`.chan-main` for the jump
@@ -4074,6 +4345,7 @@ button.chip.lg:hover {
   gap: 9px;
   padding: 12px 7px;
   background: var(--bg);
+  border-right: 1px solid var(--border-soft);
 }
 
 .channel-rail-brand,
@@ -4096,6 +4368,15 @@ button.chip.lg:hover {
   background: var(--surface-3);
   color: var(--text);
   border-radius: var(--radius-sm);
+}
+
+.channel-rail-brand:focus-visible,
+.channel-rail-toggle:focus-visible,
+.channel-rail-new:focus-visible,
+.channel-rail-button:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+  color: var(--text);
 }
 
 .channel-rail-entry.active .channel-rail-button {
@@ -4221,16 +4502,13 @@ button.chip.lg:hover {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
+  border-right: 1px solid var(--border-soft);
   overflow-x: hidden;
   transition: width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
-  /* No border. This column is a shade off the conversation in both themes
-     (`--bg-panel` against `--bg-chat`), and a whole page-height rule on top
-     of that difference is one line of chrome doing a job the ground has
-     already done. The right-hand `.thread-panel` keeps its border and gains a
-     shadow for the opposite reason: it comes and goes, so it has to announce
-     itself as something laid over the conversation rather than beside it.
-     Off-canvas on a phone it carries `--shadow-pop` instead, which is the
-     same argument — a drawer is over the page, a column is the page. */
+  /* The quiet edge matches the reference's nested panes and remains subtle
+     because the neighbouring surfaces already provide most of the separation.
+     Off-canvas on a phone the drawer also carries `--shadow-pop`, where the
+     edge becomes a crisp boundary between the drawer and its scrim. */
 }
 
 .chan-sidebar-head {
@@ -5023,6 +5301,7 @@ button.chip.lg:hover {
      conversation too, instead of the transcript reading as a panel floating
      inside a darker frame. */
   background: var(--room-tint);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
      stay reachable while it is open. */
@@ -5121,6 +5400,8 @@ button.chip.lg:hover {
   align-items: center;
   gap: 12px;
   padding: 13px 18px;
+  background: color-mix(in srgb, var(--room-tint) 94%, var(--surface-1));
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .chan-head .ch-hash {
@@ -5161,6 +5442,53 @@ button.chip.lg:hover {
   overflow-y: auto;
   min-height: 0;
   padding: 12px 24px 20px;
+}
+
+.chan-messages-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  padding-top: 30px;
+  overflow: hidden;
+}
+
+.channel-skeleton-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 540px);
+  align-items: start;
+  gap: 11px;
+}
+
+.channel-skeleton-avatar {
+  display: block;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+
+.channel-skeleton-copy {
+  display: grid;
+  gap: 9px;
+  padding-top: 2px;
+}
+
+.channel-skeleton-copy .skeleton {
+  display: block;
+  width: 30%;
+  height: 10px;
+}
+
+.channel-skeleton-copy .skeleton:last-child {
+  width: 82%;
+  height: 12px;
+}
+
+.channel-skeleton-row:nth-child(3) .channel-skeleton-copy .skeleton:last-child {
+  width: 64%;
+}
+
+.channel-skeleton-row:nth-child(4) .channel-skeleton-copy .skeleton:last-child {
+  width: 74%;
 }
 
 .chan-day {
@@ -5274,6 +5602,18 @@ button.chip.lg:hover {
      apart when any of those three numbers moves. */
   --cmsg-body-x: 52px;
   --cmsg-stem-x: 23px;
+  /* And the colour of that line, flattened. The connector is one stroke drawn
+     in several pieces — a stem for each grouped row, a final segment, and the
+     quarter turn into every thread link — and the pieces deliberately overlap
+     by a pixel or two so no hairline of rounding can break the line in half.
+     `--border-strong` is translucent, so each of those overlaps painted the
+     stroke twice and showed as a darker, discoloured tick exactly where the
+     line should read as continuous: at every row join and at every hook.
+     Mixed against the ground it is drawn on, the stroke is the same colour it
+     has always been — `--border-strong` is 28% of `--muted`, and the room's
+     tint is the surface the transcript is painted on — but it can now cross
+     itself as often as the pieces need to without changing shade. */
+  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--room-tint));
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -5304,6 +5644,17 @@ button.chip.lg:hover {
 
 .cmsg-row:hover {
   background: var(--bg-hover);
+  /* An opaque stroke has to follow the surface under it, or the line would
+     stay at the room's shade while the row it crosses lightens. */
+  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--bg-hover));
+}
+
+/* The light theme's `--border-strong` is already opaque — nothing there
+   composites twice — so the connector takes it directly rather than mixing a
+   second version of the same colour. */
+:root[data-theme="light"] .cmsg-row,
+:root[data-theme="light"] .cmsg-row:hover {
+  --cmsg-stem: var(--border-strong);
 }
 
 /* Consecutive lines from one person read as a single message group. Keep the
@@ -5335,7 +5686,7 @@ button.chip.lg:hover {
   left: var(--cmsg-stem-x);
   top: -1px;
   bottom: -1px;
-  border-left: 3px solid var(--border-strong);
+  border-left: 3px solid var(--cmsg-stem);
   border-top-left-radius: 2px;
   pointer-events: none;
 }
@@ -5366,14 +5717,16 @@ button.chip.lg:hover {
    The stroke is dropped two pixels above the wrapper so it overlaps the stem
    of the row above rather than meeting it exactly: a group whose prompts each
    carry a task is one path drawn in several pieces, and a hairline of rounding
-   between two of those pieces is a broken line. */
+   between two of those pieces is a broken line. That overlap is only free
+   because the stroke is opaque — see `--cmsg-stem` on `.cmsg-row`, which is
+   what stops the doubled pixels reading as a darker patch. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before {
   content: "";
   position: absolute;
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
   bottom: 20px;
-  border-left: 3px solid var(--border-strong);
+  border-left: 3px solid var(--cmsg-stem);
   pointer-events: none;
 }
 
@@ -5452,6 +5805,41 @@ button.chip.lg:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Completed-work references are part of the answer, not reply metadata. The
+   compact pill keeps that distinction visible while using the same durable
+   jump action as pins and ordinary references. */
+.cmsg-completed-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  margin: 6px 0 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-card-2);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cmsg-completed-ref:hover {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+.cmsg-completed-ref .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.cmsg-completed-ref .ui-icon:first-child {
+  color: var(--green);
 }
 
 .cmsg-row .cmsg-avatar {
@@ -5958,7 +6346,9 @@ button.chip.lg:hover {
 /* Each task turns out of the shared avatar stem at its thread summary. The
    eleven-pixel quarter turn starts at the stem's tangent instead of laying a
    second upright over it; the thirteen-pixel gap keeps the stroke clear of
-   the replier faces.
+   the replier faces. Where the turn does still meet the stem it meets it in
+   the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
+   the rest of the line.
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
@@ -5982,8 +6372,8 @@ button.chip.lg:hover {
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 16px);
   width: 16px;
   height: 11px;
-  border-left: 3px solid var(--border-strong);
-  border-bottom: 3px solid var(--border-strong);
+  border-left: 3px solid var(--cmsg-stem);
+  border-bottom: 3px solid var(--cmsg-stem);
   border-bottom-left-radius: 11px;
   border-bottom-right-radius: 2px;
   pointer-events: none;
@@ -8918,6 +9308,7 @@ dialog.modal[open]::backdrop {
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-foot {
+    grid-template-columns: 40px;
     justify-items: center;
     padding: 8px 0;
   }
@@ -9456,6 +9847,11 @@ dialog.modal[open]::backdrop {
     min-height: 44px;
   }
 
+  .chan-settings {
+    width: 44px;
+    height: 44px;
+  }
+
   .send-btn {
     width: 36px;
     height: 36px;
@@ -9570,6 +9966,11 @@ dialog.modal[open]::backdrop {
 
   .chan-messages {
     padding: 6px 12px 14px;
+  }
+
+  .chan-messages-loading {
+    gap: 22px;
+    padding-top: 24px;
   }
 
   .chan-composer-wrap {
@@ -10127,8 +10528,8 @@ dialog.modal[open]::backdrop {
 
   /* The same semantic pair, deepened only enough to remain readable on the
      cream surfaces. Dark mode keeps the requested source values above. */
-  --salmon: #9E3F4B;
-  --lavender: #6550B8;
+  --salmon: #9A4C33;
+  --lavender: #63527A;
 
   --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);

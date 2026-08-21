@@ -29,6 +29,49 @@ function slice(source: string, from: string, to: string): string {
   return source.slice(start, end);
 }
 
+test("channel history distinguishes loading, empty, and loaded transcripts", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  const skeleton = slice(
+    chats,
+    "function channelMessageSkeleton(repositoryId) {",
+    "\nfunction messageList(repositoryId) {",
+  );
+  assert.match(skeleton, /role="status" aria-live="polite" aria-busy="true"/u);
+  assert.match(skeleton, /class="sr-only">Loading channel messages…/u);
+  assert.equal((skeleton.match(/class="channel-skeleton-row"/gu) ?? []).length, 3);
+
+  const list = slice(
+    chats,
+    "function messageList(repositoryId) {",
+    "\n/**\n * The emoji the picker offers",
+  );
+  const loadingGuard = list.indexOf("!state.channelLoaded.has(repositoryId)");
+  const historyRead = list.indexOf("channelMessagesFor(repositoryId)");
+  assert.notEqual(loadingGuard, -1);
+  assert.equal(loadingGuard < historyRead, true, "loading wins before an empty array");
+  assert.match(list, /return channelMessageSkeleton\(repositoryId\);/u);
+
+  // Once the request settles, zero rows is a real empty state and non-zero
+  // rows continue through the ordinary message renderer.
+  assert.match(list, /entries\.length === 0/u);
+  assert.match(list, /query === "" \? "No messages yet"/u);
+  assert.match(list, /messageRow\(entry, repositoryId/u);
+  assert.match(list, /role="log"[\s\S]{0,120}aria-label="Channel messages"/u);
+
+  const messages = slice(
+    data,
+    "export function channelMessagesFor(repositoryId) {",
+    "\n/**\n * The reply that names a thread",
+  );
+  assert.match(messages, /state\.channelMessages\[repositoryId\] = \[\];/u);
+  assert.doesNotMatch(data, /seedMessages|-seed-1|-seed-2|Reviewed the last changeset/u);
+  assert.match(css, /\.chan-messages-loading \{/u);
+  assert.match(css, /\.channel-skeleton-row \{/u);
+});
+
 test("the first page asks for a size, and records whether there is more", async () => {
   const data = await publicFile("data.js");
   const load = slice(
@@ -90,6 +133,33 @@ test("earlier pages are read through the cursor, deduped, and survive a reconcil
   );
   assert.match(load, /const earlier = \(state\.channelEarlier\[repositoryId\] \?\? \[\]\)/u);
   assert.match(load, /state\.channelMessages\[repositoryId\] = \[\.\.\.earlier, \.\.\.page\];/u);
+});
+
+test("reference navigation pages backward until its thread is found or history ends", async () => {
+  const data = await publicFile("data.js");
+  const app = await publicFile("app.js");
+  const loader = slice(
+    data,
+    "export async function loadChannelMessage(",
+    "\n/**",
+  );
+
+  assert.match(loader, /let found = findChannelMessage\(repositoryId, messageId\);/u);
+  assert.match(loader, /while \(/u);
+  assert.match(loader, /state\.channelHasMore\[repositoryId\] !== false/u);
+  assert.match(loader, /const cursor = channelCursor\(loaded\[0\]\);/u);
+  assert.match(loader, /await loadEarlierChannelMessages\(repositoryId, rerender\);/u);
+  assert.match(loader, /found = findChannelMessage\(repositoryId, messageId\);/u);
+  // A repeated cursor is a malformed or exhausted page, and must not turn a
+  // reference click into an infinite request loop.
+  assert.match(loader, /const visited = new Set\(\);/u);
+  assert.match(loader, /visited\.has\(cursor\)/u);
+
+  const action = slice(app, 'case "channel-pin-jump": {', "\n    case ");
+  assert.match(action, /loadChannelMessage\(repositoryId, value, render\)/u);
+  assert.match(action, /entry\.taskId !== undefined/u);
+  assert.match(action, /state\.scrollToThreadMessage = value;/u);
+  assert.match(action, /state\.scrollToMessage = value;/u);
 });
 
 test("the control is offered only when there is more, and holds the reader's place", async () => {

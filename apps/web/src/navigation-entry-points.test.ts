@@ -33,7 +33,7 @@ function slice(source: string, from: string, to: string): string {
   return source.slice(start, end);
 }
 
-test("the account menu is the door into every screen that had none", async () => {
+test("the account menu carries account destinations", async () => {
   const app = await publicFile("app.js");
 
   // The destinations that were live and unreachable. One list, because the
@@ -58,7 +58,7 @@ test("the account menu is the door into every screen that had none", async () =>
 
   const menu = slice(app, 'case "user-menu":', 'case "switch-close":');
   assert.match(menu, /\.\.\.accountDestinations\(\)/u);
-  assert.match(menu, /value: "settings", label: "Settings"/u);
+  assert.doesNotMatch(menu, /value: "settings"|label: "Settings"/u);
   assert.match(menu, /act: "logout"/u);
 
   // Empty Agents-plus: connect goes to Settings, where agent credentials live.
@@ -162,17 +162,21 @@ test("the keyboard can reach a room, a person, or a screen", async () => {
   assert.match(app, /function openShortcutSheet\(\)/u);
 });
 
-test("the account menu opens settings, notifications, and people", async () => {
+test("settings is visible beside the account menu", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  // One button at the foot of the channel sidebar, which is the only account
-  // control on the one screen that draws no topbar — so whatever this menu
-  // holds is the whole of what is reachable from there.
+  // Settings is an explicit control at the bottom-right of the sidebar rather
+  // than another destination hidden behind the account avatar.
   assert.match(chats, /class="chan-account" data-act="user-menu"/u);
+  assert.match(
+    chats,
+    /class="icon-btn chan-settings" data-act="nav"\s*data-value="settings"/u,
+  );
+  assert.match(chats, /class="icon-btn chan-settings"[\s\S]{0,160}icon\("gear"\)/u);
   const menu = slice(app, 'case "user-menu":', 'case "switch-close":');
   assert.match(menu, /\.\.\.accountDestinations\(\)/u);
-  assert.match(menu, /value: "settings", label: "Settings"/u);
+  assert.doesNotMatch(menu, /value: "settings"|label: "Settings"/u);
 
   // Notifications and Direct messages come from the shared list, so both
   // account buttons offer the same doors — and neither offers My Agents.

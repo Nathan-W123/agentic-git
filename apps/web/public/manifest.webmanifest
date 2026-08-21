@@ -4,8 +4,8 @@
   "description": "Coordination for humans and coding agents on one live codebase.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0E1014",
-  "theme_color": "#0E1014",
+  "background_color": "#121110",
+  "theme_color": "#121110",
   "icons": [
     {
       "src": "/mark.svg",

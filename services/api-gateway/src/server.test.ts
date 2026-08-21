@@ -4150,6 +4150,149 @@ test("automatic continuation matches an existing user-rooted task thread", async
   );
 });
 
+test("matching integrated work names its agent and points back without submitting a duplicate", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "completed-work-reference");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org", callSign: "Alpha" },
+    { provider: "openai", visibility: "org", callSign: "Beta" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const objective = "implement the token refresh retry circuit breaker guard";
+
+  const first = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@Alpha ${objective}` },
+  });
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.ok(task !== undefined);
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  await runtime.store.completeSubmittedTask(task.id, "integrated");
+
+  const submittedBefore = runtime.submittedTasks.length;
+  const repeated = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Beta update the token refresh retry circuit breaker guard",
+    },
+  });
+  assert.equal(repeated.status, 201, JSON.stringify(repeated.data));
+  assert.equal(runtime.submittedTasks.length, submittedBefore);
+
+  const after = await owner.request(`${base}/messages?limit=50`);
+  const reference = (after.data.messages as any[]).find(
+    (message) =>
+      message.kind === "agent" &&
+      message.referencedMessageId === first.data.message.id,
+  );
+  assert.ok(reference !== undefined, JSON.stringify(after.data.messages));
+  assert.equal(reference.authorId, `${bootstrapped.user.id}:openai`);
+  assert.match(reference.content, /@Alpha already took care of that\.$/u);
+});
+
+test("duplicate recognition leaves unfinished, unsuccessful, opposed, uncertain, and thread work dispatchable", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org", callSign: "Alpha" },
+    { provider: "openai", visibility: "org", callSign: "Beta" },
+  ]);
+
+  const scenarios: Array<{
+    name: string;
+    status: "submitted" | "integrated" | "failed" | "cancelled";
+    first: string;
+    second: string;
+    inThread?: boolean;
+  }> = [
+    {
+      name: "unfinished",
+      status: "submitted",
+      first: "implement the unfinished token refresh retry guard",
+      second: "implement the unfinished token refresh retry guard",
+    },
+    {
+      name: "failed",
+      status: "failed",
+      first: "implement the failed token refresh retry guard",
+      second: "implement the failed token refresh retry guard",
+    },
+    {
+      name: "cancelled",
+      status: "cancelled",
+      first: "implement the cancelled token refresh retry guard",
+      second: "implement the cancelled token refresh retry guard",
+    },
+    {
+      name: "opposed",
+      status: "integrated",
+      first: "add the opposed token refresh retry policy circuit breaker guard",
+      second: "remove the opposed token refresh retry policy circuit breaker guard",
+    },
+    {
+      name: "low-confidence",
+      status: "integrated",
+      first: "implement the uncertain cache retry policy",
+      second: "implement retry dashboard metrics",
+    },
+    {
+      name: "thread-follow-up",
+      status: "integrated",
+      first: "implement the threaded token refresh retry guard",
+      second: "implement the threaded token refresh retry guard",
+      inThread: true,
+    },
+  ];
+
+  for (const [index, scenario] of scenarios.entries()) {
+    const repositoryId = await invitableRepository(
+      owner,
+      `completed-work-${String(index)}`,
+    );
+    await joinAllConnectedAgents(runtime, repositoryId);
+    const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+    const first = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: `@Alpha ${scenario.first}` },
+    });
+    assert.equal(first.status, 201, scenario.name);
+    const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+    assert.ok(task !== undefined, scenario.name);
+    if (scenario.status !== "submitted") {
+      await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+      await runtime.store.completeSubmittedTask(task.id, scenario.status);
+    }
+
+    const submittedBefore = runtime.submittedTasks.length;
+    const second = scenario.inThread === true
+      ? await owner.request(
+          `${base}/messages/${encodeURIComponent(first.data.message.id)}/replies`,
+          { method: "POST", body: { content: `@Beta ${scenario.second}` } },
+        )
+      : await owner.request(`${base}/messages`, {
+          method: "POST",
+          body: { content: `@Beta ${scenario.second}` },
+        });
+    assert.equal(second.status, 201, scenario.name);
+    if (scenario.inThread === true) {
+      await waitFor(
+        async () => runtime.submittedTasks.length === submittedBefore + 1,
+        `${scenario.name} did not dispatch`,
+      );
+    }
+    assert.equal(
+      runtime.submittedTasks.length,
+      submittedBefore + 1,
+      `${scenario.name} was mistaken for completed work`,
+    );
+  }
+});
+
 test("an agent's own owner can always @mention it, personal or org-wide", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -9617,9 +9760,9 @@ test("a collision that can run together is one line, and one that cannot say so 
     firstName,
   );
 
-  // Advisory intent overlap admits both tasks untouched, so this one is never
-  // spoken at all — saying "conflict" about work that is running anyway would
-  // teach readers to ignore the times it matters.
+  // A pair with nothing between them is never spoken at all — saying
+  // "conflict" about work that is running anyway would teach readers to
+  // ignore the times it matters.
   await runtime.store.appendAudit(undefined, {
     type: "conflict_detected",
     taskId: tasks.claude,
@@ -9631,6 +9774,14 @@ test("a collision that can run together is one line, and one that cannot say so 
       evidence: [],
     },
   });
+  // Nor is a real file overlap, whatever band it scores in. Nothing in this
+  // system admits two plans onto the same file: the wave scheduler blocks
+  // one behind the other on any structural evidence, and remote admission
+  // sequences or splits the plan. This landed in the notify band and was
+  // announced as "can run together" — and then the agent that had been held
+  // reported it could not touch those files, which is the room contradicting
+  // itself. `announceArbitration` speaks for these, off an event that knows
+  // who was actually held.
   await runtime.store.appendAudit(undefined, {
     type: "conflict_detected",
     taskId: tasks.claude,
@@ -9640,7 +9791,31 @@ test("a collision that can run together is one line, and one that cannot say so 
       taskIds: [tasks.claude, tasks.codex],
       disposition: "concurrent_with_notification",
       evidence: [
-        { kind: "file_overlap", resources: ["apps/web/public/app.js"] },
+        {
+          kind: "file_overlap",
+          resources: ["apps/web/public/app.js"],
+          score: 40,
+        },
+      ],
+    },
+  });
+  // The one collision this line exists for: intent-only evidence, which is
+  // advisory, never scheduled on, and leaves both plans admitted whole.
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "concurrent_with_notification",
+      evidence: [
+        {
+          kind: "intent_conflict",
+          resources: ["mobile sizing"],
+          score: 30,
+          advisory: true,
+        },
       ],
     },
   });
@@ -9658,12 +9833,13 @@ test("a collision that can run together is one line, and one that cannot say so 
   const lines = messages
     .filter((message) => message.authorId === "coordinator")
     .map((message) => String(message.content));
-  // Exactly one: the `concurrent` event above is deliberately not narrated.
+  // Exactly one: the `concurrent` event and the structural overlap above are
+  // both deliberately not narrated here.
   assert.deepEqual(
     lines,
     [
-      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-        `files but can run together.`,
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) are working on ` +
+        `related things but can run together.`,
     ],
     `the advisory collision did not read as one short line: ${JSON.stringify(lines)}`,
   );
@@ -9750,6 +9926,77 @@ test("a sequenced admission is removed silently when the held task can start", a
     afterRelease.some((message) => /starts now/iu.test(message.content)),
     false,
     "releasing the hold added a redundant starts-now message",
+  );
+});
+
+test("a blocked admission says who waits for whom, not that a plan is shrinking", async (t) => {
+  // In the words of the person who hit it: "narrowing its plan makes it sound
+  // like some of your specifications may be changed, which will off-put the
+  // user if that actually isn't happening". What narrows on this path is the
+  // claim on the repository, not the ask — but the room cannot tell those
+  // apart, so the line has to report the one thing it knows: the order.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "blockedroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "blocked",
+      blockedBy: [tasks.codex],
+      explanation:
+        "Plan collides with executing work beyond the sequencing threshold",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the block was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  assert.equal(
+    line,
+    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+      `files — @Claude (${firstName}) will wait for @Codex (${firstName}) ` +
+      `to go first.`,
+    `the block did not read as two names and an order: ${line}`,
+  );
+  assert.doesNotMatch(
+    line,
+    /narrow/iu,
+    "the block still described the held task's plan as shrinking",
+  );
+  // A hold, not an advisory: it retires when either end of the collision does,
+  // which is only true while the line does not end the way the together line
+  // ends.
+  assert.equal(
+    line.endsWith("can run together."),
+    false,
+    "a block was classified as a line about work that can run together",
   );
 });
 

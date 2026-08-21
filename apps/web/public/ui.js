@@ -51,22 +51,20 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * The local subset of the thick filled/duotone Lets Icons family selected for
- * Lattice's design system. Lets Icons is by Leonid Tsvetkov and licensed under
- * CC BY 4.0:
- * https://github.com/BoogieMonsta/lets-icons/tree/1feb56542e189feded296891fe8837a748c5b8d6
+ * The local subset of Coolicons v4.1 selected for Lattice's interface.
+ * Coolicons is by Kryston Schwarze and licensed under CC BY 4.0:
+ * https://github.com/krystonschwarze/coolicons/tree/v4.1
  * https://creativecommons.org/licenses/by/4.0/
  *
  * Only the geometry the product uses is kept inline, so the marks stay instant
- * and available when the control plane is offline. It has been normalized to
- * `currentColor`, the shared decorative accessibility contract, and a slightly
- * offset translucent fill beneath the heavy rounded ink. That imperfect second
- * pass gives the whole set its chunky, semi-doodled character. Product-only
- * concepts (agents and the Lattice network) receive the same treatment rather
- * than introducing a second visual language.
+ * and available when the control plane is offline. The shared wrapper preserves
+ * Coolicons' 24px grid, two-pixel rounded stroke and `currentColor` behaviour,
+ * while keeping every interface mark decorative to assistive technology.
+ * Product-only concepts (agents and the Lattice network) use that same grid and
+ * optical weight rather than introducing a second visual language.
  */
 const S = (body, extra = "") =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="chunky-duotone"${extra}><g class="ui-icon-underlay" fill="currentColor" stroke-width="3.15" opacity=".2" transform="translate(.3 .35)">${body}</g><g class="ui-icon-ink">${body}</g></svg>`;
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="coolicons" data-icon-source="coolicons-v4.1"${extra}>${body}</svg>`;
 
 export const ICONS = {
   home: S('<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>'),
@@ -637,7 +635,7 @@ export function avatar(name, size = 26, seed = name, picture) {
       name,
     )}"><img src="${esc(picture)}" alt=""></span>`;
   }
-  return `<span class="avatar sz-${size}" style="${box};background:#FF8790" title="${esc(
+  return `<span class="avatar sz-${size}" style="${box};background:#D88973" title="${esc(
     name,
   )}">${esc(initials(name))}</span>`;
 }
@@ -964,9 +962,17 @@ export function agentDoodle(kind) {
  * `agent.color` is the owner's identity colour; callers pass the colour of
  * whoever the agent belongs to, which is what makes a shared view legible.
  */
-export function agentFace(agent, size = 34) {
+export function agentFace(agent, size = 34, indicator = {}) {
   const kind = agentKindOf(agent?.provider ?? agent?.id);
-  const presence = agent?.presence ?? "offline";
+  const status = indicator.status ?? agent?.presence ?? "offline";
+  const presence =
+    status === "working" || status === "online"
+      ? "online"
+      : status === "idle"
+        ? "idle"
+        : "offline";
+  const progress = Number(indicator.progress);
+  const working = Number.isFinite(progress);
   const color = safeColor(agent?.color) ?? "var(--accent)";
   // The vendor's own mark rather than a drawn character: an agent running on
   // Claude shows Claude's, one running on Codex shows Codex's, and a reader
@@ -981,11 +987,17 @@ export function agentFace(agent, size = 34) {
   // fill its container: a 30px face rendered 300px wide and made the chats
   // roster unnavigable. A number that has to be mirrored in a stylesheet to
   // mean anything is not a size argument, it is a trap.
-  return `<span class="agent-face" data-kind="${kind}"
-    data-presence="${presence}" style="color:${color};--face-size:${Number(size)}px"
+  return `<span class="agent-face${working ? " agent-face-working" : ""}" data-kind="${kind}"
+    data-presence="${presence}" style="color:${color};--face-size:${Number(size)}px${
+      working ? `;--run:${Math.max(0, Math.min(100, progress))}` : ""
+    }"
     title="${esc(
       agent?.name ?? AGENTS[kind].label,
-    )}">${vendorMark(kind)}<i class="presence presence-${presence}"></i></span>`;
+    )}">${vendorMark(kind)}${
+      working
+        ? '<i class="agent-run" aria-label="Working"></i>'
+        : `<i class="presence presence-${presence}"></i>`
+    }</span>`;
 }
 
 /**

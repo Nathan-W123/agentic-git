@@ -179,11 +179,11 @@ sentence shape: the two agents, and the order they run in.**
 | --- | --- |
 | `sequence` | `⚖️ A and B have conflicting files — B starts once A is done.` |
 | `block` | `⚖️ A and B have conflicting files — B is narrowing its plan.` |
-| notification | `⚖️ A and B have conflicting files but can run together.` |
+| intent overlap only | `⚖️ A and B are working on related things but can run together.` |
 | partial admission | `⚖️ A and B have conflicting files — A starts on <granted files> now, <deferred files> once B is done.` |
 | a hold clearing | `⚖️ A starts now — what it was waiting on is done.` |
 
-Four rules hold that shape in place, each of them a regression somebody
+Five rules hold that shape in place, each of them a regression somebody
 reported:
 
 - **Names, not prompts.** Both sides are resolved through
@@ -207,6 +207,16 @@ reported:
   to ignore the times it matters. An approval is announced only when it releases
   a hold this task's own `plan_admitted` history shows was announced, so
   ordinary approvals do not ring the bell.
+- **One voice per collision, chosen by the evidence.** `narrateConflicts` may
+  only say "can run together", and it says it only for a pair whose evidence is
+  entirely advisory — an intent overlap, where the two plans share no file at
+  all. Anything structural, however low it scores, is `announceArbitration`'s:
+  nothing in this system admits two plans onto the same file, so a structural
+  collision always ends in a hold, a narrowing, or a split, and only
+  `plan_admitted` knows which task was held and what it was granted. Reading
+  the disposition band instead of the evidence is what once announced a real
+  file overlap in the notify band as two agents running happily together,
+  moments before the held agent reported it had been refused those very files.
 
 `narrateConflicts` is polled from the channel-progress pump (2-second cadence,
 so the line lands while the arbitration is still news) and advances a
