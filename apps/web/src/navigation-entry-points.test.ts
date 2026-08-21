@@ -61,10 +61,13 @@ test("the account menu is the door into every screen that had none", async () =>
   assert.match(menu, /value: "settings", label: "Settings"/u);
   assert.match(menu, /act: "logout"/u);
 
-  // "Connect an agent first" stays exactly as it was. It is a good empty
-  // state; what it was not is a navigation strategy, since it is offered only
-  // while this account has connected nothing.
-  assert.match(app, /label: "Connect an agent first"/u);
+  // Empty Agents-plus: connect goes to Settings, where agent credentials live.
+  // Offered only while this account has connected nothing — that is still an
+  // empty-state affordance, not a second door into a roster screen.
+  const agentMenu = slice(app, 'case "channel-agent-menu":', 'case "channel-agent-pick":');
+  assert.match(agentMenu, /label: "Connect agents"/u);
+  assert.match(agentMenu, /value: "settings"/u);
+  assert.doesNotMatch(agentMenu, /value: "agents"/u);
 });
 
 test("the notifications bell is on screen wherever the reader is", async () => {

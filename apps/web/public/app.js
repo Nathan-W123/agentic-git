@@ -1174,7 +1174,8 @@ function accountDestinations() {
     // things — what is waiting for you and who is writing to you — and a
     // roster of agent connections is not that. The screen keeps its other
     // doors: the quick switcher by name, and the channel agent menu's
-    // "Connect an agent first" while this account has connected nothing.
+    // "Connect agents" (into Settings) while this account has connected
+    // nothing.
   ];
 }
 
@@ -6263,10 +6264,13 @@ document.addEventListener("click", (event) => {
         anchor,
         connected.length === 0
           ? [
+              // Connection lives in Settings (`agentsCard`), not on My Agents.
+              // Sending somebody who has none there is the only way the plus
+              // on this heading can finish what it started.
               {
                 act: "nav",
-                value: "agents",
-                label: "Connect an agent first",
+                value: "settings",
+                label: "Connect agents",
                 iconName: "robot",
               },
             ]
