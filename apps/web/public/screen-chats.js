@@ -3349,9 +3349,9 @@ function catchUpPanel() {
   const count = catchUp.tasks.length;
   const rows = catchUp.tasks
     .map((task) => {
-      const objective =
-        withoutRolePreamble(task.objective).replace(/\s+/gu, " ").trim() ||
-        "Completed task";
+      const summary =
+        String(task.summary ?? "").trim() ||
+        "Completed and landed successfully.";
       const repository = state.repositories.find(
         (entry) => entry.id === task.repositoryId,
       );
@@ -3360,7 +3360,7 @@ function catchUpPanel() {
       return `<li class="catch-up-task">
       <span class="catch-up-check" aria-hidden="true">${icon("check")}</span>
       <div class="catch-up-task-copy">
-        <p>${esc(objective)}</p>
+        <p>${esc(summary)}</p>
         <span>${where ? `#${esc(where)} · ` : ""}${esc(when)}</span>
       </div>
     </li>`;
