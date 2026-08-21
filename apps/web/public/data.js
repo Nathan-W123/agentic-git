@@ -4507,9 +4507,9 @@ export async function setAuditorPaused(repositoryId, paused) {
 /**
  * Whether this repository's app is running, and where.
  *
- * Fetched rather than assumed, because the preview outlives the page: a
- * reload, or a second tab, must find the one that is already up instead of
- * offering to start a second.
+ * Read-only: nothing in the page starts or stops one any more. It is fetched
+ * rather than assumed because a preview outlives the page, so a reload, or a
+ * second tab, still has to find the one that is already up.
  */
 export async function loadPreview(repositoryId) {
   try {
@@ -4518,7 +4518,7 @@ export async function loadPreview(repositoryId) {
   } catch {
     // A deployment that cannot run previews answers 501, and a reader who
     // never asked for one should not see an error about it. Absent is the
-    // same as "no button", which is the right outcome either way.
+    // same as "nothing running", which is the right outcome either way.
     state.previews[repositoryId] = null;
   }
   return state.previews[repositoryId];
@@ -4544,27 +4544,6 @@ export async function uploadAttachment(repositoryId, file) {
     throw new Error("The image was not stored");
   }
   return id;
-}
-
-export async function startPreview(repositoryId) {
-  const response = await api(repositoryPath(repositoryId, "/preview"), {
-    method: "POST",
-  });
-  state.previews[repositoryId] = response?.preview ?? null;
-  return state.previews[repositoryId];
-}
-
-/** Remembers how this repository starts, so it is asked once and not again. */
-export async function setPreviewCommand(repositoryId, command) {
-  await api(repositoryPath(repositoryId, "/preview"), {
-    method: "PUT",
-    body: { command },
-  });
-}
-
-export async function stopPreview(repositoryId) {
-  await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
-  state.previews[repositoryId] = null;
 }
 
 /**

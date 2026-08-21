@@ -1122,60 +1122,19 @@ function chanSidebar(activeRepositoryId) {
 /* ---------------------------------------------------------- chan main ---- */
 
 /**
- * Start this repository's app, or go and look at the one already running.
+ * The repository's running app, if one is up.
  *
- * The link is a plain anchor to a loopback address, which works only on the
- * machine running the control plane. That is the whole design of the preview
- * and not an oversight — see `PreviewService` — so on a hosted deployment this
- * offers a link that will not open, and it says where it points rather than
- * pretending otherwise.
+ * Nothing in the page starts one any more: the play control that used to sit
+ * in the tool tray launched a server on the machine running the control plane,
+ * which is a loopback address only that machine can reach. What is left is
+ * read-only — an address for a preview started outside the page, and nothing
+ * at all when there is none.
  */
 function previewRunning(repositoryId) {
   const preview = state.previews[repositoryId];
   return preview !== null && preview !== undefined && preview.exited === undefined
     ? preview
     : undefined;
-}
-
-/**
- * Why the last preview of this repository stopped, if it stopped on its own.
- *
- * A preview that fails to come up at all is reported as an error the moment it
- * is asked for. This is the other case: one that ran, was watched, and then
- * died — which the control cannot show by flipping back to "play", because that
- * is also what it looks like before anything was ever started.
- */
-function previewStopped(repositoryId) {
-  const preview = state.previews[repositoryId];
-  return preview !== null && preview !== undefined && preview.exited !== undefined
-    ? preview
-    : undefined;
-}
-
-/** The control, which lives in the tool tray with its siblings. */
-function previewControl(repositoryId) {
-  if (!repositoryId) {
-    return "";
-  }
-  if (previewRunning(repositoryId) !== undefined) {
-    return `<button type="button" class="icon-btn on" data-act="preview-stop"
-        data-value="${esc(repositoryId)}" title="Stop the running app">
-        ${icon("close")}</button>`;
-  }
-  const stopped = previewStopped(repositoryId);
-  // The output is the diagnosis and it is the only copy: nothing else in the
-  // page renders it, so a dead preview used to be indistinguishable from one
-  // that was never started.
-  const why =
-    stopped === undefined
-      ? "Run this app and open it"
-      : `${stopped.label} stopped — ${
-          (stopped.recentOutput ?? []).slice(-3).join(" ").trim() ||
-          "it printed nothing"
-        }. Press to run it again.`;
-  return `<button type="button" class="icon-btn${stopped === undefined ? "" : " warn"}"
-      data-act="preview-start" data-value="${esc(repositoryId)}"
-      title="${esc(why)}">${icon("play")}</button>`;
 }
 
 /** The address, which stays in the header because it is state, not a control. */
@@ -1283,7 +1242,6 @@ function chanHeader(repositoryId) {
       state.chanToolsOpen !== true && !phoneLayout()
         ? ""
         : `<span class="chan-tools">
-            ${previewControl(repositoryId)}
             <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
               data-act="chan-tree-toggle" title="Files"
               aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
@@ -1441,6 +1399,16 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
  * the one thing the text cannot carry — which thread it is talking about.
  */
 const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
+
+/**
+ * How a plan nobody started in time is marked, as the gateway writes it.
+ *
+ * Mirrors `CHANNEL_PLAN_LAPSED_PREFIX` in `services/api-gateway/src/server.ts`.
+ * Deliberately a different opening from the hold above: this one says the
+ * wait is over, and the panel reads it to stop offering to start work that
+ * has already been let go.
+ */
+const PLAN_LAPSED_PREFIX = "⌛ Plan expired";
 
 /** Root kinds spoken by an agent rather than a person or the coordinator. */
 const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome"]);
@@ -3823,13 +3791,13 @@ function taskSummaryLine(task, message) {
   );
 }
 
-const TASK_GLYPH = {
-  integrated: "✓",
-  failed: "✕",
-  cancelled: "–",
-  awaiting_approval: "?",
+const TASK_ICON = {
+  integrated: "checkCircle",
+  failed: "closeCircle",
+  cancelled: "minusCircle",
+  awaiting_approval: "helpCircle",
   // A conversation between turns: the last turn landed, more may come.
-  open: "…",
+  open: "dotsHorizontal",
 };
 
 function agentHistory(agent, repositoryId) {
@@ -3843,7 +3811,7 @@ function agentHistory(agent, repositoryId) {
   }
   return `<div class="agent-history scroll">${rows
     .map(({ task, message }) => {
-      const glyph = TASK_GLYPH[task.status] ?? "•";
+      const iconName = TASK_ICON[task.status] ?? "info";
       // A description of the work, not the words that asked for it. The
       // request is still here — on the row's tooltip, with its role preamble
       // taken off, for the reader who wants to know exactly what was said.
@@ -3856,7 +3824,7 @@ function agentHistory(agent, repositoryId) {
               data-value="${esc(message.id)}"`;
       return `<div class="agent-history-row ${esc(task.status)}"${open}
         title="${esc(full)}">
-        <span class="ah-glyph">${glyph}</span>
+        <span class="ah-glyph">${icon(iconName)}</span>
         <span class="ah-objective">${esc(line)}</span>
         <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
       </div>`;
@@ -4611,6 +4579,15 @@ function planPanel(repositoryId) {
     root.taskId !== undefined &&
     state.tasks.some((task) => task.id === root.taskId);
   const held = !known || threadAwaitsGoAhead(root);
+  // A plan can also end without ever having been started: the hold has a
+  // deadline, and one that runs out is cancelled and said so in the thread.
+  // Without this the panel fell through to "this plan has been started",
+  // which is the one thing that certainly did not happen.
+  const lapsed =
+    !held &&
+    (root.replies ?? []).some((reply) =>
+      String(reply.content ?? "").startsWith(PLAN_LAPSED_PREFIX),
+    );
   return `<aside class="thread-panel plan-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -4638,7 +4615,11 @@ function planPanel(repositoryId) {
         data-value="${esc(messageId)}">${icon("play")} Start work</button>
     </div>`
         : `<div class="plan-actions">
-      <span class="plan-held">This plan has been started.</span>
+      <span class="plan-held">${
+        lapsed
+          ? "Nobody started this in time, so it was let go."
+          : "This plan has been started."
+      }</span>
       <button type="button" class="btn" data-act="plan-thread-open"
         data-value="${esc(messageId)}">Open thread</button>
     </div>`

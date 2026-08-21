@@ -520,8 +520,8 @@ export function renderAgents() {
           <span class="agent-deck-tools">${segmented(
             "agent-view",
             [
-              { value: "grid", label: "▦" },
-              { value: "list", label: "☰" },
+              { value: "grid", label: "Grid view", iconName: "grid" },
+              { value: "list", label: "List view", iconName: "list" },
             ],
             view,
           )}</span>

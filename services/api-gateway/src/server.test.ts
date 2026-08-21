@@ -353,6 +353,13 @@ async function startRuntime(
     webSocketPollIntervalMs?: number;
     webSocketReauthorizeIntervalMs?: number;
     auditorPollIntervalMs?: number;
+    /**
+     * How often finished threads and stale plan holds are swept. Tests that
+     * are about the sweep cannot wait out the production minute.
+     */
+    threadReconcileIntervalMs?: number;
+    /** How long a held `/plan` waits before it lapses. */
+    planHoldTtlMs?: number;
     codexUsageReader?: CodexUsageReader;
     /**
      * Drops the optional `listAgents` operation, as a deployment that does
@@ -898,6 +905,12 @@ async function startRuntime(
     ...(options.auditorPollIntervalMs === undefined
       ? {}
       : { auditorPollIntervalMs: options.auditorPollIntervalMs }),
+    ...(options.threadReconcileIntervalMs === undefined
+      ? {}
+      : { threadReconcileIntervalMs: options.threadReconcileIntervalMs }),
+    ...(options.planHoldTtlMs === undefined
+      ? {}
+      : { planHoldTtlMs: options.planHoldTtlMs }),
     ...(options.codexUsageReader === undefined
       ? {}
       : { codexUsageReader: options.codexUsageReader }),
@@ -6217,6 +6230,162 @@ test("a held plan nobody is recorded as asking for still starts", async (t) => {
     ).find((entry) => entry.id === task.id);
     return released?.status !== "planned";
   }, "a plan with no recorded requester was stranded");
+});
+
+test("a plan nobody starts is let go, and a late go-ahead is told why", async (t) => {
+  const runtime = await startRuntime(t, {
+    // The deadline itself, compressed. This is about what happens when a hold
+    // runs out, not about how long fifteen minutes is — but long enough that
+    // the hold below is fully written before its clock can run out, which is
+    // the one thing a zero would make racy.
+    planHoldTtlMs: 250,
+    threadReconcileIntervalMs: 25,
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "plan-hold-lapse");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Filed straight into the store, which is also the shape a hold has after
+  // the deploy that killed the process holding it: a `planned` row, a thread,
+  // and nothing in this gateway's memory that knows either exists. If the
+  // deadline lived in a timer this is exactly the case it would miss.
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rework the retry loop",
+    agentId: "hud-agent",
+    validationCommands: [],
+    planOnly: true,
+  });
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "That's the plan — nothing is running yet.",
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, root.id, task.id);
+
+  const lapseNotices = async (): Promise<string[]> =>
+    (
+      (await runtime.store.getChannelMessage(repositoryId, root.id, ownerId))
+        ?.replies ?? []
+    )
+      .map((reply) => reply.content)
+      .filter((content) => /Plan expired/u.test(content));
+
+  await waitFor(
+    async () => (await lapseNotices()).length > 0,
+    "a plan nobody started was still held after its deadline",
+  );
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (entry) => entry.id === task.id,
+    )?.status,
+    "cancelled",
+    "the thread said the plan had lapsed while the task was still held",
+  );
+
+  const said = await lapseNotices();
+  assert.equal(said.length, 1, JSON.stringify(said));
+  assert.match(said[0] ?? "", /nobody started this/iu);
+  // Not the hold's own opening: the browser recognises that one and would go
+  // on drawing this as a thread still waiting on somebody.
+  assert.doesNotMatch(said[0] ?? "", /Waiting on you/u);
+
+  // The sweep runs on a timer, so it sees this thread again and again. One
+  // lapse, one line.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal((await lapseNotices()).length, 1);
+
+  // And the answer that arrives too late is answered, rather than dropped
+  // into the chat model as a stray "go ahead".
+  const late = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "go ahead" } },
+  );
+  assert.equal(late.status, 201);
+  await waitFor(async () => {
+    const answered = await runtime.store.getChannelMessage(
+      repositoryId,
+      root.id,
+      ownerId,
+    );
+    return (answered?.replies ?? []).some((reply) =>
+      /ran out of time/u.test(reply.content),
+    );
+  }, "a go-ahead after the deadline was met with silence");
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (entry) => entry.id === task.id,
+    )?.status,
+    "cancelled",
+    "a lapsed plan was started by a late go-ahead",
+  );
+});
+
+test("a plan still inside its deadline is left alone", async (t) => {
+  const runtime = await startRuntime(t, {
+    // A minute, so the sweep below is running against a deadline that has
+    // certainly not passed — and the test never depends on what the
+    // environment has configured.
+    planHoldTtlMs: 60_000,
+    threadReconcileIntervalMs: 25,
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "plan-hold-live");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/plan @Claude (Owner) rework the retry loop" },
+  });
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(task?.status, "planned");
+
+  // Several sweeps, all of them a long way inside the deadline.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId }))[0]?.status,
+    "planned",
+    "a plan well inside its deadline was let go",
+  );
+  const root = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "user" && message.taskId !== undefined);
+  assert.ok(
+    !(root?.replies ?? []).some((reply) => /Plan expired/u.test(reply.content)),
+    JSON.stringify(root?.replies),
+  );
+
+  // And it still starts, which is the behaviour the deadline must not cost.
+  const go = await owner.request(
+    `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`,
+    { method: "POST", body: { content: "go ahead" } },
+  );
+  assert.equal(go.status, 201);
+  await waitFor(async () => {
+    const started = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.kind === "user" && message.taskId !== undefined);
+    return (started?.replies ?? []).some((reply) =>
+      /Starting now/u.test(reply.content),
+    );
+  }, "a live plan could no longer be started");
 });
 
 test("/queue chains one agent's follow-up work without claiming it early", async (t) => {

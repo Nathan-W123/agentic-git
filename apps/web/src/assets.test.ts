@@ -638,7 +638,7 @@ test("the pink tools toggle animates without replacing its node", async () => {
   const css = await publicFile("styles.css");
   const action = app.slice(
     app.indexOf('case "chan-tools-toggle"'),
-    app.indexOf('case "preview-start"'),
+    app.indexOf('case "agent-panel-open"'),
   );
 
   assert.match(
@@ -2517,7 +2517,7 @@ test(
     const app = await browserSource();
     const attachStart = app.indexOf("async function attachChannelImages");
     const attachEnd = app.indexOf(
-      "\nasync function startPreviewAction",
+      "\nasync function revertTaskAction",
       attachStart,
     );
     const attach = app.slice(attachStart, attachEnd);
@@ -4305,6 +4305,14 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   // then given structure.
   assert.match(chats, /function planDocument\(/u);
   assert.match(chats, /const inline = \(line\) =>\s*esc\(line\)/u);
+
+  // A hold has a deadline, and one that runs out is cancelled rather than
+  // started. The panel has to say which of the two happened: falling through
+  // to "this plan has been started" is the one answer that is certainly
+  // wrong, and it is what leaves somebody waiting on a run nobody authorised.
+  assert.match(chats, /const PLAN_LAPSED_PREFIX = "⌛ Plan expired";/u);
+  assert.match(chats, /const lapsed =\s*!held &&/u);
+  assert.match(chats, /Nobody started this in time, so it was let go\./u);
 
   // Approving from the panel is the same event as typing it, so a plan let go
   // from here leaves the same record in the thread.

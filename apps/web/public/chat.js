@@ -176,7 +176,11 @@ export function chatThread(agent) {
               speakerName,
             )}</span>
             <span class="msg-time">${esc(clockTime(entry.at))}${
-              mine ? '<span class="tick">✓✓</span>' : ""
+              mine
+                ? `<span class="tick" title="Delivered" aria-label="Delivered">${icon(
+                    "doubleCheck",
+                  )}</span>`
+                : ""
             }</span>
           </div>`
     }<div class="msg-text">${esc(entry.content)}</div></div></div>`;
