@@ -3676,6 +3676,71 @@ test("the progress bar restarts for each task turn in a thread", async () => {
   );
 });
 
+test("task progress is monotonic and progress bars animate between keyed values", async () => {
+  const data = await publicFile("data.js");
+  const ui = await publicFile("ui.js");
+  const styles = await publicFile("styles.css");
+
+  const progressStart = data.indexOf("const STAGE_PROGRESS");
+  const progressEnd = data.indexOf("\n/**\n * Whether a task", progressStart);
+  assert.notEqual(progressStart, -1, "task progress stages should exist");
+  assert.notEqual(progressEnd, -1, "task progress should have a boundary");
+  const taskProgress = Function(
+    `"use strict";\n${data
+      .slice(progressStart, progressEnd)
+      .replace("export function taskProgress", "function taskProgress")}\nreturn taskProgress;`,
+  )() as (task: { status: string }) => number;
+  const lifecycle = [
+    "submitted",
+    "planning",
+    "planned",
+    "approved",
+    "queued",
+    "claimed",
+    "running",
+    "replanning",
+    "awaiting_approval",
+    "validating",
+    "integrated",
+  ].map((status) => taskProgress({ status }));
+  assert.deepEqual(
+    lifecycle,
+    [...lifecycle].sort((left, right) => left - right),
+    "moving to a later lifecycle stage must not move progress backwards",
+  );
+  assert.equal(lifecycle.at(-1), 100, "terminal work should be complete");
+
+  const barStart = ui.indexOf("export function bar(percent");
+  const barEnd = ui.indexOf("\n}\n\n/**", barStart) + 2;
+  assert.notEqual(barStart, -1, "the shared progress bar should exist");
+  assert.ok(barEnd > 1, "the shared progress bar should have a boundary");
+  const bar = Function(
+    `"use strict";\n${ui
+      .slice(barStart, barEnd)
+      .replace("export function bar", "function bar")}\nreturn bar;`,
+  )() as (percent: number, tone?: string, thin?: boolean, key?: string) => string;
+  assert.doesNotMatch(
+    bar(44, "", false, "row:task-1"),
+    /bar-progress-fill/u,
+    "a newly observed bar should start at its current value",
+  );
+  const moving = bar(62, "", false, "row:task-1");
+  assert.match(moving, /bar-progress-fill/u);
+  assert.match(moving, /--bar-progress-from:44%/u);
+  assert.match(moving, /--bar-progress-to:62%/u);
+  assert.doesNotMatch(
+    bar(62, "", false, "card:task-1"),
+    /bar-progress-fill/u,
+    "each dashboard surface should keep independent progress history",
+  );
+
+  assert.match(styles, /@keyframes bar-progress-fill/u);
+  assert.match(
+    styles,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.bar > i\.bar-progress-fill \{\s*animation: none;/u,
+  );
+});
+
 test("the run fills the agent working, at the front of the stack", async () => {
   const source = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");

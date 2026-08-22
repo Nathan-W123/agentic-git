@@ -2088,11 +2088,12 @@ export function completedToday() {
 const STAGE_PROGRESS = {
   submitted: 4,
   planning: 18,
+  planned: 30,
   approved: 30,
-  queued: 26,
-  claimed: 34,
+  queued: 36,
+  claimed: 44,
   running: 62,
-  replanning: 48,
+  replanning: 72,
   awaiting_approval: 78,
   validating: 88,
   // An open conversational task's turn has landed in full; the task waits

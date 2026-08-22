@@ -1261,9 +1261,19 @@ export function dot(tone = "green", pulse = false) {
 
 /* ----------------------------------------------------------- progress ---- */
 
-export function bar(percent, tone = "", thin = false) {
-  const value = Math.max(0, Math.min(100, Math.round(percent || 0)));
-  return `<span class="bar${thin ? " thin" : ""}"><i class="${tone}" style="width:${value}%"></i></span>`;
+export function bar(percent, tone = "", thin = false, progressKey = undefined) {
+  const numeric = Number(percent);
+  const value = Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
+  const history = bar.progressByKey ?? (bar.progressByKey = new Map());
+  const previous = progressKey === undefined ? undefined : history.get(progressKey);
+  if (progressKey !== undefined) {
+    history.set(progressKey, value);
+  }
+  const changing = previous !== undefined && previous !== value;
+  const from = changing ? previous : value;
+  return `<span class="bar${thin ? " thin" : ""}"><i class="${tone}${
+    changing ? " bar-progress-fill" : ""
+  }" style="--bar-progress-from:${from}%;--bar-progress-to:${value}%;width:${value}%"></i></span>`;
 }
 
 /**

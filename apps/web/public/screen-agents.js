@@ -110,7 +110,12 @@ function agentRow(agent, active) {
     <span class="ar-prog">${
       task !== undefined && !taskStarted(task)
         ? `<span class="mt-stage">Queued</span>`
-        : `${bar(agent.progress, agent.status === "working" ? "" : "grey")}
+        : `${bar(
+            agent.progress,
+            agent.status === "working" ? "" : "grey",
+            false,
+            `agent-row:${agent.id}:${task?.id ?? "idle"}`,
+          )}
            <span class="ar-pct">${Math.round(agent.progress)}%</span>`
     }</span>
     <span class="ar-more">${iconButton("dots", {
@@ -160,7 +165,12 @@ function agentCard(agent, active) {
         ? ""
         : queued
           ? `<span class="tile-pct">Queued</span>`
-          : `${bar(agent.progress, agent.status === "working" ? "" : "grey")}
+          : `${bar(
+              agent.progress,
+              agent.status === "working" ? "" : "grey",
+              false,
+              `agent-card:${agent.id}:${task.id}`,
+            )}
              <span class="tile-pct">${Math.round(agent.progress)}%</span>`
     }`,
     act: "agent-pick",
@@ -351,7 +361,12 @@ function tabBody(tab, agent) {
       </div>
       <div class="ar-prog">${
         taskStarted(task)
-          ? `${bar(taskProgress(task))}
+          ? `${bar(
+              taskProgress(task),
+              "",
+              false,
+              `agent-task:${agent.id}:${task.id}`,
+            )}
              <span class="ar-pct">${taskProgress(task)}%</span>`
           : `<span class="mt-stage">Queued — waiting for a free slot</span>`
       }</div>

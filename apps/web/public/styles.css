@@ -1240,6 +1240,22 @@ svg.ui-icon {
   transition: width 0.4s ease;
 }
 
+.bar > i.bar-progress-fill {
+  animation:
+    bar-progress-fill 0.65s cubic-bezier(0.22, 1, 0.36, 1) both,
+    thread-activity-sweep 2.4s ease-in-out infinite;
+}
+
+@keyframes bar-progress-fill {
+  from {
+    width: var(--bar-progress-from);
+  }
+
+  to {
+    width: var(--bar-progress-to);
+  }
+}
+
 .bar.thin {
   height: 3px;
 }
@@ -1261,6 +1277,10 @@ svg.ui-icon {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .bar > i.bar-progress-fill {
+    animation: none;
+  }
+
   .bar > i:not(.green):not(.blue):not(.orange):not(.grey) {
     animation: none;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
