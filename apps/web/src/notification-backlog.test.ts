@@ -110,6 +110,10 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(data, /catchUps: \{\}/u);
   assert.match(app, /const serverOutcomes = new Map/u);
   assert.match(app, /outcome\?\.summary/u);
+  // A row that says only that the work was completed cannot be told apart
+  // from the other five, so an outcome the server could not phrase falls back
+  // to the request the task was given.
+  assert.match(app, /briefObjective\(task\.objective\)/u);
   assert.doesNotMatch(app, /function catchUpTaskOutcome\(task\)/u);
   assert.doesNotMatch(app, /Implemented: \$\{objective\}/u);
   // The digest is skimmed, so each row is one condensed claim with the who

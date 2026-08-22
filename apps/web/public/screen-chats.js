@@ -4045,7 +4045,7 @@ function shortened(text) {
  * shortens text the row already had, and the untouched objective stays one
  * hover away on the row itself.
  */
-function briefObjective(objective) {
+export function briefObjective(objective) {
   const body = withoutRolePreamble(objective)
     // Fenced code and pasted logs say how the request was written, not what it
     // asked for; inline code is worth keeping, just not its backticks.

@@ -254,7 +254,7 @@ export function buildCatchUpDigest(input: CatchUpInput): CatchUpDigest {
         id: change.id,
         repositoryId: change.repositoryId,
         completedAt: change.at,
-        summary: fallbackTaskSummary(change.agentResponse),
+        summary: fallbackTaskSummary(change.agentResponse, change.objective),
         changedFiles: change.changedFiles ?? [],
       }];
     }),
@@ -342,16 +342,53 @@ export const CATCH_UP_TASK_PROMPT = [
   "or add a greeting. Use only the supplied facts.",
 ].join(" ");
 
-function fallbackTaskSummary(agentResponse: string | undefined): string {
+/**
+ * What a finished task's row says when no model rewrote it.
+ *
+ * The agent's own account first, when it wrote one that says something. When
+ * it did not — a blank report, or one of the boilerplate openings that only
+ * repeat that an agent ran — the row falls back to what was actually asked
+ * for, because "Completed the requested work." tells a reader nothing at all
+ * about which of the night's tasks this row is. The generic sentence survives
+ * only for work with neither an account nor a readable request.
+ */
+function fallbackTaskSummary(
+  agentResponse: string | undefined,
+  objective: string | undefined,
+): string {
   const cleaned = sanitiseSummary(agentResponse);
   if (
-    cleaned === undefined ||
-    /^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\b/iu.test(cleaned) ||
-    /^implemented(?::)?\s+your role\b/iu.test(cleaned)
+    cleaned !== undefined &&
+    !/^(?:claude|codex|gemini|cursor|copilot|kiro)\s+completed\b/iu.test(cleaned) &&
+    !/^implemented(?::)?\s+your role\b/iu.test(cleaned)
   ) {
-    return "Completed the requested work.";
+    return cleaned;
   }
-  return cleaned;
+  return describedObjective(objective) ?? "Completed the requested work.";
+}
+
+/**
+ * The request itself, written as the description of the work.
+ *
+ * A request is a sentence somebody typed, so it arrives lower-cased, without
+ * a full stop, and often with several sentences of detail after the first.
+ * The opening sentence is the ask and the rest is the detail, so that is what
+ * is kept — the same cut a channel row makes — with a capital and a full stop
+ * put back on so a column of them reads as prose rather than as a paste.
+ */
+function describedObjective(
+  objective: string | undefined,
+): string | undefined {
+  const asked = sanitiseSummary(objective);
+  if (asked === undefined) {
+    return undefined;
+  }
+  // A leading fragment ("Fix it. Then...") is not worth stopping at, so the
+  // whole line is kept unless the first sentence stands on its own.
+  const first = asked.split(/(?<=[.!?])\s+/u)[0] ?? asked;
+  const sentence = first.length >= 24 ? first : asked;
+  const capitalised = sentence.charAt(0).toLocaleUpperCase() + sentence.slice(1);
+  return /[.!?\u2026]$/u.test(capitalised) ? capitalised : `${capitalised}.`;
 }
 
 function sanitiseTaskSummary(

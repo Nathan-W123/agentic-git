@@ -189,6 +189,7 @@ import {
   signInForInvitation,
 } from "./data.js";
 import {
+  briefObjective,
   captureChannelScroll,
   channelInfoPopoverHtml,
   closeComposerAutocomplete,
@@ -7939,8 +7940,12 @@ async function showSinceYouLeft() {
       return {
         ...task,
         completedAt: outcome?.completedAt ?? task.completedAt ?? task.openedAt,
+        // The server's outcome first, then the request this task was given:
+        // a row saying only that the work was completed cannot tell somebody
+        // which of last night's tasks it stands for.
         summary:
           String(outcome?.summary ?? "").trim() ||
+          briefObjective(task.objective) ||
           "Completed the requested work.",
         changedFiles: Array.isArray(outcome?.changedFiles)
           ? outcome.changedFiles
