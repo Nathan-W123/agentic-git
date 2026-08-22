@@ -3576,6 +3576,24 @@ document.addEventListener("focusin", requestUsageForHoverTarget);
 const PROFILE_CARD_MARGIN = 10;
 
 /**
+ * Put a fixed profile card at viewport coordinates, even when its anchor
+ * establishes a fixed-position containing block.
+ *
+ * Message rows use layout containment and the roster animates with a
+ * transform. Both make a nested `position: fixed` element local to the row
+ * instead of the viewport, so assigning viewport coordinates directly adds
+ * the row's own offset and leaves the card far away from the face. Measuring
+ * where that first assignment actually landed gives us the offset to remove.
+ */
+function placeProfileCard(card, left, top) {
+  card.style.left = `${left}px`;
+  card.style.top = `${top}px`;
+  const placed = card.getBoundingClientRect();
+  card.style.left = `${left + (left - placed.left)}px`;
+  card.style.top = `${top + (top - placed.top)}px`;
+}
+
+/**
  * The geometry of a profile card that a stylesheet cannot decide.
  *
  * Each card states the direction it would rather open — down from a roster
@@ -3645,8 +3663,12 @@ function positionProfileCard(event) {
       clip.bottom - PROFILE_CARD_MARGIN - height,
     );
     const desiredTop = opensDown ? box.bottom : box.top - height;
-    card.style.left = `${Math.min(maxLeft, Math.max(minLeft, box.left - 6))}px`;
-    card.style.top = `${Math.min(maxTop, Math.max(minTop, desiredTop))}px`;
+    const desiredLeft = Math.min(maxLeft, Math.max(minLeft, box.left - 6));
+    placeProfileCard(
+      card,
+      desiredLeft,
+      Math.min(maxTop, Math.max(minTop, desiredTop)),
+    );
     anchor.toggleAttribute("data-profile-flip", opensDown !== prefersDown);
   });
 }

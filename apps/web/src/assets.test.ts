@@ -5306,8 +5306,12 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(css, /max-height: var\(--profile-max-height/u);
   assert.match(css, /overflow-y: auto/u);
   assert.match(browser, /function positionProfileCard\(event\)/u);
-  assert.match(browser, /card\.style\.left =/u);
-  assert.match(browser, /card\.style\.top =/u);
+  assert.match(browser, /function placeProfileCard\(card, left, top\)/u);
+  assert.match(
+    browser,
+    /const placed = card\.getBoundingClientRect\(\);[\s\S]{0,160}left - placed\.left[\s\S]{0,100}top - placed\.top/u,
+  );
+  assert.match(browser, /placeProfileCard\(\s*card,\s*desiredLeft,/u);
   assert.match(browser, /clip\.right - PROFILE_CARD_MARGIN - width/u);
   assert.match(browser, /clip\.bottom - PROFILE_CARD_MARGIN - height/u);
   assert.match(
