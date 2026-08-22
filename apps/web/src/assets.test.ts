@@ -2162,6 +2162,26 @@ test("the product is named Kumi throughout the browser surface", async () => {
   }
 });
 
+test("the sign-in screens show the whole wordmark, not the K badge", async () => {
+  const ui = await publicFile("ui.js");
+  const app = await publicFile("app.js");
+
+  // The badge slices a square out of the word, so anything on the auth shell
+  // asking for `brandMark` gets a lone giant K — the bug this guards.
+  assert.equal(/brandMark\(/u.test(app), false, "app.js still draws the badge");
+  assert.match(app, /brandWordmark\(\d+\)/u);
+
+  const start = ui.indexOf("export function brandWordmark");
+  assert.notEqual(start, -1, "the wordmark helper was not found in ui.js");
+  const wordmark = ui.slice(start, ui.indexOf("\n}", start));
+  assert.match(wordmark, /preserveAspectRatio="xMidYMid meet"/u);
+  // All four letters, drawn once and shared with the badge.
+  assert.match(wordmark, /\$\{BRAND_LETTERS\}/u);
+
+  const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);
+  assert.ok(width > 0 && width <= 160, `the sign-in wordmark is ${width}px wide`);
+});
+
 /* ------------------------------------------------------------ controls ---- */
 
 test("a first repository can be created or imported from GitHub", async () => {

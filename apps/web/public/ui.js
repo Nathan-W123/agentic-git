@@ -299,15 +299,12 @@ if (typeof document !== "undefined") {
 }
 
 /**
- * The product mark: the KUMI wordmark.
+ * The letters of the KUMI wordmark, shared by the badge and the full word.
  *
- * One drawing serves both places the mark appears. The SVG holds the whole
- * word and is sliced from its left edge, so a square viewport — the channel
- * rail's crown — shows the K alone as a badge, while a viewport given the
- * wordmark's own 3.5:1 ratio shows all four letters. That ratio is set in
- * styles.css for the sign-in card; every other caller gets the badge. Two
- * separate drawings were the alternative, and two drawings drift: this way
- * the badge is literally the wordmark's first letter.
+ * One drawing serves both places the mark appears, because two drawings
+ * drift: the badge is literally the wordmark's first letter. `brandMark`
+ * slices a square viewport out of the left edge and gets the K; the sign-in
+ * card calls `brandWordmark` and gets all four letters.
  *
  * The letters are stroked polylines rather than filled outlines, because that
  * is what they are — one constant weight, flat cuts, no curves anywhere. The
@@ -321,18 +318,44 @@ if (typeof document !== "undefined") {
  * read neither this file nor `currentColor`, and a change to the mark belongs
  * in all three together.
  */
-export function brandMark(size = 34) {
-  return `<svg class="brand-mark" width="${size}" height="${size}"
-    viewBox="0 0 168 48" preserveAspectRatio="xMinYMid slice"
-    fill="none" stroke="currentColor" stroke-width="6.6"
-    stroke-linecap="butt" stroke-linejoin="miter" aria-hidden="true">
-    <path d="M8.3 8V40"/>
+const BRAND_LETTERS = `<path d="M8.3 8V40"/>
     <path d="M42 11 13.5 24 42 37"/>
     <path d="M54.3 8v22.7l6.3 6.3h20.8l6.3-6.3V8"/>
     <path d="M102.3 8V40"/>
     <path d="M143.7 8V40"/>
     <path d="M102.3 10.5 123 30l20.7-19.5"/>
-    <path d="M158.3 8V40"/>
+    <path d="M158.3 8V40"/>`;
+
+/** The badge: a square viewport sliced off the wordmark, so only the K shows. */
+export function brandMark(size = 34) {
+  return `<svg class="brand-mark" width="${size}" height="${size}"
+    viewBox="0 0 168 48" preserveAspectRatio="xMinYMid slice"
+    fill="none" stroke="currentColor" stroke-width="6.6"
+    stroke-linecap="butt" stroke-linejoin="miter" aria-hidden="true">
+    ${BRAND_LETTERS}
+  </svg>`;
+}
+
+/**
+ * The whole word, for the surfaces with room for it — the sign-in card and
+ * everything else on the auth shell.
+ *
+ * The height is derived from the width rather than left to CSS: the badge's
+ * `slice` cuts the word down to the K the moment the box is anywhere near
+ * square, so a stylesheet rule that fails to land — or a caller that forgets
+ * one — silently shows a giant letter instead of the name. Asking for a
+ * width here is enough to be sure of the 3.5:1 the letters were drawn at,
+ * and `meet` means the word is never cropped even if something else sizes
+ * the box. `aria-label` rather than `aria-hidden`: read out, this one is the
+ * product's name, not decoration beside a heading that already says it.
+ */
+export function brandWordmark(width = 120) {
+  const height = Math.round((width / 3.5) * 100) / 100;
+  return `<svg class="brand-wordmark" width="${width}" height="${height}"
+    viewBox="0 0 168 48" preserveAspectRatio="xMidYMid meet"
+    fill="none" stroke="currentColor" stroke-width="6.6"
+    stroke-linecap="butt" stroke-linejoin="miter" role="img" aria-label="Kumi">
+    ${BRAND_LETTERS}
   </svg>`;
 }
 

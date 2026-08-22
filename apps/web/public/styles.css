@@ -267,13 +267,12 @@ svg.ui-icon {
   text-align: center;
 }
 
-/* The sign-in card is the one place with room for the whole wordmark, so it
-   is the one place that overrides the mark's square viewport: given the
-   wordmark's own 3.5:1 ratio, nothing is sliced off and all four letters
-   show. `min()` keeps that true on a narrow phone, where the card is the
-   width of the screen rather than 396px. */
-.auth-mascot .brand-mark {
-  width: min(189px, 100%);
+/* The auth shell is the one place with room for the whole word, and
+   `brandWordmark` sizes itself, so all this does is keep it inside a narrow
+   phone where the card is the width of the screen rather than 396px. The
+   height follows the 3.5:1 the letters are drawn at. */
+.auth-mascot .brand-wordmark {
+  max-width: 100%;
   height: auto;
 }
 
@@ -702,9 +701,10 @@ svg.ui-icon {
    its own.
 
    A square box is the badge: the wordmark is sliced from its left edge, so
-   what a caller asking for one gets is the K. Widening the box is what shows
-   the rest of the word, which only the sign-in card below does. */
-.brand-mark {
+   what a caller asking for one gets is the K. The whole word is a different
+   call — `brandWordmark`, which the auth shell uses. */
+.brand-mark,
+.brand-wordmark {
   flex: none;
 }
 
