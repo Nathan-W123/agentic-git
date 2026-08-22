@@ -4415,6 +4415,17 @@ export function render() {
   rendering = true;
   try {
     renderNow();
+  } catch (error) {
+    // A throw here used to escape silently and leave the previous paint on
+    // screen. That is indistinguishable from a screen that is still loading —
+    // and when the previous paint was a loading skeleton, which it always is
+    // on the way into a channel, the room appeared to load forever. Every
+    // later render threw at the same place, so it never recovered.
+    //
+    // The stale paint is the misleading part, so it goes. What replaces it
+    // says what broke, because a person who can read the message can report
+    // it and a person looking at grey boxes cannot.
+    renderFailure(error);
   } finally {
     rendering = false;
     if (renderAgain) {
@@ -4422,6 +4433,52 @@ export function render() {
       render();
     }
   }
+}
+
+/**
+ * What the screen says when rendering itself failed.
+ *
+ * Deliberately built without the helpers the failed render just used: if
+ * `esc`, the icon set or the layout is what threw, reaching for them again
+ * would throw again and leave nothing at all. Text nodes and a reload button,
+ * nothing else.
+ */
+function renderFailure(error) {
+  const message =
+    error instanceof Error
+      ? `${error.message}${error.stack === undefined ? "" : `\n\n${error.stack}`}`
+      : String(error);
+  console.error("Render failed", error);
+  const root = document.querySelector("#app-root");
+  if (root === null) {
+    return;
+  }
+  root.hidden = false;
+  root.removeAttribute("aria-busy");
+  root.textContent = "";
+  const box = document.createElement("div");
+  box.className = "empty";
+  const title = document.createElement("b");
+  title.textContent = "This screen could not be drawn";
+  const body = document.createElement("p");
+  body.textContent =
+    "Something in the page failed while rendering. The details below say " +
+    "what, and reloading may clear it.";
+  const detail = document.createElement("pre");
+  detail.style.whiteSpace = "pre-wrap";
+  detail.style.textAlign = "left";
+  detail.style.fontSize = "12px";
+  detail.style.overflowX = "auto";
+  detail.textContent = message;
+  const again = document.createElement("button");
+  again.type = "button";
+  again.className = "btn btn-sm";
+  again.textContent = "Reload";
+  again.addEventListener("click", () => {
+    window.location.reload();
+  });
+  box.append(title, body, detail, again);
+  root.append(box);
 }
 
 /**
