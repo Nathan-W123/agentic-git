@@ -4054,7 +4054,7 @@ test("the spec tab is where an agent is made org-wide or kept personal", async (
   );
 });
 
-test("agent details use the reference profile without dropping existing controls", async () => {
+test("agent details use the reference profile with supported controls", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const spec = chats.slice(
@@ -4110,14 +4110,12 @@ test("agent details use the reference profile without dropping existing controls
     /\.aspec-current-task-active \.aspec-nav \{[\s\S]*?background: rgba\(0, 0, 0, 0\.14\);/u,
   );
 
-  // Every interactive or informative part of the former details page remains
-  // on the single scrolling surface, including owner-only and read-only paths.
+  // The remaining interactive and informative parts stay on the single
+  // scrolling surface, including owner-only and read-only paths.
   for (const action of [
     "channel-agent-visibility",
     "channel-agent-model",
     "channel-agent-effort",
-    "agent-role-form",
-    "agent-role-input",
     "agent-panel-tab",
     "agent-usage-refresh",
   ]) {
@@ -4125,13 +4123,13 @@ test("agent details use the reference profile without dropping existing controls
   }
   assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
   assert.match(spec, /data-value="history" title="Task history"/u);
-  assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository, member \}\)/u);
+  assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository \}\)/u);
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
   assert.match(spec, /const readOnly =/u);
 });
 
-test("the role field offers the two reserved roles without stopping anyone typing one", async () => {
+test("agent details omit roles while keeping channel membership", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
@@ -4139,53 +4137,23 @@ test("the role field offers the two reserved roles without stopping anyone typin
     chats.indexOf("function agentSpec(agent, repositoryId)"),
     chats.indexOf("function agentPanel()"),
   );
-  const menu = chats.slice(
-    chats.indexOf("const RESERVED_ROLES = ["),
-    chats.indexOf("const AGENT_STATUS_TITLE"),
-  );
+  for (const source of [spec, app]) {
+    assert.doesNotMatch(source, /agent-role-(?:form|input|menu|pick|custom)/u);
+  }
+  assert.doesNotMatch(chats, /roleMenuItems|RESERVED_ROLES|INVESTIGATOR_ROLE/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-role/u);
 
-  // The field is still a field: free text, same commit contract as before.
-  assert.match(spec, /class="aspec-role" data-act="agent-role-input"/u);
-  // With a picker beside it, drawn only where the server would accept one.
-  assert.match(spec, /canManageRepository\(repository\.id\)/u);
-  assert.match(spec, /data-act="agent-role-menu"/u);
-  assert.match(css, /\.agent-spec \.aspec-role-field\s*\{/u);
-  assert.match(css, /\.agent-spec \.aspec-role-pick\s*\{/u);
-
-  // Both reserved names, spelled the way the server compares them.
-  assert.match(chats, /const INVESTIGATOR_ROLE = "investigator"/u);
-  assert.match(menu, /value: AUDITOR_ROLE/u);
-  assert.match(menu, /value: INVESTIGATOR_ROLE/u);
-  // A personal agent cannot hold either, so the entry says so rather than
-  // waiting for the server to refuse it.
-  assert.match(menu, /agent\.visibility !== "org"/u);
-  assert.match(menu, /disabled: personal \|\| current === role\.value/u);
-  // And the menu always leaves a way back to plain typing.
-  assert.match(menu, /act: "agent-role-custom"/u);
-  assert.match(menu, /export function roleMenuItems\(agentId, repositoryId\)/u);
-
-  // Picking one writes through the same setting path a typed role does.
-  assert.match(app, /case "agent-role-menu":/u);
-  assert.match(app, /roleMenuItems\(value, node\.dataset\.repo\)/u);
-  assert.match(app, /showMenu\(node, items\)/u);
+  assert.match(spec, /const channelAssignment = \(repository\)/u);
+  assert.match(spec, /Channel membership/u);
   assert.match(
-    app,
-    /setChannelAgentSetting\(target\.repositoryId, target\.agentId, "role", role, render\)/u,
-  );
-  // Opening the picker must not commit-and-redraw the field out from under
-  // the click that opens it.
-  assert.match(
-    app,
-    /event\.relatedTarget\?\.dataset\?\.act === "agent-role-menu"/u,
+    spec,
+    /\.map\(\(\{ repository \}\) => channelAssignment\(repository\)\)/u,
   );
 });
 
-test("a typed role survives the redraw that commits it", async () => {
-  // Once the roster has resolved, `channelAgentsFor` used to take role only
-  // from that answer. Committing a typed role writes the local override and
-  // redraws before the roster is fetched again — so the field went blank
-  // on Enter unless the override is read here the same way model and effort
-  // already are.
+test("repository role overrides survive roster refreshes", async () => {
+  // Roles still affect task dispatch and roster presentation outside agent
+  // details, so a local override must continue to beat stale roster data.
   const data = await publicFile("data.js");
   const body = data.slice(
     data.indexOf("export function channelAgentsFor"),

@@ -7443,42 +7443,6 @@ button.chip.lg:hover {
   flex: none;
 }
 
-/* Everywhere else this agent works, on the same hairline rows: the channel is
-   the label and the role in it is the editable value. */
-.agent-spec .aspec-channels .aspec-row-label {
-  font-weight: 600;
-  color: var(--text-2);
-}
-
-.agent-spec .aspec-role {
-  flex: 1;
-  min-width: 0;
-  padding: 4px 7px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  text-align: right;
-}
-
-.agent-spec .aspec-role::placeholder {
-  color: var(--text-3);
-}
-
-.agent-spec .aspec-role:hover {
-  border-color: var(--border-soft);
-}
-
-.agent-spec .aspec-role:focus {
-  outline: none;
-  border-color: var(--accent-line);
-  background: var(--bg-inset);
-  color: var(--text);
-  text-align: left;
-}
-
 .agent-spec .aspec-note {
   margin-top: 8px;
   color: var(--text-3);
@@ -7752,66 +7716,6 @@ button.chip.lg:hover {
   text-transform: capitalize;
 }
 
-/* Input and picker travel together, so the pair is what the row sizes. */
-.agent-spec .aspec-role-field {
-  display: flex;
-  min-width: 0;
-  flex: 0 1 230px;
-  align-items: center;
-  gap: 2px;
-}
-
-.agent-spec .aspec-role {
-  flex: 0 1 230px;
-  padding: 7px 10px;
-  border-color: var(--border-soft);
-  background: var(--bg-card);
-  font-size: 13px;
-}
-
-.agent-spec .aspec-role-field .aspec-role {
-  flex: 1 1 auto;
-}
-
-.agent-spec .aspec-role-pick {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  place-items: center;
-}
-
-.agent-spec .aspec-role-pick:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.agent-spec .aspec-role-pick:focus-visible {
-  border-color: var(--accent-line);
-  color: var(--text);
-  outline: none;
-}
-
-.agent-spec .aspec-role-pick svg {
-  width: 13px;
-  height: 13px;
-}
-
-.agent-spec .aspec-role:hover {
-  border-color: var(--border-strong);
-}
-
-.agent-spec .aspec-role:focus {
-  border-color: var(--accent-line);
-  background: var(--bg-inset);
-}
-
 .agent-spec .aspec-nav {
   padding: 6px 8px;
   border: 1px solid transparent;
@@ -7895,15 +7799,6 @@ button.chip.lg:hover {
   .agent-spec .aspec-capability {
     align-items: flex-start;
     flex-wrap: wrap;
-  }
-
-  .agent-spec .aspec-role-field {
-    flex-basis: calc(100% - 36px);
-    margin-left: 36px;
-  }
-
-  .agent-spec .aspec-role {
-    text-align: left;
   }
 
   .agent-spec .aspec-current-task .aspec-nav {
