@@ -2405,6 +2405,23 @@ function messageThreadPaths(timeline, groupConsecutive) {
 }
 
 /**
+ * Names as one phrase — "Zeus", "Zeus & Athena", "Zeus, Athena, & Hermes".
+ *
+ * A clause per name read as three separate announcements when three agents
+ * were working at once; one subject carrying one verb is what a person would
+ * have written.
+ */
+function nameList(names) {
+  if (names.length <= 1) {
+    return names[0] ?? "";
+  }
+  if (names.length === 2) {
+    return `${names[0]} & ${names[1]}`;
+  }
+  return `${names.slice(0, -1).join(", ")}, & ${names[names.length - 1]}`;
+}
+
+/**
  * The three dots, for one surface.
  *
  * People and agents are shown by the same row because they mean the same
@@ -2422,7 +2439,9 @@ function typingIndicator(repositoryId, threadId) {
     return "";
   }
   const who = [
-    ...busy.map((name) => `${name} is thinking`),
+    ...(busy.length === 0
+      ? []
+      : [`${nameList(busy)} ${busy.length === 1 ? "is" : "are"} thinking`]),
     ...(names.length === 0
       ? []
       : [

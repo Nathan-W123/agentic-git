@@ -1605,6 +1605,38 @@ test("the working dot reads the task list for teammates too", async () => {
   );
 });
 
+test("several agents at work are one sentence, not one sentence each", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const nameList = extract<(names: string[]) => string>(
+    chats,
+    "nameList",
+    "typingIndicator",
+  );
+
+  assert.equal(nameList(["Zeus"]), "Zeus");
+  assert.equal(nameList(["Zeus", "Athena"]), "Zeus & Athena");
+  assert.equal(
+    nameList(["Zeus", "Athena", "Hermes"]),
+    "Zeus, Athena, & Hermes",
+  );
+
+  // Three busy agents used to read "Zeus is thinking · Athena is thinking ·
+  // Hermes is thinking" — one clause per name, announced three times over.
+  const indicator = chats.slice(
+    chats.indexOf("function typingIndicator("),
+    chats.indexOf("\nfunction loadEarlierControl("),
+  );
+  assert.match(
+    indicator,
+    /\$\{nameList\(busy\)\} \$\{busy\.length === 1 \? "is" : "are"\} thinking/u,
+  );
+  assert.equal(
+    /busy\.map\(/u.test(indicator),
+    false,
+    "the busy names should not each carry their own verb",
+  );
+});
+
 type LivenessTask = {
   id: string;
   repositoryId: string;
