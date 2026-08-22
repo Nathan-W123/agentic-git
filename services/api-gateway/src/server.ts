@@ -63,6 +63,7 @@ import {
   createId,
   describeError,
   projectBudgets,
+  readsAsReportRequest,
   ROLE_CONTEXT_PREFIX,
   withoutRoleContext,
   type ApprovalStatus,
@@ -1902,7 +1903,7 @@ const INTERROGATIVE_RE =
  * for requests that actually ask to build, fix, audit, or change something.
  */
 const ANSWER_REQUEST_RE =
-  /^(?:(?:give|show|tell)\s+me\s+(?:an?\s+)?(?:summary|overview)\b|summari[sz]e\b|describe\b|explain\b|outline\b|(?:an?\s+)?(?:summary|overview)\b)/iu;
+  /^(?:(?:give|show|tell)\s+me\s+(?:an?\s+)?(?:summary|overview)\b|summari[sz]e\b|describe\b|explain\b|outline\b|(?:an?\s+)?(?:summary|overview)\b|(?:status|progress)\s+report\b)/iu;
 
 /**
  * Whether a message addressed to an agent by name asks for an answer rather
@@ -11014,11 +11015,13 @@ export class ApiGateway {
   /**
    * Previously integrated work that is unmistakably the request being made.
    *
-   * Only successful tasks qualify. An open, failed, cancelled, queued or
-   * planned task still needs an agent, and a request made inside a thread is
-   * an explicit continuation rather than a duplicate. The overlap bar is
-   * intentionally higher than automatic thread merging: a second task is
-   * cheaper than incorrectly claiming that a change already exists.
+   * Only work with a recorded canonical promotion qualifies. `integrated` is
+   * also the terminal status for a report that changed nothing, so the status
+   * alone is not evidence that anything was implemented. An open, failed,
+   * cancelled, queued or planned task still needs an agent, and a request made
+   * inside a thread is an explicit continuation rather than a duplicate. The
+   * overlap bar is intentionally higher than automatic thread merging: a
+   * second task is cheaper than incorrectly claiming that a change exists.
    */
   private async findCompletedWorkReference(input: {
     projectId: string;
@@ -11041,9 +11044,11 @@ export class ApiGateway {
       /\b(?:undo(?:ne|ing)?|revert(?:s|ed|ing)?|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|disabl(?:e|es|ed|ing))\b/iu.test(
         text,
       );
-    let best:
-      | { task: SubmittedTask; root: ChannelMessage | undefined; score: number }
-      | undefined;
+    const matches: Array<{
+      task: SubmittedTask;
+      root: ChannelMessage | undefined;
+      score: number;
+    }> = [];
     for (const task of recentFirst(tasks)) {
       if (task.status !== "integrated") {
         continue;
@@ -11071,10 +11076,27 @@ export class ApiGateway {
         textOverlap(request, objective),
         rootRequest === "" ? 0 : textOverlap(request, rootRequest),
       );
-      if (score < 0.6 || (best !== undefined && score <= best.score)) {
+      if (score < 0.6) {
         continue;
       }
-      best = { task, root, score };
+      matches.push({ task, root, score });
+    }
+    matches.sort((left, right) => right.score - left.score);
+    let best:
+      | { task: SubmittedTask; root: ChannelMessage | undefined; score: number }
+      | undefined;
+    for (const match of matches) {
+      // Reports and no-op runs finish as `integrated` too. The promotion is
+      // the durable fact that canonical actually moved for this task; without
+      // one, saying the requested change already exists would be a guess.
+      if (
+        (await this.revisionsForTask(input.repositoryId, match.task.id).catch(
+          () => undefined,
+        )) !== undefined
+      ) {
+        best = match;
+        break;
+      }
     }
     if (best === undefined) {
       return undefined;
@@ -11259,6 +11281,11 @@ export class ApiGateway {
       input.planOnly !== true &&
       input.queueAfterCurrent !== true &&
       input.forceQuestion !== true &&
+      // This shortcut is only safe for an explicit change request. Reports
+      // and audits are time-sensitive answers, while vague instructions need
+      // the agent to read context before deciding what, if anything, exists.
+      looksLikeTaskRequest(content) &&
+      !readsAsReportRequest(withoutMentions(content)) &&
       !readsAsQuestion(content) &&
       !asksAboutWork(withoutMentions(content)) &&
       !SYSTEM_PACKAGE_INSTALL_RE.test(content)
