@@ -1176,15 +1176,23 @@ svg.ui-icon {
   flex: 1;
 }
 
-/* A bar has two ends, so it is drawn in both colours: the fill leaves in the
-   primary and arrives in the secondary. A flat fill says how far; a fill that
-   changes along its length says which way. The semantic fills below keep their
-   one colour — green means passing and nothing about taste changes that. */
+/* A live bar carries the same travelling highlight as status copy — the fill
+   still reads how far, but the sweep says the run is ongoing rather than a
+   frozen fraction. Semantic fills below keep one flat colour: green means
+   passing and nothing about taste changes that. */
 .bar > i {
   display: block;
   height: 100%;
   border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  background: linear-gradient(
+    100deg,
+    var(--accent-dim) 0 38%,
+    var(--accent-2-bright) 48%,
+    var(--accent-dim) 58% 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  animation: thread-activity-sweep 2.4s ease-in-out infinite;
   transition: width 0.4s ease;
 }
 
@@ -1206,6 +1214,13 @@ svg.ui-icon {
 
 .bar > i.grey {
   background: var(--text-4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar > i:not(.green):not(.blue):not(.orange):not(.grey) {
+    animation: none;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  }
 }
 
 /* Context usage: same optical weight as the icons beside it. */
