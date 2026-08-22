@@ -6030,6 +6030,92 @@ test("a request that merely opens a thread carries nothing; the follow-up in it 
   );
 });
 
+test("a follow-up to a busy thread agent queues behind its active task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "busy-thread-follow-up");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) handle the current work" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1 && runtime.runCalls.length === 1,
+    "the active task never started",
+  );
+  const current = (
+    await runtime.store.listSubmittedTasks({ repositoryId })
+  ).find((task) => task.objective.includes("current work"));
+  assert.ok(current !== undefined);
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  const root = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.taskId === current.id);
+  assert.ok(root !== undefined, "the active task never opened its thread");
+
+  // This is the shape that used to miss the verb-list task check and enter a
+  // provider answer turn. Because that provider is occupied by `current`, it
+  // waited for the 180-second question timeout instead of retaining the work.
+  const followUp =
+    "when I give you another task while this one is in progress, queue it " +
+    "for afterward";
+  assert.equal(looksLikeTaskRequest(followUp), false);
+  const promptsBefore = runtime.chatPrompts.length;
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: followUp } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length === 2,
+    "the busy agent's follow-up was not retained as queued work",
+  );
+
+  assert.equal(
+    runtime.chatPrompts.length,
+    promptsBefore,
+    "a busy provider should not receive a competing direct-answer turn",
+  );
+  assert.equal(runtime.submittedTasks[1]?.queueAfterCurrent, true);
+  assert.equal(
+    runtime.runCalls.length,
+    1,
+    "queued work must not ask the repository to run before its predecessor",
+  );
+  const queued = (
+    await runtime.store.listSubmittedTasks({ repositoryId })
+  ).find((task) => task.id !== current.id);
+  assert.equal(queued?.afterTaskId, current.id);
+  assert.deepEqual(
+    await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID),
+    [],
+  );
+
+  await runtime.store.completeSubmittedTask(current.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_reported",
+    taskId: current.id,
+    data: { explanation: "Current work finished." },
+  });
+  await waitFor(
+    async () => runtime.runCalls.length === 2,
+    "the queued follow-up did not start after its predecessor finished",
+  );
+  const [claimed] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(claimed?.id, queued?.id);
+});
+
 /** A thread on a person's message is a conversation between people. */
 test("a reply in a person's thread does not summon an agent", async (t) => {
   const runtime = await startRuntime(t);

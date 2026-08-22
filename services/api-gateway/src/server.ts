@@ -12247,6 +12247,12 @@ export class ApiGateway {
       input.projectId,
       input.repositoryId,
     );
+    // A provider that is already running a task cannot also service the
+    // direct-answer turn below. Treat a reply to that agent as follow-on work
+    // and let persistence chain it behind the active task; otherwise this
+    // request waits for the provider until the question timeout and is lost.
+    // `/dnc` remains the explicit way to require a direct, read-only answer.
+    const activity = await this.agentActivityIn(input.repositoryId);
     let threadAuthorId = AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
       ? root.authorId
       : root.taskId === undefined
@@ -12320,29 +12326,38 @@ export class ApiGateway {
         }
         return;
       }
-      if (forceQuestion && named[0] !== undefined) {
+      const candidate = named[0];
+      const queueAfterCurrent =
+        candidate !== undefined && activity.busy(candidate);
+      if (forceQuestion && candidate !== undefined) {
         await this.dispatchOneMention({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
           content: question,
           senderId: input.viewerId,
-          candidate: named[0],
+          candidate,
           threadMessageId: input.messageId,
           forceQuestion: true,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
         });
         return;
       }
       // An instruction goes to one agent even when several were named — two
       // agents editing one repository from one sentence is a collision, not
       // collaboration. Questions fan out; each named agent answers as itself.
-      if (!answerOnly && looksLikeTaskRequest(question) && named[0] !== undefined) {
+      if (
+        !answerOnly &&
+        candidate !== undefined &&
+        (looksLikeTaskRequest(question) || queueAfterCurrent)
+      ) {
         await this.dispatchOneMention({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
           content: question,
           senderId: input.viewerId,
-          candidate: named[0],
+          candidate,
           threadMessageId: input.messageId,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
           ...(brief ? { brief: true } : {}),
         });
         return;
@@ -12387,8 +12402,11 @@ export class ApiGateway {
       ? candidates.filter((entry) => question.includes(`@${entry.name}`))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
-    if (forceQuestion && answering[0] !== undefined) {
-      const candidate = answering[0];
+    const firstAnswering = answering[0];
+    const queueAfterCurrent =
+      firstAnswering !== undefined && activity.busy(firstAnswering);
+    if (forceQuestion && firstAnswering !== undefined) {
+      const candidate = firstAnswering;
       if (
         candidate.visibility !== "personal" ||
         candidate.userId === input.viewerId
@@ -12401,6 +12419,7 @@ export class ApiGateway {
           candidate,
           threadMessageId: input.messageId,
           forceQuestion: true,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
         });
         return;
       }
@@ -12510,6 +12529,7 @@ export class ApiGateway {
           candidate: owner,
           threadMessageId: input.messageId,
           trigger: "conversation",
+          ...(activity.busy(owner) ? { queueAfterCurrent: true } : {}),
           ...(brief ? { brief: true } : {}),
         });
         return;
@@ -12521,8 +12541,12 @@ export class ApiGateway {
     // which no similarity score can claim to know. Only one agent is given
     // the work even if several were named — two agents editing the same
     // repository from one sentence is a collision, not collaboration.
-    if (!answerOnly && looksLikeTaskRequest(question) && answering[0] !== undefined) {
-      const candidate = answering[0];
+    if (
+      !answerOnly &&
+      firstAnswering !== undefined &&
+      (looksLikeTaskRequest(question) || queueAfterCurrent)
+    ) {
+      const candidate = firstAnswering;
       if (candidate.visibility !== "personal" || candidate.userId === input.viewerId) {
         await this.dispatchOneMention({
           projectId: input.projectId,
@@ -12531,6 +12555,7 @@ export class ApiGateway {
           senderId: input.viewerId,
           candidate,
           threadMessageId: input.messageId,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
           ...(brief ? { brief: true } : {}),
         });
         return;
