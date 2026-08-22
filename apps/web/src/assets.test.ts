@@ -1065,12 +1065,17 @@ test("a reply carries a quiet visual path back to its root", async () => {
     /\n\.cmsg-row\.cmsg-threaded \.cmsg-thread-link::before \{([\s\S]*?)\n\}/u.exec(
       css,
     )?.[1];
+  const channelEndCap =
+    /\n\.cmsg-row\.cmsg-thread-path-end \.cmsg-thread-link::after \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
   const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
     css,
   )?.[1];
   assert.notEqual(channelStem, undefined, "the shared channel stem should exist");
   assert.notEqual(channelEnd, undefined, "the channel stem should end at its route");
   assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
+  assert.notEqual(channelEndCap, undefined, "the final branch should close the path");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
   for (const branch of [channelElbow, panelBranch]) {
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
@@ -1107,13 +1112,14 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
-  // Written from the column variables rather than as the 13px they work out
+  // Written from the column variables rather than as the 5px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
   // drifting apart when any of those three numbers moves.
   assert.match(
     channelElbow ?? "",
-    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 16px\);/u,
+    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 24px\);/u,
   );
+  assert.match(channelElbow ?? "", /width: 24px;/u);
   // The elbow turns out of the stem, so its own upright has to stand in the
   // stem's column. It is placed from its right edge, which means the gap plus
   // its width must land on the stem's offset — and it must be measured by the
@@ -1130,6 +1136,10 @@ test("a reply carries a quiet visual path back to its root", async () => {
     -stemLeft,
     "the elbow's upright should sit in the stem's own column",
   );
+  assert.match(channelEndCap ?? "", /width: 3px;/u);
+  assert.match(channelEndCap ?? "", /height: 3px;/u);
+  assert.match(channelEndCap ?? "", /border-radius: 50%;/u);
+  assert.match(channelEndCap ?? "", /background: var\(--cmsg-stem\);/u);
   // The hook is only the quarter turn: a straight upright here would be
   // painted on top of the shared stem and make every branch visibly thicker.
   // The 20px face and two pixels of vertical padding put the link's midpoint

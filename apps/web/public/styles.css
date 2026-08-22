@@ -6510,8 +6510,9 @@ button.chip.lg:hover {
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
    eleven-pixel quarter turn starts at the stem's tangent instead of laying a
-   second upright over it; the thirteen-pixel gap keeps the stroke clear of
-   the replier faces. Where the turn does still meet the stem it meets it in
+   second upright over it; the five-pixel gap gives the stroke and replier face
+   the same close breathing room as the avatar and stem above. Where the turn
+   does still meet the stem it meets it in
    the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
    the rest of the line.
 
@@ -6520,7 +6521,7 @@ button.chip.lg:hover {
    own three-pixel left stroke hung *outside* the declared width and pushed
    the whole corner three pixels further left than the stem it turns out of —
    a visible step where the two should be one line. Sized by the border box,
-   the gap plus the 16px of elbow put that stroke in the connector's own
+   the gap plus the 24px of elbow put that stroke in the connector's own
    column, exactly where the stem above it stands: the gap is read from
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
@@ -6534,13 +6535,28 @@ button.chip.lg:hover {
   position: absolute;
   box-sizing: border-box;
   top: calc(50% - 8px);
-  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 16px);
-  width: 16px;
+  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 24px);
+  width: 24px;
   height: 11px;
   border-left: 3px solid var(--cmsg-stem);
   border-bottom: 3px solid var(--cmsg-stem);
   border-bottom-left-radius: 11px;
   border-bottom-right-radius: 2px;
+  pointer-events: none;
+}
+
+/* The last turn closes the path with a round cap. At the same three pixels as
+   the stroke it reads as a softened endpoint rather than a new marker, but it
+   keeps the bottom branch from being mistaken for one more continuation. */
+.cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 4px);
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--cmsg-stem);
   pointer-events: none;
 }
 
