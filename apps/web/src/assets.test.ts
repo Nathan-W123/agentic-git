@@ -663,7 +663,7 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   );
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
-    chats.indexOf("function chanSearchRow"),
+    chats.indexOf("function threadParticipants"),
   );
 
   // The control stays with the surface it changes; the conversation header
@@ -857,112 +857,27 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
   assert.doesNotMatch(foldAction, /\brender\(\)/u);
 });
 
-test("the pink tools toggle animates without replacing its node", async () => {
+test("channel message search and its empty tool tray are absent", async () => {
   const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
-  const action = app.slice(
-    app.indexOf('case "chan-tools-toggle"'),
-    app.indexOf('case "agent-panel-open"'),
-  );
 
-  assert.match(
-    chats,
-    /class="icon-btn chan-tools-toggle\$\{[\s\S]{0,100}state\.chanToolsOpen === true \? " on" : ""/u,
-  );
-  assert.match(
-    css,
-    /\.icon-btn \{[\s\S]{0,260}transition: background 0\.15s ease, color 0\.15s ease;/u,
-  );
-  assert.match(
-    css,
-    /\.icon-btn\.on \{\s*background: var\(--accent-wash\);\s*color: var\(--accent-bright\);/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools-toggle svg \{\s*transition: transform 0\.15s ease;/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools-toggle\.on svg \{\s*transform: rotate\(-90deg\);/u,
-  );
+  for (const source of [app, data, chats]) {
+    assert.doesNotMatch(source, /chanMsgQuery|chanMsgSearchOpen/u);
+  }
+  assert.doesNotMatch(app, /channel-msg-search|chan-tools-toggle|ag\.chantools/u);
+  assert.doesNotMatch(app, /Search the messages in this channel/u);
+  assert.doesNotMatch(chats, /channel-msg-search|chan-search|chan-tools/u);
+  assert.doesNotMatch(chats, /function matchesQuery|function chanSearchRow/u);
+  assert.doesNotMatch(data, /chanToolsOpen|ag\.chantools/u);
+  assert.doesNotMatch(css, /\.chan-search|\.chan-tools|chan-tool-(?:in|out)/u);
 
-  // The header itself must redraw because opening the fold adds its tools.
-  // Reattaching the clicked button in its old state before applying `on`
-  // gives both the pink treatment and the arrow a real before/after to tween.
-  assert.match(action, /const toggle = node;/u);
-  assert.match(action, /state\.chanToolsOpen = open;[\s\S]*?\brender\(\);/u);
-  assert.match(action, /replacement\.replaceWith\(toggle\);/u);
-  assert.match(action, /void toggle\.offsetWidth;/u);
-  assert.match(action, /toggle\.classList\.toggle\("on", open\);/u);
-  assert.match(action, /toggle\.setAttribute\("aria-expanded", String\(open\)\);/u);
-  assert.match(
-    action,
-    /toggle\.setAttribute\("title", open \? "Hide tools" : "Show tools"\);/u,
-  );
-});
-
-test("the header tools come out of the arrow and fold back into it", async () => {
-  const app = await publicFile("app.js");
-  const css = await publicFile("styles.css");
-
-  // A screen is one `innerHTML` assignment, so the tray is a new element on
-  // every render and a bare CSS animation would replay the reveal whenever
-  // anything redrew. It joins the surfaces the render loop decides for.
-  const surfaces = app.slice(
-    app.indexOf("const MOTION_SURFACES = ["),
-    app.indexOf("/** Whether each surface was on screen"),
-  );
-  assert.match(
-    surfaces,
-    /selector: "\.chan-tools",\s*parent: "\.chan-head",\s*enter: "tools-entering",\s*leave: "tools-leaving",/u,
-  );
-
-  // A tray on its way out has to go back beside the arrow it is retreating
-  // into, not appended past it on the far side.
-  assert.match(surfaces, /place: \(parent, node\) => \{[\s\S]{0,200}toggle\.before\(node\);/u);
-  const play = app.slice(
-    app.indexOf("function playSurfaceMotion"),
-    app.indexOf("function animateOnce"),
-  );
-  assert.match(
-    play,
-    /if \(surface\.place === undefined\) \{\s*parent\.append\(closed\);\s*\} else \{\s*surface\.place\(parent, closed\);/u,
-  );
-
-  // Out of the arrow rather than in place: each icon starts the distance it
-  // sits from the arrow away from itself, and the row is staggered so it
-  // unfolds from that one point.
-  assert.match(
-    css,
-    /\.chan-tools\.tools-entering > \* \{\s*--tool-shift: 42px;\s*animation: chan-tool-out/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools\.tools-entering > \*:nth-last-child\(2\) \{\s*--tool-shift: 74px;\s*animation-delay: 0\.03s;/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools\.tools-leaving > \*:nth-child\(2\) \{\s*animation-delay: 0\.03s;/u,
-  );
-  assert.match(
-    css,
-    /@keyframes chan-tool-out \{\s*from \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
-  );
-  assert.match(
-    css,
-    /@keyframes chan-tool-in \{\s*to \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
-  );
-
-  // The stagger has to finish inside the fallback timer that drops a closing
-  // surface, or the tray outlives its own exit.
-  assert.match(css, /animation: chan-tool-in 0\.18s/u);
-  assert.match(css, /\.chan-tools\.tools-leaving > \*:nth-child\(n \+ 5\) \{\s*animation-delay: 0\.12s;/u);
-
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{\s*\.chan-tools\.tools-entering > \* \{\s*animation: none;\s*\}[\s\S]{0,320}\.chan-tools\.tools-leaving \{\s*display: none;/u,
-  );
+  // The transcript still renders every loaded message and keeps its ordinary
+  // empty state now that no query can narrow the list.
+  assert.match(chats, /const entries = channelMessagesFor\(repositoryId\);/u);
+  assert.match(chats, /"No messages yet"/u);
+  assert.match(chats, /\$\{messageList\(repositoryId\)\}/u);
 });
 
 test("the phone drawer is dragged out under the finger, not toggled", async () => {
@@ -1592,7 +1507,12 @@ test("motion is restrained, reducible, and off when an agent is not there", asyn
     css,
     /\.agent-face\[data-presence="offline"\] svg,\s*\.agent-face\[data-presence="offline"\] svg \* \{\s*animation: none;/u,
   );
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/u);
+  const reduced = [...css.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/gu)]
+    .map((match) => match[1] ?? "")
+    .find((block) => block.includes(".agent-face .agent-run::after"));
+  assert.notEqual(reduced, undefined, "the coding dot should honour reduced motion");
+  assert.match(reduced ?? "", /\.cmsg-thread-link \.ctl-faces \.ctl-working::before,/u);
+  assert.match(reduced ?? "", /animation: none;/u);
 });
 
 /**
@@ -1862,7 +1782,7 @@ test("a connected agent is not painted as a working one", async () => {
   );
 });
 
-test("working agent faces replace duplicate dots with a progress pie", async () => {
+test("working agent faces put progress around their green status dot", async () => {
   const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");
@@ -1875,12 +1795,23 @@ test("working agent faces replace duplicate dots with a progress pie", async () 
   assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
   assert.doesNotMatch(row, /statusDot\(/u);
   assert.match(ui, /working\s*\? '<i class="agent-run" aria-label="Working"><\/i>'/u);
-  const facePie = /\.agent-face \.agent-run \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  const faceRing = /\.agent-face \.agent-run \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(
-    facePie ?? "",
-    /conic-gradient\(\s*#f3efe8 calc\(var\(--run, 0\) \* 1%\)/u,
+    faceRing ?? "",
+    /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.doesNotMatch(facePie ?? "", /var\(--accent\)/u);
+  assert.match(faceRing ?? "", /right: -3px;/u);
+  assert.match(faceRing ?? "", /bottom: -1px;/u);
+  assert.match(faceRing ?? "", /width: 15px;/u);
+  assert.match(faceRing ?? "", /height: 15px;/u);
+  assert.doesNotMatch(faceRing ?? "", /#f3efe8|inset: -1px/u);
+
+  const faceDot = /\.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(faceDot, undefined, "live progress should keep a status dot");
+  assert.match(faceDot ?? "", /width: 7px;/u);
+  assert.match(faceDot ?? "", /height: 7px;/u);
+  assert.match(faceDot ?? "", /background: var\(--green\);/u);
+  assert.match(faceDot ?? "", /box-shadow: 0 0 0 2px var\(--bg-card\);/u);
 
   const progress = data.slice(
     data.indexOf("export function agentWorkingProgress"),
@@ -3602,27 +3533,28 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.doesNotMatch(idle, /ctl-activity/u);
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
-  // A pie over the whole face rather than a badge in its corner: the wedge
-  // still to come is darker than the wedge already travelled, which is the
-  // entire read.
+  // The run is a small ring around a green coding dot, leaving the face clear.
   const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
-  assert.notEqual(ring, undefined, "the pie should be drawn on the face");
+  assert.notEqual(ring, undefined, "the progress ring should be drawn beside the face");
   assert.match(ring ?? "", /border-radius: 50%;/u);
   assert.match(
     ring ?? "",
-    /conic-gradient\(\s*#f3efe8 calc\(var\(--run, 0\) \* 1%\)/u,
+    /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.doesNotMatch(ring ?? "", /var\(--accent\)/u);
-  // Undone is the darker of the two, and it is what the rest of the circle is
-  // filled with.
-  assert.match(ring ?? "", /rgba\(0, 0, 0, 0\.55\) 0\s*\);/u);
-  // It covers the icon rather than sitting in a corner of it, so nothing may
-  // pin it to one edge or cut a hole in its middle.
-  assert.match(ring ?? "", /inset: -1px;/u);
-  assert.doesNotMatch(ring ?? "", /mask:/u);
-  assert.doesNotMatch(ring ?? "", /width:/u);
-  assert.doesNotMatch(ring ?? "", /height:/u);
+  assert.match(ring ?? "", /right: -3px;/u);
+  assert.match(ring ?? "", /bottom: -1px;/u);
+  assert.match(ring ?? "", /width: 15px;/u);
+  assert.match(ring ?? "", /height: 15px;/u);
+  assert.doesNotMatch(ring ?? "", /#f3efe8|inset: -1px/u);
+
+  const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
+    .exec(css)?.[1];
+  assert.notEqual(dot, undefined, "the progress ring should surround a coding dot");
+  assert.match(dot ?? "", /width: 7px;/u);
+  assert.match(dot ?? "", /height: 7px;/u);
+  assert.match(dot ?? "", /background: var\(--green\);/u);
+  assert.match(dot ?? "", /box-shadow: 0 0 0 2px var\(--bg-chat\);/u);
 
   // Every kind of participant gets the same surface-coloured cutout. Agent
   // marks are not `.avatar`s, so putting the ring on portraits alone lets two
@@ -4012,7 +3944,7 @@ test("people and agents render directly without a main branch node", async () =>
   );
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
-    chats.indexOf("function chanSearchRow"),
+    chats.indexOf("function threadParticipants"),
   );
 
   assert.match(sidebar, /section\("People", "invite-repo"/u);
@@ -4741,11 +4673,11 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
 
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
-    chats.indexOf("function chanSearchRow"),
+    chats.indexOf("function threadParticipants"),
   );
-  // The tools tray keeps search; the info / exclamation control is gone —
-  // channel info is still reached from the sidebar brand.
-  assert.match(header, /data-act="channel-msg-search-toggle"/u);
+  // Search and the info / exclamation control are gone; channel info is still
+  // reached from the sidebar brand.
+  assert.doesNotMatch(header, /channel-msg-search|icon\("search"\)/u);
   assert.doesNotMatch(header, /iconButton\("info"/u);
   assert.doesNotMatch(header, /act: "channel-info"/u);
   assert.match(chats, /data-act="channel-info"/u);

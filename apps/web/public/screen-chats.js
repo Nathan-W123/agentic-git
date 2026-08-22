@@ -91,7 +91,6 @@ import {
   emptyState,
   miniSelect,
   relativeTime,
-  searchBox,
   showPopover,
   toast,
 } from "./ui.js";
@@ -1240,50 +1239,7 @@ function chanHeader(repositoryId) {
     <!-- No faces here. Six cropped circles said "some agents and some people
          are in this room", which the two counts already say exactly, in less
          space and without the guessing. -->
-    ${
-      // Six controls sat permanently in a header that is 44 pixels tall on a
-      // phone, and on any given visit a reader wants none of them. Behind one
-      // arrow they are a menu; in front of it they were the header.
-      //
-      // Except on a phone, where the header wraps and the tools get a full
-      // row of their own (see the 600px tier in styles.css): there the fold
-      // saved no space, and the toggle was one more tap in front of every
-      // tool. Pinned open below the breakpoint — the chevron is hidden by
-      // the same tier, and `chanToolsOpen` keeps meaning what it means on
-      // desktop.
-      state.chanToolsOpen !== true && !phoneLayout()
-        ? ""
-        : `<span class="chan-tools">
-            <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
-              data-act="channel-msg-search-toggle" title="Search messages"
-              aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
-          </span>`
-    }
-    <button type="button" class="icon-btn chan-tools-toggle${
-      state.chanToolsOpen === true ? " on" : ""
-    }" data-act="chan-tools-toggle"
-      title="${state.chanToolsOpen === true ? "Hide tools" : "Show tools"}"
-      aria-expanded="${
-        state.chanToolsOpen === true
-      }">${
-        // Points up when the tools are away and left when they are out: the
-        // arrow indicates the direction they went, not the direction of the
-        // fold. Closed it stands up on its own; open it lies down pointing
-        // back along the row it just laid out.
-        icon("chevronUp")
-      }</button>
   </header>`;
-}
-
-function chanSearchRow() {
-  if (!state.chanMsgSearchOpen) {
-    return `<div hidden></div>`;
-  }
-  return `<div class="chan-search">${searchBox(
-    "Search messages in this channel...",
-    state.chanMsgQuery,
-    "channel-msg-search",
-  )}</div>`;
 }
 
 /**
@@ -2508,25 +2464,6 @@ function loadEarlierControl(repositoryId) {
   </div>`;
 }
 
-/**
- * Whether a search term is anywhere in this thread.
- *
- * Roots and their replies both, because nearly everything an agent says lives
- * in a thread — searching only the roots meant searching past the answers and
- * being told there was nothing there.
- */
-function matchesQuery(entry, query) {
-  if (query === "") {
-    return true;
-  }
-  if (String(entry.content ?? "").toLowerCase().includes(query)) {
-    return true;
-  }
-  return (entry.replies ?? []).some((reply) =>
-    String(reply.content ?? "").toLowerCase().includes(query),
-  );
-}
-
 /** The transcript's shape while its first server page is unresolved. */
 function channelMessageSkeleton(repositoryId) {
   return `<div class="chan-messages chan-messages-loading" id="chan-messages"
@@ -2553,10 +2490,7 @@ function messageList(repositoryId) {
   if (!state.channelLoaded.has(repositoryId)) {
     return channelMessageSkeleton(repositoryId);
   }
-  const query = state.chanMsgQuery.trim().toLowerCase();
-  const entries = channelMessagesFor(repositoryId).filter((entry) =>
-    matchesQuery(entry, query),
-  );
+  const entries = channelMessagesFor(repositoryId);
   if (entries.length === 0) {
     return `<div class="chan-messages" id="chan-messages" role="log"
       aria-live="polite" aria-relevant="additions" aria-label="Channel messages"
@@ -2564,17 +2498,8 @@ function messageList(repositoryId) {
       repositoryId,
     )}${emptyState(
       "chatBubble",
-      query === "" ? "No messages yet" : "Nothing matches that search",
-      query === ""
-        ? "Say hello — messages sent here stay in this channel for your session."
-        : // Names the boundary rather than reporting a limit as an answer.
-          // Search reads what is loaded, and saying "nothing matches" when
-          // older pages had simply never been fetched is the part of this
-          // that actually misleads people — the control above offers the
-          // pages the sentence is talking about.
-          state.channelHasMore[repositoryId] === true
-          ? "Nothing in the messages loaded so far. Load earlier messages to search further back."
-          : "Try a different search term.",
+      "No messages yet",
+      "Say hello — messages sent here stay in this channel for your session.",
       // Also on the empty branch: an empty channel is exactly where somebody
       // starting to type matters most, and leaving it off here meant the dots
       // could not appear until the room already had a message in it.
@@ -5432,7 +5357,6 @@ export function renderChats() {
     }
     <div class="chan-main">
       ${chanHeader(repositoryId)}
-      ${chanSearchRow()}
       ${pinnedBanner(repositoryId)}
       ${messageList(repositoryId)}
       ${jumpToLatest()}

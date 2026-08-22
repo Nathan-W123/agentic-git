@@ -985,18 +985,37 @@ svg.ui-icon {
   border: 2px solid var(--bg-card);
 }
 
-/* One status treatment per agent face. While work is live, the progress pie
-   replaces the corner presence dot and begins fully dark at pickup. */
+/* Live work keeps the ordinary green status dot and adds progress around it.
+   The ring starts on its quiet track and fills clockwise; it stays in the
+   corner so progress never paints over the agent mark itself. */
 .agent-face .agent-run {
   position: absolute;
-  inset: -1px;
+  right: -3px;
+  bottom: -1px;
   z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: conic-gradient(
-    #f3efe8 calc(var(--run, 0) * 1%),
-    rgba(0, 0, 0, 0.62) 0
+    var(--green) calc(var(--run, 0) * 1%),
+    var(--border-strong) 0
   );
+  box-shadow: 0 0 0 2px var(--bg-card);
   pointer-events: none;
+}
+
+/* The solid centre says what the ring is measuring: green means coding. The
+   surface-coloured gap keeps the dot and the progress stroke as two readings. */
+.agent-face .agent-run::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--bg-card);
+  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -5356,7 +5375,6 @@ button.chip.lg:hover {
 }
 
 .chan-main > .chan-head,
-.chan-main > .chan-search,
 .chan-main > .chan-pins,
 .chan-main > .chan-composer-wrap {
   flex: none;
@@ -5475,10 +5493,6 @@ button.chip.lg:hover {
 
 .chan-head .spacer {
   flex: 1;
-}
-
-.chan-search {
-  padding: 0 18px 12px;
 }
 
 .chan-messages {
@@ -6587,19 +6601,9 @@ button.chip.lg:hover {
   display: none;
 }
 
-/* The run's position, drawn as a pie over the whole face of the agent running
-   it: the part still to come lies over the portrait as a dark wedge, and the
-   part already travelled uses the off-white default agent colour, so the icon
-   visibly fills up clockwise as the narration below it advances. Dark for
-   undone and light for done is the whole read — nothing to parse, just how
-   much of the face has brightened.
-
-   The dark wedge remains translucent, which lets the unfinished portion keep
-   the mark underneath legible. A hollow badge in the corner said the same
-   thing at a twelfth of the size, and at that size the sweep was a guess.
-
-   `z-index` keeps the pie whole: the faces in a stack overlap leftwards, and
-   the next one along would otherwise cut into it. */
+/* The working agent stays at the front of the stack. Its status is the same
+   green dot used elsewhere, with the run's position filling the ring around
+   that dot instead of covering the agent mark. */
 .cmsg-thread-link .ctl-faces .ctl-working {
   position: relative;
   z-index: 1;
@@ -6607,15 +6611,34 @@ button.chip.lg:hover {
   align-items: center;
 }
 
+.cmsg-thread-link .ctl-faces .ctl-working::before {
+  content: "";
+  position: absolute;
+  right: 1px;
+  bottom: 3px;
+  z-index: 2;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--bg-chat);
+  animation: status-breathe 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
 .cmsg-thread-link .ctl-faces .ctl-working::after {
   content: "";
   position: absolute;
-  inset: -1px;
+  right: -3px;
+  bottom: -1px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: conic-gradient(
-    #f3efe8 calc(var(--run, 0) * 1%),
-    rgba(0, 0, 0, 0.55) 0
+    var(--green) calc(var(--run, 0) * 1%),
+    var(--border-strong) 0
   );
+  box-shadow: 0 0 0 2px var(--bg-chat);
   pointer-events: none;
 }
 
@@ -7161,138 +7184,6 @@ button.chip.lg:hover {
 
 .cmsg-row.cmsg-auditor .cmsg-text .rt-head {
   color: var(--accent);
-}
-
-/* The header's tools, revealed together. Laid out as one group so they read
-   as a tray that opened rather than as controls that each turned up on their
-   own — the stagger below is one row unfolding, not five separate arrivals. */
-.chan-tools {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-
-/* The arrow turns to point at what it opened, which is the only thing telling
-   a reader the header has more in it than they can see. */
-.chan-tools-toggle svg {
-  transition: transform 0.15s ease;
-}
-
-/* Up at rest, left when the tools are showing. A quarter turn rather than a
-   half, so the sweep reads as the arrow tipping over toward the row it
-   revealed instead of spinning in place. */
-.chan-tools-toggle.on svg {
-  transform: rotate(-90deg);
-}
-
-/* The tools coming out of the arrow, and going back into it.
- *
- * Driven from `playSurfaceMotion` in app.js rather than from the tray's own
- * existence: the screen is one `innerHTML` assignment, so this row is a new
- * element after every keystroke and every event off the stream, and a bare
- * animation on `.chan-tools` would replay the whole reveal each time somebody
- * typed. The classes below are only ever worn for the one render that opened
- * or closed the fold.
- *
- * Each icon starts stacked under the arrow and travels the distance it
- * actually sits from it, so the row unfolds out of that one point instead of
- * sliding sideways as a block. 42px is the span between the last icon's
- * centre and the arrow's (15 + the header's 12px gap + 15), and every step
- * further along the row adds one 32px control pitch. The one nearest the arrow leads on the way out
- * and the far one leads on the way back, which is what makes the return read
- * as the row being drawn in rather than pushed away. */
-.chan-tools.tools-entering > * {
-  --tool-shift: 42px;
-  animation: chan-tool-out 0.22s cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
-}
-
-.chan-tools.tools-entering > *:nth-last-child(2) {
-  --tool-shift: 74px;
-  animation-delay: 0.03s;
-}
-
-.chan-tools.tools-entering > *:nth-last-child(3) {
-  --tool-shift: 106px;
-  animation-delay: 0.06s;
-}
-
-.chan-tools.tools-entering > *:nth-last-child(4) {
-  --tool-shift: 138px;
-  animation-delay: 0.09s;
-}
-
-/* Everything beyond the fourth travels together. The tray holds five controls
-   today and the count is not fixed, so the last rule has to be open-ended
-   rather than one more line per icon somebody adds. */
-.chan-tools.tools-entering > *:nth-last-child(n + 5) {
-  --tool-shift: 170px;
-  animation-delay: 0.12s;
-}
-
-.chan-tools.tools-leaving > * {
-  --tool-shift: 42px;
-  animation: chan-tool-in 0.18s cubic-bezier(0.55, 0.06, 0.68, 0.19) both;
-}
-
-.chan-tools.tools-leaving > *:nth-last-child(2) {
-  --tool-shift: 74px;
-}
-
-.chan-tools.tools-leaving > *:nth-last-child(3) {
-  --tool-shift: 106px;
-}
-
-.chan-tools.tools-leaving > *:nth-last-child(4) {
-  --tool-shift: 138px;
-}
-
-.chan-tools.tools-leaving > *:nth-last-child(n + 5) {
-  --tool-shift: 170px;
-}
-
-/* Counted from the other end, because the exit runs the other way: the icon
-   furthest from the arrow sets off first and the one against it goes last. */
-.chan-tools.tools-leaving > *:nth-child(2) {
-  animation-delay: 0.03s;
-}
-
-.chan-tools.tools-leaving > *:nth-child(3) {
-  animation-delay: 0.06s;
-}
-
-.chan-tools.tools-leaving > *:nth-child(4) {
-  animation-delay: 0.09s;
-}
-
-.chan-tools.tools-leaving > *:nth-child(n + 5) {
-  animation-delay: 0.12s;
-}
-
-@keyframes chan-tool-out {
-  from {
-    opacity: 0;
-    transform: translateX(var(--tool-shift)) scale(0.6);
-  }
-}
-
-@keyframes chan-tool-in {
-  to {
-    opacity: 0;
-    transform: translateX(var(--tool-shift)) scale(0.6);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chan-tools.tools-entering > * {
-    animation: none;
-  }
-
-  /* As with the closing panel: the exit is the only reason the tray is still
-     in the document, so it is taken to its last frame rather than left
-     sitting there for the length of an animation that will not run. */
-  .chan-tools.tools-leaving {
-    display: none;
-  }
 }
 
 .preview-link {
@@ -8615,6 +8506,8 @@ body.resizing-panel {
 @media (prefers-reduced-motion: reduce) {
   .agent-face svg,
   .agent-face svg *,
+  .agent-face .agent-run::after,
+  .cmsg-thread-link .ctl-faces .ctl-working::before,
   .status-working,
   .presence-online {
     animation: none;
@@ -9925,35 +9818,6 @@ dialog.modal[open]::backdrop {
   .mention-item,
   .menu-item {
     min-height: 44px;
-  }
-
-  /* The tools are pinned open on a phone (chanHeader renders them without
-     asking `chanToolsOpen` below the breakpoint), so the chevron would
-     toggle nothing. */
-  .chan-tools-toggle {
-    display: none;
-  }
-
-  /* The pinned tools become the header's own bottom row: full width, spread
-     to the phone's edges, each control thumb-sized. On desktop this same
-     group is a 30px tray folded behind the chevron; here it is the way the
-     room's tools are reached, so it gets the space a hand needs. */
-  .chan-tools {
-    display: flex;
-    flex: 1 0 100%;
-    order: 10;
-    justify-content: space-between;
-    gap: 4px;
-  }
-
-  .chan-tools .icon-btn {
-    width: 44px;
-    height: 44px;
-  }
-
-  .chan-tools .icon-btn svg {
-    width: 19px;
-    height: 19px;
   }
 
   /* My Agents' list header: four filter tabs, a spacer, and a 190px-wide

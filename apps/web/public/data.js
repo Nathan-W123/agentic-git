@@ -351,18 +351,6 @@ export const state = {
    * closed, so every new turn starts folded until the reader opens it.
    */
   thinkingOpen: {},
-  /**
-   * Whether the channel header's tool icons are showing.
-   *
-   * Closed by default. Six controls in a header 44 pixels tall is most of a
-   * phone's width spent on things a reader wants on one visit in twenty.
-   *
-   * Kept across reloads for the same reason `agentView` is: opening the tools
-   * is a statement about how this reader works, not about this visit, and
-   * re-hiding them on every load made the choice something to make again
-   * every time rather than once.
-   */
-  chanToolsOpen: stored("ag.chantools") === "true",
   /** Whether a summary is unfolded, keyed by reply id. Absent means open. */
   summaryOpen: {},
   /**
@@ -492,10 +480,6 @@ export const state = {
   slashQuery: "",
   slashIndex: 0,
   channelSlashCommands: {},
-  chanMsgQuery: "",
-  chanMsgSearchOpen: false,
-
-
   socket: undefined,
   timer: undefined,
 };
