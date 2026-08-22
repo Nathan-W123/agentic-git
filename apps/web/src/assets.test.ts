@@ -3722,14 +3722,26 @@ test("each task turn puts its own compact thinking below its prompt and starts c
 
 test("thinking disclosures show only useful status and deduplicated milestones", async () => {
   const source = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
   const activityStart = source.indexOf("function threadActivityLabel(entry)");
   const activityEnd = source.indexOf("\n/**", activityStart);
-  const thinkingStart = source.indexOf("function threadThinkingBlock");
-  const thinkingEnd = source.indexOf("\n/**", thinkingStart);
+  const thinkingStart = source.indexOf("function thinkingLineHtml");
+  const thinkingEnd = source.indexOf("\n/**", source.indexOf("function threadThinkingBlock"));
   assert.notEqual(activityStart, -1);
   assert.notEqual(activityEnd, -1);
   assert.notEqual(thinkingStart, -1);
   assert.notEqual(thinkingEnd, -1);
+  assert.doesNotMatch(
+    styles,
+    /\.thread-thinking\s*\{[^}]*border-left:/u,
+    "thinking must stay unboxed — no disclosure rail",
+  );
+  assert.doesNotMatch(
+    styles,
+    /\.thread-thinking\s+\.tt-body\s*\{[^}]*border-left:/u,
+    "the open stream must not grow a second left border",
+  );
+  assert.match(styles, /\.tt-line\.?|\.tt-cue|\.tt-thought/u);
 
   type Reply = {
     kind: string;
@@ -3776,6 +3788,7 @@ test("thinking disclosures show only useful status and deduplicated milestones",
   );
   assert.match(active.html, /class="tt-label">Thinking<\/span>/u);
   assert.doesNotMatch(active.html, /class="tt-count"/u);
+  assert.match(active.html, /class="tt-line tt-cue"/u);
 
   const completed = renderThinking(
     "root",
@@ -3854,16 +3867,23 @@ test("thinking disclosures show only useful status and deduplicated milestones",
   ];
   let previous = -1;
   for (const milestone of milestones) {
-    const markup = `<p>${milestone}</p>`;
-    const position = compact.html.indexOf(markup);
+    const position = compact.html.indexOf(milestone);
     assert.ok(position > previous, `${milestone} should stay in order`);
     assert.equal(
-      compact.html.split(markup).length - 1,
+      compact.html.split(milestone).length - 1,
       1,
       `${milestone} should appear once`,
     );
     previous = position;
   }
+  assert.match(
+    compact.html,
+    /class="tt-line tt-cue"><span>Reading code<\/span>/u,
+  );
+  assert.match(
+    compact.html,
+    /class="tt-line tt-thought">Checking an unfamiliar reply shape<\/p>/u,
+  );
   assert.equal(compact.html.includes("Task: Keep the thread concise"), false);
   assert.deepEqual(
     compact.visible.map((reply) => reply.kind),

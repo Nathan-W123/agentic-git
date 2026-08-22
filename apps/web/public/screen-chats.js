@@ -5351,6 +5351,29 @@ function threadReplyTurns(replies) {
   return turns;
 }
 
+/**
+ * One line inside an opened thinking stream: a quiet tool cue for the known
+ * run phases, or a plain thought line for anything the protocol did not name.
+ */
+function thinkingLineHtml(milestone) {
+  const text = String(milestone ?? "");
+  const cues = {
+    Starting: "play",
+    "Reading code": "search",
+    Planning: "sparkle",
+    "Writing code": "code",
+    Testing: "play",
+    Finishing: "check",
+  };
+  const iconName = /^Editing /u.test(text) ? "file" : cues[text];
+  if (iconName !== undefined) {
+    return `<p class="tt-line tt-cue">${icon(iconName)}<span>${esc(
+      text,
+    )}</span></p>`;
+  }
+  return `<p class="tt-line tt-thought">${esc(text)}</p>`;
+}
+
 /** One turn's narration, with state independent from every other turn. */
 function threadThinkingBlock(rootId, turn, index) {
   // The opening task title already names the thread, so do not repeat it in
@@ -5419,17 +5442,17 @@ function threadThinkingBlock(rootId, turn, index) {
           : `${seconds}s`;
     label = `Thought for ${duration}`;
   }
+  // Header + stream, no bordered box: the open state should read as the
+  // extended output itself, not as chrome bolted onto the thread.
   const html = `<details class="thread-thinking"${
     // Every turn starts folded. Its independent key still keeps an explicit
     // reader choice stable as more progress arrives for this turn alone.
     state.thinkingOpen[key] === true ? " open" : ""
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
-      <span class="tt-caret">${icon("chevronRight")}</span>
-      <span class="tt-label">${esc(label)}</span></summary>
-    <div class="tt-body">${milestones
-      .map((milestone) => `<p>${esc(milestone)}</p>`)
-      .join("")}</div>
+      <span class="tt-label">${esc(label)}</span>
+      <span class="tt-caret">${icon("chevronRight")}</span></summary>
+    <div class="tt-body">${milestones.map(thinkingLineHtml).join("")}</div>
   </details>`;
   return {
     html,

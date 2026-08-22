@@ -7380,10 +7380,10 @@ button.chip.lg:hover {
 }
 
 /* The agent's account of what it did, foldable because it is often the longest
-   thing in the thread. Deliberately identical to `.thread-thinking` — they sit
-   inches apart in the same thread, and two disclosures that behave the same
-   should not look like two different mechanisms. Open by default, because
-   unlike thinking this one is the answer. */
+   thing in the thread. Shares the same caret and summary mechanics as
+   `.thread-thinking`, but keeps a quiet left rail so the finished write-up
+   still reads as a document rather than a live status stream. Open by
+   default, because unlike thinking this one is the answer. */
 .thread-summary {
   margin: 2px 0 6px;
   border-left: 2px solid var(--line, #262b3a);
@@ -10643,24 +10643,23 @@ dialog.modal[open]::backdrop {
   }
 }
 
-/* A task's running commentary. Most of a thread by volume and the least of
-   what somebody opening it wants first, so it folds away — open while the
-   work is still going, because then the latest step is the point. */
+/* A task's running commentary as a quiet inline status stream: one muted
+   header, then thought or tool-cue lines when opened. No bordered disclosure
+   chrome — the open state should look like extended output, not a sidebar rail. */
 .thread-thinking {
-  margin: 2px 0 6px;
-  border-left: 2px solid var(--line, #262b3a);
-  padding-left: 10px;
+  margin: 4px 0 10px;
 }
 
 .thread-thinking > summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   cursor: pointer;
   list-style: none;
-  padding: 5px 2px;
+  padding: 2px 0;
   color: var(--text-3, #8b93a7);
   font-size: 0.84rem;
+  line-height: 1.35;
   user-select: none;
 }
 
@@ -11486,25 +11485,41 @@ dialog.modal[open]::backdrop {
   font-weight: 500;
 }
 
-/* Thinking, as one passage rather than as a stack of messages from somebody
-   who will not stop talking. Each held line becomes a paragraph inside one
-   block, which is how it arrived in the agent's head before it arrived as
-   events in ours. */
+/* Open thinking: a short stack of status lines, not a boxed transcript. */
 .thread-thinking .tt-body {
-  padding: 2px 0 4px 10px;
-  border-left: 2px solid var(--border-soft);
-  margin-left: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 2px;
+  margin: 0;
 }
 
-.thread-thinking .tt-body p {
-  margin: 0 0 6px;
+.thread-thinking .tt-line {
+  margin: 0;
   font-size: 13px;
-  line-height: 1.55;
-  color: var(--text-2);
+  line-height: 1.5;
 }
 
-.thread-thinking .tt-body p:last-child {
-  margin-bottom: 0;
+.thread-thinking .tt-thought {
+  color: var(--text-2, #b6bdd0);
+}
+
+.thread-thinking .tt-cue {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3, #8b93a7);
+}
+
+.thread-thinking .tt-cue .ui-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  opacity: 0.85;
+}
+
+.thread-thinking .tt-cue span {
+  min-width: 0;
 }
 
 /* --------------------------------------------------------- colour wheel ---- */
