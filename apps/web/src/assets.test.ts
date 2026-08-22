@@ -3399,6 +3399,15 @@ test("the invite screen lets an existing account sign in instead", async () => {
   assert.match(app, /account_exists/u);
 });
 
+test("a signed-in returning member can accept an invitation directly", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function renderInvite");
+  const body = app.slice(start, app.indexOf("\nfunction renderAuth", start));
+  assert.match(body, /invite\.signedIn === true/u);
+  assert.match(body, /Accept and rejoin/u);
+  assert.match(body, /restore your access/u);
+});
+
 test("settings only lists invitations that are still pending", async () => {
   const app = await browserSource();
   const start = app.indexOf("function invitationsCard");

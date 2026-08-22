@@ -4472,6 +4472,9 @@ export class ApiGateway {
         invitation.organizationId,
       );
       const state = publicInvitation(invitation).status;
+      const signedIn = await this.auth
+        .authenticate(request.headers.cookie)
+        .catch(() => undefined);
 
       if (method === "GET" && action === undefined) {
         // Whether the address already has an account decides which form the
@@ -4487,6 +4490,15 @@ export class ApiGateway {
         const existing = open
           ? undefined
           : await this.options.store.getUserByEmail(invitation.email);
+        // A returning member commonly still has a live session when an owner
+        // removes and re-invites them. The link can be accepted by that
+        // session directly: asking them to sign in again adds a second,
+        // failure-prone handoff before the repository grant is restored.
+        // For an addressed invitation this is only true when the session is
+        // already the named account; an unrelated signed-in account must
+        // still prove it owns the invited address.
+        const canAcceptAsSignedIn =
+          signedIn !== undefined && (open || existing?.id === signedIn.user.id);
         this.sendJson(response, 200, {
           invitation: {
             email: invitation.email,
@@ -4494,6 +4506,7 @@ export class ApiGateway {
             role: invitation.role,
             status: state,
             accountExists: existing !== undefined,
+            signedIn: canAcceptAsSignedIn,
             organizationName: organization?.name ?? "this organization",
             ...(invitation.repositoryId === undefined
               ? {}
@@ -4514,9 +4527,6 @@ export class ApiGateway {
         }
         const body = objectBody(await this.readJson(request));
         const open = invitation.email === "";
-        const signedIn = await this.auth
-          .authenticate(request.headers.cookie)
-          .catch(() => undefined);
         let user;
         if (open) {
           // Nobody is named, so whoever opened the link says who they are.

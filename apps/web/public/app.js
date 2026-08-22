@@ -429,6 +429,8 @@ function renderInvite() {
     inviteMode === undefined
       ? invite.accountExists === true
       : inviteMode === "signin";
+  const acceptCurrentAccount =
+    invite.signedIn === true && inviteMode === undefined;
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">${brandMark(54)}
@@ -441,21 +443,29 @@ function renderInvite() {
           <p>You have been invited to
             <b>${esc(invite.organizationName)}</b> on Kumi as a
             ${esc(invite.role)}. ${
-              signIn
+              acceptCurrentAccount
+                ? "Accept the invitation to restore your access."
+                : signIn
                 ? "Sign in and the invitation is yours."
                 : "Choose a password and you are in."
             }</p>
         </div>
       </div>
       <form class="auth-card" data-act="${
-        signIn ? "invite-signin" : "invite-accept"
+        acceptCurrentAccount
+          ? "invite-accept"
+          : signIn
+            ? "invite-signin"
+            : "invite-accept"
       }">
         ${
           // An open link names nobody, so the address is asked for rather
           // than shown. The addressed form still shows it and still will not
           // let it be edited: changing it there would be accepting somebody
           // else's invitation.
-          invite.open === true
+          acceptCurrentAccount
+            ? ""
+            : invite.open === true
             ? `<label class="field">
           <span>Email address</span>
           <input class="input" name="email" type="email" autocomplete="email"
@@ -467,23 +477,25 @@ function renderInvite() {
         </label>`
         }
         ${
-          signIn
+          acceptCurrentAccount
+            ? ""
+            : signIn
             ? ""
             : `<label class="field">
           <span>Your name</span>
           <input class="input" name="displayName" autocomplete="name" required>
         </label>`
         }
-        <label class="field">
+        ${acceptCurrentAccount ? "" : `<label class="field">
           <span>${signIn ? "Your password" : "Choose a password"}</span>
           <input class="input" name="password" type="password" minlength="12"
             autocomplete="${signIn ? "current-password" : "new-password"}"
             required placeholder="••••••••••••">
-        </label>
+        </label>`}
         ${
           // Only when the password is being chosen. Retyping one you already
           // know is friction with nothing to catch.
-          signIn
+          acceptCurrentAccount || signIn
             ? ""
             : `<label class="field">
           <span>Confirm password</span>
@@ -493,12 +505,20 @@ function renderInvite() {
         </label>`
         }
         <button class="btn btn-primary btn-wide" type="submit">
-          ${signIn ? "Sign in and join" : "Accept and join"}
+          ${
+            acceptCurrentAccount
+              ? "Accept and rejoin"
+              : signIn
+                ? "Sign in and join"
+                : "Accept and join"
+          }
         </button>
         <p class="form-msg" id="auth-msg" role="alert"></p>
       </form>
       <p class="auth-foot">${
-        signIn
+        acceptCurrentAccount
+          ? "This invitation will be added to your signed-in account."
+          : signIn
           ? `${
               invite.open === true
                 ? "No account yet?"
