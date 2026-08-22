@@ -4515,7 +4515,7 @@ function animateOnce(node, className, drop) {
 /* -------------------------------------------------------- text arrival ---- */
 
 /**
- * The pace an answer arrives at: how far apart consecutive words start, and
+ * The pace an answer opens at: how far apart the first few words start, and
  * how long each one takes to settle.
  *
  * Near the speed of a sentence being read aloud. Slower and the reader is
@@ -4530,9 +4530,40 @@ const REVEAL_STAGGER_MS = 26;
 const REVEAL_WORD_MS = 460;
 
 /**
- * Where the stagger stops. A long answer would otherwise hold its last
- * paragraph back for the better part of a minute, so past this many words the
- * remainder simply stands there — by then the arrival has been read.
+ * The longest an arrival is ever spread over, however much was said.
+ *
+ * A reader takes the effect in from the first line; after that every extra
+ * moment is spent watching text that is already written appear at walking
+ * pace. So a long answer is not simply the opening pace repeated — it is the
+ * same words, closer together.
+ */
+const REVEAL_MAX_TOTAL_MS = 900;
+
+/**
+ * How far apart consecutive words start, given how many there are.
+ *
+ * A short line keeps the opening pace exactly: two or three words are a beat
+ * apart, as they always were. From there the gap closes off smoothly — the
+ * spread approaches `REVEAL_MAX_TOTAL_MS` without ever reaching it — so a
+ * paragraph lands in about half a second and a wall of text still finishes
+ * inside a second and a half. Nothing is truncated and there is no cliff
+ * where a longer message suddenly stops animating; it just arrives faster the
+ * more of it there is.
+ */
+function revealStaggerFor(count) {
+  if (count <= 1) {
+    return 0;
+  }
+  return (
+    REVEAL_MAX_TOTAL_MS /
+    (count - 1 + REVEAL_MAX_TOTAL_MS / REVEAL_STAGGER_MS)
+  );
+}
+
+/**
+ * How many words are taken apart at all. Past this the remainder is left as
+ * plain text: by then it is far below the fold, and a span per word costs
+ * more than the effect is worth.
  */
 const REVEAL_MAX_WORDS = 160;
 
@@ -4615,7 +4646,7 @@ function playTextReveal(root) {
       continue;
     }
     const elapsed = now - started;
-    if (elapsed < REVEAL_MAX_WORDS * REVEAL_STAGGER_MS + REVEAL_WORD_MS) {
+    if (elapsed < REVEAL_MAX_TOTAL_MS + REVEAL_WORD_MS) {
       revealWords(block, elapsed);
     }
   }
@@ -4698,15 +4729,18 @@ function revealWords(block, elapsed) {
   const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
   const texts = [];
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-    const words = node.nodeValue ?? "";
-    if (words.trim() !== "" && !insideSkipped(node, block)) {
+    const text = node.nodeValue ?? "";
+    if (text.trim() !== "" && !insideSkipped(node, block)) {
       texts.push(node);
     }
   }
+  // Wrapped first and timed second: the stagger depends on how many words
+  // there turned out to be, and that is only known once the last one is in
+  // hand.
   const revealedPings = new Set();
-  let index = 0;
+  const words = [];
   for (const node of texts) {
-    if (index >= REVEAL_MAX_WORDS) {
+    if (words.length >= REVEAL_MAX_WORDS) {
       break;
     }
     const ping = revealPingOf(node, block);
@@ -4716,11 +4750,7 @@ function revealWords(block, elapsed) {
       }
       revealedPings.add(ping);
       ping.classList.add("text-reveal-word");
-      ping.style.setProperty(
-        "--reveal-delay",
-        `${Math.round(index * REVEAL_STAGGER_MS - elapsed)}ms`,
-      );
-      index += 1;
+      words.push(ping);
       continue;
     }
     const pieces = String(node.nodeValue).split(/(\s+)/u);
@@ -4729,21 +4759,24 @@ function revealWords(block, elapsed) {
       if (piece === "") {
         continue;
       }
-      if (piece.trim() === "" || index >= REVEAL_MAX_WORDS) {
+      if (piece.trim() === "" || words.length >= REVEAL_MAX_WORDS) {
         holder.append(piece);
         continue;
       }
       const word = document.createElement("span");
       word.className = "text-reveal-word";
-      word.style.setProperty(
-        "--reveal-delay",
-        `${Math.round(index * REVEAL_STAGGER_MS - elapsed)}ms`,
-      );
       word.textContent = piece;
       holder.append(word);
-      index += 1;
+      words.push(word);
     }
     node.replaceWith(holder);
+  }
+  const step = revealStaggerFor(words.length);
+  for (const [index, word] of words.entries()) {
+    word.style.setProperty(
+      "--reveal-delay",
+      `${Math.round(index * step - elapsed)}ms`,
+    );
   }
 }
 

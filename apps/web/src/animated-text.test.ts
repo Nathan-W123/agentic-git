@@ -59,7 +59,10 @@ test("text arrives once, and only in a surface already on screen", async () => {
   assert.match(body, /revealWords\(block, elapsed\)/u);
 
   const words = app.slice(app.indexOf("function revealWords(block, elapsed)"));
-  assert.match(words, /index \* REVEAL_STAGGER_MS - elapsed/u);
+  assert.match(words, /index \* step - elapsed/u);
+  // The arrival is over once the spread and the last word's own settle are
+  // done, and that is what decides how long a redraw keeps resuming it.
+  assert.match(body, /REVEAL_MAX_TOTAL_MS \+ REVEAL_WORD_MS/u);
   // Prose only. A diff or a code block is not read word by word, and taking
   // one apart would put a span through its whitespace.
   assert.match(app, /const REVEAL_SKIPPED = new Set\(\[[^\]]*"PRE"[^\]]*"CODE"/u);
@@ -121,4 +124,52 @@ test("a word settles from blurred and low, and holds still under reduced motion"
     /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.text-reveal-word \{\n {4}animation: none;/u,
     "words should simply be there when motion is unwanted",
   );
+});
+
+test("a long arrival hurries rather than dragging on", async () => {
+  const app = await publicFile("app.js");
+  // The pace is a function of how many words there are, so it can be read
+  // out of the source and exercised directly.
+  const pace = Function(
+    `"use strict";\n${app.slice(
+      app.indexOf("const REVEAL_STAGGER_MS"),
+      app.indexOf("const revealSeen = new Map()"),
+    )}\nreturn { revealStaggerFor, REVEAL_STAGGER_MS, REVEAL_MAX_TOTAL_MS };`,
+  )() as {
+    revealStaggerFor: (count: number) => number;
+    REVEAL_STAGGER_MS: number;
+    REVEAL_MAX_TOTAL_MS: number;
+  };
+  const spread = (count: number): number =>
+    (count - 1) * pace.revealStaggerFor(count);
+
+  // A lone word has nothing to wait for.
+  assert.equal(spread(1), 0);
+
+  // A short line keeps the opening pace: a handful of words are still a beat
+  // apart, which is the whole reason the effect reads as words arriving.
+  assert.equal(pace.revealStaggerFor(4) <= pace.REVEAL_STAGGER_MS, true);
+  assert.equal(spread(4) < 100, true, "a few words should be over at once");
+
+  // Longer means faster per word, not merely more of the same — this is what
+  // keeps a long answer from being read out at the pace of a short one.
+  assert.equal(
+    pace.revealStaggerFor(200) < pace.revealStaggerFor(20),
+    true,
+    "the gap between words should close as there are more of them",
+  );
+  assert.equal(
+    spread(200) < 4 * spread(50),
+    true,
+    "four times the words should be far less than four times the wait",
+  );
+
+  // And however much was said, the reader is never left watching.
+  for (const count of [200, 1_000, 10_000]) {
+    assert.equal(
+      spread(count) < pace.REVEAL_MAX_TOTAL_MS,
+      true,
+      "no arrival should outlast the ceiling",
+    );
+  }
 });
