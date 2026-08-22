@@ -4819,7 +4819,7 @@ test("agent details use the reference profile with supported controls", async ()
 
   // The visual hierarchy follows the supplied agent profile: a large identity,
   // introductory copy, connected-setting pills, and checked capability rows.
-  assert.match(spec, /agentFace\(agent, 68\)/u);
+  assert.match(spec, /statusAgentFace\(agent, 68, repositoryId\)/u);
   assert.match(spec, /class="aspec-description"/u);
   assert.match(spec, /<h3 class="aspec-label">Works with<\/h3>/u);
   assert.match(spec, /<h3 class="aspec-label">Capabilities<\/h3>/u);
@@ -4832,6 +4832,27 @@ test("agent details use the reference profile with supported controls", async ()
   assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(680px, 64vw\)/su);
   assert.match(css, /\.agent-spec \.aspec-chip\s*\{/u);
   assert.match(css, /\.agent-spec \.aspec-capability\s*\{/u);
+
+  // Conversation destinations are visible controls on the landing page, not
+  // icon-only knowledge hidden in the panel header. Private chat keeps the
+  // existing owner/personal rule; history is available for every agent.
+  assert.match(
+    spec,
+    /const canChatPrivately = agent\.mine === true && agent\.visibility !== "org";/u,
+  );
+  assert.match(
+    spec,
+    /canChatPrivately[\s\S]*?<button type="button" class="aspec-action aspec-action-primary"[\s\S]*?data-act="agent-panel-tab" data-value="chat">[\s\S]*?<span>Message<\/span>/u,
+  );
+  assert.match(
+    spec,
+    /<button type="button" class="aspec-action" data-act="agent-panel-tab"[\s\S]*?data-value="history">[\s\S]*?<span>History<\/span>/u,
+  );
+  assert.match(css, /\.agent-spec \.aspec-action\s*\{/u);
+  assert.match(css, /\.agent-spec \.aspec-action:focus-visible\s*\{/u);
+  // The retired wrapper was the stray centred hairline/box above the profile.
+  assert.doesNotMatch(panel, /class="agent-panel-head"/u);
+  assert.doesNotMatch(css, /^\.agent-panel-head\s*\{/mu);
 
   // Only a real assignment becomes the primary-colour bubble. Its own copy,
   // state line, mark, and history control remain legible on that solid surface.
@@ -5222,8 +5243,10 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(chats, /class="pcard-sub"/u);
   assert.match(chats, /class="pcard-section-label"/u);
   assert.match(chats, /label: "View full profile"/u);
-  assert.match(chats, /label: unread > 0 \? `Open messages · \$\{unread\}` : "Open conversation"/u);
-  assert.match(chats, /<span class="pcard-open" role="button" tabindex="-1"/u);
+  assert.match(chats, /label: unread > 0 \? `Message · \$\{unread\} unread` : "Message"/u);
+  assert.match(chats, /<span class="pcard-pop"><span class="pcard" role="group"/u);
+  assert.match(chats, /<button type="button" class="pcard-open"/u);
+  assert.doesNotMatch(chats, /class="pcard-open" role="button"/u);
   assert.match(browser, /case "agent-panel-open":/u);
   assert.match(browser, /case "dm-open":/u);
   // A colour somebody chose reaches a `style` attribute, so it is matched
@@ -5238,7 +5261,11 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(anchor ?? "", /position: relative/u);
   const pop = /\n\.pcard-pop \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(pop, undefined, "the card has a shape rule");
+  assert.match(pop ?? "", /position: fixed/u);
+  assert.match(pop ?? "", /top: -10000px/u);
+  assert.match(pop ?? "", /left: -10000px/u);
   assert.match(pop ?? "", /padding: 7px 0/u);
+  assert.match(pop ?? "", /opacity: 0/u);
   assert.match(pop ?? "", /visibility: hidden/u);
   assert.match(pop ?? "", /pointer-events: none/u);
   assert.match(
@@ -5253,16 +5280,35 @@ test("one profile card describes people and agents wherever a face is drawn", as
   );
   assert.doesNotMatch(css, /\.cmsg-identity:hover \.(avatar|agent-face)/u);
 
-  // Direction is a preference the stylesheet states and the browser overrides
-  // only where the surface has no room — the last row of a long roster has
-  // nothing under it.
-  assert.match(css, /\.pcard-anchor\[data-profile-dir="down"\] \.pcard-pop \{\n {2}top: 100%;/u);
-  assert.match(css, /\.pcard-anchor\[data-profile-dir="up"\] \.pcard-pop \{\n {2}bottom: 100%;/u);
+  // Placement is measured in both axes and fixed outside scroll clipping. It
+  // follows the visual viewport, intersects every clipping ancestor, clamps
+  // its size and coordinates, and is refreshed if that geometry changes.
+  assert.doesNotMatch(css, /\.pcard-anchor\[data-profile-dir=/u);
+  assert.match(
+    css,
+    /width: min\(246px, var\(--profile-max-width, calc\(100vw - 20px\)\)\);/u,
+  );
+  assert.match(css, /max-height: var\(--profile-max-height/u);
+  assert.match(css, /overflow-y: auto/u);
   assert.match(browser, /function positionProfileCard\(event\)/u);
-  assert.match(browser, /anchor\.toggleAttribute\("data-profile-flip", flip\)/u);
+  assert.match(browser, /card\.style\.left =/u);
+  assert.match(browser, /card\.style\.top =/u);
+  assert.match(browser, /clip\.right - PROFILE_CARD_MARGIN - width/u);
+  assert.match(browser, /clip\.bottom - PROFILE_CARD_MARGIN - height/u);
+  assert.match(
+    browser,
+    /anchor\.toggleAttribute\("data-profile-flip", opensDown !== prefersDown\)/u,
+  );
   assert.match(browser, /function clippingBoundsFor\(node\)/u);
+  assert.match(browser, /const viewport = window\.visualViewport;/u);
+  assert.match(browser, /style\.overflowX/u);
+  assert.match(browser, /style\.overflowY/u);
   assert.match(browser, /document\.addEventListener\("mouseover", positionProfileCard\)/u);
   assert.match(browser, /document\.addEventListener\("focusin", positionProfileCard\)/u);
+  assert.match(browser, /document\.addEventListener\("scroll", positionProfileCard, true\)/u);
+  assert.match(browser, /window\.addEventListener\("resize", positionProfileCard\)/u);
+  assert.match(browser, /window\.visualViewport\?\.addEventListener\("resize", positionProfileCard\)/u);
+  assert.match(browser, /window\.visualViewport\?\.addEventListener\("scroll", positionProfileCard\)/u);
 
   // On a touch screen the tap on a message face is already the action; the
   // roster keeps its card and only loses the width that assumed a sidebar.

@@ -6091,11 +6091,9 @@ button.chip.lg:hover {
 
 /* ------------------------------------------------------------ profiles ---- */
 
-/* Every face in the app hangs its card off one of these — a roster row, a
-   message, wherever somebody is drawn. `position: relative` is the whole of
-   the anchoring, and it is also what fixes the card that could never be
-   reached: the card is a *child* of the face, so a pointer that has moved on
-   to the card has not left the face, and the hover does not lapse under it. */
+/* Every face in the app owns its card — a roster row, a message, wherever
+   somebody is drawn. Keeping the card as a child means a pointer can travel
+   from the face into the card without the hover lapsing under it. */
 .pcard-anchor {
   position: relative;
   display: inline-flex;
@@ -6122,8 +6120,9 @@ button.chip.lg:hover {
    pointer crosses it without ever being over nothing, which is exactly what
    used to close the card the instant somebody reached for it. */
 .pcard-pop {
-  position: absolute;
-  left: -6px;
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
   z-index: 60;
   display: block;
   padding: 7px 0;
@@ -6136,28 +6135,6 @@ button.chip.lg:hover {
   transition:
     opacity 0.1s ease 0.1s,
     visibility 0.1s ease 0.1s;
-}
-
-/* Down from a roster row, up from a message — where the room is in the
-   ordinary case. `data-profile-flip` is set by `positionProfileCard` in
-   app.js for the cases a stylesheet cannot see: the last row of a long list
-   has nothing under it, and the first line of a thread has nothing over it. */
-.pcard-anchor[data-profile-dir="down"] .pcard-pop {
-  top: 100%;
-}
-
-.pcard-anchor[data-profile-dir="up"] .pcard-pop {
-  bottom: 100%;
-}
-
-.pcard-anchor[data-profile-dir="down"][data-profile-flip] .pcard-pop {
-  top: auto;
-  bottom: 100%;
-}
-
-.pcard-anchor[data-profile-dir="up"][data-profile-flip] .pcard-pop {
-  bottom: auto;
-  top: 100%;
 }
 
 /* The opening delay is short but not nothing: a transcript is a column of
@@ -6184,12 +6161,15 @@ button.chip.lg:hover {
    deciding whether to open the rest. */
 .pcard {
   display: block;
-  width: 246px;
+  width: min(246px, var(--profile-max-width, calc(100vw - 20px)));
+  max-height: var(--profile-max-height, calc(100dvh - 34px));
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
   background: var(--bg-panel);
   box-shadow: var(--shadow-pop);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   font-weight: 400;
   text-align: left;
   text-decoration: none;
@@ -6327,11 +6307,14 @@ button.chip.lg:hover {
    stay this short. */
 .pcard-open {
   display: block;
+  width: 100%;
   margin-top: 12px;
   padding: 7px 10px;
+  border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   color: var(--text);
+  font-family: inherit;
   font-size: 11.5px;
   font-weight: 500;
   text-align: center;
@@ -6341,6 +6324,11 @@ button.chip.lg:hover {
 
 .pcard-open:hover {
   background: var(--bg-hover);
+}
+
+.pcard-open:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
 }
 
 @media (hover: none) {
@@ -7941,6 +7929,59 @@ button.chip.lg:hover {
   color: var(--text-2);
   font-size: 15px;
   line-height: 1.62;
+}
+
+.agent-spec .aspec-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.agent-spec .aspec-action {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.agent-spec .aspec-action svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-spec .aspec-action:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.agent-spec .aspec-action:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+.agent-spec .aspec-action-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.agent-spec .aspec-action-primary:hover {
+  border-color: color-mix(in srgb, var(--accent) 88%, #000);
+  background: color-mix(in srgb, var(--accent) 88%, #000);
 }
 
 .agent-spec .aspec-sub {

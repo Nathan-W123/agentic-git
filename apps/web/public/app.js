@@ -3576,7 +3576,7 @@ document.addEventListener("focusin", requestUsageForHoverTarget);
 const PROFILE_CARD_MARGIN = 10;
 
 /**
- * The one thing about a profile card a stylesheet cannot decide.
+ * The geometry of a profile card that a stylesheet cannot decide.
  *
  * Each card states the direction it would rather open — down from a roster
  * row, up from a message, because that is where the room is in the ordinary
@@ -3585,58 +3585,108 @@ const PROFILE_CARD_MARGIN = 10;
  * in a thread has nothing over it, and a card opening into either is a card
  * clipped in half by whatever is doing the scrolling.
  *
- * So the preference stands and this only overrides it, by measuring against
- * the scroller the face actually lives in rather than the window — a sidebar
- * list crops its own contents long before the viewport does.
+ * So the preference stands and this only overrides it, by intersecting the
+ * viewport with every surface that can crop the face. The fixed card then
+ * gets a bounded width, height and position in that visible rectangle.
  */
 function positionProfileCard(event) {
-  const anchor =
-    event.target instanceof Element
-      ? event.target.closest("[data-profile-dir]")
-      : null;
-  if (anchor === null) {
-    return;
-  }
-  const card = anchor.querySelector(".pcard-pop");
-  if (card === null) {
-    return;
-  }
-  const box = anchor.getBoundingClientRect();
-  const clip = clippingBoundsFor(anchor);
-  const needed = card.offsetHeight + PROFILE_CARD_MARGIN;
-  const below = clip.bottom - box.bottom;
-  const above = box.top - clip.top;
-  const prefersDown = anchor.dataset.profileDir !== "up";
-  // Flipped only when the other side is genuinely better off. A card that has
-  // room in neither direction stays where it was asked to be, rather than
-  // jumping to the side that is a few pixels less wrong.
-  const flip = prefersDown
-    ? below < needed && above > below
-    : above < needed && below > above;
-  anchor.toggleAttribute("data-profile-flip", flip);
+  const target = event?.target;
+  const hovered =
+    target instanceof Element ? target.closest("[data-profile-dir]") : null;
+  const anchors =
+    hovered === null
+      ? document.querySelectorAll(
+          ".pcard-anchor:hover, .pcard-anchor:focus-within",
+        )
+      : [hovered];
+  anchors.forEach((anchor) => {
+    const card = anchor.querySelector(":scope > .pcard-pop");
+    if (card === null) {
+      return;
+    }
+    const box = anchor.getBoundingClientRect();
+    const clip = clippingBoundsFor(anchor);
+    const maxHeight = Math.max(
+      1,
+      clip.bottom - clip.top - PROFILE_CARD_MARGIN * 2 - 14,
+    );
+    const maxWidth = Math.max(
+      1,
+      clip.right - clip.left - PROFILE_CARD_MARGIN * 2,
+    );
+    card.style.setProperty("--profile-max-height", `${maxHeight}px`);
+    card.style.setProperty("--profile-max-width", `${maxWidth}px`);
+
+    const height = card.offsetHeight;
+    const width = card.offsetWidth;
+    const below = clip.bottom - box.bottom - PROFILE_CARD_MARGIN;
+    const above = box.top - clip.top - PROFILE_CARD_MARGIN;
+    const prefersDown = anchor.dataset.profileDir !== "up";
+    const opensDown =
+      prefersDown
+        ? below >= height
+          ? true
+          : above >= height
+            ? false
+            : below >= above
+        : above >= height
+          ? false
+          : below >= height
+            ? true
+            : below > above;
+    const minLeft = clip.left + PROFILE_CARD_MARGIN;
+    const maxLeft = Math.max(
+      minLeft,
+      clip.right - PROFILE_CARD_MARGIN - width,
+    );
+    const minTop = clip.top + PROFILE_CARD_MARGIN;
+    const maxTop = Math.max(
+      minTop,
+      clip.bottom - PROFILE_CARD_MARGIN - height,
+    );
+    const desiredTop = opensDown ? box.bottom : box.top - height;
+    card.style.left = `${Math.min(maxLeft, Math.max(minLeft, box.left - 6))}px`;
+    card.style.top = `${Math.min(maxTop, Math.max(minTop, desiredTop))}px`;
+    anchor.toggleAttribute("data-profile-flip", opensDown !== prefersDown);
+  });
 }
 
-/** The nearest thing that would crop the card, or the window. */
+/** The intersection of everything that can crop the card and the viewport. */
 function clippingBoundsFor(node) {
+  const viewport = window.visualViewport;
+  const offsetLeft = viewport?.offsetLeft || 0;
+  const offsetTop = viewport?.offsetTop || 0;
+  const bounds = {
+    left: offsetLeft,
+    top: offsetTop,
+    right: offsetLeft + (viewport?.width || window.innerWidth),
+    bottom: offsetTop + (viewport?.height || window.innerHeight),
+  };
   for (
     let parent = node.parentElement;
     parent !== null && parent !== document.body;
     parent = parent.parentElement
   ) {
-    const overflow = window.getComputedStyle(parent).overflowY;
-    if (overflow === "auto" || overflow === "scroll" || overflow === "hidden") {
-      const box = parent.getBoundingClientRect();
-      return {
-        top: Math.max(0, box.top),
-        bottom: Math.min(window.innerHeight, box.bottom),
-      };
+    const style = window.getComputedStyle(parent);
+    const box = parent.getBoundingClientRect();
+    if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) {
+      bounds.left = Math.max(bounds.left, box.left);
+      bounds.right = Math.min(bounds.right, box.right);
+    }
+    if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) {
+      bounds.top = Math.max(bounds.top, box.top);
+      bounds.bottom = Math.min(bounds.bottom, box.bottom);
     }
   }
-  return { top: 0, bottom: window.innerHeight };
+  return bounds;
 }
 
 document.addEventListener("mouseover", positionProfileCard);
 document.addEventListener("focusin", positionProfileCard);
+document.addEventListener("scroll", positionProfileCard, true);
+window.addEventListener("resize", positionProfileCard);
+window.visualViewport?.addEventListener("resize", positionProfileCard);
+window.visualViewport?.addEventListener("scroll", positionProfileCard);
 
 /* -------------------------------------------------- phone swipe ---- */
 /*
