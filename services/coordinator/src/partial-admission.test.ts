@@ -654,3 +654,87 @@ test("releasing one symbol does not release the ones still held", () => {
   assert.equal(admission.status, "approved_with_constraints");
   assert.deepEqual(withheldBy(admission), ["beta"]);
 });
+
+test("a function that does not exist yet cannot land in granted ground", () => {
+  // The safety half of withholding insertion zones. The holder is editing
+  // `alpha` and adding something it has not written; the candidate is granted
+  // the file and writes three hunks — one inside its own function, one in the
+  // gap between two declarations, one in the preamble. The two that landed
+  // where the new function could go have to come back.
+  const ranges = [
+    { name: "alpha", startLine: 6, endLine: 12 },
+    { name: "beta", startLine: 15, endLine: 21 },
+    { name: "gamma", startLine: 24, endLine: 30 },
+  ];
+  const file = "src/mod.ts";
+  const locate = (candidate: string) =>
+    candidate === file ? ranges : undefined;
+  const shape = (taskId: string, symbols: string[]): AgentPlan => ({
+    taskId,
+    objective: taskId,
+    expectedFiles: [file],
+    expectedSymbols: symbols,
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  });
+
+  const admission = new PlanAdmissionController().admit({
+    plan: shape("task_candidate", ["gamma"]),
+    agentId: "agent_candidate",
+    baseRevision: "r1",
+    baseVersion: 1,
+    active: [
+      {
+        taskId: "task_holder",
+        agentId: "agent_holder",
+        plan: {
+          ...shape("task_holder", ["alpha", "beta", "gamma"]),
+          declaredSymbols: ["alpha", "newHelper"],
+        },
+      },
+    ],
+    planRevision: 1,
+    symbolRangesInFile: locate,
+  });
+  assert.equal(admission.status, "approved_with_constraints");
+
+  const hunk = (header: string) => `${header}\n keep\n-old\n+new\n`;
+  const split = splitChangeSet(
+    shape("task_candidate", ["gamma"]),
+    admission,
+    {
+      ...changeSet([]),
+      patches: [
+        {
+          path: file,
+          status: "modified",
+          patch:
+            `--- a/${file}\n+++ b/${file}\n` +
+            // preamble, gap between beta and gamma, and its own function
+            hunk("@@ -2,2 +2,2 @@") +
+            hunk("@@ -22,2 +22,2 @@") +
+            hunk("@@ -25,2 +25,2 @@"),
+        },
+      ],
+    },
+    locate,
+  );
+
+  const promoted = split.granted.patches[0]?.patch ?? "";
+  assert.match(promoted, /@@ -25,2/u, "its own function still lands");
+  assert.doesNotMatch(
+    promoted,
+    /@@ -2,2/u,
+    "the preamble is where a new declaration can go, so it is not granted",
+  );
+  assert.doesNotMatch(
+    promoted,
+    /@@ -22,2/u,
+    "nor is the gap between two declarations",
+  );
+  const held = split.deferred[0]?.patch ?? "";
+  assert.match(held, /@@ -2,2/u);
+  assert.match(held, /@@ -22,2/u);
+});
