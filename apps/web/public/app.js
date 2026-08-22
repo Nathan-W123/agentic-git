@@ -5403,6 +5403,14 @@ document.addEventListener("click", (event) => {
     // is held across the prepend by the anchoring in `render`: content is
     // being added *above* the viewport, so the offset that was captured means
     // nothing and the `scrollHeight` delta is what has to be applied.
+    // Asking again after a failed first read. `ensureChannelMessages` refuses
+    // a channel it has already been refused, so the flag has to be cleared by
+    // the request rather than by the render that follows it.
+    case "channel-retry-load": {
+      void ensureChannelMessages(value, render, true);
+      render();
+      return;
+    }
     case "channel-load-earlier": {
       const list = document.querySelector("#chan-messages");
       const anchor = list === null ? undefined : {

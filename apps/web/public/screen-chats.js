@@ -2486,7 +2486,32 @@ function channelMessageSkeleton(repositoryId) {
   </div>`;
 }
 
+/**
+ * The transcript when its first read failed, rather than a shell forever.
+ *
+ * A loading skeleton and a refused read looked identical: the shell renders
+ * until `channelLoaded` names the repository, and a read that failed never
+ * named it. Saying so — with the status, and a way to ask again — is the
+ * difference between a room that is loading and a room that is broken.
+ */
+function channelLoadFailure(repositoryId) {
+  const failure = state.channelFailed[repositoryId] ?? {};
+  const status =
+    failure.status === undefined ? "" : ` (${String(failure.status)})`;
+  return `<div class="chan-messages" id="chan-messages" role="status"
+    aria-live="polite" data-scroll-key="channel:${esc(repositoryId)}">${emptyState(
+      "chatBubble",
+      "This channel could not be loaded",
+      `${failure.message ?? "The request did not complete"}${status}`,
+      `<button type="button" class="btn btn-sm" data-act="channel-retry-load"
+        data-value="${esc(repositoryId)}">Try again</button>`,
+    )}</div>`;
+}
+
 function messageList(repositoryId) {
+  if (state.channelFailed[repositoryId] !== undefined) {
+    return channelLoadFailure(repositoryId);
+  }
   if (!state.channelLoaded.has(repositoryId)) {
     return channelMessageSkeleton(repositoryId);
   }
