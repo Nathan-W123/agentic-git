@@ -50,6 +50,7 @@ test("loads every control-room asset with an explicit content type", async () =>
     "/code-view.js",
     "/screen-repos.js",
     "/screen-code.js",
+    "/screen-chats.js",
     "/screen-agents.js",
     "/screen-notifications.js",
   ]) {
@@ -3650,7 +3651,7 @@ test("an agent's reply to a person is shown, not folded into the thinking block"
   );
 });
 
-test("each task turn puts its own thinking below its prompt and starts closed", async () => {
+test("each task turn puts its own compact thinking below its prompt and starts closed", async () => {
   const source = await publicFile("screen-chats.js");
   const groupingStart = source.indexOf("function threadReplyTurns");
   const thinkingStart = source.indexOf("function threadThinkingBlock");
@@ -3703,6 +3704,176 @@ test("each task turn puts its own thinking below its prompt and starts closed", 
     false,
     "an active turn should start closed just like a finished turn",
   );
+  assert.equal(
+    thinking.includes('class="tt-task"'),
+    false,
+    "the disclosure should not repeat the task already shown by the thread",
+  );
+  assert.equal(
+    /\bstep\$\{/u.test(thinking),
+    false,
+    "the compact summary should not count narration lines",
+  );
+});
+
+test("thinking disclosures show only useful status and deduplicated milestones", async () => {
+  const source = await publicFile("screen-chats.js");
+  const activityStart = source.indexOf("function threadActivityLabel(entry)");
+  const activityEnd = source.indexOf("\n/**", activityStart);
+  const thinkingStart = source.indexOf("function threadThinkingBlock");
+  const thinkingEnd = source.indexOf("\n/**", thinkingStart);
+  assert.notEqual(activityStart, -1);
+  assert.notEqual(activityEnd, -1);
+  assert.notEqual(thinkingStart, -1);
+  assert.notEqual(thinkingEnd, -1);
+
+  type Reply = {
+    kind: string;
+    content: string;
+    at?: string | undefined;
+  };
+  const renderThinking = Function(
+    "state",
+    "esc",
+    "icon",
+    "isThreadThinking",
+    "isThreadEnding",
+    "threadReplyTurns",
+    `"use strict";\n${source.slice(activityStart, activityEnd)}\n${source.slice(
+      thinkingStart,
+      thinkingEnd,
+    )}\nreturn threadThinkingBlock;`,
+  )(
+    { thinkingOpen: {} },
+    (value: unknown) => String(value),
+    () => "",
+    (reply: Reply) => reply.kind === "progress",
+    (reply: Reply) =>
+      reply.kind === "outcome" || /^Done —/u.test(reply.content),
+    (replies: Reply[]) => [{ replies }],
+  ) as (
+    rootId: string,
+    turn: { prompt?: Reply; replies: Reply[] },
+    index: number,
+  ) => { html: string; visible: Reply[] };
+
+  const active = renderThinking(
+    "root",
+    {
+      replies: [
+        {
+          kind: "progress",
+          content: "Finished editing. Validating…",
+          at: "2026-08-22T12:00:00.000Z",
+        },
+      ],
+    },
+    0,
+  );
+  assert.match(active.html, /class="tt-label">Thinking<\/span>/u);
+  assert.doesNotMatch(active.html, /class="tt-count"/u);
+
+  const completed = renderThinking(
+    "root",
+    {
+      replies: [
+        {
+          kind: "progress",
+          content: "Reading the repository and working out a plan…",
+          at: "2026-08-22T12:00:00.000Z",
+        },
+        {
+          kind: "outcome",
+          content: "The work is complete.",
+          at: "2026-08-22T12:01:05.000Z",
+        },
+      ],
+    },
+    1,
+  );
+  assert.match(completed.html, /class="tt-label">Thought for 1m 5s<\/span>/u);
+  assert.doesNotMatch(completed.html, /class="tt-count"/u);
+
+  for (const at of [undefined, "not-a-timestamp"]) {
+    const withoutDuration = renderThinking(
+      "root",
+      {
+        replies: [
+          { kind: "progress", content: "Planning changes", at },
+          { kind: "outcome", content: "The work is complete.", at },
+        ],
+      },
+      2,
+    );
+    assert.match(withoutDuration.html, /class="tt-label">Thought<\/span>/u);
+    assert.doesNotMatch(withoutDuration.html, /Thought for/u);
+  }
+
+  const compact = renderThinking(
+    "root",
+    {
+      replies: [
+        { kind: "agent", content: "Task: Keep the thread concise" },
+        {
+          kind: "progress",
+          content: "Reading the repository and working out a plan…",
+        },
+        {
+          kind: "progress",
+          content: "Reading the repository and working out a plan…",
+        },
+        { kind: "progress", content: "Planning changes" },
+        { kind: "progress", content: "Planning changes" },
+        {
+          kind: "progress",
+          content: "Working on apps/web/public/screen-chats.js…",
+        },
+        {
+          kind: "progress",
+          content: "Checking an unfamiliar reply shape",
+        },
+        { kind: "progress", content: "Finished editing. Validating…" },
+        { kind: "progress", content: "Finished editing. Validating…" },
+        { kind: "agent", content: "Here is the conversational reply." },
+        { kind: "plan", content: "Open plan" },
+        { kind: "outcome", content: "The compact flow is ready." },
+      ],
+    },
+    3,
+  );
+  const milestones = [
+    "Reading code",
+    "Planning",
+    "Editing screen-chats.js",
+    "Checking an unfamiliar reply shape",
+    "Testing",
+  ];
+  let previous = -1;
+  for (const milestone of milestones) {
+    const markup = `<p>${milestone}</p>`;
+    const position = compact.html.indexOf(markup);
+    assert.ok(position > previous, `${milestone} should stay in order`);
+    assert.equal(
+      compact.html.split(markup).length - 1,
+      1,
+      `${milestone} should appear once`,
+    );
+    previous = position;
+  }
+  assert.equal(compact.html.includes("Task: Keep the thread concise"), false);
+  assert.deepEqual(
+    compact.visible.map((reply) => reply.kind),
+    ["agent", "plan", "outcome"],
+    "conversation, plans, and outcomes must remain outside the thinking fold",
+  );
+
+  const titleOnly = renderThinking(
+    "root",
+    { replies: [{ kind: "agent", content: "Task: Already visible above" }] },
+    4,
+  );
+  assert.equal(titleOnly.html, "", "an empty disclosure should be omitted");
+  assert.deepEqual(titleOnly.visible, []);
 });
 
 test("the progress bar restarts for each task turn in a thread", async () => {

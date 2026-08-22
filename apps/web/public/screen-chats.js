@@ -5118,27 +5118,72 @@ function threadReplyTurns(replies) {
 
 /** One turn's narration, with state independent from every other turn. */
 function threadThinkingBlock(rootId, turn, index) {
-  // A task title belongs to the fold only when it opens this turn. A later
-  // agent reply that happens to begin "Task:" is something the agent said to
-  // the reader and must stay visible.
+  // The opening task title already names the thread, so do not repeat it in
+  // the disclosure. A later agent reply that happens to begin "Task:" is
+  // something the agent said to the reader and must stay visible.
   const [first, ...rest] = turn.replies;
   const titleLine = /^Task: /u.test(String(first?.content ?? ""))
     ? first
     : undefined;
   const body = titleLine === undefined ? turn.replies : rest;
   const steps = body.filter(isThreadThinking);
-  if (steps.length === 0 && titleLine === undefined) {
-    return { html: "", visible: body };
+  const visible = body.filter((reply) => !isThreadThinking(reply));
+  if (steps.length === 0) {
+    return { html: "", visible };
   }
 
   const key = `${rootId}:thinking:${index}`;
-  // Silent at zero. A task that has been stated and not yet worked on has a
-  // block holding the request alone, and "0 steps" reads as a failure rather
-  // than work that has not started.
-  const count =
-    steps.length === 0
-      ? ""
-      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  const milestones = [];
+  for (const step of steps) {
+    const lines = String(step.content ?? "")
+      .split(/\n+/u)
+      .map((line) => line.replace(/\s+/gu, " ").trim())
+      .filter((line) => line.length > 0);
+    for (const line of lines) {
+      // Use the same small phase vocabulary as the collapsed channel row.
+      // Anything outside that known protocol stays verbatim in the expanded
+      // disclosure, so compacting the routine narration never loses a useful
+      // or unexpected update.
+      const phase = threadActivityLabel({
+        replies: [{ ...step, content: line }],
+      });
+      const known =
+        phase !== "Starting" ||
+        /starting on the code|Starting on |execution started/iu.test(line);
+      const milestone = known ? phase : line;
+      if (!milestones.includes(milestone)) {
+        milestones.push(milestone);
+      }
+    }
+  }
+  if (milestones.length === 0) {
+    return { html: "", visible };
+  }
+
+  const ending = [...body].reverse().find(isThreadEnding);
+  const startedAt = steps
+    .map((reply) => Date.parse(String(reply.at ?? "")))
+    .find((at) => Number.isFinite(at));
+  const finishedAt = Date.parse(String(ending?.at ?? ""));
+  let label = ending === undefined ? "Thinking" : "Thought";
+  if (
+    ending !== undefined &&
+    startedAt !== undefined &&
+    Number.isFinite(finishedAt) &&
+    finishedAt >= startedAt
+  ) {
+    const elapsed = Math.max(1, Math.round((finishedAt - startedAt) / 1000));
+    const hours = Math.floor(elapsed / 3600);
+    const minutes = Math.floor((elapsed % 3600) / 60);
+    const seconds = elapsed % 60;
+    const duration =
+      hours > 0
+        ? `${hours}h${minutes > 0 ? ` ${minutes}m` : ""}`
+        : minutes > 0
+          ? `${minutes}m${seconds > 0 ? ` ${seconds}s` : ""}`
+          : `${seconds}s`;
+    label = `Thought for ${duration}`;
+  }
   const html = `<details class="thread-thinking"${
     // Every turn starts folded. Its independent key still keeps an explicit
     // reader choice stable as more progress arrives for this turn alone.
@@ -5146,27 +5191,14 @@ function threadThinkingBlock(rootId, turn, index) {
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
       <span class="tt-caret">${icon("chevronRight")}</span>
-      <span class="tt-label">Thinking</span>
-      <span class="tt-count">${esc(count)}</span></summary>
-    <div class="tt-body">${
-      titleLine === undefined
-        ? ""
-        : `<p class="tt-task">${esc(
-            String(titleLine.content ?? "")
-              .replace(/^Task:\s*/u, "")
-              .trim(),
-          )}</p>`
-    }${steps
-      .map((reply) => String(reply.content ?? "").trim())
-      .filter((text) => text.length > 0)
-      .join("\n")
-      .split(/\n+/u)
-      .map((line) => `<p>${esc(line)}</p>`)
+      <span class="tt-label">${esc(label)}</span></summary>
+    <div class="tt-body">${milestones
+      .map((milestone) => `<p>${esc(milestone)}</p>`)
       .join("")}</div>
   </details>`;
   return {
     html,
-    visible: body.filter((reply) => !isThreadThinking(reply)),
+    visible,
   };
 }
 
