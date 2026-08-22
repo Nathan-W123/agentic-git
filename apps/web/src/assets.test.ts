@@ -1113,14 +1113,24 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
-  // Written from the column variables rather than as the 5px they work out
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
+    "the connector should leave a quiet gap beneath the avatar",
+  );
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 41px;/u,
+    "a single-task connector should use the same shortened start",
+  );
+  // Written from the column variables rather than as the 9px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
   // drifting apart when any of those three numbers moves.
   assert.match(
     channelElbow ?? "",
-    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 24px\);/u,
+    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 20px\);/u,
   );
-  assert.match(channelElbow ?? "", /width: 24px;/u);
+  assert.match(channelElbow ?? "", /width: 20px;/u);
   // The elbow turns out of the stem, so its own upright has to stand in the
   // stem's column. It is placed from its right edge, which means the gap plus
   // its width must land on the stem's offset — and it must be measured by the
@@ -1141,6 +1151,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelEndCap ?? "", /height: 3px;/u);
   assert.match(channelEndCap ?? "", /border-radius: 50%;/u);
   assert.match(channelEndCap ?? "", /background: var\(--cmsg-stem\);/u);
+  assert.match(channelEndCap ?? "", /right: calc\(100% \+ 8px\);/u);
   // The hook is only the quarter turn: a straight upright here would be
   // painted on top of the shared stem and make every branch visibly thicker.
   // The 20px face and two pixels of vertical padding put the link's midpoint
@@ -1170,6 +1181,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
+  assert.match(panelBranch ?? "", /top: 48px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
