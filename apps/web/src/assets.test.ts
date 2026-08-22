@@ -1937,6 +1937,19 @@ test("working agent faces fill the mark itself with the run's progress", async (
   assert.doesNotMatch(faceFillLayer ?? "", /radial-gradient\(/u);
   assert.doesNotMatch(css, /\.agent-face \.agent-run::after \{/u);
 
+  // The fill glimmers the way live status copy does: the same travelling band
+  // on the same clock, held back over part of the bright mark so the dark one
+  // underneath shows through as it passes.
+  const faceFillSweep = /\.agent-face \.agent-run > svg \{([\s\S]*?)\n\}/u
+    .exec(css)?.[1];
+  assert.notEqual(faceFillSweep, undefined, "a live fill should carry a sweep");
+  assert.match(faceFillSweep ?? "", /mask-size: 250% 100%;/u);
+  assert.match(
+    faceFillSweep ?? "",
+    /animation: agent-run-sweep 2\.4s ease-in-out infinite;/u,
+  );
+  assert.match(css, /@keyframes agent-run-sweep \{/u);
+
   // The mark below stays dark and low, lifting a little as the fill grows.
   const faceFill = /\.agent-face-working > svg \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(faceFill, undefined, "an unfilled mark should read as dark");
