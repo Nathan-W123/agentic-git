@@ -990,13 +990,13 @@ svg.ui-icon {
    corner so progress never paints over the agent mark itself. */
 .agent-face .agent-run {
   position: absolute;
-  right: -3px;
-  bottom: -1px;
+  right: -2px;
+  bottom: 0;
   z-index: 1;
   display: grid;
   place-items: center;
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
@@ -1007,7 +1007,8 @@ svg.ui-icon {
 }
 
 /* The solid centre says what the ring is measuring: green means coding. The
-   surface-coloured gap keeps the dot and the progress stroke as two readings. */
+   surface-coloured gap keeps the static dot and one-pixel progress stroke as
+   two readings. */
 .agent-face .agent-run::after {
   content: "";
   width: 7px;
@@ -1015,7 +1016,6 @@ svg.ui-icon {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 2px var(--bg-card);
-  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -6622,17 +6622,16 @@ button.chip.lg:hover {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 2px var(--bg-chat);
-  animation: status-breathe 2.4s ease-in-out infinite;
   pointer-events: none;
 }
 
 .cmsg-thread-link .ctl-faces .ctl-working::after {
   content: "";
   position: absolute;
-  right: -3px;
-  bottom: -1px;
-  width: 15px;
-  height: 15px;
+  right: -2px;
+  bottom: 0;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
@@ -8506,8 +8505,6 @@ body.resizing-panel {
 @media (prefers-reduced-motion: reduce) {
   .agent-face svg,
   .agent-face svg *,
-  .agent-face .agent-run::after,
-  .cmsg-thread-link .ctl-faces .ctl-working::before,
   .status-working,
   .presence-online {
     animation: none;

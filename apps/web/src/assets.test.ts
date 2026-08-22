@@ -1507,12 +1507,6 @@ test("motion is restrained, reducible, and off when an agent is not there", asyn
     css,
     /\.agent-face\[data-presence="offline"\] svg,\s*\.agent-face\[data-presence="offline"\] svg \* \{\s*animation: none;/u,
   );
-  const reduced = [...css.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/gu)]
-    .map((match) => match[1] ?? "")
-    .find((block) => block.includes(".agent-face .agent-run::after"));
-  assert.notEqual(reduced, undefined, "the coding dot should honour reduced motion");
-  assert.match(reduced ?? "", /\.cmsg-thread-link \.ctl-faces \.ctl-working::before,/u);
-  assert.match(reduced ?? "", /animation: none;/u);
 });
 
 /**
@@ -1800,10 +1794,10 @@ test("working agent faces put progress around their green status dot", async () 
     faceRing ?? "",
     /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.match(faceRing ?? "", /right: -3px;/u);
-  assert.match(faceRing ?? "", /bottom: -1px;/u);
-  assert.match(faceRing ?? "", /width: 15px;/u);
-  assert.match(faceRing ?? "", /height: 15px;/u);
+  assert.match(faceRing ?? "", /right: -2px;/u);
+  assert.match(faceRing ?? "", /bottom: 0;/u);
+  assert.match(faceRing ?? "", /width: 13px;/u);
+  assert.match(faceRing ?? "", /height: 13px;/u);
   assert.doesNotMatch(faceRing ?? "", /#f3efe8|inset: -1px/u);
 
   const faceDot = /\.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u.exec(css)?.[1];
@@ -1812,6 +1806,7 @@ test("working agent faces put progress around their green status dot", async () 
   assert.match(faceDot ?? "", /height: 7px;/u);
   assert.match(faceDot ?? "", /background: var\(--green\);/u);
   assert.match(faceDot ?? "", /box-shadow: 0 0 0 2px var\(--bg-card\);/u);
+  assert.doesNotMatch(faceDot ?? "", /animation:/u);
 
   const progress = data.slice(
     data.indexOf("export function agentWorkingProgress"),
@@ -3542,10 +3537,10 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     ring ?? "",
     /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.match(ring ?? "", /right: -3px;/u);
-  assert.match(ring ?? "", /bottom: -1px;/u);
-  assert.match(ring ?? "", /width: 15px;/u);
-  assert.match(ring ?? "", /height: 15px;/u);
+  assert.match(ring ?? "", /right: -2px;/u);
+  assert.match(ring ?? "", /bottom: 0;/u);
+  assert.match(ring ?? "", /width: 13px;/u);
+  assert.match(ring ?? "", /height: 13px;/u);
   assert.doesNotMatch(ring ?? "", /#f3efe8|inset: -1px/u);
 
   const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
@@ -3555,6 +3550,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.match(dot ?? "", /height: 7px;/u);
   assert.match(dot ?? "", /background: var\(--green\);/u);
   assert.match(dot ?? "", /box-shadow: 0 0 0 2px var\(--bg-chat\);/u);
+  assert.doesNotMatch(dot ?? "", /animation:/u);
 
   // Every kind of participant gets the same surface-coloured cutout. Agent
   // marks are not `.avatar`s, so putting the ring on portraits alone lets two
