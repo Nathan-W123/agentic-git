@@ -4214,6 +4214,49 @@ button.chip.lg:hover {
   max-width: 800px;
 }
 
+/* Channel activity recap — three big figures, Spotify-Wrapped energy without
+   a second card language. Lives on Settings, not in the channel-info tray. */
+.channel-wrapped {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 6px 17px 18px;
+}
+
+.channel-wrapped-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 14px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  min-width: 0;
+}
+
+.channel-wrapped-value {
+  font-size: 28px;
+  font-weight: 650;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.channel-wrapped-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+@media (max-width: 520px) {
+  .channel-wrapped {
+    grid-template-columns: 1fr;
+  }
+}
+
 .set-row {
   display: flex;
   align-items: center;
@@ -6447,6 +6490,68 @@ button.chip.lg:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .cmsg-thread-link .ctl-activity {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+/* Words arriving, one just behind the last: each starts a little low, a
+   little out of focus, and settles. The stagger is set per word by the render
+   loop — see `playTextReveal` in app.js, which is also what decides that a
+   block is new to the reader in the first place — so the stylesheet only has
+   to describe what one word does.
+
+   `inline-block` is what lets a word be moved and blurred at all; the spaces
+   between them are left as plain text, so lines break and copy exactly as
+   they did before anything was wrapped. */
+.text-reveal-word {
+  display: inline-block;
+  animation: text-reveal-in 460ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  /* Set per word by the render loop, and negative for a word part-way
+     through: a redraw lands in the middle of most arrivals, and a negative
+     delay is what carries the animation on from where it was rather than
+     starting it again. */
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
+@keyframes text-reveal-in {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+}
+
+/* Live status copy — who is thinking, what a run is doing — reads as ongoing
+   rather than as having arrived, so it keeps the same travelling highlight the
+   thread summary's activity line uses instead of the one-off reveal. */
+.text-sweep {
+  background: linear-gradient(
+    100deg,
+    var(--text-4) 0 38%,
+    var(--text) 48%,
+    var(--text-4) 58% 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thread-activity-sweep 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-reveal-word {
+    animation: none;
+  }
+
+  .text-sweep {
     animation: none;
     background: none;
     -webkit-text-fill-color: currentColor;

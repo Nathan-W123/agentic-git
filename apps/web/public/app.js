@@ -198,6 +198,7 @@ import {
   reactionPicker,
   renderChats,
   rosterMenuItems,
+  personMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
   startPlannedWork,
@@ -1185,6 +1186,47 @@ function dmBadge() {
 
 /* ----------------------------------------------------------- settings ---- */
 
+/**
+ * Channel activity as a Wrapped-style recap — messages, replies, and tokens
+ * for the open repository. Lived in the channel-info popover; Settings is
+ * where a look-back belongs, not a tools tray.
+ */
+function channelStatsCard() {
+  const repository = currentRepository();
+  const repositoryId = repository?.id ?? "";
+  const stats =
+    repositoryId === "" ? undefined : state.channelStats[repositoryId];
+  const fmt = (value) => Number(value ?? 0).toLocaleString();
+  const tiles =
+    stats === undefined || stats === null
+      ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">Counting…</div></span></div>`
+      : `<div class="channel-wrapped">
+          <div class="channel-wrapped-tile">
+            <div class="channel-wrapped-value">${fmt(stats.messages)}</div>
+            <div class="channel-wrapped-label">Messages</div>
+          </div>
+          <div class="channel-wrapped-tile">
+            <div class="channel-wrapped-value">${fmt(stats.replies)}</div>
+            <div class="channel-wrapped-label">Replies</div>
+          </div>
+          <div class="channel-wrapped-tile">
+            <div class="channel-wrapped-value">${fmt(stats.tokens)}${
+              stats.tokensIncomplete ? "+" : ""
+            }</div>
+            <div class="channel-wrapped-label">Tokens</div>
+          </div>
+        </div>`;
+  return `<section class="card channel-stats-card">
+    <div class="panel-head"><div><h3>Channel wrapped</h3>
+      <p>${
+        repositoryId === ""
+          ? "Open a channel to see how this room has been used."
+          : `A look back at #${esc(repositoryId)} — the work this room has held.`
+      }</p></div></div>
+    ${tiles}
+  </section>`;
+}
+
 function settingsScreen() {
   const project = state.project;
   const policy = project?.policy ?? {};
@@ -1205,6 +1247,8 @@ function settingsScreen() {
       ${invitationsCard()}
 
       ${appearanceCard()}
+
+      ${channelStatsCard()}
 
       <section class="card">
         <div class="panel-head"><div><h3>Approval policy</h3>
@@ -2247,46 +2291,67 @@ async function deleteRepositoryAction(repositoryId) {
  * Promoting an existing organization member to repository-scoped co-owner —
  * the same capabilities the repository's creator has there, without
  * touching the member's organization-wide role.
+ *
+ * Prefer a concrete `userId` from the People-row menu. Without one, a picker
+ * still asks which member — the old channel-info promote button used that.
  */
-async function promoteRepositoryOwnerAction(repositoryId) {
-  const candidates = state.members.filter(
-    (member) => member.userId !== currentUserId(),
-  );
-  if (candidates.length === 0) {
-    toast("There is no other organization member to promote.", "error");
-    return;
-  }
-  const values = await showModal({
-    title: "Promote a member to co-owner",
-    subtitle:
-      `Gives full capabilities on ${repositoryId} only — the same the ` +
-      `repository's creator has there — without changing their ` +
-      "organization-wide role.",
-    confirm: "Promote",
-    body: `<label class="field">
-        <span>Member</span>
-        <select class="input" name="userId">
-          ${candidates
-            .map(
-              (member) =>
-                `<option value="${esc(member.userId)}">${esc(
-                  member.user?.displayName ?? member.user?.email ?? member.userId,
-                )}</option>`,
-            )
-            .join("")}
-        </select>
-      </label>`,
-  });
-  if (values === undefined) {
-    return;
+async function promoteRepositoryOwnerAction(repositoryId, userId) {
+  let targetUserId = userId;
+  if (!targetUserId) {
+    const candidates = state.members.filter(
+      (member) => member.userId !== currentUserId(),
+    );
+    if (candidates.length === 0) {
+      toast("There is no other organization member to promote.", "error");
+      return;
+    }
+    const values = await showModal({
+      title: "Promote a member to co-owner",
+      subtitle:
+        `Gives full capabilities on ${repositoryId} only — the same the ` +
+        `repository's creator has there — without changing their ` +
+        "organization-wide role.",
+      confirm: "Promote",
+      body: `<label class="field">
+          <span>Member</span>
+          <select class="input" name="userId">
+            ${candidates
+              .map(
+                (member) =>
+                  `<option value="${esc(member.userId)}">${esc(
+                    member.user?.displayName ?? member.user?.email ?? member.userId,
+                  )}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>`,
+    });
+    if (values === undefined) {
+      return;
+    }
+    targetUserId = values.userId;
+  } else {
+    const confirmed = await showModal({
+      title: "Promote to co-owner?",
+      subtitle:
+        `Gives full capabilities on ${repositoryId} only — the same the ` +
+        `repository's creator has there — without changing their ` +
+        "organization-wide role.",
+      confirm: "Promote",
+    });
+    if (confirmed === undefined) {
+      return;
+    }
   }
   try {
-    await setRepositoryGrant(repositoryId, values.userId, "owner");
+    await setRepositoryGrant(repositoryId, targetUserId, "owner");
     toast("Promoted to repository co-owner", "ok");
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    void ensureRepositoryGrants(repositoryId, refreshChannelInfoPopover);
+    delete state.repositoryGrants[repositoryId];
+    void ensureRepositoryGrants(repositoryId, render);
+    render();
     refreshChannelInfoPopover();
   }
 }
@@ -2295,10 +2360,13 @@ async function promoteRepositoryOwnerAction(repositoryId) {
 async function revokeRepositoryGrantAction(repositoryId, userId) {
   try {
     await revokeRepositoryGrant(repositoryId, userId);
+    toast("Co-owner access removed", "ok");
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    void ensureRepositoryGrants(repositoryId, refreshChannelInfoPopover);
+    delete state.repositoryGrants[repositoryId];
+    void ensureRepositoryGrants(repositoryId, render);
+    render();
     refreshChannelInfoPopover();
   }
 }
@@ -4169,6 +4237,204 @@ function animateOnce(node, className, drop) {
   window.setTimeout(finish, 400);
 }
 
+/* -------------------------------------------------------- text arrival ---- */
+
+/**
+ * The pace an answer arrives at: how far apart consecutive words start, and
+ * how long each one takes to settle.
+ *
+ * Near the speed of a sentence being read aloud. Slower and the reader is
+ * waiting for words they can already half-see; faster and nothing has
+ * visibly happened at all.
+ *
+ * The word's own duration is stated here as well as in `.text-reveal-word`,
+ * because this is what decides when an arrival is over and stops being
+ * resumed; the stylesheet is what actually plays it.
+ */
+const REVEAL_STAGGER_MS = 26;
+const REVEAL_WORD_MS = 460;
+
+/**
+ * Where the stagger stops. A long answer would otherwise hold its last
+ * paragraph back for the better part of a minute, so past this many words the
+ * remainder simply stands there — by then the arrival has been read.
+ */
+const REVEAL_MAX_WORDS = 160;
+
+/** How many arrivals are remembered before the oldest are let go. */
+const REVEAL_MEMORY = 800;
+
+/**
+ * What this tab has already watched arrive, and when each one started.
+ *
+ * The screen is redrawn by replacing the whole document — see
+ * `MOTION_SURFACES` — so "is this element new" is never the question CSS can
+ * answer on its own. Every block that can animate carries a stable
+ * `data-reveal` key, and this map is the only thing that knows whether the
+ * words under that key are new to the reader or have been on screen for a
+ * while.
+ *
+ * The timestamp is kept rather than a bare flag because a redraw lands in the
+ * middle of most arrivals — somebody typing in the room is enough — and the
+ * words have to pick the animation back up where the last frame left it
+ * instead of starting over or snapping to the end.
+ */
+const revealSeen = new Map();
+
+/**
+ * The surfaces that were on screen a moment ago, by the group half of the key.
+ *
+ * This is what separates "a message arrived" from "you opened a conversation
+ * that already had a hundred of them". Only text belonging to a surface the
+ * reader was already looking at animates; opening a channel, a thread or a
+ * direct message shows its backlog the way it has always been shown, whole.
+ */
+let revealGroups = new Set();
+
+/** `group|id` — the group is the surface, the id is the block within it. */
+function revealGroupOf(key) {
+  const cut = key.indexOf("|");
+  return cut === -1 ? key : key.slice(0, cut);
+}
+
+function motionIsUnwanted() {
+  return (
+    window.matchMedia !== undefined &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+/**
+ * Plays whatever arrived in this render, and only what arrived.
+ *
+ * Runs after the swap, beside `playSurfaceMotion` and for the same reason:
+ * the outgoing document is gone by then, and the render loop is the only
+ * thing left that remembers what it was showing.
+ */
+function playTextReveal(root) {
+  const quiet = motionIsUnwanted();
+  const now = Date.now();
+  const groups = new Set();
+  for (const block of root.querySelectorAll("[data-reveal]")) {
+    const key = block.dataset.reveal ?? "";
+    if (key === "") {
+      continue;
+    }
+    const group = revealGroupOf(key);
+    groups.add(group);
+    const started = revealSeen.get(key);
+    if (started === undefined) {
+      // New to the document. Whether it is new to the *reader* is the
+      // question the group answers: text in a surface that was not on screen
+      // last time is a backlog being opened, not an answer coming in.
+      const arriving = !quiet && revealGroups.has(group);
+      revealSeen.set(key, arriving ? now : 0);
+      if (arriving) {
+        revealWords(block, 0);
+      }
+      continue;
+    }
+    // Zero means "was already here", which never animates. Anything else is
+    // an arrival still in flight until its last word has landed.
+    if (started === 0 || quiet) {
+      continue;
+    }
+    const elapsed = now - started;
+    if (elapsed < REVEAL_MAX_WORDS * REVEAL_STAGGER_MS + REVEAL_WORD_MS) {
+      revealWords(block, elapsed);
+    }
+  }
+  revealGroups = groups;
+  forgetOldReveals(groups);
+}
+
+/**
+ * Keeps the map from growing for as long as the tab is open.
+ *
+ * Only keys from surfaces nobody is looking at are dropped: forgetting a
+ * message still on screen would make it arrive a second time on the next
+ * redraw, which is the one thing this whole mechanism exists to prevent.
+ */
+function forgetOldReveals(groups) {
+  if (revealSeen.size <= REVEAL_MEMORY) {
+    return;
+  }
+  for (const key of revealSeen.keys()) {
+    if (!groups.has(revealGroupOf(key))) {
+      revealSeen.delete(key);
+    }
+  }
+}
+
+/** Text that is not prose, and is not taken apart. */
+const REVEAL_SKIPPED = new Set([
+  "PRE",
+  "CODE",
+  "SCRIPT",
+  "STYLE",
+  "TEXTAREA",
+  "SVG",
+]);
+
+function insideSkipped(node, root) {
+  let parent = node.parentNode;
+  while (parent !== null && parent !== root) {
+    if (REVEAL_SKIPPED.has(String(parent.nodeName).toUpperCase())) {
+      return true;
+    }
+    parent = parent.parentNode;
+  }
+  return false;
+}
+
+/**
+ * Wraps each word of a block in its own element so it can come in on its own
+ * delay, resuming `elapsed` milliseconds into the sequence.
+ *
+ * A negative delay is what does the resuming: the browser starts an animation
+ * that far through rather than waiting, so a redraw two hundred milliseconds
+ * into an arrival carries on from two hundred milliseconds instead of
+ * replaying the opening. Whitespace is left as it was, which is what keeps
+ * wrapping, selection and copied text identical to the markup underneath.
+ */
+function revealWords(block, elapsed) {
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  const texts = [];
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const words = node.nodeValue ?? "";
+    if (words.trim() !== "" && !insideSkipped(node, block)) {
+      texts.push(node);
+    }
+  }
+  let index = 0;
+  for (const node of texts) {
+    if (index >= REVEAL_MAX_WORDS) {
+      break;
+    }
+    const pieces = String(node.nodeValue).split(/(\s+)/u);
+    const holder = document.createDocumentFragment();
+    for (const piece of pieces) {
+      if (piece === "") {
+        continue;
+      }
+      if (piece.trim() === "" || index >= REVEAL_MAX_WORDS) {
+        holder.append(piece);
+        continue;
+      }
+      const word = document.createElement("span");
+      word.className = "text-reveal-word";
+      word.style.setProperty(
+        "--reveal-delay",
+        `${Math.round(index * REVEAL_STAGGER_MS - elapsed)}ms`,
+      );
+      word.textContent = piece;
+      holder.append(word);
+      index += 1;
+    }
+    node.replaceWith(holder);
+  }
+}
+
 export function render() {
   if (rendering) {
     renderAgain = true;
@@ -4292,6 +4558,11 @@ function renderNow() {
   // nothing.
   playSurfaceMotion(root);
 
+  // What the swap turned out to have *said*: the words that were not in the
+  // room a moment ago come in one at a time, and everything already there
+  // stays where it is. See `playTextReveal`.
+  playTextReveal(root);
+
   // Chats owns this now: the inline file and diff blocks in the transcript are
   // the only place code is read, so the channel has to load its own changeset
   // rather than inherit one a separate Code screen happened to fetch first.
@@ -4330,6 +4601,14 @@ function renderNow() {
       }
     });
     void ensureChannelRoster(activeChannelId(), () => {
+      if (state.route === "chats") {
+        render();
+      }
+    });
+    // Grants feed the People-row promote / demote menus. Loaded with the
+    // roster rather than on channel-info open — those actions no longer live
+    // in that popover.
+    void ensureRepositoryGrants(activeChannelId(), () => {
       if (state.route === "chats") {
         render();
       }
@@ -4388,6 +4667,20 @@ function renderNow() {
     )) {
       void ensureAgentOptions(provider, () => {
         if (state.route === "chats") {
+          render();
+        }
+      });
+    }
+  }
+  if (state.route === "settings") {
+    const repositoryId = activeChannelId();
+    // Once per repository, same claim pattern as previews: `undefined` is
+    // "not asked", `null` is "asked, still counting", and a real object is
+    // the recap. Without the claim, every settings render would re-fetch.
+    if (repositoryId && state.channelStats[repositoryId] === undefined) {
+      state.channelStats[repositoryId] = null;
+      void loadChannelStats(repositoryId).then(() => {
+        if (state.route === "settings") {
           render();
         }
       });
@@ -5659,6 +5952,13 @@ document.addEventListener("click", (event) => {
     case "roster-agent-menu":
       showMenu(node, rosterMenuItems(value));
       return;
+    /**
+     * The menu on a People row — promote / demote / remove co-owner, the
+     * same actions that used to live in the channel-info panel.
+     */
+    case "roster-person-menu":
+      showMenu(node, personMenuItems(value));
+      return;
     /** Replaces the rendered name with its inline editor. */
     case "channel-settings-toggle":
       closePopover();
@@ -5692,11 +5992,6 @@ document.addEventListener("click", (event) => {
       return;
     case "channel-info":
       showPopover(node, channelInfoPopoverHtml(value));
-      // Grants are fetched lazily, unlike the roster: the panel that reads
-      // them only ever shows for someone who can already manage the
-      // repository, so most opens of this popover need nothing here.
-      void ensureRepositoryGrants(value, refreshChannelInfoPopover);
-      void loadChannelStats(value).then(refreshChannelInfoPopover);
       return;
     case "channel-agent-add":
       addChannelAgent(activeChannelId(), value);
@@ -5719,12 +6014,25 @@ document.addEventListener("click", (event) => {
     case "channel-delete-repo":
       void deleteRepositoryAction(value);
       return;
-    case "channel-grant-promote":
-      void promoteRepositoryOwnerAction(value);
+    case "channel-grant-promote": {
+      // People-row menus pass `${repositoryId}:${userId}`; the legacy picker
+      // path still accepts a bare repository id.
+      closePopover();
+      const separatorIndex = value.indexOf(":");
+      if (separatorIndex === -1) {
+        void promoteRepositoryOwnerAction(value);
+      } else {
+        void promoteRepositoryOwnerAction(
+          value.slice(0, separatorIndex),
+          value.slice(separatorIndex + 1),
+        );
+      }
       return;
+    }
     case "channel-grant-revoke": {
-      // `value` is `${repositoryId}:${userId}` — see `coOwnerPanelHtml` in
-      // screen-chats.js.
+      // `value` is `${repositoryId}:${userId}` — see `personMenuItems` /
+      // `coOwnerPanelHtml` in screen-chats.js.
+      closePopover();
       const separatorIndex = value.indexOf(":");
       void revokeRepositoryGrantAction(
         value.slice(0, separatorIndex),
