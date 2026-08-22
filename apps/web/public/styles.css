@@ -873,6 +873,17 @@ svg.ui-icon {
   height: 22px;
 }
 
+/* The way back out of a settings sub-page, ahead of the page icon. The head
+   aligns its children to the top, and a 30px button beside a 40px tile reads
+   as sitting high; the offset centres it against the tile. The negative
+   margin closes the 16px head gap to something that reads as one unit —
+   "back to here" — rather than two unrelated controls. */
+.page-head .ph-back {
+  flex: none;
+  margin-top: 5px;
+  margin-right: -6px;
+}
+
 .page-head h1 {
   font-size: 27px;
   font-weight: 600;
