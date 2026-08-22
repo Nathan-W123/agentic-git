@@ -6284,14 +6284,21 @@ export class ApiGateway {
         throw new HttpError(404, "user_not_found", "User was not found");
       }
       const project = await this.options.store.getProject(projectId);
-      const membership =
+      const [membership, existingGrants] = await Promise.all([
         project === undefined
           ? undefined
-          : await this.options.store.getMembership(
-              project.organizationId,
-              userId,
-            );
-      if (membership === undefined) {
+          : this.options.store.getMembership(project.organizationId, userId),
+        this.options.store.listRepositoryGrants(repositoryId),
+      ]);
+      // People invited to only this repository intentionally have no
+      // organization membership. They are still valid promotion targets once
+      // their existing grant puts them in this repository's People list. Keep
+      // rejecting unrelated accounts so knowing a user id cannot itself grant
+      // access.
+      if (
+        membership === undefined &&
+        !existingGrants.some((grant) => grant.userId === userId)
+      ) {
         throw new HttpError(
           404,
           "not_found",

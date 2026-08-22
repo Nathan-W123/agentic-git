@@ -8636,6 +8636,50 @@ test("promoting an existing member to repository owner actually grants the capab
   );
 });
 
+test("promoting a repository-only guest to co-owner does not require organization membership", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  await invitableRepository(owner, "promote-guest-repo");
+
+  const guest = await runtime.store.createUser({
+    email: "guest-to-promote@example.com",
+    displayName: "Repository Guest",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: "promote-guest-repo",
+    userId: guest.id,
+    role: "viewer",
+    grantedBy: bootstrapped.user.id,
+    createdAt: new Date().toISOString(),
+  });
+
+  const promoted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/promote-guest-repo/grants/${guest.id}`,
+    { method: "POST", body: { role: "owner" } },
+  );
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.data));
+  assert.equal(promoted.data.grant.role, "owner");
+  assert.equal(
+    await runtime.store.getMembership(DEFAULT_ORGANIZATION_ID, guest.id),
+    undefined,
+  );
+
+  // An unrelated account still cannot be added merely by knowing its id.
+  const stranger = await runtime.store.createUser({
+    email: "stranger-not-in-repo@example.com",
+    displayName: "Stranger",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const rejected = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/promote-guest-repo/grants/${stranger.id}`,
+    { method: "POST", body: { role: "owner" } },
+  );
+  assert.equal(rejected.status, 404, JSON.stringify(rejected.data));
+  assert.equal(rejected.data.error.code, "not_found");
+});
+
 test("revoking a repository grant does not orphan the repository — organization role still reaches it", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
