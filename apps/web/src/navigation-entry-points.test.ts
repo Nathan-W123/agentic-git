@@ -209,3 +209,34 @@ test("direct messages are offered with people and with nobody else", async () =>
   assert.match(list, /!talking\.has\(person\.id\)/u);
   assert.match(list, /label: "Nobody else on this project yet"/u);
 });
+
+test("Advanced is the foot of Settings, and holds what left it", async () => {
+  const app = await publicFile("app.js");
+
+  // The way in. Last card on the page, after the account — a settings screen
+  // whose first two cards were project-wide policy asked everybody to read
+  // past the team's rules to reach their own name.
+  const settings = slice(app, "function settingsScreen() {", "\n/**");
+  assert.match(settings, /data-act="nav" data-value="advanced"/u);
+  assert.equal(
+    settings.indexOf('data-value="advanced"') > settings.indexOf("<h3>Account</h3>"),
+    true,
+    "Advanced belongs below the account card, at the bottom of Settings",
+  );
+  // And what left: neither card is still drawn on the page it moved off.
+  assert.doesNotMatch(settings, /repositoryCard\(\)|admissionsCard\(\)/u);
+
+  // The page itself, and the way back out of it by hand for anybody whose
+  // browser Back is not where they look.
+  const advanced = slice(app, "function advancedScreen() {", "\nfunction settingsScreen");
+  assert.match(advanced, /repositoryCard\(\)/u);
+  assert.match(advanced, /admissionsCard\(\)/u);
+  assert.match(advanced, /data-act="nav" data-value="settings"/u);
+  // Its own scroll identity: the toggles on it redraw the whole app, and a
+  // page that jumps to the top on every switch is unusable.
+  assert.match(advanced, /data-scroll-key="advanced"/u);
+
+  // Reachable by name as well, because a page with exactly one door is a page
+  // people lose.
+  assert.match(app, /\{ route: "advanced", label: "Advanced settings" \}/u);
+});

@@ -1231,16 +1231,163 @@ function channelStatsCard() {
   </section>`;
 }
 
-function settingsScreen() {
-  const project = state.project;
-  const policy = project?.policy ?? {};
+/**
+ * The gate every plan passes before a worker is allowed to run it.
+ *
+ * Project-wide rather than personal — one person raising the bar raises
+ * it for everybody's agents — which is why it lives behind Advanced now
+ * rather than between a colour picker and a sign-out button.
+ */
+function admissionsCard() {
+  const policy = state.project?.policy ?? {};
   const approvals = policy.approvals ?? {};
   const budgets = policy.budgets ?? {};
+  return `<section class="card">
+    <div class="panel-head"><div><h3>Admissions</h3>
+      <p>What must stop for a person before a plan is admitted</p></div></div>
+    <form data-act="policy-save">
+      <div class="set-row">
+        <span class="sr-body">
+          <div class="sr-title">Human approval</div>
+          <div class="sr-sub">Gate risky plans and changesets on a reviewer.</div>
+        </span>
+        <span class="sr-ctl">
+          <button type="button" class="switch${
+            approvals.enabled === false ? "" : " on"
+          }" data-act="toggle" data-field="approvalsEnabled"
+            aria-label="Human approval"></button>
+          <input type="hidden" name="approvalsEnabled"
+            value="${approvals.enabled === false ? "false" : "true"}">
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="sr-body">
+          <div class="sr-title">Review schema changes</div>
+          <div class="sr-sub">Pause whenever a plan touches a schema.</div>
+        </span>
+        <span class="sr-ctl">
+          <button type="button" class="switch${
+            approvals.requireSchemaReview === false ? "" : " on"
+          }" data-act="toggle" data-field="requireSchemaReview"
+            aria-label="Review schema changes"></button>
+          <input type="hidden" name="requireSchemaReview"
+            value="${approvals.requireSchemaReview === false ? "false" : "true"}">
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="sr-body">
+          <div class="sr-title">Protected paths</div>
+          <div class="sr-sub">One glob per line. Changes here always need review.</div>
+        </span>
+      </div>
+      <div style="padding:0 17px 14px">
+        <textarea class="input" name="protectedPaths" rows="3"
+          placeholder="infrastructure/**">${esc(
+            (approvals.protectedPaths ?? []).join("\n"),
+          )}</textarea>
+      </div>
+      <div class="set-row">
+        <span class="sr-body">
+          <div class="sr-title">Approval timeout</div>
+          <div class="sr-sub">Minutes before an unanswered request expires.</div>
+        </span>
+        <span class="sr-ctl">
+          <input class="input" name="approvalTimeoutMinutes" style="width:110px"
+            value="${esc(minutesValue(approvals.approvalTimeoutMs))}"
+            placeholder="Default">
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="sr-body">
+          <div class="sr-title">Task runtime budget</div>
+          <div class="sr-sub">Minutes one task may run before it is stopped.</div>
+        </span>
+        <span class="sr-ctl">
+          <input class="input" name="maxTaskRuntimeMinutes" style="width:110px"
+            value="${esc(minutesValue(budgets.maxTaskRuntimeMs))}"
+            placeholder="Unlimited">
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="sr-ctl"><button class="btn btn-primary" type="submit">
+          Save policy</button></span>
+      </div>
+    </form>
+  </section>`;
+}
+
+/**
+ * Which repository the control plane owns, and on which branch. Read-only
+ * by design: canonical moves through the pipeline, not through a field on
+ * a settings page.
+ */
+function repositoryCard() {
   const repository = currentRepository();
+  return `<section class="card">
+    <div class="panel-head"><div><h3>Repository</h3>
+      <p>Canonical state is owned by the control plane</p></div></div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">${esc(repository?.id ?? "No repository open")}</div>
+        <div class="sr-sub">${esc(
+          repository?.remoteUrl ?? "No remote recorded",
+        )}. Publishing canonical to a remote branch is <code>/push</code> in
+        the channel; the CLI does the same thing from outside the product.
+        </div>
+      </span>
+      <span class="sr-ctl">
+        <code class="hint-code">/push</code>
+      </span>
+    </div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Canonical branch</div>
+        <div class="sr-sub">Git commits remain in Repository History; there is no
+          direct branch or reset access outside the pipeline.</div>
+      </span>
+      <span class="sr-ctl">${esc(repository?.branch ?? "—")}</span>
+    </div>
+  </section>`;
+}
+
+/**
+ * Advanced — the settings that are about the project rather than about you.
+ *
+ * Repository and admissions used to sit in the middle of Settings, between
+ * the agents somebody signs in and the account they sign out of, and they are
+ * a different kind of thing: nobody changes them on the way past, and
+ * changing one changes it for the whole team. A page of their own at the
+ * bottom of Settings keeps the everyday screen to the everyday choices. It is
+ * a route rather than a panel so that it can be linked to, and so the
+ * browser's back button is a way out of it.
+ */
+function advancedScreen() {
+  return `<div class="scroll" data-scroll-key="advanced"><div class="page">
+    <div class="page-head">
+      <button class="icon-btn ph-back" data-act="nav" data-value="settings"
+        title="Back to settings" aria-label="Back to settings"
+        >${icon("arrowLeft")}</button>
+      <span class="ph-icon">${icon("sliders")}</span>
+      <div><h1>Advanced</h1>
+        <p>Repository and admissions. Both are project-wide — what you change
+          here, everybody's agents work under.</p></div>
+    </div>
+
+    <div class="settings-grid">
+      ${repositoryCard()}
+
+      ${admissionsCard()}
+    </div>
+  </div></div>`;
+}
+
+function settingsScreen() {
   return `<div class="scroll" data-scroll-key="settings"><div class="page">
     <div class="page-head">
       <span class="ph-icon">${icon("gear")}</span>
-      <div><h1>Settings</h1><p>Project policy, repository, and your account.</p></div>
+      <div><h1>Settings</h1><p>Your agents, your account, and this channel.
+        Repository and admissions are under Advanced, at the foot of the
+        page.</p></div>
     </div>
 
     <div class="settings-grid">
@@ -1255,105 +1402,6 @@ function settingsScreen() {
       ${channelStatsCard()}
 
       <section class="card">
-        <div class="panel-head"><div><h3>Approval policy</h3>
-          <p>What must stop for a person before it reaches canonical</p></div></div>
-        <form data-act="policy-save">
-          <div class="set-row">
-            <span class="sr-body">
-              <div class="sr-title">Human approval</div>
-              <div class="sr-sub">Gate risky plans and changesets on a reviewer.</div>
-            </span>
-            <span class="sr-ctl">
-              <button type="button" class="switch${
-                approvals.enabled === false ? "" : " on"
-              }" data-act="toggle" data-field="approvalsEnabled"
-                aria-label="Human approval"></button>
-              <input type="hidden" name="approvalsEnabled"
-                value="${approvals.enabled === false ? "false" : "true"}">
-            </span>
-          </div>
-          <div class="set-row">
-            <span class="sr-body">
-              <div class="sr-title">Review schema changes</div>
-              <div class="sr-sub">Pause whenever a plan touches a schema.</div>
-            </span>
-            <span class="sr-ctl">
-              <button type="button" class="switch${
-                approvals.requireSchemaReview === false ? "" : " on"
-              }" data-act="toggle" data-field="requireSchemaReview"
-                aria-label="Review schema changes"></button>
-              <input type="hidden" name="requireSchemaReview"
-                value="${approvals.requireSchemaReview === false ? "false" : "true"}">
-            </span>
-          </div>
-          <div class="set-row">
-            <span class="sr-body">
-              <div class="sr-title">Protected paths</div>
-              <div class="sr-sub">One glob per line. Changes here always need review.</div>
-            </span>
-          </div>
-          <div style="padding:0 17px 14px">
-            <textarea class="input" name="protectedPaths" rows="3"
-              placeholder="infrastructure/**">${esc(
-                (approvals.protectedPaths ?? []).join("\n"),
-              )}</textarea>
-          </div>
-          <div class="set-row">
-            <span class="sr-body">
-              <div class="sr-title">Approval timeout</div>
-              <div class="sr-sub">Minutes before an unanswered request expires.</div>
-            </span>
-            <span class="sr-ctl">
-              <input class="input" name="approvalTimeoutMinutes" style="width:110px"
-                value="${esc(minutesValue(approvals.approvalTimeoutMs))}"
-                placeholder="Default">
-            </span>
-          </div>
-          <div class="set-row">
-            <span class="sr-body">
-              <div class="sr-title">Task runtime budget</div>
-              <div class="sr-sub">Minutes one task may run before it is stopped.</div>
-            </span>
-            <span class="sr-ctl">
-              <input class="input" name="maxTaskRuntimeMinutes" style="width:110px"
-                value="${esc(minutesValue(budgets.maxTaskRuntimeMs))}"
-                placeholder="Unlimited">
-            </span>
-          </div>
-          <div class="set-row">
-            <span class="sr-ctl"><button class="btn btn-primary" type="submit">
-              Save policy</button></span>
-          </div>
-        </form>
-      </section>
-
-      <section class="card">
-        <div class="panel-head"><div><h3>Repository</h3>
-          <p>Canonical state is owned by the control plane</p></div></div>
-        <div class="set-row">
-          <span class="sr-body">
-            <div class="sr-title">${esc(repository?.id ?? "No repository open")}</div>
-            <div class="sr-sub">${esc(
-              repository?.remoteUrl ?? "No remote recorded",
-            )}. Publishing canonical to a remote branch is <code>/push</code> in
-            the channel; the CLI does the same thing from outside the product.
-            </div>
-          </span>
-          <span class="sr-ctl">
-            <code class="hint-code">/push</code>
-          </span>
-        </div>
-        <div class="set-row">
-          <span class="sr-body">
-            <div class="sr-title">Canonical branch</div>
-            <div class="sr-sub">Git commits remain in Repository History; there is no
-              direct branch or reset access outside the pipeline.</div>
-          </span>
-          <span class="sr-ctl">${esc(repository?.branch ?? "—")}</span>
-        </div>
-      </section>
-
-      <section class="card">
         <div class="panel-head"><div><h3>Account</h3></div></div>
         <div class="set-row">
           <span class="sr-body">
@@ -1362,6 +1410,20 @@ function settingsScreen() {
           </span>
           <span class="sr-ctl">
             <button class="btn btn-sm" data-act="logout">${icon("logout")} Sign out</button>
+          </span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="set-row">
+          <span class="sr-body">
+            <div class="sr-title">Advanced</div>
+            <div class="sr-sub">Repository and admissions — the project-wide
+              settings, off the page everybody opens.</div>
+          </span>
+          <span class="sr-ctl">
+            <button class="btn btn-sm" data-act="nav" data-value="advanced">
+              Open ${icon("chevronRight")}</button>
           </span>
         </div>
       </section>
@@ -2728,6 +2790,10 @@ const ROUTES = new Set([
   "agents",
   "notifications",
   "settings",
+  // Settings' own second page rather than a fifth product destination: it is
+  // reached from the foot of Settings and from nowhere in the navigation.
+  // A route all the same, so it can be linked and so Back leaves it.
+  "advanced",
 ]);
 
 function currentAgent() {
@@ -2743,6 +2809,8 @@ function screen() {
       return renderNotifications();
     case "settings":
       return settingsScreen();
+    case "advanced":
+      return advancedScreen();
     default:
       return renderChats();
   }
@@ -3072,6 +3140,7 @@ function switcherEntries(query) {
       { route: "agents", label: "My agents" },
       { route: "notifications", label: "Notifications" },
       { route: "settings", label: "Settings" },
+      { route: "advanced", label: "Advanced settings" },
     ].map((screen) => ({
       kind: "Screen",
       label: screen.label,
@@ -3953,18 +4022,35 @@ const FOCUSABLE_FIELDS = new Set(["INPUT", "TEXTAREA"]);
  * sending somebody back to the first card after every click. Keying this one
  * surface makes navigation safe too: when entering or leaving Settings only
  * one side of the render has the key, so no position crosses between screens.
+ *
+ * Advanced is a settings page as well and its toggles redraw in exactly the
+ * same way, so it is keyed too — under its own name. The name travels with
+ * the offset and the restore insists on both, which is what stops Settings'
+ * position being dropped onto Advanced when the render between them is the
+ * navigation from one to the other.
  */
 function captureSettingsScroll() {
-  return document.querySelector('[data-scroll-key="settings"]')?.scrollTop;
+  const settings = document.querySelector('[data-scroll-key="settings"]');
+  if (settings !== null) {
+    return { key: "settings", top: settings.scrollTop };
+  }
+  const advanced = document.querySelector('[data-scroll-key="advanced"]');
+  return advanced === null
+    ? undefined
+    : { key: "advanced", top: advanced.scrollTop };
 }
 
 function restoreSettingsScroll(saved) {
   if (saved === undefined) {
     return;
   }
-  const scroller = document.querySelector('[data-scroll-key="settings"]');
+  const scroller = document.querySelector(
+    saved.key === "advanced"
+      ? '[data-scroll-key="advanced"]'
+      : '[data-scroll-key="settings"]',
+  );
   if (scroller !== null) {
-    scroller.scrollTop = saved;
+    scroller.scrollTop = saved.top;
   }
 }
 

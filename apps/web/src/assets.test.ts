@@ -641,7 +641,18 @@ test("navigation is the four product routes and nothing invented", async () => {
   const parsed = [...(routes ?? "").matchAll(/"([a-z]+)"/gu)].map(
     (match) => match[1],
   );
-  assert.deepEqual(parsed, ["chats", "agents", "notifications", "settings"]);
+  // Four product destinations, plus Settings' own second page. Advanced is
+  // not navigation: nothing in the rail, the topbar or the account menu goes
+  // there, and the only door is the last card on Settings. It is a route so
+  // that it can be linked and so Back is the way out, not because it is a
+  // fifth place to be.
+  assert.deepEqual(parsed, [
+    "chats",
+    "agents",
+    "notifications",
+    "settings",
+    "advanced",
+  ]);
   // Code is read where it is discussed — files and diffs render inline in the
   // channel transcript — so neither it nor the coordinator is a page of its
   // own, and tasks still belong to the agent that owns them.
