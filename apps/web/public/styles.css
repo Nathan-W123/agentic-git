@@ -701,16 +701,6 @@ svg.ui-icon {
 
 /* ------------------------------------------------------------- brand ---- */
 
-/* The mark takes its size from the `width`/`height` the caller passes to
-   `brandMark` — 28 in the channel rail's crown, 54 on the sign-in card. It
-   used to be pinned to 34px here, which is neither, and every caller that
-   asked for another size was quietly overruled unless it also had a rule of
-   its own.
-
-   A square box is the badge: the wordmark is sliced from its left edge, so
-   what a caller asking for one gets is the K. The whole word is a different
-   call — `brandWordmark`, which the auth shell uses. */
-.brand-mark,
 .brand-wordmark {
   flex: none;
 }
@@ -1582,17 +1572,12 @@ svg.ui-icon {
   background: var(--bg);
 }
 
-.boot-skeleton-mark,
 .boot-skeleton-rail-button {
   display: block;
   width: 40px;
   height: 40px;
   flex: none;
   border-radius: var(--radius-lg);
-}
-
-.boot-skeleton-mark {
-  margin-bottom: 6px;
 }
 
 .boot-skeleton-sidebar {
@@ -1739,7 +1724,6 @@ svg.ui-icon {
     padding: 8px 6px;
   }
 
-  .boot-skeleton-mark,
   .boot-skeleton-rail-button {
     width: 40px;
   }
@@ -4550,7 +4534,6 @@ button.chip.lg:hover {
   border-right: 1px solid var(--border-soft);
 }
 
-.channel-rail-brand,
 .channel-rail-toggle,
 .channel-rail-new,
 .channel-rail-button {
@@ -4563,7 +4546,6 @@ button.chip.lg:hover {
   transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
 }
 
-.channel-rail-brand:hover,
 .channel-rail-toggle:hover,
 .channel-rail-new:hover,
 .channel-rail-button:hover {
@@ -4572,7 +4554,6 @@ button.chip.lg:hover {
   border-radius: var(--radius-sm);
 }
 
-.channel-rail-brand:focus-visible,
 .channel-rail-toggle:focus-visible,
 .channel-rail-new:focus-visible,
 .channel-rail-button:focus-visible {
@@ -10218,7 +10199,6 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
-  .channel-rail-brand,
   .channel-rail-new,
   .channel-rail-button {
     width: 40px;

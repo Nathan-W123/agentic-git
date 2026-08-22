@@ -5097,7 +5097,6 @@ function renderLoadingShell(root = $("#app-root")) {
     aria-label="Loading Kumi">
     <span class="sr-only">Loading Kumi…</span>
     <div class="boot-skeleton-rail" aria-hidden="true">
-      <span class="skeleton boot-skeleton-mark"></span>
       <span class="skeleton boot-skeleton-rail-button"></span>
       <span class="skeleton boot-skeleton-rail-button"></span>
       <span class="skeleton boot-skeleton-rail-button"></span>

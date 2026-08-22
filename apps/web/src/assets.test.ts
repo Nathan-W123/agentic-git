@@ -17,30 +17,17 @@ test("loads every control-room asset with an explicit content type", async () =>
   const assets = await loadStaticAssets();
   assert.equal(assets.get("/index.html")?.contentType, "text/html; charset=utf-8");
   assert.equal(assets.get("/styles.css")?.contentType, "text/css; charset=utf-8");
-  assert.equal(assets.get("/mark.svg")?.contentType, "image/svg+xml");
   assert.equal(
     assets.get("/manifest.webmanifest")?.contentType,
     "application/manifest+json",
   );
-  // The home-screen icons: iOS reads only the apple-touch link, Android's
-  // maskable shape comes from the manifest, and both need real PNGs.
-  for (const icon of ["/apple-touch-icon.png", "/icon-192.png", "/icon-512.png"]) {
-    assert.equal(
-      assets.get(icon)?.contentType,
-      "image/png",
-      `${icon} should be served`,
-    );
-    // A PNG that is not a PNG (a stray text file, a bad regeneration) would
-    // ship silently; the signature is cheap to pin.
-    const body = assets.get(icon)?.body;
-    assert.equal(Buffer.isBuffer(body), true, `${icon} should be bytes`);
-    assert.equal(
-      Buffer.isBuffer(body)
-        ? body.subarray(0, 8).toString("hex")
-        : undefined,
-      "89504e470d0a1a0a",
-      `${icon} should be a real PNG`,
-    );
+  for (const icon of [
+    "/mark.svg",
+    "/apple-touch-icon.png",
+    "/icon-192.png",
+    "/icon-512.png",
+  ]) {
+    assert.equal(assets.get(icon), undefined, `${icon} should not be served`);
   }
   for (const module of [
     "/app.js",
@@ -118,6 +105,7 @@ test("the initial document paints an accessible loading shell", async () => {
     /class="boot-shell" role="status" aria-live="polite"[\s\S]{0,100}aria-label="Loading Kumi"/u,
   );
   assert.match(html, /class="sr-only">Loading Kumi…<\/span>/u);
+  assert.doesNotMatch(html, /boot-skeleton-mark/u);
 
   // The script owns the same shape after the document paint, then clears the
   // busy state only when it has a real application or signed-out surface.
@@ -125,8 +113,10 @@ test("the initial document paints an accessible loading shell", async () => {
   assert.match(app, /root\.setAttribute\("aria-busy", "true"\);/u);
   assert.match(app, /root\.removeAttribute\("aria-busy"\);/u);
   assert.match(app, /appRoot\.removeAttribute\("aria-busy"\);/u);
+  assert.doesNotMatch(app, /boot-skeleton-mark/u);
 
   assert.match(css, /\.boot-shell \{/u);
+  assert.doesNotMatch(css, /boot-skeleton-mark/u);
   assert.match(
     css,
     /@media \(prefers-reduced-motion: reduce\) \{\s*\.skeleton \{\s*animation: none;/u,
@@ -138,6 +128,7 @@ test("the initial document paints an accessible loading shell", async () => {
   const served = assets.get("/index.html")?.body.toString("utf8") ?? "";
   assert.match(served, /id="app-root" aria-busy="true"/u);
   assert.match(served, /class="boot-shell" role="status"/u);
+  assert.doesNotMatch(served, /boot-skeleton-mark/u);
   assert.match(served, /src="\/app\.[0-9a-f]{12}\.js"/u);
 });
 
@@ -2313,20 +2304,21 @@ test("the product is named Kumi throughout the browser surface", async () => {
   }
 });
 
-test("the sign-in screens show the whole wordmark, not the K badge", async () => {
+test("the full wordmark remains without a standalone K badge", async () => {
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
 
-  // The badge slices a square out of the word, so anything on the auth shell
-  // asking for `brandMark` gets a lone giant K — the bug this guards.
-  assert.equal(/brandMark\(/u.test(app), false, "app.js still draws the badge");
+  assert.doesNotMatch(ui, /brandMark/u);
+  assert.doesNotMatch(app, /brandMark/u);
+  assert.doesNotMatch(chats, /brandMark|channel-rail-brand/u);
   assert.match(app, /brandWordmark\(\d+\)/u);
 
   const start = ui.indexOf("export function brandWordmark");
   assert.notEqual(start, -1, "the wordmark helper was not found in ui.js");
   const wordmark = ui.slice(start, ui.indexOf("\n}", start));
   assert.match(wordmark, /preserveAspectRatio="xMidYMid meet"/u);
-  // All four letters, drawn once and shared with the badge.
+  // All four letters remain available as one complete wordmark.
   assert.match(wordmark, /\$\{BRAND_LETTERS\}/u);
 
   const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);
