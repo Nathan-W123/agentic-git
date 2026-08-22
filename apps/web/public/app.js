@@ -162,6 +162,7 @@ import {
   renderAgents,
   retryTask,
   selectAgent,
+  startAddAgentFlow,
 } from "./screen-agents.js";
 import {
   readAll,
@@ -6667,35 +6668,10 @@ document.addEventListener("click", (event) => {
         })
         .catch((error) => toast(error.message, "error"));
       return;
-    case "agent-add": {
-      // Which agent to connect is the user's decision. Silently picking the
-      // first unconnected provider made "Add Agent" a lottery on a screen
-      // whose whole subject is which agents are yours.
-      // Offered on whether *you* have connected it, not on whether the host
-      // machine happens to be signed in. Filtering on `connected` hid every
-      // provider the host was logged into, which on a developer's own machine
-      // is usually all of them — so "Add agent" reported that everything was
-      // already connected while the user had connected nothing.
-      const choices = state.providers.filter(
-        (entry) => entry.ownCredential === undefined,
-      );
-      if (choices.length === 0) {
-        toast("You have connected every available agent.");
-        return;
-      }
-      showMenu(
-        node,
-        choices.map((entry) => ({
-          act: "agent-connect",
-          value: entry.id,
-          label: entry.connected
-            ? `Connect your own ${agentLabelOf(entry.id)}`
-            : `Connect ${agentLabelOf(entry.id)}`,
-          iconName: "robot",
-        })),
-      );
+    case "agent-add":
+      closePopover();
+      void startAddAgentFlow(render);
       return;
-    }
     case "agent-disconnect":
       void api(`/chat/providers/${encodeURIComponent(value)}`, {
         method: "DELETE",
@@ -6966,34 +6942,39 @@ document.addEventListener("click", (event) => {
               .map((agent) => agent.id)
           : [],
       );
-      const connected = myAgents().filter((agent) => agent.connected === true);
-      showMenu(
-        anchor,
-        connected.length === 0
-          ? [
-              // Connection lives in Settings (`agentsCard`), not on My Agents.
-              // Sending somebody who has none there is the only way the plus
-              // on this heading can finish what it started.
-              {
-                act: "nav",
-                value: "settings",
-                label: "Connect agents",
-                iconName: "robot",
-              },
-            ]
-          : connected.map((agent) => ({
-              // Carries the repository too: this menu can be opened from a
-              // channel that is not the one currently on screen, and adding
-              // to whichever happens to be open would be silently wrong.
-              act: "channel-agent-pick",
-              value: `${value}|${agent.id}`,
-              label: inChannel.has(agent.id)
-                ? `${agent.name} · already here`
-                : agent.name,
-              iconName: "robot",
-              disabled: inChannel.has(agent.id),
-            })),
+      const connected = myAgents().filter(
+        (agent) => agent.mine === true && agent.connected === true,
       );
+      const canConnectAnother = state.providers.some(
+        (provider) =>
+          provider.ownCredential === undefined &&
+          (provider.signInFlow !== undefined ||
+            (provider.acceptedCredentialKinds ?? []).length > 0),
+      );
+      showMenu(anchor, [
+        ...connected.map((agent) => ({
+          // Carries the repository too: this menu can be opened from a
+          // channel that is not the one currently on screen, and adding
+          // to whichever happens to be open would be silently wrong.
+          act: "channel-agent-pick",
+          value: `${value}|${agent.id}`,
+          label: inChannel.has(agent.id)
+            ? `${agent.name} · already here`
+            : agent.name,
+          iconName: "robot",
+          disabled: inChannel.has(agent.id),
+        })),
+        {
+          // Always leave a way forward. Previously one connected agent that
+          // was already in the room filled this menu with a single disabled
+          // row, so the plus button could no longer start another connection.
+          act: "agent-add",
+          label: canConnectAnother
+            ? "Connect another agent"
+            : "View agent connections",
+          iconName: "plus",
+        },
+      ]);
       return;
     }
     /**

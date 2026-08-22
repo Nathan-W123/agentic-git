@@ -52,6 +52,7 @@ import {
   tabs,
   tileCard,
   toast,
+  vendorMark,
 } from "./ui.js";
 
 /**
@@ -650,6 +651,126 @@ const SESSION_FILE_WARNING =
   "A copied session file shares a refresh token with the machine it came " +
   "from: signing out there, or a refresh on either side, can invalidate the " +
   "other. An API key or subscription token does not do this.";
+
+/** The short promise beside a provider in the first step of connecting it. */
+function providerConnectionDescription(provider) {
+  if (provider.ownCredential !== undefined) {
+    return "Connected to your account";
+  }
+  const browser = provider.signInFlow !== undefined;
+  const credential = (provider.acceptedCredentialKinds ?? []).length > 0;
+  if (browser && credential) {
+    return "Browser sign-in or your own credential";
+  }
+  if (browser) {
+    return "Continue with browser sign-in";
+  }
+  if (credential) {
+    return "Connect with your own credential";
+  }
+  return "Connection is not available on this deployment";
+}
+
+/**
+ * Starts every Add Agent control at the same provider choice.
+ *
+ * Existing connections remain visible so the list does not appear to change
+ * underneath somebody after their first connection, but only a provider this
+ * account has not connected can be chosen. The provider's own flow takes over
+ * after this step, which keeps browser approval, code exchange, and credential
+ * entry in one implementation.
+ */
+export async function startAddAgentFlow(rerender) {
+  try {
+    if (!state.providersLoaded) {
+      await loadProviders();
+    }
+  } catch (error) {
+    toast(`Could not load available agents — ${error.message}`, "error");
+    return;
+  }
+
+  const providers = state.providers ?? [];
+  const available = providers.filter(
+    (provider) =>
+      provider.ownCredential === undefined &&
+      (provider.signInFlow !== undefined ||
+        (provider.acceptedCredentialKinds ?? []).length > 0),
+  );
+  const selected = available[0]?.id;
+  const choices = providers
+    .map((provider) => {
+      const connected = provider.ownCredential !== undefined;
+      const connectable =
+        provider.signInFlow !== undefined ||
+        (provider.acceptedCredentialKinds ?? []).length > 0;
+      const disabled = connected || !connectable;
+      return `<label class="agent-provider-choice${
+        connected ? " is-connected" : disabled ? " is-disabled" : ""
+      }">
+        <input type="radio" name="providerChoice" value="${esc(provider.id)}"${
+          provider.id === selected ? " checked" : ""
+        }${disabled ? " disabled" : ""}>
+        <span class="agent-provider-mark">${vendorMark(provider.id)}</span>
+        <span class="agent-provider-copy">
+          <strong>${esc(agentLabelOf(provider.id))}</strong>
+          <small>${esc(providerConnectionDescription(provider))}</small>
+        </span>
+        <span class="agent-provider-state">${
+          connected ? "Connected" : disabled ? "Unavailable" : "Choose"
+        }</span>
+      </label>`;
+    })
+    .join("");
+  const availabilityNote =
+    providers.length === 0
+      ? "Ask an administrator to enable an agent provider for this deployment."
+      : providers.every((provider) => provider.ownCredential !== undefined)
+        ? "Every available provider is already connected to your account."
+        : available.length === 0
+          ? "No additional provider can be connected on this deployment."
+          : "Next, you will see the sign-in or connection details for the provider you choose.";
+
+  const pending = showModal({
+    title: "Add an agent",
+    subtitle:
+      "Choose a provider. Your existing agents and their conversations stay unchanged.",
+    confirm: available.length === 0 ? "Done" : "Continue",
+    cancel: available.length === 0 ? "Close" : "Not now",
+    body: `<fieldset class="agent-provider-picker">
+        <legend class="sr-only">Agent provider</legend>
+        ${
+          choices ||
+          `<p class="agent-provider-empty">No agent providers are available on this deployment.</p>`
+        }
+      </fieldset>
+      <input type="hidden" name="providerId" value="${esc(selected ?? "")}">
+      <p class="modal-hint">${availabilityNote}</p>`,
+  });
+
+  // `showModal` collects ordinary form fields. Keep one hidden field in sync
+  // with the radio cards so it receives the checked value, not merely the last
+  // radio in document order.
+  const dialog = document.querySelector("#modal");
+  const syncProvider = (event) => {
+    const field = event.target;
+    if (!(field instanceof HTMLInputElement) || field.name !== "providerChoice") {
+      return;
+    }
+    const value = dialog?.querySelector('[name="providerId"]');
+    if (value instanceof HTMLInputElement) {
+      value.value = field.value;
+    }
+  };
+  dialog?.addEventListener("change", syncProvider);
+  const values = await pending;
+  dialog?.removeEventListener("change", syncProvider);
+  const providerId = String(values?.providerId ?? "");
+  if (providerId === "") {
+    return;
+  }
+  await connectAgent(providerId, rerender);
+}
 
 /**
  * Connecting means handing over a credential of your own — not borrowing the

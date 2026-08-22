@@ -1317,6 +1317,58 @@ test("agent settings sign in first, but can fall back to a credential", async ()
   assert.match(source, /Use a credential instead/u);
 });
 
+test("adding another agent always begins with a provider choice", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const css = await publicFile("styles.css");
+
+  // Every Add Agent control reaches the same modal instead of an anchored
+  // menu whose available rows can be exhausted by the first connection.
+  assert.match(agents, /export async function startAddAgentFlow/u);
+  assert.match(agents, /title: "Add an agent"/u);
+  assert.match(agents, /name="providerChoice"/u);
+  assert.match(agents, /name="providerId"/u);
+  assert.match(agents, /await connectAgent\(providerId, rerender\)/u);
+  assert.match(
+    app,
+    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
+  );
+
+  // A connection belongs to this account. A host CLI login (`connected`) is
+  // not a reason to hide it, and an existing account credential remains in
+  // the stable list as a disabled Connected row.
+  assert.match(agents, /provider\.ownCredential !== undefined/u);
+  assert.match(agents, /connected \? "Connected"/u);
+  assert.doesNotMatch(
+    agents,
+    /available = providers\.filter\([\s\S]{0,160}provider\.connected/u,
+  );
+
+  // The channel sidebar plus must keep a live way to connect another provider
+  // even when its only current agent is the disabled "already here" row.
+  const channelMenuStart = app.indexOf('case "channel-agent-menu"');
+  const channelMenu = app.slice(
+    channelMenuStart,
+    app.indexOf('case "channel-agent-pick"', channelMenuStart),
+  );
+  assert.notEqual(channelMenuStart, -1);
+  assert.match(
+    channelMenu,
+    /agent\.mine === true && agent\.connected === true/u,
+  );
+  assert.match(channelMenu, /disabled: inChannel\.has\(agent\.id\)/u);
+  assert.match(channelMenu, /act: "agent-add"/u);
+  assert.match(channelMenu, /Connect another agent/u);
+
+  assert.match(css, /\.agent-provider-picker \{/u);
+  assert.match(css, /\.agent-provider-choice:has\(input:checked\)/u);
+  assert.match(css, /\.agent-provider-choice\.is-connected/u);
+  assert.match(
+    css,
+    /@media \(max-width: 520px\) \{\s*\.agent-provider-picker \{\s*grid-template-columns: 1fr;/u,
+  );
+});
+
 test("every composer control sits on one row with an icon-sized context dial", async () => {
   const source = await publicFile("chat.js");
   const bar = /<div class="composer-bar">([\s\S]*?)<\/div>/u.exec(source)?.[1];
