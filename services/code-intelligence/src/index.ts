@@ -12,6 +12,13 @@ import {
 } from "@coord/shared-types";
 import ts from "typescript";
 
+import {
+  braceSymbolRanges,
+  pythonSymbolRanges,
+  rubySymbolRanges,
+  type BraceLanguage,
+} from "./symbol-ranges.js";
+
 export {
   groundPlan,
   identifierTokens,
@@ -35,6 +42,9 @@ export {
 export type SupportedLanguage =
   | "typescript"
   | "javascript"
+  | "python"
+  | "ruby"
+  | BraceLanguage
   | "json"
   | "yaml"
   | "sql"
@@ -87,6 +97,16 @@ export interface IndexedFile {
    * the two, before deciding anything enforcement depends on.
    */
   symbolRanges: SymbolRange[];
+  /**
+   * Set when this file's language has declarations worth placing but this
+   * file's could not be placed — a syntax error, brackets that do not
+   * balance, no interpreter to ask.
+   *
+   * Without it an unreadable file is indistinguishable from an empty one:
+   * both carry `symbolRanges: []`, and "declares nothing" is safe to enforce
+   * a withholding against while "could not read" is emphatically not.
+   */
+  symbolRangesUnknown?: boolean;
   /** Call edges inside this file, attributed to the calling symbol. */
   symbolCalls: SymbolCall[];
   imports: string[];
@@ -152,6 +172,26 @@ const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
   [".jsx", "javascript"],
   [".mjs", "javascript"],
   [".cjs", "javascript"],
+  [".py", "python"],
+  [".pyi", "python"],
+  [".rb", "ruby"],
+  [".rake", "ruby"],
+  [".go", "go"],
+  [".rs", "rust"],
+  [".java", "java"],
+  [".cs", "csharp"],
+  [".c", "c"],
+  [".h", "c"],
+  [".cc", "cpp"],
+  [".cpp", "cpp"],
+  [".cxx", "cpp"],
+  [".hpp", "cpp"],
+  [".hh", "cpp"],
+  [".php", "php"],
+  [".swift", "swift"],
+  [".kt", "kotlin"],
+  [".kts", "kotlin"],
+  [".scala", "scala"],
   [".json", "json"],
   [".yaml", "yaml"],
   [".yml", "yaml"],
@@ -438,6 +478,78 @@ function flattenJsonKeys(
   return output;
 }
 
+/** Languages whose declarations a scanner in this package can place. */
+/**
+ * Languages whose declarations this package can place well enough to enforce
+ * a withholding against. Everything else is arbitrated a whole file at a time.
+ */
+const RANGEABLE_LANGUAGES = new Set<SupportedLanguage>([
+  "typescript",
+  "javascript",
+  "python",
+  "ruby",
+  "go",
+  "rust",
+  "java",
+  "csharp",
+  "c",
+  "cpp",
+  "php",
+  "swift",
+  "kotlin",
+  "scala",
+]);
+
+const BRACE_LANGUAGES = new Set<string>([
+  "go",
+  "rust",
+  "java",
+  "csharp",
+  "c",
+  "cpp",
+  "php",
+  "swift",
+  "kotlin",
+  "scala",
+]);
+
+/**
+ * A file in a language this package scans rather than parses.
+ *
+ * Only the declarations are read. Imports, APIs, schemas and call edges are
+ * left empty rather than guessed: they drive enrichment and conflict scoring,
+ * where a wrong answer is worse than no answer, and the thing symbol-level
+ * admission actually needs is the spans.
+ *
+ * `symbolRanges` empty means the scanner read the file and found nothing;
+ * `undefined` from the scanner means it could not read the file, and is
+ * recorded here as an unparsed file so `symbolRangesInFile` says "no idea".
+ */
+function analyzeScannedFile(
+  filePath: string,
+  source: string,
+  language: SupportedLanguage,
+  ranges: SymbolRange[] | undefined,
+): IndexedFile {
+  return {
+    path: filePath,
+    language,
+    bytes: Buffer.byteLength(source),
+    symbols: (ranges ?? []).map((range) => range.name),
+    symbolRanges: ranges ?? [],
+    ...(ranges === undefined ? { symbolRangesUnknown: true } : {}),
+    symbolCalls: [],
+    imports: [],
+    dependencies: [],
+    referencedSymbols: [],
+    apis: [],
+    schemas: [],
+    configKeys: [],
+    tests: [],
+    services: [],
+  };
+}
+
 function analyzeDataFile(
   filePath: string,
   source: string,
@@ -608,6 +720,8 @@ export class CodeIntelligenceService {
       SOURCE_EXTENSIONS.has(path.posix.extname(filePath).toLowerCase()),
     );
     const files: IndexedFile[] = [];
+    /** Python sources, answered in one batch once every file has been read. */
+    const pythonSources = new Map<string, string>();
     let totalBytes = 0;
     let skippedFiles = 0;
 
@@ -653,11 +767,42 @@ export class CodeIntelligenceService {
         if (language === undefined) {
           continue;
         }
-        files.push(
-          language === "typescript" || language === "javascript"
-            ? analyzeScript(filePath, source, language)
-            : analyzeDataFile(filePath, source, language),
-        );
+        if (language === "typescript" || language === "javascript") {
+          files.push(analyzeScript(filePath, source, language));
+        } else if (language === "python") {
+          // Held back for the batch: one interpreter answers for every Python
+          // file in the repository rather than one per file.
+          pythonSources.set(filePath, source);
+          files.push(analyzeScannedFile(filePath, source, language, undefined));
+        } else if (language === "ruby") {
+          files.push(
+            analyzeScannedFile(filePath, source, language, rubySymbolRanges(source)),
+          );
+        } else if (BRACE_LANGUAGES.has(language)) {
+          files.push(
+            analyzeScannedFile(
+              filePath,
+              source,
+              language,
+              braceSymbolRanges(source, language as BraceLanguage),
+            ),
+          );
+        } else {
+          files.push(analyzeDataFile(filePath, source, language));
+        }
+      }
+    }
+
+    // One interpreter for the repository. A file the reader could not answer
+    // for simply keeps the empty placeholder recorded above, and
+    // `symbolRangesInFile` reports it as unreadable rather than as empty.
+    const pythonAnswers = await pythonSymbolRanges(pythonSources);
+    for (const file of files) {
+      const ranges = pythonAnswers.get(file.path);
+      if (ranges !== undefined) {
+        file.symbolRanges = ranges;
+        file.symbols = ranges.map((range) => range.name);
+        delete file.symbolRangesUnknown;
       }
     }
 
@@ -722,7 +867,8 @@ export class CodeIntelligenceService {
     if (file === undefined) {
       return undefined;
     }
-    return file.language === "typescript" || file.language === "javascript"
+    return RANGEABLE_LANGUAGES.has(file.language) &&
+      file.symbolRangesUnknown !== true
       ? file.symbolRanges
       : undefined;
   }
@@ -765,6 +911,16 @@ export class CodeIntelligenceService {
       .map((edge) => `file:${edge.toFile}`);
     const enriched: AgentPlan = {
       ...structuredClone(plan),
+      // Kept before it is widened, because the widening is lossy in the one
+      // place it matters. Every symbol of every declared file goes into
+      // `expectedSymbols` below, which is what makes two plans comparable —
+      // and what would make a holder claim every function in a file it
+      // shares, leaving a co-editor the gaps between them. Symbol-level
+      // withholding reads this instead.
+      //
+      // The first enrichment wins: running twice must not record the widened
+      // set as though the agent had asked for it.
+      declaredSymbols: [...(plan.declaredSymbols ?? plan.expectedSymbols)],
       expectedSymbols: uniqueStrings([
         ...plan.expectedSymbols,
         ...files.flatMap((file) => file.symbols),

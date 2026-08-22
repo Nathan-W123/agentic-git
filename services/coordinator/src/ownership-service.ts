@@ -113,11 +113,32 @@ export class DefaultOwnershipPolicy implements OwnershipPolicy {
           ...(ranges === undefined ? {} : { ranges }),
         };
       }),
-      ...complete.expectedSymbols.map((id): PlannedResource => ({
-        type: "symbol",
-        id,
-        mode: "exclusive",
-      })),
+      // A symbol the agent named is reserved. A symbol enrichment added
+      // because the agent named the file it lives in is only noted.
+      //
+      // `enrichPlan` puts every symbol of a declared file into the plan, so
+      // leasing all of them exclusively means naming one file reserves every
+      // function in it — and two tasks on different functions of one file
+      // then collide on every symbol, which is the case symbol-level leases
+      // exist to let through. Dropping the inherited ones entirely is the
+      // other wrong answer: they are real evidence that this task is working
+      // in there, and arbitration reads them. `observe` keeps the evidence
+      // and drops the reservation, since it is compatible with every mode.
+      //
+      // Absent `declaredSymbols` means nothing widened this plan, so every
+      // symbol on it is the agent's own.
+      ...(() => {
+        const own = new Set(
+          (plan.declaredSymbols ?? complete.expectedSymbols).map((name) =>
+            name.toLowerCase(),
+          ),
+        );
+        return complete.expectedSymbols.map((id): PlannedResource => ({
+          type: "symbol",
+          id,
+          mode: own.has(id.toLowerCase()) ? "exclusive" : "observe",
+        }));
+      })(),
       ...complete.expectedApis.map((id): PlannedResource => ({
         type: "api",
         id,

@@ -295,13 +295,26 @@ function declaredSpans(
 ): readonly NamedRange[] | undefined {
   const complete = completeAgentPlan(plan);
   const files = uniqueRepositoryPaths(complete.expectedFiles);
-  if (!files.includes(file) || complete.expectedSymbols.length === 0) {
+  // What the agent said, not what enrichment widened it to.
+  //
+  // `enrichPlan` puts every symbol of every declared file into
+  // `expectedSymbols`. Read here, that makes a holder occupy the whole of any
+  // file it named, so the only thing left to grant a second agent is the
+  // space between the declarations — it is admitted to the file, writes the
+  // function it came for, and has every hunk deferred back out again. The
+  // split fired and bought nothing.
+  //
+  // `declaredSymbols` is the same plan's pre-enrichment words. Absent means
+  // the plan was never enriched, so `expectedSymbols` is already those words;
+  // empty means the agent named no symbols, which still takes the file whole.
+  const claimed = plan.declaredSymbols ?? complete.expectedSymbols;
+  if (!files.includes(file) || claimed.length === 0) {
     return undefined;
   }
   const referents = plan.grounding?.symbolReferents ?? [];
   // A declaration stands for its referent where verification found one, and
   // for itself where it did not.
-  const wanted = complete.expectedSymbols.map((symbol) => {
+  const wanted = claimed.map((symbol) => {
     const resolved = referents
       .filter((entry) => entry.declared === symbol)
       .map((entry) => entry.resolved.toLowerCase());
@@ -362,6 +375,25 @@ interface PartiallyHeldFile {
    * is divided out of that file's patch at the hunk.
    */
   symbols: DeferredResource[];
+}
+
+/**
+ * Whether a holder named this symbol itself, rather than inheriting it.
+ *
+ * Only meaningful for symbols, and only for an enriched plan: `undefined`
+ * `declaredSymbols` means nothing widened this plan, so `expectedSymbols` is
+ * already what the agent asked for and every entry in it counts.
+ */
+function holdsSymbolItself(
+  resourceType: ResourceType,
+  plan: AgentPlan,
+  resourceId: string,
+): boolean {
+  if (resourceType !== "symbol" || plan.declaredSymbols === undefined) {
+    return true;
+  }
+  const wanted = resourceId.toLowerCase();
+  return plan.declaredSymbols.some((name) => name.toLowerCase() === wanted);
 }
 
 /** One withheld resource per symbol a holder occupies in a shared file. */
@@ -1334,6 +1366,17 @@ export class PlanAdmissionController {
           continue;
         }
         for (const id of item.resources) {
+          if (holdsSymbolItself(kind.resourceType, entry.plan, id) === false) {
+            // The overlap is real, but it is an overlap with enrichment. A
+            // plan that names a file is given every symbol in that file, so
+            // scoring finds this symbol on both sides whenever the holder
+            // named the file at all — which says the holder wants the file,
+            // not that it wants this function. Withholding on it hands the
+            // candidate a file with every function in it withheld, and the
+            // file-level contest below already covers what the holder
+            // genuinely reserved.
+            continue;
+          }
           note(
             id,
             entry.taskId,
