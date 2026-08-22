@@ -3357,6 +3357,21 @@ test("the invite screen names the product, not only the team", async () => {
   assert.match(body, /on Kumi/u);
 });
 
+test("an invite link opened in a running session enters the invitation flow", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function applyHash");
+  const body = app.slice(start, app.indexOf("\n/* ---", start));
+  const invitation = body.indexOf("handleInviteLink");
+  const signedOutShell = body.indexOf('const authRoot = $("#auth-root")');
+  const ordinaryRoute = body.indexOf("const route = window.location.hash");
+
+  assert.match(app, /addEventListener\("hashchange", applyHash\)/u);
+  assert.match(body, /\^#invite\\\/\.\+\$/u);
+  assert.notEqual(invitation, -1);
+  assert.ok(invitation < signedOutShell);
+  assert.ok(invitation < ordinaryRoute);
+});
+
 /**
  * An invitation sent to somebody who is already on Kumi — a second team, a
  * second repository — must not dead-end on a form that cannot succeed.
