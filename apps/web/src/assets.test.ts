@@ -50,6 +50,7 @@ test("loads every control-room asset with an explicit content type", async () =>
     "/code-view.js",
     "/screen-repos.js",
     "/screen-code.js",
+    "/screen-chats.js",
     "/screen-agents.js",
     "/screen-notifications.js",
   ]) {
@@ -1120,13 +1121,13 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
   assert.match(
     css,
-    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
-    "the connector should leave a quiet gap beneath the avatar",
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 40px;/u,
+    "the connector should flow directly from the avatar",
   );
   assert.match(
     css,
-    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 41px;/u,
-    "a single-task connector should use the same shortened start",
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 31px;/u,
+    "a single-task connector should use the same continuous start",
   );
   // Written from the column variables rather than as the 9px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
@@ -1317,6 +1318,58 @@ test("agent settings sign in first, but can fall back to a credential", async ()
   assert.match(source, /Use a credential instead/u);
 });
 
+test("adding another agent always begins with a provider choice", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const css = await publicFile("styles.css");
+
+  // Every Add Agent control reaches the same modal instead of an anchored
+  // menu whose available rows can be exhausted by the first connection.
+  assert.match(agents, /export async function startAddAgentFlow/u);
+  assert.match(agents, /title: "Add an agent"/u);
+  assert.match(agents, /name="providerChoice"/u);
+  assert.match(agents, /name="providerId"/u);
+  assert.match(agents, /await connectAgent\(providerId, rerender\)/u);
+  assert.match(
+    app,
+    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
+  );
+
+  // A connection belongs to this account. A host CLI login (`connected`) is
+  // not a reason to hide it, and an existing account credential remains in
+  // the stable list as a disabled Connected row.
+  assert.match(agents, /provider\.ownCredential !== undefined/u);
+  assert.match(agents, /connected \? "Connected"/u);
+  assert.doesNotMatch(
+    agents,
+    /available = providers\.filter\([\s\S]{0,160}provider\.connected/u,
+  );
+
+  // The channel sidebar plus must keep a live way to connect another provider
+  // even when its only current agent is the disabled "already here" row.
+  const channelMenuStart = app.indexOf('case "channel-agent-menu"');
+  const channelMenu = app.slice(
+    channelMenuStart,
+    app.indexOf('case "channel-agent-pick"', channelMenuStart),
+  );
+  assert.notEqual(channelMenuStart, -1);
+  assert.match(
+    channelMenu,
+    /agent\.mine === true && agent\.connected === true/u,
+  );
+  assert.match(channelMenu, /disabled: inChannel\.has\(agent\.id\)/u);
+  assert.match(channelMenu, /act: "agent-add"/u);
+  assert.match(channelMenu, /Connect another agent/u);
+
+  assert.match(css, /\.agent-provider-picker \{/u);
+  assert.match(css, /\.agent-provider-choice:has\(input:checked\)/u);
+  assert.match(css, /\.agent-provider-choice\.is-connected/u);
+  assert.match(
+    css,
+    /@media \(max-width: 520px\) \{\s*\.agent-provider-picker \{\s*grid-template-columns: 1fr;/u,
+  );
+});
+
 test("every composer control sits on one row with an icon-sized context dial", async () => {
   const source = await publicFile("chat.js");
   const bar = /<div class="composer-bar">([\s\S]*?)<\/div>/u.exec(source)?.[1];
@@ -1397,6 +1450,13 @@ test("the composer is one card with bottom utilities and a send arrow", async ()
   assert.match(shape ?? "", /box-shadow: var\(--shadow-card\);/u);
   assert.match(shape ?? "", /--composer-shape: var\(--radius-lg\);/u);
   assert.match(shape ?? "", /--composer-spacer-layout: block;/u);
+  // Focus only firms the edge; it must not paint the pink wash that used to
+  // ring the card. Mention-active salmon rings stay on their own wrappers.
+  const focus = /\n\.composer:focus-within \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(focus, undefined, "focused composer has an active rule");
+  assert.match(focus ?? "", /border-color: var\(--border-strong\);/u);
+  assert.match(focus ?? "", /box-shadow: var\(--shadow-card\);/u);
+  assert.doesNotMatch(focus ?? "", /--accent-line|--accent-wash/u);
   assert.match(css, /\.composer-bar \.spacer \{\s*display: var\(--composer-spacer-layout/u);
   assert.match(
     css,
@@ -1913,6 +1973,31 @@ test("working agent faces fill the mark itself with the run's progress", async (
   assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
   assert.doesNotMatch(row, /statusDot\(/u);
 
+  // One run, one mark, wherever it is met. The sidebar roster above, the room's
+  // thread summary and the thread list all hand the same face the same reading
+  // of the same run, so the answer to "how far along" does not change shape
+  // between the three places somebody looks for it.
+  const runMark = chats.slice(
+    chats.indexOf("function threadRunMark(entry, repositoryId, fallbackAuthor)"),
+    chats.indexOf("function threadListPanel(repositoryId)"),
+  );
+  assert.notEqual(runMark, "", "a thread row should draw a run of its own");
+  assert.match(runMark, /threadWorkingAuthor\(entry, repositoryId\) \?\? fallbackAuthor/u);
+  assert.match(runMark, /threadProgress\(entry\) \?\? 0/u);
+  assert.match(
+    runMark,
+    /agentFace\(author\.agent, 16, \{\s*status: "working",\s*progress,\s*\}\)/u,
+    "a running thread row fills the agent's own mark, not a dot of its own",
+  );
+  // The bare dot is the fallback for a run whose agent is not known yet, and
+  // nothing else: the row markup reaches it only through the mark above.
+  const list = chats.slice(
+    chats.indexOf("function threadListPanel(repositoryId)"),
+    chats.indexOf("function threadPanel(repositoryId, selectedMessageId)"),
+  );
+  assert.doesNotMatch(list, /ti-live/u);
+  assert.match(list, /threadRunMark\(entry, repositoryId, author\)/u);
+
   // The status badge is drawn whether or not a run is going: progress moved
   // off it, so it is no longer the thing being replaced while work happens.
   assert.match(ui, /<i class="presence presence-\$\{presence\}"><\/i>/u);
@@ -1944,6 +2029,13 @@ test("working agent faces fill the mark itself with the run's progress", async (
     .exec(css)?.[1];
   assert.notEqual(faceFillSweep, undefined, "a live fill should carry a sweep");
   assert.match(faceFillSweep ?? "", /mask-size: 250% 100%;/u);
+  assert.equal(
+    (faceFillSweep ?? "").match(
+      /#000 0 38%,\s+rgba\(0, 0, 0, 0\.4\) 48%,\s+#000 58% 100%/gu,
+    )?.length,
+    2,
+    "both mask forms should dim the travelling band instead of brightening it",
+  );
   assert.match(
     faceFillSweep ?? "",
     /animation: agent-run-sweep 2\.4s ease-in-out infinite;/u,
@@ -3559,7 +3651,7 @@ test("an agent's reply to a person is shown, not folded into the thinking block"
   );
 });
 
-test("each task turn puts its own thinking below its prompt and starts closed", async () => {
+test("each task turn puts its own compact thinking below its prompt and starts closed", async () => {
   const source = await publicFile("screen-chats.js");
   const groupingStart = source.indexOf("function threadReplyTurns");
   const thinkingStart = source.indexOf("function threadThinkingBlock");
@@ -3612,6 +3704,176 @@ test("each task turn puts its own thinking below its prompt and starts closed", 
     false,
     "an active turn should start closed just like a finished turn",
   );
+  assert.equal(
+    thinking.includes('class="tt-task"'),
+    false,
+    "the disclosure should not repeat the task already shown by the thread",
+  );
+  assert.equal(
+    /\bstep\$\{/u.test(thinking),
+    false,
+    "the compact summary should not count narration lines",
+  );
+});
+
+test("thinking disclosures show only useful status and deduplicated milestones", async () => {
+  const source = await publicFile("screen-chats.js");
+  const activityStart = source.indexOf("function threadActivityLabel(entry)");
+  const activityEnd = source.indexOf("\n/**", activityStart);
+  const thinkingStart = source.indexOf("function threadThinkingBlock");
+  const thinkingEnd = source.indexOf("\n/**", thinkingStart);
+  assert.notEqual(activityStart, -1);
+  assert.notEqual(activityEnd, -1);
+  assert.notEqual(thinkingStart, -1);
+  assert.notEqual(thinkingEnd, -1);
+
+  type Reply = {
+    kind: string;
+    content: string;
+    at?: string | undefined;
+  };
+  const renderThinking = Function(
+    "state",
+    "esc",
+    "icon",
+    "isThreadThinking",
+    "isThreadEnding",
+    "threadReplyTurns",
+    `"use strict";\n${source.slice(activityStart, activityEnd)}\n${source.slice(
+      thinkingStart,
+      thinkingEnd,
+    )}\nreturn threadThinkingBlock;`,
+  )(
+    { thinkingOpen: {} },
+    (value: unknown) => String(value),
+    () => "",
+    (reply: Reply) => reply.kind === "progress",
+    (reply: Reply) =>
+      reply.kind === "outcome" || /^Done —/u.test(reply.content),
+    (replies: Reply[]) => [{ replies }],
+  ) as (
+    rootId: string,
+    turn: { prompt?: Reply; replies: Reply[] },
+    index: number,
+  ) => { html: string; visible: Reply[] };
+
+  const active = renderThinking(
+    "root",
+    {
+      replies: [
+        {
+          kind: "progress",
+          content: "Finished editing. Validating…",
+          at: "2026-08-22T12:00:00.000Z",
+        },
+      ],
+    },
+    0,
+  );
+  assert.match(active.html, /class="tt-label">Thinking<\/span>/u);
+  assert.doesNotMatch(active.html, /class="tt-count"/u);
+
+  const completed = renderThinking(
+    "root",
+    {
+      replies: [
+        {
+          kind: "progress",
+          content: "Reading the repository and working out a plan…",
+          at: "2026-08-22T12:00:00.000Z",
+        },
+        {
+          kind: "outcome",
+          content: "The work is complete.",
+          at: "2026-08-22T12:01:05.000Z",
+        },
+      ],
+    },
+    1,
+  );
+  assert.match(completed.html, /class="tt-label">Thought for 1m 5s<\/span>/u);
+  assert.doesNotMatch(completed.html, /class="tt-count"/u);
+
+  for (const at of [undefined, "not-a-timestamp"]) {
+    const withoutDuration = renderThinking(
+      "root",
+      {
+        replies: [
+          { kind: "progress", content: "Planning changes", at },
+          { kind: "outcome", content: "The work is complete.", at },
+        ],
+      },
+      2,
+    );
+    assert.match(withoutDuration.html, /class="tt-label">Thought<\/span>/u);
+    assert.doesNotMatch(withoutDuration.html, /Thought for/u);
+  }
+
+  const compact = renderThinking(
+    "root",
+    {
+      replies: [
+        { kind: "agent", content: "Task: Keep the thread concise" },
+        {
+          kind: "progress",
+          content: "Reading the repository and working out a plan…",
+        },
+        {
+          kind: "progress",
+          content: "Reading the repository and working out a plan…",
+        },
+        { kind: "progress", content: "Planning changes" },
+        { kind: "progress", content: "Planning changes" },
+        {
+          kind: "progress",
+          content: "Working on apps/web/public/screen-chats.js…",
+        },
+        {
+          kind: "progress",
+          content: "Checking an unfamiliar reply shape",
+        },
+        { kind: "progress", content: "Finished editing. Validating…" },
+        { kind: "progress", content: "Finished editing. Validating…" },
+        { kind: "agent", content: "Here is the conversational reply." },
+        { kind: "plan", content: "Open plan" },
+        { kind: "outcome", content: "The compact flow is ready." },
+      ],
+    },
+    3,
+  );
+  const milestones = [
+    "Reading code",
+    "Planning",
+    "Editing screen-chats.js",
+    "Checking an unfamiliar reply shape",
+    "Testing",
+  ];
+  let previous = -1;
+  for (const milestone of milestones) {
+    const markup = `<p>${milestone}</p>`;
+    const position = compact.html.indexOf(markup);
+    assert.ok(position > previous, `${milestone} should stay in order`);
+    assert.equal(
+      compact.html.split(markup).length - 1,
+      1,
+      `${milestone} should appear once`,
+    );
+    previous = position;
+  }
+  assert.equal(compact.html.includes("Task: Keep the thread concise"), false);
+  assert.deepEqual(
+    compact.visible.map((reply) => reply.kind),
+    ["agent", "plan", "outcome"],
+    "conversation, plans, and outcomes must remain outside the thinking fold",
+  );
+
+  const titleOnly = renderThinking(
+    "root",
+    { replies: [{ kind: "agent", content: "Task: Already visible above" }] },
+    4,
+  );
+  assert.equal(titleOnly.html, "", "an empty disclosure should be omitted");
+  assert.deepEqual(titleOnly.visible, []);
 });
 
 test("the progress bar restarts for each task turn in a thread", async () => {
@@ -3916,14 +4178,23 @@ test("the run fills the agent working, at the front of the stack", async () => {
   assert.notEqual(fill, undefined, "a working portrait in a stack should brighten");
   assert.match(fill ?? "", /opacity: calc\(0\.5 \+ var\(--run, 0\) \* 0\.005\);/u);
 
-  const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
-    .exec(css)?.[1];
+  // The badge on a filling face is the one `agentFace` already draws, halved
+  // for the stack — not a second dot painted beside it, which was the same
+  // colour and size but static while every other live mark breathed.
+  assert.doesNotMatch(
+    css,
+    /\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{/u,
+    "the stack should reuse the face's own badge rather than draw its own",
+  );
+  const dot =
+    /\n\.cmsg-thread-link \.ctl-faces \.ctl-working \.presence \{([\s\S]*?)\n\}/u
+      .exec(css)?.[1];
   assert.notEqual(dot, undefined, "a filling face still carries its coding dot");
+  assert.match(dot ?? "", /display: block;/u);
   assert.match(dot ?? "", /width: 5px;/u);
   assert.match(dot ?? "", /height: 5px;/u);
-  assert.match(dot ?? "", /background: var\(--green\);/u);
-  assert.match(dot ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
-  assert.doesNotMatch(dot ?? "", /animation:/u);
+  assert.match(dot ?? "", /border-width: 1px;/u);
+  assert.match(dot ?? "", /border-color: var\(--bg-chat\);/u);
 
   // Every kind of participant gets the same surface-coloured cutout. Agent
   // marks are not `.avatar`s, so putting the ring on portraits alone lets two
@@ -3973,6 +4244,13 @@ test("working thread summaries carry a concise sweeping activity", async () => {
     "Testing",
   );
 
+  const listStart = source.indexOf("function threadListPanel(repositoryId)");
+  const list = source.slice(
+    listStart,
+    source.indexOf("\n/**\n * Your own agent", listStart),
+  );
+  assert.match(list, /class="ti-activity text-sweep"/u);
+
   const sweep = /\n\.cmsg-thread-link \.ctl-activity \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(sweep ?? "", /animation: thread-activity-sweep/u);
   assert.match(sweep ?? "", /background-clip: text;/u);
@@ -3981,6 +4259,100 @@ test("working thread summaries carry a concise sweeping activity", async () => {
     css,
     /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-activity \{\n {4}animation: none;/u,
   );
+  const sharedSweep = /\n\.text-sweep \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(sharedSweep ?? "", /animation: thread-activity-sweep/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.text-sweep \{\n {4}animation: none;/u,
+  );
+});
+
+test("ended threads wrap as compact pills without live activity motion", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const listStart = chats.indexOf("function threadListPanel(repositoryId)");
+  const list = chats.slice(
+    listStart,
+    chats.indexOf("\n/**\n * Your own agent", listStart),
+  );
+  const finishedMarkup = list.slice(
+    list.indexOf("if (finished)"),
+    list.indexOf('class="thread-item${working', list.indexOf("if (finished)")),
+  );
+
+  assert.match(finishedMarkup, /class="thread-item thread-item-ended/u);
+  assert.match(finishedMarkup, /class="ti-done"/u);
+  assert.doesNotMatch(finishedMarkup, /ti-activity|text-sweep/u);
+  const wrap = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(wrap ?? "", /display: flex;/u);
+  assert.match(wrap ?? "", /flex-wrap: wrap;/u);
+  const pill = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(pill ?? "", /border-radius: 999px;/u);
+  assert.match(pill ?? "", /max-width: 260px;/u);
+});
+
+test("long thread titles stay on one compact line", async () => {
+  const css = await publicFile("styles.css");
+  const title = /\n\.thread-item \.ti-text \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(title ?? "", /min-width: 0;/u);
+  assert.match(title ?? "", /overflow: hidden;/u);
+  assert.match(title ?? "", /text-overflow: ellipsis;/u);
+  assert.match(title ?? "", /white-space: nowrap;/u);
+  assert.doesNotMatch(title ?? "", /line-clamp/u);
+  const row =
+    /\n\.thread-list-finished \.thread-item-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(row ?? "", /max-width: 100%;/u);
+});
+
+test("thread list keeps unfinished work ahead of ended threads", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const listStart = chats.indexOf("function threadListPanel(repositoryId)");
+  const list = chats.slice(
+    listStart,
+    chats.indexOf("\n/**\n * Your own agent", listStart),
+  );
+
+  assert.match(list, /const working = threadIsWorking\(entry\);/u);
+  assert.match(list, /const waiting = threadAwaitsGoAhead\(entry\);/u);
+  assert.match(list, /const ended =\s*!working &&\s*!waiting &&/u);
+  assert.match(list, /\(entry\.replies \?\? \[\]\)\.some\(isThreadEnding\)/u);
+  assert.match(
+    list,
+    /const active = summaries\.filter\(\(summary\) => !summary\.ended\);/u,
+  );
+  assert.match(
+    list,
+    /const ended = summaries\.filter\(\(summary\) => summary\.ended\);/u,
+  );
+  assert.ok(
+    list.indexOf('class="thread-list-active"') <
+      list.indexOf('class="thread-list-finished"'),
+    "unfinished summaries should render before the completed pills",
+  );
+  assert.match(list, /: "Pending";/u);
+});
+
+test("compact thread summaries keep accessible thread navigation", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const listStart = chats.indexOf("function threadListPanel(repositoryId)");
+  const list = chats.slice(
+    listStart,
+    chats.indexOf("\n/**\n * Your own agent", listStart),
+  );
+  const openCase = app.slice(
+    app.indexOf('case "channel-thread-open"'),
+    app.indexOf('case "thread-composer-focus"'),
+  );
+
+  assert.equal(
+    list.match(/data-act="channel-thread-open"/gu)?.length,
+    2,
+    "both active rows and ended pills should open their thread",
+  );
+  assert.match(list, /aria-label="\$\{esc\(`Open completed thread:/u);
+  assert.match(list, /aria-label="\$\{esc\(`Open thread:/u);
+  assert.match(openCase, /openThreadPanel\(value\);/u);
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {
@@ -4476,6 +4848,14 @@ test("agent details use the reference profile with supported controls", async ()
   }
   assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
   assert.match(spec, /data-value="history" title="Task history"/u);
+  // The live assignment opens its thread the same way a history row does.
+  assert.match(spec, /const openCurrentTask =/u);
+  assert.match(
+    spec,
+    /taskMessage === undefined\s*\?\s*""\s*:\s*` role="button" tabindex="0" data-act="channel-thread-open"/u,
+  );
+  assert.match(spec, /data-value="\$\{esc\(taskMessage\.id\)\}"/u);
+  assert.match(css, /\.aspec-current-task-active\[role="button"\]/u);
   assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository \}\)/u);
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
@@ -5002,9 +5382,10 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(chats, /const lapsed =\s*!held &&/u);
   assert.match(chats, /Nobody started this in time, so it was let go\./u);
 
-  // The panel is the approval record people act on, so its workflow markers
+  // The panel is the approval record people act on, so agent workflow markers
   // do not also pose as conversation. They stay in the stored reply list for
   // the gateway; only the three visible transcript surfaces use this view.
+  // Exact user "go ahead" replies stay visible — they were said on purpose.
   const transcriptStart = chats.indexOf("function planTranscriptReplies(");
   const transcriptEnd = chats.indexOf(
     "\n/**\n * How a plan nobody started",
@@ -5015,6 +5396,10 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(
     chats,
     /const PLAN_LIFECYCLE_REPLY_PREFIXES = \[\s*HOLD_NOTICE_PREFIX,\s*"Starting now\.",\s*"▶ Go-ahead received",\s*\];/u,
+  );
+  assert.doesNotMatch(
+    chats.slice(transcriptStart, transcriptEnd),
+    /content\.toLowerCase\(\) === "go ahead"/u,
   );
   const planTranscriptReplies = Function(
     "planReplyOf",
@@ -5046,11 +5431,12 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
     ),
     [
       "# A short plan",
+      "go ahead",
       "The ordinary answer stays visible.",
       "⌛ Plan expired — nobody started this.",
       "go ahead with the documentation too",
     ],
-    "only redundant plan approval chatter should disappear",
+    "only agent lifecycle markers should disappear; exact go-ahead stays",
   );
   const reviewReplies = [
     { kind: "outcome", content: "⏸ Waiting on you — this needs a review." },

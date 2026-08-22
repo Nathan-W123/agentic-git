@@ -1450,12 +1450,14 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
 const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
 
 /**
- * Workflow markers the plan panel already communicates by changing state.
+ * Agent workflow markers the plan panel already communicates by changing
+ * state.
  *
  * They remain in the stored thread for the gateway to resume and audit the
  * run, but repeating them in the conversation makes approving one plan look
- * like four separate replies. The expiry marker is deliberately absent: it
- * is an outcome somebody still needs to see.
+ * like several system notices. Exact user approvals ("go ahead") stay visible
+ * — they are the person's own words. The expiry marker is deliberately
+ * absent: it is an outcome somebody still needs to see.
  */
 const PLAN_LIFECYCLE_REPLY_PREFIXES = [
   HOLD_NOTICE_PREFIX,
@@ -1470,9 +1472,8 @@ function planTranscriptReplies(root, replies = root?.replies ?? []) {
   }
   return replies.filter((reply) => {
     const content = String(reply.content ?? "").trim();
-    return !(
-      (reply.kind === "user" && content.toLowerCase() === "go ahead") ||
-      PLAN_LIFECYCLE_REPLY_PREFIXES.some((prefix) => content.startsWith(prefix))
+    return !PLAN_LIFECYCLE_REPLY_PREFIXES.some((prefix) =>
+      content.startsWith(prefix),
     );
   });
 }
@@ -3836,6 +3837,29 @@ function chanTreePanel(repositoryId) {
   </aside>`;
 }
 
+/**
+ * The run on a thread row, drawn the way every other surface draws one.
+ *
+ * A row used to carry a bare accent dot here while the roster and the room
+ * both showed the agent's own mark filling clockwise, so the same run read as
+ * three different things depending on where somebody happened to be looking.
+ * It is the mark here too now, fed by the same reading of the narration the
+ * room's summary uses, so a glance anywhere answers "how far along" the same
+ * way. The dot survives only for a working thread whose agent is not yet
+ * known, where there is no mark to fill.
+ */
+function threadRunMark(entry, repositoryId, fallbackAuthor) {
+  const author = threadWorkingAuthor(entry, repositoryId) ?? fallbackAuthor;
+  const progress = threadProgress(entry) ?? 0;
+  if (author?.agent === undefined) {
+    return `<span class="ti-live"><span class="sr-only">Working</span></span>`;
+  }
+  return `<span class="ti-run">${agentFace(author.agent, 16, {
+    status: "working",
+    progress,
+  })}<span class="sr-only">Working, ${progress}% done</span></span>`;
+}
+
 function threadListPanel(repositoryId) {
   // Newest first, and "newest" means the last thing to happen in the thread
   // rather than when it started — a thread somebody added to five minutes ago
@@ -3855,13 +3879,102 @@ function threadListPanel(repositoryId) {
     )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
+  const summaries = threads.map((entry) => {
+    const working = threadIsWorking(entry);
+    const waiting = threadAwaitsGoAhead(entry);
+    const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+    const ended =
+      !working &&
+      !waiting &&
+      (["integrated", "failed", "cancelled"].includes(task?.status) ||
+        (entry.replies ?? []).some(isThreadEnding));
+    return { entry, working, waiting, ended };
+  });
+  const active = summaries.filter((summary) => !summary.ended);
+  const ended = summaries.filter((summary) => summary.ended);
+  const manageable = canManageRepository(repositoryId);
+  const renderThread = ({ entry, working, waiting }, finished = false) => {
+    const replies = planTranscriptReplies(entry);
+    const titled = threadTitleReply(entry);
+    const count = replies.filter(
+      (reply) => reply.kind !== "progress" && reply !== titled,
+    ).length;
+    const author =
+      threadLastAgentAuthor(entry, repositoryId) ??
+      channelAuthor(repositoryId, entry);
+    const title = threadTitle(entry);
+    const status = working
+      ? threadActivityLabel(entry)
+      : waiting
+        ? "Waiting for you"
+        : finished
+          ? "Completed"
+          : "Pending";
+    const said = threadSaidCount(count);
+    const context = `${status} — ${title} — ${author.name}, ${said} — started ${clockTime(entry.at)}`;
+    if (finished) {
+      return `<div class="thread-item-row">
+        <button type="button" class="thread-item thread-item-ended${manageable ? " thread-item-managed" : ""}"
+          title="${esc(context)}"
+          aria-label="${esc(`Open completed thread: ${title}. ${author.name}, ${said}.`)}"
+          data-act="channel-thread-open" data-value="${esc(entry.id)}">
+          <span class="ti-done" aria-hidden="true">${icon("check")}</span>
+          <span class="ti-text">${esc(title)}</span>
+          <span class="ti-who">${esc(author.name)}</span>
+        </button>
+        ${
+          manageable
+            ? iconButton("trash", {
+                act: "channel-thread-delete",
+                value: entry.id,
+                title: "Delete this thread",
+                small: true,
+              })
+            : ""
+        }
+      </div>`;
+    }
+    return `<div class="thread-item-row">
+      <button type="button" class="thread-item${working ? " thread-item-active" : ""}${waiting ? " thread-item-held" : ""}${!working && !waiting ? " thread-item-pending" : ""}"
+        title="${esc(context)}"
+        aria-label="${esc(`Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
+        data-act="channel-thread-open" data-value="${esc(entry.id)}">
+        <span class="ti-main">
+          <span class="ti-text">${esc(title)}</span>
+          <span class="ti-meta">
+            ${
+              working
+                ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
+                : waiting
+                  ? `<span class="ti-held">Waiting for you</span>`
+                  : `<span class="ti-pending">Pending</span>`
+            }
+            <span class="ti-who">${esc(author.name)}</span>
+            <span class="ti-count">${esc(said)}</span>
+            ${working ? threadRunMark(entry, repositoryId, author) : ""}
+          </span>
+        </span>
+        <span class="ti-go">${icon("chevronRight")}</span>
+      </button>
+      ${
+        manageable
+          ? iconButton("trash", {
+              act: "channel-thread-delete",
+              value: entry.id,
+              title: "Delete this thread",
+              small: true,
+            })
+          : ""
+      }
+    </div>`;
+  };
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
       ${panelKind("Threads")}
       <span class="spacer"></span>
       ${
-        threads.length === 0 || !canManageRepository(repositoryId)
+        threads.length === 0 || !manageable
           ? ""
           : iconButton("trash", {
               act: "channel-threads-clear",
@@ -3875,95 +3988,20 @@ function threadListPanel(repositoryId) {
       ${
         threads.length === 0
           ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
-          : threads
-              .map((entry) => {
-                const replies = planTranscriptReplies(entry);
-                const titled = threadTitleReply(entry);
-                // Thinking is the run talking to itself; it has never been a
-                // reply and should not be counted as one here either. The
-                // title reply is the thread's name, not a message in it.
-                const count = replies.filter(
-                  (reply) => reply.kind !== "progress" && reply !== titled,
-                ).length;
-                // The agent that worked the thread, not the person whose
-                // message it hangs under. Every row in a channel one person
-                // asks in carried that same person's name, which answered a
-                // question nobody scanning a work log has; the useful name is
-                // the colleague who did — or is doing — the work. Falls back
-                // to the root author only for a thread no agent has spoken in
-                // yet, where there is no better answer.
-                const author =
-                  threadLastAgentAuthor(entry, repositoryId) ??
-                  channelAuthor(repositoryId, entry);
-                // The one thing a log of finished work cannot say for itself:
-                // which of these is still moving. Marked from the task's own
-                // status, the same signal that keeps the agent's typing dots
-                // up in the channel, so the two never disagree about who is
-                // working.
-                const working = threadIsWorking(entry);
-                // The other half of the same question. A held thread is not
-                // working and not finished, and without this it read as the
-                // latter — a row somebody had already dealt with — which is
-                // precisely the thread that needs them.
-                const held = threadAwaitsGoAhead(entry);
-                // The subject leads: somebody scanning this log is looking
-                // for a piece of work, and the agent's name told them which
-                // colleague — the wrong first question. Who and how much
-                // demote to one quiet line beneath, and the clock time goes
-                // to the row's tooltip: the list is newest-first, so the
-                // ordering already answers "when" for anybody scanning it.
-                //
-                // No leading glyph either. Every row carried the same terminal
-                // mark: fifty identical icons down a list are a texture rather
-                // than information, and this one was actively misleading — a
-                // thread is a conversation about a piece of work, not a shell
-                // session, so the mark promised a log of command output. There
-                // was nothing meaningful to put in its place. The author's face
-                // was the obvious candidate, but a thread is rooted in the
-                // message that asked for the work, so that column would have
-                // been the same person's avatar the whole way down. The name
-                // leads instead, and the one thing worth spotting at a glance —
-                // which thread is running — is already carried by the accent
-                // wash and leading edge of `.thread-item-active`.
-                return `<div class="thread-item-row">
-                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}${held ? " thread-item-held" : ""}"
-                    title="${esc(
-                      working
-                        ? `Working now — started ${clockTime(entry.at)}`
-                        : held
-                          ? `Waiting for your go-ahead — started ${clockTime(entry.at)}`
-                          : clockTime(entry.at),
-                    )}"
-                    data-act="channel-thread-open" data-value="${esc(entry.id)}">
-                    <span class="ti-main">
-                      <span class="ti-text">${esc(threadTitle(entry))}</span>
-                      <span class="ti-meta">
-                        <span class="ti-who">${esc(author.name)}</span>
-                        <span class="ti-count">${esc(threadSaidCount(count))}</span>
-                        ${
-                          working
-                            ? `<span class="ti-live"><span class="sr-only">Working</span></span>`
-                            : held
-                              ? `<span class="ti-held">Waiting for you</span>`
-                              : ""
-                        }
-                      </span>
-                    </span>
-                    <span class="ti-go">${icon("chevronRight")}</span>
-                  </button>
-                  ${
-                    canManageRepository(repositoryId)
-                      ? iconButton("trash", {
-                          act: "channel-thread-delete",
-                          value: entry.id,
-                          title: "Delete this thread",
-                          small: true,
-                        })
-                      : ""
-                  }
-                </div>`;
-              })
-              .join("")
+          : `${
+              active.length === 0
+                ? ""
+                : `<div class="thread-list-active" aria-label="Active threads">
+                    ${active.map((summary) => renderThread(summary)).join("")}
+                  </div>`
+            }
+            ${
+              ended.length === 0
+                ? ""
+                : `<div class="thread-list-finished" aria-label="Completed threads">
+                    ${ended.map((summary) => renderThread(summary, true)).join("")}
+                  </div>`
+            }`
       }
     </div>
   </aside>`;
@@ -4356,6 +4394,13 @@ function agentSpec(agent, repositoryId) {
   const elsewhere = assignments.filter(
     ({ repository }) => repository.id !== repositoryId,
   );
+  // Same doorway as a history row: the live assignment opens its thread.
+  // Idle ("Available for new work") stays inert — there is nowhere to go.
+  const openCurrentTask =
+    taskMessage === undefined
+      ? ""
+      : ` role="button" tabindex="0" data-act="channel-thread-open"
+          data-value="${esc(taskMessage.id)}" title="Open this task's thread"`;
   return `<div class="agent-spec">
     <div class="aspec-content">
       <section class="aspec-head">
@@ -4377,7 +4422,7 @@ function agentSpec(agent, repositoryId) {
         <div class="aspec-capabilities">
           <div class="aspec-capability aspec-current-task${
             task === undefined ? "" : " aspec-current-task-active"
-          }">
+          }"${openCurrentTask}>
             <span class="aspec-capability-mark">${icon("check")}</span>
             <span class="aspec-capability-copy">
               <span class="aspec-capability-title">${
@@ -5073,27 +5118,72 @@ function threadReplyTurns(replies) {
 
 /** One turn's narration, with state independent from every other turn. */
 function threadThinkingBlock(rootId, turn, index) {
-  // A task title belongs to the fold only when it opens this turn. A later
-  // agent reply that happens to begin "Task:" is something the agent said to
-  // the reader and must stay visible.
+  // The opening task title already names the thread, so do not repeat it in
+  // the disclosure. A later agent reply that happens to begin "Task:" is
+  // something the agent said to the reader and must stay visible.
   const [first, ...rest] = turn.replies;
   const titleLine = /^Task: /u.test(String(first?.content ?? ""))
     ? first
     : undefined;
   const body = titleLine === undefined ? turn.replies : rest;
   const steps = body.filter(isThreadThinking);
-  if (steps.length === 0 && titleLine === undefined) {
-    return { html: "", visible: body };
+  const visible = body.filter((reply) => !isThreadThinking(reply));
+  if (steps.length === 0) {
+    return { html: "", visible };
   }
 
   const key = `${rootId}:thinking:${index}`;
-  // Silent at zero. A task that has been stated and not yet worked on has a
-  // block holding the request alone, and "0 steps" reads as a failure rather
-  // than work that has not started.
-  const count =
-    steps.length === 0
-      ? ""
-      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  const milestones = [];
+  for (const step of steps) {
+    const lines = String(step.content ?? "")
+      .split(/\n+/u)
+      .map((line) => line.replace(/\s+/gu, " ").trim())
+      .filter((line) => line.length > 0);
+    for (const line of lines) {
+      // Use the same small phase vocabulary as the collapsed channel row.
+      // Anything outside that known protocol stays verbatim in the expanded
+      // disclosure, so compacting the routine narration never loses a useful
+      // or unexpected update.
+      const phase = threadActivityLabel({
+        replies: [{ ...step, content: line }],
+      });
+      const known =
+        phase !== "Starting" ||
+        /starting on the code|Starting on |execution started/iu.test(line);
+      const milestone = known ? phase : line;
+      if (!milestones.includes(milestone)) {
+        milestones.push(milestone);
+      }
+    }
+  }
+  if (milestones.length === 0) {
+    return { html: "", visible };
+  }
+
+  const ending = [...body].reverse().find(isThreadEnding);
+  const startedAt = steps
+    .map((reply) => Date.parse(String(reply.at ?? "")))
+    .find((at) => Number.isFinite(at));
+  const finishedAt = Date.parse(String(ending?.at ?? ""));
+  let label = ending === undefined ? "Thinking" : "Thought";
+  if (
+    ending !== undefined &&
+    startedAt !== undefined &&
+    Number.isFinite(finishedAt) &&
+    finishedAt >= startedAt
+  ) {
+    const elapsed = Math.max(1, Math.round((finishedAt - startedAt) / 1000));
+    const hours = Math.floor(elapsed / 3600);
+    const minutes = Math.floor((elapsed % 3600) / 60);
+    const seconds = elapsed % 60;
+    const duration =
+      hours > 0
+        ? `${hours}h${minutes > 0 ? ` ${minutes}m` : ""}`
+        : minutes > 0
+          ? `${minutes}m${seconds > 0 ? ` ${seconds}s` : ""}`
+          : `${seconds}s`;
+    label = `Thought for ${duration}`;
+  }
   const html = `<details class="thread-thinking"${
     // Every turn starts folded. Its independent key still keeps an explicit
     // reader choice stable as more progress arrives for this turn alone.
@@ -5101,27 +5191,14 @@ function threadThinkingBlock(rootId, turn, index) {
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
       <span class="tt-caret">${icon("chevronRight")}</span>
-      <span class="tt-label">Thinking</span>
-      <span class="tt-count">${esc(count)}</span></summary>
-    <div class="tt-body">${
-      titleLine === undefined
-        ? ""
-        : `<p class="tt-task">${esc(
-            String(titleLine.content ?? "")
-              .replace(/^Task:\s*/u, "")
-              .trim(),
-          )}</p>`
-    }${steps
-      .map((reply) => String(reply.content ?? "").trim())
-      .filter((text) => text.length > 0)
-      .join("\n")
-      .split(/\n+/u)
-      .map((line) => `<p>${esc(line)}</p>`)
+      <span class="tt-label">${esc(label)}</span></summary>
+    <div class="tt-body">${milestones
+      .map((milestone) => `<p>${esc(milestone)}</p>`)
       .join("")}</div>
   </details>`;
   return {
     html,
-    visible: body.filter((reply) => !isThreadThinking(reply)),
+    visible,
   };
 }
 

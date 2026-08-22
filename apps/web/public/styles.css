@@ -1035,15 +1035,15 @@ svg.ui-icon {
 .agent-face .agent-run > svg {
   -webkit-mask-image: linear-gradient(
     100deg,
-    rgba(0, 0, 0, 0.4) 0 38%,
-    #000 48%,
-    rgba(0, 0, 0, 0.4) 58% 100%
+    #000 0 38%,
+    rgba(0, 0, 0, 0.4) 48%,
+    #000 58% 100%
   );
   mask-image: linear-gradient(
     100deg,
-    rgba(0, 0, 0, 0.4) 0 38%,
-    #000 48%,
-    rgba(0, 0, 0, 0.4) 58% 100%
+    #000 0 38%,
+    rgba(0, 0, 0, 0.4) 48%,
+    #000 58% 100%
   );
   -webkit-mask-size: 250% 100%;
   mask-size: 250% 100%;
@@ -2825,10 +2825,10 @@ svg.ui-icon {
   pointer-events: auto;
 }
 
-/* Focus stays quiet enough that the card does not turn into an alert. */
+/* Focus stays quiet: a stronger neutral edge, no accent wash ring. */
 .composer:focus-within {
-  border-color: var(--accent-line);
-  box-shadow: 0 0 0 2px var(--accent-wash);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card);
 }
 
 /* Utilities lead and send closes the bottom row. */
@@ -5912,11 +5912,11 @@ button.chip.lg:hover {
   pointer-events: none;
 }
 
-/* Every grouped path leaves its avatar from the same point, eight pixels below
-   the 32px face, regardless of the height of that first message. The small
-   break keeps the connector visually separate from the face. */
+/* Every grouped path leaves from the bottom centre of its 32px avatar,
+   regardless of the height of that first message. Tucking the stem one pixel
+   into the face removes the floating gap while keeping the join smooth. */
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
-  top: 48px;
+  top: 40px;
 }
 
 /* The final row owns a wrapper that stops immediately after the thread link.
@@ -5954,7 +5954,7 @@ button.chip.lg:hover {
 
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
   .cmsg-thread-route::before {
-  top: 41px;
+  top: 31px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -6733,6 +6733,15 @@ button.chip.lg:hover {
   animation-delay: var(--reveal-delay, 0ms);
 }
 
+/* A picture arrives with the words it was posted beside, on the same clock and
+   in its own place in the order — see `revealWords`. It has no `display` of
+   its own on purpose: `.cmsg-image` is the block that reserves the picture's
+   box, and overriding that here would move the message as it came in. */
+.text-reveal-media {
+  animation: text-reveal-in 460ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
 @keyframes text-reveal-in {
   from {
     opacity: 0;
@@ -6769,6 +6778,10 @@ button.chip.lg:hover {
     animation: none;
   }
 
+  .text-reveal-media {
+    animation: none;
+  }
+
   .text-sweep {
     animation: none;
     background: none;
@@ -6799,8 +6812,8 @@ button.chip.lg:hover {
   border: 0;
 }
 
-/* A presence dot on a 20px face in a stack is a third of the face, and it is
-   answering a question nobody asked of a thread summary. */
+/* A presence dot on every 20px face in a stack is a third of each face, and it
+   is answering a question nobody asked of the people who merely spoke here. */
 .cmsg-thread-link .ctl-faces .presence {
   display: none;
 }
@@ -6815,18 +6828,20 @@ button.chip.lg:hover {
   align-items: center;
 }
 
-.cmsg-thread-link .ctl-faces .ctl-working::before {
-  content: "";
-  position: absolute;
-  right: 0;
+/* The face's own badge rather than one drawn beside it. It used to be a
+   `::before` on this wrapper: the same colour and size, but static, so the one
+   live signal in a room breathed everywhere except here. Halved and given the
+   chat surface's cutout the way the room's own faces are, it is now literally
+   the badge `agentFace` draws, on the clock every other live mark keeps. */
+.cmsg-thread-link .ctl-faces .ctl-working .presence {
+  display: block;
+  right: -1px;
   bottom: 1px;
   z-index: 2;
   width: 5px;
   height: 5px;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 1px var(--bg-chat);
-  pointer-events: none;
+  border-width: 1px;
+  border-color: var(--bg-chat);
 }
 
 /* An agent face in the stack fills itself, so nothing is drawn around it here.
@@ -7993,6 +8008,21 @@ button.chip.lg:hover {
   color: #fff;
 }
 
+/* Only when the channel message is known — same rule as history rows — so an
+   inert idle row never looks clickable. */
+.agent-spec .aspec-current-task-active[role="button"] {
+  cursor: pointer;
+}
+
+.agent-spec .aspec-current-task-active[role="button"]:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+
+.agent-spec .aspec-current-task-active[role="button"]:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
 .agent-spec .aspec-current-task-active .aspec-capability-mark,
 .agent-spec .aspec-current-task-active .aspec-capability-title,
 .agent-spec .aspec-current-task-active .aspec-capability-meta,
@@ -9100,6 +9130,128 @@ dialog.modal[open]::backdrop {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
+}
+
+/* The first step of Add Agent. Providers stay in one stable list after a
+   connection; connected rows quiet down instead of disappearing, so adding a
+   second agent never looks like the first one replaced it. */
+.agent-provider-picker {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.agent-provider-choice {
+  position: relative;
+  min-width: 0;
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 2px 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease;
+}
+
+.agent-provider-choice:hover:not(.is-connected):not(.is-disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.agent-provider-choice:has(input:checked) {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
+.agent-provider-choice:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.agent-provider-choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.agent-provider-mark {
+  grid-row: 1 / 3;
+  align-self: center;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-bright);
+}
+
+.agent-provider-mark svg {
+  width: 24px;
+  height: 24px;
+}
+
+.agent-provider-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agent-provider-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agent-provider-copy small {
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.agent-provider-state {
+  color: var(--accent-bright);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.agent-provider-choice.is-connected,
+.agent-provider-choice.is-disabled {
+  cursor: default;
+  background: var(--bg-card);
+  border-color: var(--border-soft);
+}
+
+.agent-provider-choice.is-connected .agent-provider-mark,
+.agent-provider-choice.is-connected .agent-provider-state {
+  color: var(--green);
+}
+
+.agent-provider-choice.is-connected .agent-provider-copy,
+.agent-provider-choice.is-disabled {
+  opacity: 0.7;
+}
+
+.agent-provider-empty {
+  grid-column: 1 / -1;
+  color: var(--text-3);
+  padding: 12px 0;
+}
+
+@media (max-width: 520px) {
+  .agent-provider-picker {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Attribution pills: the rendered 3dicons object, then a short label, in a
@@ -10514,16 +10666,31 @@ dialog.modal[open]::backdrop {
   height: 13px;
 }
 
-/* One thread in the pullout, as a card: glyph, name, one metadata line,
-   chevron. It was three stacked lines plus an avatar plus a delete button that
-   fell onto a fourth line of its own, on a divider-ruled list — five bands of
-   chrome per thread. Cards separated by space need no rules between them, and
-   the delete button now sits on the row it belongs to. */
+/* Live work stays in a short stack; completed work becomes a wrapping run of
+   pills underneath. This keeps the state that still needs attention prominent
+   without making every finished thread consume the width of the panel. */
+.thread-list-active {
+  display: grid;
+  gap: 6px;
+}
+
+.thread-list-finished {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.thread-list-active + .thread-list-finished {
+  padding-top: 9px;
+  margin-top: 9px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .thread-item-row {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-bottom: 8px;
 }
 
 /* The trash stays out of the way until the row is under the pointer; on touch,
@@ -10548,10 +10715,10 @@ dialog.modal[open]::backdrop {
 .thread-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 0;
   border-radius: var(--radius);
   background: var(--bg-card);
@@ -10563,6 +10730,89 @@ dialog.modal[open]::backdrop {
 
 .thread-item:hover {
   background: var(--bg-card-2);
+}
+
+.thread-item:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+/* A completed thread is one compact, single-line destination. The full title,
+   author, reply count, time and status remain in its accessible label and
+   tooltip; the pill keeps only the title and author visible. */
+.thread-list-finished .thread-item-row {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.thread-item-ended {
+  flex: 0 1 auto;
+  max-width: 260px;
+  padding: 5px 9px;
+  gap: 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-inset);
+}
+
+.thread-item-ended.thread-item-managed {
+  padding-right: 30px;
+}
+
+.thread-item-ended:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-card-2);
+}
+
+.thread-item-ended .ti-done {
+  display: inline-flex;
+  flex: none;
+  color: var(--green);
+}
+
+.thread-item-ended .ti-done svg {
+  width: 13px;
+  height: 13px;
+}
+
+.thread-list-finished .thread-item-ended .ti-who {
+  flex: none;
+  max-width: 72px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.thread-item-ended .ti-who::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--text-4);
+}
+
+/* The per-thread delete action occupies the pill's reserved trailing space,
+   so hidden actions do not turn every compact item back into a wide row. */
+.thread-list-finished .thread-item-row > .icon-btn {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: 3px;
+  width: 22px;
+  height: 22px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: var(--bg-inset);
+}
+
+.thread-item-pending {
+  box-shadow: inset 2px 0 0 var(--border-strong);
+}
+
+.ti-pending {
+  flex: none;
+  color: var(--text-3);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 /* The thread an agent is working on right now. The list is a log of finished
@@ -10603,6 +10853,27 @@ dialog.modal[open]::backdrop {
   .thread-item-active .ti-live {
     animation: none;
   }
+}
+
+/* What a running row actually carries, whenever the agent on it is known: the
+   same mark filling clockwise that the roster and the room both draw, at the
+   size a line of metadata allows. The dot above is now only the fallback for a
+   thread no agent has spoken in yet. Three places showed the same run three
+   different ways — a filling mark, a filling mark with a frozen badge, and
+   this, a bare dot in a colour of its own that said nothing about how far the
+   work had got. Now they read alike, so a glance costs nothing to relearn. */
+.thread-item .ti-run {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+}
+
+/* Halved and hair-ringed, exactly as a face in the room transcript is. */
+.thread-item .ti-run .presence {
+  right: -1px;
+  width: 5px;
+  height: 5px;
+  border-width: 1px;
 }
 
 /* The held counterpart of `.thread-item-active`. Same shape — a wash and a
@@ -10991,35 +11262,47 @@ dialog.modal[open]::backdrop {
 
 .thread-item .ti-main {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   flex: 1;
   min-width: 0;
 }
 
-/* The name the agent gave the task carries the card. Wrapped to two lines
-   rather than truncated at one: a task name is a sentence, and the half of it
-   that fits is rarely the half that identifies the work. */
+/* A summary never grows taller because its task name is long. The full name
+   remains in the button's label and tooltip. */
 .thread-item .ti-text {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
   color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Who, then how much — metadata, in the size and colour that says so. */
+/* Current phase, then who and how much — one quiet metadata line. */
 .thread-item .ti-meta {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   font-size: 11.5px;
+  line-height: 1.3;
   min-width: 0;
 }
 
+.thread-item .ti-activity {
+  flex: 0 1 110px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread-item .ti-who {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -11029,6 +11312,12 @@ dialog.modal[open]::backdrop {
 .thread-item .ti-count {
   color: var(--text-4);
   flex: none;
+}
+
+.thread-item-ended .ti-text {
+  flex: 0 1 auto;
+  font-size: 12.5px;
+  font-weight: 500;
 }
 
 /* Thinking, as one passage rather than as a stack of messages from somebody
