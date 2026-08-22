@@ -94,6 +94,62 @@ export type PromptCliProcessRunner = (
  */
 const MAX_NARRATION_TAIL = 512 * 1024;
 
+/**
+ * Linux rejects any individual argv entry larger than 128 KiB, independently
+ * of the much larger total ARG_MAX allowance. Leave room for encoding and
+ * platform bookkeeping while turning a variadic CLI prompt into safe words.
+ */
+const MAX_PROMPT_ARGUMENT_BYTES = 96 * 1024;
+
+function splitPromptArguments(prompt: string): string[] {
+  if (Buffer.byteLength(prompt, "utf8") <= MAX_PROMPT_ARGUMENT_BYTES) {
+    return [prompt];
+  }
+
+  const chunks: string[] = [];
+  let start = 0;
+  let index = 0;
+  let bytes = 0;
+  let lastSpace = -1;
+
+  for (const character of prompt) {
+    const characterStart = index;
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    index += character.length;
+
+    if (bytes + characterBytes > MAX_PROMPT_ARGUMENT_BYTES) {
+      if (lastSpace >= start) {
+        // Cursor joins variadic prompt arguments with one space. Splitting on
+        // an existing single space therefore reconstructs the original text.
+        chunks.push(prompt.slice(start, lastSpace));
+        start = lastSpace + 1;
+        bytes = Buffer.byteLength(prompt.slice(start, characterStart), "utf8");
+        if (bytes + characterBytes > MAX_PROMPT_ARGUMENT_BYTES) {
+          chunks.push(prompt.slice(start, characterStart));
+          start = characterStart;
+          bytes = 0;
+        }
+      } else {
+        // Generated prompts normally contain many spaces. This fallback also
+        // handles an unusually long token; the inserted separator is safer
+        // than allowing the process to fail before the CLI starts.
+        chunks.push(prompt.slice(start, characterStart));
+        start = characterStart;
+        bytes = 0;
+      }
+      lastSpace = -1;
+    }
+
+    bytes += characterBytes;
+    if (character === " ") {
+      lastSpace = characterStart;
+    }
+  }
+
+  chunks.push(prompt.slice(start));
+  return chunks;
+}
+
 /** How one concrete CLI is invoked and how its output is unwrapped. */
 export interface PromptCliProfile {
   /** Adapter id used in configuration and error messages. */
@@ -116,9 +172,10 @@ export interface PromptCliProfile {
   ): string[];
   /**
    * Most CLIs accept the prompt on stdin. Browser-account CLIs whose
-   * non-interactive command requires a positional value opt into `argument`.
+   * non-interactive command requires positional values opt into `argument`
+   * or the variadic `arguments` form.
    */
-  promptDelivery?: "stdin" | "argument";
+  promptDelivery?: "stdin" | "argument" | "arguments";
   /**
    * Unwraps the CLI's stdout into the model's text answer, or throws when
    * the envelope itself reports failure.
@@ -507,7 +564,14 @@ function unwrapBrowserCli(stdout: string, name: string): string {
 export const CURSOR_PROFILE: PromptCliProfile = {
   name: "cursor",
   defaultCommand: "agent",
-  promptDelivery: "argument",
+  // Cursor declares its prompt as the variadic `[prompt...]`. Keep large
+  // prompts below Linux's per-argument MAX_ARG_STRLEN limit by sending them
+  // as several positional words; Cursor joins those words before starting
+  // the agent. A single generated prompt can readily exceed 128 KiB once it
+  // contains task context and prior coordinator decisions, at which point
+  // passing it as one argument makes spawn fail with E2BIG before Cursor even
+  // starts.
+  promptDelivery: "arguments",
   planningArgs: (model) => [
     "-p",
     "--output-format",
@@ -2139,12 +2203,18 @@ export class PromptCliAdapter implements AgentAdapter {
     // vendor CLIs expose non-interactive mode only through a positional
     // prompt; their profile opts into that explicitly above.
     const promptInArgument = this.profile.promptDelivery === "argument";
+    const promptArguments =
+      this.profile.promptDelivery === "arguments"
+        ? splitPromptArguments(prompt)
+        : promptInArgument
+          ? [prompt]
+          : [];
     const active = this.runner(
       this.command,
-      promptInArgument ? [...argv, prompt] : argv,
+      promptArguments.length === 0 ? argv : [...argv, ...promptArguments],
       {
         cwd: workingDirectory,
-        ...(promptInArgument ? {} : { input: prompt }),
+        ...(promptArguments.length === 0 ? { input: prompt } : {}),
         ...(this.options.env === undefined ? {} : { env: this.options.env }),
         timeoutMs,
         maxOutputBytes: this.maxOutputBytes,

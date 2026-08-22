@@ -6,10 +6,9 @@
  * iOS does not read SVG for `apple-touch-icon`, and Android's maskable icons
  * want a full-bleed raster it can crop its own shape out of — two things the
  * favicon SVG cannot be. Rather than vendoring an image toolchain for one
- * mark made of two rounded-rectangle strokes, this evaluates that geometry
- * per pixel (signed distance to a rounded rectangle, the same weave mask the
- * SVG applies) and writes the PNGs itself. Deterministic on purpose: the
- * committed icons are reproducible by running
+ * letter made of three straight strokes, this evaluates that geometry per
+ * pixel (distance to a butt-capped stroke) and writes the PNGs itself.
+ * Deterministic on purpose: the committed icons are reproducible by running
  *
  *     node scripts/render-brand-icons.mjs
  *
@@ -32,51 +31,46 @@ const PUBLIC_DIR = path.join(
 
 /* ------------------------------------------------ the mark, in numbers --- */
 
-// From mark.svg: a 48-unit box; one rounded rect (x 9, y 17.5, w 30, h 13,
-// rx 6.5) stroked at 3.2, drawn twice — rotated +45° and −45° about the
-// centre — with the +45 bar erased where the −45 bar's 7-wide mask stroke
-// crosses it, which is what makes the two read as woven.
+// The K of the KUMI wordmark, from mark.svg: a 48-unit box holding a stem and
+// two arms that meet it at mid-height, every one of them the same 6.6-wide
+// stroke with flat ends.
+//
+// The arms are given as running to x 9 — past the vertex, into the stem —
+// where mark.svg instead stops them at 13.5 and lets a mitred join make the
+// point. The two agree everywhere that shows: the stem covers the overshoot,
+// and the arms' own edges, not the join, are what the eye reads as the
+// letter's notch. Extending them is what lets this file treat each stroke
+// independently rather than reproducing SVG's join rules.
 const BOX = 48;
-const CENTER = BOX / 2;
-const HALF_W = 15;
-const HALF_H = 6.5;
-const CORNER = 6.5;
-const STROKE = 3.2;
-const MASK_STROKE = 7;
+const STROKE = 6.6;
+const HALF_STROKE = STROKE / 2;
 const BACKGROUND = [0x1a, 0x1a, 0x1a];
 const INK = [0xed, 0xed, 0xed];
 
-/** Signed distance from a point (in the rect's own frame) to its outline. */
-function roundedRectDistance(x, y) {
-  const qx = Math.abs(x) - (HALF_W - CORNER);
-  const qy = Math.abs(y) - (HALF_H - CORNER);
-  const outside = Math.hypot(Math.max(qx, 0), Math.max(qy, 0));
-  return outside + Math.min(Math.max(qx, qy), 0) - CORNER;
-}
-
-/** Distance in the frame of the bar rotated by `degrees` about the centre. */
-function barDistance(x, y, degrees) {
-  const radians = (degrees * Math.PI) / 180;
-  const dx = x - CENTER;
-  const dy = y - CENTER;
-  // Inverse rotation: the sample moves into the bar's local frame.
-  const localX = dx * Math.cos(radians) + dy * Math.sin(radians);
-  const localY = -dx * Math.sin(radians) + dy * Math.cos(radians);
-  return roundedRectDistance(localX, localY);
-}
+/** Each stroke as the two ends of its centre line. */
+const STROKES = [
+  [8.3, 8, 8.3, 40],
+  [42, 11, 9, 24],
+  [42, 37, 9, 24],
+];
 
 /**
- * The mark's colour at one point of the 48-unit box: ink on either bar,
- * except where the weave mask hides the +45 bar under the −45 one.
+ * Whether a point lies on one stroke: inside its width, and between its two
+ * ends rather than beyond them, which is what a flat end means.
  */
+function onStroke(x, y, [x1, y1, x2, y2]) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const length = Math.hypot(dx, dy);
+  // Distance along the stroke, and away from it, in the stroke's own frame.
+  const along = ((x - x1) * dx + (y - y1) * dy) / length;
+  const across = ((x - x1) * -dy + (y - y1) * dx) / length;
+  return along >= 0 && along <= length && Math.abs(across) <= HALF_STROKE;
+}
+
+/** The mark's colour at one point of the 48-unit box: ink on any stroke. */
 function inkAt(x, y) {
-  const over = Math.abs(barDistance(x, y, -45)) <= STROKE / 2;
-  if (over) {
-    return true;
-  }
-  const under = Math.abs(barDistance(x, y, 45)) <= STROKE / 2;
-  const cut = Math.abs(barDistance(x, y, -45)) <= MASK_STROKE / 2;
-  return under && !cut;
+  return STROKES.some((stroke) => onStroke(x, y, stroke));
 }
 
 /* --------------------------------------------------------- rasterising --- */

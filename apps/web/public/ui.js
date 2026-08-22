@@ -299,40 +299,40 @@ if (typeof document !== "undefined") {
 }
 
 /**
- * The product mark: two loops woven through each other.
+ * The product mark: the KUMI wordmark.
  *
- * The interlocking is the mark, so the symbol needs nothing
- * else — no face, no badge, no enclosing shape. Two identical rounded loops
- * crossed at a right angle read as four lobes and a weave, which is the whole
- * idea in the fewest possible strokes.
+ * One drawing serves both places the mark appears. The SVG holds the whole
+ * word and is sliced from its left edge, so a square viewport — the channel
+ * rail's crown — shows the K alone as a badge, while a viewport given the
+ * wordmark's own 3.5:1 ratio shows all four letters. That ratio is set in
+ * styles.css for the sign-in card; every other caller gets the badge. Two
+ * separate drawings were the alternative, and two drawings drift: this way
+ * the badge is literally the wordmark's first letter.
  *
- * The weave is cut with a mask rather than drawn with a background-coloured
- * halo under the crossing strand. A halo has to know what colour it is sitting
- * on, and this mark sits on four different surfaces — the sidebar, the sign-in
- * card, the mobile header, a favicon — so it would be wrong on three of them.
- * The mask removes the pixels instead, which is true against anything.
+ * The letters are stroked polylines rather than filled outlines, because that
+ * is what they are — one constant weight, flat cuts, no curves anywhere. The
+ * K's arms run past the vertex into the stem so their ends are hidden under
+ * it, which is also how the raster icons are drawn; a joint that only exists
+ * in one of the two would not survive the next edit.
  *
- * `currentColor` for the same reason: the mark takes the colour of the text
- * beside it, so it is white on dark and near-black on light without a second
- * definition, and carries no hue of its own.
+ * `currentColor` throughout: the mark takes the colour of the text beside it,
+ * so it is right on dark and light without a second definition. mark.svg and
+ * scripts/render-brand-icons.mjs carry the same K for the surfaces that can
+ * read neither this file nor `currentColor`, and a change to the mark belongs
+ * in all three together.
  */
 export function brandMark(size = 34) {
   return `<svg class="brand-mark" width="${size}" height="${size}"
-    viewBox="0 0 48 48" fill="none" aria-hidden="true">
-    <defs>
-      <mask id="brand-weave" maskUnits="userSpaceOnUse"
-        x="0" y="0" width="48" height="48">
-        <rect width="48" height="48" fill="#fff"/>
-        <rect x="6" y="15.5" width="36" height="17" rx="8.5"
-          transform="rotate(-45 24 24)" fill="none" stroke="#000"
-          stroke-width="7.6"/>
-      </mask>
-    </defs>
-    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
-      transform="rotate(45 24 24)" mask="url(#brand-weave)"
-      stroke="currentColor" stroke-width="3.4"/>
-    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
-      transform="rotate(-45 24 24)" stroke="currentColor" stroke-width="3.4"/>
+    viewBox="0 0 168 48" preserveAspectRatio="xMinYMid slice"
+    fill="none" stroke="currentColor" stroke-width="6.6"
+    stroke-linecap="butt" stroke-linejoin="miter" aria-hidden="true">
+    <path d="M8.3 8V40"/>
+    <path d="M42 11 13.5 24 42 37"/>
+    <path d="M54.3 8v22.7l6.3 6.3h20.8l6.3-6.3V8"/>
+    <path d="M102.3 8V40"/>
+    <path d="M143.7 8V40"/>
+    <path d="M102.3 10.5 123 30l20.7-19.5"/>
+    <path d="M158.3 8V40"/>
   </svg>`;
 }
 

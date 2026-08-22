@@ -4918,11 +4918,17 @@ function navigate(route) {
 }
 
 function applyHash() {
+  // Invite links can arrive after boot as well as on the initial page load.
+  // Give them the same invitation flow before either the signed-out shell or
+  // the ordinary product router gets a chance to ignore the special hash.
+  if (/^#invite\/.+$/u.test(window.location.hash)) {
+    void handleInviteLink();
+    return;
+  }
   // While the signed-out shell is up the hash names a form, not a screen —
   // so following `/#signin` from the create-account page has to swap the
   // form rather than fall through to the router, which knows nothing about
-  // it. The invite screen renders here too; its hash is not an auth hash, so
-  // it is left alone.
+  // it.
   const authRoot = $("#auth-root");
   if (authRoot !== null && !authRoot.hidden) {
     const mode = authModeFromHash();

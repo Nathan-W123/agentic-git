@@ -1917,6 +1917,29 @@ test("working agent faces put progress around their green status dot", async () 
   assert.match(roomRingDot ?? "", /width: 3px;/u);
   assert.match(roomRingDot ?? "", /height: 3px;/u);
 
+  // Threads share that transcript markup, but the badge is 50% larger there
+  // only — group-chat rows keep the halved room size above.
+  const threadDot =
+    /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.presence \{([\s\S]*?)\n\}/u
+      .exec(css)?.[1];
+  assert.notEqual(threadDot, undefined, "a face in a thread sizes its own dot");
+  assert.match(threadDot ?? "", /width: 7\.5px;/u);
+  assert.match(threadDot ?? "", /height: 7\.5px;/u);
+
+  const threadRing =
+    /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.agent-run \{([\s\S]*?)\n\}/u
+      .exec(css)?.[1];
+  assert.notEqual(threadRing, undefined, "a working face in a thread sizes its ring");
+  assert.match(threadRing ?? "", /width: 7\.5px;/u);
+  assert.match(threadRing ?? "", /height: 7\.5px;/u);
+
+  const threadRingDot =
+    /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u
+      .exec(css)?.[1];
+  assert.notEqual(threadRingDot, undefined, "the ring in a thread keeps its centre");
+  assert.match(threadRingDot ?? "", /width: 4\.5px;/u);
+  assert.match(threadRingDot ?? "", /height: 4\.5px;/u);
+
   const progress = data.slice(
     data.indexOf("export function agentWorkingProgress"),
     data.indexOf("function agentIsWorking"),
@@ -3332,6 +3355,21 @@ test("the invite screen names the product, not only the team", async () => {
   // product unless this screen says which one it actually is.
   assert.match(body, /organizationName/u);
   assert.match(body, /on Kumi/u);
+});
+
+test("an invite link opened in a running session enters the invitation flow", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function applyHash");
+  const body = app.slice(start, app.indexOf("\n/* ---", start));
+  const invitation = body.indexOf("handleInviteLink");
+  const signedOutShell = body.indexOf('const authRoot = $("#auth-root")');
+  const ordinaryRoute = body.indexOf("const route = window.location.hash");
+
+  assert.match(app, /addEventListener\("hashchange", applyHash\)/u);
+  assert.match(body, /\^#invite\\\/\.\+\$/u);
+  assert.notEqual(invitation, -1);
+  assert.ok(invitation < signedOutShell);
+  assert.ok(invitation < ordinaryRoute);
 });
 
 /**
