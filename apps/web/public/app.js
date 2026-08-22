@@ -4695,6 +4695,153 @@ function insideSkipped(node, root) {
 }
 
 /**
+ * A picture posted with the message.
+ *
+ * An attachment is part of the body rather than something beside it —
+ * `messageBody` in screen-chats.js puts it inside the very block the words
+ * are in — so it belongs to the same arrival. The link is what carries the
+ * picture's box; the bare image is the fallback for anywhere one is written
+ * without it.
+ */
+function revealIsMedia(element) {
+  return (
+    element.classList.contains("cmsg-image") ||
+    (String(element.nodeName).toUpperCase() === "IMG" &&
+      element.hasAttribute("data-attachment"))
+  );
+}
+
+/**
+ * The outermost thing around this node that arrives in one piece, if any.
+ *
+ * A picture is not read word by word, and neither is a span of code inside a
+ * sentence: each is one thing that appears, so each takes a single place in
+ * the schedule instead of being split or — as both were — left out of it
+ * altogether and shown whole while the words around them were still coming
+ * in.
+ *
+ * Outermost, because a picture is a link around an image: counting it twice
+ * would leave one copy waiting on the other in the middle of the message.
+ */
+function revealWholeOf(node, block) {
+  let found = null;
+  for (
+    let step = node;
+    step !== null && step !== block;
+    step = step.parentNode
+  ) {
+    if (
+      step instanceof Element &&
+      (revealIsMedia(step) || String(step.nodeName).toUpperCase() === "CODE")
+    ) {
+      found = step;
+    }
+  }
+  return found;
+}
+
+/**
+ * Wraps each piece of a block in its own element so it can come in on its own
+ * delay, resuming `elapsed` milliseconds into the sequence.
+ *
+ * A negative delay is what does the resuming: the browser starts an animation
+ * that far through rather than waiting, so a redraw two hundred milliseconds
+ * into an arrival carries on from two hundred milliseconds instead of
+ * replaying the opening. Whitespace is left as it was, which is what keeps
+ * wrapping, selection and copied text identical to the markup underneath.
+ *
+ * A piece is usually a word, but the message is what arrives, not only its
+ * prose: a picture posted with it takes a place in the same schedule, which
+ * is also what gives a message of nothing but a picture an arrival at all.
+ *
+ * The block is the body and stops there. The quoted line above a reply, the
+ * reactions under it and the buttons beside it are the room's furniture
+ * rather than anything that was said, so they stay where they are — see the
+ * `data-reveal` key in screen-chats.js for what a block is.
+ */
+function revealWords(block, elapsed) {
+  // One pass in reading order over the text and the elements together, so a
+  // picture between two paragraphs arrives between them rather than before or
+  // after everything else.
+  const walker = document.createTreeWalker(
+    block,
+    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+  );
+  const parts = [];
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node instanceof Element) {
+      if (revealWholeOf(node, block) === node && !insideSkipped(node, block)) {
+        parts.push(node);
+      }
+      continue;
+    }
+    const text = node.nodeValue ?? "";
+    if (
+      text.trim() !== "" &&
+      !insideSkipped(node, block) &&
+      revealWholeOf(node, block) === null
+    ) {
+      parts.push(node);
+    }
+  }
+  // Wrapped first and timed second: the stagger depends on how many pieces
+  // there turned out to be, and that is only known once the last one is in
+  // hand.
+  const revealedPings = new Set();
+  const words = [];
+  for (const part of parts) {
+    if (part instanceof Element) {
+      // Kept however long the message runs to. A picture or a piece of code
+      // is a handful of nodes at most, and one of them standing at full
+      // strength beside a sentence that is still arriving is the whole thing
+      // this is here to prevent.
+      part.classList.add(
+        revealIsMedia(part) ? "text-reveal-media" : "text-reveal-word",
+      );
+      words.push(part);
+      continue;
+    }
+    if (words.length >= REVEAL_MAX_WORDS) {
+      continue;
+    }
+    const ping = revealPingOf(part, block);
+    if (ping !== null) {
+      if (revealedPings.has(ping)) {
+        continue;
+      }
+      revealedPings.add(ping);
+      ping.classList.add("text-reveal-word");
+      words.push(ping);
+      continue;
+    }
+    const pieces = String(part.nodeValue).split(/(\s+)/u);
+    const holder = document.createDocumentFragment();
+    for (const piece of pieces) {
+      if (piece === "") {
+        continue;
+      }
+      if (piece.trim() === "" || words.length >= REVEAL_MAX_WORDS) {
+        holder.append(piece);
+        continue;
+      }
+      const word = document.createElement("span");
+      word.className = "text-reveal-word";
+      word.textContent = piece;
+      holder.append(word);
+      words.push(word);
+    }
+    part.replaceWith(holder);
+  }
+  const step = revealStaggerFor(words.length);
+  for (const [index, word] of words.entries()) {
+    word.style.setProperty(
+      "--reveal-delay",
+      `${Math.round(index * step - elapsed)}ms`,
+    );
+  }
+}
+
+/**
  * A posted ping or slash command, if this text node belongs to one.
  *
  * Those spans carry a coloured wash. Splitting them word by word would leave
@@ -4714,71 +4861,6 @@ function revealPingOf(node, block) {
     parent = parent.parentNode;
   }
   return null;
-}
-
-/**
- * Wraps each word of a block in its own element so it can come in on its own
- * delay, resuming `elapsed` milliseconds into the sequence.
- *
- * A negative delay is what does the resuming: the browser starts an animation
- * that far through rather than waiting, so a redraw two hundred milliseconds
- * into an arrival carries on from two hundred milliseconds instead of
- * replaying the opening. Whitespace is left as it was, which is what keeps
- * wrapping, selection and copied text identical to the markup underneath.
- */
-function revealWords(block, elapsed) {
-  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-  const texts = [];
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-    const text = node.nodeValue ?? "";
-    if (text.trim() !== "" && !insideSkipped(node, block)) {
-      texts.push(node);
-    }
-  }
-  // Wrapped first and timed second: the stagger depends on how many words
-  // there turned out to be, and that is only known once the last one is in
-  // hand.
-  const revealedPings = new Set();
-  const words = [];
-  for (const node of texts) {
-    if (words.length >= REVEAL_MAX_WORDS) {
-      break;
-    }
-    const ping = revealPingOf(node, block);
-    if (ping !== null) {
-      if (revealedPings.has(ping)) {
-        continue;
-      }
-      revealedPings.add(ping);
-      ping.classList.add("text-reveal-word");
-      words.push(ping);
-      continue;
-    }
-    const pieces = String(node.nodeValue).split(/(\s+)/u);
-    const holder = document.createDocumentFragment();
-    for (const piece of pieces) {
-      if (piece === "") {
-        continue;
-      }
-      if (piece.trim() === "" || words.length >= REVEAL_MAX_WORDS) {
-        holder.append(piece);
-        continue;
-      }
-      const word = document.createElement("span");
-      word.className = "text-reveal-word";
-      word.textContent = piece;
-      holder.append(word);
-      words.push(word);
-    }
-    node.replaceWith(holder);
-  }
-  const step = revealStaggerFor(words.length);
-  for (const [index, word] of words.entries()) {
-    word.style.setProperty(
-      "--reveal-delay",
-      `${Math.round(index * step - elapsed)}ms`,
-    );
-  }
 }
 
 export function render() {

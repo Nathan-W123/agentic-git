@@ -6733,6 +6733,15 @@ button.chip.lg:hover {
   animation-delay: var(--reveal-delay, 0ms);
 }
 
+/* A picture arrives with the words it was posted beside, on the same clock and
+   in its own place in the order — see `revealWords`. It has no `display` of
+   its own on purpose: `.cmsg-image` is the block that reserves the picture's
+   box, and overriding that here would move the message as it came in. */
+.text-reveal-media {
+  animation: text-reveal-in 460ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
 @keyframes text-reveal-in {
   from {
     opacity: 0;
@@ -6766,6 +6775,10 @@ button.chip.lg:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .text-reveal-word {
+    animation: none;
+  }
+
+  .text-reveal-media {
     animation: none;
   }
 
