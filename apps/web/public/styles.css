@@ -985,18 +985,37 @@ svg.ui-icon {
   border: 2px solid var(--bg-card);
 }
 
-/* One status treatment per agent face. While work is live, the progress pie
-   replaces the corner presence dot and begins fully dark at pickup. */
+/* Live work keeps the ordinary green status dot and adds progress around it.
+   The ring starts on its quiet track and fills clockwise; it stays in the
+   corner so progress never paints over the agent mark itself. */
 .agent-face .agent-run {
   position: absolute;
-  inset: -1px;
+  right: -3px;
+  bottom: -1px;
   z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: conic-gradient(
-    #f3efe8 calc(var(--run, 0) * 1%),
-    rgba(0, 0, 0, 0.62) 0
+    var(--green) calc(var(--run, 0) * 1%),
+    var(--border-strong) 0
   );
+  box-shadow: 0 0 0 2px var(--bg-card);
   pointer-events: none;
+}
+
+/* The solid centre says what the ring is measuring: green means coding. The
+   surface-coloured gap keeps the dot and the progress stroke as two readings. */
+.agent-face .agent-run::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--bg-card);
+  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -6582,19 +6601,9 @@ button.chip.lg:hover {
   display: none;
 }
 
-/* The run's position, drawn as a pie over the whole face of the agent running
-   it: the part still to come lies over the portrait as a dark wedge, and the
-   part already travelled uses the off-white default agent colour, so the icon
-   visibly fills up clockwise as the narration below it advances. Dark for
-   undone and light for done is the whole read — nothing to parse, just how
-   much of the face has brightened.
-
-   The dark wedge remains translucent, which lets the unfinished portion keep
-   the mark underneath legible. A hollow badge in the corner said the same
-   thing at a twelfth of the size, and at that size the sweep was a guess.
-
-   `z-index` keeps the pie whole: the faces in a stack overlap leftwards, and
-   the next one along would otherwise cut into it. */
+/* The working agent stays at the front of the stack. Its status is the same
+   green dot used elsewhere, with the run's position filling the ring around
+   that dot instead of covering the agent mark. */
 .cmsg-thread-link .ctl-faces .ctl-working {
   position: relative;
   z-index: 1;
@@ -6602,15 +6611,34 @@ button.chip.lg:hover {
   align-items: center;
 }
 
+.cmsg-thread-link .ctl-faces .ctl-working::before {
+  content: "";
+  position: absolute;
+  right: 1px;
+  bottom: 3px;
+  z-index: 2;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--bg-chat);
+  animation: status-breathe 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
 .cmsg-thread-link .ctl-faces .ctl-working::after {
   content: "";
   position: absolute;
-  inset: -1px;
+  right: -3px;
+  bottom: -1px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: conic-gradient(
-    #f3efe8 calc(var(--run, 0) * 1%),
-    rgba(0, 0, 0, 0.55) 0
+    var(--green) calc(var(--run, 0) * 1%),
+    var(--border-strong) 0
   );
+  box-shadow: 0 0 0 2px var(--bg-chat);
   pointer-events: none;
 }
 
@@ -8478,6 +8506,8 @@ body.resizing-panel {
 @media (prefers-reduced-motion: reduce) {
   .agent-face svg,
   .agent-face svg *,
+  .agent-face .agent-run::after,
+  .cmsg-thread-link .ctl-faces .ctl-working::before,
   .status-working,
   .presence-online {
     animation: none;
