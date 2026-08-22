@@ -765,6 +765,16 @@ export class CodeIntelligenceService {
       .map((edge) => `file:${edge.toFile}`);
     const enriched: AgentPlan = {
       ...structuredClone(plan),
+      // Kept before it is widened, because the widening is lossy in the one
+      // place it matters. Every symbol of every declared file goes into
+      // `expectedSymbols` below, which is what makes two plans comparable —
+      // and what would make a holder claim every function in a file it
+      // shares, leaving a co-editor the gaps between them. Symbol-level
+      // withholding reads this instead.
+      //
+      // The first enrichment wins: running twice must not record the widened
+      // set as though the agent had asked for it.
+      declaredSymbols: [...(plan.declaredSymbols ?? plan.expectedSymbols)],
       expectedSymbols: uniqueStrings([
         ...plan.expectedSymbols,
         ...files.flatMap((file) => file.symbols),
