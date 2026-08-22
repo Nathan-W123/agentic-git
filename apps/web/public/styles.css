@@ -2721,6 +2721,43 @@ svg.ui-icon {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* The channel and thread composers start as a single, control-height row.
+   Their highlighted text needs the extra wrapper that identifies them here;
+   private-agent composers keep the roomier toolbar below the field because
+   they also carry model and effort selectors. JavaScript adds
+   `.is-multiline` only when the text actually wraps, at which point the
+   regular field-over-toolbar layout below takes over. */
+.composer:has(.composer-field):not(.is-multiline) {
+  position: relative;
+  min-height: 50px;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-field {
+  min-height: 50px;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-field textarea,
+.composer:has(.composer-field):not(.is-multiline) .composer-mirror {
+  min-height: 50px;
+  padding-left: 54px;
+  padding-right: 54px;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-bar {
+  position: absolute;
+  z-index: 1;
+  inset: 4px 8px;
+  min-height: 42px;
+  padding: 0;
+  pointer-events: none;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-bar button,
+.composer:has(.composer-field):not(.is-multiline) .composer-bar label,
+.composer:has(.composer-field):not(.is-multiline) .composer-bar select {
+  pointer-events: auto;
+}
+
 /* Focus stays quiet enough that the card does not turn into an alert. */
 .composer:focus-within {
   border-color: var(--accent-line);
@@ -2824,6 +2861,7 @@ svg.ui-icon {
   line-height: 1.55;
   min-height: 58px;
   max-height: 164px;
+  overflow-y: auto;
 }
 
 /* Only the composer that actually has a mirror under it.
