@@ -19,6 +19,7 @@ import {
   isFavourite,
   loadContext,
   persist,
+  repositoryLabel,
   state,
 } from "./data.js";
 import {
@@ -69,6 +70,7 @@ function visibleRepositories() {
       (repo) =>
         query === "" ||
         repo.id.toLowerCase().includes(query) ||
+        repositoryLabel(repo.id).toLowerCase().includes(query) ||
         String(repo.branch ?? "").toLowerCase().includes(query),
     );
   if (state.repoSort === "name") {
@@ -97,7 +99,10 @@ function repositoryCard(repo) {
       )}</span>
       <div style="min-width:0;flex:1">
         <div class="rc-name">
-          <span>${esc(repo.id)}</span>
+          <!-- What it is called, which is its id until somebody renames it.
+               The id stays the title: it is what every task and API path
+               addresses, so a renamed repository is still identifiable. -->
+          <span title="${esc(repo.id)}">${esc(repositoryLabel(repo.id))}</span>
           <button class="star${isFavourite(repo.id) ? " on" : ""}"
             data-act="star" data-value="${esc(repo.id)}"
             aria-pressed="${isFavourite(repo.id)}"

@@ -916,4 +916,10 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 41,
+    name: "repository-display-names",
+    statements: [`ALTER TABLE repositories ADD COLUMN display_name TEXT`],
+  },
 ];

@@ -83,6 +83,15 @@ export interface StoredRepository {
   id: string;
   path: string;
   branch: string;
+  /**
+   * What people call this repository, when they have renamed it.
+   *
+   * The id stays the handle: it keys every row that references a repository
+   * and names the mirror directory on disk, so renaming it would be a
+   * migration rather than an edit. A display name is the part somebody
+   * actually wanted to change, and absent means "call it by its id".
+   */
+  displayName?: string;
   provider?: "local" | "git" | "github";
   remoteUrl?: string;
   /**
@@ -1438,6 +1447,15 @@ export interface CoordinationStore {
    * cascade is deliberate and the store-contract tests assert it.
    */
   removeRepository(id: string): Promise<void>;
+  /**
+   * Sets or clears a repository's display name.
+   *
+   * Separate from {@link CoordinationStore.saveRepository} because that one
+   * is first-insert-wins on every backend — a resubmission must not move what
+   * is already recorded — so it cannot express an edit. Passing `undefined`
+   * puts the repository back to being called by its id.
+   */
+  renameRepository(id: string, displayName: string | undefined): Promise<void>;
   listRepositories(): Promise<StoredRepository[]>;
   getRepository(id: string): Promise<StoredRepository | undefined>;
 

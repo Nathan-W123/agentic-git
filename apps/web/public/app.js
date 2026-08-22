@@ -74,6 +74,8 @@ import {
   renameChannelAgent,
   setChannelAgentSetting,
   deleteRepository,
+  renameRepository,
+  repositoryLabel,
   leaveRepository,
   channelMessagesFor,
   deleteAllChannelThreads,
@@ -88,6 +90,8 @@ import {
   uploadAttachment,
   setRepositoryGrant,
   revokeRepositoryGrant,
+  updateMemberRole,
+  removeMember,
   state,
   toggleChannelMessagePin,
   toggleChannelReaction,
@@ -2284,6 +2288,99 @@ async function deleteRepositoryAction(repositoryId) {
     render();
   } catch (error) {
     toast(error.message, "error");
+  }
+}
+
+/**
+ * Renaming a repository — what it is called, not what it is keyed by.
+ *
+ * The id keeps addressing the channel, its tasks and its files, so the modal
+ * says so rather than implying a rename moves anything. Clearing the field
+ * puts the repository back to being called by its id.
+ */
+async function renameRepositoryAction(repositoryId) {
+  const current = repositoryLabel(repositoryId);
+  const values = await showModal({
+    title: "Rename this repository",
+    subtitle: `Changes what ${repositoryId} is called here. Its id keeps addressing the channel, its tasks and its files.`,
+    confirm: "Rename",
+    body: `<label class="field">
+        <span>Name</span>
+        <input class="input" name="name" value="${esc(current)}"
+          maxlength="80" autocomplete="off" placeholder="${esc(repositoryId)}">
+      </label>`,
+  });
+  if (values === undefined) {
+    return;
+  }
+  const name = String(values.name ?? "").trim();
+  if (name === current) {
+    closePopover();
+    return;
+  }
+  try {
+    await renameRepository(repositoryId, name);
+    closePopover();
+    toast(name === "" ? `Renamed back to ${repositoryId}` : `Renamed to ${name}`, "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Promote, demote, or remove somebody organization-wide, from the "..." on
+ * their roster row.
+ *
+ * One function for the three because they differ only in what they ask and
+ * what they call: each confirms first — a role change reaches every
+ * repository the organization owns — and each re-renders afterwards so the
+ * roster agrees with what just happened.
+ */
+async function memberRoleAction(userId, role) {
+  const name = memberName(userId) ?? userId;
+  const promoting = role === "admin" || role === "owner";
+  const confirmed = await showModal({
+    title: promoting ? `Promote ${name} to ${role}?` : `Demote ${name} to ${role}?`,
+    subtitle: promoting
+      ? "They will be able to manage people and settings across the organization."
+      : "They keep their access to the organization's repositories, without managing people.",
+    confirm: promoting ? "Promote" : "Demote",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await updateMemberRole(userId, role);
+    toast(promoting ? `${name} is now an ${role}` : `${name} is now a ${role}`, "ok");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    closePopover();
+    render();
+  }
+}
+
+/** Removing somebody from the organization outright. */
+async function removeMemberAction(userId) {
+  const name = memberName(userId) ?? userId;
+  const confirmed = await showModal({
+    title: `Remove ${name}?`,
+    subtitle:
+      "They lose access to every repository this organization owns. Their messages stay in the channels they wrote them in.",
+    confirm: "Remove",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await removeMember(userId);
+    toast(`Removed ${name}`, "ok");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    closePopover();
+    render();
   }
 }
 
@@ -5137,6 +5234,20 @@ document.addEventListener("click", (event) => {
           label: isFavourite(value) ? "Remove from favourites" : "Add to favourites",
           iconName: "star",
         },
+        // The same two the channel's own menu carries, for whoever reached
+        // the repository from here instead.
+        ...(canManageRepository(value)
+          ? [
+              { act: "channel-rename-repo", value, label: "Rename repository…", iconName: "pencil" },
+              {
+                act: "channel-delete-repo",
+                value,
+                label: "Delete repository",
+                iconName: "trash",
+                danger: true,
+              },
+            ]
+          : []),
         { separator: true },
         { act: "copy-id", value, label: "Copy repository id", iconName: "file" },
       ]);
@@ -6020,6 +6131,28 @@ document.addEventListener("click", (event) => {
     case "channel-delete-repo":
       void deleteRepositoryAction(value);
       return;
+    case "channel-rename-repo":
+      void renameRepositoryAction(value);
+      return;
+    /**
+     * The People row's promote / demote / remove. `value` carries the target
+     * role for the two role changes (`${userId}:${role}`) so the menu that
+     * was drawn is what gets applied, rather than a second lookup that could
+     * disagree with it by the time it is clicked.
+     */
+    case "member-promote":
+    case "member-demote": {
+      closePopover();
+      const separatorIndex = value.indexOf(":");
+      const userId = value.slice(0, separatorIndex);
+      const role = value.slice(separatorIndex + 1);
+      void memberRoleAction(userId, role);
+      return;
+    }
+    case "member-remove":
+      closePopover();
+      void removeMemberAction(value);
+      return;
     case "channel-grant-promote": {
       // People-row menus pass `${repositoryId}:${userId}`; the legacy picker
       // path still accepts a bare repository id.
@@ -6440,16 +6573,25 @@ document.addEventListener("click", (event) => {
               },
             ]
           : []),
-        // Deleting is the admin's counterpart: somebody whose access is
-        // organization-wide cannot leave a repository, but can remove it.
-        // Without this the menu had nothing to offer them at all.
+        // Renaming and deleting are the admin's counterparts: somebody whose
+        // access is organization-wide cannot leave a repository, but can
+        // rename or remove it. Without these the menu had nothing to offer
+        // them at all. A rename changes only what the repository is called —
+        // the id keeps addressing the channel, its tasks and its files.
         ...(canManageRepository(value)
           ? [
               {
+                act: "channel-rename-repo",
+                value,
+                label: `Rename #${repositoryLabel(value)}`,
+                iconName: "pencil",
+              },
+              {
                 act: "channel-delete-repo",
                 value,
-                label: `Delete #${value}`,
-                iconName: "close",
+                label: `Delete #${repositoryLabel(value)}`,
+                iconName: "trash",
+                danger: true,
               },
             ]
           : []),

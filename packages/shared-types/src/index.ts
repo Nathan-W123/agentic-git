@@ -1104,7 +1104,12 @@ export type AuditEventType =
    * doc comment in `@coord/persistence` — so this event marks the one
    * irreversible removal of a repository's own state.
    */
-  | "repository_deleted";
+  | "repository_deleted"
+  /**
+   * A repository was given a new display name. The id it is keyed by never
+   * changes, so this records only what people call it.
+   */
+  | "repository_renamed";
 
 export interface AuditEvent {
   id: string;

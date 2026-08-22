@@ -1131,6 +1131,19 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    // What a repository is called, when somebody has renamed it. Nullable
+    // rather than backfilled with the id: absent means nobody has renamed
+    // this one, and the interface falls back to the id, which is what every
+    // existing repository is already called.
+    //
+    // The id itself stays the key. It names the mirror directory and every
+    // row that references a repository, so renaming it would be a migration
+    // of the whole database rather than an edit of one field.
+    version: 41,
+    name: "repository-display-names",
+    statements: [`ALTER TABLE repositories ADD COLUMN display_name TEXT`],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

@@ -25,6 +25,7 @@ import {
 api,
   canDeleteChannelEntry,
   canLeaveRepository,
+  canManageOrganization,
   canManageRepository,
   channelAgentsFor,
   channelAuthor,
@@ -45,6 +46,7 @@ api,
   keptRightPanels,
   markChannelRead,
   memberName,
+  memberRole,
   myAgents,
   myAvatar,
   outstandingQuestionsFor,
@@ -57,6 +59,7 @@ api,
   providerEffortOptions,
   providerModelOptions,
   providerOptionsNote,
+  repositoryLabel,
   saveChannelDraft,
   sendChannelMessage,
   snapshotChannelRead,
@@ -140,10 +143,11 @@ function channelRail(activeRepositoryId) {
         .map((repo) => {
           const active = repo.id === activeRepositoryId;
           const unread = channelUnreadCount(repo.id);
+          const label = repositoryLabel(repo.id);
           return `<div class="channel-rail-entry${active ? " active" : ""}">
             <button type="button" class="channel-rail-button" data-act="channel-open"
-              data-value="${esc(repo.id)}" title="#${esc(repo.id)}"
-              aria-label="Open channel ${esc(repo.id)}"${active ? ' aria-current="page"' : ""}>
+              data-value="${esc(repo.id)}" title="#${esc(label)}"
+              aria-label="Open channel ${esc(label)}"${active ? ' aria-current="page"' : ""}>
               ${channelPictureMarkup(repo.id, 36)}
               ${
                 unread > 0
@@ -151,8 +155,8 @@ function channelRail(activeRepositoryId) {
                   : ""
               }
             </button>
-            <label class="channel-rail-edit" title="Change picture for ${esc(repo.id)}"
-              aria-label="Change picture for ${esc(repo.id)}">${icon("pencil")}
+            <label class="channel-rail-edit" title="Change picture for ${esc(label)}"
+              aria-label="Change picture for ${esc(label)}">${icon("pencil")}
               <input type="file" accept="image/*" data-act="channel-picture-pick"
                 data-repository="${esc(repo.id)}" hidden>
             </label>
@@ -794,47 +798,84 @@ function personRow(person) {
 }
 
 /**
- * What the "..." on a People row offers — promote, demote, or remove a
- * repository co-owner — mirroring {@link rosterMenuItems} for agents.
+ * What the "..." on a People row offers — promote, demote, and remove —
+ * mirroring {@link rosterMenuItems} for agents.
+ *
+ * Two scopes, in the order somebody in a channel thinks of them. The
+ * repository-scoped pair comes first: co-owner is the capability that means
+ * something *here*, and whoever can moderate this repository may grant and
+ * take it back. The organization-wide trio comes second and only for an
+ * admin or owner, because those change what somebody can reach in every
+ * repository the organization has, not just this one.
  *
  * Built here for the same reason the agent menu is: every condition is the
  * one the row itself is drawn from (who can moderate, who already holds a
- * grant). Splitting that across files is how a menu ends up offering what
- * the row would not.
+ * grant, what role the person holds). Splitting that across files is how a
+ * menu ends up offering what the row would not.
  */
 export function personMenuItems(userId) {
   const repositoryId = activeChannelId();
-  if (
-    !repositoryId ||
-    !userId ||
-    userId === currentUserId() ||
-    !canManageRepository(repositoryId)
-  ) {
+  if (!repositoryId || !userId || userId === currentUserId()) {
     return [];
   }
-  const grants = state.repositoryGrants[repositoryId] ?? [];
-  const grant = grants.find((entry) => entry.userId === userId);
-  if (grant !== undefined) {
-    return [
-      {
-        act: "channel-grant-revoke",
-        value: `${repositoryId}:${userId}`,
-        label: "Remove co-owner",
-        hint: "Takes back repository-scoped co-owner access",
-        iconName: "close",
-        danger: true,
-      },
-    ];
+  const items = [];
+  if (canManageRepository(repositoryId)) {
+    const grants = state.repositoryGrants[repositoryId] ?? [];
+    const grant = grants.find((entry) => entry.userId === userId);
+    items.push(
+      grant === undefined
+        ? {
+            act: "channel-grant-promote",
+            value: `${repositoryId}:${userId}`,
+            label: "Promote to co-owner",
+            hint: "Same capabilities as the repository's creator, on this channel only",
+            iconName: "users",
+          }
+        : {
+            act: "channel-grant-revoke",
+            value: `${repositoryId}:${userId}`,
+            label: "Demote from co-owner",
+            hint: "Takes back repository-scoped co-owner access",
+            iconName: "chevronDown",
+          },
+    );
   }
-  return [
-    {
-      act: "channel-grant-promote",
-      value: `${repositoryId}:${userId}`,
-      label: "Promote to co-owner",
-      hint: "Same capabilities as the repository's creator, on this channel only",
-      iconName: "users",
-    },
-  ];
+  // Organization-wide. Only what the server will actually accept is offered:
+  // it refuses a role above the caller's own and refuses demoting the last
+  // owner, and a menu item that always fails is worse than no item.
+  const role = memberRole(userId);
+  if (canManageOrganization() && role !== undefined) {
+    if (items.length > 0) {
+      items.push({ separator: true });
+    }
+    if (role !== "admin" && role !== "owner") {
+      items.push({
+        act: "member-promote",
+        value: `${userId}:admin`,
+        label: "Promote to admin",
+        hint: "Can manage people and settings across the organization",
+        iconName: "shield",
+      });
+    }
+    if (role === "admin" || role === "owner") {
+      items.push({
+        act: "member-demote",
+        value: `${userId}:developer`,
+        label: "Demote to developer",
+        hint: "Keeps them in the organization, without managing people",
+        iconName: "chevronDown",
+      });
+    }
+    items.push({
+      act: "member-remove",
+      value: userId,
+      label: "Remove from the organization",
+      hint: "Takes away every repository this organization owns",
+      iconName: "close",
+      danger: true,
+    });
+  }
+  return items;
 }
 
 /** The role the roster acts on. */
@@ -1037,7 +1078,9 @@ function chanSidebar(activeRepositoryId) {
       <button type="button" class="chan-brand" data-act="channel-info"
         data-value="${channel}" title="Channel info" aria-label="Channel info">
         ${channelPictureMarkup(activeRepositoryId ?? "", 28)}
-        <span class="brand-text"><b>${channel}</b></span>
+        <span class="brand-text"><b>${esc(
+          repositoryLabel(activeRepositoryId ?? ""),
+        )}</b></span>
       </button>
       <button type="button" class="icon-btn desk-only chan-collapse-btn"
         data-act="chan-collapse-toggle"
@@ -1214,7 +1257,13 @@ function chanHeader(repositoryId) {
       title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
-      <div class="ch-name">${esc(repositoryId ?? "")}</div>
+      <!-- What the repository is called, which is its id until somebody
+           renames it from the menu on the right of this header. The id stays
+           the title attribute: it is what every task, run and API path
+           addresses, so a renamed channel must still be identifiable. -->
+      <div class="ch-name" title="${esc(repositoryId ?? "")}">${esc(
+        repositoryLabel(repositoryId ?? ""),
+      )}</div>
       <div class="ch-desc">
         <!-- Counted, not spelled out. "3 agents, 2 teammates" is six words
              for two numbers, and it grew or shrank with the plural — the two
@@ -1236,6 +1285,15 @@ function chanHeader(repositoryId) {
       // your app is up.
       previewLink(repositoryId)
     }
+    <!-- Rename and delete live here, on the channel itself. The menu was
+         reachable from nowhere before this: the repositories grid that used
+         to carry it is no longer a screen, so a repository could be renamed
+         or removed only through the API. -->
+    ${iconButton("dots", {
+      act: "channel-menu",
+      value: repositoryId ?? "",
+      title: "Channel actions",
+    })}
     <!-- No faces here. Six cropped circles said "some agents and some people
          are in this room", which the two counts already say exactly, in less
          space and without the guessing. -->

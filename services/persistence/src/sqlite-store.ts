@@ -238,8 +238,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
     this.db
       .prepare(
         `INSERT INTO repositories
-           (id, path, branch, first_seen_at, provider, remote_url, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (id, path, branch, first_seen_at, provider, remote_url, created_by,
+            display_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO NOTHING`,
       )
       .run(
@@ -250,6 +251,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         repository.provider ?? "local",
         repository.remoteUrl ?? null,
         repository.createdBy ?? null,
+        repository.displayName ?? null,
       );
     const existing = await this.getRepository(repository.id);
     if (existing === undefined || repositoryConflicts(existing, repository)) {
@@ -1673,6 +1675,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  public async renameRepository(
+    id: string,
+    displayName: string | undefined,
+  ): Promise<void> {
+    this.db
+      .prepare("UPDATE repositories SET display_name = ? WHERE id = ?")
+      .run(displayName ?? null, id);
   }
 
   public async listRepositories(): Promise<StoredRepository[]> {
@@ -4265,6 +4276,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     const provider = optionalText(row, "provider");
     const remoteUrl = optionalText(row, "remote_url");
     const createdBy = optionalText(row, "created_by");
+    const displayName = optionalText(row, "display_name");
     return {
       id: text(row, "id"),
       path: text(row, "path"),
@@ -4274,6 +4286,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         : { provider: provider as "git" | "github" }),
       ...(remoteUrl === undefined ? {} : { remoteUrl }),
       ...(createdBy === undefined ? {} : { createdBy }),
+      ...(displayName === undefined ? {} : { displayName }),
     };
   }
 
