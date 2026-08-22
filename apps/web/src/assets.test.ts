@@ -339,6 +339,7 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
   const enhancement = ui.slice(
     ui.indexOf("S.showPinnedMessages ="),
     ui.indexOf("/**\n * The product mark"),
@@ -365,10 +366,21 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
     app.indexOf('case "channel-pins-toggle"'),
     app.indexOf('case "channel-pinned-open"'),
   );
-  assert.match(toggle, /state\.pinsOpen = state\.pinsOpen !== true/u);
+  assert.match(
+    toggle,
+    /setPinnedMessagesOpen\(state\.pinsOpen !== true\)/u,
+  );
+  assert.doesNotMatch(toggle, /render\(\)/u);
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
   assert.match(chats, /const open = state\.pinsOpen === true/u);
-  assert.match(chats, /!open[\s\S]{0,80}\? ""[\s\S]{0,80}chan-pins-list/u);
+  assert.match(chats, /chan-pins\$\{open \? " open" : ""\}/u);
+  assert.match(chats, /chan-pins-list-frame" aria-hidden="\$\{!open\}"/u);
+  assert.match(styles, /\.chan-pins-list-frame \{[\s\S]*grid-template-rows: 0fr/u);
+  assert.match(
+    styles,
+    /\.chan-pins\.open \.chan-pins-list-frame \{[\s\S]*grid-template-rows: 1fr/u,
+  );
+  assert.match(styles, /prefers-reduced-motion: reduce/u);
 
   // Fresh sessions start with the banner folded; readers unfold it when they
   // want to see pins, and the toggle remembers only for this visit.

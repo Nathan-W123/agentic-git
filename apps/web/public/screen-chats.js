@@ -5947,25 +5947,23 @@ function pinnedBanner(repositoryId) {
     return `<div hidden></div>`;
   }
   const open = state.pinsOpen === true;
-  return `<div class="chan-pins">
+  return `<div class="chan-pins${open ? " open" : ""}">
     <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
       aria-expanded="${open}">
       ${icon("pin")}
       <span>${pins.length} pinned</span>
       <span class="spacer"></span>
-      ${icon(open ? "chevronUp" : "chevronDown")}
+      ${icon("chevronDown")}
     </button>
-    ${
-      !open
-        ? ""
-        : `<div class="chan-pins-list">${pins
-            .map((entry) => {
-              const title = threadTitle(entry) || "(no text)";
-              const pinner =
-                entry.pinnedBy === undefined
-                  ? "someone"
-                  : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
-              return `<div class="chan-pin-row">
+    <div class="chan-pins-list-frame" aria-hidden="${!open}"${open ? "" : " inert"}>
+      <div class="chan-pins-list">${pins
+        .map((entry) => {
+          const title = threadTitle(entry) || "(no text)";
+          const pinner =
+            entry.pinnedBy === undefined
+              ? "someone"
+              : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
+          return `<div class="chan-pin-row">
                 <button type="button" class="chan-pin-jump"
                   data-act="channel-pinned-open" data-value="${esc(entry.id)}"
                   title="Pinned by ${esc(pinner)}">
@@ -5979,9 +5977,9 @@ function pinnedBanner(repositoryId) {
                   small: true,
                 })}
               </div>`;
-            })
-            .join("")}</div>`
-    }
+        })
+        .join("")}</div>
+    </div>
   </div>`;
 }
 

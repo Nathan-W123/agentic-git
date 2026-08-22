@@ -3655,6 +3655,37 @@ function markChanFolding(shell) {
   }, CHAN_FOLD_MS);
 }
 
+/**
+ * Opens or closes the pinned-message shelf without replacing the chat screen.
+ * Keeping the existing nodes in place gives the list and chevron a before and
+ * after state for their CSS transitions.
+ */
+function setPinnedMessagesOpen(open) {
+  const next = open === true;
+  state.pinsOpen = next;
+
+  const banner = document.querySelector(".chan-pins");
+  if (banner === null) {
+    return;
+  }
+  banner.classList.toggle("open", next);
+  banner
+    .querySelector(".chan-pins-head")
+    ?.setAttribute("aria-expanded", String(next));
+  const list = banner.querySelector(".chan-pins-list-frame");
+  list?.setAttribute("aria-hidden", String(!next));
+  list?.toggleAttribute("inert", !next);
+
+  const shortcut = document.querySelector(".ch-pins-toggle");
+  if (shortcut !== null) {
+    const title = next ? "Hide pinned messages" : "Show pinned messages";
+    shortcut.classList.toggle("on", next);
+    shortcut.title = title;
+    shortcut.setAttribute("aria-label", title);
+    shortcut.setAttribute("aria-pressed", String(next));
+  }
+}
+
 function setChanDrawer(open) {
   const next = open === true;
   state.chanSidebarOpen = next;
@@ -5619,8 +5650,7 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "channel-pins-toggle":
-      state.pinsOpen = state.pinsOpen !== true;
-      render();
+      setPinnedMessagesOpen(state.pinsOpen !== true);
       return;
     // A pin is a durable doorway into its conversation. Even a person's
     // root with no replies yet opens in the thread panel, and the one-shot

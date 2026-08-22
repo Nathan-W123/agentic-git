@@ -5460,14 +5460,45 @@ button.chip.lg:hover {
   height: 14px;
 }
 
+.chan-pins-head [data-icon="chevronDown"] {
+  transition: transform 180ms ease;
+}
+
+.chan-pins.open .chan-pins-head [data-icon="chevronDown"] {
+  transform: rotate(180deg);
+}
+
 .chan-pins-head .spacer {
   flex: 1;
 }
 
+.chan-pins-list-frame {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    grid-template-rows 220ms ease,
+    opacity 150ms ease;
+}
+
+.chan-pins.open .chan-pins-list-frame {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
 .chan-pins-list {
+  min-height: 0;
   max-height: 132px;
   overflow-y: auto;
   padding: 0 8px 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chan-pins-head [data-icon="chevronDown"],
+  .chan-pins-list-frame {
+    transition: none;
+  }
 }
 
 .chan-pin-row {
