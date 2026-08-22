@@ -6396,6 +6396,63 @@ button.chip.lg:hover {
   text-decoration: underline;
 }
 
+/* The reply count stays the way into the thread; this quiet second line says
+   what the live agent is doing without repeating the detailed narration in
+   the room. It is constrained to one line because a phase is a glance, not a
+   second message. */
+.cmsg-thread-link .ctl-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.cmsg-thread-link .ctl-summary-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* A narrow highlight travels through the letters while the task is live. The
+   base and highlight both come from the theme, so the sweep remains legible
+   on light and dark chat surfaces and with a custom accent. */
+.cmsg-thread-link .ctl-activity {
+  max-width: min(220px, 45vw);
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  background: linear-gradient(
+    100deg,
+    var(--text-4) 0 38%,
+    var(--text) 48%,
+    var(--text-4) 58% 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thread-activity-sweep 2.4s ease-in-out infinite;
+}
+
+@keyframes thread-activity-sweep {
+  to {
+    background-position: -150% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmsg-thread-link .ctl-activity {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
 /* The repliers, overlapped. `avatar-stack` already carries the overlap for
    portraits; agent faces are vendor marks rather than `.avatar`s, so the same
    pull has to be spelled out for whatever the stack actually holds. Every

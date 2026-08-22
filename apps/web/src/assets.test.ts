@@ -3541,7 +3541,10 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     `"use strict";\n${slice("function threadParticipants(replies", "\n/**")}\n${slice(
       "function threadWorkingAuthor(entry",
       "\n/*",
-    )}\n${slice("function threadSummaryLink(entry", "\n/**")}\nreturn threadSummaryLink;`,
+    )}\n${slice("function threadActivityLabel(entry", "\n/**")}\n${slice(
+      "function threadSummaryLink(entry",
+      "\n/**",
+    )}\nreturn threadSummaryLink;`,
   )(
     () => undefined,
     () => false,
@@ -3577,6 +3580,11 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     "the ring should carry the run's position",
   );
   assert.match(
+    running,
+    /<span class="ctl-activity">Starting<\/span>/u,
+    "a live thread should say what the agent is doing",
+  );
+  assert.match(
     running.slice(running.indexOf("ctl-faces")),
     /ctl-working[\s\S]*?<face>claude<\/face>[\s\S]*?<avatar>Ada<\/avatar>/u,
     "the agent still working should be ringed and first in the stack",
@@ -3591,6 +3599,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   // people spoke in.
   const idle = summary({ id: "m1", replies }, replies, "repo-1", undefined);
   assert.doesNotMatch(idle, /ctl-working/u);
+  assert.doesNotMatch(idle, /ctl-activity/u);
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
   // A pie over the whole face rather than a badge in its corner: the wedge
@@ -3627,6 +3636,49 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     stackedFace ?? "",
     /box-shadow: 0 0 0 2px var\(--bg-chat\);/u,
     "the chat surface should visibly separate overlapping reply icons",
+  );
+});
+
+test("working thread summaries carry a concise sweeping activity", async () => {
+  const source = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const start = source.indexOf("function threadActivityLabel(entry)");
+  const end = source.indexOf("\n/**", start);
+  assert.notEqual(start, -1, "the activity selector should exist");
+  assert.notEqual(end, -1, "the activity selector should have a boundary");
+  const activity = Function(
+    "threadReplyTurns",
+    `"use strict";\n${source.slice(start, end)}\nreturn threadActivityLabel;`,
+  )((replies: unknown[]) => [{ replies }]) as (entry: {
+    replies: Array<{ kind: string; content: string }>;
+  }) => string;
+
+  assert.equal(
+    activity({
+      replies: [{ kind: "progress", content: "Reading the repository and working out a plan…" }],
+    }),
+    "Reading code",
+  );
+  assert.equal(
+    activity({
+      replies: [{ kind: "progress", content: "Working on apps/web/public/styles.css…" }],
+    }),
+    "Editing styles.css",
+  );
+  assert.equal(
+    activity({
+      replies: [{ kind: "progress", content: "Finished editing. Validating…" }],
+    }),
+    "Testing",
+  );
+
+  const sweep = /\n\.cmsg-thread-link \.ctl-activity \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(sweep ?? "", /animation: thread-activity-sweep/u);
+  assert.match(sweep ?? "", /background-clip: text;/u);
+  assert.match(css, /@keyframes thread-activity-sweep/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-activity \{\n {4}animation: none;/u,
   );
 });
 

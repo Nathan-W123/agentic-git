@@ -1327,15 +1327,25 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
         : face;
     })
     .join("");
+  const activity =
+    progress === undefined ? undefined : threadActivityLabel(entry);
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
       <span class="avatar-stack ctl-faces">${faces}</span>
-      <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
-        threadAwaitsGoAhead(entry)
-          ? `<span class="ctl-held" aria-hidden="true"></span>
-      <span class="sr-only">Waiting for your go-ahead</span>`
-          : ""
-      }
+      <span class="ctl-copy">
+        <span class="ctl-summary-main">
+          <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
+            threadAwaitsGoAhead(entry)
+              ? `<span class="ctl-held" aria-hidden="true"></span>
+          <span class="sr-only">Waiting for your go-ahead</span>`
+              : ""
+          }
+        </span>${
+          activity === undefined
+            ? ""
+            : `<span class="ctl-activity">${esc(activity)}</span>`
+        }
+      </span>
     </button>`;
 }
 
@@ -1625,6 +1635,50 @@ function changedFilesBlock(entry, repositoryId) {
       }</summary>
     <ul class="cmsg-files">${rows}</ul>
   </details>`;
+}
+
+/**
+ * The shortest useful account of what the current turn is doing.
+ *
+ * The detailed narration remains inside the thread. This is deliberately a
+ * tiny phase label for the collapsed channel row: it follows the newest turn,
+ * names a file only while one is actually being edited, and never repeats a
+ * finished turn's stale activity. The protocol phrases are the same ones
+ * `threadProgress` already reads, so the words and the progress pie advance
+ * from one source of truth.
+ */
+function threadActivityLabel(entry) {
+  const turns = threadReplyTurns(entry.replies ?? []);
+  const replies = turns[turns.length - 1]?.replies ?? [];
+  let label = "Starting";
+  for (const reply of replies) {
+    if (reply.kind !== "progress") {
+      continue;
+    }
+    const text = String(reply.content ?? "").trim();
+    if (/Reading the repository/iu.test(text)) {
+      label = "Reading code";
+    }
+    if (/Planning changes|Planned the change|re-planning/iu.test(text)) {
+      label = "Planning";
+    }
+    if (/starting on the code|Starting on |execution started/iu.test(text)) {
+      label = "Writing code";
+    }
+    const working = /^Working on ([^,]+?)(?:,| and |…|\.\.\.|$)/u.exec(text);
+    if (working?.[1] !== undefined) {
+      const path = working[1].trim();
+      const name = path.split(/[\\/]/u).pop();
+      label = name === undefined || name === "" ? "Writing code" : `Editing ${name}`;
+    }
+    if (/Validating…|Wrote changes to|Finished editing/iu.test(text)) {
+      label = "Testing";
+    }
+    if (/Validation passed/iu.test(text)) {
+      label = "Finishing";
+    }
+  }
+  return label;
 }
 
 /**
