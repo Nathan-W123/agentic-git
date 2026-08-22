@@ -170,17 +170,17 @@ then goes silent is indistinguishable from a hang.
 
 **In the room, the coordinator speaks.** Neither agent decided the order, so
 putting the sentence in an agent's mouth would read as agents negotiating with
-each other. Both room-level narrators — `narrateConflicts` for
-`conflict_detected` and `announceArbitration` for `plan_admitted` — append a
-`system` channel entry authored by `coordinator`, and both emit the **same
-sentence shape: the two agents, and the order they run in.**
+each other. `announceArbitration` (`services/api-gateway/src/server.ts`) speaks
+off `plan_admitted` and appends a `system` channel entry authored by
+`coordinator`, always in the **same sentence shape: who is involved, and the
+order they run in.**
 
 | Situation | The room hears |
 | --- | --- |
 | `sequence` | `⚖️ A and B have conflicting files — B starts once A is done.` |
-| `block` | `⚖️ A and B have conflicting files — B is narrowing its plan.` |
-| intent overlap only | `⚖️ A and B are working on related things but can run together.` |
+| `block` | `⚖️ A and B have conflicting files — B will wait for A to go first.` |
 | partial admission | `⚖️ A and B have conflicting files — A starts on <granted files> now, <deferred files> once B is done.` |
+| both sides one agent | `⚖️ A is working on multiple tasks that conflict — it will do "<other task>" first, then "<this task>".` |
 | a hold clearing | `⚖️ A starts now — what it was waiting on is done.` |
 
 Five rules hold that shape in place, each of them a regression somebody
@@ -202,28 +202,35 @@ reported:
   to the audit record, which is where an argument that long belongs. Only a
   partial admission names files, because a split is illegible without them, and
   then at most four with `and N more`.
-- **Silence where there is no decision.** A `concurrent` disposition admits both
-  plans untouched and is not announced at all; announcing it would teach readers
-  to ignore the times it matters. An approval is announced only when it releases
-  a hold this task's own `plan_admitted` history shows was announced, so
-  ordinary approvals do not ring the bell.
-- **One voice per collision, chosen by the evidence.** `narrateConflicts` may
-  only say "can run together", and it says it only for a pair whose evidence is
-  entirely advisory — an intent overlap, where the two plans share no file at
-  all. Anything structural, however low it scores, is `announceArbitration`'s:
-  nothing in this system admits two plans onto the same file, so a structural
-  collision always ends in a hold, a narrowing, or a split, and only
-  `plan_admitted` knows which task was held and what it was granted. Reading
-  the disposition band instead of the evidence is what once announced a real
-  file overlap in the notify band as two agents running happily together,
-  moments before the held agent reported it had been refused those very files.
+- **Silence where there is no decision.** `conflict_detected` is not narrated
+  at all — no disposition, no evidence band. A collision an admission acts on is
+  announced by the admission, which knows which task was actually held and what
+  it was granted; a collision no admission acts on is two plans overlapping only
+  in intent, both admitted whole, neither refused anything. The room used to be
+  told about that second kind — "A and B are working on related things but can
+  run together" — which is an announcement with no decision in it, and teaches
+  readers to skim past the ones that do have a decision in them. Reading the
+  disposition band as licence to say it was worse still: a real file overlap
+  scoring inside the notify band was announced as two agents running happily
+  together, moments before the held agent reported it had been refused those
+  very files. An approval is likewise announced only when it releases a hold
+  this task's own `plan_admitted` history shows was announced, so ordinary
+  approvals do not ring the bell.
+- **One agent is not two.** One agent handed two tasks that collide is
+  arbitrated exactly like two agents that do, and both sides of the line resolve
+  to the same name — so the room was told "@Hades and @Hades have conflicting
+  files — @Hades will wait for @Hades to go first", which names the only thing
+  the reader already knew and none of what they wanted. When the held task and
+  its blockers all resolve to one agent, the line names that agent once and
+  tells the two tasks apart by what each was asked to do. Blockers are also
+  deduplicated by resolved name, so two of one agent's tasks blocking a third
+  are never listed as "@Hades and @Hades".
 
-`narrateConflicts` is polled from the channel-progress pump (2-second cadence,
-so the line lands while the arbitration is still news) and advances a
-`conflictSequence` cursor over the audit log. Events written before
-`conflict_detected` carried a project and repository, or naming anything other
-than exactly two tasks, are skipped: there is nowhere to route them and no
-order to state.
+Advisory lines already standing in rooms from earlier deployments are still
+recognised and swept: an advisory describes two runs in flight and retires when
+they have stopped, a hold retires as soon as either end of it is over, and a
+message carries only its text and its task — so the sentence itself is what
+tells the sweep which one it is looking at.
 
 ## Replanning
 
