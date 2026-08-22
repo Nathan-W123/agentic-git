@@ -114,7 +114,7 @@ import {
   hslToHex,
   agentLabelOf,
   avatar,
-  brandMark,
+  brandWordmark,
   esc,
   icon,
   iconButton,
@@ -402,7 +402,7 @@ function renderInvite() {
   const invite = state.invite;
   if (invite === undefined) {
     return `<main class="auth-shell"><div class="auth-box">
-      <div class="auth-mascot">${brandMark(54)}
+      <div class="auth-mascot">${brandWordmark(120)}
         <div><h1>Checking your invitation…</h1></div></div>
     </div></main>`;
   }
@@ -416,7 +416,7 @@ function renderInvite() {
       }[invite.status] ??
       "This invitation is no longer valid.";
     return `<main class="auth-shell"><div class="auth-box">
-      <div class="auth-mascot">${brandMark(54)}
+      <div class="auth-mascot">${brandWordmark(120)}
         <div><h1>That link will not work</h1><p>${esc(reason)}</p></div></div>
       <p class="auth-foot">Ask whoever invited you to send a new one.</p>
     </div></main>`;
@@ -433,7 +433,7 @@ function renderInvite() {
     invite.signedIn === true && inviteMode === undefined;
   return `<main class="auth-shell">
     <div class="auth-box">
-      <div class="auth-mascot">${brandMark(54)}
+      <div class="auth-mascot">${brandWordmark(120)}
         <div>
           <h1>Join ${esc(invite.organizationName)}</h1>
           <!-- Both names, always. The headline is the team you are joining,
@@ -537,7 +537,7 @@ function renderRegistrationConfirmation() {
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
-        ${brandMark(54)}
+        ${brandWordmark(120)}
         <div>
           <h1>${logOnly ? "Your code is in the server log" : "Check your email"}</h1>
           <p>${
@@ -582,7 +582,7 @@ function renderAuth() {
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
-        ${brandMark(54)}
+        ${brandWordmark(120)}
         <div>
           <h1>${
             bootstrap
@@ -716,7 +716,7 @@ function renderPasswordReset() {
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
-        ${brandMark(54)}
+        ${brandWordmark(120)}
         <div>
           <h1>${reset ? "Choose a new password" : "Reset your password"}</h1>
           <p>${

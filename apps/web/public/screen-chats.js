@@ -3506,15 +3506,23 @@ function catchUpPanel() {
         String(task.summary ?? "").trim() ||
         "Completed and landed successfully.";
       const when = relativeTime(task.completedAt);
+      const changedFiles = Array.isArray(task.changedFiles)
+        ? task.changedFiles
+        : [];
       const files =
-        Array.isArray(task.changedFiles) && task.changedFiles.length > 0
-          ? `<span class="catch-up-task-files">${icon("file")} ${esc(
-              task.changedFiles.slice(0, 3).join(", "),
-            )}${
-              task.changedFiles.length > 3
-                ? ` and ${esc(String(task.changedFiles.length - 3))} more`
-                : ""
-            }</span>`
+        changedFiles.length > 0
+          ? `<div class="catch-up-task-files">
+              <span class="catch-up-file-count">${icon("file")} ${esc(
+                String(changedFiles.length),
+              )} ${changedFiles.length === 1 ? "file" : "files"} changed</span>
+              <span class="catch-up-file-names">${esc(
+                task.changedFiles.slice(0, 3).join(", "),
+              )}${
+                changedFiles.length > 3
+                  ? ` and ${esc(String(changedFiles.length - 3))} more`
+                  : ""
+              }</span>
+            </div>`
           : "";
       return `<li class="catch-up-task">
       <div class="catch-up-task-copy">
@@ -3537,8 +3545,10 @@ function catchUpPanel() {
     <div class="thread-body catch-up-body"
       data-scroll-key="catch-up:${esc(catchUp.projectId)}:${esc(catchUp.since)}">
       <div class="catch-up-intro">
-        <p class="catch-up-kicker">Since you left</p>
-        <h2>${esc(String(count))} completed ${count === 1 ? "task" : "tasks"}</h2>
+        <h2><strong>${esc(String(count))}</strong> ${
+          count === 1 ? "task" : "tasks"
+        } completed</h2>
+        <p>Work finished while you were away.</p>
       </div>
       <ul class="catch-up-task-list" aria-label="Completed tasks">${rows}</ul>
     </div>
