@@ -4476,6 +4476,14 @@ test("agent details use the reference profile with supported controls", async ()
   }
   assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
   assert.match(spec, /data-value="history" title="Task history"/u);
+  // The live assignment opens its thread the same way a history row does.
+  assert.match(spec, /const openCurrentTask =/u);
+  assert.match(
+    spec,
+    /taskMessage === undefined\s*\?\s*""\s*:\s*` role="button" tabindex="0" data-act="channel-thread-open"/u,
+  );
+  assert.match(spec, /data-value="\$\{esc\(taskMessage\.id\)\}"/u);
+  assert.match(css, /\.aspec-current-task-active\[role="button"\]/u);
   assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository \}\)/u);
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);

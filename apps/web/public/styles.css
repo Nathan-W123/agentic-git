@@ -7993,6 +7993,21 @@ button.chip.lg:hover {
   color: #fff;
 }
 
+/* Only when the channel message is known — same rule as history rows — so an
+   inert idle row never looks clickable. */
+.agent-spec .aspec-current-task-active[role="button"] {
+  cursor: pointer;
+}
+
+.agent-spec .aspec-current-task-active[role="button"]:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+
+.agent-spec .aspec-current-task-active[role="button"]:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
 .agent-spec .aspec-current-task-active .aspec-capability-mark,
 .agent-spec .aspec-current-task-active .aspec-capability-title,
 .agent-spec .aspec-current-task-active .aspec-capability-meta,

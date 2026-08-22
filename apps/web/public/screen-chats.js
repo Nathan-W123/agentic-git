@@ -4356,6 +4356,13 @@ function agentSpec(agent, repositoryId) {
   const elsewhere = assignments.filter(
     ({ repository }) => repository.id !== repositoryId,
   );
+  // Same doorway as a history row: the live assignment opens its thread.
+  // Idle ("Available for new work") stays inert — there is nowhere to go.
+  const openCurrentTask =
+    taskMessage === undefined
+      ? ""
+      : ` role="button" tabindex="0" data-act="channel-thread-open"
+          data-value="${esc(taskMessage.id)}" title="Open this task's thread"`;
   return `<div class="agent-spec">
     <div class="aspec-content">
       <section class="aspec-head">
@@ -4377,7 +4384,7 @@ function agentSpec(agent, repositoryId) {
         <div class="aspec-capabilities">
           <div class="aspec-capability aspec-current-task${
             task === undefined ? "" : " aspec-current-task-active"
-          }">
+          }"${openCurrentTask}>
             <span class="aspec-capability-mark">${icon("check")}</span>
             <span class="aspec-capability-copy">
               <span class="aspec-capability-title">${
