@@ -4723,7 +4723,9 @@ test("clicking an agent opens its details while chat and history stay explicit",
   // The avatar is part of the primary row target. It must not shadow the row
   // with the private-chat action and bypass the profile-like landing surface.
   assert.match(row, /data-act="agent-panel-open"/u);
-  assert.match(row, /aria-label="Open details for \$\{esc\(agent\.name\)\}"/u);
+  // The label travels with the profile now, so the sidebar and the transcript
+  // announce the same face the same way.
+  assert.match(chats, /label: `Open details for \$\{agent\.name\}`/u);
   assert.doesNotMatch(row, /data-act="agent-chat-open"/u);
 
   assert.match(open, /state\.activeAgentPanel = value;/u);
@@ -5119,85 +5121,130 @@ test("completed-work responses use an accessible inline pill while ordinary refe
   assert.doesNotMatch(ordinary ?? "", /border-radius: 999px/u);
 });
 
-test("a message's face and name open the person and describe them on hover", async () => {
+test("one profile card describes people and agents wherever a face is drawn", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
+  const browser = await browserSource();
+
+  // One description, two subjects, and the same shape for both: a roster in
+  // which only half the faces answer "who is this" is a roster that has to be
+  // learned twice.
+  assert.match(chats, /function agentProfile\(agent, repositoryId\)/u);
+  assert.match(chats, /function personProfile\(userId, name, repositoryId\)/u);
+  assert.match(chats, /function profileCard\(profile\)/u);
+  assert.match(
+    chats,
+    /function profileAnchor\(profile, cls, direction, content, options = \{\}\)/u,
+  );
 
   const identityStart = chats.indexOf("function authorIdentity(");
-  const identityEnd = chats.indexOf("\nfunction identityWrap(", identityStart);
-  const identity = chats.slice(identityStart, identityEnd);
-  assert.notEqual(identityStart, -1, "a message author resolves to an identity");
-  assert.notEqual(identityEnd, -1, "the identity resolver has a boundary");
-
-  // The two destinations the roster already uses, so a face means the same
-  // thing in the transcript as it does in the sidebar.
-  assert.match(identity, /act: "agent-panel-open"/u);
-  assert.match(identity, /act: "dm-open"/u);
-  const browser = await browserSource();
-  assert.match(browser, /case "dm-open":/u);
-  assert.match(browser, /case "agent-panel-open":/u);
-
-  // Nobody presses their own name into a conversation with themselves, and an
-  // agent the roster could not resolve is left alone rather than read as a
+  const identity = chats.slice(
+    identityStart,
+    chats.indexOf("\nfunction identityWrap(", identityStart),
+  );
+  assert.notEqual(identityStart, -1, "a message author resolves to a profile");
+  assert.match(identity, /return agentProfile\(author\.agent, repositoryId\)/u);
+  assert.match(identity, /return personProfile\(userId, author\.name, repositoryId\)/u);
+  // An agent the roster could not resolve is left alone rather than read as a
   // person — its author id is `<userId>:<provider>`, which is a direct message
   // to an id nobody has.
   assert.match(
     identity,
-    /userId === "you" \|\|\s*userId === currentUserId\(\) \|\|\s*AGENT_AUTHORED_KINDS\.has\(entry\.kind\)/u,
+    /userId === "you" \|\| AGENT_AUTHORED_KINDS\.has\(entry\.kind\)/u,
   );
   assert.match(
     chats,
     /const AGENT_AUTHORED_KINDS = new Set\(\["agent", "progress", "outcome"\]\)/u,
   );
 
-  // Both the picture and the name carry the button, and both carry the card.
-  // Wrapped from inside, so the avatar and the header line keep the markup
-  // the rest of the transcript's layout is written against.
-  const rowStart = chats.indexOf("function messageRow(");
-  const row = chats.slice(rowStart, chats.indexOf("\nfunction typingIndicator", rowStart));
-  assert.match(row, /const identity = authorIdentity\(repositoryId, entry, author\)/u);
-  assert.match(
-    row,
-    /<span class="cmsg-avatar">\$\{identityWrap\(\s*identity,\s*authorFace\(author, 32\),/u,
+  // Both rosters hang the card off the face rather than the whole row: a
+  // row-wide trigger opens it while somebody is reaching for rename or remove.
+  const person = chats.slice(
+    chats.indexOf("function personRow(person)"),
+    chats.indexOf("/** The role the roster acts on."),
   );
-  assert.match(
-    row,
-    /class="cmsg-name\$\{[^}]*\}">\$\{identityWrap\(\s*identity,\s*esc\(author\.name\),/u,
+  const agentRow = chats.slice(
+    chats.indexOf("function rosterRow(agent)"),
+    chats.indexOf('/**\n * What the "..." on a roster row offers'),
   );
-  // Nobody to open means the face and the name are handed back as they were:
-  // a tab stop that does nothing is worse than no tab stop.
+  assert.match(person, /profileAnchor\(\s*personProfile\(userId, name, repositoryId\),\s*"rr-avatar",\s*"down",/u);
+  assert.match(agentRow, /profileAnchor\(\s*agentProfile\(agent, activeChannelId\(\)\),\s*"rr-avatar",\s*"down",/u);
+  // The usage figures still arrive on the first hover, as one section of the
+  // card rather than a card of their own.
+  assert.match(agentRow, /"data-hover": "agent-usage"/u);
+  assert.match(chats, /function usageBlock\(agent\)/u);
+  assert.match(chats, /<span class="pcard-usage">\$\{body\}<\/span>/u);
+  assert.match(browser, /function requestUsageForHoverTarget\(event\)/u);
+
+  // A conversation opened from a search or a notification is the one place
+  // somebody is read without the sidebar row that would otherwise explain them.
   assert.match(
     chats,
-    /function identityWrap\(identity, content\) \{\s*if \(identity === undefined\) \{\s*return content;/u,
-  );
-  assert.match(chats, /\$\{content\}\$\{profileCard\(identity\)\}/u);
-
-  // A span answers the keyboard only because `role=button` plus `data-act` is
-  // the pair app.js's delegated handler looks for.
-  assert.match(chats, /class="cmsg-identity" role="button" tabindex="0"/u);
-  assert.match(chats, /data-act="\$\{esc\(identity\.act\)\}" data-value="\$\{esc\(identity\.value\)\}"/u);
-  assert.match(chats, /aria-label="\$\{esc\(identity\.label\)\}"/u);
-  assert.match(
-    await browserSource(),
-    /const row = event\.target\.closest\?\.\('\[role="button"\]\[data-act\]'\)/u,
+    /profileAnchor\(\s*personProfile\(userId, name, repositoryId\),\s*"dm-head-face",\s*"down",/u,
   );
 
-  // Revealed by CSS the way the roster's usage card is, so reading one costs
-  // no request — but delayed, because a pointer crosses many names on its way
-  // down a transcript and an instant card would flash open the whole way.
-  const card = /\n\.profile-card \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.notEqual(card, undefined, "the hover card has a shape rule");
-  assert.match(card ?? "", /visibility: hidden/u);
-  assert.match(card ?? "", /pointer-events: none/u);
+  // The transcript draws this markup once per message and twice per author
+  // line, so the card hangs off the face and the name keeps the press alone.
+  assert.match(chats, /function identityWrap\(identity, content, withCard = false\)/u);
   assert.match(
-    css,
-    /\.cmsg-identity:hover \.profile-card,\n\.cmsg-identity:focus-within \.profile-card \{[\s\S]*?visibility: visible;[\s\S]*?transition-delay/u,
+    chats,
+    /\? profileAnchor\(identity, "cmsg-identity", "up", content, attributes\)\s*: plainAnchor\(identity, "cmsg-identity", content, attributes\)/u,
   );
-  // On a touch screen the tap is the action; a card under the finger only
-  // covers what it describes.
+
+  // What the card actually says: who they are, how to read them at a glance,
+  // and the way through to everything it left out.
+  assert.match(chats, /class="pcard-banner"/u);
+  assert.match(chats, /class="pcard-name"/u);
+  assert.match(chats, /class="pcard-sub"/u);
+  assert.match(chats, /class="pcard-section-label"/u);
+  assert.match(chats, /label: "View full profile"/u);
+  assert.match(chats, /label: unread > 0 \? `Open messages · \$\{unread\}` : "Open conversation"/u);
+  assert.match(chats, /<span class="pcard-open" role="button" tabindex="-1"/u);
+  assert.match(browser, /case "agent-panel-open":/u);
+  assert.match(browser, /case "dm-open":/u);
+  // A colour somebody chose reaches a `style` attribute, so it is matched
+  // against the shape a picker stores rather than escaped and hoped for.
+  assert.match(chats, /const HEX_COLOR = \/\^#\(\?:\[0-9a-f\]\{3\}\|\[0-9a-f\]\{6\}\)\$\/iu/u);
+  assert.match(chats, /style="--pcard-accent:\$\{profile\.accent\}"/u);
+
+  // The card lives inside its own anchor and carries the gap as padding, which
+  // is what makes it reachable at all: a pointer moving from the face to the
+  // card never leaves the thing the hover is on.
+  const anchor = /\n\.pcard-anchor \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(anchor ?? "", /position: relative/u);
+  const pop = /\n\.pcard-pop \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(pop, undefined, "the card has a shape rule");
+  assert.match(pop ?? "", /padding: 7px 0/u);
+  assert.match(pop ?? "", /visibility: hidden/u);
+  assert.match(pop ?? "", /pointer-events: none/u);
   assert.match(
     css,
-    /@media \(hover: none\) \{\n {2}\.profile-card \{\n {4}display: none;/u,
+    /\.pcard-anchor:hover > \.pcard-pop,\n\.pcard-anchor:focus-within > \.pcard-pop \{[\s\S]*?visibility: visible;\s*pointer-events: auto;[\s\S]*?transition-delay/u,
+  );
+  // No ring drawn round the face at the same time: the card opening is the
+  // answer to the hover, and the outline was the same news twice.
+  assert.match(
+    css,
+    /\.pcard-anchor:hover \.avatar,\n\.pcard-anchor:hover \.agent-face \{\n {2}outline: none;/u,
+  );
+  assert.doesNotMatch(css, /\.cmsg-identity:hover \.(avatar|agent-face)/u);
+
+  // Direction is a preference the stylesheet states and the browser overrides
+  // only where the surface has no room — the last row of a long roster has
+  // nothing under it.
+  assert.match(css, /\.pcard-anchor\[data-profile-dir="down"\] \.pcard-pop \{\n {2}top: 100%;/u);
+  assert.match(css, /\.pcard-anchor\[data-profile-dir="up"\] \.pcard-pop \{\n {2}bottom: 100%;/u);
+  assert.match(browser, /function positionProfileCard\(event\)/u);
+  assert.match(browser, /anchor\.toggleAttribute\("data-profile-flip", flip\)/u);
+  assert.match(browser, /function clippingBoundsFor\(node\)/u);
+  assert.match(browser, /document\.addEventListener\("mouseover", positionProfileCard\)/u);
+  assert.match(browser, /document\.addEventListener\("focusin", positionProfileCard\)/u);
+
+  // On a touch screen the tap on a message face is already the action; the
+  // roster keeps its card and only loses the width that assumed a sidebar.
+  assert.match(
+    css,
+    /@media \(hover: none\) \{[\s\S]*?\.cmsg-identity \.pcard-pop \{\n {4}display: none;/u,
   );
 });
 

@@ -4950,15 +4950,6 @@ button.chip.lg:hover {
     pointer-events: auto !important;
   }
 
-  /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
-     `rosterRow` in screen-chats.js, which gives the avatar a `tabindex` so a
-     tap can focus it. This only removes the width clamp that assumed the
-     card was opening beside a mouse pointer inside a 268px sidebar; the
-     sidebar can be much narrower than that once it is a phone drawer. */
-  .rr-usage {
-    max-width: calc(100vw - 32px);
-  }
-
   /* The platform's tap flash is a grey-blue rectangle in somebody else's
      palette, drawn over rows that already have hover treatments in ours.
      Zeroed only here, where the :active states below take over the job —
@@ -5140,7 +5131,7 @@ button.chip.lg:hover {
 /* One list closed on its own heading, folded by the same `1fr` -> `0fr` the
    whole-panel collapse uses. Clipped only here, never at rest: an agent's
    usage card opens below its row and reaches past the bottom of the list, so
-   a list that cropped while open would swallow it (see `.rr-usage`). */
+   a list that cropped while open would swallow it (see `.pcard-pop`). */
 .chan-roster.chan-roster-closed {
   grid-template-rows: 0fr;
   overflow: hidden;
@@ -5155,12 +5146,13 @@ button.chip.lg:hover {
   transition: background 0.13s ease;
 }
 
-/* The usage card opens *below* the row and inside the roster's own width.
+/* A profile card opens *below* the row and inside the roster's own width.
    `.chan-scroll` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways
-   out of the sidebar is not merely off-panel, it is invisible. */
-/* Anchored to the avatar, not the row: the card is about the agent, and a
-   row-wide trigger meant it opened while reaching for rename or remove. */
+   out of the sidebar is not merely off-panel, it is invisible. Anchored to
+   the avatar rather than the row for the same reason on the other axis: a
+   row-wide trigger opened it while somebody was reaching for rename or
+   remove. The shape of the card itself is `.pcard`. */
 .rr-avatar {
   position: relative;
   display: inline-flex;
@@ -5304,37 +5296,8 @@ button.chip.lg:hover {
   pointer-events: auto;
 }
 
-.rr-usage {
-  position: absolute;
-  /* Width is stated, not inherited. Anchoring moved to the avatar so the card
-     opens from the agent rather than the whole row — but the avatar is about
-     thirty pixels wide, and stretching to its edges squeezed the card into a
-     column barely wider than the face, wrapping every label to one word a
-     line. It opens from the avatar's left edge at the width the content
-     needs, still inside the sidebar so nothing clips it. */
-  left: 0;
-  width: 232px;
-  top: calc(100% + 2px);
-  z-index: 40;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 9px;
-  background: var(--bg-panel);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 34%);
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 0.12s ease,
-    visibility 0.12s ease;
-  pointer-events: none;
-}
-
-.rr-avatar:hover .rr-usage,
-.rr-avatar:focus-within .rr-usage {
-  opacity: 1;
-  visibility: visible;
-}
-
+/* The usage figures are a section of the profile card now (see `.pcard`), so
+   what is left here is only how one window is drawn. */
 .rr-usage-row {
   display: flex;
   align-items: center;
@@ -5376,6 +5339,7 @@ button.chip.lg:hover {
 .rr-usage-plan,
 .rr-usage-src,
 .rr-usage-empty {
+  display: block;
   margin-top: 4px;
   font-size: 10.5px;
   line-height: 1.45;
@@ -6134,110 +6098,278 @@ button.chip.lg:hover {
   text-underline-offset: 2px;
 }
 
-.cmsg-row .cmsg-avatar .cmsg-identity:hover .avatar,
-.cmsg-row .cmsg-avatar .cmsg-identity:hover .agent-face {
-  outline: 2px solid var(--accent-bright);
-  outline-offset: 1px;
-}
-
 .cmsg-row .cmsg-identity:focus-visible {
   outline: 2px solid var(--accent-bright);
   outline-offset: 2px;
   border-radius: 6px;
 }
 
-/* Who somebody is, on the way past. Same mechanism as the roster's
-   `.rr-usage` — rendered with the row, revealed by CSS — with one addition:
-   a delay before it opens. The roster is a short list somebody points at
-   deliberately; a transcript is a column of names a pointer crosses on its
-   way to the scrollbar, and a card that appeared instantly would flash open
-   and shut the whole way down. Closing stays immediate. */
-.profile-card {
-  position: absolute;
-  left: 0;
-  /* Upward, unlike the roster's card, because a transcript is pinned to its
-     newest line: the message most likely to be pointed at is the last one,
-     and a card opening below it would open past the bottom of the scroller
-     into the composer. Above it there is always the conversation. */
-  bottom: calc(100% + 6px);
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 216px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 38%);
-  font-weight: 400;
-  text-decoration: none;
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 0.12s ease,
-    visibility 0.12s ease;
-  pointer-events: none;
-}
+/* ------------------------------------------------------------ profiles ---- */
 
-.cmsg-identity:hover .profile-card,
-.cmsg-identity:focus-within .profile-card {
-  opacity: 1;
-  visibility: visible;
-  transition-delay: 0.28s;
-}
-
-.profile-card-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-}
-
-/* The dot inside is absolutely positioned against the face, the way it is
-   everywhere else a face carries one. */
-.profile-card-face {
+/* Every face in the app hangs its card off one of these — a roster row, a
+   message, wherever somebody is drawn. `position: relative` is the whole of
+   the anchoring, and it is also what fixes the card that could never be
+   reached: the card is a *child* of the face, so a pointer that has moved on
+   to the card has not left the face, and the hover does not lapse under it. */
+.pcard-anchor {
   position: relative;
   display: inline-flex;
   flex: none;
 }
 
-.profile-card-id {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
+/* No ring on the way past. The card opening is the answer to a hover; an
+   outline drawn round the face at the same time is the same news twice, and
+   it is the one thing on this interaction nobody asked for. The keyboard
+   keeps a ring of its own, because there it is the only signal there is. */
+.pcard-anchor:hover .avatar,
+.pcard-anchor:hover .agent-face {
+  outline: none;
 }
 
-.profile-card-name {
-  font-size: 13px;
+.pcard-anchor:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* The bridge. The card sits inside a transparent box a little taller than
+   itself, so the gap between the face and the card belongs to the card — the
+   pointer crosses it without ever being over nothing, which is exactly what
+   used to close the card the instant somebody reached for it. */
+.pcard-pop {
+  position: absolute;
+  left: -6px;
+  z-index: 60;
+  display: block;
+  padding: 7px 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  /* The delay in the base rule is the one that runs on the way *out*: a
+     pointer crossing a column of faces must not leave a trail of cards behind
+     it, and one that clips the corner of a card must not lose it. */
+  transition:
+    opacity 0.1s ease 0.1s,
+    visibility 0.1s ease 0.1s;
+}
+
+/* Down from a roster row, up from a message — where the room is in the
+   ordinary case. `data-profile-flip` is set by `positionProfileCard` in
+   app.js for the cases a stylesheet cannot see: the last row of a long list
+   has nothing under it, and the first line of a thread has nothing over it. */
+.pcard-anchor[data-profile-dir="down"] .pcard-pop {
+  top: 100%;
+}
+
+.pcard-anchor[data-profile-dir="up"] .pcard-pop {
+  bottom: 100%;
+}
+
+.pcard-anchor[data-profile-dir="down"][data-profile-flip] .pcard-pop {
+  top: auto;
+  bottom: 100%;
+}
+
+.pcard-anchor[data-profile-dir="up"][data-profile-flip] .pcard-pop {
+  bottom: auto;
+  top: 100%;
+}
+
+/* The opening delay is short but not nothing: a transcript is a column of
+   faces a pointer crosses on its way to the scrollbar, and a card that
+   appeared instantly would flash open and shut the whole way down. */
+.pcard-anchor:hover > .pcard-pop,
+.pcard-anchor:focus-within > .pcard-pop {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0.16s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pcard-pop {
+    transition: none;
+  }
+}
+
+/* Shaped after the reference profile popout: a coloured crown, the face
+   breaking out of it, the name and the one line that identifies it, then a
+   short column of labelled facts and the way through to the whole page.
+   Deliberately short — everything on it is what somebody needs *before*
+   deciding whether to open the rest. */
+.pcard {
+  display: block;
+  width: 246px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+  font-weight: 400;
+  text-align: left;
+  text-decoration: none;
+  cursor: default;
+}
+
+/* Whoever's colour this is: an agent carries its owner's, a person carries
+   their own, and anybody who has chosen none gets the theme's accent. The
+   only large block of colour on the card, which is what lets the rest of it
+   stay quiet. */
+.pcard-banner {
+  display: block;
+  height: 42px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--pcard-accent, var(--accent)) 42%, var(--surface-2)),
+    color-mix(in srgb, var(--pcard-accent, var(--accent)) 12%, var(--surface-2))
+  );
+}
+
+.pcard-body {
+  display: block;
+  padding: 0 13px 13px;
+}
+
+/* Breaking out of the crown, as the reference does. The ring is the card's
+   own background, so the face reads as sitting on the card rather than
+   punched through it. */
+.pcard-face {
+  position: relative;
+  /* A block-level flex box rather than an inline one: inline sits on a text
+     baseline, and the descender space under a 52px face is a band of empty
+     card nobody put there. */
+  display: flex;
+  width: fit-content;
+  margin: -22px 0 6px;
+  padding: 3px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+}
+
+.pcard-face .status-dot {
+  right: 2px;
+  bottom: 2px;
+  width: 9px;
+  height: 9px;
+  border-width: 2px;
+}
+
+.pcard-name {
+  display: block;
+  font-size: 14.5px;
   font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.profile-card-detail,
-.profile-card-status {
-  font-size: 11px;
+/* The one line that tells two of them apart — an address for a person, the
+   vendor and owner for an agent. */
+.pcard-sub {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.profile-card-hint {
-  font-size: 11px;
-  color: var(--accent-bright);
-  border-top: 1px solid var(--border-soft);
-  padding-top: 6px;
+.pcard-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
 }
 
-/* No pointer, no hover: on a touch screen the tap *is* the action, and a card
-   that opens under the finger it was opened by only hides what it describes.
-   The button underneath keeps working — this removes the card, not the tap. */
+/* The dot means what it means everywhere else — the palette lives in
+   `.status-dot` and its four colours, and only the placement changes: pinned
+   to the corner of a face, and simply sitting in a line of text here. */
+.pcard-status .status-dot {
+  position: static;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border: 0;
+}
+
+.pcard-rule {
+  display: block;
+  height: 1px;
+  margin: 11px 0 1px;
+  background: var(--border-soft);
+}
+
+/* One fact: what it is, then what it says. The small label is what keeps a
+   short column of these readable without a rule between every pair. */
+.pcard-section {
+  display: block;
+  margin-top: 8px;
+}
+
+.pcard-section-label {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+/* Two lines at most. A card is a summary, and the objective an agent is
+   working through is the one field here long enough to turn it into a page. */
+.pcard-section-body {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.pcard-usage {
+  display: block;
+  margin-top: 4px;
+}
+
+/* The way through to everything this card left out, which is what lets it
+   stay this short. */
+.pcard-open {
+  display: block;
+  margin-top: 12px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.pcard-open:hover {
+  background: var(--bg-hover);
+}
+
 @media (hover: none) {
-  .profile-card {
+  /* A finger has no hover, and the tap on a face *is* the action — so in a
+     transcript the card would open under the finger that already opened the
+     page behind it. The roster keeps its card, where a tap focuses the face
+     and the row's own destination is the "…" beside it; it only loses the
+     width that assumed a sidebar to open inside. */
+  .cmsg-identity .pcard-pop {
     display: none;
+  }
+
+  .pcard {
+    max-width: calc(100vw - 32px);
   }
 }
 
@@ -9132,6 +9264,52 @@ dialog.modal[open]::backdrop {
   gap: 9px;
 }
 
+/* Posted images use the same native dialog as decisions, but without turning
+   a picture into a card full of confirmation chrome. The image owns the
+   surface and stays inside the viewport at every aspect ratio. */
+.modal-image-card {
+  position: relative;
+  display: block;
+  width: auto;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.modal-image {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  object-fit: contain;
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-pop);
+}
+
+.modal-image-close {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  right: 10px;
+  color: #fff;
+  background: rgba(5, 7, 12, 0.68);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.modal-image-close:hover {
+  color: #fff;
+  background: rgba(5, 7, 12, 0.84);
+}
+
 /* The first step of Add Agent. Providers stay in one stable list after a
    connection; connected rows quiet down instead of disappearing, so adding a
    second agent never looks like the first one replaced it. */
@@ -9554,7 +9732,7 @@ dialog.modal[open]::backdrop {
   /* Clipped while the fold is running, and only then. An agent's usage card
      opens below its row and the last row's card reaches past the bottom of
      the list, so a list that clipped at rest would swallow it (see
-     `.rr-usage`). The rail clips as well, where the lists are folded away and
+     `.pcard-pop`). The rail clips as well, where the lists are folded away and
      nothing in them can be reached anyway. */
   .chats-shell.chan-folding .chan-roster,
   .chats-shell.chan-collapsed .chan-roster {

@@ -3562,12 +3562,81 @@ function requestUsageForHoverTarget(event) {
 }
 document.addEventListener("mouseover", requestUsageForHoverTarget);
 // `:hover` never matches on a touch screen, so the card above has nothing to
-// reveal it there — `rosterRow` (screen-chats.js) gives `.rr-avatar` a
-// `tabindex`, and `.rr-avatar:focus-within .rr-usage` (styles.css) already
-// shows the card on focus exactly as it does on hover. This is what supplies
-// the data for a tap the same way the listener above supplies it for a
-// pointer.
+// reveal it there — `profileAnchor` (screen-chats.js) gives every face a
+// `tabindex`, and `.pcard-anchor:focus-within .pcard-pop` (styles.css)
+// already shows the card on focus exactly as it does on hover. This is what
+// supplies the data for a tap the same way the listener above supplies it
+// for a pointer.
 document.addEventListener("focusin", requestUsageForHoverTarget);
+
+/**
+ * How much clear space a profile card wants past its own height before it is
+ * willing to open in the direction it prefers.
+ */
+const PROFILE_CARD_MARGIN = 10;
+
+/**
+ * The one thing about a profile card a stylesheet cannot decide.
+ *
+ * Each card states the direction it would rather open — down from a roster
+ * row, up from a message, because that is where the room is in the ordinary
+ * case. What a rule cannot know is whether that room exists for *this* face:
+ * the last agent in a long roster has nothing under it, and the first message
+ * in a thread has nothing over it, and a card opening into either is a card
+ * clipped in half by whatever is doing the scrolling.
+ *
+ * So the preference stands and this only overrides it, by measuring against
+ * the scroller the face actually lives in rather than the window — a sidebar
+ * list crops its own contents long before the viewport does.
+ */
+function positionProfileCard(event) {
+  const anchor =
+    event.target instanceof Element
+      ? event.target.closest("[data-profile-dir]")
+      : null;
+  if (anchor === null) {
+    return;
+  }
+  const card = anchor.querySelector(".pcard-pop");
+  if (card === null) {
+    return;
+  }
+  const box = anchor.getBoundingClientRect();
+  const clip = clippingBoundsFor(anchor);
+  const needed = card.offsetHeight + PROFILE_CARD_MARGIN;
+  const below = clip.bottom - box.bottom;
+  const above = box.top - clip.top;
+  const prefersDown = anchor.dataset.profileDir !== "up";
+  // Flipped only when the other side is genuinely better off. A card that has
+  // room in neither direction stays where it was asked to be, rather than
+  // jumping to the side that is a few pixels less wrong.
+  const flip = prefersDown
+    ? below < needed && above > below
+    : above < needed && below > above;
+  anchor.toggleAttribute("data-profile-flip", flip);
+}
+
+/** The nearest thing that would crop the card, or the window. */
+function clippingBoundsFor(node) {
+  for (
+    let parent = node.parentElement;
+    parent !== null && parent !== document.body;
+    parent = parent.parentElement
+  ) {
+    const overflow = window.getComputedStyle(parent).overflowY;
+    if (overflow === "auto" || overflow === "scroll" || overflow === "hidden") {
+      const box = parent.getBoundingClientRect();
+      return {
+        top: Math.max(0, box.top),
+        bottom: Math.min(window.innerHeight, box.bottom),
+      };
+    }
+  }
+  return { top: 0, bottom: window.innerHeight };
+}
+
+document.addEventListener("mouseover", positionProfileCard);
+document.addEventListener("focusin", positionProfileCard);
 
 /* -------------------------------------------------- phone swipe ---- */
 /*
@@ -5379,7 +5448,14 @@ function answerQuestionStep(choice) {
 
 function actionOf(event) {
   const node = event.target.closest("[data-act]");
-  return node === null ? undefined : { node, act: node.dataset.act, value: node.dataset.value };
+  if (node !== null) {
+    return { node, act: node.dataset.act, value: node.dataset.value };
+  }
+  const attachment = event.target.closest(".cmsg-image");
+  if (attachment === null || attachment.querySelector("img[data-attachment]") === null) {
+    return undefined;
+  }
+  return { node: attachment, act: "image-preview", value: undefined };
 }
 
 /**
@@ -5432,6 +5508,21 @@ document.addEventListener("click", (event) => {
   }
 
   switch (act) {
+    case "image-preview": {
+      event.preventDefault();
+      const image = node.querySelector("img[data-attachment]");
+      if (image === null) {
+        return;
+      }
+      void showModal({
+        title: "Image preview",
+        image: {
+          src: image.currentSrc || image.src,
+          alt: image.alt,
+        },
+      });
+      return;
+    }
     case "nav":
       event.preventDefault();
       navigate(value);
