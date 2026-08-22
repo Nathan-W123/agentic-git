@@ -1016,11 +1016,11 @@ svg.ui-icon {
    one-pixel progress stroke as two readings. */
 .agent-face .agent-run::after {
   content: "";
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 2px var(--bg-card);
+  box-shadow: 0 0 0 1px var(--bg-card);
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -6619,14 +6619,14 @@ button.chip.lg:hover {
 .cmsg-thread-link .ctl-faces .ctl-working::before {
   content: "";
   position: absolute;
-  right: 1px;
-  bottom: 3px;
+  right: 0;
+  bottom: 2px;
   z-index: 2;
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 2px var(--bg-chat);
+  box-shadow: 0 0 0 1px var(--bg-chat);
   pointer-events: none;
 }
 
