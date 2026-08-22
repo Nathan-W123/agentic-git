@@ -4588,16 +4588,17 @@ function animateOnce(node, className, drop) {
  * The pace an answer opens at: how far apart the first few words start, and
  * how long each one takes to settle.
  *
- * Near the speed of a sentence being read aloud. Slower and the reader is
- * waiting for words they can already half-see; faster and nothing has
- * visibly happened at all.
+ * Deliberately short. The effect is meant to be noticed at the edge of
+ * attention and then be over — a line or two should read as one soft settle
+ * rather than as a sentence being spelled out. Anything slower and the reader
+ * is waiting on words they can already half-see.
  *
  * The word's own duration is stated here as well as in `.text-reveal-word`,
  * because this is what decides when an arrival is over and stops being
  * resumed; the stylesheet is what actually plays it.
  */
-const REVEAL_STAGGER_MS = 26;
-const REVEAL_WORD_MS = 460;
+const REVEAL_STAGGER_MS = 18;
+const REVEAL_WORD_MS = 220;
 
 /**
  * The longest an arrival is ever spread over, however much was said.
@@ -4605,20 +4606,23 @@ const REVEAL_WORD_MS = 460;
  * A reader takes the effect in from the first line; after that every extra
  * moment is spent watching text that is already written appear at walking
  * pace. So a long answer is not simply the opening pace repeated — it is the
- * same words, closer together.
+ * same words, much closer together: the more there is to say, the quicker it
+ * is said, and the ceiling here plus one word's settle is the longest any
+ * message can hold the reader.
  */
-const REVEAL_MAX_TOTAL_MS = 900;
+const REVEAL_MAX_TOTAL_MS = 420;
 
 /**
  * How far apart consecutive words start, given how many there are.
  *
- * A short line keeps the opening pace exactly: two or three words are a beat
- * apart, as they always were. From there the gap closes off smoothly — the
- * spread approaches `REVEAL_MAX_TOTAL_MS` without ever reaching it — so a
- * paragraph lands in about half a second and a wall of text still finishes
- * inside a second and a half. Nothing is truncated and there is no cliff
- * where a longer message suddenly stops animating; it just arrives faster the
- * more of it there is.
+ * A short line is barely staggered at all: a handful of words are a fraction
+ * of a beat apart, which is enough to read as arriving and little enough to
+ * be finished before it can be studied. From there the gap closes off
+ * smoothly — the spread approaches `REVEAL_MAX_TOTAL_MS` without ever
+ * reaching it — so a paragraph lands in under half a second and a wall of
+ * text is done inside two thirds of one. Nothing is truncated and there is no
+ * cliff where a longer message suddenly stops animating; it just arrives
+ * faster the more of it there is.
  */
 function revealStaggerFor(count) {
   if (count <= 1) {
@@ -4632,10 +4636,11 @@ function revealStaggerFor(count) {
 
 /**
  * How many words are taken apart at all. Past this the remainder is left as
- * plain text: by then it is far below the fold, and a span per word costs
- * more than the effect is worth.
+ * plain text: by then it is far below the fold, and at the pace a message
+ * this long arrives at, the tail is landing within a few milliseconds of
+ * itself anyway — a span apiece costs more than the effect is worth.
  */
-const REVEAL_MAX_WORDS = 160;
+const REVEAL_MAX_WORDS = 120;
 
 /** How many arrivals are remembered before the oldest are let go. */
 const REVEAL_MEMORY = 800;
