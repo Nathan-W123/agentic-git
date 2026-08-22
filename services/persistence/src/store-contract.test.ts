@@ -2078,6 +2078,87 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a lease plan keeps the symbols its agent declared`, async () => {
+    // `declaredSymbols` is what separates the symbols an agent asked for from
+    // the ones enrichment added to its plan, and every symbol-level decision
+    // downstream reads it: withholding, the ownership lease, and the release
+    // that hands a function back when its holder moves on. It also lives only
+    // on the plan, which goes through this table as JSON — so a serializer
+    // that dropped an unrecognised field would turn symbol-level arbitration
+    // back into whole-file arbitration everywhere, silently, with every test
+    // above still passing.
+    const { store, cleanup } = await backend.open();
+    try {
+    const owner = await store.createUser({
+      email: `symbols-${backend.name}@example.com`,
+      displayName: "Symbols",
+      passwordDigest: "digest",
+    });
+    const worker = await store.registerWorker({
+      userId: owner.id,
+      organizationId: DEFAULT_ORGANIZATION_ID,
+      name: "symbol-worker",
+      adapters: ["codex"],
+      version: "0.1.0",
+    });
+    await store.saveRepository(REPOSITORY);
+    const task = await store.submitTask({
+      repositoryId: REPOSITORY.id,
+      objective: "declare one symbol of several",
+      agentId: "codex",
+      validationCommands: [],
+    });
+    const leased = await store.leaseNextTask({
+      workerId: worker.id,
+      taskId: task.id,
+      baseRevision: BASE_VERSION.revision,
+      ttlMs: 60_000,
+      repositoryParallelism: 2,
+    });
+    assert.ok(leased !== undefined);
+
+    const saved = await store.saveWorkLeasePlan({
+      leaseId: leased.lease.id,
+      submission: {
+        plan: {
+          ...PLAN,
+          taskId: task.id,
+          expectedFiles: ["src/mod.ts"],
+          // As enrichment leaves it: every symbol in the file it named,
+          // with the one the agent actually asked for kept apart.
+          expectedSymbols: ["alpha", "beta", "gamma"],
+          declaredSymbols: ["alpha"],
+        },
+        admission: {
+          status: "approved",
+          taskId: task.id,
+          planRevision: 1,
+          baseRevision: BASE_VERSION.revision,
+          ownershipGrants: [],
+          constraints: [],
+          blockedBy: [],
+          conflicts: [],
+          explanation: "contract test",
+          decidedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      observedApprovedLeaseIds: [],
+    });
+    assert.equal(saved.outcome, "saved");
+
+    const readBack = (await store.getWorkLease(leased.lease.id))?.plan?.plan;
+    assert.deepEqual(readBack?.expectedSymbols, ["alpha", "beta", "gamma"]);
+    assert.deepEqual(
+      readBack?.declaredSymbols,
+      ["alpha"],
+      "the agent's own declarations must survive the round trip, or a " +
+        "holder claims every symbol in every file it named",
+    );
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: lease plans are recorded and serialized against each other`, async () => {
     const { store, cleanup } = await backend.open();
     try {
