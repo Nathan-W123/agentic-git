@@ -1390,16 +1390,24 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
   const faces = ordered
     .slice(0, 3)
     .map((author, index) => {
+      // The one being measured is handed the run, so its mark fills up with
+      // the progress the same way it does everywhere else. Nothing is drawn
+      // around it here.
+      const running = working !== undefined && index === 0;
       const face =
         author.agent !== undefined
-          ? agentFace(author.agent, 20)
+          ? agentFace(
+              author.agent,
+              20,
+              running ? { status: "working", progress } : {},
+            )
           : avatar(
               author.name,
               20,
               author.name,
               author.name === currentUserName() ? myAvatar() : undefined,
             );
-      return working !== undefined && index === 0
+      return running
         ? `<span class="ctl-working" style="--run:${progress}"
             title="${progress}% by phase">${face}<span class="sr-only">Working, ${progress}% done</span></span>`
         : face;
