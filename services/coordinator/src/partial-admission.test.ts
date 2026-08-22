@@ -16,6 +16,7 @@ import {
   splitChangeSet,
   withheldPatchRecord,
 } from "./partial-admission.js";
+import { PlanAdmissionController } from "./plan-admission.js";
 
 /**
  * Where a partial admission stops being a promise and becomes enforcement:
@@ -478,4 +479,65 @@ test("nothing withheld records nothing", () => {
     truncated: false,
     bytes: 0,
   });
+});
+
+/**
+ * Two agents, one file, a function each.
+ *
+ * The case symbol-level admission exists for, and the one it could not do
+ * until the enriched symbol set stopped being read as a claim. `enrichPlan`
+ * gives a plan that names a file every symbol in it, so a holder that
+ * declared one function claimed all of them: the second agent was admitted to
+ * the file with every function withheld, wrote the one it came for, had every
+ * hunk deferred back out, and landed nothing after a full run.
+ */
+test("two agents editing different functions of one file both keep theirs", () => {
+  const ranges = [
+    { name: "alpha", startLine: 6, endLine: 12 },
+    { name: "beta", startLine: 15, endLine: 21 },
+    { name: "gamma", startLine: 24, endLine: 30 },
+  ];
+  const file = "src/mod.ts";
+  const plan = (taskId: string, symbols: string[]): AgentPlan => ({
+    taskId,
+    objective: taskId,
+    expectedFiles: [file],
+    expectedSymbols: symbols,
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  });
+
+  // Exactly what enrichment produces: the holder declared `alpha`, and every
+  // symbol in the file was added to what it expects.
+  const holder: AgentPlan = {
+    ...plan("task_holder", ["alpha", "beta", "gamma"]),
+    declaredSymbols: ["alpha"],
+  };
+
+  const admission = new PlanAdmissionController().admit({
+    plan: plan("task_candidate", ["gamma"]),
+    agentId: "agent_candidate",
+    baseRevision: "r1",
+    baseVersion: 1,
+    active: [
+      {
+        taskId: "task_holder",
+        agentId: "agent_holder",
+        plan: holder,
+      },
+    ],
+    planRevision: 1,
+    symbolRangesInFile: (candidate) =>
+      candidate === file ? ranges : undefined,
+  });
+
+  assert.equal(admission.status, "approved_with_constraints");
+  const withheld = (admission.deferredResources ?? []).map(
+    (resource) => resource.resourceId,
+  );
+  // The holder's own function, and only it. `beta` was never claimed by
+  // anyone, and `gamma` is what the candidate came for.
+  assert.deepEqual(withheld, ["alpha"]);
 });
