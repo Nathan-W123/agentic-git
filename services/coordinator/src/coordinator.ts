@@ -100,6 +100,7 @@ import {
   assertChangeSetWithinPlan,
 } from "./scope-validator.js";
 import { frozenClaimCovers } from "./blanket-claim.js";
+import { estimateScope } from "./scope-estimation.js";
 
 export interface CoordinatedTask {
   task: TaskDefinition;
@@ -368,6 +369,11 @@ interface PlannedTask extends CoordinatedTask {
    * holders still own the files.
    */
   speculatedAdvance?: CanonicalAdvance;
+  /**
+   * The anchored estimate a blanket claim was granted against, kept so the
+   * freeze has something to narrow to before the agent's first write.
+   */
+  blanketEstimate?: readonly string[];
 }
 
 interface PreparedTask extends PlannedTask {
@@ -842,6 +848,26 @@ export interface BlanketFreezeRequest {
   observe(): Promise<
     ReadonlyArray<{ path: string; status: FilePatchStatus }>
   >;
+  /**
+   * Where the objective said this task would go, for a holder that has not
+   * written anything yet.
+   *
+   * A claim can only be narrowed to what its holder has actually touched, and
+   * a holder that has touched nothing used to be left holding the repository
+   * — correctly, because erasing the claim would admit the arrival into the
+   * files the holder is about to write. But "has written nothing" is not the
+   * rare case: it is the whole of the window between an agent starting and
+   * its first edit, which for a real coding agent is however long it spends
+   * reading. Every arrival during that window was refused everything.
+   *
+   * So a holder that cannot yet be narrowed by observation is narrowed by
+   * declaration instead. This is only ever populated from an estimate the
+   * coordinator judged anchored — a task whose objective named real paths,
+   * directories or symbols — and a task whose objective could not produce one
+   * is never granted a blanket claim in the first place. Empty means fall
+   * back to keeping the claim whole.
+   */
+  estimatedFiles: readonly string[];
 }
 
 /** The remainder of a partially admitted task, once its granted half landed. */
@@ -1690,7 +1716,7 @@ export class Coordinator {
           const acceptClaim = entry.adapter.acceptBlanketClaim?.bind(
             entry.adapter,
           );
-          const claim =
+          const claimable =
             input.tasks.length === 1 &&
             turnStart.replan === undefined &&
             acceptClaim !== undefined &&
@@ -1700,7 +1726,43 @@ export class Coordinator {
             // so the claim would hold the whole repository until the task
             // ended and every arrival would wait it out.
             this.workspaces.listWorkingChanges !== undefined &&
-            this.planAuthority?.freezeBlanketClaim !== undefined
+            this.planAuthority?.freezeBlanketClaim !== undefined;
+          // What this task says it will touch, before it has touched
+          // anything. A blanket claim can only be narrowed to observed
+          // writes, so a holder still reading its way into the problem used
+          // to pin the whole repository for as long as that took — and that
+          // is the common case, not an edge one.
+          //
+          // The estimate is what makes the claim narrowable from the moment
+          // it is granted. It also decides whether the claim is granted at
+          // all: an objective that names nothing real cannot be narrowed by
+          // declaration either, and a claim that can never be given back
+          // early is not worth the planning round it saves. Those tasks fall
+          // through and plan properly, which is the same trade the condition
+          // above makes for an unfreezable workspace.
+          //
+          // Only "anchored" counts. The estimator grades itself, and a weak
+          // estimate is one assembled from words that happened to match
+          // rather than from a path, directory or symbol the objective named
+          // — narrowing a claim to that would hand somebody else files this
+          // task is about to want.
+          //
+          // Paid for with an index build the solo path otherwise skips, which
+          // is deliberate: indexing is the most expensive step in the control
+          // plane, but a planning round trip is an agent round trip, and this
+          // is the cheaper of the two ways to learn where a task is going.
+          const estimate = claimable
+            ? await this.intelligence
+                .index(input.repository, version.revision)
+                .then((built) => estimateScope(entry.task.objective, built))
+                .catch(() => undefined)
+            : undefined;
+          const estimatedFiles =
+            estimate?.confidence === "anchored"
+              ? estimate.files.map((file) => file.path)
+              : [];
+          const claim =
+            claimable && claimRepository !== undefined && estimatedFiles.length > 0
               ? await claimRepository({
                   task: entry.task,
                   repository: input.repository,
@@ -1737,6 +1799,7 @@ export class Coordinator {
               plan: claim,
               planRevision: 1,
               plannedVersion: version,
+              blanketEstimate: estimatedFiles,
               decision: {
                 decision: "approved",
                 taskId: entry.task.id,
@@ -4497,6 +4560,7 @@ export class Coordinator {
             : { projectId: input.projectId }),
           baseVersion: waveVersion,
           observe: async () => await list(workspace),
+          estimatedFiles: entry.blanketEstimate ?? [],
         });
       } catch {
         return;

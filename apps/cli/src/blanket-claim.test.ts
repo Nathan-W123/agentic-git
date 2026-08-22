@@ -6,6 +6,7 @@ import type { CanonicalRepository } from "@coord/repository-service";
 import type { CanonicalVersion, TaskDefinition } from "@coord/shared-types";
 import { isBlanketClaim } from "@coord/shared-types";
 
+import { frozenClaimCovers } from "@coord/coordinator";
 import { LeasePlanAuthority } from "./lease-admission.js";
 
 /**
@@ -156,6 +157,7 @@ test("a second task freezes the first to what it has touched", async () => {
     planRevision: 1,
     repository: REPOSITORY,
     baseVersion: BASE,
+    estimatedFiles: [],
     observe: async () => {
       reads += 1;
       return [
@@ -279,7 +281,7 @@ test("a claim already carrying a contract is never widened into a blanket one", 
   );
 });
 
-test("a holder that has written nothing keeps the whole repository", async () => {
+test("a holder with nothing to narrow to at all keeps the whole repository", async () => {
   const { store, worker } = await seed();
   const first = await leaseFor(store, worker, "rewrite the renderer");
   const holder = new LeasePlanAuthority({
@@ -303,6 +305,7 @@ test("a holder that has written nothing keeps the whole repository", async () =>
     planRevision: 1,
     repository: REPOSITORY,
     baseVersion: BASE,
+    estimatedFiles: [],
     observe: async () => [],
   });
 
@@ -399,4 +402,66 @@ test("a repository-wide hold is announced, and announced once", async () => {
   );
   assert.equal(holds[0]?.event.data["status"], "sequenced");
   assert.deepEqual(holds[0]?.event.data["blockedBy"], [first.task.id]);
+});
+
+test("a holder that has written nothing is narrowed to its estimate", async () => {
+  const { store, worker } = await seed();
+  const first = await leaseFor(store, worker, "rewrite the renderer");
+  const holder = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[first.task.id, first.leaseId]]),
+  });
+  const claim = await holder.claimRepository({
+    task: first.task,
+    repository: REPOSITORY,
+    baseVersion: BASE,
+  });
+  assert.notEqual(claim, undefined);
+  await leaseFor(store, worker, "fix the audio mixer");
+
+  // The same window as the test above — the arrival lands before the holder's
+  // first write — but this claim was granted against an anchored estimate, so
+  // there is something to narrow to that is not an observation.
+  const frozen = await holder.freezeBlanketClaim({
+    task: first.task,
+    plan: claim!,
+    planRevision: 1,
+    repository: REPOSITORY,
+    baseVersion: BASE,
+    estimatedFiles: ["src/renderer/draw.ts", "src/renderer/shade.ts"],
+    observe: async () => [],
+  });
+
+  assert.notEqual(
+    frozen,
+    undefined,
+    "an anchored estimate is something to narrow to, so the freeze must land",
+  );
+  assert.deepEqual(frozen?.expectedFiles, [
+    "src/renderer/draw.ts",
+    "src/renderer/shade.ts",
+  ]);
+  assert.equal(frozen?.claim?.kind, "frozen");
+
+  const lease = await store.getWorkLease(first.leaseId);
+  assert.ok(
+    lease?.plan !== undefined && !isBlanketClaim(lease.plan.plan),
+    "the durable claim is no longer repository-wide",
+  );
+
+  // And the point of all of it: the file the arriving task wants is no longer
+  // inside what the holder claims. Whether admission then says yes is covered
+  // against a real repository in partial-admission-crossrun.test.ts; what
+  // matters here is that the holder stopped standing in the way of it while
+  // it had not started typing.
+  assert.equal(
+    frozenClaimCovers(frozen!, "src/audio/mixer.ts"),
+    false,
+    "the narrowed claim should no longer reach the arriving task's file",
+  );
+  assert.equal(
+    frozenClaimCovers(frozen!, "src/renderer/draw.ts"),
+    true,
+    "and should still reach its own",
+  );
 });
