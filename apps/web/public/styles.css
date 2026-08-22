@@ -9189,6 +9189,29 @@ dialog.modal[open]::backdrop {
   padding: 0;
 }
 
+.catch-up-task-open {
+  appearance: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% + 12px);
+  margin: -6px;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.catch-up-task-open:hover,
+.catch-up-task-open:focus-visible {
+  background: var(--bg-hover);
+}
+
 .catch-up-task-lead {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -9201,6 +9224,36 @@ dialog.modal[open]::backdrop {
   letter-spacing: -0.01em;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.catch-up-task-arrow {
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-4);
+}
+
+.catch-up-task-arrow .ui-icon,
+.catch-up-file .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.catch-up-files {
+  padding-top: 2px;
+}
+
+.catch-up-file {
+  appearance: none;
+  min-width: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.catch-up-file:hover,
+.catch-up-file:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .catch-up-actions {

@@ -191,6 +191,7 @@ import {
 import {
   briefObjective,
   captureChannelScroll,
+  channelMessageHasTaskThread,
   channelInfoPopoverHtml,
   closeComposerAutocomplete,
   copyMessageText,
@@ -6000,6 +6001,46 @@ document.addEventListener("click", (event) => {
       dismissSinceYouLeft();
       render();
       return;
+    case "catch-up-task-open": {
+      const taskRepositoryId = node.dataset.repository ?? activeChannelId();
+      if (!value || !taskRepositoryId) {
+        return;
+      }
+      void (async () => {
+        await ensureChannelMessages(taskRepositoryId, render);
+        let taskMessage = channelMessagesFor(taskRepositoryId).find(
+          (entry) =>
+            entry.taskId === value && channelMessageHasTaskThread(entry),
+        );
+        while (
+          taskMessage === undefined &&
+          state.channelHasMore[taskRepositoryId] === true
+        ) {
+          const before = channelMessagesFor(taskRepositoryId).length;
+          await loadEarlierChannelMessages(taskRepositoryId, render);
+          taskMessage = channelMessagesFor(taskRepositoryId).find(
+            (entry) =>
+              entry.taskId === value && channelMessageHasTaskThread(entry),
+          );
+          if (channelMessagesFor(taskRepositoryId).length === before) {
+            break;
+          }
+        }
+        if (taskMessage === undefined) {
+          toast(
+            "That task's thread is no longer in the channel history.",
+            "error",
+          );
+          return;
+        }
+        openThreadPanel(taskMessage.id);
+        state.activeChannelThread = taskMessage.id;
+        state.threadReplyMessageId = undefined;
+        state.autoOpenedThread = undefined;
+        render();
+      })();
+      return;
+    }
     // Reading it is done; saying something about it happens in the thread.
     case "plan-thread-open":
       state.activePlan = undefined;

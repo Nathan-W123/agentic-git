@@ -2449,7 +2449,7 @@ function continuesUserMessageGroup(previous, current, startsNewDay) {
 }
 
 /** Whether a channel root owns the compact thread summary drawn under it. */
-function channelMessageHasTaskThread(entry) {
+export function channelMessageHasTaskThread(entry) {
   const replies = entry.replies ?? [];
   return (
     replies.length > 0 &&
@@ -3560,8 +3560,8 @@ function catchUpLead(summary) {
  * Each row is one condensed claim and an attribution pill bar: which agent
  * did it, how many files moved, how long ago. Everything the pills carry used
  * to be another line of prose under the summary, which is how a digest meant
- * to be read at a glance turned into six paragraphs to read. The names of the
- * changed files are the file pill's title rather than a line of their own.
+ * to be read at a glance turned into six paragraphs to read. File names stay
+ * compact beneath those facts, but each one is also a way into the file.
  */
 function catchUpPanel() {
   const catchUp = state.catchUp;
@@ -3581,6 +3581,7 @@ function catchUpPanel() {
       const changedFiles = Array.isArray(task.changedFiles)
         ? task.changedFiles
         : [];
+      const taskRepositoryId = task.repositoryId ?? catchUp.repositoryId;
       touched += changedFiles.length;
       const worker = roster.find((agent) => taskBelongsToAgent(task, agent));
       if (worker !== undefined) {
@@ -3590,7 +3591,13 @@ function catchUpPanel() {
         String(task.summary ?? "").trim() ||
         "Completed and landed successfully.";
       return `<li class="catch-up-task">
-      <p class="catch-up-task-lead">${esc(catchUpLead(summary))}</p>
+      <button type="button" class="catch-up-task-open"
+        data-act="catch-up-task-open" data-value="${esc(task.id)}"
+        data-repository="${esc(taskRepositoryId)}"
+        title="Open this task's thread">
+        <span class="catch-up-task-lead">${esc(catchUpLead(summary))}</span>
+        <span class="catch-up-task-arrow" aria-hidden="true">${icon("arrowRight")}</span>
+      </button>
       ${pillBar(
         [
           worker === undefined
@@ -3612,6 +3619,22 @@ function catchUpPanel() {
         ],
         relativeTime(task.completedAt),
       )}
+      ${
+        changedFiles.length === 0
+          ? ""
+          : `<div class="pill-bar catch-up-files" aria-label="Files changed by this task">
+          ${changedFiles
+            .map(
+              (path) => `<button type="button" class="pill catch-up-file"
+            data-act="chan-file-open" data-value="${esc(path)}"
+            data-task="${esc(task.id)}" data-repository="${esc(taskRepositoryId)}"
+            title="Open ${esc(path)}">${icon(
+              "file",
+            )}<span class="pill-label">${esc(path)}</span></button>`,
+            )
+            .join("")}
+        </div>`
+      }
     </li>`;
     })
     .join("");
