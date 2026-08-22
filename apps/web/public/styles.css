@@ -9015,9 +9015,51 @@ dialog.modal[open]::backdrop {
   gap: 9px;
 }
 
-/* The return-to-app catch-up follows the quiet, editorial rhythm of a Pulse
-   write-up: one large idea at the top, generous space between updates, and
-   compact elements only where structured file details benefit from them. */
+/* Attribution pills: the rendered 3dicons object, then a short label, in a
+   row that reads inline with the text above it. Sized off the label so one
+   pill is never taller than the line it belongs to. */
+.pill-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 10px 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pill .pill-3d {
+  flex: 0 0 auto;
+  height: 18px;
+  width: 18px;
+}
+
+.pill-note {
+  color: var(--text-4);
+  font-size: 12px;
+}
+
+/* The return-to-app catch-up is a digest, not a transcript: one large count
+   at the top, one line of claim per task, and the who and the how-much moved
+   out of the prose into pills that can be read without reading. */
 .catch-up-panel {
   width: var(--panel-w, 420px);
 }
@@ -9027,90 +9069,51 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-body {
-  padding: 30px 22px 36px;
+  padding: 24px 22px 30px;
 }
 
 .catch-up-intro {
-  padding-bottom: 34px;
+  display: grid;
+  gap: 12px;
+  padding-bottom: 22px;
 }
 
 .catch-up-intro h2 {
   color: var(--text);
-  font-size: 30px;
+  font-size: 24px;
   font-weight: 450;
-  letter-spacing: -0.035em;
-  line-height: 1.08;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
 }
 
 .catch-up-intro h2 strong {
-  font-size: 44px;
+  font-size: 34px;
   font-weight: 650;
-}
-
-.catch-up-intro > p {
-  margin-top: 12px;
-  color: var(--text-2);
-  font-size: 13.5px;
 }
 
 .catch-up-task-list {
   display: grid;
-  gap: 34px;
+  gap: 18px;
 }
 
 .catch-up-task {
+  display: grid;
+  gap: 8px;
   padding: 0;
 }
 
-.catch-up-task-copy {
-  min-width: 0;
-}
-
-.catch-up-task-copy p {
+.catch-up-task-lead {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
   color: var(--text);
-  font-size: 16px;
+  font-size: 14.5px;
   font-weight: 500;
-  letter-spacing: -0.012em;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-.catch-up-task-copy > span {
-  display: block;
-  margin-top: 7px;
-  color: var(--text-4);
-  font-size: 12px;
-}
-
-.catch-up-task-files {
-  display: grid;
-  gap: 4px;
-  margin-top: 13px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-card);
-  color: var(--text-3);
-  font-size: 11.5px;
-  overflow-wrap: anywhere;
-}
-
-.catch-up-task-files .catch-up-file-count {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--text-2);
-  font-weight: 550;
-}
-
-.catch-up-task-files .catch-up-file-names {
-  color: var(--text-4);
+  letter-spacing: -0.01em;
   line-height: 1.45;
-}
-
-.catch-up-task-files svg {
-  flex: 0 0 auto;
-  height: 14px;
-  width: 14px;
+  overflow-wrap: anywhere;
 }
 
 .catch-up-actions {

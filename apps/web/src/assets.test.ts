@@ -282,10 +282,11 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
   }
 
-  // Coolicons uses one clean rounded line on a 24px grid. Pin the shared
-  // wrapper here so adding a glyph cannot quietly introduce a second optical
-  // weight, lose its theme colour, or become visible to a screen reader as
-  // meaningless content.
+  // Basil uses one light rounded line on a 24px grid. Pin the shared wrapper
+  // here so adding a glyph cannot quietly introduce a second optical weight,
+  // lose its theme colour, or become visible to a screen reader as
+  // meaningless content — and so the set it was replaced from cannot creep
+  // back one icon at a time.
   for (const [name, glyph] of Object.entries(ui.ICONS)) {
     assert.match(
       glyph,
@@ -297,19 +298,19 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
       /stroke="currentColor"/u,
       `${name} follows text colour`,
     );
-    assert.match(glyph, /stroke-width="2"/u, `${name} uses Coolicons' stroke`);
+    assert.match(glyph, /stroke-width="1\.8"/u, `${name} uses Basil's stroke`);
     assert.match(glyph, /stroke-linecap="round"/u, `${name} has rounded ends`);
     assert.match(glyph, /stroke-linejoin="round"/u, `${name} has rounded joins`);
     assert.match(glyph, /aria-hidden="true"/u, `${name} is decorative`);
     assert.match(glyph, /focusable="false"/u, `${name} cannot take focus`);
     assert.match(
       glyph,
-      /data-icon-style="coolicons"/u,
+      /data-icon-style="basil"/u,
       `${name} identifies the selected icon treatment`,
     );
     assert.match(
       glyph,
-      /data-icon-source="coolicons-v4\.1"/u,
+      /data-icon-source="basil-icons-community"/u,
       `${name} keeps the source attribution`,
     );
     assert.doesNotMatch(

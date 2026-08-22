@@ -93,6 +93,7 @@ import {
   imeComposing,
   emptyState,
   miniSelect,
+  pillBar,
   relativeTime,
   showPopover,
   toast,
@@ -3497,6 +3498,27 @@ function panelClose(act, title) {
 }
 
 /**
+ * A finished task's account of itself, cut down to the part somebody skimming
+ * actually reads.
+ *
+ * Agents write a paragraph, and a column of paragraphs is a wall: the digest
+ * existed to be read in one glance and had become the thing to be caught up
+ * on. The first sentence is nearly always the claim — what changed — and the
+ * rest is method, so that is what is kept, with a second sentence only when
+ * the first is too short to say anything on its own. The full text is still
+ * in the channel, which is where somebody who wants the method goes.
+ */
+function catchUpLead(summary) {
+  const text = String(summary).replace(/\s+/gu, " ").trim();
+  const sentences = text.match(/[^.!?]+[.!?]*/gu) ?? [text];
+  let lead = (sentences[0] ?? text).trim();
+  if (lead.length < 60 && sentences.length > 1) {
+    lead = `${lead} ${(sentences[1] ?? "").trim()}`.trim();
+  }
+  return lead.length > 150 ? `${lead.slice(0, 149).trimEnd()}\u2026` : lead;
+}
+
+/**
  * Work that finished while this person was away, in the same side surface a
  * plan uses rather than in a blocking modal over the whole room.
  *
@@ -3504,6 +3526,12 @@ function panelClose(act, title) {
  * them from that snapshot keeps the list stable while polls update the main
  * task collection behind it, and lets a reader dismiss exactly what they were
  * shown before the server advances their catch-up mark.
+ *
+ * Each row is one condensed claim and an attribution pill bar: which agent
+ * did it, how many files moved, how long ago. Everything the pills carry used
+ * to be another line of prose under the summary, which is how a digest meant
+ * to be read at a glance turned into six paragraphs to read. The names of the
+ * changed files are the file pill's title rather than a line of their own.
  */
 function catchUpPanel() {
   const catchUp = state.catchUp;
@@ -3515,36 +3543,45 @@ function catchUpPanel() {
     (entry) => entry.id === catchUp.repositoryId,
   );
   const repositoryName = repository?.name ?? catchUp.repositoryId;
+  const roster = channelAgentsFor(catchUp.repositoryId);
+  const workers = new Set();
+  let touched = 0;
   const rows = catchUp.tasks
     .map((task) => {
-      const summary =
-        String(task.summary ?? "").trim() ||
-        "Completed and landed successfully.";
-      const when = relativeTime(task.completedAt);
       const changedFiles = Array.isArray(task.changedFiles)
         ? task.changedFiles
         : [];
-      const files =
-        changedFiles.length > 0
-          ? `<div class="catch-up-task-files">
-              <span class="catch-up-file-count">${icon("file")} ${esc(
-                String(changedFiles.length),
-              )} ${changedFiles.length === 1 ? "file" : "files"} changed</span>
-              <span class="catch-up-file-names">${esc(
-                task.changedFiles.slice(0, 3).join(", "),
-              )}${
-                changedFiles.length > 3
-                  ? ` and ${esc(String(changedFiles.length - 3))} more`
-                  : ""
-              }</span>
-            </div>`
-          : "";
+      touched += changedFiles.length;
+      const worker = roster.find((agent) => taskBelongsToAgent(task, agent));
+      if (worker !== undefined) {
+        workers.add(worker.name);
+      }
+      const summary =
+        String(task.summary ?? "").trim() ||
+        "Completed and landed successfully.";
       return `<li class="catch-up-task">
-      <div class="catch-up-task-copy">
-        <p>${esc(summary)}</p>
-        <span>${esc(when)}</span>
-        ${files}
-      </div>
+      <p class="catch-up-task-lead">${esc(catchUpLead(summary))}</p>
+      ${pillBar(
+        [
+          worker === undefined
+            ? undefined
+            : {
+                icon: "agent",
+                label: worker.name,
+                title: `${worker.name} did this work`,
+              },
+          changedFiles.length === 0
+            ? undefined
+            : {
+                icon: "file",
+                label: `${String(changedFiles.length)} ${
+                  changedFiles.length === 1 ? "file" : "files"
+                }`,
+                title: changedFiles.join(", "),
+              },
+        ],
+        relativeTime(task.completedAt),
+      )}
     </li>`;
     })
     .join("");
@@ -3562,8 +3599,31 @@ function catchUpPanel() {
       <div class="catch-up-intro">
         <h2><strong>${esc(String(count))}</strong> ${
           count === 1 ? "task" : "tasks"
-        } completed</h2>
-        <p>Work finished while you were away.</p>
+        } done</h2>
+        ${pillBar(
+          [
+            workers.size === 0
+              ? undefined
+              : {
+                  icon: "agent",
+                  label:
+                    workers.size === 1
+                      ? [...workers][0]
+                      : `${String(workers.size)} agents`,
+                  title: [...workers].join(", "),
+                },
+            touched === 0
+              ? undefined
+              : {
+                  icon: "file",
+                  label: `${String(touched)} ${
+                    touched === 1 ? "file" : "files"
+                  }`,
+                  title: "Files changed while you were away",
+                },
+          ],
+          "while you were away",
+        )}
       </div>
       <ul class="catch-up-task-list" aria-label="Completed tasks">${rows}</ul>
     </div>
