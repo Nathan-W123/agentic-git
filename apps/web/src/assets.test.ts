@@ -335,6 +335,7 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
 });
 
 test("pinned messages can be hidden and shown without being unpinned", async () => {
+  const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
@@ -368,6 +369,10 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
   assert.match(chats, /const open = state\.pinsOpen === true/u);
   assert.match(chats, /!open[\s\S]{0,80}\? ""[\s\S]{0,80}chan-pins-list/u);
+
+  // Fresh sessions start with the banner folded; readers unfold it when they
+  // want to see pins, and the toggle remembers only for this visit.
+  assert.match(data, /pinsOpen: false/u);
 });
 
 test("serves the vendored Monaco build same-origin under /vendor", async () => {

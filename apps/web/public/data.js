@@ -412,7 +412,7 @@ export const state = {
    */
   channelPins: {},
   /** Whether the pinned banner is unfolded. A reading preference, session-only. */
-  pinsOpen: true,
+  pinsOpen: false,
   /** A one-shot message id the next channel render should scroll to. */
   scrollToMessage: undefined,
   /**
