@@ -47,6 +47,16 @@ import {
   type UserCredentialKind,
 } from "@coord/workspace-manager";
 
+/**
+ * How often the queue is checked for work nothing is driving.
+ *
+ * Shorter than the five-minute work-lease TTL, so the sweep that reclaims a
+ * dead run's lease and the sweep that dispatches what it freed are at most
+ * one interval apart rather than a whole TTL. Long enough that an idle
+ * deployment is doing one indexed read a minute.
+ */
+const QUEUE_RESUME_INTERVAL_MS = 60_000;
+
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
   return process.argv
@@ -782,7 +792,7 @@ async function serve(
   console.log(`Coordinator control room: http://${host}:${port}`);
   console.log(`Project: ${project.root}`);
 
-  // Resume the queue this restart interrupted.
+  // Resume the queue nothing is driving.
   //
   // Task execution had exactly four triggers — a mention, a retry, an
   // audit-fix dispatch, and the manual run route — and none of them is "the
@@ -793,11 +803,35 @@ async function serve(
   // nothing ever told the queue to run again. In the channel that read as an
   // agent thinking forever — dots with no work behind them.
   //
+  // On a timer rather than once at boot, which is what made the boot-only
+  // version miss the case it was written for. A lease is minted for
+  // `WORK_LEASE_TTL_MS` — five minutes — and heartbeated for as long as its
+  // run lives, so the lease of a process that died seconds ago does not
+  // expire for another five minutes. A container restart takes about ten
+  // seconds. The one expiry sweep at boot therefore ran while the stranded
+  // lease was still comfortably active, reclaimed nothing, read a queue that
+  // did not yet contain the stranded task, and never looked again. The task
+  // reached `submitted` minutes later, off the back of some unrelated lazy
+  // sweep, with nothing left in the process that would ever dispatch it.
+  //
+  // Every pass is the whole recovery, in order: expire the leases that have
+  // now lapsed, then run whatever that put back in the queue. Reaching the
+  // stranded task takes as long as its last lease had left, so a deploy
+  // mid-run costs a delay rather than the task.
+  //
   // Expiry first, so tasks a dead worker was holding are back in `submitted`
   // before the queue is read. Fire-and-forget per repository, one run each:
   // `runPendingTasks` drains everything queued for that repository, and boot
   // must not block on agent work.
-  void (async () => {
+  //
+  // Repositories with a resume already in flight are skipped. A run holds its
+  // leases for as long as it takes, and an agent takes far longer than one
+  // sweep interval, so without this every pass would stack another run on the
+  // same repository — each of which reads canonical, leases nothing, and
+  // returns. Correct but wasteful, and the waste is proportional to how long
+  // the work takes.
+  const resuming = new Set<string>();
+  const resumeQueuedWork = async (): Promise<void> => {
     await store.expireWorkLeases(new Date().toISOString());
     const pending = await store.listSubmittedTasks({ status: "submitted" });
     const repositories = new Map(
@@ -806,31 +840,51 @@ async function serve(
         task,
       ]),
     );
-    for (const task of repositories.values()) {
+    for (const [key, task] of repositories) {
+      if (resuming.has(key)) {
+        continue;
+      }
       // A row from before tasks carried a project cannot be routed to a run;
       // the default project is what those rows meant.
       const projectId = task.projectId ?? "proj_default";
       console.log(
         `Resuming queued work in ${task.repositoryId} (task ${task.id})`,
       );
-      void operations
-        .runRepository?.({
+      resuming.add(key);
+      void Promise.resolve(
+        operations.runRepository?.({
           projectId,
           repositoryId: task.repositoryId,
           // The person whose work is being resumed, not whoever restarted the
           // process: the run spends the same credential the original dispatch
           // chose, which is keyed off the submitter.
           actorId: task.submittedBy ?? "system",
-        })
+        }),
+      )
         .catch((error: unknown) => {
           console.error(
             `Resume failed for ${task.repositoryId}: ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
+        })
+        .finally(() => {
+          resuming.delete(key);
         });
     }
-  })().catch((error: unknown) => {
+  };
+  const queueSweep = setInterval(() => {
+    void resumeQueuedWork().catch((error: unknown) => {
+      console.error(
+        `Queue resume failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }, QUEUE_RESUME_INTERVAL_MS);
+  queueSweep.unref?.();
+  // And immediately, for the work that was already queued when this started.
+  void resumeQueuedWork().catch((error: unknown) => {
     console.error(
       `Queue resume failed: ${
         error instanceof Error ? error.message : String(error)
