@@ -267,9 +267,14 @@ svg.ui-icon {
   text-align: center;
 }
 
+/* The sign-in card is the one place with room for the whole wordmark, so it
+   is the one place that overrides the mark's square viewport: given the
+   wordmark's own 3.5:1 ratio, nothing is sliced off and all four letters
+   show. `min()` keeps that true on a narrow phone, where the card is the
+   width of the screen rather than 396px. */
 .auth-mascot .brand-mark {
-  width: 54px;
-  height: 54px;
+  width: min(189px, 100%);
+  height: auto;
 }
 
 .auth-mascot h1 {
@@ -691,9 +696,14 @@ svg.ui-icon {
 /* ------------------------------------------------------------- brand ---- */
 
 /* The mark takes its size from the `width`/`height` the caller passes to
-   `brandMark` — 26 in the sidebar's crown, 54 on the sign-in card. It used to
-   be pinned to 34px here, which is neither, and every caller that asked for
-   another size was quietly overruled unless it also had a rule of its own. */
+   `brandMark` — 28 in the channel rail's crown, 54 on the sign-in card. It
+   used to be pinned to 34px here, which is neither, and every caller that
+   asked for another size was quietly overruled unless it also had a rule of
+   its own.
+
+   A square box is the badge: the wordmark is sliced from its left edge, so
+   what a caller asking for one gets is the K. Widening the box is what shows
+   the rest of the word, which only the sign-in card below does. */
 .brand-mark {
   flex: none;
 }
