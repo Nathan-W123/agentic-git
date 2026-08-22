@@ -3667,6 +3667,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
     "isThreadThinking",
     "threadSaidCount",
     "threadAwaitsGoAhead",
+    "planTranscriptReplies",
     "threadReplyTurns",
     "channelAuthor",
     "agentFace",
@@ -3686,6 +3687,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
     () => false,
     (said: number) => `${said} replies`,
     () => false,
+    (_entry: unknown, replies: unknown[]) => replies,
     (replies: unknown[]) => [{ replies }],
     (_repositoryId: string, reply: { author: string; agent?: boolean }) => ({
       name: reply.author,
@@ -4850,6 +4852,99 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(chats, /const PLAN_LAPSED_PREFIX = "⌛ Plan expired";/u);
   assert.match(chats, /const lapsed =\s*!held &&/u);
   assert.match(chats, /Nobody started this in time, so it was let go\./u);
+
+  // The panel is the approval record people act on, so its workflow markers
+  // do not also pose as conversation. They stay in the stored reply list for
+  // the gateway; only the three visible transcript surfaces use this view.
+  const transcriptStart = chats.indexOf("function planTranscriptReplies(");
+  const transcriptEnd = chats.indexOf(
+    "\n/**\n * How a plan nobody started",
+    transcriptStart,
+  );
+  assert.notEqual(transcriptStart, -1, "plan replies should have a visible view");
+  assert.notEqual(transcriptEnd, -1, "the visible plan reply view has a boundary");
+  assert.match(
+    chats,
+    /const PLAN_LIFECYCLE_REPLY_PREFIXES = \[\s*HOLD_NOTICE_PREFIX,\s*"Starting now\.",\s*"▶ Go-ahead received",\s*\];/u,
+  );
+  const planTranscriptReplies = Function(
+    "planReplyOf",
+    "PLAN_LIFECYCLE_REPLY_PREFIXES",
+    `"use strict";\n${chats.slice(transcriptStart, transcriptEnd)}\nreturn planTranscriptReplies;`,
+  )(
+    (entry: { replies?: Array<{ kind?: string }> }) =>
+      entry?.replies?.find((reply) => reply.kind === "plan"),
+    ["⏸ Waiting on you", "Starting now.", "▶ Go-ahead received"],
+  ) as <T extends { kind: string; content: string }>(entry: {
+    replies: T[];
+  }) => T[];
+  const planReplies = [
+    { kind: "plan", content: "# A short plan" },
+    { kind: "outcome", content: "⏸ Waiting on you — read the plan." },
+    { kind: "user", content: "go ahead" },
+    { kind: "progress", content: "Starting now." },
+    {
+      kind: "outcome",
+      content: "▶ Go-ahead received — picking this back up now.",
+    },
+    { kind: "agent", content: "The ordinary answer stays visible." },
+    { kind: "outcome", content: "⌛ Plan expired — nobody started this." },
+    { kind: "user", content: "go ahead with the documentation too" },
+  ];
+  assert.deepEqual(
+    planTranscriptReplies({ replies: planReplies }).map(
+      (reply) => reply.content,
+    ),
+    [
+      "# A short plan",
+      "The ordinary answer stays visible.",
+      "⌛ Plan expired — nobody started this.",
+      "go ahead with the documentation too",
+    ],
+    "only redundant plan approval chatter should disappear",
+  );
+  const reviewReplies = [
+    { kind: "outcome", content: "⏸ Waiting on you — this needs a review." },
+    { kind: "user", content: "go ahead" },
+    {
+      kind: "outcome",
+      content: "▶ Go-ahead received — picking this back up now.",
+    },
+  ];
+  assert.deepEqual(
+    planTranscriptReplies({ replies: reviewReplies }),
+    reviewReplies,
+    "a review gate without a plan keeps its lifecycle conversation",
+  );
+  const summary = chats.slice(
+    chats.indexOf("function threadSummaryLink("),
+    chats.indexOf(
+      "\n/**\n * How the room's own hold line",
+      chats.indexOf("function threadSummaryLink("),
+    ),
+  );
+  const list = chats.slice(
+    chats.indexOf("function threadListPanel("),
+    chats.indexOf("\n/**\n * Your own agent", chats.indexOf("function threadListPanel(")),
+  );
+  const renderer = chats.slice(
+    chats.indexOf("function threadReplies("),
+    chats.indexOf("\n/**\n * A plan, in the thread", chats.indexOf("function threadReplies(")),
+  );
+  assert.match(
+    summary,
+    /const visibleReplies = planTranscriptReplies\(entry, replies\)/u,
+  );
+  assert.match(summary, /const said = visibleReplies\.filter/u);
+  assert.match(
+    summary,
+    /threadParticipants\(visibleReplies, repositoryId\)/u,
+  );
+  assert.match(list, /const replies = planTranscriptReplies\(entry\)/u);
+  assert.match(list, /const count = replies\.filter/u);
+  assert.match(renderer, /const replies = planTranscriptReplies\(root\)/u);
+  assert.match(renderer, /const said = replies\.filter/u);
+  assert.match(renderer, /threadReplyTurns\(replies\)/u);
 
   // Approving from the panel is the same event as typing it, so a plan let go
   // from here leaves the same record in the thread.

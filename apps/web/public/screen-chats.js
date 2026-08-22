@@ -1367,11 +1367,12 @@ function threadSaidCount(said) {
  * moving it.
  */
 function threadSummaryLink(entry, replies, repositoryId, progress) {
+  const visibleReplies = planTranscriptReplies(entry, replies);
   const titled = threadTitleReply(entry);
-  const said = replies.filter(
+  const said = visibleReplies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
-  const participants = threadParticipants(replies, repositoryId);
+  const participants = threadParticipants(visibleReplies, repositoryId);
   // Whoever the badge belongs to goes first. A stack of faces is in the order
   // people happened to speak, which is no help at all when the question the
   // reader has is "who is on this right now" — so the one being measured is
@@ -1444,6 +1445,34 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
  * the one thing the text cannot carry — which thread it is talking about.
  */
 const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
+
+/**
+ * Workflow markers the plan panel already communicates by changing state.
+ *
+ * They remain in the stored thread for the gateway to resume and audit the
+ * run, but repeating them in the conversation makes approving one plan look
+ * like four separate replies. The expiry marker is deliberately absent: it
+ * is an outcome somebody still needs to see.
+ */
+const PLAN_LIFECYCLE_REPLY_PREFIXES = [
+  HOLD_NOTICE_PREFIX,
+  "Starting now.",
+  "▶ Go-ahead received",
+];
+
+/** Replies that belong in the visible conversation around a plan. */
+function planTranscriptReplies(root, replies = root?.replies ?? []) {
+  if (planReplyOf(root) === undefined) {
+    return replies;
+  }
+  return replies.filter((reply) => {
+    const content = String(reply.content ?? "").trim();
+    return !(
+      (reply.kind === "user" && content.toLowerCase() === "go ahead") ||
+      PLAN_LIFECYCLE_REPLY_PREFIXES.some((prefix) => content.startsWith(prefix))
+    );
+  });
+}
 
 /**
  * How a plan nobody started in time is marked, as the gateway writes it.
@@ -3806,7 +3835,7 @@ function threadListPanel(repositoryId) {
           ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
           : threads
               .map((entry) => {
-                const replies = entry.replies ?? [];
+                const replies = planTranscriptReplies(entry);
                 const titled = threadTitleReply(entry);
                 // Thinking is the run talking to itself; it has never been a
                 // reply and should not be counted as one here either. The
@@ -5063,7 +5092,7 @@ function threadThinkingBlock(rootId, turn, index) {
  * work. Keeping the same fold per turn preserves chronology and causality.
  */
 function threadReplies(root, repositoryId) {
-  const replies = root.replies ?? [];
+  const replies = planTranscriptReplies(root);
   if (replies.length === 0) {
     return `<div class="thread-count">No replies yet</div>`;
   }
