@@ -1176,15 +1176,23 @@ svg.ui-icon {
   flex: 1;
 }
 
-/* A bar has two ends, so it is drawn in both colours: the fill leaves in the
-   primary and arrives in the secondary. A flat fill says how far; a fill that
-   changes along its length says which way. The semantic fills below keep their
-   one colour — green means passing and nothing about taste changes that. */
+/* A live bar carries the same travelling highlight as status copy — the fill
+   still reads how far, but the sweep says the run is ongoing rather than a
+   frozen fraction. Semantic fills below keep one flat colour: green means
+   passing and nothing about taste changes that. */
 .bar > i {
   display: block;
   height: 100%;
   border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  background: linear-gradient(
+    100deg,
+    var(--accent-dim) 0 38%,
+    var(--accent-2-bright) 48%,
+    var(--accent-dim) 58% 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  animation: thread-activity-sweep 2.4s ease-in-out infinite;
   transition: width 0.4s ease;
 }
 
@@ -1206,6 +1214,13 @@ svg.ui-icon {
 
 .bar > i.grey {
   background: var(--text-4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar > i:not(.green):not(.blue):not(.orange):not(.grey) {
+    animation: none;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  }
 }
 
 /* Context usage: same optical weight as the icons beside it. */
@@ -5833,10 +5848,11 @@ button.chip.lg:hover {
   pointer-events: none;
 }
 
-/* Every grouped path leaves its avatar from the same point, four pixels below
-   the 32px face, regardless of the height of that first message. */
+/* Every grouped path leaves its avatar from the same point, eight pixels below
+   the 32px face, regardless of the height of that first message. The small
+   break keeps the connector visually separate from the face. */
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
-  top: 44px;
+  top: 48px;
 }
 
 /* The final row owns a wrapper that stops immediately after the thread link.
@@ -5874,7 +5890,7 @@ button.chip.lg:hover {
 
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
   .cmsg-thread-route::before {
-  top: 37px;
+  top: 41px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -6510,8 +6526,8 @@ button.chip.lg:hover {
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
    eleven-pixel quarter turn starts at the stem's tangent instead of laying a
-   second upright over it; the five-pixel gap gives the stroke and replier face
-   the same close breathing room as the avatar and stem above. Where the turn
+   second upright over it; the nine-pixel gap gives the stroke and replier face
+   the same quiet breathing room as the avatar and stem above. Where the turn
    does still meet the stem it meets it in
    the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
    the rest of the line.
@@ -6521,7 +6537,7 @@ button.chip.lg:hover {
    own three-pixel left stroke hung *outside* the declared width and pushed
    the whole corner three pixels further left than the stem it turns out of —
    a visible step where the two should be one line. Sized by the border box,
-   the gap plus the 24px of elbow put that stroke in the connector's own
+   the gap plus the 20px of elbow put that stroke in the connector's own
    column, exactly where the stem above it stands: the gap is read from
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
@@ -6535,8 +6551,8 @@ button.chip.lg:hover {
   position: absolute;
   box-sizing: border-box;
   top: calc(50% - 8px);
-  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 24px);
-  width: 24px;
+  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
+  width: 20px;
   height: 11px;
   border-left: 3px solid var(--cmsg-stem);
   border-bottom: 3px solid var(--cmsg-stem);
@@ -6552,7 +6568,7 @@ button.chip.lg:hover {
   content: "";
   position: absolute;
   top: 50%;
-  right: calc(100% + 4px);
+  right: calc(100% + 8px);
   width: 3px;
   height: 3px;
   border-radius: 50%;
@@ -8329,7 +8345,7 @@ body.resizing-panel {
   content: "";
   position: absolute;
   left: 15px;
-  top: 44px;
+  top: 48px;
   bottom: -15px;
   width: 11px;
   border-left: 3px solid var(--border-strong);
