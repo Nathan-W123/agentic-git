@@ -1016,10 +1016,10 @@ export function agentFace(agent, size = 34, indicator = {}) {
     }"
     title="${esc(
       agent?.name ?? AGENTS[kind].label,
-    )}">${vendorMark(kind)}${
+    )}">${vendorMark(kind)}<i class="presence presence-${presence}"></i>${
       working
         ? '<i class="agent-run" aria-label="Working"></i>'
-        : `<i class="presence presence-${presence}"></i>`
+        : ""
     }</span>`;
 }
 

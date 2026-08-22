@@ -1000,48 +1000,50 @@ svg.ui-icon {
   position: absolute;
   right: -2px;
   bottom: 0;
+  /* Above the progress ring: where the two meet in the corner, the badge is
+     the thing that has to stay readable. */
+  z-index: 1;
   width: 9px;
   height: 9px;
   border-radius: 50%;
   border: 2px solid var(--bg-card);
 }
 
-/* Live work keeps the ordinary green status dot and adds progress around it.
-   The ring starts on its quiet track and fills clockwise; it stays in the
-   corner so progress never paints over the agent mark itself. The surface
-   ring that lifts it off the mark is a single pixel: any thicker and the
-   white read as the widest band in the badge, which made the one-pixel
-   progress stroke inside it look like a hairline mistake. */
+/* Progress is read around the agent itself, not around the status badge. The
+   run sweeps clockwise as a pie-chart ring circling the mark, and the mark is
+   what it fills: a task at 0% shows the face at half strength, and it comes
+   up to full as the ring closes. The status dot stays exactly where it was —
+   it says what the agent is, the ring says how far the work has got. */
 .agent-face .agent-run {
   position: absolute;
-  right: -2px;
-  bottom: 0;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 9px;
-  height: 9px;
+  inset: -2px;
+  z-index: 0;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
     var(--border-strong) 0
   );
-  box-shadow: 0 0 0 1px var(--bg-card);
+  /* The disc is masked back to a ring so the sweep never paints over the
+     face. Everything inside the stroke is cut away rather than covered, which
+     keeps the mark's own opacity the only thing saying how far along it is. */
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
   pointer-events: none;
 }
 
-/* The solid centre says what the ring is measuring: green means coding. It is
-   lit rather than breathing — the ring beside it is already the moving part,
-   and a dot that faded underneath a filling ring read as two clocks running
-   against each other. The surface-coloured gap keeps the static dot and the
-   one-pixel progress stroke as two readings. */
-.agent-face .agent-run::after {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 1px var(--bg-card);
+/* Half-lit at nothing done, fully lit at done. The mark is the progress bar's
+   own fill, so a glance at the face alone already says roughly how far a run
+   has got, before anyone reads the ring around it. */
+.agent-face-working svg {
+  opacity: calc(0.5 + var(--run, 0) * 0.005);
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -5935,8 +5937,8 @@ button.chip.lg:hover {
    that; in the room it sits on the one face at the head of a message, where
    the same dot read as a bead stuck to the mark. Halved here and nowhere
    else, so the side tab keeps the size it was asked to keep. The surface ring
-   and the progress track halve with it: a one-pixel band around a 5px badge
-   is the reading the two-pixel band gave the 9px one. */
+   halves with it: a one-pixel band around a 5px badge is the reading the
+   two-pixel band gave the 9px one. */
 .cmsg-row .cmsg-avatar .agent-face .presence {
   right: -1px;
   width: 5px;
@@ -5944,15 +5946,20 @@ button.chip.lg:hover {
   border-width: 1px;
 }
 
+/* The ring travels around a face rather than beside it, so a smaller face in
+   the transcript only needs a thinner stroke, not a smaller badge. */
 .cmsg-row .cmsg-avatar .agent-face .agent-run {
-  right: -1px;
-  width: 5px;
-  height: 5px;
-}
-
-.cmsg-row .cmsg-avatar .agent-face .agent-run::after {
-  width: 3px;
-  height: 3px;
+  inset: -1.5px;
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 1.5px),
+    #000 calc(100% - 1.5px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 1.5px),
+    #000 calc(100% - 1.5px)
+  );
 }
 
 /* Threads reuse the room transcript markup, but the status badge on a face
@@ -5965,13 +5972,17 @@ button.chip.lg:hover {
 }
 
 .thread-panel .cmsg-row .cmsg-avatar .agent-face .agent-run {
-  width: 7.5px;
-  height: 7.5px;
-}
-
-.thread-panel .cmsg-row .cmsg-avatar .agent-face .agent-run::after {
-  width: 4.5px;
-  height: 4.5px;
+  inset: -2px;
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
 }
 
 .cmsg-row .cmsg-body {
@@ -6672,8 +6683,8 @@ button.chip.lg:hover {
 }
 
 /* The working agent stays at the front of the stack. Its status is the same
-   green dot used elsewhere, with the run's position filling the ring around
-   that dot instead of covering the agent mark. */
+   green dot used elsewhere, and the run's position circles the face itself —
+   the same reading the roster gives, at the size the stack allows. */
 .cmsg-thread-link .ctl-faces .ctl-working {
   position: relative;
   z-index: 1;
@@ -6698,17 +6709,32 @@ button.chip.lg:hover {
 .cmsg-thread-link .ctl-faces .ctl-working::after {
   content: "";
   position: absolute;
-  right: -1px;
-  bottom: 0;
-  width: 7px;
-  height: 7px;
+  inset: -2px;
+  z-index: 1;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
     var(--border-strong) 0
   );
-  box-shadow: 0 0 0 1px var(--bg-chat);
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 1.5px),
+    #000 calc(100% - 1.5px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 1.5px),
+    #000 calc(100% - 1.5px)
+  );
   pointer-events: none;
+}
+
+/* And the face inside it fills with the run, half-lit at nothing done and
+   fully lit when the ring closes — a thread's progress is legible from the
+   stack alone. */
+.cmsg-thread-link .ctl-faces .ctl-working > .agent-face,
+.cmsg-thread-link .ctl-faces .ctl-working > .avatar {
+  opacity: calc(0.5 + var(--run, 0) * 0.005);
 }
 
 /* ------------------------------------------------------------ mention ---- */
