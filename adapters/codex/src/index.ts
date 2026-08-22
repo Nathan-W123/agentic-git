@@ -137,7 +137,15 @@ const PLAN_SCHEMA = {
     taskId: { type: "string" },
     objective: { type: "string" },
     expectedFiles: { type: "array", items: { type: "string" } },
-    expectedSymbols: { type: "array", items: { type: "string" } },
+    expectedSymbols: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Every function, class or method this task will add, change or " +
+        "remove, including ones that do not exist yet. Naming them lets " +
+        "another task work elsewhere in the same file; an empty list claims " +
+        "each listed file whole.",
+    },
     expectedApis: { type: "array", items: { type: "string" } },
     expectedSchemas: { type: "array", items: { type: "string" } },
     expectedConfigKeys: { type: "array", items: { type: "string" } },
@@ -2052,7 +2060,15 @@ export class CodexAdapter implements AgentAdapter {
       `Canonical revision: ${input.canonicalVersion.revision}`,
       `Required validation commands: ${JSON.stringify(input.task.validationCommands)}`,
       "List every repository-relative file you expect to change.",
-      "List affected symbols, APIs, schemas, configuration keys, tests, and services.",
+      // Naming the functions is what lets somebody else work in the same file
+      // at the same time: arbitration withholds the ones named here and grants
+      // the rest of the file to whoever asks next. An empty list is read as a
+      // claim on every file listed, whole — the difference between a colleague
+      // working alongside this task and one waiting for it to finish.
+      "In expectedSymbols, name every function, class or method you expect to",
+      "add, change or remove, including ones that do not exist yet. Leave it",
+      "empty only for a change that belongs to no declaration at all.",
+      "List affected APIs, schemas, configuration keys, tests, and services.",
       "State a concise intent that distinguishes adding, removing, enabling, or disabling behavior.",
       "List external access honestly; the execution sandbox may deny it.",
     ].join("\n");

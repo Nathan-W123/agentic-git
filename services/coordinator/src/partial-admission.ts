@@ -94,9 +94,39 @@ export function splitChangeSet(
   const withheldSymbols: Record<string, string[]> = {};
   const divided: DividedPatch[] = [];
 
-  /** Where the withheld symbols sit in one file, as far as the index knows. */
+  /**
+   * Where the withheld symbols sit in one file.
+   *
+   * The admission's own answer first, and the index only as the fallback.
+   * Arbitration already worked out which lines it was withholding and wrote
+   * them onto each resource, and that answer is strictly better than one
+   * re-derived here: it can name a span the index cannot. A holder that is
+   * going to *add* a function has no range in the index to point at, but
+   * arbitration knows the places that function could land — the gaps between
+   * declarations, the preamble, the tail — and withholds those. Looking the
+   * name up in the index would find nothing and promote the lot.
+   */
+  const locatedRanges = new Map<string, NamedRange[]>();
+  for (const resource of admission.deferredResources ?? []) {
+    if (resource.resourceType !== "symbol") {
+      continue;
+    }
+    for (const location of resource.locations ?? []) {
+      const existing = locatedRanges.get(location.file) ?? [];
+      existing.push({
+        name: resource.resourceId,
+        startLine: location.startLine,
+        endLine: location.endLine,
+      });
+      locatedRanges.set(location.file, existing);
+    }
+  }
+  const withheldNamedRanges = (
+    file: string,
+  ): readonly NamedRange[] | undefined =>
+    locatedRanges.get(file) ?? symbolRangesInFile?.(file);
   const withheldRangesIn = (file: string): LineRange[] =>
-    (symbolRangesInFile?.(file) ?? []).filter((range) =>
+    (withheldNamedRanges(file) ?? []).filter((range) =>
       withheldSet.has(range.name),
     );
 
@@ -115,7 +145,7 @@ export function splitChangeSet(
         ? []
         : namesTouchedByPatch(
             patch.patch,
-            symbolRangesInFile?.(patch.path),
+            withheldNamedRanges(patch.path),
             withheldNames,
           );
     if (reached.length > 0) {

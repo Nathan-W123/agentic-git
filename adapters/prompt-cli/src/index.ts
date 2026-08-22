@@ -1026,6 +1026,14 @@ const PLAN_SHAPE_INSTRUCTIONS = [
   '  expectedConfigKeys, expectedTests, expectedServices, dependencies,',
   '  commands (array of {executable, args, label}), externalAccess,',
   '  riskLevel ("low"|"medium"|"high"|"critical"), intent (a non-empty concise string)',
+  // Naming the functions is what lets somebody else work in the same file at
+  // the same time: arbitration withholds the ones named here and grants the
+  // rest of the file to whoever asks next. An empty list is read as a claim on
+  // every file listed, whole, so it is the difference between a colleague
+  // working alongside this task and one waiting for it.
+  "expectedSymbols matters more than it looks: name every function, class or",
+  "method you expect to add, change or remove, including ones you will create.",
+  "Leave it empty only for a change that belongs to no declaration at all.",
 ].join("\n");
 
 /**
