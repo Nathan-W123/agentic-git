@@ -51,69 +51,87 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * The local subset of Coolicons v4.1 selected for Kumi's interface.
- * Coolicons is by Kryston Schwarze and licensed under CC BY 4.0:
- * https://github.com/krystonschwarze/coolicons/tree/v4.1
+ * The local subset of Basil Icons selected for Kumi's interface.
+ *
+ * Basil is by Zaid Bin Sayeed and published to the Figma community under
+ * CC BY 4.0:
+ * https://www.figma.com/community/file/1219493694635474558
  * https://creativecommons.org/licenses/by/4.0/
  *
- * Only the geometry the product uses is kept inline, so the marks stay instant
- * and available when the control plane is offline. The shared wrapper preserves
- * Coolicons' 24px grid, two-pixel rounded stroke and `currentColor` behaviour,
- * while keeping every interface mark decorative to assistive technology.
- * Product-only concepts (agents and the Kumi network) use that same grid and
- * optical weight rather than introducing a second visual language.
+ * It replaces the line set the interface used before, wholesale rather than
+ * icon by icon: half a set is worse than either whole one, because the eye
+ * reads the difference in weight long before it reads the picture. Basil's
+ * marks sit large in the box with soft, generous corners and one light
+ * rounded stroke, which is the friendlier register this product wanted.
+ *
+ * Only the geometry the product uses is kept inline, so the marks stay
+ * instant and available when the control plane is offline. The shared wrapper
+ * preserves Basil's 24px grid, 1.8px rounded stroke and `currentColor`
+ * behaviour, while keeping every interface mark decorative to assistive
+ * technology. Product-only concepts (agents and the Kumi network) use that
+ * same grid and optical weight rather than introducing a second visual
+ * language, and the two vendor marks here — GitHub and Google — stay their
+ * owners' published artwork, because a logo redrawn in somebody else's style
+ * is no longer the logo.
  */
 const S = (body, extra = "") =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="coolicons" data-icon-source="coolicons-v4.1"${extra}>${body}</svg>`;
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="basil" data-icon-source="basil-icons-community"${extra}>${body}</svg>`;
 
 export const ICONS = {
-  home: S('<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>'),
-  folder: S(
-    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  home: S(
+    '<path d="M3.8 10.6 12 4.1l8.2 6.5v8.1a1.8 1.8 0 0 1-1.8 1.8H5.6a1.8 1.8 0 0 1-1.8-1.8z"/><path d="M9.6 20.5v-5a2.4 2.4 0 0 1 4.8 0v5"/>',
   ),
-  code: S('<path d="m9 17-5-5 5-5"/><path d="m15 7 5 5-5 5"/>'),
+  folder: S(
+    '<path d="M3.2 8.2A2.8 2.8 0 0 1 6 5.4h2.7c.6 0 1.2.2 1.7.6l1.5 1.2h6.1a2.8 2.8 0 0 1 2.8 2.8v6.6a2.8 2.8 0 0 1-2.8 2.8H6a2.8 2.8 0 0 1-2.8-2.8z"/>',
+  ),
+  code: S(
+    '<path d="M8.4 8.2 4.2 12l4.2 3.8"/><path d="m15.6 8.2 4.2 3.8-4.2 3.8"/><path d="m13.4 6-2.8 12"/>',
+  ),
   robot: S(
-    '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4.5"/><circle cx="12" cy="3.4" r="1.3"/><circle cx="9.2" cy="13.4" r="1.15" fill="currentColor" stroke="none"/><circle cx="14.8" cy="13.4" r="1.15" fill="currentColor" stroke="none"/><path d="M9.6 16.8h4.8"/>',
+    '<rect x="3.4" y="7.4" width="17.2" height="12.4" rx="4.6"/><path d="M12 7.4V4.7"/><circle cx="12" cy="3.5" r="1.2"/><circle cx="9" cy="12.8" r="1.25" fill="currentColor" stroke="none"/><circle cx="15" cy="12.8" r="1.25" fill="currentColor" stroke="none"/><path d="M9.9 16.4h4.2"/>',
   ),
   // Head and shoulders, the two of them deliberately the same silhouette so
   // the pair reads as one count of people beside one count of agents rather
-  // than as two unrelated pictures. Square head and antenna for the agent,
-  // round head for the person; nothing below the shoulders in either.
+  // than as two unrelated pictures. Soft-cornered head and antenna for the
+  // agent, round head for the person; nothing below the shoulders in either.
   personBust: S(
-    '<circle cx="12" cy="8" r="3.4"/><path d="M5.5 19.5c0-3.3 2.9-5.6 6.5-5.6s6.5 2.3 6.5 5.6"/>',
+    '<circle cx="12" cy="7.9" r="3.6"/><path d="M4.9 20.1c0-3.5 3.2-5.7 7.1-5.7s7.1 2.2 7.1 5.7"/>',
   ),
   robotBust: S(
-    '<rect x="6.6" y="5.2" width="10.8" height="8.4" rx="2.4"/><path d="M12 5.2V3"/><circle cx="12" cy="2.3" r="1"/><circle cx="9.8" cy="9.2" r="0.95" fill="currentColor" stroke="none"/><circle cx="14.2" cy="9.2" r="0.95" fill="currentColor" stroke="none"/><path d="M5.5 19.5c0-3.1 2.9-5.3 6.5-5.3s6.5 2.2 6.5 5.3"/>',
+    '<rect x="6.4" y="5" width="11.2" height="8.6" rx="3.2"/><path d="M12 5V3.1"/><circle cx="12" cy="2.4" r="1"/><circle cx="9.7" cy="9.2" r="1.05" fill="currentColor" stroke="none"/><circle cx="14.3" cy="9.2" r="1.05" fill="currentColor" stroke="none"/><path d="M4.9 20.1c0-3.3 3.2-5.4 7.1-5.4s7.1 2.1 7.1 5.4"/>',
   ),
   network: S(
-    '<circle cx="12" cy="12" r="3"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="m6.6 6.6 3 3M17.4 6.6l-3 3M6.6 17.4l3-3M17.4 17.4l-3-3"/>',
+    '<circle cx="12" cy="12" r="3.2"/><circle cx="4.8" cy="5.8" r="2.2"/><circle cx="19.2" cy="5.8" r="2.2"/><circle cx="12" cy="20.1" r="2.2"/><path d="m6.5 7.3 3.2 2.6M17.5 7.3l-3.2 2.6M12 15.2v2.7"/>',
   ),
   bell: S(
-    '<path d="M18 9a6 6 0 0 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/>',
+    '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/>',
   ),
   gear: S(
-    '<circle cx="12" cy="12" r="3"/><path d="M19.4 14.5a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.46V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.46-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.6 1.6 0 0 0 9 4.72 1.6 1.6 0 0 0 10 3.26V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.46 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.6 1.6 0 0 0 19.28 9a1.6 1.6 0 0 0 1.46 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/>',
+    '<circle cx="12" cy="12" r="3.2"/><path d="M12 3.2v2.3M12 18.5v2.3M20.8 12h-2.3M5.5 12H3.2M18.2 5.8l-1.7 1.7M7.5 16.5l-1.7 1.7M18.2 18.2l-1.7-1.7M7.5 7.5 5.8 5.8"/>',
   ),
-  search: S('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/>'),
-  plus: S('<path d="M12 5v14M5 12h14"/>'),
-  close: S('<path d="M18 6 6 18M6 6l12 12"/>'),
+  search: S('<circle cx="10.9" cy="10.9" r="6.5"/><path d="m15.7 15.7 3.9 3.9"/>'),
+  plus: S('<path d="M12 5.4v13.2M5.4 12h13.2"/>'),
+  close: S('<path d="M17.6 6.4 6.4 17.6M6.4 6.4l11.2 11.2"/>'),
   // Deleting is the one action here that destroys something, so it gets its
   // own mark rather than borrowing the close cross — the two must not be a
   // slip apart.
   trash: S(
-    '<path d="M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3"/>',
+    '<path d="M4.4 6.7h15.2"/><path d="M9.4 6.7V5.4A1.6 1.6 0 0 1 11 3.8h2a1.6 1.6 0 0 1 1.6 1.6v1.3"/><path d="m6.5 6.7.8 11.5a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9l.8-11.5"/><path d="M10.4 10.6v5.3M13.6 10.6v5.3"/>',
   ),
-  chevronDown: S('<path d="m6 9 6 6 6-6"/>'),
-  chevronRight: S('<path d="m9 6 6 6-6 6"/>'),
-  chevronUp: S('<path d="m6 15 6-6 6 6"/>'),
-  arrowRight: S('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
-  arrowLeft: S('<path d="M19 12H5"/><path d="m11 6-6 6 6 6"/>'),
+  chevronDown: S('<path d="m7.4 10 4.6 4.4L16.6 10"/>'),
+  chevronRight: S('<path d="m10 7.4 4.4 4.6L10 16.6"/>'),
+  chevronUp: S('<path d="m7.4 14 4.6-4.4L16.6 14"/>'),
+  arrowRight: S('<path d="M4.4 12h15.2"/><path d="m13.4 6.2 5.8 5.8-5.8 5.8"/>'),
+  arrowLeft: S('<path d="M19.6 12H4.4"/><path d="m10.6 6.2-5.8 5.8 5.8 5.8"/>'),
   branch: S(
-    '<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2"/><path d="M18 10.4c0 4-4.2 3.4-6.6 4.6"/>',
+    '<circle cx="7" cy="5.8" r="2.4"/><circle cx="7" cy="18.2" r="2.4"/><circle cx="17" cy="7.6" r="2.4"/><path d="M7 8.2v7.6"/><path d="M17 10c0 3.7-3.3 4.4-6.3 5.4"/>',
   ),
   git: S(
-    '<circle cx="12" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M12 8.2v7.6"/>',
+    '<circle cx="12" cy="12" r="3.1"/><path d="M3.6 12h5.3M15.1 12h5.3"/>',
   ),
+  // GitHub and Google keep their owners' published artwork rather than being
+  // redrawn in Basil's hand: a logo in somebody else's style is a drawing of
+  // a logo, and these two say which account somebody is signing in with.
   github: S(
     '<path d="M9 19c-4 1.2-4-2.2-5.6-2.8M15 21v-3.3c0-.9-.1-1.3-.6-1.8 2.4-.3 4.8-1.2 4.8-5.2a4 4 0 0 0-1.1-2.8 3.7 3.7 0 0 0-.1-2.8s-.9-.3-2.9 1.1a10 10 0 0 0-5.2 0C7.9 2 7 2.3 7 2.3a3.7 3.7 0 0 0-.1 2.8A4 4 0 0 0 5.8 8c0 3.9 2.4 4.8 4.7 5.2-.3.3-.6.8-.6 1.6V21"/>',
   ),
@@ -121,124 +139,142 @@ export const ICONS = {
     '<path d="M20.6 12.2c0-.6-.1-1.2-.2-1.8H12v3.4h4.8a4.1 4.1 0 0 1-1.8 2.7v2.2h2.9a8.6 8.6 0 0 0 2.7-6.5z"/><path d="M12 21a8.5 8.5 0 0 0 5.9-2.2l-2.9-2.2A5.3 5.3 0 0 1 12 17.4a5.3 5.3 0 0 1-4.9-3.6H4.1v2.3A9 9 0 0 0 12 21z"/><path d="M7.1 13.8a5.3 5.3 0 0 1 0-3.4V8.1H4.1a9 9 0 0 0 0 8.1z"/><path d="M12 6.6c1.3 0 2.5.5 3.5 1.4l2.6-2.6A9 9 0 0 0 4.1 8.1l3 2.3A5.3 5.3 0 0 1 12 6.6z"/>',
   ),
   cloud: S(
-    '<path d="M17.5 19a4.5 4.5 0 0 0 .3-9 6 6 0 0 0-11.6 1.6A3.7 3.7 0 0 0 7 19z"/>',
+    '<path d="M7.6 19.2a4.4 4.4 0 0 1-.7-8.7 5.7 5.7 0 0 1 10.8 1.1 3.8 3.8 0 0 1-.5 7.6z"/>',
   ),
   link: S(
-    '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7L12.7 18"/>',
+    '<path d="M10.3 13.7a3.9 3.9 0 0 0 5.9.4l2.1-2.1a3.9 3.9 0 0 0-5.5-5.5l-1.2 1.2"/><path d="M13.7 10.3a3.9 3.9 0 0 0-5.9-.4l-2.1 2.1a3.9 3.9 0 0 0 5.5 5.5l1.2-1.2"/>',
   ),
-  star: S('<path d="m12 3.6 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.8l5.9-.9z"/>'),
+  star: S(
+    '<path d="m12 3.8 2.6 5.2 5.8.9-4.2 4 1 5.7-5.2-2.7-5.2 2.7 1-5.7-4.2-4 5.8-.9z"/>',
+  ),
   dots: S(
-    '<circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"/>',
+    '<circle cx="12" cy="5.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="18.8" r="1.5" fill="currentColor" stroke="none"/>',
   ),
   dotsHorizontal: S(
-    '<circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/>',
+    '<circle cx="5.2" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="18.8" cy="12" r="1.5" fill="currentColor" stroke="none"/>',
   ),
-  filter: S('<path d="M3 5h18l-7 8v6l-4 2v-8z"/>'),
+  filter: S('<path d="M4.4 7.2h15.2M7.2 12h9.6M10 16.8h4"/>'),
   grid: S(
-    '<rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/>',
+    '<rect x="3.8" y="3.8" width="7.4" height="7.4" rx="2.6"/><rect x="12.8" y="3.8" width="7.4" height="7.4" rx="2.6"/><rect x="3.8" y="12.8" width="7.4" height="7.4" rx="2.6"/><rect x="12.8" y="12.8" width="7.4" height="7.4" rx="2.6"/>',
   ),
-  list: S('<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>'),
+  list: S(
+    '<path d="M9 6.6h10.6M9 12h10.6M9 17.4h10.6"/><circle cx="4.8" cy="6.6" r="1.15" fill="currentColor" stroke="none"/><circle cx="4.8" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="4.8" cy="17.4" r="1.15" fill="currentColor" stroke="none"/>',
+  ),
   file: S(
-    '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    '<path d="M13.6 3.6H7.8a2.4 2.4 0 0 0-2.4 2.4v12a2.4 2.4 0 0 0 2.4 2.4h8.4a2.4 2.4 0 0 0 2.4-2.4V8.4z"/><path d="M13.4 3.8v2.9a1.8 1.8 0 0 0 1.8 1.8h3.1"/>',
   ),
   history: S(
-    '<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 5v4h4"/><path d="M12 8v4.4l3 1.7"/>',
+    '<path d="M3.8 12a8.2 8.2 0 1 0 2.6-6"/><path d="M3.6 5.2v4.2h4.2"/><path d="M12 7.9v4.4l3 1.7"/>',
   ),
   sparkle: S(
-    '<path d="M12 3.5 13.7 9l5.3 1.7L13.7 12.4 12 18l-1.7-5.6L5 10.7 10.3 9z"/><path d="M18.5 3.5v3M20 5h-3"/>',
+    '<path d="M11.4 4.2c0 3.7 2.5 6.2 6.2 6.2-3.7 0-6.2 2.5-6.2 6.2 0-3.7-2.5-6.2-6.2-6.2 3.7 0 6.2-2.5 6.2-6.2Z"/><path d="M18 15.6v3M19.5 17.1h-3"/>',
   ),
   wand: S(
-    '<path d="M4 20 13.5 10.5"/><path d="m16.5 4 .9 2.6L20 7.5l-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9z"/><path d="M6 5.5v2.6M7.3 6.8H4.7"/><path d="M19 14.5v2.2M20.1 15.6h-2.2"/>',
+    '<path d="M4.4 19.6 14 10"/><path d="m16.6 3.8.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9z"/><path d="M6.4 5.2v2.4M7.6 6.4H5.2"/><path d="M19.2 14.4v2.2M20.3 15.5h-2.2"/>',
   ),
   paperclip: S(
-    '<path d="M20 11.5 12.4 19a4.6 4.6 0 0 1-6.5-6.5l7.7-7.7a3.1 3.1 0 0 1 4.3 4.3l-7.6 7.7a1.5 1.5 0 0 1-2.2-2.2l7-7"/>',
+    '<path d="M19.4 11.4 12 18.8a4.7 4.7 0 0 1-6.6-6.6l7.5-7.5a3.2 3.2 0 0 1 4.5 4.5l-7.4 7.5a1.6 1.6 0 0 1-2.3-2.3l6.8-6.8"/>',
   ),
   at: S(
-    '<circle cx="12" cy="12" r="3.6"/><path d="M15.6 12v1.4a2.6 2.6 0 0 0 5.2 0V12a8.8 8.8 0 1 0-3.5 7"/>',
+    '<circle cx="12" cy="12" r="3.5"/><path d="M15.5 12v1.4a2.6 2.6 0 0 0 5.1 0V12a8.6 8.6 0 1 0-3.4 6.8"/>',
   ),
-  send: S('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
+  send: S('<path d="M4.4 12h15.2"/><path d="m13.4 6.2 5.8 5.8-5.8 5.8"/>'),
   sliders: S(
-    '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+    '<path d="M4.4 8.2h3.4M12.2 8.2h7.4M4.4 15.8h7.4M15.8 15.8h3.8"/><circle cx="10" cy="8.2" r="2.3"/><circle cx="13.6" cy="15.8" r="2.3"/>',
   ),
-  check: S('<path d="m5 12.5 4.5 4.5L19 7"/>'),
+  check: S('<path d="m5.4 12.6 4.4 4.4L18.6 7.4"/>'),
   doubleCheck: S(
-    '<path d="m3.5 12.5 3.8 3.8 7.9-8.1"/><path d="m11.2 14.8 2 2 7.3-8.6"/>',
+    '<path d="m3.4 12.6 3.9 3.9 7.8-8.2"/><path d="m11.4 15.1 2 2 7.2-8.6"/>',
   ),
-  checkCircle: S('<circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-4.9"/>'),
-  closeCircle: S('<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/>'),
-  minusCircle: S('<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>'),
-  helpCircle: S('<circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.5 2.5 0 1 1 3.6 2.25c-.9.48-1.3 1-1.3 2"/><circle cx="12" cy="16.8" r=".85" fill="currentColor" stroke="none"/>'),
+  checkCircle: S(
+    '<circle cx="12" cy="12" r="8.4"/><path d="m8.4 12.2 2.5 2.5 4.7-5"/>',
+  ),
+  closeCircle: S('<circle cx="12" cy="12" r="8.4"/><path d="m9.2 9.2 5.6 5.6M14.8 9.2l-5.6 5.6"/>'),
+  minusCircle: S('<circle cx="12" cy="12" r="8.4"/><path d="M8.2 12h7.6"/>'),
+  helpCircle: S(
+    '<circle cx="12" cy="12" r="8.4"/><path d="M9.8 9.4a2.4 2.4 0 1 1 3.4 2.2c-.85.45-1.2.95-1.2 1.9"/><circle cx="12" cy="16.4" r=".9" fill="currentColor" stroke="none"/>',
+  ),
   alert: S(
-    '<path d="M12 4.5 21 20H3z"/><path d="M12 10v4"/><circle cx="12" cy="17" r="0.9" fill="currentColor" stroke="none"/>',
+    '<path d="M10.3 5a2 2 0 0 1 3.4 0l6.8 11.7a2 2 0 0 1-1.7 3H5.2a2 2 0 0 1-1.7-3z"/><path d="M12 9.6v3.9"/><circle cx="12" cy="16.6" r=".9" fill="currentColor" stroke="none"/>',
   ),
-  clock: S('<circle cx="12" cy="12" r="9"/><path d="M12 7v5.3l3.2 1.9"/>'),
+  clock: S('<circle cx="12" cy="12" r="8.4"/><path d="M12 7.2V12l3.1 1.8"/>'),
   users: S(
-    '<circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16.5 5.2a3.2 3.2 0 0 1 0 5.6"/><path d="M18 14.4a5.5 5.5 0 0 1 3 5.6"/>',
+    '<circle cx="9.4" cy="8.2" r="3.4"/><path d="M3.4 19.4a6 6 0 0 1 12 0"/><path d="M16.2 5.3a3.4 3.4 0 0 1 0 5.8"/><path d="M17.6 13.9a5.8 5.8 0 0 1 3 5.5"/>',
   ),
   lock: S(
-    '<rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+    '<rect x="4.6" y="10.2" width="14.8" height="9.6" rx="3.2"/><path d="M8 10.2V7.7a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15" r="1.25" fill="currentColor" stroke="none"/>',
   ),
-  play: S('<path d="M7 4.8 19 12 7 19.2z"/>'),
-  pause: S('<path d="M9 5v14M15 5v14"/>'),
+  play: S('<path d="M8 5.5 19 12 8 18.5z"/>'),
+  pause: S(
+    '<rect x="7.2" y="4.8" width="3.6" height="14.4" rx="1.7"/><rect x="13.2" y="4.8" width="3.6" height="14.4" rx="1.7"/>',
+  ),
   globe: S(
-    '<circle cx="12" cy="12" r="9"/><path d="M3.2 9.5h17.6M3.2 14.5h17.6"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/>',
+    '<circle cx="12" cy="12" r="8.4"/><path d="M3.7 9.6h16.6M3.7 14.4h16.6"/><path d="M12 3.6a14 14 0 0 1 0 16.8 14 14 0 0 1 0-16.8z"/>',
   ),
-  shield: S('<path d="M12 3.2 19 6v6c0 4.3-3 7.4-7 8.8-4-1.4-7-4.5-7-8.8V6z"/>'),
+  shield: S(
+    '<path d="M12 3.4 19 6.2v5.6c0 4.2-2.9 7.3-7 8.8-4.1-1.5-7-4.6-7-8.8V6.2z"/><path d="m9.2 12 2.1 2.1 3.5-4"/>',
+  ),
   sync: S(
-    '<path d="M20.5 12a8.5 8.5 0 0 1-14.6 6"/><path d="M3.5 12a8.5 8.5 0 0 1 14.6-6"/><path d="M18.5 2.5V6h-3.4M5.5 21.5V18h3.4"/>',
+    '<path d="M20.2 12a8.2 8.2 0 0 1-14.1 5.7"/><path d="M3.8 12a8.2 8.2 0 0 1 14.1-5.7"/><path d="M17.6 2.9v3.7h-3.7M6.4 21.1v-3.7h3.7"/>',
   ),
   database: S(
-    '<ellipse cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"/><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"/>',
+    '<ellipse cx="12" cy="6.2" rx="7.2" ry="2.8"/><path d="M4.8 6.2v11.6c0 1.6 3.2 2.8 7.2 2.8s7.2-1.2 7.2-2.8V6.2"/><path d="M4.8 12c0 1.6 3.2 2.8 7.2 2.8s7.2-1.2 7.2-2.8"/>',
   ),
   cpu: S(
-    '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>',
+    '<rect x="6.6" y="6.6" width="10.8" height="10.8" rx="3.2"/><rect x="10.2" y="10.2" width="3.6" height="3.6" rx="1.3"/><path d="M9.8 3.4v3.2M14.2 3.4v3.2M9.8 17.4v3.2M14.2 17.4v3.2M3.4 9.8h3.2M3.4 14.2h3.2M17.4 9.8h3.2M17.4 14.2h3.2"/>',
   ),
   layers: S(
-    '<path d="m12 3 8.5 4.5L12 12 3.5 7.5z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/>',
+    '<path d="m12 3.6 8.2 4.3-8.2 4.3-8.2-4.3z"/><path d="m4.4 12.4 7.6 4 7.6-4"/><path d="m4.4 16.4 7.6 4 7.6-4"/>',
   ),
   terminal: S(
-    '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="m6.5 9 3 3-3 3"/><path d="M13 15h4.5"/>',
+    '<rect x="2.8" y="4.4" width="18.4" height="15.2" rx="4.4"/><path d="m7.6 9.8 2.6 2.5-2.6 2.5"/><path d="M12.8 14.8h4.2"/>',
   ),
-  refresh: S(
-    '<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20.5 4v4h-4"/>',
-  ),
+  refresh: S('<path d="M20 12a8 8 0 1 1-2.5-5.8"/><path d="M20.4 4.2v4.2h-4.2"/>'),
   folderPlus: S(
-    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11.5v5M9.5 14h5"/>',
+    '<path d="M3.2 8.2A2.8 2.8 0 0 1 6 5.4h2.7c.6 0 1.2.2 1.7.6l1.5 1.2h6.1a2.8 2.8 0 0 1 2.8 2.8v6.6a2.8 2.8 0 0 1-2.8 2.8H6a2.8 2.8 0 0 1-2.8-2.8z"/><path d="M12 11v5M9.5 13.5h5"/>',
   ),
   columns: S(
-    '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
+    '<rect x="3.4" y="4.6" width="17.2" height="14.8" rx="3.6"/><path d="M12 4.6v14.8"/>',
   ),
-  info: S('<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle cx="12" cy="8" r="0.9" fill="currentColor" stroke="none"/>'),
-  chart: S('<path d="M4 19.5V13M10 19.5V6M16 19.5v-4M22 19.5H2"/>'),
+  info: S(
+    '<circle cx="12" cy="12" r="8.4"/><path d="M12 11.2v5.2"/><circle cx="12" cy="8.1" r=".9" fill="currentColor" stroke="none"/>',
+  ),
+  chart: S(
+    '<path d="M4.2 3.8v14.4a2 2 0 0 0 2 2h13.6"/><path d="M8.6 16.6v-3.4M12.6 16.6V8.6M16.6 16.6v-5.6"/>',
+  ),
   logout: S(
-    '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M9 8 5 12l4 4"/><path d="M5 12h9"/>',
+    '<path d="M14.2 4.4h3.4A2.4 2.4 0 0 1 20 6.8v10.4a2.4 2.4 0 0 1-2.4 2.4h-3.4"/><path d="m9.2 8.4-3.6 3.6 3.6 3.6"/><path d="M5.6 12h9"/>',
   ),
-  external: S('<path d="M13.5 4.5H19V10"/><path d="m19 4.5-8 8"/><path d="M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/>'),
-  bolt: S('<path d="M13.5 3 5 13.5h5.5L10 21l8.5-10.5H13z"/>'),
-  eye: S('<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>'),
-  menu: S('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+  external: S(
+    '<path d="M13.6 4.4h6v6"/><path d="m19.6 4.4-8.2 8.2"/><path d="M17.8 13.8v4.2a1.8 1.8 0 0 1-1.8 1.8H6a1.8 1.8 0 0 1-1.8-1.8V8a1.8 1.8 0 0 1 1.8-1.8h4.2"/>',
+  ),
+  bolt: S('<path d="M13.4 3.2 5.6 13.4h5.4l-.4 7.4 7.8-10.2H13z"/>'),
+  eye: S(
+    '<path d="M2.8 12S6.6 6 12 6s9.2 6 9.2 6-3.8 6-9.2 6-9.2-6-9.2-6Z"/><circle cx="12" cy="12" r="3"/>',
+  ),
+  menu: S('<path d="M4.4 7.2h15.2M4.4 12h15.2M4.4 16.8h15.2"/>'),
   chatBubble: S(
-    '<path d="M4 5.5h16v10.5H9l-4.5 4V16H4z" stroke-linejoin="round"/>',
+    '<path d="M12 4.2c-4.5 0-8.1 3-8.1 6.8 0 2.1 1.1 3.9 2.8 5.2l-.7 3.4a.6.6 0 0 0 .9.6l3.7-2c.5.1.9.1 1.4.1 4.5 0 8.1-3 8.1-6.8s-3.6-7.3-8.1-7.3z"/>',
   ),
   smile: S(
-    '<circle cx="12" cy="12" r="9"/><path d="M8.3 14.2c1 1.3 2.3 2 3.7 2s2.7-.7 3.7-2"/><circle cx="8.7" cy="9.8" r="1" fill="currentColor" stroke="none"/><circle cx="15.3" cy="9.8" r="1" fill="currentColor" stroke="none"/>',
+    '<circle cx="12" cy="12" r="8.4"/><path d="M8.4 14.1c.9 1.3 2.2 2 3.6 2s2.7-.7 3.6-2"/><circle cx="8.9" cy="9.9" r="1.05" fill="currentColor" stroke="none"/><circle cx="15.1" cy="9.9" r="1.05" fill="currentColor" stroke="none"/>',
   ),
-  reply: S('<path d="M9 8 4.5 12 9 16"/><path d="M4.5 12h9a6 6 0 0 1 6 6v1"/>'),
+  reply: S(
+    '<path d="M9.4 7.4 4.8 11.8l4.6 4.4"/><path d="M4.8 11.8h8.6a5.8 5.8 0 0 1 5.8 5.8v1"/>',
+  ),
   // Two overlapping sheets — the clipboard glyph every surface uses for "take
   // these words with you". Drawn as one rounded rectangle behind another
   // rather than as a clipboard with a clasp: at 14px the clasp closes up into
   // a smudge and the pair of sheets stays readable.
   copy: S(
-    '<rect x="9" y="9" width="11" height="11" rx="2.2"/><path d="M5.5 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v.5"/>',
+    '<rect x="8.6" y="8.6" width="11.6" height="11.6" rx="3.4"/><path d="M5.8 15.4h-.4a2 2 0 0 1-2-2V5.8a2 2 0 0 1 2-2H13a2 2 0 0 1 2 2v.4"/>',
   ),
   pin: S(
-    '<path d="M9.3 3.5h5.4l-.6 5.2 3.2 3.6H6.7l3.2-3.6z"/><path d="M12 12.3V20"/>',
+    '<path d="m14.5 3.4 6.1 6.1-2.4.6-3.3 3.3-.3 3.7-1.4 1.4-7.7-7.7 1.4-1.4 3.7-.3 3.3-3.3z"/><path d="m8.9 15.1-4.5 4.5"/>',
   ),
-  hash: S(
-    '<path d="M9.5 3.5 6.8 20.5M17.2 3.5l-2.7 17M4 8.5h16M3 15.5h16"/>',
-  ),
+  hash: S('<path d="M9.9 4.2 7.7 19.8M16.3 4.2l-2.2 15.6M4.6 8.9h15M3.9 15.1h15"/>'),
   pencil: S(
-    '<path d="M4 20l.9-4.2L15.6 5.1a1.5 1.5 0 0 1 2.1 0l1.2 1.2a1.5 1.5 0 0 1 0 2.1L8.2 19.1z"/><path d="M14.3 6.4l3.3 3.3"/>',
+    '<path d="m4.2 19.8.9-4.4L15.9 4.6a2 2 0 0 1 2.8 0l.7.7a2 2 0 0 1 0 2.8L8.6 18.9z"/><path d="m14.4 6.1 3.5 3.5"/>',
   ),
 };
 
@@ -249,6 +285,148 @@ export function icon(name, extra = "") {
   const attributes = extra.replace(/\s*\bclass="[^"]*"/u, "").trim();
   const shared = `class="ui-icon${className === "" ? "" : ` ${className}`}" data-icon="${resolvedName}"${attributes === "" ? "" : ` ${attributes}`} `;
   return glyph.replace("<svg ", `<svg ${shared}`);
+}
+
+/* ------------------------------------------------- attribution pills ---- */
+
+/**
+ * The little rendered objects that ride inside an attribution pill.
+ *
+ * These are the one place in the interface that is deliberately *not* a flat
+ * line mark: they follow 3dicons, Vijay Verma's open 3D set
+ * (https://3dicons.co, CC0), which is what the small glossy objects in a
+ * ChatGPT source pill are doing too. A pill says who or what a piece of work
+ * came from, and it has to be picked out of a paragraph at a glance; colour
+ * and depth do in one look what a fourth grey line icon could not do at all.
+ *
+ * Each is built from the same three parts a rendered icon has — a body under
+ * a top-lit gradient, a soft specular highlight, and the subject itself in
+ * white — so the family looks like one set rather than a bag of stickers.
+ * The interface set in {@link ICONS} stays flat Basil everywhere else, and
+ * these appear only inside {@link pillBar}.
+ */
+const PILL_ART = {
+  agent: {
+    from: "#b7a7ff",
+    to: "#5b3df5",
+    glyph:
+      '<rect x="6.6" y="7.4" width="10.8" height="8.6" rx="3" fill="#fff"/><path d="M12 7.4V5.2" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="4.5" r="1.1" fill="#fff"/><circle cx="9.7" cy="11.6" r="1.15" fill="#4c31d8"/><circle cx="14.3" cy="11.6" r="1.15" fill="#4c31d8"/>',
+  },
+  file: {
+    from: "#8fd0ff",
+    to: "#2b6ef5",
+    glyph:
+      '<path d="M9 5.6h4.4l3.4 3.4v8.2a1.4 1.4 0 0 1-1.4 1.4H9a1.4 1.4 0 0 1-1.4-1.4V7a1.4 1.4 0 0 1 1.4-1.4z" fill="#fff"/><path d="M13.3 5.8v2.6a1 1 0 0 0 1 1h2.5" fill="#cfe4ff"/><path d="M10 12.4h4M10 15h2.8" stroke="#2b6ef5" stroke-width="1.3" stroke-linecap="round"/>',
+  },
+  folder: {
+    from: "#ffd98a",
+    to: "#f0961d",
+    glyph:
+      '<path d="M6.4 8.4a1.4 1.4 0 0 1 1.4-1.4h2.4l1.5 1.5h4.1a1.4 1.4 0 0 1 1.4 1.4v6a1.4 1.4 0 0 1-1.4 1.4H7.8a1.4 1.4 0 0 1-1.4-1.4z" fill="#fff"/>',
+  },
+  clock: {
+    from: "#8ef0da",
+    to: "#0f9b86",
+    glyph:
+      '<circle cx="12" cy="12" r="5.6" fill="#fff"/><path d="M12 8.7V12l2.3 1.4" stroke="#0f9b86" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
+  },
+  done: {
+    from: "#9df3b4",
+    to: "#12a150",
+    glyph:
+      '<path d="m8.4 12.3 2.6 2.6 5-5.4" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+  },
+  code: {
+    from: "#b6c0ff",
+    to: "#4338ca",
+    glyph:
+      '<path d="m9.6 9.6-2.8 2.4 2.8 2.4M14.4 9.6l2.8 2.4-2.8 2.4M13.2 8.4l-2.4 7.2" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+  },
+  branch: {
+    from: "#ffc39a",
+    to: "#ee6c1f",
+    glyph:
+      '<circle cx="9" cy="8.4" r="1.9" fill="#fff"/><circle cx="9" cy="15.6" r="1.9" fill="#fff"/><circle cx="15.4" cy="9.4" r="1.9" fill="#fff"/><path d="M9 10.3v3.4M15.4 11.3c0 2.4-2.2 2.6-4 3.2" stroke="#fff" stroke-width="1.5" stroke-linecap="round" fill="none"/>',
+  },
+  message: {
+    from: "#ffb6dc",
+    to: "#e0409a",
+    glyph:
+      '<path d="M12 6.6c-3.2 0-5.8 2-5.8 4.6 0 1.4.8 2.7 2 3.5l-.5 2.3a.5.5 0 0 0 .7.5l2.6-1.3h1c3.2 0 5.8-2 5.8-4.6S15.2 6.6 12 6.6z" fill="#fff"/>',
+  },
+  person: {
+    from: "#9be8ff",
+    to: "#0d8bd8",
+    glyph:
+      '<circle cx="12" cy="9.8" r="2.7" fill="#fff"/><path d="M6.9 17.6c0-2.6 2.3-4.2 5.1-4.2s5.1 1.6 5.1 4.2z" fill="#fff"/>',
+  },
+};
+
+/**
+ * Gradient ids have to be unique per drawing, because a `fill="url(#id)"`
+ * resolves against the whole document: two pills sharing an id are one pill
+ * whose gradient disappears the moment the other is removed from the DOM.
+ * A counter is enough — nothing here is server-rendered or compared across
+ * renders.
+ */
+let pillArtSerial = 0;
+
+/** One rendered object, sized by the pill that contains it. */
+export function pillIcon(name) {
+  const art = PILL_ART[name] ?? PILL_ART.done;
+  pillArtSerial += 1;
+  const body = `pill3d-b${pillArtSerial}`;
+  const gloss = `pill3d-g${pillArtSerial}`;
+  return `<svg class="pill-3d" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+    data-icon-style="3dicons" data-pill-icon="${esc(name)}">
+    <defs>
+      <linearGradient id="${body}" x1="5" y1="3" x2="19" y2="21"
+        gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="${art.from}"/>
+        <stop offset="1" stop-color="${art.to}"/>
+      </linearGradient>
+      <radialGradient id="${gloss}" cx="0.34" cy="0.26" r="0.62">
+        <stop offset="0" stop-color="#fff" stop-opacity="0.55"/>
+        <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <circle cx="12" cy="12" r="10.4" fill="url(#${body})"/>
+    <circle cx="12" cy="12" r="10.4" fill="url(#${gloss})"/>
+    ${art.glyph}
+  </svg>`;
+}
+
+/**
+ * A row of attribution, written the way a source pill is: the objects that
+ * did or hold the work, then a few plain words about it.
+ *
+ * Prose is the wrong shape for "this agent, these files, that long ago" — it
+ * costs a whole sentence to say what three chips say instantly, and a reader
+ * skimming a digest never reaches the end of the sentence. Each pill takes an
+ * optional `title` for the detail that would have bloated the label, so the
+ * long version is a hover away rather than gone.
+ *
+ * Pills with no label are dropped rather than drawn empty: callers assemble
+ * these from record fields that are often missing.
+ */
+export function pillBar(pills, note = "") {
+  const chips = pills
+    .filter((pill) => pill !== undefined && String(pill.label ?? "").trim() !== "")
+    .map(
+      (pill) =>
+        `<span class="pill"${
+          pill.title ? ` title="${esc(pill.title)}"` : ""
+        }>${pillIcon(pill.icon)}<span class="pill-label">${esc(
+          pill.label,
+        )}</span></span>`,
+    )
+    .join("");
+  if (chips === "" && note === "") {
+    return "";
+  }
+  return `<div class="pill-bar">${chips}${
+    note === "" ? "" : `<span class="pill-note">${esc(note)}</span>`
+  }</div>`;
 }
 
 /**

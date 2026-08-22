@@ -112,7 +112,16 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(app, /outcome\?\.summary/u);
   assert.doesNotMatch(app, /function catchUpTaskOutcome\(task\)/u);
   assert.doesNotMatch(app, /Implemented: \$\{objective\}/u);
-  assert.match(chats, /task\.changedFiles\.slice\(0, 3\)/u);
+  // The digest is skimmed, so each row is one condensed claim with the who
+  // and the how-much moved into attribution pills rather than spelled out in
+  // prose. The full file list is the pill's title, not three names and a
+  // count of the rest.
+  assert.match(chats, /function catchUpLead\(summary\)/u);
+  assert.match(chats, /class="catch-up-task-lead"/u);
+  assert.match(chats, /pillBar\(/u);
+  assert.match(chats, /icon: "agent"/u);
+  assert.match(chats, /changedFiles\.join\(", "\)/u);
+  assert.doesNotMatch(chats, /catch-up-file-names/u);
   assert.match(chats, /state\.catchUp = state\.catchUps\?\.\[repositoryId\]/u);
   assert.match(chats, /String\(task\.summary \?\? ""\)/u);
   assert.doesNotMatch(

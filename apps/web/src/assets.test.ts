@@ -282,10 +282,11 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
   }
 
-  // Coolicons uses one clean rounded line on a 24px grid. Pin the shared
-  // wrapper here so adding a glyph cannot quietly introduce a second optical
-  // weight, lose its theme colour, or become visible to a screen reader as
-  // meaningless content.
+  // Basil uses one light rounded line on a 24px grid. Pin the shared wrapper
+  // here so adding a glyph cannot quietly introduce a second optical weight,
+  // lose its theme colour, or become visible to a screen reader as
+  // meaningless content — and so the set it was replaced from cannot creep
+  // back one icon at a time.
   for (const [name, glyph] of Object.entries(ui.ICONS)) {
     assert.match(
       glyph,
@@ -297,19 +298,19 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
       /stroke="currentColor"/u,
       `${name} follows text colour`,
     );
-    assert.match(glyph, /stroke-width="2"/u, `${name} uses Coolicons' stroke`);
+    assert.match(glyph, /stroke-width="1\.8"/u, `${name} uses Basil's stroke`);
     assert.match(glyph, /stroke-linecap="round"/u, `${name} has rounded ends`);
     assert.match(glyph, /stroke-linejoin="round"/u, `${name} has rounded joins`);
     assert.match(glyph, /aria-hidden="true"/u, `${name} is decorative`);
     assert.match(glyph, /focusable="false"/u, `${name} cannot take focus`);
     assert.match(
       glyph,
-      /data-icon-style="coolicons"/u,
+      /data-icon-style="basil"/u,
       `${name} identifies the selected icon treatment`,
     );
     assert.match(
       glyph,
-      /data-icon-source="coolicons-v4\.1"/u,
+      /data-icon-source="basil-icons-community"/u,
       `${name} keeps the source attribution`,
     );
     assert.doesNotMatch(
@@ -339,6 +340,7 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
   const enhancement = ui.slice(
     ui.indexOf("S.showPinnedMessages ="),
     ui.indexOf("/**\n * The product mark"),
@@ -365,10 +367,21 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
     app.indexOf('case "channel-pins-toggle"'),
     app.indexOf('case "channel-pinned-open"'),
   );
-  assert.match(toggle, /state\.pinsOpen = state\.pinsOpen !== true/u);
+  assert.match(
+    toggle,
+    /setPinnedMessagesOpen\(state\.pinsOpen !== true\)/u,
+  );
+  assert.doesNotMatch(toggle, /render\(\)/u);
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
   assert.match(chats, /const open = state\.pinsOpen === true/u);
-  assert.match(chats, /!open[\s\S]{0,80}\? ""[\s\S]{0,80}chan-pins-list/u);
+  assert.match(chats, /chan-pins\$\{open \? " open" : ""\}/u);
+  assert.match(chats, /chan-pins-list-frame" aria-hidden="\$\{!open\}"/u);
+  assert.match(styles, /\.chan-pins-list-frame \{[\s\S]*grid-template-rows: 0fr/u);
+  assert.match(
+    styles,
+    /\.chan-pins\.open \.chan-pins-list-frame \{[\s\S]*grid-template-rows: 1fr/u,
+  );
+  assert.match(styles, /prefers-reduced-motion: reduce/u);
 
   // Fresh sessions start with the banner folded; readers unfold it when they
   // want to see pins, and the toggle remembers only for this visit.
@@ -1053,12 +1066,17 @@ test("a reply carries a quiet visual path back to its root", async () => {
     /\n\.cmsg-row\.cmsg-threaded \.cmsg-thread-link::before \{([\s\S]*?)\n\}/u.exec(
       css,
     )?.[1];
+  const channelEndCap =
+    /\n\.cmsg-row\.cmsg-thread-path-end \.cmsg-thread-link::after \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
   const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
     css,
   )?.[1];
   assert.notEqual(channelStem, undefined, "the shared channel stem should exist");
   assert.notEqual(channelEnd, undefined, "the channel stem should end at its route");
   assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
+  assert.notEqual(channelEndCap, undefined, "the final branch should close the path");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
   for (const branch of [channelElbow, panelBranch]) {
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
@@ -1095,13 +1113,14 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
-  // Written from the column variables rather than as the 13px they work out
+  // Written from the column variables rather than as the 5px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
   // drifting apart when any of those three numbers moves.
   assert.match(
     channelElbow ?? "",
-    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 16px\);/u,
+    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 24px\);/u,
   );
+  assert.match(channelElbow ?? "", /width: 24px;/u);
   // The elbow turns out of the stem, so its own upright has to stand in the
   // stem's column. It is placed from its right edge, which means the gap plus
   // its width must land on the stem's offset — and it must be measured by the
@@ -1118,6 +1137,10 @@ test("a reply carries a quiet visual path back to its root", async () => {
     -stemLeft,
     "the elbow's upright should sit in the stem's own column",
   );
+  assert.match(channelEndCap ?? "", /width: 3px;/u);
+  assert.match(channelEndCap ?? "", /height: 3px;/u);
+  assert.match(channelEndCap ?? "", /border-radius: 50%;/u);
+  assert.match(channelEndCap ?? "", /background: var\(--cmsg-stem\);/u);
   // The hook is only the quarter turn: a straight upright here would be
   // painted on top of the shared stem and make every branch visibly thicker.
   // The 20px face and two pixels of vertical padding put the link's midpoint
@@ -3143,6 +3166,19 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
     css,
     /\.cmsg-text \.slash-ping \{[\s\S]{0,180}padding: 1px 4px;/u,
   );
+
+  // While a message is arriving, a posted ping or command is one reveal
+  // unit so its coloured wash does not sit empty ahead of the letters.
+  const app = await publicFile("app.js");
+  const revealWords = app.slice(app.indexOf("function revealWords(block, elapsed)"));
+  assert.match(revealWords, /function revealPingOf\(node, block\)/u);
+  assert.match(revealWords, /classList\.contains\("mention-ping"\)/u);
+  assert.match(revealWords, /classList\.contains\("slash-ping"\)/u);
+  assert.match(
+    css,
+    /\.cmsg-text \.mention-ping \{[\s\S]{0,320}text-reveal-word/u,
+    "posted ping styling should note the shared arrival class",
+  );
 });
 
 test("channel messages compact only an uninterrupted run from one person", async () => {
@@ -3631,6 +3667,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
     "isThreadThinking",
     "threadSaidCount",
     "threadAwaitsGoAhead",
+    "planTranscriptReplies",
     "threadReplyTurns",
     "channelAuthor",
     "agentFace",
@@ -3650,6 +3687,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
     () => false,
     (said: number) => `${said} replies`,
     () => false,
+    (_entry: unknown, replies: unknown[]) => replies,
     (replies: unknown[]) => [{ replies }],
     (_repositoryId: string, reply: { author: string; agent?: boolean }) => ({
       name: reply.author,
@@ -4814,6 +4852,99 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(chats, /const PLAN_LAPSED_PREFIX = "⌛ Plan expired";/u);
   assert.match(chats, /const lapsed =\s*!held &&/u);
   assert.match(chats, /Nobody started this in time, so it was let go\./u);
+
+  // The panel is the approval record people act on, so its workflow markers
+  // do not also pose as conversation. They stay in the stored reply list for
+  // the gateway; only the three visible transcript surfaces use this view.
+  const transcriptStart = chats.indexOf("function planTranscriptReplies(");
+  const transcriptEnd = chats.indexOf(
+    "\n/**\n * How a plan nobody started",
+    transcriptStart,
+  );
+  assert.notEqual(transcriptStart, -1, "plan replies should have a visible view");
+  assert.notEqual(transcriptEnd, -1, "the visible plan reply view has a boundary");
+  assert.match(
+    chats,
+    /const PLAN_LIFECYCLE_REPLY_PREFIXES = \[\s*HOLD_NOTICE_PREFIX,\s*"Starting now\.",\s*"▶ Go-ahead received",\s*\];/u,
+  );
+  const planTranscriptReplies = Function(
+    "planReplyOf",
+    "PLAN_LIFECYCLE_REPLY_PREFIXES",
+    `"use strict";\n${chats.slice(transcriptStart, transcriptEnd)}\nreturn planTranscriptReplies;`,
+  )(
+    (entry: { replies?: Array<{ kind?: string }> }) =>
+      entry?.replies?.find((reply) => reply.kind === "plan"),
+    ["⏸ Waiting on you", "Starting now.", "▶ Go-ahead received"],
+  ) as <T extends { kind: string; content: string }>(entry: {
+    replies: T[];
+  }) => T[];
+  const planReplies = [
+    { kind: "plan", content: "# A short plan" },
+    { kind: "outcome", content: "⏸ Waiting on you — read the plan." },
+    { kind: "user", content: "go ahead" },
+    { kind: "progress", content: "Starting now." },
+    {
+      kind: "outcome",
+      content: "▶ Go-ahead received — picking this back up now.",
+    },
+    { kind: "agent", content: "The ordinary answer stays visible." },
+    { kind: "outcome", content: "⌛ Plan expired — nobody started this." },
+    { kind: "user", content: "go ahead with the documentation too" },
+  ];
+  assert.deepEqual(
+    planTranscriptReplies({ replies: planReplies }).map(
+      (reply) => reply.content,
+    ),
+    [
+      "# A short plan",
+      "The ordinary answer stays visible.",
+      "⌛ Plan expired — nobody started this.",
+      "go ahead with the documentation too",
+    ],
+    "only redundant plan approval chatter should disappear",
+  );
+  const reviewReplies = [
+    { kind: "outcome", content: "⏸ Waiting on you — this needs a review." },
+    { kind: "user", content: "go ahead" },
+    {
+      kind: "outcome",
+      content: "▶ Go-ahead received — picking this back up now.",
+    },
+  ];
+  assert.deepEqual(
+    planTranscriptReplies({ replies: reviewReplies }),
+    reviewReplies,
+    "a review gate without a plan keeps its lifecycle conversation",
+  );
+  const summary = chats.slice(
+    chats.indexOf("function threadSummaryLink("),
+    chats.indexOf(
+      "\n/**\n * How the room's own hold line",
+      chats.indexOf("function threadSummaryLink("),
+    ),
+  );
+  const list = chats.slice(
+    chats.indexOf("function threadListPanel("),
+    chats.indexOf("\n/**\n * Your own agent", chats.indexOf("function threadListPanel(")),
+  );
+  const renderer = chats.slice(
+    chats.indexOf("function threadReplies("),
+    chats.indexOf("\n/**\n * A plan, in the thread", chats.indexOf("function threadReplies(")),
+  );
+  assert.match(
+    summary,
+    /const visibleReplies = planTranscriptReplies\(entry, replies\)/u,
+  );
+  assert.match(summary, /const said = visibleReplies\.filter/u);
+  assert.match(
+    summary,
+    /threadParticipants\(visibleReplies, repositoryId\)/u,
+  );
+  assert.match(list, /const replies = planTranscriptReplies\(entry\)/u);
+  assert.match(list, /const count = replies\.filter/u);
+  assert.match(renderer, /const replies = planTranscriptReplies\(root\)/u);
+  assert.match(renderer, /const said = replies\.filter/u);
+  assert.match(renderer, /threadReplyTurns\(replies\)/u);
 
   // Approving from the panel is the same event as typing it, so a plan let go
   // from here leaves the same record in the thread.

@@ -5460,14 +5460,45 @@ button.chip.lg:hover {
   height: 14px;
 }
 
+.chan-pins-head [data-icon="chevronDown"] {
+  transition: transform 180ms ease;
+}
+
+.chan-pins.open .chan-pins-head [data-icon="chevronDown"] {
+  transform: rotate(180deg);
+}
+
 .chan-pins-head .spacer {
   flex: 1;
 }
 
+.chan-pins-list-frame {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    grid-template-rows 220ms ease,
+    opacity 150ms ease;
+}
+
+.chan-pins.open .chan-pins-list-frame {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
 .chan-pins-list {
+  min-height: 0;
   max-height: 132px;
   overflow-y: auto;
   padding: 0 8px 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chan-pins-head [data-icon="chevronDown"],
+  .chan-pins-list-frame {
+    transition: none;
+  }
 }
 
 .chan-pin-row {
@@ -6479,8 +6510,9 @@ button.chip.lg:hover {
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
    eleven-pixel quarter turn starts at the stem's tangent instead of laying a
-   second upright over it; the thirteen-pixel gap keeps the stroke clear of
-   the replier faces. Where the turn does still meet the stem it meets it in
+   second upright over it; the five-pixel gap gives the stroke and replier face
+   the same close breathing room as the avatar and stem above. Where the turn
+   does still meet the stem it meets it in
    the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
    the rest of the line.
 
@@ -6489,7 +6521,7 @@ button.chip.lg:hover {
    own three-pixel left stroke hung *outside* the declared width and pushed
    the whole corner three pixels further left than the stem it turns out of —
    a visible step where the two should be one line. Sized by the border box,
-   the gap plus the 16px of elbow put that stroke in the connector's own
+   the gap plus the 24px of elbow put that stroke in the connector's own
    column, exactly where the stem above it stands: the gap is read from
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
@@ -6503,13 +6535,28 @@ button.chip.lg:hover {
   position: absolute;
   box-sizing: border-box;
   top: calc(50% - 8px);
-  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 16px);
-  width: 16px;
+  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 24px);
+  width: 24px;
   height: 11px;
   border-left: 3px solid var(--cmsg-stem);
   border-bottom: 3px solid var(--cmsg-stem);
   border-bottom-left-radius: 11px;
   border-bottom-right-radius: 2px;
+  pointer-events: none;
+}
+
+/* The last turn closes the path with a round cap. At the same three pixels as
+   the stroke it reads as a softened endpoint rather than a new marker, but it
+   keeps the bottom branch from being mistaken for one more continuation. */
+.cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 4px);
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--cmsg-stem);
   pointer-events: none;
 }
 
@@ -6960,6 +7007,10 @@ button.chip.lg:hover {
   padding: 1px 4px;
 }
 
+/* During arrival the render loop tags the whole ping with
+   `text-reveal-word` so its wash and letters share one fade-in instead of
+   an empty coloured box waiting for the name inside it. */
+
 /* The mirror must stay character-for-character the width of the textarea or
    the caret and every character after a ping drift sideways. That includes
    font weight: bold glyphs have different advances from the transparent
@@ -6984,6 +7035,9 @@ button.chip.lg:hover {
   border-radius: 4px;
   padding: 1px 4px;
 }
+
+/* During arrival the render loop tags the whole command with
+   `text-reveal-word` so its wash and letters share one fade-in. */
 
 /* Paint only, for the same reason as the mention above it: padding or heavier
    glyphs here would move every following character away from the caret. */
@@ -8968,9 +9022,51 @@ dialog.modal[open]::backdrop {
   gap: 9px;
 }
 
-/* The return-to-app catch-up follows the quiet, editorial rhythm of a Pulse
-   write-up: one large idea at the top, generous space between updates, and
-   compact elements only where structured file details benefit from them. */
+/* Attribution pills: the rendered 3dicons object, then a short label, in a
+   row that reads inline with the text above it. Sized off the label so one
+   pill is never taller than the line it belongs to. */
+.pill-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 10px 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pill .pill-3d {
+  flex: 0 0 auto;
+  height: 18px;
+  width: 18px;
+}
+
+.pill-note {
+  color: var(--text-4);
+  font-size: 12px;
+}
+
+/* The return-to-app catch-up is a digest, not a transcript: one large count
+   at the top, one line of claim per task, and the who and the how-much moved
+   out of the prose into pills that can be read without reading. */
 .catch-up-panel {
   width: var(--panel-w, 420px);
 }
@@ -8980,90 +9076,51 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-body {
-  padding: 30px 22px 36px;
+  padding: 24px 22px 30px;
 }
 
 .catch-up-intro {
-  padding-bottom: 34px;
+  display: grid;
+  gap: 12px;
+  padding-bottom: 22px;
 }
 
 .catch-up-intro h2 {
   color: var(--text);
-  font-size: 30px;
+  font-size: 24px;
   font-weight: 450;
-  letter-spacing: -0.035em;
-  line-height: 1.08;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
 }
 
 .catch-up-intro h2 strong {
-  font-size: 44px;
+  font-size: 34px;
   font-weight: 650;
-}
-
-.catch-up-intro > p {
-  margin-top: 12px;
-  color: var(--text-2);
-  font-size: 13.5px;
 }
 
 .catch-up-task-list {
   display: grid;
-  gap: 34px;
+  gap: 18px;
 }
 
 .catch-up-task {
+  display: grid;
+  gap: 8px;
   padding: 0;
 }
 
-.catch-up-task-copy {
-  min-width: 0;
-}
-
-.catch-up-task-copy p {
+.catch-up-task-lead {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
   color: var(--text);
-  font-size: 16px;
+  font-size: 14.5px;
   font-weight: 500;
-  letter-spacing: -0.012em;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-.catch-up-task-copy > span {
-  display: block;
-  margin-top: 7px;
-  color: var(--text-4);
-  font-size: 12px;
-}
-
-.catch-up-task-files {
-  display: grid;
-  gap: 4px;
-  margin-top: 13px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-card);
-  color: var(--text-3);
-  font-size: 11.5px;
-  overflow-wrap: anywhere;
-}
-
-.catch-up-task-files .catch-up-file-count {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--text-2);
-  font-weight: 550;
-}
-
-.catch-up-task-files .catch-up-file-names {
-  color: var(--text-4);
+  letter-spacing: -0.01em;
   line-height: 1.45;
-}
-
-.catch-up-task-files svg {
-  flex: 0 0 auto;
-  height: 14px;
-  width: 14px;
+  overflow-wrap: anywhere;
 }
 
 .catch-up-actions {
