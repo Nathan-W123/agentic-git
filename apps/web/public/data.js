@@ -2990,7 +2990,7 @@ export async function answerAgentQuestion(repositoryId, requestId, answers) {
   }
 }
 
-/** Channel stats for the info popover, keyed by repository id. */
+/** Channel stats for the Settings wrapped recap, keyed by repository id. */
 export async function loadChannelStats(repositoryId) {
   const stats = await apiOptional(channelPath(repositoryId, "/stats"), undefined);
   if (stats !== undefined) {
@@ -3711,21 +3711,26 @@ export async function ensureChannelRoster(repositoryId, rerender) {
 }
 
 /**
- * Loads the repository-scoped grants the co-owner panel shows, straight into
- * `state.repositoryGrants` — unconditionally, unlike `ensureChannelRoster`'s
- * once-per-repository cache, since the panel that reads them only opens
- * when the channel info popover does and grants change rarely enough that a
- * fresh read each time is simpler than inventing invalidation for it.
+ * Loads the repository-scoped grants the People-row co-owner menus read,
+ * straight into `state.repositoryGrants`. Cached per repository once loaded
+ * (like the roster); callers that just changed a grant clear the entry first
+ * so the next ensure re-reads.
  *
  * Skipped for anyone who cannot manage the repository: the fetch would
  * succeed (the route only requires `view`) but nothing would render it, so
- * asking is wasted work for the common case of an ordinary collaborator
- * opening channel info.
+ * asking is wasted work for the common case of an ordinary collaborator.
  */
 export async function ensureRepositoryGrants(repositoryId, rerender) {
-  if (!repositoryId || !canManageRepository(repositoryId)) {
+  if (
+    !repositoryId ||
+    !canManageRepository(repositoryId) ||
+    state.repositoryGrants[repositoryId] !== undefined
+  ) {
     return;
   }
+  // Claimed before the request so a second render in the same tick does not
+  // fire it again.
+  state.repositoryGrants[repositoryId] = [];
   state.repositoryGrants[repositoryId] = await loadRepositoryGrants(repositoryId);
   rerender();
 }

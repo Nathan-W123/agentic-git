@@ -4733,3 +4733,50 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.doesNotMatch(css, /\n\.plan-card \{/u);
   assert.match(css, /\n\.plan-actions \{/u);
 });
+
+test("channel stats live in settings and people rows own co-owner actions", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  const header = chats.slice(
+    chats.indexOf("function chanHeader"),
+    chats.indexOf("function chanSearchRow"),
+  );
+  // The tools tray keeps search; the info / exclamation control is gone —
+  // channel info is still reached from the sidebar brand.
+  assert.match(header, /data-act="channel-msg-search-toggle"/u);
+  assert.doesNotMatch(header, /iconButton\("info"/u);
+  assert.doesNotMatch(header, /act: "channel-info"/u);
+  assert.match(chats, /data-act="channel-info"/u);
+
+  const info = chats.slice(
+    chats.indexOf("export function channelInfoPopoverHtml"),
+    chats.indexOf("/* -------------------------------------------------------------- screen ---- */"),
+  );
+  assert.doesNotMatch(info, /<h4>Stats<\/h4>/u);
+  assert.doesNotMatch(info, /coOwnerPanelHtml\(/u);
+  assert.doesNotMatch(info, /channel-grant-promote/u);
+
+  assert.match(app, /function channelStatsCard\(/u);
+  assert.match(app, /\$\{channelStatsCard\(\)\}/u);
+  assert.match(app, /class="channel-wrapped"/u);
+  assert.match(css, /\n\.channel-wrapped \{/u);
+  assert.match(app, /loadChannelStats\(repositoryId\)/u);
+
+  const person = chats.slice(
+    chats.indexOf("function personRow(person)"),
+    chats.indexOf("/** The role the roster acts on."),
+  );
+  assert.match(person, /act: "roster-person-menu"/u);
+  assert.match(person, /iconButton\("dots"/u);
+  assert.match(chats, /export function personMenuItems\(/u);
+  assert.match(chats, /act: "channel-grant-promote"/u);
+  assert.match(chats, /act: "channel-grant-revoke"/u);
+  assert.match(chats, /label: "Promote to co-owner"/u);
+  assert.match(chats, /label: "Remove co-owner"/u);
+
+  assert.match(app, /case "roster-person-menu":/u);
+  assert.match(app, /showMenu\(node, personMenuItems\(value\)\)/u);
+  assert.match(app, /ensureRepositoryGrants\(activeChannelId\(\)/u);
+});

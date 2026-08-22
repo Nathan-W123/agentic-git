@@ -4214,6 +4214,49 @@ button.chip.lg:hover {
   max-width: 800px;
 }
 
+/* Channel activity recap — three big figures, Spotify-Wrapped energy without
+   a second card language. Lives on Settings, not in the channel-info tray. */
+.channel-wrapped {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 6px 17px 18px;
+}
+
+.channel-wrapped-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 14px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  min-width: 0;
+}
+
+.channel-wrapped-value {
+  font-size: 28px;
+  font-weight: 650;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.channel-wrapped-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+@media (max-width: 520px) {
+  .channel-wrapped {
+    grid-template-columns: 1fr;
+  }
+}
+
 .set-row {
   display: flex;
   align-items: center;

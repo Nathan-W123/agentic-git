@@ -741,6 +741,10 @@ function personRow(person) {
   const me = userId === currentUserId();
   const online = personOnline(userId);
   const unread = dmUnreadFrom(userId);
+  // Promote / demote / remove live behind the same "…" pattern the agent
+  // roster uses — never on the channel-info panel. Only drawn when there is
+  // something to offer; an empty menu is a dead control.
+  const hasMenu = personMenuItems(userId).length > 0;
   // Writing to yourself is not a conversation, so your own row is a label
   // rather than a button — everyone else's opens the thread with them.
   return `<div class="roster-row">
@@ -776,8 +780,62 @@ function personRow(person) {
         }
       </span>
       ${unread > 0 ? `<span class="rr-badge">${unread}</span>` : ""}
+      ${
+        hasMenu
+          ? `<span class="rr-more">${iconButton("dots", {
+              act: "roster-person-menu",
+              value: userId,
+              title: `More for ${name}`,
+              small: true,
+            })}</span>`
+          : ""
+      }
     </div>
   </div>`;
+}
+
+/**
+ * What the "..." on a People row offers — promote, demote, or remove a
+ * repository co-owner — mirroring {@link rosterMenuItems} for agents.
+ *
+ * Built here for the same reason the agent menu is: every condition is the
+ * one the row itself is drawn from (who can moderate, who already holds a
+ * grant). Splitting that across files is how a menu ends up offering what
+ * the row would not.
+ */
+export function personMenuItems(userId) {
+  const repositoryId = activeChannelId();
+  if (
+    !repositoryId ||
+    !userId ||
+    userId === currentUserId() ||
+    !canManageRepository(repositoryId)
+  ) {
+    return [];
+  }
+  const grants = state.repositoryGrants[repositoryId] ?? [];
+  const grant = grants.find((entry) => entry.userId === userId);
+  if (grant !== undefined) {
+    return [
+      {
+        act: "channel-grant-revoke",
+        value: `${repositoryId}:${userId}`,
+        label: "Remove co-owner",
+        hint: "Takes back repository-scoped co-owner access",
+        iconName: "close",
+        danger: true,
+      },
+    ];
+  }
+  return [
+    {
+      act: "channel-grant-promote",
+      value: `${repositoryId}:${userId}`,
+      label: "Promote to co-owner",
+      hint: "Same capabilities as the repository's creator, on this channel only",
+      iconName: "users",
+    },
+  ];
 }
 
 /** The role the roster acts on. */
@@ -1199,7 +1257,6 @@ function chanHeader(repositoryId) {
             <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
               data-act="channel-msg-search-toggle" title="Search messages"
               aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
-            ${iconButton("info", { act: "channel-info", value: repositoryId ?? "", title: "Channel info" })}
           </span>`
     }
     <button type="button" class="icon-btn chan-tools-toggle${
@@ -5210,15 +5267,16 @@ function addableAgents(repositoryId) {
 }
 
 /**
- * Current per-repository grants, for the co-owner panel below.
+ * Current per-repository grants — kept for callers that still want a compact
+ * list. Promote / demote / remove now live on People-row menus
+ * ({@link personMenuItems}); channel info no longer hosts this panel.
  *
  * Read straight from `state.repositoryGrants`, populated by
- * `ensureRepositoryGrants` (see the `channel-info` action in app.js) rather
- * than fetched here — `channelInfoPopoverHtml` has to stay synchronous, the
- * same reason `channelAgentsFor` reads `state.channelRoster` instead of
- * fetching.
+ * `ensureRepositoryGrants` when the chats screen loads rather than fetched
+ * here — this helper stays synchronous, the same reason `channelAgentsFor`
+ * reads `state.channelRoster` instead of fetching.
  */
-function coOwnerPanelHtml(repositoryId) {
+export function coOwnerPanelHtml(repositoryId) {
   const grants = state.repositoryGrants[repositoryId] ?? [];
   return `<div class="pop-block">
       <h4>Repository co-owners</h4>
@@ -5255,6 +5313,9 @@ export function channelInfoPopoverHtml(repositoryId) {
   const addable = addableAgents(repositoryId);
   const canManage = canManageRepository(repositoryId);
   const canLeave = canLeaveRepository();
+  // Stats moved to Settings (`channelStatsCard`); co-owner promote / demote /
+  // remove moved to People-row menus (`personMenuItems`). Channel info keeps
+  // branch, remote, agents, sync, leave, and delete.
   return `<div class="pop-head"><h3># ${esc(repositoryId)}</h3><span class="spacer"></span>
       ${iconButton("close", { act: "pop-close", title: "Close", small: true })}</div>
     <div class="pop-block">
@@ -5264,22 +5325,6 @@ export function channelInfoPopoverHtml(repositoryId) {
     <div class="pop-block">
       <h4>Remote</h4>
       <p>${esc(repository?.remoteUrl ?? "No remote recorded")}</p>
-    </div>
-    <div class="pop-block">
-      <h4>Stats</h4>
-      <p>${(() => {
-        const stats = state.channelStats[repositoryId];
-        if (stats === undefined) {
-          return "Counting…";
-        }
-        // Exact, grouped figures rather than "1.2k": these are counts of a
-        // room's own work, and rounding them made a busy afternoon and a busy
-        // month read the same. Only the token lower bound still carries a "+".
-        const fmt = (value) => value.toLocaleString();
-        return `${fmt(stats.messages)} messages · ` +
-          `${fmt(stats.replies)} replies · ${fmt(stats.tokens)}` +
-          `${stats.tokensIncomplete ? "+" : ""} tokens`;
-      })()}</p>
     </div>
     <div class="pop-block">
       <h4>Agents in this channel</h4>
@@ -5304,7 +5349,6 @@ export function channelInfoPopoverHtml(repositoryId) {
              </div>
            </div>`
     }
-    ${canManage ? coOwnerPanelHtml(repositoryId) : ""}
     ${
       // Bringing the repository up to date with GitHub. It lived on the
       // repositories screen, which this interface no longer has — leaving a
