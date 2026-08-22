@@ -239,48 +239,319 @@ function usageAccountLine(report) {
 }
 
 /**
- * The hover card for one roster entry.
+ * The usage figures for one of this account's own agents, as one section of
+ * its profile card.
  *
  * Only for this account's own agents: the usage route reports the *caller's*
  * account, so showing it beside a teammate's agent would put your consumption
  * under their name. Rendered from state rather than fetched on open, so the
  * first hover shows "Checking…" and every later one is instant.
  */
-function usageTip(agent) {
+function usageBlock(agent) {
   if (agent.mine !== true) {
     return "";
   }
   const report = state.providerUsage[agent.id];
   let body;
   if (report === undefined || report.loading === true) {
-    body = `<div class="rr-usage-empty">Checking usage…</div>`;
+    body = `<span class="rr-usage-empty">Checking usage…</span>`;
   } else if (report.unavailableReason !== undefined) {
-    body = `<div class="rr-usage-empty">${esc(report.unavailableReason)}</div>`;
+    body = `<span class="rr-usage-empty">${esc(report.unavailableReason)}</span>`;
   } else if ((report.windows ?? []).length === 0) {
-    body = `<div class="rr-usage-empty">No usage reported.</div>`;
+    body = `<span class="rr-usage-empty">No usage reported.</span>`;
   } else {
     body = `${report.windows
       .map((window) => {
         const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
-        return `<div class="rr-usage-row">
+        return `<span class="rr-usage-row">
           <span class="rr-usage-label">${esc(window.label)}</span>
           <span class="rr-usage-bar"><i style="width:${percent}%"></i></span>
           <span class="rr-usage-pct">${Math.round(percent)}%</span>
-        </div>${
+        </span>${
           usageResetText(window) === ""
             ? ""
-            : `<div class="rr-usage-reset">${esc(usageResetText(window))}</div>`
+            : `<span class="rr-usage-reset">${esc(usageResetText(window))}</span>`
         }`;
       })
       .join("")}
       ${
         usageAccountLine(report) === ""
           ? ""
-          : `<div class="rr-usage-plan">${esc(usageAccountLine(report))}</div>`
+          : `<span class="rr-usage-plan">${esc(usageAccountLine(report))}</span>`
       }
-      ${report.source === undefined ? "" : `<div class="rr-usage-src">${esc(report.source)}</div>`}`;
+      ${report.source === undefined ? "" : `<span class="rr-usage-src">${esc(report.source)}</span>`}`;
   }
-  return `<div class="rr-usage" role="tooltip">${body}</div>`;
+  return `<span class="pcard-section">
+    <span class="pcard-section-label">Usage</span>
+    <span class="pcard-usage">${body}</span>
+  </span>`;
+}
+
+/* ------------------------------------------------------------ profiles ---- */
+
+/**
+ * A colour somebody chose, or nothing.
+ *
+ * The value ends up in a `style` attribute, so it is matched against the exact
+ * shape a colour picker stores rather than escaped and hoped for: anything
+ * else is dropped and the card falls back to the theme's own accent. Same
+ * reasoning as `safeColor` in ui.js, which guards the faces.
+ */
+const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/iu;
+
+function safeAccent(value) {
+  return typeof value === "string" && HEX_COLOR.test(value.trim())
+    ? value.trim()
+    : undefined;
+}
+
+/** "Aug 2, 2019", or nothing when the record does not carry a date. */
+function joinedDate(value) {
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+  const when = new Date(value);
+  return Number.isNaN(when.getTime())
+    ? ""
+    : when.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+}
+
+/**
+ * One person's record in this room, under either shape it arrives in.
+ *
+ * The organization member list nests the account under `user`; the room's own
+ * people list flattens it to `id`/`name`. `personRow` reads both, and so must
+ * anything that wants the same facts from a different surface.
+ */
+function personRecord(repositoryId, userId) {
+  return channelPeopleFor(repositoryId).find(
+    (candidate) =>
+      (candidate.user?.id ?? candidate.userId ?? candidate.id ?? "") === userId,
+  );
+}
+
+/**
+ * Everything a profile card says about one agent.
+ *
+ * Assembled from state alone — no request, nothing to wait for — so the same
+ * description serves the roster, the transcript and anywhere else a face is
+ * drawn, and the three cannot drift apart on what an agent is.
+ */
+function agentProfile(agent, repositoryId) {
+  const status = agentStatus(agent, repositoryId);
+  const progress = agentWorkingProgress(agent, repositoryId);
+  const providerId = agent.provider ?? agent.id;
+  const owner =
+    agent.mine === true
+      ? "Your agent"
+      : `${memberName(agent.userId ?? "")}'s agent`;
+  // The work it has in hand, preferring this room's but never calling an agent
+  // idle while it is visibly busy in another channel — the same order
+  // `agentSpec` resolves in.
+  const agentTasks = [...activeTasks(), ...waitingTasks()].filter((candidate) =>
+    taskBelongsToAgent(candidate, agent),
+  );
+  const task =
+    agentTasks.find((candidate) => candidate.repositoryId === repositoryId) ??
+    agentTasks[0];
+  const facts = [];
+  if (task !== undefined) {
+    const taskRepositoryId = task.repositoryId ?? repositoryId;
+    facts.push({
+      // Only what is true of it right now. A queued task described as work in
+      // hand is the one line on this card somebody would act on and be wrong.
+      label: status === "working" ? "Working on" : "Waiting to start",
+      value: taskSummaryLine(
+        task,
+        channelMessagesFor(taskRepositoryId).find(
+          (entry) => entry.taskId === task.id,
+        ),
+      ),
+    });
+  }
+  facts.push({
+    label: "Role here",
+    value: String(agent.role ?? "").trim() || "No role set",
+  });
+  facts.push({ label: "Model", value: String(agent.model ?? "").trim() || "Default" });
+  facts.push({
+    label: "Who may task it",
+    value: agent.visibility === "org" ? "Anyone in the org" : "Only its owner",
+  });
+  return {
+    kind: "agent",
+    name: agent.name,
+    face: statusAgentFace(agent, 52, repositoryId),
+    accent: safeAccent(agent.color),
+    // The vendor behind it and whose account pays for it: the two facts that
+    // decide what an agent can be asked for, said before anything else.
+    subtitle: `${agentLabelOf(providerId)} · ${owner}`,
+    status,
+    statusText:
+      status === "working" && Number.isFinite(progress)
+        ? `${AGENT_STATUS_TITLE[status]} · ${Math.round(progress)}%`
+        : (AGENT_STATUS_TITLE[status] ?? ""),
+    facts,
+    usage: usageBlock(agent),
+    action: {
+      act: "agent-panel-open",
+      value: String(agent.id ?? ""),
+      label: "View full profile",
+    },
+    label: `Open details for ${agent.name}`,
+  };
+}
+
+/**
+ * Everything a profile card says about one person.
+ *
+ * Deliberately the same shape as an agent's. A channel's participants are
+ * people and agents side by side, and a reader who has learned where the role
+ * sits on one card should not have to learn it again on the other.
+ */
+function personProfile(userId, name, repositoryId) {
+  const me = userId === currentUserId();
+  const record = personRecord(repositoryId, userId);
+  const online = me || personOnline(userId);
+  const unread = dmUnreadFrom(userId);
+  const coOwner = (state.repositoryGrants[repositoryId] ?? []).some(
+    (grant) => grant.userId === userId && grant.role === "owner",
+  );
+  // A repository owner grant is presented as the title people chose in the
+  // menu, exactly as the row under the name does it; the organization role is
+  // the floor for everyone who has not been given one here.
+  const role = coOwner
+    ? "Co-owner"
+    : String(record?.role ?? memberRole(userId) ?? "").trim();
+  const facts = [];
+  if (role !== "") {
+    facts.push({ label: "Role", value: capitalised(role) });
+  }
+  const joined = joinedDate(record?.user?.createdAt ?? record?.createdAt);
+  if (joined !== "") {
+    facts.push({ label: "Member since", value: joined });
+  }
+  if (unread > 0) {
+    facts.push({
+      label: "Waiting",
+      value: `${unread} unread message${unread === 1 ? "" : "s"}`,
+    });
+  }
+  const status = online ? "working" : "away";
+  return {
+    kind: "person",
+    name: `${name}${me ? " (you)" : ""}`,
+    face: `${avatar(name, 52, name, me ? myAvatar() : undefined)}${statusDot(
+      status,
+      "",
+    )}`,
+    accent: safeAccent(record?.user?.appearance?.accent),
+    // The address is the one thing that tells two people with the same
+    // display name apart, which is the whole job of a handle here.
+    subtitle: String(record?.user?.email ?? "").trim(),
+    status,
+    statusText: me ? "You're here" : online ? "Here now" : "Away",
+    facts,
+    usage: "",
+    // Nothing to open with yourself — the same reasoning that makes your own
+    // roster row a label rather than a button.
+    action: me
+      ? undefined
+      : {
+          act: "dm-open",
+          value: userId,
+          label: unread > 0 ? `Open messages · ${unread}` : "Open conversation",
+        },
+    label: me
+      ? `Your profile`
+      : `Open your conversation with ${name}`,
+  };
+}
+
+/**
+ * Who somebody is, without leaving what you were reading to find out.
+ *
+ * Rendered with the row and revealed by CSS, so no pointer tracking and no
+ * request is involved in reading one — everything on it is already in state
+ * for the roster's sake. The card is a real surface rather than a tooltip:
+ * it sits inside its own anchor, so a pointer can travel from the face into
+ * the card without the hover ever lapsing, and the last line is the way
+ * through to the full page when the summary is not enough.
+ *
+ * Shaped after the reference profile popout: a coloured crown, the face
+ * breaking out of it, name and handle, then a short column of labelled facts
+ * — the ones somebody actually needs before deciding whether to open the
+ * whole thing.
+ */
+function profileCard(profile) {
+  if (profile === undefined) {
+    return "";
+  }
+  const facts = profile.facts.filter(({ value }) => String(value ?? "") !== "");
+  const hasDetail = facts.length > 0 || profile.usage !== "";
+  return `<span class="pcard-pop"><span class="pcard" role="tooltip"${
+    profile.accent === undefined ? "" : ` style="--pcard-accent:${profile.accent}"`
+  }>
+    <span class="pcard-banner"></span>
+    <span class="pcard-body">
+      <span class="pcard-face">${profile.face}</span>
+      <span class="pcard-name">${esc(profile.name)}</span>
+      ${
+        profile.subtitle === ""
+          ? ""
+          : `<span class="pcard-sub">${esc(profile.subtitle)}</span>`
+      }
+      <span class="pcard-status">
+        <span class="status-dot status-${esc(profile.status)}"></span>
+        ${esc(profile.statusText)}
+      </span>
+      ${hasDetail ? `<span class="pcard-rule"></span>` : ""}
+      ${facts
+        .map(
+          (fact) => `<span class="pcard-section">
+            <span class="pcard-section-label">${esc(fact.label)}</span>
+            <span class="pcard-section-body">${esc(fact.value)}</span>
+          </span>`,
+        )
+        .join("")}
+      ${profile.usage}
+      ${
+        profile.action === undefined
+          ? ""
+          : `<span class="pcard-open" role="button" tabindex="-1"
+              data-act="${esc(profile.action.act)}"
+              data-value="${esc(profile.action.value)}">${esc(
+                profile.action.label,
+              )}</span>`
+      }
+    </span>
+  </span></span>`;
+}
+
+/**
+ * The face somebody points at, and the card it opens.
+ *
+ * `data-profile-dir` is the direction the card prefers; `positionProfileCard`
+ * in app.js flips it when the surface it is opening into has no room, which
+ * is the only thing about these cards that a stylesheet cannot decide on its
+ * own.
+ */
+function profileAnchor(profile, cls, direction, content, options = {}) {
+  return `<span class="${cls} pcard-anchor" data-profile-dir="${direction}"
+    tabindex="0" aria-label="${esc(profile.label)}"${attributeList(
+      options,
+    )}>${content}${profileCard(profile)}</span>`;
+}
+
+/** Attributes an anchor was handed, written out in one place. */
+function attributeList(options) {
+  return Object.entries(options)
+    .map(([name, value]) => ` ${name}="${esc(String(value))}"`)
+    .join("");
 }
 
 /**
@@ -767,20 +1038,28 @@ function personRow(person) {
         ? ""
         : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}"`
     }>
-      <span class="rr-avatar">
-        ${avatar(name, 22, name, me ? myAvatar() : undefined)}
-        ${
-          // Your own dot is green whenever you can see it: the page being
-          // open is what "here" means, and a roster where everyone else has
-          // a status and you have none reads as broken rather than modest.
-          me
-            ? statusDot("working", "You're here")
-            : statusDot(
-                online ? "working" : "away",
-                online ? `${name} is here` : `${name} is away`,
-              )
-        }
-      </span>
+      ${
+        // The same card an agent's face carries, from the same builders. A
+        // roster in which only half the faces answer "who is this" is a
+        // roster that has to be learned twice.
+        profileAnchor(
+          personProfile(userId, name, repositoryId),
+          "rr-avatar",
+          "down",
+          `${avatar(name, 22, name, me ? myAvatar() : undefined)}${
+            // Your own dot is green whenever you can see it: the page being
+            // open is what "here" means, and a roster where everyone else
+            // has a status and you have none reads as broken rather than
+            // modest.
+            me
+              ? statusDot("working", "You're here")
+              : statusDot(
+                  online ? "working" : "away",
+                  online ? `${name} is here` : `${name} is away`,
+                )
+          }`,
+        )
+      }
       <span class="rr-body">
         <div class="rr-name">${esc(name)}${me ? " (you)" : ""}</div>
         ${
@@ -916,12 +1195,17 @@ function rosterRow(agent) {
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
-      <span class="rr-avatar" data-hover="agent-usage"
-        data-hover-value="${esc(agent.id)}" tabindex="0"
-        aria-label="Open details for ${esc(agent.name)}">
-        ${usageTip(agent)}
-        ${statusAgentFace(agent, 22, activeChannelId())}
-      </span>
+      ${
+        // `data-hover` is what starts the usage fetch the card's own section
+        // reads — see `requestUsageForHoverTarget` in app.js.
+        profileAnchor(
+          agentProfile(agent, activeChannelId()),
+          "rr-avatar",
+          "down",
+          statusAgentFace(agent, 22, activeChannelId()),
+          { "data-hover": "agent-usage", "data-hover-value": agent.id },
+        )
+      }
       <span class="rr-body">
         ${
           settingsOpen
@@ -1962,69 +2246,26 @@ const AGENT_AUTHORED_KINDS = new Set(["agent", "progress", "outcome"]);
  * thing wherever it is pressed: a person opens the conversation with them, an
  * agent opens its panel.
  *
+ * One description, built by the same two functions the roster uses, so a face
+ * says the same things about somebody wherever it is met.
+ *
  * `undefined` for the reader's own lines and for authors the room cannot name
- * at all. There is no conversation with yourself to open, and a card headed by
- * an empty id is worse than no card — the same reasoning that makes your own
- * `personRow` a label rather than a button.
+ * at all. A card headed by an empty id is worse than no card — the same
+ * reasoning that makes your own `personRow` a label rather than a button.
  */
 function authorIdentity(repositoryId, entry, author) {
   if (author.agent !== undefined) {
-    const status = agentStatus(author.agent, repositoryId);
-    return {
-      kind: "agent",
-      act: "agent-panel-open",
-      value: String(author.agent.id ?? ""),
-      name: author.name,
-      face: statusAgentFace(author.agent, 38, repositoryId),
-      // What the agent is here for, which is the line its roster row leads
-      // with too. "Your agent" is worth saying on a shared transcript: whose
-      // an agent is decides who may task it.
-      detail: [
-        String(author.agent.role ?? "").trim(),
-        author.agent.mine === true ? "Your agent" : "",
-      ]
-        .filter((part) => part !== "")
-        .join(" · "),
-      status,
-      statusText: AGENT_STATUS_TITLE[status] ?? "",
-      label: `Open details for ${author.name}`,
-      hint: "Open agent details",
-    };
+    return agentProfile(author.agent, repositoryId);
   }
   const userId = String(entry.authorId ?? "");
-  if (
-    userId === "" ||
-    userId === "you" ||
-    userId === currentUserId() ||
-    AGENT_AUTHORED_KINDS.has(entry.kind)
-  ) {
+  if (userId === "" || userId === "you" || AGENT_AUTHORED_KINDS.has(entry.kind)) {
     return undefined;
   }
-  // Both roster shapes, exactly as `personRow` reads them: the organization
-  // list nests the account under `user`, the room's own people list flattens
-  // it. Reading only one is what used to leave a name as "Someone".
-  const person = channelPeopleFor(repositoryId).find(
-    (candidate) =>
-      (candidate.user?.id ?? candidate.userId ?? candidate.id ?? "") === userId,
-  );
-  const online = personOnline(userId);
-  const unread = dmUnreadFrom(userId);
-  return {
-    kind: "person",
-    act: "dm-open",
-    value: userId,
-    name: author.name,
-    face: avatar(author.name, 38, author.name),
-    detail: String(person?.role ?? "").trim(),
-    status: online ? "working" : "away",
-    statusText: online ? "Here now" : "Away",
-    label: `Open your conversation with ${author.name}`,
-    hint: unread > 0 ? `Open messages · ${unread} unread` : "Send a message",
-  };
+  return personProfile(userId, author.name, repositoryId);
 }
 
 /**
- * A face or a name, wrapped in the button that opens whoever it belongs to.
+ * A face or a name, wrapped in the anchor that opens whoever it belongs to.
  *
  * A wrapper inside the existing avatar and name rather than those elements
  * themselves: the picture keeps its place in the row's layout and the name
@@ -2032,57 +2273,40 @@ function authorIdentity(repositoryId, entry, author) {
  * is exactly the thing somebody aimed at. Content back untouched when there
  * is nobody to open — a tab stop that does nothing is worse than no tab stop.
  *
+ * Upward, unlike the roster's card, because a transcript is pinned to its
+ * newest line: the message most likely to be pointed at is the last one, and
+ * a card opening below it would open into the composer.
+ *
  * A span with `role=button` rather than a `<button>`, because a real button
  * inside the message's own controls is markup a browser will not keep. The
  * keyboard is served by `role=button` plus `data-act` and the delegated
  * handler in `app.js` that exists for exactly that pair.
  */
-function identityWrap(identity, content) {
+function identityWrap(identity, content, withCard = false) {
   if (identity === undefined) {
     return content;
   }
-  return `<span class="cmsg-identity" role="button" tabindex="0"
-    data-act="${esc(identity.act)}" data-value="${esc(identity.value)}"
-    aria-label="${esc(identity.label)}">${content}${profileCard(identity)}</span>`;
+  const action = identity.action;
+  const attributes = {
+    ...(action === undefined
+      ? {}
+      : { role: "button", "data-act": action.act, "data-value": action.value }),
+  };
+  // The card hangs off the face and not off the name as well. Both are the
+  // same anchor and either would carry it, but a transcript draws this markup
+  // once per message and twice per author line — a second copy of the whole
+  // card in every row is a page of markup nobody can see, for a gesture the
+  // face beside it already answers.
+  return withCard
+    ? profileAnchor(identity, "cmsg-identity", "up", content, attributes)
+    : plainAnchor(identity, "cmsg-identity", content, attributes);
 }
 
-/**
- * Who somebody is, without leaving the conversation to find out.
- *
- * CSS-driven exactly like the roster's `.rr-usage`: rendered with the message
- * and revealed by `:hover`/`:focus-within`, so no pointer tracking and no
- * request is involved in reading one. Everything on it is already in state
- * for the roster's sake, so a hover costs nothing a render did not cost
- * anyway.
- */
-function profileCard(identity) {
-  if (identity === undefined) {
-    return "";
-  }
-  return `<span class="profile-card" role="tooltip">
-    <span class="profile-card-head">
-      <span class="profile-card-face">${identity.face}${
-        identity.kind === "agent"
-          ? ""
-          : statusDot(
-              identity.status,
-              // No tooltip on the dot: the line under it already says this
-              // in words, and nested native tooltips obscure the card.
-              "",
-            )
-      }</span>
-      <span class="profile-card-id">
-        <span class="profile-card-name">${esc(identity.name)}</span>
-        ${
-          identity.detail === ""
-            ? ""
-            : `<span class="profile-card-detail">${esc(identity.detail)}</span>`
-        }
-      </span>
-    </span>
-    <span class="profile-card-status">${esc(identity.statusText)}</span>
-    <span class="profile-card-hint">${esc(identity.hint)}</span>
-  </span>`;
+/** The same press without the card — see `identityWrap`. */
+function plainAnchor(profile, cls, content, options = {}) {
+  return `<span class="${cls}" tabindex="0" aria-label="${esc(
+    profile.label,
+  )}"${attributeList(options)}>${content}</span>`;
 }
 
 /** The face a message is drawn with, at whatever size is asked for. */
@@ -2234,6 +2458,7 @@ function messageRow(
         : `<span class="cmsg-avatar">${identityWrap(
             identity,
             authorFace(author, 32, repositoryId),
+            true,
           )}</span>`
     }
     <div class="cmsg-body">
@@ -4665,7 +4890,17 @@ function dmPanel() {
     <header class="thread-head">
       ${panelKind("Direct")}
       <span class="dm-head-name">
-        ${avatar(name, 20)}
+        ${
+          // The same card their roster row carries. A conversation opened from
+          // a search or a notification is the one place somebody is read
+          // without the sidebar entry that would otherwise explain them.
+          profileAnchor(
+            personProfile(userId, name, repositoryId),
+            "dm-head-face",
+            "down",
+            avatar(name, 20),
+          )
+        }
         ${esc(name)}
         ${statusDot(online ? "working" : "away", online ? "Here" : "Away")}
       </span>
