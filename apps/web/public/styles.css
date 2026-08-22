@@ -2825,10 +2825,10 @@ svg.ui-icon {
   pointer-events: auto;
 }
 
-/* Focus stays quiet enough that the card does not turn into an alert. */
+/* Focus stays quiet: a stronger neutral edge, no accent wash ring. */
 .composer:focus-within {
-  border-color: var(--accent-line);
-  box-shadow: 0 0 0 2px var(--accent-wash);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card);
 }
 
 /* Utilities lead and send closes the bottom row. */

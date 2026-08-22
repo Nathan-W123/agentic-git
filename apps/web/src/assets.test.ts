@@ -1397,6 +1397,13 @@ test("the composer is one card with bottom utilities and a send arrow", async ()
   assert.match(shape ?? "", /box-shadow: var\(--shadow-card\);/u);
   assert.match(shape ?? "", /--composer-shape: var\(--radius-lg\);/u);
   assert.match(shape ?? "", /--composer-spacer-layout: block;/u);
+  // Focus only firms the edge; it must not paint the pink wash that used to
+  // ring the card. Mention-active salmon rings stay on their own wrappers.
+  const focus = /\n\.composer:focus-within \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(focus, undefined, "focused composer has an active rule");
+  assert.match(focus ?? "", /border-color: var\(--border-strong\);/u);
+  assert.match(focus ?? "", /box-shadow: var\(--shadow-card\);/u);
+  assert.doesNotMatch(focus ?? "", /--accent-line|--accent-wash/u);
   assert.match(css, /\.composer-bar \.spacer \{\s*display: var\(--composer-spacer-layout/u);
   assert.match(
     css,
