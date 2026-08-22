@@ -5920,6 +5920,31 @@ button.chip.lg:hover {
   margin-top: 1px;
 }
 
+/* The status badge on a face in the transcript, at half the size the roster
+   gives it. The sidebar's dot is read down a column of names and is sized for
+   that; in the room it sits on the one face at the head of a message, where
+   the same dot read as a bead stuck to the mark. Halved here and nowhere
+   else, so the side tab keeps the size it was asked to keep. The surface ring
+   and the progress track halve with it: a one-pixel band around a 5px badge
+   is the reading the two-pixel band gave the 9px one. */
+.cmsg-row .cmsg-avatar .agent-face .presence {
+  right: -1px;
+  width: 5px;
+  height: 5px;
+  border-width: 1px;
+}
+
+.cmsg-row .cmsg-avatar .agent-face .agent-run {
+  right: -1px;
+  width: 5px;
+  height: 5px;
+}
+
+.cmsg-row .cmsg-avatar .agent-face .agent-run::after {
+  width: 3px;
+  height: 3px;
+}
+
 .cmsg-row .cmsg-body {
   min-width: 0;
   flex: 1;
@@ -6631,10 +6656,10 @@ button.chip.lg:hover {
   content: "";
   position: absolute;
   right: 0;
-  bottom: 2px;
+  bottom: 1px;
   z-index: 2;
-  width: 9px;
-  height: 9px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 1px var(--bg-chat);
@@ -6644,10 +6669,10 @@ button.chip.lg:hover {
 .cmsg-thread-link .ctl-faces .ctl-working::after {
   content: "";
   position: absolute;
-  right: -2px;
+  right: -1px;
   bottom: 0;
-  width: 13px;
-  height: 13px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
@@ -10370,11 +10395,11 @@ dialog.modal[open]::backdrop {
 .cmsg-thread-link .ctl-held {
   flex: none;
   align-self: center;
-  width: 6px;
-  height: 6px;
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
   background: var(--orange);
-  box-shadow: 0 0 0 3px var(--orange-wash);
+  box-shadow: 0 0 0 2px var(--orange-wash);
   animation: status-breathe 2.4s ease-in-out infinite;
 }
 
