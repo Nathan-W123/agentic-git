@@ -1177,7 +1177,7 @@ export class Coordinator {
               continue;
             }
             entry.plannedVersion = waveVersion;
-            entry.speculatedAdvance = undefined;
+            delete entry.speculatedAdvance;
           }
         }
         // Every task still queued has to see the canonical state the previous
@@ -1206,7 +1206,7 @@ export class Coordinator {
               recorder,
               runAudit,
             );
-            entry.speculatedAdvance = undefined;
+            delete entry.speculatedAdvance;
           }),
         );
 
@@ -1357,7 +1357,7 @@ export class Coordinator {
                   changedFiles: [],
                 },
               );
-              entry.speculatedAdvance = undefined;
+              delete entry.speculatedAdvance;
             } else {
               entry.plan = answer.plan;
             }
@@ -2448,13 +2448,17 @@ export class Coordinator {
           {
             reason:
               "Blocking work is in progress; plan against its current edits",
-            changedFiles: overlay.advance.changedFiles,
-            changedSymbols: overlay.advance.changedSymbols,
-            changedApis: overlay.advance.changedApis,
-            changedSchemas: overlay.advance.changedSchemas,
-            changedConfigKeys: overlay.advance.changedConfigKeys,
-            changedTests: overlay.advance.changedTests,
-            changedServices: overlay.advance.changedServices,
+            // Copied rather than aliased. A CanonicalAdvance is readonly and
+            // a notice is not, so the notice takes its own array — which also
+            // means nothing can reach back through the notice and mutate the
+            // advance the speculation is graded against.
+            changedFiles: [...overlay.advance.changedFiles],
+            changedSymbols: [...overlay.advance.changedSymbols],
+            changedApis: [...overlay.advance.changedApis],
+            changedSchemas: [...overlay.advance.changedSchemas],
+            changedConfigKeys: [...overlay.advance.changedConfigKeys],
+            changedTests: [...overlay.advance.changedTests],
+            changedServices: [...overlay.advance.changedServices],
           },
           overlay.changes,
         );
