@@ -7007,6 +7007,10 @@ button.chip.lg:hover {
   padding: 1px 4px;
 }
 
+/* During arrival the render loop tags the whole ping with
+   `text-reveal-word` so its wash and letters share one fade-in instead of
+   an empty coloured box waiting for the name inside it. */
+
 /* The mirror must stay character-for-character the width of the textarea or
    the caret and every character after a ping drift sideways. That includes
    font weight: bold glyphs have different advances from the transparent
@@ -7031,6 +7035,9 @@ button.chip.lg:hover {
   border-radius: 4px;
   padding: 1px 4px;
 }
+
+/* During arrival the render loop tags the whole command with
+   `text-reveal-word` so its wash and letters share one fade-in. */
 
 /* Paint only, for the same reason as the mention above it: padding or heavier
    glyphs here would move every following character away from the caret. */

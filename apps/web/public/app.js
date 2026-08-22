@@ -4661,6 +4661,28 @@ function insideSkipped(node, root) {
 }
 
 /**
+ * A posted ping or slash command, if this text node belongs to one.
+ *
+ * Those spans carry a coloured wash. Splitting them word by word would leave
+ * the box visible while each piece faded in, so the whole token is tagged as
+ * one arrival instead.
+ */
+function revealPingOf(node, block) {
+  let parent = node.parentNode;
+  while (parent !== null && parent !== block) {
+    if (
+      parent instanceof Element &&
+      (parent.classList.contains("mention-ping") ||
+        parent.classList.contains("slash-ping"))
+    ) {
+      return parent;
+    }
+    parent = parent.parentNode;
+  }
+  return null;
+}
+
+/**
  * Wraps each word of a block in its own element so it can come in on its own
  * delay, resuming `elapsed` milliseconds into the sequence.
  *
@@ -4679,10 +4701,25 @@ function revealWords(block, elapsed) {
       texts.push(node);
     }
   }
+  const revealedPings = new Set();
   let index = 0;
   for (const node of texts) {
     if (index >= REVEAL_MAX_WORDS) {
       break;
+    }
+    const ping = revealPingOf(node, block);
+    if (ping !== null) {
+      if (revealedPings.has(ping)) {
+        continue;
+      }
+      revealedPings.add(ping);
+      ping.classList.add("text-reveal-word");
+      ping.style.setProperty(
+        "--reveal-delay",
+        `${Math.round(index * REVEAL_STAGGER_MS - elapsed)}ms`,
+      );
+      index += 1;
+      continue;
     }
     const pieces = String(node.nodeValue).split(/(\s+)/u);
     const holder = document.createDocumentFragment();

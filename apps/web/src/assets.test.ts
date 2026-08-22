@@ -3166,6 +3166,19 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
     css,
     /\.cmsg-text \.slash-ping \{[\s\S]{0,180}padding: 1px 4px;/u,
   );
+
+  // While a message is arriving, a posted ping or command is one reveal
+  // unit so its coloured wash does not sit empty ahead of the letters.
+  const app = await publicFile("app.js");
+  const revealWords = app.slice(app.indexOf("function revealWords(block, elapsed)"));
+  assert.match(revealWords, /function revealPingOf\(node, block\)/u);
+  assert.match(revealWords, /classList\.contains\("mention-ping"\)/u);
+  assert.match(revealWords, /classList\.contains\("slash-ping"\)/u);
+  assert.match(
+    css,
+    /\.cmsg-text \.mention-ping \{[\s\S]{0,320}text-reveal-word/u,
+    "posted ping styling should note the shared arrival class",
+  );
 });
 
 test("channel messages compact only an uninterrupted run from one person", async () => {
