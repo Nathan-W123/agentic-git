@@ -406,7 +406,7 @@ test("a mid-run scope expansion is arbitrated and granted", async (t) => {
   );
 });
 
-test("a scope expansion another task holds is deferred, not refused", async (t) => {
+test("a scope expansion waits until another task releases it", async (t) => {
   const runtime = await startRuntime(t);
 
   // A rival worker is already executing with an admitted plan on the very
@@ -452,30 +452,67 @@ test("a scope expansion another task holds is deferred, not refused", async (t) 
 
   const worker = makeWorker(runtime);
   await worker.register();
-  const result = await worker.runOnce();
+  const running = worker.runOnce();
+  const deadline = Date.now() + 10_000;
+  let scopeDecisions = (await runtime.store.listAudit()).filter(
+    (event) => event.type === "scope_change_decided",
+  );
+  while (
+    !scopeDecisions.some(
+      (event) =>
+        (event.data["decision"] as { decision?: string } | undefined)
+          ?.decision === "deferred",
+    ) &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    scopeDecisions = (await runtime.store.listAudit()).filter(
+      (event) => event.type === "scope_change_decided",
+    );
+  }
+  assert.ok(
+    scopeDecisions.some(
+      (event) =>
+        (event.data["decision"] as { decision?: string } | undefined)
+          ?.decision === "deferred",
+    ),
+    "the scope request should be observed waiting on its holder",
+  );
+  await runtime.store.completeSubmittedTask(held.id, "integrated");
+  assert.equal(
+    await runtime.store.finishWorkLease(
+      rivalAssignment.lease.id,
+      "completed",
+      new Date().toISOString(),
+      "holder finished",
+    ),
+    true,
+  );
+
+  const result = await running;
   assert.equal(result.taskId, expanding.id);
   assert.equal(result.accepted, true, result.reason);
 
-  // Deferred, with the holder named — not a flat refusal, and not a failure.
-  // The agent stayed inside the scope it already owned and its work landed.
-  const decided = (await runtime.store.listAudit()).find(
-    (event) => event.type === "scope_change_decided",
-  );
+  // The deferral was not handed back to the agent as an ending. The worker
+  // retried the same request while the model remained parked, and only the
+  // eventual grant resumed it.
+  const decided = (await runtime.store.listAudit())
+    .filter((event) => event.type === "scope_change_decided")
+    .at(-1);
   const decision = decided?.data["decision"] as
     | { decision?: string; blockedBy?: string[]; retryAfterMs?: number }
     | undefined;
-  assert.equal(decision?.decision, "deferred");
-  assert.deepEqual(decision?.blockedBy, [held.id]);
-  assert.ok((decision?.retryAfterMs ?? 0) > 0);
+  assert.equal(decision?.decision, "approved");
 
   const storedTask = (await runtime.store.listSubmittedTasks()).find(
     (entry) => entry.id === expanding.id,
   );
   assert.equal(storedTask?.status, "integrated");
   const run = await runtime.store.getRun(storedTask?.runId ?? "");
-  assert.deepEqual(run?.changeSets[0]?.patches.map((patch) => patch.path), [
-    "src/value.js",
-  ]);
+  assert.deepEqual(
+    run?.changeSets[0]?.patches.map((patch) => patch.path).sort(),
+    ["src/extra.js", "src/value.js"],
+  );
 });
 
 test("a task past its token budget is stopped while it is still spending", async (t) => {

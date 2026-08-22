@@ -729,6 +729,11 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   // Channels and their pictures live in the dedicated rail. Collapsing the
   // adjacent tool/roster sidebar cannot hide that navigation surface.
   assert.match(chats, /function channelPictureMarkup/u);
+  assert.match(
+    chats,
+    /function channelPictureMarkup[\s\S]*?const label = repositoryLabel\(repositoryId\);[\s\S]*?const initials =\s*label\s*\.split/u,
+    "an unset channel picture should follow the repository's current display name",
+  );
   assert.match(chats, /function channelRail/u);
   assert.match(chats, /class="channel-rail" aria-label="Channels"/u);
   assert.match(chats, /data-act="channel-picture-pick"/u);
@@ -1931,6 +1936,19 @@ test("working agent faces fill the mark itself with the run's progress", async (
   assert.doesNotMatch(faceFillLayer ?? "", /background:|border-radius: 50%;/u);
   assert.doesNotMatch(faceFillLayer ?? "", /radial-gradient\(/u);
   assert.doesNotMatch(css, /\.agent-face \.agent-run::after \{/u);
+
+  // The fill glimmers the way live status copy does: the same travelling band
+  // on the same clock, held back over part of the bright mark so the dark one
+  // underneath shows through as it passes.
+  const faceFillSweep = /\.agent-face \.agent-run > svg \{([\s\S]*?)\n\}/u
+    .exec(css)?.[1];
+  assert.notEqual(faceFillSweep, undefined, "a live fill should carry a sweep");
+  assert.match(faceFillSweep ?? "", /mask-size: 250% 100%;/u);
+  assert.match(
+    faceFillSweep ?? "",
+    /animation: agent-run-sweep 2\.4s ease-in-out infinite;/u,
+  );
+  assert.match(css, /@keyframes agent-run-sweep \{/u);
 
   // The mark below stays dark and low, lifting a little as the fill grows.
   const faceFill = /\.agent-face-working > svg \{([\s\S]*?)\n\}/u.exec(css)?.[1];
@@ -3598,6 +3616,7 @@ test("each task turn puts its own thinking below its prompt and starts closed", 
 
 test("the progress bar restarts for each task turn in a thread", async () => {
   const source = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
   const progressStart = source.indexOf("function threadProgress(entry)");
   const progressEnd = source.indexOf("\n/*", progressStart);
   const turnsStart = source.indexOf("function threadReplyTurns(replies)");
@@ -3610,9 +3629,19 @@ test("the progress bar restarts for each task turn in a thread", async () => {
   assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
   assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
 
+  const stageStart = data.indexOf("const STAGE_PROGRESS");
+  const stageEnd = data.indexOf("\n/** Lifecycle order", stageStart);
+  assert.notEqual(stageStart, -1, "lifecycle stage floors should exist");
+  assert.notEqual(stageEnd, -1, "lifecycle stage floors should have a boundary");
+  const STAGE_PROGRESS = Function(
+    `"use strict";\n${data.slice(stageStart, stageEnd)}\nreturn STAGE_PROGRESS;`,
+  )() as Record<string, number>;
+
   const progress = Function(
     "state",
     "THREAD_FINISHED_RE",
+    "STAGE_PROGRESS",
+    "taskProgress",
     `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
       progressStart,
       progressEnd,
@@ -3620,6 +3649,8 @@ test("the progress bar restarts for each task turn in a thread", async () => {
   )(
     { tasks: [{ id: "task-1", status: "claimed" }] },
     /^(Done —|I could not|This was cancelled)/u,
+    STAGE_PROGRESS,
+    (task: { status?: string }) => STAGE_PROGRESS[task?.status ?? ""] ?? 0,
   ) as (entry: {
     taskId: string;
     replies: Array<{ kind: string; content: string }>;
@@ -3639,7 +3670,7 @@ test("the progress bar restarts for each task turn in a thread", async () => {
 
   assert.equal(
     progress(thread),
-    20,
+    STAGE_PROGRESS.claimed,
     "an earlier ending must not hide the active turn's progress",
   );
   assert.equal(
@@ -3647,7 +3678,7 @@ test("the progress bar restarts for each task turn in a thread", async () => {
       ...thread,
       replies: thread.replies.filter((reply) => reply.kind !== "user"),
     }),
-    20,
+    STAGE_PROGRESS.claimed,
     "a task added without a copied prompt must restart progress too",
   );
   thread.replies.push({ kind: "outcome", content: "The follow-up is complete" });
@@ -3655,6 +3686,112 @@ test("the progress bar restarts for each task turn in a thread", async () => {
     progress(thread),
     undefined,
     "the bar should still disappear when the current turn ends",
+  );
+});
+
+test("task progress is monotonic and progress bars animate between keyed values", async () => {
+  const data = await publicFile("data.js");
+  const ui = await publicFile("ui.js");
+  const styles = await publicFile("styles.css");
+
+  const progressStart = data.indexOf("const STAGE_PROGRESS");
+  const progressEnd = data.indexOf("\n/**\n * Whether a task", progressStart);
+  assert.notEqual(progressStart, -1, "task progress stages should exist");
+  assert.notEqual(progressEnd, -1, "task progress should have a boundary");
+  const progressSource = data
+    .slice(progressStart, progressEnd)
+    .replace("export function taskProgress", "function taskProgress");
+  assert.match(
+    progressSource,
+    /STAGE_INTERPOLATE[\s\S]*codingFileShare[\s\S]*codingTimeShare/u,
+    "coding stages should interpolate from files touched and time on the run",
+  );
+  const taskProgress = Function(
+    "state",
+    `"use strict";\n${progressSource}\nreturn taskProgress;`,
+  )({
+    audit: [
+      {
+        event: {
+          type: "plan_received",
+          taskId: "task-coding",
+          data: { expectedFiles: ["a.js", "b.js"] },
+        },
+      },
+    ],
+    changeSets: {
+      "task-coding": { patches: [{ path: "a.js" }] },
+    },
+    agentBusy: {},
+  }) as (task: {
+    id?: string;
+    status: string;
+    claimedAt?: string;
+  }) => number;
+  const lifecycle = [
+    "submitted",
+    "planning",
+    "planned",
+    "approved",
+    "queued",
+    "claimed",
+    "running",
+    "replanning",
+    "awaiting_approval",
+    "validating",
+    "integrated",
+  ].map((status) => taskProgress({ status }));
+  assert.deepEqual(
+    lifecycle,
+    [...lifecycle].sort((left, right) => left - right),
+    "moving to a later lifecycle stage must not move progress backwards",
+  );
+  assert.equal(lifecycle.at(-1), 100, "terminal work should be complete");
+
+  const claimedFloor = taskProgress({ status: "claimed" });
+  const claimedMid = taskProgress({
+    id: "task-coding",
+    status: "claimed",
+    claimedAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+  const runningFloor = taskProgress({ status: "running" });
+  assert.ok(
+    claimedMid > claimedFloor,
+    "coding should advance inside its stage when planned files are touched",
+  );
+  assert.ok(
+    claimedMid < runningFloor,
+    "within-stage coding progress must stay below the next lifecycle floor",
+  );
+
+  const barStart = ui.indexOf("export function bar(percent");
+  const barEnd = ui.indexOf("\n}\n\n/**", barStart) + 2;
+  assert.notEqual(barStart, -1, "the shared progress bar should exist");
+  assert.ok(barEnd > 1, "the shared progress bar should have a boundary");
+  const bar = Function(
+    `"use strict";\n${ui
+      .slice(barStart, barEnd)
+      .replace("export function bar", "function bar")}\nreturn bar;`,
+  )() as (percent: number, tone?: string, thin?: boolean, key?: string) => string;
+  assert.doesNotMatch(
+    bar(44, "", false, "row:task-1"),
+    /bar-progress-fill/u,
+    "a newly observed bar should start at its current value",
+  );
+  const moving = bar(62, "", false, "row:task-1");
+  assert.match(moving, /bar-progress-fill/u);
+  assert.match(moving, /--bar-progress-from:44%/u);
+  assert.match(moving, /--bar-progress-to:62%/u);
+  assert.doesNotMatch(
+    bar(62, "", false, "card:task-1"),
+    /bar-progress-fill/u,
+    "each dashboard surface should keep independent progress history",
+  );
+
+  assert.match(styles, /@keyframes bar-progress-fill/u);
+  assert.match(
+    styles,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.bar > i\.bar-progress-fill \{\s*animation: none;/u,
   );
 });
 

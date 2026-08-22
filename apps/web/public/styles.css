@@ -1025,6 +1025,50 @@ svg.ui-icon {
   pointer-events: none;
 }
 
+/* The filled sector reads as a run still going rather than as a frozen
+   fraction, so it carries the same travelling highlight the live status copy
+   does — see `.text-sweep`, same gradient shape and same clock. A band of the
+   bright copy is held back as it passes, letting the dark mark underneath show
+   through, which is what makes the glimmer a wave across the fill rather than
+   the whole fill pulsing. Masking the inner mark rather than tinting it keeps
+   the fill in the owner's colour at every point of the sweep. */
+.agent-face .agent-run > svg {
+  -webkit-mask-image: linear-gradient(
+    100deg,
+    rgba(0, 0, 0, 0.4) 0 38%,
+    #000 48%,
+    rgba(0, 0, 0, 0.4) 58% 100%
+  );
+  mask-image: linear-gradient(
+    100deg,
+    rgba(0, 0, 0, 0.4) 0 38%,
+    #000 48%,
+    rgba(0, 0, 0, 0.4) 58% 100%
+  );
+  -webkit-mask-size: 250% 100%;
+  mask-size: 250% 100%;
+  -webkit-mask-position: 100% 0;
+  mask-position: 100% 0;
+  animation: agent-run-sweep 2.4s ease-in-out infinite;
+}
+
+@keyframes agent-run-sweep {
+  to {
+    -webkit-mask-position: -150% 0;
+    mask-position: -150% 0;
+  }
+}
+
+/* Nothing travelling, so nothing is held back either: the fill goes back to
+   being the plain bright sector. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-face .agent-run > svg {
+    animation: none;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+}
+
 /* Dark and barely there with nothing done, and lifting a little as the fill
    grows, so even the unfilled part of the mark says roughly how far along a
    run is. Only the mark directly in the face is dimmed — the copy inside the
@@ -1196,6 +1240,22 @@ svg.ui-icon {
   transition: width 0.4s ease;
 }
 
+.bar > i.bar-progress-fill {
+  animation:
+    bar-progress-fill 0.65s cubic-bezier(0.22, 1, 0.36, 1) both,
+    thread-activity-sweep 2.4s ease-in-out infinite;
+}
+
+@keyframes bar-progress-fill {
+  from {
+    width: var(--bar-progress-from);
+  }
+
+  to {
+    width: var(--bar-progress-to);
+  }
+}
+
 .bar.thin {
   height: 3px;
 }
@@ -1217,6 +1277,10 @@ svg.ui-icon {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .bar > i.bar-progress-fill {
+    animation: none;
+  }
+
   .bar > i:not(.green):not(.blue):not(.orange):not(.grey) {
     animation: none;
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
@@ -9125,6 +9189,29 @@ dialog.modal[open]::backdrop {
   padding: 0;
 }
 
+.catch-up-task-open {
+  appearance: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% + 12px);
+  margin: -6px;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.catch-up-task-open:hover,
+.catch-up-task-open:focus-visible {
+  background: var(--bg-hover);
+}
+
 .catch-up-task-lead {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -9137,6 +9224,36 @@ dialog.modal[open]::backdrop {
   letter-spacing: -0.01em;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.catch-up-task-arrow {
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-4);
+}
+
+.catch-up-task-arrow .ui-icon,
+.catch-up-file .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.catch-up-files {
+  padding-top: 2px;
+}
+
+.catch-up-file {
+  appearance: none;
+  min-width: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.catch-up-file:hover,
+.catch-up-file:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .catch-up-actions {

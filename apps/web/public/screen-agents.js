@@ -17,6 +17,7 @@ import {
   connectGitHub,
   connectProviderCredential,
   gitHubSignInStatus,
+  heldFiles,
   loadContext,
   loadGitHub,
   loadProviders,
@@ -110,7 +111,12 @@ function agentRow(agent, active) {
     <span class="ar-prog">${
       task !== undefined && !taskStarted(task)
         ? `<span class="mt-stage">Queued</span>`
-        : `${bar(agent.progress, agent.status === "working" ? "" : "grey")}
+        : `${bar(
+            agent.progress,
+            agent.status === "working" ? "" : "grey",
+            false,
+            `agent-row:${agent.id}:${task?.id ?? "idle"}`,
+          )}
            <span class="ar-pct">${Math.round(agent.progress)}%</span>`
     }</span>
     <span class="ar-more">${iconButton("dots", {
@@ -160,7 +166,12 @@ function agentCard(agent, active) {
         ? ""
         : queued
           ? `<span class="tile-pct">Queued</span>`
-          : `${bar(agent.progress, agent.status === "working" ? "" : "grey")}
+          : `${bar(
+              agent.progress,
+              agent.status === "working" ? "" : "grey",
+              false,
+              `agent-card:${agent.id}:${task.id}`,
+            )}
              <span class="tile-pct">${Math.round(agent.progress)}%</span>`
     }`,
     act: "agent-pick",
@@ -244,6 +255,11 @@ function agentChangeSet(agent) {
 function agentRails(agent) {
   const task = agent.task;
   const patches = agentChangeSet(agent)?.patches ?? [];
+  const held =
+    task === undefined
+      ? []
+      : heldFiles().filter((file) => file.taskId === task.id);
+  const progress = task === undefined ? agent.progress : taskProgress(task);
   return `<div class="agent-rails">
     ${sectionRail(
       "Model",
@@ -282,7 +298,15 @@ function agentRails(agent) {
                 title: task.objective,
               },
               taskStarted(task)
-                ? { label: `${taskProgress(task)}% done`, iconName: "clock", tone: "blue" }
+                ? {
+                    label: `${progress}% done`,
+                    iconName: "clock",
+                    tone: "blue",
+                    title:
+                      held.length > 0
+                        ? `${patches.length} of ${held.length} planned files in the changeset`
+                        : undefined,
+                  }
                 : { label: "Queued", iconName: "clock", tone: "orange" },
               task.repositoryId === undefined || task.repositoryId === ""
                 ? undefined
@@ -294,9 +318,18 @@ function agentRails(agent) {
       "Files",
       chipRow([
         patches.length === 0
-          ? { label: "Nothing touched yet", iconName: "file" }
+          ? {
+              label:
+                held.length === 0
+                  ? "Nothing touched yet"
+                  : `0 of ${held.length} planned files touched`,
+              iconName: "file",
+            }
           : {
-              label: `${patches.length} file${patches.length === 1 ? "" : "s"} in the changeset`,
+              label:
+                held.length > 0
+                  ? `${patches.length} of ${held.length} planned files in the changeset`
+                  : `${patches.length} file${patches.length === 1 ? "" : "s"} in the changeset`,
               iconName: "file",
               tone: "green",
             },
@@ -351,7 +384,12 @@ function tabBody(tab, agent) {
       </div>
       <div class="ar-prog">${
         taskStarted(task)
-          ? `${bar(taskProgress(task))}
+          ? `${bar(
+              taskProgress(task),
+              "",
+              false,
+              `agent-task:${agent.id}:${task.id}`,
+            )}
              <span class="ar-pct">${taskProgress(task)}%</span>`
           : `<span class="mt-stage">Queued — waiting for a free slot</span>`
       }</div>

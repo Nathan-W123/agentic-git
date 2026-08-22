@@ -2081,18 +2081,21 @@ export function completedToday() {
 /**
  * How far along a task is.
  *
- * The pipeline has fixed stages, so the honest progress signal is which stage
- * the task has reached — not a number an agent invented. A task that has not
- * started reads 0, an integrated one reads 100.
+ * The pipeline has fixed stages, so each status owns a floor. While a stage is
+ * still open — especially while coding — progress also moves *inside* that
+ * band toward the next stage's floor, from files touched and time on the run.
+ * Stage changes alone used to be the only updates; the bar then only looked
+ * smooth because CSS eased between those jumps.
  */
-const STAGE_PROGRESS = {
+export const STAGE_PROGRESS = {
   submitted: 4,
   planning: 18,
+  planned: 30,
   approved: 30,
-  queued: 26,
-  claimed: 34,
+  queued: 36,
+  claimed: 44,
   running: 62,
-  replanning: 48,
+  replanning: 72,
   awaiting_approval: 78,
   validating: 88,
   // An open conversational task's turn has landed in full; the task waits
@@ -2103,8 +2106,166 @@ const STAGE_PROGRESS = {
   cancelled: 100,
 };
 
+/** Lifecycle order used to find the next stage's floor (this stage's ceiling). */
+const STAGE_ORDER = [
+  "submitted",
+  "planning",
+  "planned",
+  "approved",
+  "queued",
+  "claimed",
+  "running",
+  "replanning",
+  "awaiting_approval",
+  "validating",
+  "integrated",
+];
+
+/** Stages that wait on a queue or a person — progress stays on the floor. */
+const STAGE_HELD_STILL = new Set([
+  "submitted",
+  "planned",
+  "approved",
+  "queued",
+  "awaiting_approval",
+]);
+
+/** Stages that are actively doing work and should move inside their band. */
+const STAGE_INTERPOLATE = new Set([
+  "planning",
+  "claimed",
+  "running",
+  "replanning",
+  "validating",
+]);
+
+function stageCeiling(status) {
+  const floor = STAGE_PROGRESS[status] ?? 0;
+  const index = STAGE_ORDER.indexOf(status);
+  if (index === -1) {
+    return floor;
+  }
+  for (let next = index + 1; next < STAGE_ORDER.length; next += 1) {
+    const value = STAGE_PROGRESS[STAGE_ORDER[next]];
+    if (value !== undefined && value > floor) {
+      return value;
+    }
+  }
+  return 100;
+}
+
+/** Declared files for one task, from the plan the coordinator recorded. */
+function expectedPathsForTask(taskId) {
+  if (taskId === undefined || typeof state === "undefined") {
+    return [];
+  }
+  const paths = [];
+  const seen = new Set();
+  for (const entry of state.audit ?? []) {
+    const event = entry.event ?? entry;
+    if (event.type !== "plan_received" || event.taskId !== taskId) {
+      continue;
+    }
+    const files = event.data?.expectedFiles;
+    if (!Array.isArray(files)) {
+      continue;
+    }
+    for (const file of files) {
+      if (typeof file !== "string" || file === "" || seen.has(file)) {
+        continue;
+      }
+      seen.add(file);
+      paths.push(file);
+    }
+  }
+  return paths;
+}
+
+/** Paths already in this task's changeset, when one has been loaded. */
+function editedPathsForTask(taskId) {
+  if (taskId === undefined || typeof state === "undefined") {
+    return [];
+  }
+  return (state.changeSets?.[taskId]?.patches ?? [])
+    .map((patch) => patch?.path)
+    .filter((path) => typeof path === "string" && path !== "");
+}
+
+/**
+ * How much of the plan's file list is already in the changeset.
+ *
+ * Missing changeset data reads as zero rather than guessing — time-share
+ * below still keeps the bar from sitting frozen while coding.
+ */
+function codingFileShare(task) {
+  const expected = expectedPathsForTask(task?.id);
+  if (expected.length === 0) {
+    return 0;
+  }
+  const edited = new Set(editedPathsForTask(task.id));
+  let done = 0;
+  for (const path of expected) {
+    if (edited.has(path)) {
+      done += 1;
+    }
+  }
+  return Math.min(1, done / expected.length);
+}
+
+/**
+ * Soft advance while a stage is open, so progress keeps flowing between the
+ * discrete file and status events. Asymptotes toward the ceiling and never
+ * finishes the stage on the clock alone.
+ */
+function codingTimeShare(task) {
+  if (task === undefined) {
+    return 0;
+  }
+  const fromTask =
+    Date.parse(String(task.claimedAt ?? "")) ||
+    Date.parse(String(task.createdAt ?? "")) ||
+    0;
+  const fromBusy =
+    typeof state !== "undefined" && task.id !== undefined
+      ? Number(state.agentBusy?.[task.id]?.at ?? 0)
+      : 0;
+  const started = fromTask || fromBusy;
+  if (!Number.isFinite(started) || started <= 0) {
+    return 0;
+  }
+  const elapsed = Math.max(0, Date.now() - started);
+  // ~12 minutes to ~90% of the band; the stage change still owns the last step.
+  return 0.9 * (1 - Math.exp(-elapsed / (12 * 60 * 1000)));
+}
+
 export function taskProgress(task) {
-  return STAGE_PROGRESS[task?.status] ?? 0;
+  const status = task?.status;
+  const floor = STAGE_PROGRESS[status] ?? 0;
+  if (status === undefined) {
+    return 0;
+  }
+  if (floor >= 100 || STAGE_HELD_STILL.has(status)) {
+    return floor;
+  }
+  if (!STAGE_INTERPOLATE.has(status)) {
+    return floor;
+  }
+  // Status-only callers (and the monotonic unit slice) stay on the floor.
+  if (typeof state === "undefined" || task?.id === undefined) {
+    return floor;
+  }
+  const ceiling = stageCeiling(status);
+  if (ceiling <= floor) {
+    return floor;
+  }
+  let share = codingTimeShare(task);
+  if (status === "claimed" || status === "running" || status === "replanning") {
+    // Files are the honest coding signal; time fills the gaps between them.
+    share = Math.max(codingFileShare(task), share * 0.55);
+  } else if (status === "validating") {
+    share = Math.max(0.4, share);
+  }
+  return Math.round(floor + (ceiling - floor) * Math.min(1, share));
 }
 
 /**

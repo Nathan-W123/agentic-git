@@ -110,12 +110,16 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(data, /catchUps: \{\}/u);
   assert.match(app, /const serverOutcomes = new Map/u);
   assert.match(app, /outcome\?\.summary/u);
+  // A row that says only that the work was completed cannot be told apart
+  // from the other five, so an outcome the server could not phrase falls back
+  // to the request the task was given.
+  assert.match(app, /briefObjective\(task\.objective\)/u);
   assert.doesNotMatch(app, /function catchUpTaskOutcome\(task\)/u);
   assert.doesNotMatch(app, /Implemented: \$\{objective\}/u);
   // The digest is skimmed, so each row is one condensed claim with the who
   // and the how-much moved into attribution pills rather than spelled out in
-  // prose. The full file list is the pill's title, not three names and a
-  // count of the rest.
+  // prose. The file count keeps the old compact attribution, while the paths
+  // themselves become direct controls below it.
   assert.match(chats, /function catchUpLead\(summary\)/u);
   assert.match(chats, /class="catch-up-task-lead"/u);
   assert.match(chats, /pillBar\(/u);
@@ -133,6 +137,53 @@ test("returning users see completed work in the side panel", async () => {
   );
   assert.doesNotMatch(app, /catch-up-card/u);
   assert.match(styles, /\.catch-up-task-list \{/u);
+
+  // A completed-work summary is a native control carrying the stable task
+  // identity. It resolves that task's channel root, including older pages,
+  // and opens the existing thread surface rather than a generic destination.
+  assert.match(
+    chats,
+    /<button type="button" class="catch-up-task-open"/u,
+  );
+  assert.match(
+    chats,
+    /data-act="catch-up-task-open" data-value="\$\{esc\(task\.id\)\}"/u,
+  );
+  assert.match(chats, /data-repository="\$\{esc\(taskRepositoryId\)\}"/u);
+  assert.match(chats, /export function channelMessageHasTaskThread\(entry\)/u);
+  assert.match(app, /case "catch-up-task-open": \{/u);
+  assert.match(
+    app,
+    /entry\.taskId === value && channelMessageHasTaskThread\(entry\)/u,
+  );
+  assert.match(app, /loadEarlierChannelMessages\(taskRepositoryId, render\)/u);
+  assert.match(app, /openThreadPanel\(taskMessage\.id\)/u);
+
+  // Every reported path is its own native control. The established channel
+  // file action receives both the path and the task it came from so the file
+  // panel opens the matching contents and changeset.
+  assert.match(
+    chats,
+    /<button type="button" class="pill catch-up-file"/u,
+  );
+  assert.match(
+    chats,
+    /data-act="chan-file-open" data-value="\$\{esc\(path\)\}"/u,
+  );
+  assert.match(chats, /data-task="\$\{esc\(task\.id\)\}"/u);
+  assert.match(
+    app,
+    /state\.chanFileTaskId = node\?\.dataset\?\.task \?\? undefined/u,
+  );
+  assert.match(app, /void loadChannelFile\(value, render\)/u);
+  assert.match(
+    styles,
+    /\.catch-up-task-open:hover,\s*\.catch-up-task-open:focus-visible/u,
+  );
+  assert.match(
+    styles,
+    /\.catch-up-file:hover,\s*\.catch-up-file:focus-visible/u,
+  );
 
   // Closing from the button, Escape, or a swipe advances the same personal
   // watermark only after the list has actually been shown.

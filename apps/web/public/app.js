@@ -189,7 +189,9 @@ import {
   signInForInvitation,
 } from "./data.js";
 import {
+  briefObjective,
   captureChannelScroll,
+  channelMessageHasTaskThread,
   channelInfoPopoverHtml,
   closeComposerAutocomplete,
   copyMessageText,
@@ -5999,6 +6001,46 @@ document.addEventListener("click", (event) => {
       dismissSinceYouLeft();
       render();
       return;
+    case "catch-up-task-open": {
+      const taskRepositoryId = node.dataset.repository ?? activeChannelId();
+      if (!value || !taskRepositoryId) {
+        return;
+      }
+      void (async () => {
+        await ensureChannelMessages(taskRepositoryId, render);
+        let taskMessage = channelMessagesFor(taskRepositoryId).find(
+          (entry) =>
+            entry.taskId === value && channelMessageHasTaskThread(entry),
+        );
+        while (
+          taskMessage === undefined &&
+          state.channelHasMore[taskRepositoryId] === true
+        ) {
+          const before = channelMessagesFor(taskRepositoryId).length;
+          await loadEarlierChannelMessages(taskRepositoryId, render);
+          taskMessage = channelMessagesFor(taskRepositoryId).find(
+            (entry) =>
+              entry.taskId === value && channelMessageHasTaskThread(entry),
+          );
+          if (channelMessagesFor(taskRepositoryId).length === before) {
+            break;
+          }
+        }
+        if (taskMessage === undefined) {
+          toast(
+            "That task's thread is no longer in the channel history.",
+            "error",
+          );
+          return;
+        }
+        openThreadPanel(taskMessage.id);
+        state.activeChannelThread = taskMessage.id;
+        state.threadReplyMessageId = undefined;
+        state.autoOpenedThread = undefined;
+        render();
+      })();
+      return;
+    }
     // Reading it is done; saying something about it happens in the thread.
     case "plan-thread-open":
       state.activePlan = undefined;
@@ -7939,8 +7981,12 @@ async function showSinceYouLeft() {
       return {
         ...task,
         completedAt: outcome?.completedAt ?? task.completedAt ?? task.openedAt,
+        // The server's outcome first, then the request this task was given:
+        // a row saying only that the work was completed cannot tell somebody
+        // which of last night's tasks it stands for.
         summary:
           String(outcome?.summary ?? "").trim() ||
+          briefObjective(task.objective) ||
           "Completed the requested work.",
         changedFiles: Array.isArray(outcome?.changedFiles)
           ? outcome.changedFiles

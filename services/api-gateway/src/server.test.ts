@@ -6030,6 +6030,92 @@ test("a request that merely opens a thread carries nothing; the follow-up in it 
   );
 });
 
+test("a follow-up to a busy thread agent queues behind its active task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "busy-thread-follow-up");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) handle the current work" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1 && runtime.runCalls.length === 1,
+    "the active task never started",
+  );
+  const current = (
+    await runtime.store.listSubmittedTasks({ repositoryId })
+  ).find((task) => task.objective.includes("current work"));
+  assert.ok(current !== undefined);
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  const root = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.taskId === current.id);
+  assert.ok(root !== undefined, "the active task never opened its thread");
+
+  // This is the shape that used to miss the verb-list task check and enter a
+  // provider answer turn. Because that provider is occupied by `current`, it
+  // waited for the 180-second question timeout instead of retaining the work.
+  const followUp =
+    "when I give you another task while this one is in progress, queue it " +
+    "for afterward";
+  assert.equal(looksLikeTaskRequest(followUp), false);
+  const promptsBefore = runtime.chatPrompts.length;
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: followUp } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length === 2,
+    "the busy agent's follow-up was not retained as queued work",
+  );
+
+  assert.equal(
+    runtime.chatPrompts.length,
+    promptsBefore,
+    "a busy provider should not receive a competing direct-answer turn",
+  );
+  assert.equal(runtime.submittedTasks[1]?.queueAfterCurrent, true);
+  assert.equal(
+    runtime.runCalls.length,
+    1,
+    "queued work must not ask the repository to run before its predecessor",
+  );
+  const queued = (
+    await runtime.store.listSubmittedTasks({ repositoryId })
+  ).find((task) => task.id !== current.id);
+  assert.equal(queued?.afterTaskId, current.id);
+  assert.deepEqual(
+    await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID),
+    [],
+  );
+
+  await runtime.store.completeSubmittedTask(current.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_reported",
+    taskId: current.id,
+    data: { explanation: "Current work finished." },
+  });
+  await waitFor(
+    async () => runtime.runCalls.length === 2,
+    "the queued follow-up did not start after its predecessor finished",
+  );
+  const [claimed] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(claimed?.id, queued?.id);
+});
+
 /** A thread on a person's message is a conversation between people. */
 test("a reply in a person's thread does not summon an agent", async (t) => {
   const runtime = await startRuntime(t);
@@ -9870,9 +9956,9 @@ test("a quick task keeps its outcome inline after acknowledging the handoff", as
 /**
  * Puts one dispatched task in the room, which is what starts the fast pump.
  *
- * `narrateConflicts` rides on `pumpChannelProgress`, and that timer only
+ * `announceArbitration` rides on `pumpChannelProgress`, and that timer only
  * exists while some task is being watched — so a conflict test needs a real
- * mention dispatch before an appended `conflict_detected` can be narrated.
+ * mention dispatch before an appended admission can be narrated.
  */
 async function roomWithTwoAgents(
   runtime: TestRuntime,
@@ -9917,8 +10003,8 @@ test("a file collision and its admission produce one authoritative ordering", as
   // that lands.' Two truncated walls of somebody's own prompt and three
   // clauses of justification, to say that one agent goes after another.
   //
-  // Two separate faults produced that. `narrateConflicts` never resolved a
-  // name at all, and the resolver `announceArbitration` did use matched a
+  // Two separate faults produced that. The detector's own line never resolved
+  // a name at all, and the resolver `announceArbitration` did use matched a
   // task's `agentId` against the *provider* id ("anthropic") when a real
   // agentId is named after the vendor ("test-agent-claude") — so it missed
   // every task and fell through to the objective it was written to replace.
@@ -10009,7 +10095,18 @@ test("a file collision and its admission produce one authoritative ordering", as
   );
 });
 
-test("a collision that can run together is one line, and one that cannot say so is silent", async (t) => {
+test("a collision no admission acts on is not announced at all", async (t) => {
+  // This used to be the one line `narrateConflicts` existed for: "@Claude and
+  // @Codex are working on related things but can run together." Both plans
+  // admitted whole, neither refused anything, nobody waiting — an
+  // announcement with no decision in it, in the room where people watch for
+  // the ones that do have a decision in them. And when both tasks belonged to
+  // one agent it came out "@Hades and @Hades", which is the coordinator
+  // reporting a collision between somebody and themselves.
+  //
+  // So no disposition and no evidence is narrated here any more. What is left
+  // is the collision an admission actually acts on, and that is spoken by
+  // `announceArbitration`, off the event that knows who was held.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const session = await bootstrap(owner);
@@ -10029,35 +10126,12 @@ test("a collision that can run together is one line, and one that cannot say so 
     firstName,
   );
 
-  // A pair with nothing between them is never spoken at all — saying
-  // "conflict" about work that is running anyway would teach readers to
-  // ignore the times it matters.
-  await runtime.store.appendAudit(undefined, {
-    type: "conflict_detected",
-    taskId: tasks.claude,
-    data: {
-      projectId: DEFAULT_PROJECT_ID,
-      repositoryId: repo,
-      taskIds: [tasks.claude, tasks.codex],
-      disposition: "concurrent",
-      evidence: [],
-    },
-  });
-  // Nor is a real file overlap, whatever band it scores in. Nothing in this
-  // system admits two plans onto the same file: the wave scheduler blocks
-  // one behind the other on any structural evidence, and remote admission
-  // sequences or splits the plan. This landed in the notify band and was
-  // announced as "can run together" — and then the agent that had been held
-  // reported it could not touch those files, which is the room contradicting
-  // itself. `announceArbitration` speaks for these, off an event that knows
-  // who was actually held.
-  await runtime.store.appendAudit(undefined, {
-    type: "conflict_detected",
-    taskId: tasks.claude,
-    data: {
-      projectId: DEFAULT_PROJECT_ID,
-      repositoryId: repo,
-      taskIds: [tasks.claude, tasks.codex],
+  // Every shape the detector can record: a pair with nothing between them,
+  // a real file overlap scored inside the notify band, and the intent-only
+  // overlap the advisory line was written for.
+  for (const detected of [
+    { disposition: "concurrent", evidence: [] },
+    {
       disposition: "concurrent_with_notification",
       evidence: [
         {
@@ -10067,16 +10141,7 @@ test("a collision that can run together is one line, and one that cannot say so 
         },
       ],
     },
-  });
-  // The one collision this line exists for: intent-only evidence, which is
-  // advisory, never scheduled on, and leaves both plans admitted whole.
-  await runtime.store.appendAudit(undefined, {
-    type: "conflict_detected",
-    taskId: tasks.claude,
-    data: {
-      projectId: DEFAULT_PROJECT_ID,
-      repositoryId: repo,
-      taskIds: [tasks.claude, tasks.codex],
+    {
       disposition: "concurrent_with_notification",
       evidence: [
         {
@@ -10087,6 +10152,31 @@ test("a collision that can run together is one line, and one that cannot say so 
         },
       ],
     },
+  ]) {
+    await runtime.store.appendAudit(undefined, {
+      type: "conflict_detected",
+      taskId: tasks.claude,
+      data: {
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryId: repo,
+        taskIds: [tasks.claude, tasks.codex],
+        ...detected,
+      },
+    });
+  }
+
+  // A collision that *is* acted on, appended last, as the proof the room was
+  // reachable all along. Waiting on a line that must not appear proves
+  // nothing; waiting on the next one that must, and then finding it alone,
+  // proves both halves.
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
+    },
   });
 
   await waitFor(
@@ -10094,7 +10184,7 @@ test("a collision that can run together is one line, and one that cannot say so 
       const messages = await runtime.store.listChannelMessages(repo, ownerId);
       return messages.some((message) => message.authorId === "coordinator");
     },
-    "the advisory collision was never announced",
+    "the arbitration was never announced",
     8_000,
   );
 
@@ -10102,15 +10192,13 @@ test("a collision that can run together is one line, and one that cannot say so 
   const lines = messages
     .filter((message) => message.authorId === "coordinator")
     .map((message) => String(message.content));
-  // Exactly one: the `concurrent` event and the structural overlap above are
-  // both deliberately not narrated here.
   assert.deepEqual(
     lines,
     [
-      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) are working on ` +
-        `related things but can run together.`,
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+        `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
     ],
-    `the advisory collision did not read as one short line: ${JSON.stringify(lines)}`,
+    `a collision nobody was held by was still narrated: ${JSON.stringify(lines)}`,
   );
 });
 
@@ -10269,6 +10357,96 @@ test("a blocked admission says who waits for whom, not that a plan is shrinking"
   );
 });
 
+test("one agent holding two conflicting tasks is named once, with the order", async (t) => {
+  // In the words of the person who hit it: "don't go like, at Hades and at
+  // Hades are working on related things". One agent handed two tasks that
+  // collide is arbitrated exactly like two agents that do, and both sides of
+  // the line resolve to the same name — so the room was told "@Hades and
+  // @Hades have conflicting files — @Hades will wait for @Hades to go first",
+  // which names the only thing the reader already knew and none of what they
+  // wanted. What they wanted is the order, and which task is which.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "oneagentroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+  // The second half of the collision is the same agent's other task — the
+  // vendor-resolved id the dispatched one carries, not the other vendor's.
+  const alsoClaude = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "swap the retry timeout",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  const held = (
+    await runtime.store.listSubmittedTasks({ repositoryId: repo })
+  ).find((task) => task.id === tasks.claude);
+  assert.ok(held !== undefined, "the dispatched task went missing");
+  const heldObjective = held.objective.split("\n")[0] ?? "";
+  assert.ok(
+    heldObjective.length <= 40,
+    `the fixture objective is long enough to be truncated: ${heldObjective}`,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "blocked",
+      blockedBy: [alsoClaude.id],
+      explanation:
+        "Plan collides with executing work beyond the sequencing threshold",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the one-agent collision was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  assert.equal(
+    line,
+    `⚖️ @Claude (${firstName}) is working on multiple tasks that conflict — ` +
+      `it will do "swap the retry timeout" first, then "${heldObjective}".`,
+    `the one-agent collision did not read as one agent and an order: ${line}`,
+  );
+  // The shape of the complaint, named so a rewrite cannot bring it back: the
+  // agent is mentioned once, and never set against itself.
+  assert.equal(
+    line.split(`@Claude (${firstName})`).length - 1,
+    1,
+    `the line named the same agent twice: ${line}`,
+  );
+  assert.doesNotMatch(
+    line,
+    /have conflicting files/u,
+    "the line still described one agent's own two tasks as a collision between agents",
+  );
+});
+
 test("a hold is taken back when the held task stops instead of starting", async (t) => {
   // An approved re-admission was the only thing that ever withdrew one of
   // these. Every other way out of a hold — the run failed, somebody cancelled
@@ -10418,10 +10596,12 @@ test("notices left standing by a restart are swept once their collision is over"
   );
 });
 
-test("the can-run-together line goes once neither run is in flight", async (t) => {
-  // Present tense about two runs that are running. Left alone it became the
-  // room's permanent last word on a collision that stopped mattering when both
-  // agents finished, hours earlier.
+test("an advisory line an older deployment left behind is still swept", async (t) => {
+  // Nothing writes "they can run together" any more, but the deployments that
+  // did are the same rooms people are still reading, and those lines are
+  // present tense about two runs that are running. Left alone one becomes the
+  // room's permanent last word on a collision that stopped mattering hours
+  // ago — so the sweep still has to recognise it and take it back.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const session = await bootstrap(owner);
@@ -10441,25 +10621,18 @@ test("the can-run-together line goes once neither run is in flight", async (t) =
     firstName,
   );
 
-  await runtime.store.appendAudit(undefined, {
-    type: "conflict_detected",
+  // Written straight into the room, which is the only way one can arrive now:
+  // the process that posted it is gone, and all this one has is the message.
+  await runtime.store.appendChannelMessage({
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "system",
+    authorId: "coordinator",
+    content:
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) are working on ` +
+      `related things but can run together.`,
     taskId: tasks.claude,
-    data: {
-      projectId: DEFAULT_PROJECT_ID,
-      repositoryId: repo,
-      taskIds: [tasks.claude, tasks.codex],
-      disposition: "concurrent_with_notification",
-      evidence: [{ kind: "file_overlap", resources: ["apps/web/public/app.js"] }],
-    },
   });
-  await waitFor(
-    async () =>
-      (await runtime.store.listChannelMessages(repo, ownerId)).some(
-        (message) => message.authorId === "coordinator",
-      ),
-    "the advisory collision was never announced",
-    8_000,
-  );
 
   const sweep = async (): Promise<void> => {
     await (
@@ -10473,14 +10646,12 @@ test("the can-run-together line goes once neither run is in flight", async (t) =
       .filter((message) => message.authorId === "coordinator")
       .map((message) => String(message.content));
 
-  // One side finishing is not enough: the other is still overlapping it, which
-  // is the whole content of the line.
-  await runtime.store.cancelSubmittedTask(tasks.codex);
+  // Still running: the line is out of date in its wording, not in its claim.
   await sweep();
   assert.equal(
     (await coordinatorLines()).length,
     1,
-    "the advisory line went while one of the two runs was still going",
+    "the sweep took an advisory line about a run that was still going",
   );
 
   await runtime.store.cancelSubmittedTask(tasks.claude);
@@ -10488,7 +10659,7 @@ test("the can-run-together line goes once neither run is in flight", async (t) =
   assert.deepEqual(
     await coordinatorLines(),
     [],
-    "the advisory line outlived both runs it described",
+    "the advisory line outlived the run it described",
   );
 });
 

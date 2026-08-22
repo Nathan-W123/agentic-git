@@ -257,6 +257,9 @@ test("an unusable task rewrite falls back to the agent result, not the prompt", 
     "Moved the connection panel beneath the agent controls.",
   );
 
+  // Boilerplate that only says an agent ran is worth less than the request
+  // it ran on, so the row describes the task rather than announcing that
+  // something happened.
   const legacy = digest({
     landed: [{
       ...change,
@@ -264,7 +267,32 @@ test("an unusable task rewrite falls back to the agent result, not the prompt", 
         "Implemented: Your role in this repository: Backend. Move the panel.",
     }],
   });
-  assert.equal(legacy.tasks[0]?.summary, "Completed the requested work.");
+  assert.equal(
+    legacy.tasks[0]?.summary,
+    "A very long user request that should not become the title.",
+  );
+});
+
+test("a task with no account of itself is described by what it was asked", () => {
+  const built = digest({
+    landed: [{
+      id: "task-1",
+      repositoryId: "repo-1",
+      objective: "move the github settings below the agent settings",
+      at: NOW,
+    }],
+  });
+  assert.equal(
+    built.tasks[0]?.summary,
+    "Move the github settings below the agent settings.",
+  );
+
+  // Only work with nothing to describe it at all falls back to the wording
+  // that says nothing.
+  const blank = digest({
+    landed: [{ id: "task-2", repositoryId: "repo-1", objective: "", at: NOW }],
+  });
+  assert.equal(blank.tasks[0]?.summary, "Completed the requested work.");
 });
 
 test("a quiet interval never reaches the model at all", async () => {

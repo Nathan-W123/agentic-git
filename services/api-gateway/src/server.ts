@@ -585,18 +585,21 @@ const CHANNEL_PLAN_LAPSED_PREFIX = "⌛ Plan expired";
  */
 const CHANNEL_ARBITRATION_PREFIX = "⚖️";
 /**
- * How the advisory line ends, and so how one is told from a hold.
+ * How the advisory line ended, and so how one is still told from a hold.
  *
- * The two say opposite things — nothing is waiting, versus one agent is
- * waiting on another — and they retire on opposite conditions, but a message
- * carries only its text and its task. So the sentence itself is the
- * classifier, which is safe precisely because this file is the only thing
- * that writes it: the line is built from this constant, so the test for it
- * cannot drift from the words being tested.
+ * Nothing writes this line any more: two plans that overlap only in intent
+ * are both admitted whole, neither is refused anything, and a room told
+ * "they can run together" was being handed an announcement with no decision
+ * in it. What survives is the reading of it, because the lines this
+ * deployment has already posted outlive the process that posted them, and a
+ * hold and an advisory retire on opposite conditions — a hold as soon as
+ * either end of it is over, an advisory only once both runs have stopped.
+ * A message carries only its text and its task, so the sentence itself is
+ * what tells the sweep which one it is looking at.
  */
 const CHANNEL_ADVISORY_ENDING = "can run together.";
 
-/** Which of the coordinator's two conflict lines this is, read off the words. */
+/** Which of the coordinator's conflict lines this is, read off the words. */
 function arbitrationNoticeKind(content: string): "hold" | "advisory" {
   return content.endsWith(CHANNEL_ADVISORY_ENDING) ? "advisory" : "hold";
 }
@@ -3598,8 +3601,6 @@ export class ApiGateway {
   private channelProgressTimer: NodeJS.Timeout | undefined;
   private auditorTimer: NodeJS.Timeout | undefined;
   private threadReconcileTimer: NodeJS.Timeout | undefined;
-  /** Last `conflict_detected` sequence narrated to a channel. */
-  private conflictSequence: number | undefined;
   /**
    * The coordinator's temporary conflict lines currently standing in a room,
    * by message id.
@@ -3609,6 +3610,8 @@ export class ApiGateway {
    * end of it does: the held task stops, or the work it names finishes. An
    * `advisory` — "working on related things but can run together" — is about
    * two runs being in flight, so it ends when both of them have stopped.
+   * Nothing posts an advisory any more; the kind stays because the ones
+   * already standing in rooms still have to retire on their own condition.
    *
    * Memory only, and deliberately not the sole record: a hold routinely
    * outlives the process that announced it, which is why the notice also
@@ -3878,9 +3881,6 @@ export class ApiGateway {
     void this.lapseStalePlanHolds().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
-      // Backstop for a conflict recorded moments before a restart killed the
-      // fast pump: slow, but nothing stays unsaid.
-      void this.narrateConflicts().catch(() => undefined);
       void this.reconcileArbitrationNotices().catch(() => undefined);
       void this.lapseStalePlanHolds().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
@@ -12247,6 +12247,12 @@ export class ApiGateway {
       input.projectId,
       input.repositoryId,
     );
+    // A provider that is already running a task cannot also service the
+    // direct-answer turn below. Treat a reply to that agent as follow-on work
+    // and let persistence chain it behind the active task; otherwise this
+    // request waits for the provider until the question timeout and is lost.
+    // `/dnc` remains the explicit way to require a direct, read-only answer.
+    const activity = await this.agentActivityIn(input.repositoryId);
     let threadAuthorId = AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
       ? root.authorId
       : root.taskId === undefined
@@ -12320,29 +12326,38 @@ export class ApiGateway {
         }
         return;
       }
-      if (forceQuestion && named[0] !== undefined) {
+      const candidate = named[0];
+      const queueAfterCurrent =
+        candidate !== undefined && activity.busy(candidate);
+      if (forceQuestion && candidate !== undefined) {
         await this.dispatchOneMention({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
           content: question,
           senderId: input.viewerId,
-          candidate: named[0],
+          candidate,
           threadMessageId: input.messageId,
           forceQuestion: true,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
         });
         return;
       }
       // An instruction goes to one agent even when several were named — two
       // agents editing one repository from one sentence is a collision, not
       // collaboration. Questions fan out; each named agent answers as itself.
-      if (!answerOnly && looksLikeTaskRequest(question) && named[0] !== undefined) {
+      if (
+        !answerOnly &&
+        candidate !== undefined &&
+        (looksLikeTaskRequest(question) || queueAfterCurrent)
+      ) {
         await this.dispatchOneMention({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
           content: question,
           senderId: input.viewerId,
-          candidate: named[0],
+          candidate,
           threadMessageId: input.messageId,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
           ...(brief ? { brief: true } : {}),
         });
         return;
@@ -12387,8 +12402,11 @@ export class ApiGateway {
       ? candidates.filter((entry) => question.includes(`@${entry.name}`))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
-    if (forceQuestion && answering[0] !== undefined) {
-      const candidate = answering[0];
+    const firstAnswering = answering[0];
+    const queueAfterCurrent =
+      firstAnswering !== undefined && activity.busy(firstAnswering);
+    if (forceQuestion && firstAnswering !== undefined) {
+      const candidate = firstAnswering;
       if (
         candidate.visibility !== "personal" ||
         candidate.userId === input.viewerId
@@ -12401,6 +12419,7 @@ export class ApiGateway {
           candidate,
           threadMessageId: input.messageId,
           forceQuestion: true,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
         });
         return;
       }
@@ -12510,6 +12529,7 @@ export class ApiGateway {
           candidate: owner,
           threadMessageId: input.messageId,
           trigger: "conversation",
+          ...(activity.busy(owner) ? { queueAfterCurrent: true } : {}),
           ...(brief ? { brief: true } : {}),
         });
         return;
@@ -12521,8 +12541,12 @@ export class ApiGateway {
     // which no similarity score can claim to know. Only one agent is given
     // the work even if several were named — two agents editing the same
     // repository from one sentence is a collision, not collaboration.
-    if (!answerOnly && looksLikeTaskRequest(question) && answering[0] !== undefined) {
-      const candidate = answering[0];
+    if (
+      !answerOnly &&
+      firstAnswering !== undefined &&
+      (looksLikeTaskRequest(question) || queueAfterCurrent)
+    ) {
+      const candidate = firstAnswering;
       if (candidate.visibility !== "personal" || candidate.userId === input.viewerId) {
         await this.dispatchOneMention({
           projectId: input.projectId,
@@ -12531,6 +12555,7 @@ export class ApiGateway {
           senderId: input.viewerId,
           candidate,
           threadMessageId: input.messageId,
+          ...(queueAfterCurrent ? { queueAfterCurrent: true } : {}),
           ...(brief ? { brief: true } : {}),
         });
         return;
@@ -15452,14 +15477,22 @@ export class ApiGateway {
    * this channel, and short: enough to tell two holds apart, not enough to
    * read as a quotation.
    *
-   * Shared by both room-level narrators. `narrateConflicts` used to quote
-   * objectives while `announceArbitration` named agents, so the same collision
-   * was announced two different ways depending on which event arrived.
+   * The objective comes back beside the name rather than instead of it,
+   * because there is one collision the name alone cannot describe: both sides
+   * of it belong to the same agent. "@Hades and @Hades have conflicting
+   * files" names the who twice and the what never, and reads as the
+   * coordinator arguing with itself. There the two tasks are told apart by
+   * what they were asked to do.
    */
   private async channelAgentNamer(
     projectId: string,
     repositoryId: string,
-  ): Promise<(taskId: unknown) => string> {
+  ): Promise<{
+    /** The agent behind a task, as the room knows it. */
+    name: (taskId: unknown) => string;
+    /** What that task was asked to do, short and quoted. */
+    objective: (taskId: unknown) => string;
+  }> {
     const tasks = await this.options.store.listSubmittedTasks({
       repositoryId,
     });
@@ -15477,7 +15510,17 @@ export class ApiGateway {
       projectId,
       repositoryId,
     ).catch(() => []);
-    return (taskId: unknown): string => {
+    const shortObjective = (taskId: unknown): string => {
+      const found = tasks.find((candidate) => candidate.id === taskId);
+      // The request, not the preamble a channel dispatch puts in front of it.
+      // Otherwise every hold in a repository with roles set reads "Your role in
+      // this repository: auditor" and names nothing.
+      const first =
+        withoutRoleContext(found?.objective ?? "another task").split("\n")[0] ??
+        "";
+      return first.length > 40 ? `"${first.slice(0, 37)}…"` : `"${first}"`;
+    };
+    const name = (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
       const owned = connections.filter(
         (connection) => connection.userId === found?.submittedBy,
@@ -15516,14 +15559,9 @@ export class ApiGateway {
           ).name
         }`;
       }
-      // The request, not the preamble a channel dispatch puts in front of it.
-      // Otherwise every hold in a repository with roles set reads "Your role in
-      // this repository: auditor" and names nothing.
-      const first =
-        withoutRoleContext(found?.objective ?? "another task").split("\n")[0] ??
-        "";
-      return first.length > 40 ? `"${first.slice(0, 37)}…"` : `"${first}"`;
+      return shortObjective(taskId);
     };
+    return { name, objective: shortObjective };
   }
 
   /**
@@ -15539,6 +15577,15 @@ export class ApiGateway {
    * coordinator explaining itself to a room that only wanted to know the
    * order. The blocker may have finished between the event and this lookup —
    * the announcement still stands, it just reads as history.
+   *
+   * Two agents is the ordinary case, not the only one. One agent given two
+   * tasks that collide is arbitrated exactly like two agents that do, and the
+   * sentence came out "@Hades and @Hades have conflicting files — @Hades will
+   * wait for @Hades to go first": a true decision phrased as a stranger's
+   * quarrel, naming the one thing the reader already knew and none of what
+   * they needed. So when both sides resolve to one agent it is said as what it
+   * is — one agent, two tasks, and the order it will take them in — with the
+   * tasks told apart by what each was asked to do.
    */
   private async announceArbitration(
     watched: { projectId: string; repositoryId: string; taskId: string },
@@ -15548,15 +15595,30 @@ export class ApiGateway {
       watched.projectId,
       watched.repositoryId,
     );
-    const held = describe(watched.taskId);
+    const held = describe.name(watched.taskId);
     const blockedBy = (
       Array.isArray(data["blockedBy"]) ? data["blockedBy"] : []
     ).filter((entry): entry is string => typeof entry === "string");
-    const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
-      .slice(0, 2)
-      .map(describe);
+    // Deduplicated by the name that will be printed, not by task id. Two of
+    // one agent's tasks blocking a third resolve to the same name, and
+    // "@Hades and @Hades" is not a list of two blockers.
+    const blockers = [
+      ...new Set(blockedBy.slice(0, 2).map((entry) => describe.name(entry))),
+    ];
     const blocker =
       blockers.length > 0 ? blockers.join(" and ") : "work in flight";
+    // Only a resolved agent name can be shared by two tasks and still mean one
+    // agent. The objective fallback is per task, so two of them matching would
+    // be two tasks asked for the same thing, which is a different sentence.
+    const oneAgent =
+      held.startsWith("@") && blockers.length === 1 && blockers[0] === held;
+    const heldWork = describe.objective(watched.taskId);
+    const blockerWork =
+      blockedBy.length > 0
+        ? [...new Set(blockedBy.slice(0, 2).map(describe.objective))].join(
+            " and ",
+          )
+        : "the work already in flight";
     const fileList = (value: unknown): string[] =>
       (Array.isArray(value) ? value : []).filter(
         (entry): entry is string => typeof entry === "string",
@@ -15589,25 +15651,34 @@ export class ApiGateway {
       );
       // The one case where the files earn their place in the line: a split is
       // only legible if the room can see which half started. Still one
-      // sentence, and still the two agents first.
-      line =
-        `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts on ` +
-        `${granted.length > 0 ? clause(granted) : "the free part"} now, ` +
-        `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
-        `${blocker} is done.`;
+      // sentence, and still the agents first.
+      line = oneAgent
+        ? `⚖️ ${held} is working on multiple tasks that conflict — it starts ` +
+          `on ${granted.length > 0 ? clause(granted) : "the free part"} now ` +
+          `and takes ${
+            deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"
+          } once ${blockerWork} is done.`
+        : `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts on ` +
+          `${granted.length > 0 ? clause(granted) : "the free part"} now, ` +
+          `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
+          `${blocker} is done.`;
     } else if (status === "blocked") {
       // The same order the sequenced line reports, said the same way. It used
       // to read "${held} is narrowing its plan", which describes an internal
       // retry the room cannot see and which the person who submitted the work
       // read as their own request being trimmed. Who goes first is the part
       // that is true and the part they wanted.
-      line =
-        `⚖️ ${held} and ${blocker} have conflicting files — ${held} will ` +
-        `wait for ${blocker} to go first.`;
+      line = oneAgent
+        ? `⚖️ ${held} is working on multiple tasks that conflict — it will do ` +
+          `${blockerWork} first, then ${heldWork}.`
+        : `⚖️ ${held} and ${blocker} have conflicting files — ${held} will ` +
+          `wait for ${blocker} to go first.`;
     } else {
-      line =
-        `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
-        `once ${blocker} is done.`;
+      line = oneAgent
+        ? `⚖️ ${held} is working on multiple tasks that conflict — ` +
+          `${heldWork} starts once ${blockerWork} is done.`
+        : `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
+          `once ${blocker} is done.`;
     }
     await this.replaceArbitrationNotice(watched, line, blockedBy);
   }
@@ -15931,7 +16002,11 @@ export class ApiGateway {
         (record.event.data as Record<string, unknown>)["revision"] ===
         data["revision"],
     )?.event.taskId;
-    const winner = objectiveOf(winnerTaskId);
+    // Not "${held} and ${held}": one agent's own two tasks can race each
+    // other to canonical, and a task that lost to itself is replanning on top
+    // of its own result — which the one-sided sentence already says.
+    const candidate = objectiveOf(winnerTaskId);
+    const winner = candidate === held ? undefined : candidate;
     const files = (Array.isArray(data["changedFiles"]) ? data["changedFiles"] : [])
       .filter((entry): entry is string => typeof entry === "string")
       .slice(0, 3);
@@ -15994,158 +16069,7 @@ export class ApiGateway {
     return people;
   }
 
-  /**
-   * Says out loud what the coordinator decided when two tasks collided.
-   *
-   * The detector has always written `conflict_detected` — task ids, the
-   * overlapping files, a disposition and its own explanation — and none of it
-   * ever reached a person: the event carried no repository, so nothing could
-   * route it to a channel, and `narrateTaskEvent` had no case for it. The one
-   * thing this product does that a pile of uncoordinated agents cannot was
-   * invisible in the room where people watch the agents work; the only
-   * symptom of an arbitration was one task mysteriously waiting.
-   *
-   * Spoken by the room, not by an agent. Every collision with structural
-   * evidence behind it — not merely the ones the detector scored as
-   * sequence/block — is deliberately left to `announceArbitration`, whose
-   * `plan_admitted` event identifies the actual held task and what it was
-   * granted. Guessing from the detector's pair emitted a second, sometimes
-   * reversed sentence, and in the notify band it emitted a contradictory one.
-   *
-   * What is left for this path is the collision no admission acts on: two
-   * plans whose only overlap is intent. Both run whole, neither is refused
-   * anything, and the room is told so once.
-   */
-  private async narrateConflicts(): Promise<void> {
-    const events = await this.options.store.listAuditEvents({
-      types: ["conflict_detected"],
-      ...(this.conflictSequence === undefined
-        ? { occurredAfter: this.auditorSince }
-        : { afterSequence: this.conflictSequence }),
-      limit: 25,
-    });
-    for (const record of events) {
-      this.conflictSequence = Math.max(
-        this.conflictSequence ?? 0,
-        record.sequence,
-      );
-      const data = (record.event.data ?? {}) as Record<string, unknown>;
-      const repositoryId = data["repositoryId"];
-      const projectId = data["projectId"];
-      const taskIds = Array.isArray(data["taskIds"]) ? data["taskIds"] : [];
-      if (
-        typeof repositoryId !== "string" ||
-        typeof projectId !== "string" ||
-        taskIds.length !== 2
-      ) {
-        // Written before the event carried a repository. Nothing to route.
-        continue;
-      }
-      const disposition = String(data["disposition"] ?? "");
-      // Advisory intent overlap admits both tasks untouched; saying "conflict"
-      // about work that is running anyway would teach readers to ignore the
-      // times it matters.
-      if (
-        disposition === "concurrent" ||
-        disposition === "sequence" ||
-        disposition === "block"
-      ) {
-        continue;
-      }
-      // The disposition band is not on its own a licence to say "can run
-      // together", and reading it as one is what put a false line in the room.
-      //
-      // Structural evidence — a shared file, symbol, API, schema — is never
-      // admitted concurrently by anything in this system. The wave scheduler
-      // blocks one task behind the other on *any* non-advisory evidence
-      // (`buildBlockers`), and remote admission sequences the plan or
-      // splits it and withholds the contested files. A pair can still score
-      // inside the notify band while all of that happens, so a real file
-      // overlap arrived here as `concurrent_with_notification` and was
-      // announced as two agents happily overlapping — moments before the
-      // agent that had been held reported it could not touch those very
-      // files. Two coordinator lines about one collision, saying opposite
-      // things.
-      //
-      // So the words are decided by the evidence, not the band. Structural
-      // collisions belong to `announceArbitration`, which speaks off
-      // `plan_admitted` and therefore knows which task was actually held,
-      // what it was granted, and what it gets once the holder is done. What
-      // is left here is the case this line was written for: intent-only
-      // evidence, where both plans really were admitted whole and neither
-      // agent will be refused anything.
-      const evidence = Array.isArray(data["evidence"]) ? data["evidence"] : [];
-      const structural = evidence.some((entry) => {
-        if (typeof entry !== "object" || entry === null) {
-          return false;
-        }
-        const item = entry as { advisory?: unknown; score?: unknown };
-        if (item.advisory === true) {
-          return false;
-        }
-        // A scoreless entry is one written before scores were recorded, or by
-        // a caller that omitted them. Structural is the safe reading: the cost
-        // of staying quiet is a line nobody sees, and the cost of guessing the
-        // other way is the contradiction above.
-        return typeof item.score === "number" ? item.score > 0 : true;
-      });
-      if (structural) {
-        continue;
-      }
-      // The same resolver `announceArbitration` uses. This path used to quote
-      // the first 57 characters of both objectives, so one collision read as a
-      // wall of somebody's prompt while the admission event for the very same
-      // pair read "@Ares and @Juno" — two voices for one decision.
-      const describe = await this.channelAgentNamer(projectId, repositoryId);
-      const named = taskIds.map(describe);
-      // The detector's explanation is deliberately not appended. It is the
-      // full case — every term the two objectives share, with the score — and
-      // pasting it into the room produced a message thousands of words long
-      // listing variable names, for a reader whose question was "who is
-      // waiting on whom". It is written to the audit record, which is where an
-      // argument that long belongs; the room gets the answer.
-      //
-      // "related things", not "conflicting files": the only collisions that
-      // reach this line are intent overlaps, where the two plans share no file
-      // at all. Claiming files were shared and then that nobody minded was the
-      // sentence a reader took as permission — and the reason a refusal, when
-      // one came, read as the coordinator contradicting itself.
-      const line =
-        `⚖️ ${named[0]} and ${named[1]} are working on related things but ` +
-        CHANNEL_ADVISORY_ENDING;
-      // Said in the present tense about two runs that are running, so it is
-      // withdrawn once neither of them is — a room that has been quiet for a
-      // day should not still be reporting who was allowed to overlap in it.
-      // The subject goes on the message so a fresh process can still find the
-      // line; the pair is remembered so this one can wait for both halves.
-      const [first = "", second = ""] = taskIds.map((entry) => String(entry));
-      const message = await this.appendChannelEntry({
-        projectId,
-        repositoryId,
-        kind: "system",
-        authorId: "coordinator",
-        content: line,
-        taskId: first,
-      }).catch(() => undefined);
-      if (message !== undefined) {
-        this.arbitrationNotices.set(message.id, {
-          projectId,
-          repositoryId,
-          taskId: first,
-          content: line,
-          kind: "advisory",
-          alsoNamed: [second],
-        });
-      }
-    }
-  }
-
   private async pumpChannelProgress(): Promise<void> {
-    // Piggybacked here because a conflict can only arise while tasks are
-    // running, which is exactly when this pump is awake — and its 2-second
-    // cadence puts the orchestrator's line in the room while the arbitration
-    // is still news rather than history.
-    await this.narrateConflicts().catch(() => undefined);
     if (this.watchedChannelTasks.size === 0) {
       if (this.channelProgressTimer !== undefined) {
         clearInterval(this.channelProgressTimer);
