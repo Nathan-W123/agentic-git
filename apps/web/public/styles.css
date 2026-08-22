@@ -998,8 +998,8 @@ svg.ui-icon {
   z-index: 1;
   display: grid;
   place-items: center;
-  width: 13px;
-  height: 13px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
@@ -1016,8 +1016,8 @@ svg.ui-icon {
    one-pixel progress stroke as two readings. */
 .agent-face .agent-run::after {
   content: "";
-  width: 9px;
-  height: 9px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 1px var(--bg-card);

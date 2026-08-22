@@ -1864,8 +1864,8 @@ test("working agent faces put progress around their green status dot", async () 
   );
   assert.match(faceRing ?? "", /right: -2px;/u);
   assert.match(faceRing ?? "", /bottom: 0;/u);
-  assert.match(faceRing ?? "", /width: 13px;/u);
-  assert.match(faceRing ?? "", /height: 13px;/u);
+  assert.match(faceRing ?? "", /width: 9px;/u);
+  assert.match(faceRing ?? "", /height: 9px;/u);
   // One pixel of surface around the badge, not two: the outer rim is the
   // separation, never the widest band in the mark.
   assert.match(faceRing ?? "", /box-shadow: 0 0 0 1px var\(--bg-card\);/u);
@@ -1876,8 +1876,8 @@ test("working agent faces put progress around their green status dot", async () 
   const idleDot = /\.agent-face \.presence \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(idleDot ?? "", /width: 9px;/u);
   assert.match(idleDot ?? "", /height: 9px;/u);
-  assert.match(faceDot ?? "", /width: 9px;/u);
-  assert.match(faceDot ?? "", /height: 9px;/u);
+  assert.match(faceDot ?? "", /width: 5px;/u);
+  assert.match(faceDot ?? "", /height: 5px;/u);
   assert.match(faceDot ?? "", /background: var\(--green\);/u);
   assert.match(faceDot ?? "", /box-shadow: 0 0 0 1px var\(--bg-card\);/u);
   assert.doesNotMatch(faceDot ?? "", /animation:/u);
