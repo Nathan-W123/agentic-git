@@ -1495,15 +1495,34 @@ export function substituteGroundedNames(plan: AgentPlan): GroundedPlanView {
   };
 }
 
-/** The symbols arbitration must treat a plan as claiming; see {@link arbitrationFiles}. */
+/**
+ * The symbols arbitration must treat a plan as claiming; see
+ * {@link arbitrationFiles}.
+ *
+ * The agent's own declarations, not the ones enrichment added. `enrichPlan`
+ * puts every symbol of every declared file into `expectedSymbols`, so scoring
+ * symbol overlap against that set finds an overlap between any two plans that
+ * merely named the same file — which is what file overlap already says, and
+ * says better. Counted twice it becomes structural evidence of a symbol
+ * collision that neither agent declared, and one of them is sequenced behind
+ * a function the other never asked for.
+ *
+ * Grounding still counts, narrowed the same way: a referent stands in for the
+ * declaration it resolved, so only referents of symbols this plan actually
+ * declared are claimed on its behalf.
+ */
 export function arbitrationSymbols(plan: AgentPlan): string[] {
+  const declared = plan.declaredSymbols ?? plan.expectedSymbols;
   const grounding = plan.grounding;
   if (grounding === undefined) {
-    return plan.expectedSymbols;
+    return declared;
   }
+  const own = new Set(declared.map((name) => name.toLowerCase()));
   return uniqueStrings([
-    ...plan.expectedSymbols,
-    ...grounding.symbolReferents.map((entry) => entry.resolved),
+    ...declared,
+    ...grounding.symbolReferents
+      .filter((entry) => own.has(entry.declared.toLowerCase()))
+      .map((entry) => entry.resolved),
   ]);
 }
 
