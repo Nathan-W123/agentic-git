@@ -2113,7 +2113,14 @@ function messageRow(
               <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
             </div>`
       }
-      <div class="cmsg-text">${
+      <div class="cmsg-text" data-reveal="${esc(
+        // The key the render loop watches new words arrive under — see
+        // `playTextReveal` in app.js. Its first half is the surface, so a
+        // reply already read in the room does not arrive a second time when
+        // the thread holding it is opened; its second half is the message,
+        // which is what makes an arrival happen once and never again.
+        `${isReply ? `thread:${entry.messageId ?? entry.id}` : `chan:${repositoryId}`}|msg-${entry.id}`,
+      )}">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
           : `${messageBodyWithIcons(entry, repositoryId)}${completedReference}`
@@ -2418,7 +2425,7 @@ function typingIndicator(repositoryId, threadId) {
   // working do not arrive as two different visual languages.
   return `<div class="chan-typing" aria-live="polite">
     <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span class="typing-who">${esc(who)}</span>
+    <span class="typing-who text-sweep">${esc(who)}</span>
   </div>`;
 }
 
@@ -4399,7 +4406,8 @@ function dmPanel() {
                 return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}"
                     id="dm-msg-${esc(message.id)}">
                   ${directMessageReference(message, messages, name)}
-                  <div class="dm-bubble cmsg-text">${messageBody(
+                  <div class="dm-bubble cmsg-text"
+                    data-reveal="dm:${esc(userId)}|msg-${esc(message.id)}">${messageBody(
                     message.content,
                     repositoryId,
                     [],

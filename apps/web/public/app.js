@@ -4169,6 +4169,204 @@ function animateOnce(node, className, drop) {
   window.setTimeout(finish, 400);
 }
 
+/* -------------------------------------------------------- text arrival ---- */
+
+/**
+ * The pace an answer arrives at: how far apart consecutive words start, and
+ * how long each one takes to settle.
+ *
+ * Near the speed of a sentence being read aloud. Slower and the reader is
+ * waiting for words they can already half-see; faster and nothing has
+ * visibly happened at all.
+ *
+ * The word's own duration is stated here as well as in `.text-reveal-word`,
+ * because this is what decides when an arrival is over and stops being
+ * resumed; the stylesheet is what actually plays it.
+ */
+const REVEAL_STAGGER_MS = 26;
+const REVEAL_WORD_MS = 460;
+
+/**
+ * Where the stagger stops. A long answer would otherwise hold its last
+ * paragraph back for the better part of a minute, so past this many words the
+ * remainder simply stands there — by then the arrival has been read.
+ */
+const REVEAL_MAX_WORDS = 160;
+
+/** How many arrivals are remembered before the oldest are let go. */
+const REVEAL_MEMORY = 800;
+
+/**
+ * What this tab has already watched arrive, and when each one started.
+ *
+ * The screen is redrawn by replacing the whole document — see
+ * `MOTION_SURFACES` — so "is this element new" is never the question CSS can
+ * answer on its own. Every block that can animate carries a stable
+ * `data-reveal` key, and this map is the only thing that knows whether the
+ * words under that key are new to the reader or have been on screen for a
+ * while.
+ *
+ * The timestamp is kept rather than a bare flag because a redraw lands in the
+ * middle of most arrivals — somebody typing in the room is enough — and the
+ * words have to pick the animation back up where the last frame left it
+ * instead of starting over or snapping to the end.
+ */
+const revealSeen = new Map();
+
+/**
+ * The surfaces that were on screen a moment ago, by the group half of the key.
+ *
+ * This is what separates "a message arrived" from "you opened a conversation
+ * that already had a hundred of them". Only text belonging to a surface the
+ * reader was already looking at animates; opening a channel, a thread or a
+ * direct message shows its backlog the way it has always been shown, whole.
+ */
+let revealGroups = new Set();
+
+/** `group|id` — the group is the surface, the id is the block within it. */
+function revealGroupOf(key) {
+  const cut = key.indexOf("|");
+  return cut === -1 ? key : key.slice(0, cut);
+}
+
+function motionIsUnwanted() {
+  return (
+    window.matchMedia !== undefined &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+/**
+ * Plays whatever arrived in this render, and only what arrived.
+ *
+ * Runs after the swap, beside `playSurfaceMotion` and for the same reason:
+ * the outgoing document is gone by then, and the render loop is the only
+ * thing left that remembers what it was showing.
+ */
+function playTextReveal(root) {
+  const quiet = motionIsUnwanted();
+  const now = Date.now();
+  const groups = new Set();
+  for (const block of root.querySelectorAll("[data-reveal]")) {
+    const key = block.dataset.reveal ?? "";
+    if (key === "") {
+      continue;
+    }
+    const group = revealGroupOf(key);
+    groups.add(group);
+    const started = revealSeen.get(key);
+    if (started === undefined) {
+      // New to the document. Whether it is new to the *reader* is the
+      // question the group answers: text in a surface that was not on screen
+      // last time is a backlog being opened, not an answer coming in.
+      const arriving = !quiet && revealGroups.has(group);
+      revealSeen.set(key, arriving ? now : 0);
+      if (arriving) {
+        revealWords(block, 0);
+      }
+      continue;
+    }
+    // Zero means "was already here", which never animates. Anything else is
+    // an arrival still in flight until its last word has landed.
+    if (started === 0 || quiet) {
+      continue;
+    }
+    const elapsed = now - started;
+    if (elapsed < REVEAL_MAX_WORDS * REVEAL_STAGGER_MS + REVEAL_WORD_MS) {
+      revealWords(block, elapsed);
+    }
+  }
+  revealGroups = groups;
+  forgetOldReveals(groups);
+}
+
+/**
+ * Keeps the map from growing for as long as the tab is open.
+ *
+ * Only keys from surfaces nobody is looking at are dropped: forgetting a
+ * message still on screen would make it arrive a second time on the next
+ * redraw, which is the one thing this whole mechanism exists to prevent.
+ */
+function forgetOldReveals(groups) {
+  if (revealSeen.size <= REVEAL_MEMORY) {
+    return;
+  }
+  for (const key of revealSeen.keys()) {
+    if (!groups.has(revealGroupOf(key))) {
+      revealSeen.delete(key);
+    }
+  }
+}
+
+/** Text that is not prose, and is not taken apart. */
+const REVEAL_SKIPPED = new Set([
+  "PRE",
+  "CODE",
+  "SCRIPT",
+  "STYLE",
+  "TEXTAREA",
+  "SVG",
+]);
+
+function insideSkipped(node, root) {
+  let parent = node.parentNode;
+  while (parent !== null && parent !== root) {
+    if (REVEAL_SKIPPED.has(String(parent.nodeName).toUpperCase())) {
+      return true;
+    }
+    parent = parent.parentNode;
+  }
+  return false;
+}
+
+/**
+ * Wraps each word of a block in its own element so it can come in on its own
+ * delay, resuming `elapsed` milliseconds into the sequence.
+ *
+ * A negative delay is what does the resuming: the browser starts an animation
+ * that far through rather than waiting, so a redraw two hundred milliseconds
+ * into an arrival carries on from two hundred milliseconds instead of
+ * replaying the opening. Whitespace is left as it was, which is what keeps
+ * wrapping, selection and copied text identical to the markup underneath.
+ */
+function revealWords(block, elapsed) {
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  const texts = [];
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const words = node.nodeValue ?? "";
+    if (words.trim() !== "" && !insideSkipped(node, block)) {
+      texts.push(node);
+    }
+  }
+  let index = 0;
+  for (const node of texts) {
+    if (index >= REVEAL_MAX_WORDS) {
+      break;
+    }
+    const pieces = String(node.nodeValue).split(/(\s+)/u);
+    const holder = document.createDocumentFragment();
+    for (const piece of pieces) {
+      if (piece === "") {
+        continue;
+      }
+      if (piece.trim() === "" || index >= REVEAL_MAX_WORDS) {
+        holder.append(piece);
+        continue;
+      }
+      const word = document.createElement("span");
+      word.className = "text-reveal-word";
+      word.style.setProperty(
+        "--reveal-delay",
+        `${Math.round(index * REVEAL_STAGGER_MS - elapsed)}ms`,
+      );
+      word.textContent = piece;
+      holder.append(word);
+      index += 1;
+    }
+    node.replaceWith(holder);
+  }
+}
+
 export function render() {
   if (rendering) {
     renderAgain = true;
@@ -4291,6 +4489,11 @@ function renderNow() {
   // flow, over a layout that has already settled — so this order costs it
   // nothing.
   playSurfaceMotion(root);
+
+  // What the swap turned out to have *said*: the words that were not in the
+  // room a moment ago come in one at a time, and everything already there
+  // stays where it is. See `playTextReveal`.
+  playTextReveal(root);
 
   // Chats owns this now: the inline file and diff blocks in the transcript are
   // the only place code is read, so the channel has to load its own changeset
