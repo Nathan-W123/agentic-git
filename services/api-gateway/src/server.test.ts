@@ -3022,6 +3022,7 @@ test("an invitation is claimed by an existing account by signing in", async (t) 
   const preview = await anonymous.request(`/api/v1/invitations/${token}`);
   assert.equal(preview.status, 200);
   assert.equal(preview.data.invitation.accountExists, true);
+  assert.equal(preview.data.invitation.signedIn, false);
 
   // Holding the link is still not enough on its own.
   const unauthenticated = await anonymous.request(
@@ -3039,6 +3040,9 @@ test("an invitation is claimed by an existing account by signing in", async (t) 
     body: { email: "returning@example.com", password: PASSWORD },
   });
   assert.equal(signedIn.status, 200, JSON.stringify(signedIn.data));
+  const signedInPreview = await joiner.request(`/api/v1/invitations/${token}`);
+  assert.equal(signedInPreview.status, 200);
+  assert.equal(signedInPreview.data.invitation.signedIn, true);
   const accepted = await joiner.request(`/api/v1/invitations/${token}/accept`, {
     method: "POST",
     body: {},
@@ -3060,6 +3064,92 @@ test("an invitation is claimed by an existing account by signing in", async (t) 
   const me = await joiner.request("/api/v1/auth/me");
   assert.equal(me.status, 200);
   assert.equal(me.data.user.id, registered.data.user.id);
+});
+
+test("a removed member can use a new invite link to regain project access", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "returning-member-repo");
+
+  const returning = new TestClient(runtime.origin);
+  const registered = await registerAccount(returning, runtime.mail, {
+    email: "removed@example.com",
+    displayName: "Removed Member",
+    password: PASSWORD,
+  });
+  assert.equal(registered.status, 201, JSON.stringify(registered.data));
+  const added = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/members`,
+    {
+      method: "POST",
+      body: { userId: registered.data.user.id, role: "developer" },
+    },
+  );
+  assert.equal(added.status, 201, JSON.stringify(added.data));
+
+  // Refresh the member's session while the organization role exists, then
+  // remove it. This is the real returning-member shape: the browser may still
+  // hold the old session when the owner sends the replacement invitation.
+  assert.equal(
+    (
+      await returning.request("/api/v1/auth/login", {
+        method: "POST",
+        body: { email: "removed@example.com", password: PASSWORD },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/members/${registered.data.user.id}`,
+        { method: "DELETE" },
+      )
+    ).status,
+    200,
+  );
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: {
+        role: "developer",
+        repositoryId: repo,
+        projectId: DEFAULT_PROJECT_ID,
+      },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  const token = invited.data.token as string;
+  const preview = await returning.request(`/api/v1/invitations/${token}`);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.invitation.signedIn, true);
+
+  const accepted = await returning.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  const organizations = await returning.request("/api/v1/organizations");
+  assert.equal(organizations.status, 200);
+  assert.equal(
+    organizations.data.organizations.some(
+      (entry: { id: string }) => entry.id === DEFAULT_ORGANIZATION_ID,
+    ),
+    true,
+  );
+  const projects = await returning.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+  );
+  assert.equal(projects.status, 200, JSON.stringify(projects.data));
+  assert.equal(
+    projects.data.projects.some(
+      (entry: { id: string }) => entry.id === DEFAULT_PROJECT_ID,
+    ),
+    true,
+  );
 });
 
 test("an invitation works once and stops working when revoked", async (t) => {
