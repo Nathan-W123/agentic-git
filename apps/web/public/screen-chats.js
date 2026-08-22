@@ -63,8 +63,10 @@ api,
   saveChannelDraft,
   sendChannelMessage,
   snapshotChannelRead,
+  STAGE_PROGRESS,
   state,
   taskBelongsToAgent,
+  taskProgress,
   threadAwaitsGoAhead,
   threadIsWorking,
   threadTitle,
@@ -1806,9 +1808,12 @@ function threadActivityLabel(entry) {
  * ending. Parsing those beats new plumbing — it works for every thread ever
  * written, and the bar can never disagree with the words directly above it.
  *
- * The executing span is the honest core: files named in "Working on" lines
- * against the count the plan declared is a measured fact. Everything else is
- * a fixed milestone, which is all a phase deserves.
+ * Milestones sit on the same lifecycle floors as `STAGE_PROGRESS`. The
+ * executing span interpolates inside the coding band (claimed → validating)
+ * from files named in "Working on" lines, so the face keeps moving while
+ * coding rather than waiting for the next stage jump. When the task record
+ * itself has within-stage progress, that is the floor the narration cannot
+ * fall below.
  */
 function threadProgress(entry) {
   // Only the newest turn can be moving. A completed turn leaves its outcome
@@ -1834,27 +1839,29 @@ function threadProgress(entry) {
   }
   let planned = 0;
   const touched = new Set();
-  let progress = 5;
+  let progress = STAGE_PROGRESS.submitted;
   // A bar only means something over a run the narration can recognise. The
   // audit thread — and any other thread whose replies carry none of the run
-  // markers below — sat at the 5% floor forever, reading as a task stuck at
+  // markers below — sat at the floor forever, reading as a task stuck at
   // the beginning rather than a thread that simply is not a task.
   let sawRunMarker = false;
+  const codingFloor = STAGE_PROGRESS.claimed;
+  const codingCeiling = STAGE_PROGRESS.validating;
   for (const reply of replies) {
     const text = String(reply.content ?? "");
     if (/planning workspace prepared/iu.test(text)) {
       sawRunMarker = true;
-      progress = Math.max(progress, 10);
+      progress = Math.max(progress, STAGE_PROGRESS.planning);
     }
     const plannedMatch = /planned (\d+) file/iu.exec(text);
     if (plannedMatch !== null) {
       sawRunMarker = true;
       planned = Number(plannedMatch[1]);
-      progress = Math.max(progress, 15);
+      progress = Math.max(progress, STAGE_PROGRESS.planned);
     }
     if (/execution started/iu.test(text)) {
       sawRunMarker = true;
-      progress = Math.max(progress, 20);
+      progress = Math.max(progress, codingFloor);
     }
     const working = /^Working on (.+?)(?:…|\.\.\.|$)/u.exec(text.trim());
     if (working?.[1] !== undefined) {
@@ -1865,19 +1872,30 @@ function threadProgress(entry) {
         }
       }
       const share = planned > 0 ? Math.min(touched.size / planned, 1) : 0.5;
-      progress = Math.max(progress, Math.round(20 + 55 * share));
+      progress = Math.max(
+        progress,
+        Math.round(codingFloor + (codingCeiling - codingFloor) * share),
+      );
     }
     if (/Validating…|Wrote changes to/iu.test(text)) {
-      progress = Math.max(progress, 80);
+      progress = Math.max(progress, codingCeiling);
     }
     if (/Validation passed/iu.test(text)) {
-      progress = Math.max(progress, 90);
+      progress = Math.max(progress, Math.round((codingCeiling + 100) / 2));
     }
     if (THREAD_FINISHED_RE.test(text.trim())) {
       return undefined; // Finished threads carry no bar; the ending says it.
     }
   }
-  return sawRunMarker ? progress : undefined;
+  if (!sawRunMarker) {
+    return undefined;
+  }
+  // Within-stage task progress (files / time) is the same source the agent
+  // face reads — lift the narration to it so the two cannot disagree.
+  if (task !== undefined) {
+    progress = Math.max(progress, taskProgress(task));
+  }
+  return progress;
 }
 
 /**

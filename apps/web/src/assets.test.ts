@@ -3616,6 +3616,7 @@ test("each task turn puts its own thinking below its prompt and starts closed", 
 
 test("the progress bar restarts for each task turn in a thread", async () => {
   const source = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
   const progressStart = source.indexOf("function threadProgress(entry)");
   const progressEnd = source.indexOf("\n/*", progressStart);
   const turnsStart = source.indexOf("function threadReplyTurns(replies)");
@@ -3628,9 +3629,19 @@ test("the progress bar restarts for each task turn in a thread", async () => {
   assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
   assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
 
+  const stageStart = data.indexOf("const STAGE_PROGRESS");
+  const stageEnd = data.indexOf("\n/** Lifecycle order", stageStart);
+  assert.notEqual(stageStart, -1, "lifecycle stage floors should exist");
+  assert.notEqual(stageEnd, -1, "lifecycle stage floors should have a boundary");
+  const STAGE_PROGRESS = Function(
+    `"use strict";\n${data.slice(stageStart, stageEnd)}\nreturn STAGE_PROGRESS;`,
+  )() as Record<string, number>;
+
   const progress = Function(
     "state",
     "THREAD_FINISHED_RE",
+    "STAGE_PROGRESS",
+    "taskProgress",
     `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
       progressStart,
       progressEnd,
@@ -3638,6 +3649,8 @@ test("the progress bar restarts for each task turn in a thread", async () => {
   )(
     { tasks: [{ id: "task-1", status: "claimed" }] },
     /^(Done —|I could not|This was cancelled)/u,
+    STAGE_PROGRESS,
+    (task: { status?: string }) => STAGE_PROGRESS[task?.status ?? ""] ?? 0,
   ) as (entry: {
     taskId: string;
     replies: Array<{ kind: string; content: string }>;
@@ -3657,7 +3670,7 @@ test("the progress bar restarts for each task turn in a thread", async () => {
 
   assert.equal(
     progress(thread),
-    20,
+    STAGE_PROGRESS.claimed,
     "an earlier ending must not hide the active turn's progress",
   );
   assert.equal(
@@ -3665,7 +3678,7 @@ test("the progress bar restarts for each task turn in a thread", async () => {
       ...thread,
       replies: thread.replies.filter((reply) => reply.kind !== "user"),
     }),
-    20,
+    STAGE_PROGRESS.claimed,
     "a task added without a copied prompt must restart progress too",
   );
   thread.replies.push({ kind: "outcome", content: "The follow-up is complete" });
@@ -3685,11 +3698,36 @@ test("task progress is monotonic and progress bars animate between keyed values"
   const progressEnd = data.indexOf("\n/**\n * Whether a task", progressStart);
   assert.notEqual(progressStart, -1, "task progress stages should exist");
   assert.notEqual(progressEnd, -1, "task progress should have a boundary");
+  const progressSource = data
+    .slice(progressStart, progressEnd)
+    .replace("export function taskProgress", "function taskProgress");
+  assert.match(
+    progressSource,
+    /STAGE_INTERPOLATE[\s\S]*codingFileShare[\s\S]*codingTimeShare/u,
+    "coding stages should interpolate from files touched and time on the run",
+  );
   const taskProgress = Function(
-    `"use strict";\n${data
-      .slice(progressStart, progressEnd)
-      .replace("export function taskProgress", "function taskProgress")}\nreturn taskProgress;`,
-  )() as (task: { status: string }) => number;
+    "state",
+    `"use strict";\n${progressSource}\nreturn taskProgress;`,
+  )({
+    audit: [
+      {
+        event: {
+          type: "plan_received",
+          taskId: "task-coding",
+          data: { expectedFiles: ["a.js", "b.js"] },
+        },
+      },
+    ],
+    changeSets: {
+      "task-coding": { patches: [{ path: "a.js" }] },
+    },
+    agentBusy: {},
+  }) as (task: {
+    id?: string;
+    status: string;
+    claimedAt?: string;
+  }) => number;
   const lifecycle = [
     "submitted",
     "planning",
@@ -3709,6 +3747,22 @@ test("task progress is monotonic and progress bars animate between keyed values"
     "moving to a later lifecycle stage must not move progress backwards",
   );
   assert.equal(lifecycle.at(-1), 100, "terminal work should be complete");
+
+  const claimedFloor = taskProgress({ status: "claimed" });
+  const claimedMid = taskProgress({
+    id: "task-coding",
+    status: "claimed",
+    claimedAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+  const runningFloor = taskProgress({ status: "running" });
+  assert.ok(
+    claimedMid > claimedFloor,
+    "coding should advance inside its stage when planned files are touched",
+  );
+  assert.ok(
+    claimedMid < runningFloor,
+    "within-stage coding progress must stay below the next lifecycle floor",
+  );
 
   const barStart = ui.indexOf("export function bar(percent");
   const barEnd = ui.indexOf("\n}\n\n/**", barStart) + 2;

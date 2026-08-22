@@ -17,6 +17,7 @@ import {
   connectGitHub,
   connectProviderCredential,
   gitHubSignInStatus,
+  heldFiles,
   loadContext,
   loadGitHub,
   loadProviders,
@@ -254,6 +255,11 @@ function agentChangeSet(agent) {
 function agentRails(agent) {
   const task = agent.task;
   const patches = agentChangeSet(agent)?.patches ?? [];
+  const held =
+    task === undefined
+      ? []
+      : heldFiles().filter((file) => file.taskId === task.id);
+  const progress = task === undefined ? agent.progress : taskProgress(task);
   return `<div class="agent-rails">
     ${sectionRail(
       "Model",
@@ -292,7 +298,15 @@ function agentRails(agent) {
                 title: task.objective,
               },
               taskStarted(task)
-                ? { label: `${taskProgress(task)}% done`, iconName: "clock", tone: "blue" }
+                ? {
+                    label: `${progress}% done`,
+                    iconName: "clock",
+                    tone: "blue",
+                    title:
+                      held.length > 0
+                        ? `${patches.length} of ${held.length} planned files in the changeset`
+                        : undefined,
+                  }
                 : { label: "Queued", iconName: "clock", tone: "orange" },
               task.repositoryId === undefined || task.repositoryId === ""
                 ? undefined
@@ -304,9 +318,18 @@ function agentRails(agent) {
       "Files",
       chipRow([
         patches.length === 0
-          ? { label: "Nothing touched yet", iconName: "file" }
+          ? {
+              label:
+                held.length === 0
+                  ? "Nothing touched yet"
+                  : `0 of ${held.length} planned files touched`,
+              iconName: "file",
+            }
           : {
-              label: `${patches.length} file${patches.length === 1 ? "" : "s"} in the changeset`,
+              label:
+                held.length > 0
+                  ? `${patches.length} of ${held.length} planned files in the changeset`
+                  : `${patches.length} file${patches.length === 1 ? "" : "s"} in the changeset`,
               iconName: "file",
               tone: "green",
             },
