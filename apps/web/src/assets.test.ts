@@ -335,6 +335,7 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
 });
 
 test("pinned messages can be hidden and shown without being unpinned", async () => {
+  const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
@@ -368,6 +369,10 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
   assert.match(chats, /const open = state\.pinsOpen === true/u);
   assert.match(chats, /!open[\s\S]{0,80}\? ""[\s\S]{0,80}chan-pins-list/u);
+
+  // Fresh sessions start with the banner folded; readers unfold it when they
+  // want to see pins, and the toggle remembers only for this visit.
+  assert.match(data, /pinsOpen: false/u);
 });
 
 test("serves the vendored Monaco build same-origin under /vendor", async () => {
@@ -1855,7 +1860,7 @@ test("a connected agent is not painted as a working one", async () => {
   );
 });
 
-test("working agent faces put progress around their green status dot", async () => {
+test("working agent faces ring the mark itself with the run's progress", async () => {
   const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");
@@ -1867,36 +1872,43 @@ test("working agent faces put progress around their green status dot", async () 
 
   assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
   assert.doesNotMatch(row, /statusDot\(/u);
-  assert.match(ui, /working\s*\? '<i class="agent-run" aria-label="Working"><\/i>'/u);
+
+  // The status badge is drawn whether or not a run is going: progress moved
+  // off it, so it is no longer the thing being replaced while work happens.
+  assert.match(ui, /<i class="presence presence-\$\{presence\}"><\/i>/u);
+  assert.match(ui, /working\s*\n?\s*\? '<i class="agent-run" aria-label="Working"><\/i>'/u);
+
   const faceRing = /\.agent-face \.agent-run \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(faceRing, undefined, "a working face should carry a progress ring");
   assert.match(
     faceRing ?? "",
     /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.match(faceRing ?? "", /right: -2px;/u);
-  assert.match(faceRing ?? "", /bottom: 0;/u);
-  assert.match(faceRing ?? "", /width: 9px;/u);
-  assert.match(faceRing ?? "", /height: 9px;/u);
-  // One pixel of surface around the badge, not two: the outer rim is the
-  // separation, never the widest band in the mark.
-  assert.match(faceRing ?? "", /box-shadow: 0 0 0 1px var\(--bg-card\);/u);
-  assert.doesNotMatch(faceRing ?? "", /#f3efe8|inset: -1px/u);
+  // Around the mark, not beside it: the sweep circles the whole face and is
+  // masked back to a ring so it never paints over the agent.
+  assert.match(faceRing ?? "", /inset: -2px;/u);
+  assert.match(faceRing ?? "", /border-radius: 50%;/u);
+  assert.match(faceRing ?? "", /mask: radial-gradient\(/u);
+  assert.doesNotMatch(faceRing ?? "", /width: 9px;|right: -2px;/u);
 
-  const faceDot = /\.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.notEqual(faceDot, undefined, "live progress should keep a status dot");
+  // No badge inside the ring any more — the mark is what the ring surrounds.
+  assert.equal(
+    /\.agent-face \.agent-run::after \{/u.test(css),
+    false,
+    "the ring should surround the agent mark rather than a dot",
+  );
+
+  // The mark itself is the fill: half-lit at nothing done, full at done.
+  const faceFill = /\.agent-face-working svg \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(faceFill, undefined, "a working mark should brighten with the run");
+  assert.match(faceFill ?? "", /opacity: calc\(0\.5 \+ var\(--run, 0\) \* 0\.005\);/u);
+
+  // The ordinary status dot keeps the roster's size, and the transcript keeps
+  // its halved one — none of that moved when progress left the badge.
   const idleDot = /\.agent-face \.presence \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(idleDot ?? "", /width: 9px;/u);
   assert.match(idleDot ?? "", /height: 9px;/u);
-  assert.match(faceDot ?? "", /width: 5px;/u);
-  assert.match(faceDot ?? "", /height: 5px;/u);
-  assert.match(faceDot ?? "", /background: var\(--green\);/u);
-  assert.match(faceDot ?? "", /box-shadow: 0 0 0 1px var\(--bg-card\);/u);
-  assert.doesNotMatch(faceDot ?? "", /animation:/u);
 
-  // Those are the roster's sizes, and the roster keeps them. On a face in a
-  // room the same badge is halved — the transcript shows one face per
-  // message, where a dot sized for a column of names read as a bead stuck to
-  // the mark. Scoped to the transcript row, so the side tab is untouched.
   const roomDot = /\.cmsg-row \.cmsg-avatar \.agent-face \.presence \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
   assert.notEqual(roomDot, undefined, "a face in a room sizes its own dot");
@@ -1904,21 +1916,13 @@ test("working agent faces put progress around their green status dot", async () 
   assert.match(roomDot ?? "", /height: 5px;/u);
   assert.match(roomDot ?? "", /border-width: 1px;/u);
 
+  // A smaller face gets a thinner stroke rather than a smaller badge.
   const roomRing = /\.cmsg-row \.cmsg-avatar \.agent-face \.agent-run \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
   assert.notEqual(roomRing, undefined, "a working face in a room sizes its ring");
-  assert.match(roomRing ?? "", /width: 5px;/u);
-  assert.match(roomRing ?? "", /height: 5px;/u);
+  assert.match(roomRing ?? "", /inset: -1\.5px;/u);
+  assert.match(roomRing ?? "", /mask: radial-gradient\(/u);
 
-  const roomRingDot =
-    /\.cmsg-row \.cmsg-avatar \.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u
-      .exec(css)?.[1];
-  assert.notEqual(roomRingDot, undefined, "the ring in a room keeps its centre");
-  assert.match(roomRingDot ?? "", /width: 3px;/u);
-  assert.match(roomRingDot ?? "", /height: 3px;/u);
-
-  // Threads share that transcript markup, but the badge is 50% larger there
-  // only — group-chat rows keep the halved room size above.
   const threadDot =
     /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.presence \{([\s\S]*?)\n\}/u
       .exec(css)?.[1];
@@ -1930,15 +1934,8 @@ test("working agent faces put progress around their green status dot", async () 
     /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.agent-run \{([\s\S]*?)\n\}/u
       .exec(css)?.[1];
   assert.notEqual(threadRing, undefined, "a working face in a thread sizes its ring");
-  assert.match(threadRing ?? "", /width: 7\.5px;/u);
-  assert.match(threadRing ?? "", /height: 7\.5px;/u);
-
-  const threadRingDot =
-    /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u
-      .exec(css)?.[1];
-  assert.notEqual(threadRingDot, undefined, "the ring in a thread keeps its centre");
-  assert.match(threadRingDot ?? "", /width: 4\.5px;/u);
-  assert.match(threadRingDot ?? "", /height: 4\.5px;/u);
+  assert.match(threadRing ?? "", /inset: -2px;/u);
+  assert.match(threadRing ?? "", /mask: radial-gradient\(/u);
 
   const progress = data.slice(
     data.indexOf("export function agentWorkingProgress"),
@@ -3708,21 +3705,25 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.doesNotMatch(idle, /ctl-activity/u);
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
-  // The run is a small ring around a green coding dot, leaving the face clear.
+  // The run circles the face in the stack, the same reading the roster gives.
   const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
-  assert.notEqual(ring, undefined, "the progress ring should be drawn beside the face");
+  assert.notEqual(ring, undefined, "the progress ring should be drawn around the face");
   assert.match(ring ?? "", /border-radius: 50%;/u);
   assert.match(
     ring ?? "",
     /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.match(ring ?? "", /right: -1px;/u);
-  assert.match(ring ?? "", /bottom: 0;/u);
-  assert.match(ring ?? "", /width: 7px;/u);
-  assert.match(ring ?? "", /height: 7px;/u);
-  assert.match(ring ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
-  assert.doesNotMatch(ring ?? "", /#f3efe8|inset: -1px/u);
+  assert.match(ring ?? "", /inset: -2px;/u);
+  assert.match(ring ?? "", /mask: radial-gradient\(/u);
+  assert.doesNotMatch(ring ?? "", /width: 7px;|right: -1px;/u);
+
+  // And the face under it fills with the run rather than staying flat.
+  const fill =
+    /\n\.cmsg-thread-link \.ctl-faces \.ctl-working > \.agent-face,\n[^{]*\{([\s\S]*?)\n\}/u
+      .exec(css)?.[1];
+  assert.notEqual(fill, undefined, "a working face in a stack should brighten");
+  assert.match(fill ?? "", /opacity: calc\(0\.5 \+ var\(--run, 0\) \* 0\.005\);/u);
 
   const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];

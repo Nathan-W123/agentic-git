@@ -739,12 +739,19 @@ function personRow(person) {
     person.user?.email ??
     person.name ??
     "Someone";
-  const role = String(person.role ?? "").trim();
   const userId = person.user?.id ?? person.userId ?? person.id ?? "";
+  const repositoryId = activeChannelId();
+  const coOwner = (state.repositoryGrants[repositoryId] ?? []).some(
+    (grant) => grant.userId === userId && grant.role === "owner",
+  );
+  // A repository owner grant is presented as the title people chose in the
+  // menu, rather than leaving the old organization-wide role under the name
+  // and making the promotion look as though it did nothing.
+  const role = coOwner ? "Co-owner" : String(person.role ?? "").trim();
   const me = userId === currentUserId();
   const online = personOnline(userId);
   const unread = dmUnreadFrom(userId);
-  // Promote / demote / remove live behind the same "…" pattern the agent
+  // Change role / promote / remove live behind the same "…" pattern the agent
   // roster uses — never on the channel-info panel. Only drawn when there is
   // something to offer; an empty menu is a dead control.
   const hasMenu = personMenuItems(userId).length > 0;
@@ -798,7 +805,7 @@ function personRow(person) {
 }
 
 /**
- * What the "..." on a People row offers — promote, demote, and remove —
+ * What the "..." on a People row offers — role, co-owner, and removal —
  * mirroring {@link rosterMenuItems} for agents.
  *
  * Two scopes, in the order somebody in a channel thinks of them. The
@@ -819,11 +826,14 @@ export function personMenuItems(userId) {
     return [];
   }
   const items = [];
-  if (canManageRepository(repositoryId)) {
-    const grants = state.repositoryGrants[repositoryId] ?? [];
-    const grant = grants.find((entry) => entry.userId === userId);
+  const canManageChannel = canManageRepository(repositoryId);
+  const grants = state.repositoryGrants[repositoryId] ?? [];
+  const coOwner = grants.some(
+    (entry) => entry.userId === userId && entry.role === "owner",
+  );
+  if (canManageChannel) {
     items.push(
-      grant === undefined
+      !coOwner
         ? {
             act: "channel-grant-promote",
             value: `${repositoryId}:${userId}`,
@@ -840,37 +850,34 @@ export function personMenuItems(userId) {
           },
     );
   }
-  // Organization-wide. Only what the server will actually accept is offered:
-  // it refuses a role above the caller's own and refuses demoting the last
-  // owner, and a menu item that always fails is worse than no item.
+  // Organization-wide. The dialog offers every ordinary membership role in
+  // one place instead of guessing whether the next change is a promotion or
+  // demotion. A repository-only guest has no organization membership, so the
+  // same dialog changes their repository grant instead. Co-owner stays
+  // separate because it is the full repository-scoped capability.
   const role = memberRole(userId);
-  if (canManageOrganization() && role !== undefined) {
+  const canManageRole =
+    (role !== undefined && canManageOrganization()) ||
+    (role === undefined && canManageChannel);
+  if (canManageRole) {
     if (items.length > 0) {
       items.push({ separator: true });
     }
-    if (role !== "admin" && role !== "owner") {
-      items.push({
-        act: "member-promote",
-        value: `${userId}:admin`,
-        label: "Promote to admin",
-        hint: "Can manage people and settings across the organization",
-        iconName: "shield",
-      });
-    }
-    if (role === "admin" || role === "owner") {
-      items.push({
-        act: "member-demote",
-        value: `${userId}:developer`,
-        label: "Demote to developer",
-        hint: "Keeps them in the organization, without managing people",
-        iconName: "chevronDown",
-      });
-    }
+    items.push({
+      act: "member-role",
+      value: `${repositoryId}:${userId}`,
+      label: "Change role",
+      hint: "Choose admin, developer, reviewer, or viewer",
+      iconName: "shield",
+    });
     items.push({
       act: "member-remove",
-      value: userId,
-      label: "Remove from the organization",
-      hint: "Takes away every repository this organization owns",
+      value: `${repositoryId}:${userId}`,
+      label: "Remove from KUMI",
+      hint:
+        role === undefined
+          ? "Takes away access to this repository"
+          : "Takes away every repository this organization owns",
       iconName: "close",
       danger: true,
     });
