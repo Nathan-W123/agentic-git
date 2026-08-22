@@ -987,7 +987,10 @@ svg.ui-icon {
 
 /* Live work keeps the ordinary green status dot and adds progress around it.
    The ring starts on its quiet track and fills clockwise; it stays in the
-   corner so progress never paints over the agent mark itself. */
+   corner so progress never paints over the agent mark itself. The surface
+   ring that lifts it off the mark is a single pixel: any thicker and the
+   white read as the widest band in the badge, which made the one-pixel
+   progress stroke inside it look like a hairline mistake. */
 .agent-face .agent-run {
   position: absolute;
   right: -2px;
@@ -1002,13 +1005,15 @@ svg.ui-icon {
     var(--green) calc(var(--run, 0) * 1%),
     var(--border-strong) 0
   );
-  box-shadow: 0 0 0 2px var(--bg-card);
+  box-shadow: 0 0 0 1px var(--bg-card);
   pointer-events: none;
 }
 
-/* The solid centre says what the ring is measuring: green means coding. The
-   surface-coloured gap keeps the static dot and one-pixel progress stroke as
-   two readings. */
+/* The solid centre says what the ring is measuring: green means coding. It is
+   lit rather than breathing — the ring beside it is already the moving part,
+   and a dot that faded underneath a filling ring read as two clocks running
+   against each other. The surface-coloured gap keeps the static dot and the
+   one-pixel progress stroke as two readings. */
 .agent-face .agent-run::after {
   content: "";
   width: 7px;
@@ -6637,7 +6642,7 @@ button.chip.lg:hover {
     var(--green) calc(var(--run, 0) * 1%),
     var(--border-strong) 0
   );
-  box-shadow: 0 0 0 2px var(--bg-chat);
+  box-shadow: 0 0 0 1px var(--bg-chat);
   pointer-events: none;
 }
 

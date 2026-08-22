@@ -1798,6 +1798,9 @@ test("working agent faces put progress around their green status dot", async () 
   assert.match(faceRing ?? "", /bottom: 0;/u);
   assert.match(faceRing ?? "", /width: 13px;/u);
   assert.match(faceRing ?? "", /height: 13px;/u);
+  // One pixel of surface around the badge, not two: the outer rim is the
+  // separation, never the widest band in the mark.
+  assert.match(faceRing ?? "", /box-shadow: 0 0 0 1px var\(--bg-card\);/u);
   assert.doesNotMatch(faceRing ?? "", /#f3efe8|inset: -1px/u);
 
   const faceDot = /\.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u.exec(css)?.[1];
@@ -3541,6 +3544,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.match(ring ?? "", /bottom: 0;/u);
   assert.match(ring ?? "", /width: 13px;/u);
   assert.match(ring ?? "", /height: 13px;/u);
+  assert.match(ring ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
   assert.doesNotMatch(ring ?? "", /#f3efe8|inset: -1px/u);
 
   const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
