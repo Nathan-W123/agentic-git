@@ -1613,22 +1613,51 @@ export function toast(message, tone = "") {
 /* -------------------------------------------------------------- modal ---- */
 
 /** One application modal, as a native <dialog> so focus and Esc are free. */
-export function showModal({ title, subtitle = "", body = "", confirm = "Confirm", cancel = "Cancel" }) {
+export function showModal({
+  title,
+  subtitle = "",
+  body = "",
+  confirm = "Confirm",
+  cancel = "Cancel",
+  image,
+}) {
   const dialog = $("#modal");
+  const returnFocus = document.activeElement;
   return new Promise((resolve) => {
-    dialog.innerHTML = `<form method="dialog" class="modal-card">
-      <div>
-        <h3>${esc(title)}</h3>
-        ${subtitle ? `<p class="modal-sub">${esc(subtitle)}</p>` : ""}
-      </div>
-      ${body}
-      <div class="modal-actions">
-        <button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>
-        <button class="btn btn-primary" value="confirm" type="submit">${esc(confirm)}</button>
-      </div>
-    </form>`;
+    dialog.returnValue = "";
+    if (image) {
+      dialog.setAttribute("aria-labelledby", "modal-image-title");
+    } else {
+      dialog.removeAttribute("aria-labelledby");
+    }
+    dialog.innerHTML = image
+      ? `<form method="dialog" class="modal-card modal-image-card">
+          <h3 class="sr-only" id="modal-image-title">${esc(title)}</h3>
+          <button class="icon-btn modal-image-close" value="cancel" type="submit" aria-label="Close image preview">${icon("close")}</button>
+          <img class="modal-image" src="${esc(image.src)}" alt="${esc(image.alt)}">
+        </form>`
+      : `<form method="dialog" class="modal-card">
+          <div>
+            <h3>${esc(title)}</h3>
+            ${subtitle ? `<p class="modal-sub">${esc(subtitle)}</p>` : ""}
+          </div>
+          ${body}
+          <div class="modal-actions">
+            <button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>
+            <button class="btn btn-primary" value="confirm" type="submit">${esc(confirm)}</button>
+          </div>
+        </form>`;
+    const onBackdropClick = (event) => {
+      if (image && event.target === dialog) {
+        dialog.close("cancel");
+      }
+    };
     const onClose = () => {
       dialog.removeEventListener("close", onClose);
+      dialog.removeEventListener("click", onBackdropClick);
+      if (image && returnFocus instanceof HTMLElement && returnFocus.isConnected) {
+        returnFocus.focus();
+      }
       if (dialog.returnValue !== "confirm") {
         resolve(undefined);
         return;
@@ -1640,6 +1669,7 @@ export function showModal({ title, subtitle = "", body = "", confirm = "Confirm"
       }
       resolve(values);
     };
+    dialog.addEventListener("click", onBackdropClick);
     dialog.addEventListener("close", onClose);
     dialog.showModal();
   });

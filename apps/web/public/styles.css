@@ -9264,6 +9264,52 @@ dialog.modal[open]::backdrop {
   gap: 9px;
 }
 
+/* Posted images use the same native dialog as decisions, but without turning
+   a picture into a card full of confirmation chrome. The image owns the
+   surface and stays inside the viewport at every aspect ratio. */
+.modal-image-card {
+  position: relative;
+  display: block;
+  width: auto;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.modal-image {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  object-fit: contain;
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-pop);
+}
+
+.modal-image-close {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  right: 10px;
+  color: #fff;
+  background: rgba(5, 7, 12, 0.68);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.modal-image-close:hover {
+  color: #fff;
+  background: rgba(5, 7, 12, 0.84);
+}
+
 /* The first step of Add Agent. Providers stay in one stable list after a
    connection; connected rows quiet down instead of disappearing, so adding a
    second agent never looks like the first one replaced it. */

@@ -5448,7 +5448,14 @@ function answerQuestionStep(choice) {
 
 function actionOf(event) {
   const node = event.target.closest("[data-act]");
-  return node === null ? undefined : { node, act: node.dataset.act, value: node.dataset.value };
+  if (node !== null) {
+    return { node, act: node.dataset.act, value: node.dataset.value };
+  }
+  const attachment = event.target.closest(".cmsg-image");
+  if (attachment === null || attachment.querySelector("img[data-attachment]") === null) {
+    return undefined;
+  }
+  return { node: attachment, act: "image-preview", value: undefined };
 }
 
 /**
@@ -5501,6 +5508,21 @@ document.addEventListener("click", (event) => {
   }
 
   switch (act) {
+    case "image-preview": {
+      event.preventDefault();
+      const image = node.querySelector("img[data-attachment]");
+      if (image === null) {
+        return;
+      }
+      void showModal({
+        title: "Image preview",
+        image: {
+          src: image.currentSrc || image.src,
+          alt: image.alt,
+        },
+      });
+      return;
+    }
     case "nav":
       event.preventDefault();
       navigate(value);
