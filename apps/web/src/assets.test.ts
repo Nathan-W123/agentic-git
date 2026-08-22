@@ -5159,9 +5159,10 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(chats, /const lapsed =\s*!held &&/u);
   assert.match(chats, /Nobody started this in time, so it was let go\./u);
 
-  // The panel is the approval record people act on, so its workflow markers
+  // The panel is the approval record people act on, so agent workflow markers
   // do not also pose as conversation. They stay in the stored reply list for
   // the gateway; only the three visible transcript surfaces use this view.
+  // Exact user "go ahead" replies stay visible — they were said on purpose.
   const transcriptStart = chats.indexOf("function planTranscriptReplies(");
   const transcriptEnd = chats.indexOf(
     "\n/**\n * How a plan nobody started",
@@ -5172,6 +5173,10 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(
     chats,
     /const PLAN_LIFECYCLE_REPLY_PREFIXES = \[\s*HOLD_NOTICE_PREFIX,\s*"Starting now\.",\s*"▶ Go-ahead received",\s*\];/u,
+  );
+  assert.doesNotMatch(
+    chats.slice(transcriptStart, transcriptEnd),
+    /content\.toLowerCase\(\) === "go ahead"/u,
   );
   const planTranscriptReplies = Function(
     "planReplyOf",
@@ -5203,11 +5208,12 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
     ),
     [
       "# A short plan",
+      "go ahead",
       "The ordinary answer stays visible.",
       "⌛ Plan expired — nobody started this.",
       "go ahead with the documentation too",
     ],
-    "only redundant plan approval chatter should disappear",
+    "only agent lifecycle markers should disappear; exact go-ahead stays",
   );
   const reviewReplies = [
     { kind: "outcome", content: "⏸ Waiting on you — this needs a review." },

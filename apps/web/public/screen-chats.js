@@ -1450,12 +1450,14 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
 const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
 
 /**
- * Workflow markers the plan panel already communicates by changing state.
+ * Agent workflow markers the plan panel already communicates by changing
+ * state.
  *
  * They remain in the stored thread for the gateway to resume and audit the
  * run, but repeating them in the conversation makes approving one plan look
- * like four separate replies. The expiry marker is deliberately absent: it
- * is an outcome somebody still needs to see.
+ * like several system notices. Exact user approvals ("go ahead") stay visible
+ * — they are the person's own words. The expiry marker is deliberately
+ * absent: it is an outcome somebody still needs to see.
  */
 const PLAN_LIFECYCLE_REPLY_PREFIXES = [
   HOLD_NOTICE_PREFIX,
@@ -1470,9 +1472,8 @@ function planTranscriptReplies(root, replies = root?.replies ?? []) {
   }
   return replies.filter((reply) => {
     const content = String(reply.content ?? "").trim();
-    return !(
-      (reply.kind === "user" && content.toLowerCase() === "go ahead") ||
-      PLAN_LIFECYCLE_REPLY_PREFIXES.some((prefix) => content.startsWith(prefix))
+    return !PLAN_LIFECYCLE_REPLY_PREFIXES.some((prefix) =>
+      content.startsWith(prefix),
     );
   });
 }
