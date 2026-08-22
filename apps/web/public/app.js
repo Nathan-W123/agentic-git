@@ -1143,36 +1143,29 @@ function notificationBell() {
  * The screens the account menu is the way into.
  *
  * Both account buttons — the topbar avatar and the channel sidebar's foot —
- * open the same menu, so this is one change point for both. Each destination
- * was a live screen or panel with no door: the routes existed, the screens
- * rendered, `go-notifications` was even a case in the action handler, and
- * nothing anywhere navigated to any of them.
+ * open the same menu, so this is one change point for both.
  *
- * The counts are read here rather than carried in state, so a number in this
+ * Notifications is deliberately not one of them any more. Pressing your own
+ * name is how you reach your own things, and a backlog of everything every
+ * agent has done is not that; it is still the bell in the topbar and still
+ * reachable by name in the quick switcher.
+ *
+ * My Agents is absent for the same reason it always was: a roster of agent
+ * connections is not the account's own things either, and it keeps the quick
+ * switcher and the channel agent menu's "Connect agents" as its doors.
+ *
+ * The count is read here rather than carried in state, so a number in this
  * menu cannot disagree with the list it sits above.
  */
 function accountDestinations() {
-  const unread = unreadCount();
   const dms = dmUnreadTotal();
   return [
-    {
-      act: "go-notifications",
-      label: "Notifications",
-      iconName: "bell",
-      ...(unread === 0 ? {} : { hint: `${unread} unread` }),
-    },
     {
       act: "dm-list",
       label: "Direct messages",
       iconName: "chatBubble",
       ...(dms === 0 ? {} : { hint: `${dms} unread` }),
     },
-    // My Agents is deliberately absent. This menu is the account's own
-    // things — what is waiting for you and who is writing to you — and a
-    // roster of agent connections is not that. The screen keeps its other
-    // doors: the quick switcher by name, and the channel agent menu's
-    // "Connect agents" (into Settings) while this account has connected
-    // nothing.
   ];
 }
 

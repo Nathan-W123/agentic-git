@@ -44,16 +44,18 @@ test("the account menu carries account destinations", async () => {
     "function accountDestinations() {",
     "\n/**",
   );
-  assert.match(destinations, /act: "go-notifications"/u);
   assert.match(destinations, /act: "dm-list"/u);
-  // My Agents is not one of them: this menu is what is waiting for you and
-  // who is writing to you, not a roster of agent connections.
+  // Notifications is not one of them. Pressing your own name is how you reach
+  // your own things, and the backlog of everything every agent has done is not
+  // that — it keeps the topbar bell and the quick switcher.
+  assert.doesNotMatch(destinations, /act: "go-notifications"/u);
+  // My Agents is not one of them either: this menu is who is writing to you,
+  // not a roster of agent connections.
   assert.doesNotMatch(destinations, /value: "agents"/u);
 
-  // The counts are read at the moment the menu is built, not carried in
-  // state: a number that can disagree with the list under it is worse than no
-  // number, and both are cheap.
-  assert.match(destinations, /const unread = unreadCount\(\);/u);
+  // The count is read at the moment the menu is built, not carried in state:
+  // a number that can disagree with the list under it is worse than no
+  // number, and it is cheap.
   assert.match(destinations, /const dms = dmUnreadTotal\(\);/u);
 
   const menu = slice(app, 'case "user-menu":', 'case "switch-close":');
@@ -74,8 +76,8 @@ test("the Chats sidebar has no notification shortcut", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  // Notifications remain reachable from the account menu and from the
-  // topbar on secondary screens.
+  // Notifications remain reachable from the topbar on secondary screens and
+  // by name in the quick switcher.
   assert.match(app, /function notificationBell\(\)/u);
   assert.match(app, /case "go-notifications":/u);
 
@@ -178,11 +180,11 @@ test("settings is visible beside the account menu", async () => {
   assert.match(menu, /\.\.\.accountDestinations\(\)/u);
   assert.doesNotMatch(menu, /value: "settings"|label: "Settings"/u);
 
-  // Notifications and Direct messages come from the shared list, so both
-  // account buttons offer the same doors — and neither offers My Agents.
+  // Direct messages comes from the shared list, so both account buttons offer
+  // the same door — and neither offers Notifications or My Agents.
   const destinations = slice(app, "function accountDestinations() {", "\n/**");
-  assert.match(destinations, /act: "go-notifications"/u);
   assert.match(destinations, /act: "dm-list"/u);
+  assert.doesNotMatch(destinations, /act: "go-notifications"/u);
   assert.doesNotMatch(destinations, /value: "agents"/u);
 });
 
