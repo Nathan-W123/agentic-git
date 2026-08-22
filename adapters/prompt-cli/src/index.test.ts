@@ -22,6 +22,7 @@ import {
   CLAUDE_PROFILE,
   GEMINI_PROFILE,
   createClaudeAdapter,
+  createCursorAdapter,
   createGeminiAdapter,
   extractJsonObject,
   resolveClaudeCommand,
@@ -812,6 +813,50 @@ test("gemini: json envelope, --yolo execution, collected diff", async () => {
   await adapter.sendContext(session.id, contextFor(workspace));
   const changeSet = await adapter.collectChanges(session.id);
   assert.equal(changeSet.patches.length, 1);
+});
+
+test("cursor: large prompts are split below the per-argument spawn limit", async () => {
+  const fixture = await createFixture();
+  const objective = `Investigate Cursor with ${"a large context ".repeat(12_000)}`;
+  const task = { ...TASK, objective, agentId: "cursor" };
+  const plan = { ...PLAN, objective };
+  let promptArguments: readonly string[] = [];
+
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    const promptStart = args.indexOf("--force") + 1;
+    promptArguments = args.slice(promptStart);
+    assert.equal(options.input, undefined);
+    return output(JSON.stringify(plan));
+  };
+
+  const adapter = createCursorAdapter({
+    agentId: "cursor",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    runner,
+  });
+  const session = await adapter.startTask({
+    task,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+
+  assert.ok(promptArguments.length > 1);
+  assert.ok(
+    promptArguments.every(
+      (argument) => Buffer.byteLength(argument, "utf8") < 128 * 1024,
+    ),
+  );
+  assert.match(promptArguments.join(" "), /a large context a large context/u);
+  assert.ok(promptArguments.join(" ").includes(objective));
 });
 
 test("an error envelope fails planning instead of being parsed as a plan", async () => {
