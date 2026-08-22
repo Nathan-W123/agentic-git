@@ -222,3 +222,83 @@ test("a project filter keeps only events stamped with that project", async () =>
 
   await store.close();
 });
+
+test("sharing counts what coordination allowed, not what it prevented", async () => {
+  const store = new InMemoryCoordinationStore();
+
+  // A whole-file partial: task_b keeps the file it asked for, minus one it
+  // did not get. Any lease can do this, so it is counted but not as sharing.
+  await append(store, "plan_admitted", "task_b", {
+    status: "approved_with_constraints",
+    partial: true,
+    grantedFiles: ["src/b.ts"],
+    deferredResources: [
+      { resourceType: "file", resourceId: "src/shared.ts", heldBy: ["task_a"] },
+    ],
+  });
+
+  // A within-file partial: task_c is granted src/mod.ts while task_a is
+  // working on a function inside it. This is the one nothing else can do.
+  await append(store, "plan_admitted", "task_c", {
+    status: "approved_with_constraints",
+    partial: true,
+    grantedFiles: ["src/mod.ts"],
+    deferredResources: [
+      { resourceType: "symbol", resourceId: "alpha", heldBy: ["task_a"] },
+    ],
+  });
+  // The same file shared again, by a third task. Counted once as a file.
+  await append(store, "plan_admitted", "task_d", {
+    status: "approved_with_constraints",
+    partial: true,
+    grantedFiles: ["src/mod.ts"],
+    deferredResources: [
+      { resourceType: "symbol", resourceId: "beta", heldBy: ["task_a"] },
+    ],
+  });
+
+  // A release and a pickup, in the order that makes the claim: task_e is
+  // refused and names task_a, task_a hands a file back, task_e then starts.
+  await append(store, "plan_admitted", "task_e", {
+    status: "sequenced",
+    blockedBy: ["task_a"],
+  });
+  await append(store, "ownership_released", "task_a", {
+    files: ["src/handed-back.ts"],
+    stage: "scope_release",
+  });
+  await append(store, "plan_admitted", "task_e", { status: "approved" });
+
+  // A task admitted without ever being held is not a pickup.
+  await append(store, "plan_admitted", "task_f", { status: "approved" });
+
+  const metrics = await computeCoordinationMetrics(store);
+
+  assert.equal(metrics.sharing.partialAdmissions, 3);
+  assert.equal(metrics.sharing.withinFileAdmissions, 2);
+  // src/mod.ts, once, however many tasks shared it. src/b.ts does not count:
+  // nothing was working inside it.
+  assert.equal(metrics.sharing.filesSharedBetweenTasks, 1);
+  assert.equal(metrics.sharing.releases, 1);
+  assert.equal(metrics.sharing.releasedFiles, 1);
+  assert.equal(metrics.sharing.pickupsAfterRelease, 1);
+});
+
+test("a task admitted before its blocker released is not counted as a pickup", async () => {
+  // Order is the whole of the claim. Without it, any task that was ever held
+  // and later ran would look like a pickup.
+  const store = new InMemoryCoordinationStore();
+  await append(store, "plan_admitted", "task_b", {
+    status: "sequenced",
+    blockedBy: ["task_a"],
+  });
+  await append(store, "plan_admitted", "task_b", { status: "approved" });
+  await append(store, "ownership_released", "task_a", {
+    files: ["src/late.ts"],
+    stage: "scope_release",
+  });
+
+  const metrics = await computeCoordinationMetrics(store);
+  assert.equal(metrics.sharing.releases, 1);
+  assert.equal(metrics.sharing.pickupsAfterRelease, 0);
+});
