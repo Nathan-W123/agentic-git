@@ -120,6 +120,9 @@ const AGENT = [
   "    // repository, and nothing can be partially admitted behind it. Writing",
   "    // first is what a real agent mid-edit looks like.",
   '    const blockFirst = started.objective.includes("BLOCKFIRST");',
+  "    // DROP:<file> hands a file back partway through, which is what a real",
+  "    // agent does when it finishes with one and knows somebody is waiting.",
+  '    const drop = /DROP:([^ ]+)/.exec(started.objective);',
   "    function writeAll() {",
   '      for (const file of field("WRITE")) {',
   "        const target = path.join(message.workspacePath, file);",
@@ -129,6 +132,17 @@ const AGENT = [
   "    }",
   "    if (!blockFirst) writeAll();",
   '    mark("executing-" + started.taskId);',
+  "    if (drop !== null) {",
+  '      waitForSignal("drop-" + started.taskId);',
+  "      send({",
+  '        type: "event",',
+  '        event: "scope_release_requested",',
+  "        releasedFiles: [drop[1]],",
+  '        reason: "finished with it",',
+  "        occurredAt: new Date().toISOString(),",
+  "      });",
+  '      mark("dropped-" + started.taskId);',
+  "    }",
   '    waitForSignal("release-" + started.taskId);',
   "    if (blockFirst) writeAll();",
   "    send({",
@@ -421,6 +435,110 @@ test("a holder still reading is narrowed by its objective, not by its writes", a
     }
     if (second !== undefined) {
       await releaseSignal(harness.signalsPath, `release-${second.id}`);
+    }
+    await Promise.allSettled([runOne, runTwo]);
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a file dropped mid-run is picked up by a task in another run", async () => {
+  // The release path end to end, across the boundary that matters. Every
+  // existing test of it drives one Coordinator.run() holding both tasks, so
+  // the release never has to leave the process — but a release only helps if
+  // the task waiting on the file is somebody else's dispatch, which means the
+  // narrowed plan has to reach the durable lease before the waiter's next
+  // admission reads it.
+  //
+  // The holder here declares two files and hands one back partway through,
+  // while still working. Nothing about it settles; nothing restarts.
+  const harness = await createHarness();
+  const store = harness.project.openStore();
+  await store.createUser({
+    email: "drop@example.com",
+    displayName: "Drop",
+    passwordDigest: "digest",
+  });
+  let runOne: Promise<unknown> | undefined;
+  let runTwo: Promise<unknown> | undefined;
+  let first: { id: string } | undefined;
+  let second: { id: string } | undefined;
+
+  try {
+    const repository = await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "dropped",
+    });
+
+    // Holds both files, writes only its own, and will give the shared one back.
+    first = await taskSubmit(harness.project, store, {
+      objective:
+        // Deliberately vague: no real path, so the scope estimate stays
+        // weak, no repository-wide claim is granted, and this task holds
+        // exactly the two files it planned until it gives one back.
+        "tidy up the two modules FILES:shared|py,a|py " +
+        "WRITE:a|py DROP:shared|py",
+    });
+    runOne = runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+    });
+    await awaitSignal(
+      harness.signalsPath,
+      `executing-${first.id}`,
+      120_000,
+      "The first task never reached execution.",
+    );
+
+    // The second wants the shared file and nothing else, so until the drop
+    // lands there is nothing it can be given.
+    second = await taskSubmit(harness.project, store, {
+      objective:
+        "adjust the shared module FILES:shared|py WRITE:shared|py",
+    });
+    runTwo = runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+    });
+
+    // Let the holder hand it back, and confirm it did before expecting
+    // anything of the waiter — otherwise a waiter that started for some other
+    // reason would read as a successful pickup.
+    await releaseSignal(harness.signalsPath, `drop-${first.id}`);
+    await awaitSignal(
+      harness.signalsPath,
+      `dropped-${first.id}`,
+      120_000,
+      "The first task never released the shared file.",
+    );
+
+    await awaitSignal(
+      harness.signalsPath,
+      `executing-${second.id}`,
+      120_000,
+      `The second task never started after ${SHARED_FILE} was released. The ` +
+        "holder is still running, so the only thing that could have let it " +
+        "in is the release reaching the durable lease it arbitrates against.",
+    );
+
+    await releaseSignal(harness.signalsPath, `release-${first.id}`);
+    await releaseSignal(harness.signalsPath, `release-${second.id}`);
+    await Promise.all([runOne, runTwo]);
+
+    const events = await store.listAuditEvents();
+    const firstId = first.id;
+    assert.ok(
+      events.some(
+        (entry) =>
+          entry.event.type === "ownership_released" &&
+          entry.event.taskId === firstId,
+      ),
+      "no ownership release was recorded, so the second task got in some " +
+        "other way than the one under test",
+    );
+  } finally {
+    for (const id of [first?.id, second?.id]) {
+      if (id !== undefined) {
+        await releaseSignal(harness.signalsPath, `drop-${id}`);
+        await releaseSignal(harness.signalsPath, `release-${id}`);
+      }
     }
     await Promise.allSettled([runOne, runTwo]);
     await rm(harness.root, { recursive: true, force: true });
