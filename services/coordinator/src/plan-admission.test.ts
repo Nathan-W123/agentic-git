@@ -1250,10 +1250,18 @@ test("two plans working on different functions of one file both run", () => {
   ]);
 });
 
-test("a holder with a symbol the index cannot place keeps the whole file", () => {
-  // `roundingRule` is nowhere in the file task_b named, so task_b may be about
-  // to write it at a line nobody can predict. Its footprint is not known to be
-  // smaller than the file and the candidate waits, as it always did.
+test("a symbol the index cannot place withholds the room it could take", () => {
+  // `roundingRule` is nowhere in the file task_b named, so task_b is about to
+  // write it at a line nobody can predict. That used to end the matter — the
+  // footprint was not known to be smaller than the file, so the candidate
+  // waited — and it cost the commonest shape there is, an agent editing one
+  // function while adding another beside it.
+  //
+  // Unpredictable is not unbounded. New code lands in the parts of a file
+  // that are not already a declaration: above the first, between them, inside
+  // a class between its members, after the last. Withholding those leaves the
+  // bodies the holder did not name still grantable, and there is nowhere left
+  // for `roundingRule` to appear that the candidate was given.
   const admission = admit(
     sharedFileCandidate(),
     [declaringHolder(["orderTotal", "roundingRule"])],
@@ -1261,9 +1269,23 @@ test("a holder with a symbol the index cannot place keeps the whole file", () =>
     placed(),
   );
 
-  assert.equal(admission.status, "sequenced");
-  assert.deepEqual(admission.blockedBy, ["task_b"]);
-  assert.equal(admission.deferredResources, undefined);
+  assert.equal(admission.status, "approved_with_constraints");
+  const withheld = new Map(
+    (admission.deferredResources ?? []).map((resource) => [
+      resource.resourceId,
+      (resource.locations ?? []).map(
+        (location) => `${location.startLine}-${location.endLine}`,
+      ),
+    ]),
+  );
+  // The function it named, at the lines the index placed it at.
+  assert.deepEqual(withheld.get("orderTotal"), ["40-80"]);
+  // And the one it has not written yet, at every line that is not already
+  // somebody's declaration: before `orderTotal`, between the two, and nothing
+  // after `formatTotal`, which is the last line the index accounts for.
+  assert.deepEqual(withheld.get("roundingRule"), ["1-39", "81-99"]);
+  // `formatTotal` is what the candidate came for, and it is still its own.
+  assert.equal(withheld.has("formatTotal"), false);
 });
 
 test("a holder that occupies every line the index placed keeps the file", () => {

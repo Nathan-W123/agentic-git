@@ -330,13 +330,75 @@ function declaredSpans(
       placed.add(range.name.toLowerCase());
     }
   }
-  if (wanted.some((names) => !names.every((name) => placed.has(name)))) {
+  const occupies = new Set(wanted.flat());
+  const all = locate(file) ?? [];
+  const own = all.filter((range) => occupies.has(range.name.toLowerCase()));
+  // Declarations this plan made that the index cannot place are functions it
+  // is going to write, not mistakes. Nobody can say which lines they will
+  // occupy, because they do not exist yet — but the places they *could*
+  // occupy are exactly the parts of the file that are not already somebody's
+  // declaration, and those can be withheld.
+  const unwritten = claimed.filter((symbol, at) => {
+    const names = wanted[at] ?? [];
+    return !names.every((name) => placed.has(name));
+  });
+  if (unwritten.length === 0) {
+    return own;
+  }
+  const zones = insertionZones(all);
+  if (zones.length === 0) {
+    // Nothing to withhold the new code to, so nothing can be promised about
+    // where it lands. The whole file, as before.
     return undefined;
   }
-  const occupies = new Set(wanted.flat());
-  return (locate(file) ?? []).filter((range) =>
-    occupies.has(range.name.toLowerCase()),
+  // Attributed to the symbol that is going to be written, which is the honest
+  // reading and the one that renders: "newHelper is held by task X", and its
+  // locations are every place newHelper might turn up.
+  const first = unwritten[0] ?? "pending declaration";
+  return [
+    ...own,
+    ...zones.map((zone) => ({
+      name: first,
+      startLine: zone.startLine,
+      endLine: zone.endLine,
+    })),
+  ];
+}
+
+/**
+ * Where a declaration that does not exist yet could be written.
+ *
+ * Everything inside the part of the file the index describes that is not
+ * already the body of an innermost declaration: the preamble above the first
+ * one, the gaps between them, the space inside a class between its methods,
+ * and the tail after the last.
+ *
+ * Innermost is the whole of the rule. A class is a range containing other
+ * ranges, and a new method lands *inside* it — but between its existing
+ * members, never inside one of their bodies. So containers are treated as
+ * open ground and only leaf declarations are closed, which is what lets a
+ * second agent still be granted a method of a class its holder is adding to.
+ *
+ * The bound is the last line the index accounts for rather than the end of
+ * the file, for the same reason {@link leavesGround} uses it: granting the
+ * space past everything anyone declared is not a grant of anything.
+ */
+function insertionZones(all: readonly NamedRange[]): LineRange[] {
+  const known = all.reduce((end, range) => Math.max(end, range.endLine), 0);
+  if (known === 0) {
+    return [];
+  }
+  const leaves = all.filter(
+    (range) =>
+      !all.some(
+        (other) =>
+          other !== range &&
+          other.startLine >= range.startLine &&
+          other.endLine <= range.endLine &&
+          (other.startLine > range.startLine || other.endLine < range.endLine),
+      ),
   );
+  return subtractRanges([{ startLine: 1, endLine: known }], leaves);
 }
 
 /**

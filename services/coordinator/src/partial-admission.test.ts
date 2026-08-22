@@ -541,3 +541,200 @@ test("two agents editing different functions of one file both keep theirs", () =
   // anyone, and `gamma` is what the candidate came for.
   assert.deepEqual(withheld, ["alpha"]);
 });
+
+/**
+ * Releasing a symbol, and the waiter picking it up.
+ *
+ * Splitting a file is only half of what symbol-level arbitration promises.
+ * The other half is that the withholding ends: a holder that gives up a
+ * function, or finishes with it, has to stop standing in the way of whoever
+ * was refused it. Nothing here is a timer or a signal — `active` is derived
+ * from the live leases, so a holder that narrowed its plan or went away is
+ * simply a different set of declarations, and the next admission is decided
+ * against that.
+ */
+const RELEASE_FILE = "src/mod.ts";
+const RELEASE_RANGES = [
+  { name: "alpha", startLine: 6, endLine: 12 },
+  { name: "beta", startLine: 15, endLine: 21 },
+  { name: "gamma", startLine: 24, endLine: 30 },
+];
+
+function releasePlan(taskId: string, symbols: string[]): AgentPlan {
+  return {
+    taskId,
+    objective: taskId,
+    expectedFiles: [RELEASE_FILE],
+    expectedSymbols: symbols,
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+}
+
+/** The holder as enrichment leaves it: every symbol, one of them its own. */
+function releaseHolder(declared: string[]): {
+  taskId: string;
+  agentId: string;
+  plan: AgentPlan;
+} {
+  return {
+    taskId: "task_holder",
+    agentId: "agent_holder",
+    plan: {
+      ...releasePlan("task_holder", ["alpha", "beta", "gamma"]),
+      declaredSymbols: declared,
+    },
+  };
+}
+
+function askFor(
+  symbols: string[],
+  active: { taskId: string; agentId: string; plan: AgentPlan }[],
+): PlanAdmission {
+  return new PlanAdmissionController().admit({
+    plan: releasePlan("task_candidate", symbols),
+    agentId: "agent_candidate",
+    baseRevision: "r1",
+    baseVersion: 1,
+    active,
+    planRevision: 1,
+    symbolRangesInFile: (file) =>
+      file === RELEASE_FILE ? RELEASE_RANGES : undefined,
+  });
+}
+
+function withheldBy(admission: PlanAdmission): string[] {
+  return (admission.deferredResources ?? [])
+    .map((resource) => resource.resourceId)
+    .sort();
+}
+
+test("a held symbol is withheld while its holder still declares it", () => {
+  const admission = askFor(["alpha"], [releaseHolder(["alpha"])]);
+  // Admitted to the file, refused the function — the candidate can still work
+  // elsewhere in it, and the refused half comes back as a follow-up.
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(withheldBy(admission), ["alpha"]);
+});
+
+test("releasing a symbol hands it to the task that was refused it", () => {
+  // The same holder, having moved on from `alpha` to `beta`. Nothing else
+  // about the request changes, so the only thing that can account for the
+  // different answer is the release.
+  const before = askFor(["alpha"], [releaseHolder(["alpha"])]);
+  const after = askFor(["alpha"], [releaseHolder(["beta"])]);
+  assert.deepEqual(withheldBy(before), ["alpha"]);
+  assert.deepEqual(
+    withheldBy(after),
+    ["beta"],
+    "alpha was released, so it should no longer be withheld",
+  );
+  assert.equal(
+    withheldBy(after).includes("alpha"),
+    false,
+    "the released symbol must not still be held against the candidate",
+  );
+});
+
+test("a holder that finished withholds nothing at all", () => {
+  // Settling is the coarsest release there is: the lease ends, the plan
+  // leaves `active`, and the next admission is a plain one.
+  const admission = askFor(["alpha"], []);
+  assert.equal(admission.status, "approved");
+  assert.deepEqual(withheldBy(admission), []);
+});
+
+test("releasing one symbol does not release the ones still held", () => {
+  // The failure worth guarding against is a release that over-delivers: a
+  // holder that gave up `alpha` still has `beta`, and a candidate wanting
+  // both must get exactly one of them.
+  const admission = askFor(["alpha", "beta"], [releaseHolder(["beta"])]);
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(withheldBy(admission), ["beta"]);
+});
+
+test("a function that does not exist yet cannot land in granted ground", () => {
+  // The safety half of withholding insertion zones. The holder is editing
+  // `alpha` and adding something it has not written; the candidate is granted
+  // the file and writes three hunks — one inside its own function, one in the
+  // gap between two declarations, one in the preamble. The two that landed
+  // where the new function could go have to come back.
+  const ranges = [
+    { name: "alpha", startLine: 6, endLine: 12 },
+    { name: "beta", startLine: 15, endLine: 21 },
+    { name: "gamma", startLine: 24, endLine: 30 },
+  ];
+  const file = "src/mod.ts";
+  const locate = (candidate: string) =>
+    candidate === file ? ranges : undefined;
+  const shape = (taskId: string, symbols: string[]): AgentPlan => ({
+    taskId,
+    objective: taskId,
+    expectedFiles: [file],
+    expectedSymbols: symbols,
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  });
+
+  const admission = new PlanAdmissionController().admit({
+    plan: shape("task_candidate", ["gamma"]),
+    agentId: "agent_candidate",
+    baseRevision: "r1",
+    baseVersion: 1,
+    active: [
+      {
+        taskId: "task_holder",
+        agentId: "agent_holder",
+        plan: {
+          ...shape("task_holder", ["alpha", "beta", "gamma"]),
+          declaredSymbols: ["alpha", "newHelper"],
+        },
+      },
+    ],
+    planRevision: 1,
+    symbolRangesInFile: locate,
+  });
+  assert.equal(admission.status, "approved_with_constraints");
+
+  const hunk = (header: string) => `${header}\n keep\n-old\n+new\n`;
+  const split = splitChangeSet(
+    shape("task_candidate", ["gamma"]),
+    admission,
+    {
+      ...changeSet([]),
+      patches: [
+        {
+          path: file,
+          status: "modified",
+          patch:
+            `--- a/${file}\n+++ b/${file}\n` +
+            // preamble, gap between beta and gamma, and its own function
+            hunk("@@ -2,2 +2,2 @@") +
+            hunk("@@ -22,2 +22,2 @@") +
+            hunk("@@ -25,2 +25,2 @@"),
+        },
+      ],
+    },
+    locate,
+  );
+
+  const promoted = split.granted.patches[0]?.patch ?? "";
+  assert.match(promoted, /@@ -25,2/u, "its own function still lands");
+  assert.doesNotMatch(
+    promoted,
+    /@@ -2,2/u,
+    "the preamble is where a new declaration can go, so it is not granted",
+  );
+  assert.doesNotMatch(
+    promoted,
+    /@@ -22,2/u,
+    "nor is the gap between two declarations",
+  );
+  const held = split.deferred[0]?.patch ?? "";
+  assert.match(held, /@@ -2,2/u);
+  assert.match(held, /@@ -22,2/u);
+});
