@@ -1120,13 +1120,13 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
   assert.match(
     css,
-    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
-    "the connector should leave a quiet gap beneath the avatar",
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 40px;/u,
+    "the connector should flow directly from the avatar",
   );
   assert.match(
     css,
-    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 41px;/u,
-    "a single-task connector should use the same shortened start",
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 31px;/u,
+    "a single-task connector should use the same continuous start",
   );
   // Written from the column variables rather than as the 9px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
