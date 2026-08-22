@@ -5794,11 +5794,10 @@ button.chip.lg:hover {
      `--border-strong` is translucent, so each of those overlaps painted the
      stroke twice and showed as a darker, discoloured tick exactly where the
      line should read as continuous: at every row join and at every hook.
-     Mixed against the ground it is drawn on, the stroke is the same colour it
-     has always been — `--border-strong` is 28% of `--muted`, and the room's
-     tint is the surface the transcript is painted on — but it can now cross
-     itself as often as the pieces need to without changing shade. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--room-tint));
+     Mixed against the ground it is drawn on, the stroke stays opaque enough
+     to cross itself without changing shade. Eighteen percent keeps it behind
+     the message and faces instead of reading as another piece of content. */
+  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--room-tint));
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -5831,15 +5830,7 @@ button.chip.lg:hover {
   background: var(--bg-hover);
   /* An opaque stroke has to follow the surface under it, or the line would
      stay at the room's shade while the row it crosses lightens. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--bg-hover));
-}
-
-/* The light theme's `--border-strong` is already opaque — nothing there
-   composites twice — so the connector takes it directly rather than mixing a
-   second version of the same colour. */
-:root[data-theme="light"] .cmsg-row,
-:root[data-theme="light"] .cmsg-row:hover {
-  --cmsg-stem: var(--border-strong);
+  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--bg-hover));
 }
 
 /* Consecutive lines from one person read as a single message group. Keep the
@@ -5871,16 +5862,16 @@ button.chip.lg:hover {
   left: var(--cmsg-stem-x);
   top: -1px;
   bottom: -1px;
-  border-left: 3px solid var(--cmsg-stem);
-  border-top-left-radius: 2px;
+  border-left: 2px solid var(--cmsg-stem);
+  border-top-left-radius: 3px;
   pointer-events: none;
 }
 
-/* Every grouped path leaves from the bottom centre of its 32px avatar,
-   regardless of the height of that first message. Tucking the stem one pixel
-   into the face removes the floating gap while keeping the join smooth. */
+/* Every grouped path leaves from beneath its 32px avatar, regardless of the
+   height of that first message. A small break keeps the connector from
+   looking attached to the face and gives the quieter stroke room to begin. */
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
-  top: 40px;
+  top: 48px;
 }
 
 /* The final row owns a wrapper that stops immediately after the thread link.
@@ -5894,7 +5885,7 @@ button.chip.lg:hover {
    line. The route's foot is the foot of the thread link itself — see the
    `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
    out of this sum. `bottom: 20px` ends the stem at the top tangent of the
-   eleven-pixel quarter turn below. The old hook carried a seven-pixel upright
+   ten-pixel turn below. The old hook carried a seven-pixel upright
    over this stem and the final segment deliberately ended inside it; that
    double-painted the connector at every branch and left a dark, swollen join.
    The stem and turn now meet once, edge to edge, so the stroke keeps one
@@ -5912,13 +5903,13 @@ button.chip.lg:hover {
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
   bottom: 20px;
-  border-left: 3px solid var(--cmsg-stem);
+  border-left: 2px solid var(--cmsg-stem);
   pointer-events: none;
 }
 
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
   .cmsg-thread-route::before {
-  top: 31px;
+  top: 39px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -6033,27 +6024,21 @@ button.chip.lg:hover {
   margin-top: 1px;
 }
 
-/* The status badge on a face in the transcript, at half the size the roster
-   gives it. The sidebar's dot is read down a column of names and is sized for
-   that; in the room it sits on the one face at the head of a message, where
-   the same dot read as a bead stuck to the mark. Halved here and nowhere
-   else, so the side tab keeps the size it was asked to keep. The surface ring
-   halves with it: a one-pixel band around a 5px badge is the reading the
-   two-pixel band gave the 9px one. */
+/* The status badge on a face in the transcript, smaller than the size the
+   roster gives it. The sidebar's dot is read down a column of names and is
+   sized for that; in the room it sits on the one face at the head of a
+   message. It used to be halved to 5px, which on a 32px face read as a speck
+   rather than a status — the thread panel had already had to override it back
+   up, and that size is the one this transcript wants too, so the room now
+   carries it directly and threads simply inherit it. The side tab and the
+   reply stack keep the sizes they were asked to keep, below. The surface ring
+   stays a one-pixel band, which is the reading the two-pixel band gives the
+   9px badge. */
 .cmsg-row .cmsg-avatar .agent-face .presence {
   right: -1px;
-  width: 5px;
-  height: 5px;
-  border-width: 1px;
-}
-
-/* Threads reuse the room transcript markup, but the status badge on a face
-   there needs more presence than the halved room size — one and a half times
-   the room badge, and only inside the thread panel so group chats stay as they
-   are. */
-.thread-panel .cmsg-row .cmsg-avatar .agent-face .presence {
   width: 7.5px;
   height: 7.5px;
+  border-width: 1px;
 }
 
 .cmsg-row .cmsg-body {
@@ -6721,7 +6706,7 @@ button.chip.lg:hover {
 }
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
-   eleven-pixel quarter turn starts at the stem's tangent instead of laying a
+   ten-pixel rounded turn starts at the stem's tangent instead of laying a
    second upright over it; the nine-pixel gap gives the stroke and replier face
    the same quiet breathing room as the avatar and stem above. Where the turn
    does still meet the stem it meets it in
@@ -6730,18 +6715,18 @@ button.chip.lg:hover {
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
-   own three-pixel left stroke hung *outside* the declared width and pushed
-   the whole corner three pixels further left than the stem it turns out of —
+   own left stroke hangs *outside* the declared width and pushes the whole
+   corner further left than the stem it turns out of —
    a visible step where the two should be one line. Sized by the border box,
    the gap plus the 20px of elbow put that stroke in the connector's own
    column, exactly where the stem above it stands: the gap is read from
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
 
-   Top and height are read together: the difference between them (11 - 8) is
-   what puts the horizontal run three pixels below the link's middle, where it
-   has always sat. Matching the height to the radius removes the straight
-   upright entirely, leaving only the turn that branches from the stem. */
+   Top and height are read together: the difference between them (10 - 8) is
+   what puts the horizontal run two pixels below the link's middle. The
+   slightly oval bend keeps the turn soft without making it geometrically
+   perfect, which suits the hand-drawn faces beside it. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
@@ -6749,15 +6734,15 @@ button.chip.lg:hover {
   top: calc(50% - 8px);
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
   width: 20px;
-  height: 11px;
-  border-left: 3px solid var(--cmsg-stem);
-  border-bottom: 3px solid var(--cmsg-stem);
-  border-bottom-left-radius: 11px;
-  border-bottom-right-radius: 2px;
+  height: 10px;
+  border-left: 2px solid var(--cmsg-stem);
+  border-bottom: 2px solid var(--cmsg-stem);
+  border-bottom-left-radius: 12px 9px;
+  border-bottom-right-radius: 3px 2px;
   pointer-events: none;
 }
 
-/* The last turn closes the path with a round cap. At the same three pixels as
+/* The last turn closes the path with a round cap. At the same two pixels as
    the stroke it reads as a softened endpoint rather than a new marker, but it
    keeps the bottom branch from being mistaken for one more continuation. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
@@ -6765,8 +6750,8 @@ button.chip.lg:hover {
   position: absolute;
   top: 50%;
   right: calc(100% + 8px);
-  width: 3px;
-  height: 3px;
+  width: 2px;
+  height: 2px;
   border-radius: 50%;
   background: var(--cmsg-stem);
   pointer-events: none;
@@ -6962,9 +6947,9 @@ button.chip.lg:hover {
 
 /* The face's own badge rather than one drawn beside it. It used to be a
    `::before` on this wrapper: the same colour and size, but static, so the one
-   live signal in a room breathed everywhere except here. Halved and given the
-   chat surface's cutout the way the room's own faces are, it is now literally
-   the badge `agentFace` draws, on the clock every other live mark keeps. */
+   live signal in a room breathed everywhere except here. Halved for the stack
+   and given the chat surface's cutout, it is now literally the badge
+   `agentFace` draws, on the clock every other live mark keeps. */
 .cmsg-thread-link .ctl-faces .ctl-working .presence {
   display: block;
   right: -1px;
@@ -11046,7 +11031,9 @@ dialog.modal[open]::backdrop {
   align-self: center;
 }
 
-/* Halved and hair-ringed, exactly as a face in the room transcript is. */
+/* Halved and hair-ringed. The room transcript's own badge has since grown,
+   but this one sits on a 20px face in a list of tabs rather than at the head
+   of a message, and at that size it is already read. */
 .thread-item .ti-run .presence {
   right: -1px;
   width: 5px;
