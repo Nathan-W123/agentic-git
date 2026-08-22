@@ -2427,7 +2427,7 @@ test("a follow-up task is arbitrated whole, so a task sheds scope only once", as
   }
 });
 
-test("an agent that only edited the deferred file is requeued, not failed", async () => {
+test("an agent blocked by a partial admission is requeued to wait", async () => {
   const harness = await splitHarness();
   try {
     await holdTheContestedFile(harness);
@@ -2459,15 +2459,10 @@ test("an agent that only edited the deferred file is requeued, not failed", asyn
       },
       baseVersion: split.canonicalVersion,
     });
-    await writeFile(
-      path.join(workspace.path, "src", "value.js"),
-      "export const value = 42;\n",
-      "utf8",
-    );
     const changeSet = await workspaces.collectChangeSet(workspace, {
       symbolsChanged: [],
       riskAssessment: { level: "low", reasons: [] },
-      agentExplanation: "only touched the deferred file",
+      agentExplanation: "the deferred file is required before work can start",
     });
     await workspaces.destroy(workspace);
 
@@ -2486,8 +2481,10 @@ test("an agent that only edited the deferred file is requeued, not failed", asyn
       },
     );
 
-    // Nothing to promote, but nothing wrong with the task either: it goes back
-    // to the queue at full scope rather than being marked failed.
+    // The old result path looked only for patches on deferred files. An agent
+    // that obeyed its constraints and wrote nothing therefore reported a
+    // successful no-op, even though it explicitly said the held file blocked
+    // the work. It now goes back at full scope instead.
     assert.equal(outcome.accepted, false);
     assert.equal(outcome.requeued, true);
     assert.match(outcome.reason ?? "", /deferred resource/u);
@@ -2506,6 +2503,33 @@ test("an agent that only edited the deferred file is requeued, not failed", asyn
       false,
     );
     assert.equal((await harness.store.listRuns()).length, 0);
+
+    // A retry must not receive the same partial slice and spend another empty
+    // execution. Its earlier partial admission is durable, so the whole plan
+    // waits behind the holder this time.
+    const retry = await leaseWork(
+      harness.store,
+      {
+        workerId: harness.workerId,
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryParallelism: 2,
+      },
+      harness.repositories,
+    );
+    assert.ok(retry);
+    assert.equal(retry.task.id, split.task.id);
+    const retriedAdmission = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: retry.lease.id,
+        actorId: "user",
+        plan: splitTaskPlan(retry),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.ok(retriedAdmission.outcome === "admitted");
+    assert.equal(retriedAdmission.admission.status, "sequenced");
+    assert.equal(retriedAdmission.admission.deferredResources, undefined);
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

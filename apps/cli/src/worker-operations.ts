@@ -654,12 +654,28 @@ async function requeueForDeferredScope(
   store: CoordinationStore,
   lease: WorkLease,
   task: SubmittedTask,
+  admission: PlanAdmission,
   split: { deferred: readonly { path: string }[] },
 ): Promise<WorkResultAcceptance> {
-  const paths = split.deferred.map((patch) => patch.path).sort();
+  const resources = admission.deferredResources ?? [];
+  const paths = [
+    ...new Set([
+      ...split.deferred.map((patch) => patch.path),
+      ...resources
+        .filter((resource) => resource.resourceType === "file")
+        .map((resource) => resource.resourceId),
+    ]),
+  ].sort();
+  const labels = resources.map(
+    (resource) => `${resource.resourceType}:${resource.resourceId}`,
+  );
+  const blockedBy = [
+    ...new Set(resources.flatMap((resource) => resource.heldBy)),
+  ].sort();
   const reason =
-    "Every change the agent made was to a deferred resource " +
-    `(${paths.join(", ")}); the task was requeued at full scope`;
+    "No work could be completed without the deferred resources " +
+    `(${(labels.length > 0 ? labels : paths).join(", ")}); the task was ` +
+    "requeued at full scope to wait for them";
   const now = new Date().toISOString();
   const released = await store.finishWorkLease(
     lease.id,
@@ -671,13 +687,18 @@ async function requeueForDeferredScope(
     await store.expireWorkLeases(now);
     return { accepted: false, reason: "lease was lost before requeueing" };
   }
-  await trace(store, undefined, "replan_requested", task.id, {
+  await trace(store, undefined, "plan_admitted", task.id, {
     projectId: task.projectId,
     repositoryId: task.repositoryId,
     workerId: lease.workerId,
     leaseId: lease.id,
+    status: "sequenced",
+    blockedBy,
+    constraints: ["Retry the whole plan after the holders finish"],
     deferredFiles: paths,
-    reason,
+    deferredResources: resources,
+    explanation: reason,
+    partialNoProgress: true,
   });
   return { accepted: false, reason, requeued: true };
 }
@@ -1118,6 +1139,27 @@ export async function blockedAdmissionHistory(
 }
 
 /**
+ * Whether this task has already spent an execution on a partial admission.
+ *
+ * A task may prove that its nominally free files cannot be changed without
+ * the withheld ones. That attempt is returned to the queue, and allowing the
+ * next lease to split the same plan again would repeat the empty execution
+ * forever. The audit trail survives that lease boundary, so it is the stable
+ * signal that subsequent admissions must decide the plan as one unit.
+ */
+export async function wasPartiallyAdmitted(
+  store: CoordinationStore,
+  taskId: TaskId,
+): Promise<boolean> {
+  return (
+    await store.listAuditEvents({
+      taskId,
+      types: ["plan_admitted"],
+    })
+  ).some((entry) => entry.event.data["partial"] === true);
+}
+
+/**
  * The plans currently executing in one repository, and the exact set of
  * leases that view was read from.
  *
@@ -1541,6 +1583,7 @@ export async function admitWorkPlan(
   const refusals = legacyAdmissionLoop()
     ? { consecutive: 0, total: 0 }
     : await blockedAdmissionHistory(store, task.id);
+  const alreadySplit = await wasPartiallyAdmitted(store, task.id);
   const blockedAttempts = Math.max(
     refusals.consecutive,
     // The lifetime count is scaled so it only overrides the consecutive one
@@ -1580,7 +1623,8 @@ export async function admitWorkPlan(
       // A task that already exists because an earlier admission was partial is
       // decided whole. One split per lineage is what stops a task from shedding
       // scope round after round, each round paying for another agent run.
-      partialAdmission: !isDeferredScopeFollowUp(task.objective),
+      partialAdmission:
+        !isDeferredScopeFollowUp(task.objective) && !alreadySplit,
       // The same index that enriched this plan is what can say which of the
       // enriched claims came from which file, so a withheld file takes its own
       // symbols with it instead of leaving them to block the remainder.
@@ -2418,11 +2462,22 @@ export async function acceptWorkResult(
     );
   }
 
-  // The agent spent its whole run inside the part it did not own. Nothing can
-  // be promoted, but nothing is wrong with the task either, so it goes back to
-  // the queue rather than being failed — the same treatment a stale base gets.
-  if (split.granted.patches.length === 0 && split.deferred.length > 0) {
-    return await requeueForDeferredScope(store, leaseAtStart, task, split);
+  // A partial admission is useful only if its free portion can make progress
+  // independently. An empty granted changeset proves that it could not —
+  // whether the agent obeyed the constraint and wrote nothing, or wrote only
+  // to withheld files. Return the original task at full scope so its next
+  // admission waits for the holders instead of reporting an empty success.
+  if (
+    split.granted.patches.length === 0 &&
+    planAdmissionPartial(admitted.admission)
+  ) {
+    return await requeueForDeferredScope(
+      store,
+      leaseAtStart,
+      task,
+      admitted.admission,
+      split,
+    );
   }
 
   const promoted = split.granted;

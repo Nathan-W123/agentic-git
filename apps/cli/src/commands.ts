@@ -1452,6 +1452,32 @@ export async function runPendingTasks(
     let failed = 0;
     let cancelled = 0;
     for (const entry of result.tasks) {
+      if (entry.status === "queued") {
+        // A partial admission can turn out not to contain an independently
+        // useful piece of work. The coordinator closes that empty execution
+        // and reports it as queued; releasing (not completing) the durable
+        // lease is what puts the same request back behind the holders. The
+        // next admission is all-or-nothing, so the task now waits rather than
+        // running the same unworkable slice again.
+        const lease = leases.get(entry.task.id);
+        if (lease === undefined) {
+          await store.retrySubmittedTask(entry.task.id);
+        } else {
+          const released = await store.finishWorkLease(
+            lease.id,
+            "released",
+            new Date().toISOString(),
+            entry.explanation,
+          );
+          if (!released) {
+            throw new Error(
+              `Could not release queued work lease ${lease.id}`,
+            );
+          }
+          leases.delete(entry.task.id);
+        }
+        continue;
+      }
       if (entry.status === "cancelled") {
         // Whoever stopped it already settled the row and released the lease
         // — that is how the run came to notice at all. Writing a completion

@@ -863,7 +863,9 @@ export class Worker {
    * The worker holds no view of what other tasks own, so it cannot answer
    * this itself — which is why it used to refuse outright. It forwards
    * instead, and the coordinator arbitrates the widened plan against every
-   * other active lease and answers grant, defer, or refuse.
+   * other active lease. A temporary deferral is retried here while the agent
+   * remains blocked on its request; handing "not yet" back to the model made
+   * agents that required the held file report an empty completion.
    *
    * A transport failure is not silently turned into a grant. The agent is
    * told the expansion was not granted and continues inside the scope it
@@ -891,10 +893,32 @@ export class Worker {
       occurredAt: event.occurredAt,
     };
     try {
-      return await this.options.client.requestScopeChange(
-        assignment.lease.id,
-        request,
+      let decision: ScopeChangeDecision;
+      do {
+        decision = await this.options.client.requestScopeChange(
+          assignment.lease.id,
+          request,
+        );
+        if (
+          decision.decision === "deferred" &&
+          !this.stopping &&
+          !this.cancellationRequested
+        ) {
+          const requested =
+            Number.isSafeInteger(decision.retryAfterMs) &&
+            (decision.retryAfterMs ?? 0) > 0
+              ? decision.retryAfterMs!
+              : MIN_PLAN_RETRY_MS;
+          await this.waitForAdmissionRetry(
+            Math.max(1, Math.min(MIN_PLAN_RETRY_MS, requested)),
+          );
+        }
+      } while (
+        decision.decision === "deferred" &&
+        !this.stopping &&
+        !this.cancellationRequested
       );
+      return decision;
     } catch (error) {
       if (error instanceof LeaseLostError) {
         throw error;

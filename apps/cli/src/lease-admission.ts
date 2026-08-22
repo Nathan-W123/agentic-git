@@ -35,7 +35,10 @@ import {
   type TaskId,
 } from "@coord/shared-types";
 
-import { blockedAdmissionHistory } from "./worker-operations.js";
+import {
+  blockedAdmissionHistory,
+  wasPartiallyAdmitted,
+} from "./worker-operations.js";
 
 /**
  * What makes one admission answer different from another.
@@ -165,6 +168,10 @@ export class LeasePlanAuthority implements PlanAuthority {
       // built.
       return await this.publish(request, lease, request.plan, approvedLeaseIds);
     }
+    const alreadySplit = await wasPartiallyAdmitted(
+      this.store,
+      request.task.id,
+    );
 
     // A repository-wide claim is answered before the index is built. There is
     // nothing to arbitrate against a claim that covers everything — the
@@ -184,7 +191,13 @@ export class LeasePlanAuthority implements PlanAuthority {
       // way out of it — and exact-base integration is a better answer than
       // waiting on a holder that is never going to narrow.
       const waited = this.waitedMs(request.task.id, false);
-      const forced = waited >= this.maxWaitMs;
+      // Initial work eventually falls back to exact-base integration rather
+      // than waiting forever. A live widening cannot: letting it through
+      // would grant a running agent scope another task still owns.
+      const forced =
+        request.revising !== true &&
+        !alreadySplit &&
+        waited >= this.maxWaitMs;
       // Recorded like every other refusal. A hold nobody can see is what made
       // this path look asleep, and returning early from here was how a
       // repository-wide hold came to be the only decision that left no trace.
@@ -263,7 +276,7 @@ export class LeasePlanAuthority implements PlanAuthority {
       partialAdmission:
         request.partialAdmission === false
           ? false
-          : !isDeferredScopeFollowUp(request.task.objective),
+          : !isDeferredScopeFollowUp(request.task.objective) && !alreadySplit,
       resourcesInFile: (file) => this.intelligence.resourcesInFile(index, file),
       symbolRangesInFile: (file) =>
         this.intelligence.symbolRangesInFile(index, file),
@@ -278,28 +291,36 @@ export class LeasePlanAuthority implements PlanAuthority {
       ? reducePlanScope(enriched, decided.deferredResources ?? [])
       : enriched;
 
-    const saved = await this.store.saveWorkLeasePlan({
-      leaseId: lease.id,
-      submission: { plan: grantedPlan, admission: decided },
-      observedApprovedLeaseIds: approvedLeaseIds,
-      // Without this a task revising its own approved plan would be answered
-      // `already_admitted` and handed back its *old* contract as though it
-      // covered the new plan — approving a widening nobody arbitrated, which
-      // is the precise failure this path exists to prevent.
-      ...(request.revising === true ? { replaceApproved: true } : {}),
-    });
-    if (saved.outcome === "stale") {
-      // Someone was admitted between the read and the write, so this decision
-      // was made against a view that no longer exists. Decide again.
-      return await this.admit(request);
+    let admission = decided;
+    if (!(request.revising === true && !planAdmissionApproved(decided))) {
+      const saved = await this.store.saveWorkLeasePlan({
+        leaseId: lease.id,
+        submission: { plan: grantedPlan, admission: decided },
+        observedApprovedLeaseIds: approvedLeaseIds,
+        // Without this a task revising its own approved plan would be answered
+        // `already_admitted` and handed back its *old* contract as though it
+        // covered the new plan — approving a widening nobody arbitrated,
+        // which is the precise failure this path exists to prevent.
+        ...(request.revising === true ? { replaceApproved: true } : {}),
+      });
+      if (saved.outcome === "stale") {
+        // Someone was admitted between the read and the write, so this
+        // decision was made against a view that no longer exists. Decide
+        // again.
+        return await this.admit(request);
+      }
+      if (saved.outcome === "lease_lost") {
+        return { outcome: "admitted", plan: request.plan };
+      }
+      admission =
+        saved.outcome === "already_admitted"
+          ? saved.lease.plan!.admission
+          : decided;
     }
-    if (saved.outcome === "lease_lost") {
-      return { outcome: "admitted", plan: request.plan };
-    }
-    const admission =
-      saved.outcome === "already_admitted"
-        ? saved.lease.plan!.admission
-        : decided;
+    // A refused live widening leaves the old approved contract on the lease.
+    // Replacing it with this sequenced decision would make the task's current
+    // files look unowned while the agent is still working — and would make a
+    // retry impossible to distinguish from a task that was never admitted.
 
     // Reported once per collision, not once per time we look at it. The same
     // two plans stay in conflict for as long as one of them is running, and
@@ -338,7 +359,11 @@ export class LeasePlanAuthority implements PlanAuthority {
 
     const approved = planAdmissionApproved(admission);
     const waited = this.waitedMs(request.task.id, approved);
-    const forced = !approved && waited >= this.maxWaitMs;
+    const forced =
+      request.revising !== true &&
+      !alreadySplit &&
+      !approved &&
+      waited >= this.maxWaitMs;
 
     await this.record(request, {
       type: "plan_admitted",

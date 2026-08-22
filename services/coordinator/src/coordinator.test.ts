@@ -694,7 +694,10 @@ test("an agent may replace its own plan, and is held to the same checks", async 
     );
     // The plan in force is the new one, so scope enforcement holds the agent
     // to what it proposed rather than to what it originally declared.
-    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/c.txt"), true);
+    assert.equal(
+      result.tasks[0]?.plan.expectedFiles.includes("src/c.txt"),
+      true,
+    );
     assert.equal(result.tasks[0]?.status, "integrated");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -941,6 +944,76 @@ test("a file the admission withheld is held back, not called a scope escape", as
   }
 });
 
+test("an empty partial admission waits instead of reporting success", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/shared.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "",
+      false,
+      undefined,
+      "The required file is held by another task",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          return {
+            outcome: "admitted",
+            plan: { ...request.plan, expectedFiles: ["src/a.txt"] },
+            admission: {
+              status: "approved_with_constraints",
+              taskId: request.task.id,
+              planRevision: 1,
+              baseRevision: "b".repeat(40),
+              ownershipGrants: [],
+              constraints: ["Leave src/shared.txt to its current holder"],
+              blockedBy: [],
+              conflicts: [],
+              deferredResources: [
+                {
+                  resourceType: "file",
+                  resourceId: "src/shared.txt",
+                  heldBy: ["task_elsewhere"],
+                  reason: "leased to task_elsewhere",
+                },
+              ],
+              explanation: "src/shared.txt is leased to task_elsewhere",
+              decidedAt: new Date().toISOString(),
+            },
+          };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "queued");
+    assert.deepEqual(result.tasks[0]?.decision.blockedBy, ["task_elsewhere"]);
+    assert.equal(
+      result.audit.some((event) => event.type === "task_reported"),
+      false,
+    );
+    assert.equal(
+      result.audit
+        .filter((event) => event.type === "plan_admitted")
+        .at(-1)?.data["status"],
+      "sequenced",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an agent can ask the platform to act, and is told what happened", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
 
@@ -1138,7 +1211,7 @@ test("a deployment that performs no actions says so, and the task carries on", a
   }
 });
 
-test("refuses live scope that overlaps work running in another run", async () => {
+test("waits for live scope held by work running in another run", async () => {
   // The wave this task belongs to is the only thing the conflict check can
   // see, and a task in a different run is not in it. Before the authority was
   // consulted here, an agent could widen into a file another run was holding
@@ -1158,22 +1231,25 @@ test("refuses live scope that overlaps work running in another run", async () =>
       "src/c.txt",
     );
     const asked: string[][] = [];
+    let wideningAttempts = 0;
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
       planAuthority: {
         async admit(request) {
           asked.push([...request.plan.expectedFiles]);
-          // Approve the original plan, refuse the widening — which is what a
-          // durable authority does when somebody else holds the extra file.
-          return request.plan.expectedFiles.includes("src/c.txt")
-            ? {
+          if (request.plan.expectedFiles.includes("src/c.txt")) {
+            wideningAttempts += 1;
+            if (wideningAttempts === 1) {
+              return {
                 outcome: "deferred",
-                retryAfterMs: 1_000,
+                retryAfterMs: 1,
                 blockedBy: ["task_elsewhere"],
                 explanation: "src/c.txt is leased to task_elsewhere",
-              }
-            : { outcome: "admitted", plan: request.plan };
+              };
+            }
+          }
+          return { outcome: "admitted", plan: request.plan };
         },
       },
     }).run({
@@ -1183,12 +1259,13 @@ test("refuses live scope that overlaps work running in another run", async () =>
       tasks: [{ task: task("task_a"), adapter: agent }],
     });
 
-    // Refused, not queued: the agent is mid-execution with a plan it can still
-    // work inside, so it is told to carry on rather than left waiting.
-    assert.equal(agent.scopeDecisions[0]?.decision, "rejected");
+    // The first answer stays inside the coordinator. The agent remains parked
+    // on its one request until the holder is gone, then receives the grant.
+    assert.equal(wideningAttempts, 2);
+    assert.equal(agent.scopeDecisions[0]?.decision, "approved");
     assert.match(
       agent.scopeDecisions[0]?.explanation ?? "",
-      /task_elsewhere/u,
+      /conflict-free/u,
     );
     // The widening was actually put to the authority, rather than the check
     // being skipped when a run has only one task in it.
@@ -1196,9 +1273,10 @@ test("refuses live scope that overlaps work running in another run", async () =>
       asked.some((files) => files.includes("src/c.txt")),
       true,
     );
-    // And the task still finishes the work it was admitted for.
+    // And the task finishes the expanded work instead of reporting that it
+    // could not proceed.
     assert.equal(result.tasks[0]?.status, "integrated");
-    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/c.txt"), false);
+    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/c.txt"), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

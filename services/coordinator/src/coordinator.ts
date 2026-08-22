@@ -62,6 +62,7 @@ import {
   type TaskExecutionResult,
   isBlanketClaim,
   planAdmissionApproved,
+  planAdmissionPartial,
 } from "@coord/shared-types";
 import {
   GitWorktreeWorkspaceManager,
@@ -1049,7 +1050,8 @@ export class Coordinator {
         runAudit,
       );
       const runStatus = result.tasks.every(
-        (taskResult) => taskResult.status === "integrated",
+        (taskResult) =>
+          taskResult.status === "integrated" || taskResult.status === "queued",
       )
         ? "completed"
         : "failed";
@@ -1461,7 +1463,10 @@ export class Coordinator {
         for (const result of prepared) {
           if (!("changeSet" in result)) {
             taskResults.push(result);
-            if (result.status !== "integrated") {
+            if (
+              result.status !== "integrated" &&
+              result.status !== "queued"
+            ) {
               const plannedTask = admittedWave.find(
                 (entry) => entry.task.id === result.task.id,
               );
@@ -3330,6 +3335,65 @@ export class Coordinator {
         throw new ScopeExpansionError(split.escaped);
       }
       const granted = split?.granted ?? changeSet;
+      // A partial admission is useful only when the free portion can make
+      // progress on its own. Real agents sometimes discover after starting
+      // that it cannot: the files they were granted depend on the files that
+      // were withheld, so the honest result is an empty changeset and an
+      // account saying the lease prevented the work. Treating that as a
+      // successful report loses the request and produces exactly the wrong
+      // user-facing ending. Return the task to the queue instead. Its next
+      // admission is all-or-nothing (the durable partial-admission history is
+      // consulted by the lease authority), so it waits without spending a
+      // second execution while the holders remain active.
+      if (
+        entry.admission !== undefined &&
+        planAdmissionPartial(entry.admission) &&
+        granted.patches.length === 0
+      ) {
+        const blockedBy = uniqueStrings(
+          (entry.admission.deferredResources ?? []).flatMap(
+            (resource) => resource.heldBy,
+          ),
+        );
+        let explanation =
+          "The free portion could not be completed without the leased " +
+          "resources, so the task was returned to the queue to wait for them";
+        const cleanupFailure = await this.cleanupTask(
+          entry,
+          workspace,
+          recorder,
+          runAudit,
+        );
+        if (cleanupFailure !== undefined) {
+          explanation += `; ${cleanupFailure}`;
+        }
+        await recorder?.status(entry.task.id, "queued", explanation);
+        await this.trace(
+          recorder,
+          runAudit,
+          "plan_admitted",
+          entry.task.id,
+          {
+            status: "sequenced",
+            blockedBy,
+            constraints: ["Retry the whole plan after the holders finish"],
+            explanation,
+            partialNoProgress: true,
+          },
+        );
+        return {
+          task: entry.task,
+          plan: entry.plan,
+          decision: {
+            ...entry.decision,
+            decision: "queued",
+            blockedBy,
+            explanation,
+          },
+          status: "queued",
+          explanation,
+        };
+      }
       // A claim frozen from observation can be narrower than the sweep it was
       // taken in the middle of: three files of a directory were on disk, the
       // fourth was written a minute later. That file was never refused to
@@ -3652,31 +3716,51 @@ export class Coordinator {
       // agent could widen into a file a task in another run was already
       // holding, and nothing noticed until both tried to land.
       //
-      // A widening is refused rather than queued. Everywhere else a deferral
-      // means "wait and try again", but this agent is mid-execution with an
-      // approved plan it can still work inside — telling it to carry on is a
-      // real answer, and holding a running agent idle waiting for a lease is
-      // not.
+      // A widening that reaches live ownership waits here, before the answer
+      // is handed back to the agent. Returning a deferral immediately asks
+      // the model to decide what "not yet" means; agents whose requested file
+      // is required quite reasonably finish with an empty report saying they
+      // could not work. The control plane already knows this is temporary, so
+      // it keeps the scope request parked and retries it itself. The agent is
+      // still blocked on resolveScopeChange and spends no additional turn.
       if (this.planAuthority !== undefined) {
-        const answer = await this.planAuthority.admit({
-          task: entry.task,
-          plan: revisedPlan,
-          planRevision: entry.planRevision + 1,
-          baseVersion: waveVersion,
-          repository: input.repository,
-          ...(input.projectId === undefined
-            ? {}
-            : { projectId: input.projectId }),
-          // Replaces a contract that was already approved, which is the one
-          // case the store lets a plan be rewritten — and only because the
-          // rewrite has just been decided against every other holder.
-          revising: true,
-          // The same all-or-nothing rule the comment above states for a
-          // deferral, applied to a narrower grant: both are "not the whole
-          // thing", and this caller can act on neither.
-          partialAdmission: false,
-        });
-        if (answer.outcome === "admitted" && answer.admission !== undefined) {
+        let answer: PlanAuthorityDecision;
+        do {
+          answer = await this.planAuthority.admit({
+            task: entry.task,
+            plan: revisedPlan,
+            planRevision: entry.planRevision + 1,
+            baseVersion: waveVersion,
+            repository: input.repository,
+            ...(input.projectId === undefined
+              ? {}
+              : { projectId: input.projectId }),
+            // Replaces a contract that was already approved, which is the one
+            // case the store lets a plan be rewritten — and only because the
+            // rewrite has just been decided against every other holder.
+            revising: true,
+            // The same all-or-nothing rule the comment above states for a
+            // deferral, applied to a narrower grant: both are "not the whole
+            // thing", and this caller can act on neither.
+            partialAdmission: false,
+          });
+          if (answer.outcome === "deferred") {
+            const stopped = this.cancellations?.reasonFor(entry.task.id);
+            if (stopped !== undefined) {
+              throw new Error(stopped);
+            }
+            await new Promise((resolve) =>
+              setTimeout(
+                resolve,
+                Math.max(1, Math.min(1_000, answer.retryAfterMs)),
+              ),
+            );
+          }
+        } while (answer.outcome === "deferred");
+        if (answer.outcome !== "admitted") {
+          throw new Error("Scope expansion remained deferred");
+        }
+        if (answer.admission !== undefined) {
           // Refused for the reason the wave loop welcomes a partial grant and
           // this path cannot: there, the reduced plan becomes the contract. On
           // this path `revisedPlan` is what ownership is taken on and what the
@@ -3686,12 +3770,6 @@ export class Coordinator {
           throw new Error(
             `Scope expansion overlaps work running elsewhere in this ` +
               `repository: ${answer.admission.explanation}`,
-          );
-        }
-        if (answer.outcome !== "admitted") {
-          throw new Error(
-            `Scope expansion overlaps work running elsewhere in this ` +
-              `repository: ${answer.explanation}`,
           );
         }
       }
