@@ -3613,16 +3613,16 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   );
   assert.match(ring ?? "", /right: -2px;/u);
   assert.match(ring ?? "", /bottom: 0;/u);
-  assert.match(ring ?? "", /width: 13px;/u);
-  assert.match(ring ?? "", /height: 13px;/u);
+  assert.match(ring ?? "", /width: 9px;/u);
+  assert.match(ring ?? "", /height: 9px;/u);
   assert.match(ring ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
   assert.doesNotMatch(ring ?? "", /#f3efe8|inset: -1px/u);
 
   const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
   assert.notEqual(dot, undefined, "the progress ring should surround a coding dot");
-  assert.match(dot ?? "", /width: 9px;/u);
-  assert.match(dot ?? "", /height: 9px;/u);
+  assert.match(dot ?? "", /width: 5px;/u);
+  assert.match(dot ?? "", /height: 5px;/u);
   assert.match(dot ?? "", /background: var\(--green\);/u);
   assert.match(dot ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
   assert.doesNotMatch(dot ?? "", /animation:/u);
