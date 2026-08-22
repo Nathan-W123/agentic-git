@@ -10271,7 +10271,11 @@ dialog.modal[open]::backdrop {
      exactly where it was. See the phone drawer drag in app.js. */
   .chan-sidebar {
     position: fixed;
-    top: 0;
+    /* Below the banner, like the rail it slides over: a drawer that started
+       at the top of the screen covered the channel's own name and the
+       actions button while it was open, so the header the drawer belongs to
+       disappeared the moment it was used. */
+    top: var(--chan-head-h);
     bottom: 0;
     left: 0;
     width: 86vw;
@@ -10292,6 +10296,14 @@ dialog.modal[open]::backdrop {
     will-change: transform;
   }
 
+  /* The status-bar inset is the banner's to pay now — see `.chan-head`
+     above. Two classes deep to outrank the blanket safe-area rule further
+     down the file, which still applies to the panels that do start at the
+     top of the viewport. */
+  .chats-shell .chan-sidebar {
+    padding-top: 0;
+  }
+
   .chats-shell.roster-open .chan-sidebar {
     transform: none;
   }
@@ -10309,7 +10321,10 @@ dialog.modal[open]::backdrop {
   .chan-sidebar-scrim {
     display: block;
     position: fixed;
-    inset: 0;
+    /* Everything the drawer covers, and nothing above it: the banner stays
+       lit and tappable, so closing the drawer is not the only thing the top
+       of the screen can do while it is open. */
+    inset: var(--chan-head-h) 0 0;
     z-index: 75;
     background: rgba(4, 5, 9, 0.5);
     opacity: 0;
@@ -10330,21 +10345,69 @@ dialog.modal[open]::backdrop {
     transition: none;
   }
 
-  /* The header carries a lot on desktop — title, counts, an avatar stack,
-     five toggle buttons, and now the two navigation buttons above. Wrapping
-     rather than shrinking everything to illegibility: the title stays on
-     its own line and the toggle buttons get a second row. The avatar stack
-     is dropped rather than shrunk further — it is a decorative echo of the
-     roster, which the new channels button now opens directly. */
-  .chan-head {
-    flex-wrap: wrap;
-    row-gap: 8px;
-    padding: 10px 12px;
+  /* One banner across the whole phone, with everything else underneath it.
+     The header used to be a column-width strip starting where the channel
+     rail ended, so the top of the screen read as two unrelated bars: a rail
+     running past the status bar on the left, a title beside it. And because
+     it wrapped, the channel actions button dropped to a second row on the
+     left — a menu at the bottom-left of a header is not where a thumb looks
+     for it.
+
+     Fixed and full-bleed instead: the title, the counts and the actions
+     button share one row spanning the viewport, the button sits at the top
+     right where the spacer pushes it, and `.chats-shell` pays back the
+     height it no longer occupies in flow as padding — which is what drops
+     the rail, the conversation and the drawer below it.
+
+     Selectors are `.chats-shell`-prefixed on purpose: the base `.chan-head`
+     padding and the safe-area top-up further down this file are both one
+     class deep and both come later, so a bare `.chan-head` rule here is
+     outranked and silently does nothing. The inset is folded into the
+     height and paid as padding here instead. */
+  .chats-shell {
+    --chan-head-h: calc(52px + var(--safe-top));
+    padding-top: var(--chan-head-h);
+  }
+
+  .chats-shell .chan-head {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    /* Under the drawer (76) and its scrim (75), and under a full-screen
+       `.thread-panel` (72), which takes over the whole phone and owns its
+       own header while it is open. Above everything in the conversation
+       column, which is what it is a banner over. */
+    z-index: 70;
+    height: var(--chan-head-h);
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: var(--safe-top) 8px 0 10px;
   }
 
   .chan-head .spacer {
-    flex: 1 0 100%;
-    height: 0;
+    flex: 1;
+    height: auto;
+  }
+
+  /* The channel is already named, in the widest type on the row; the small
+     bubble beside the name was spending 19px plus a gap saying so again. */
+  .chats-shell .chan-head .ch-hash {
+    display: none;
+  }
+
+  /* Whatever room is left after the two buttons, and no more — a long
+     channel name otherwise pushes the actions button off the right edge
+     rather than being cut where it runs out of banner. */
+  .chats-shell .chan-head .ch-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chats-shell .chan-head .ch-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Same shape of overflow as the header, and the same fix: the counts and

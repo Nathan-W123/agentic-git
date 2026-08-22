@@ -5699,3 +5699,90 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
   assert.match(app, /showMenu\(node, personMenuItems\(value\)\)/u);
   assert.match(app, /ensureRepositoryGrants\(activeChannelId\(\)/u);
 });
+
+test("a phone's channel header is one banner across the screen with its actions on the right", async () => {
+  const css = await publicFile("styles.css");
+  const chats = await publicFile("screen-chats.js");
+
+  // Fixed, full width, and tall enough to clear the status bar — the header
+  // used to start where the channel rail ended, so the top of a phone read as
+  // two unrelated bars.
+  const banner = css.slice(
+    css.indexOf(".chats-shell .chan-head {"),
+    css.indexOf("}", css.indexOf(".chats-shell .chan-head {")),
+  );
+  assert.notEqual(banner, "", "the phone header banner rule is still there");
+  assert.match(banner, /position: fixed;/u);
+  assert.match(banner, /left: 0;/u);
+  assert.match(banner, /right: 0;/u);
+  assert.match(banner, /height: var\(--chan-head-h\);/u);
+  // One row. Wrapping is what dropped the channel actions button onto a
+  // second line at the left, where no thumb looks for a menu.
+  assert.match(banner, /flex-wrap: nowrap;/u);
+  assert.doesNotMatch(banner, /flex-wrap: wrap;/u);
+  // The spacer pushes that button to the right edge instead of breaking the
+  // row in half.
+  assert.match(
+    css,
+    /@media \(max-width: 600px\)[\s\S]*?\.chan-head \.spacer \{\s*flex: 1;\s*height: auto;/u,
+  );
+  // Under the drawer, its scrim and a full-screen thread panel; above the
+  // conversation it is a banner over.
+  assert.match(banner, /z-index: 70;/u);
+  // The status-bar inset is paid inside the banner's own height.
+  assert.match(
+    css,
+    /\.chats-shell \{\s*--chan-head-h: calc\(52px \+ var\(--safe-top\)\);/u,
+  );
+  assert.match(banner, /padding: var\(--safe-top\)/u);
+
+  // The actions menu is still the last thing in the header, which is what
+  // puts it at the right end of the banner.
+  const header = chats.slice(
+    chats.indexOf("function chanHeader"),
+    chats.indexOf("function threadParticipants"),
+  );
+  assert.ok(
+    header.indexOf('act: "channel-menu"') >
+      header.indexOf('class="icon-btn chan-sidebar-btn"'),
+    "the channel actions button comes after the channels button",
+  );
+  assert.ok(
+    header.indexOf('act: "channel-menu"') > header.indexOf('<span class="spacer">'),
+    "the spacer pushes the channel actions button to the right",
+  );
+});
+
+test("a phone's channel rail and sidebar drawer start below the header banner", async () => {
+  const css = await publicFile("styles.css");
+
+  // The banner is out of flow, so the shell pays its height back as padding —
+  // which is what drops the rail, the conversation and the drawer under it.
+  assert.match(
+    css,
+    /\.chats-shell \{\s*--chan-head-h: calc\(52px \+ var\(--safe-top\)\);\s*padding-top: var\(--chan-head-h\);/u,
+  );
+
+  // The drawer slides out from under the banner rather than over it, so the
+  // header it belongs to stays visible while it is open.
+  const drawerAt = css.indexOf("  .chan-sidebar {\n    position: fixed;");
+  assert.notEqual(drawerAt, -1, "the phone drawer rule is still there");
+  const drawer = css.slice(
+    drawerAt,
+    css.indexOf("will-change: transform;", drawerAt),
+  );
+  assert.match(drawer, /top: var\(--chan-head-h\);/u);
+  assert.doesNotMatch(drawer, /top: 0;/u);
+  // And its safe-area top-up is the banner's job now, not the drawer's.
+  assert.match(
+    css,
+    /\.chats-shell \.chan-sidebar \{\s*padding-top: 0;/u,
+  );
+
+  // The scrim covers what the drawer covers and no more: the banner stays
+  // lit and tappable behind it.
+  assert.match(
+    css,
+    /\.chan-sidebar-scrim \{[\s\S]{0,400}inset: var\(--chan-head-h\) 0 0;/u,
+  );
+});
