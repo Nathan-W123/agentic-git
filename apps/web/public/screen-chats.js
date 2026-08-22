@@ -464,7 +464,7 @@ function personProfile(userId, name, repositoryId) {
       : {
           act: "dm-open",
           value: userId,
-          label: unread > 0 ? `Open messages · ${unread}` : "Open conversation",
+          label: unread > 0 ? `Message · ${unread} unread` : "Message",
         },
     label: me
       ? `Your profile`
@@ -493,7 +493,8 @@ function profileCard(profile) {
   }
   const facts = profile.facts.filter(({ value }) => String(value ?? "") !== "");
   const hasDetail = facts.length > 0 || profile.usage !== "";
-  return `<span class="pcard-pop"><span class="pcard" role="tooltip"${
+  return `<span class="pcard-pop"><span class="pcard" role="group"
+    aria-label="${esc(profile.name)} profile"${
     profile.accent === undefined ? "" : ` style="--pcard-accent:${profile.accent}"`
   }>
     <span class="pcard-banner"></span>
@@ -522,11 +523,11 @@ function profileCard(profile) {
       ${
         profile.action === undefined
           ? ""
-          : `<span class="pcard-open" role="button" tabindex="-1"
+          : `<button type="button" class="pcard-open"
               data-act="${esc(profile.action.act)}"
               data-value="${esc(profile.action.value)}">${esc(
                 profile.action.label,
-              )}</span>`
+              )}</button>`
       }
     </span>
   </span></span>`;
@@ -536,9 +537,8 @@ function profileCard(profile) {
  * The face somebody points at, and the card it opens.
  *
  * `data-profile-dir` is the direction the card prefers; `positionProfileCard`
- * in app.js flips it when the surface it is opening into has no room, which
- * is the only thing about these cards that a stylesheet cannot decide on its
- * own.
+ * in app.js measures the visible surface, flips when needed, and keeps every
+ * edge of the card inside it.
  */
 function profileAnchor(profile, cls, direction, content, options = {}) {
   return `<span class="${cls} pcard-anchor" data-profile-dir="${direction}"
@@ -4559,6 +4559,7 @@ function agentSpec(agent, repositoryId) {
   // Model and reasoning are the agent's own credential spending its owner's
   // account, so only that owner picks them; a teammate reads what was chosen.
   const providerId = agent.provider ?? agent.id;
+  const canChatPrivately = agent.mine === true && agent.visibility !== "org";
   const models = agent.mine === true ? providerModelOptions(providerId) : [];
   const efforts =
     agent.mine === true
@@ -4636,14 +4637,30 @@ function agentSpec(agent, repositoryId) {
         <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
           repositoryId,
         )}${agent.mine ? " · Your agent" : ""}</div>
+        <p class="aspec-description">${esc(agentLabelOf(providerId))} agent ${
+          agent.mine ? "connected to your account" : "shared with this channel"
+        }.</p>
+        <div class="aspec-actions">
+          ${
+            canChatPrivately
+              ? `<button type="button" class="aspec-action aspec-action-primary"
+                  data-act="agent-panel-tab" data-value="chat">
+                  ${icon("chatBubble")}<span>Message</span></button>`
+              : ""
+          }
+          <button type="button" class="aspec-action" data-act="agent-panel-tab"
+            data-value="history">${icon("history")}<span>History</span></button>
+        </div>
       </section>
 
       <section class="aspec-section">
+        <h3 class="aspec-label">Works with</h3>
         ${configuration}
         ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
       </section>
 
       <section class="aspec-section">
+        <h3 class="aspec-label">Capabilities</h3>
         <div class="aspec-capabilities">
           <div class="aspec-capability aspec-current-task${
             task === undefined ? "" : " aspec-current-task-active"
@@ -5351,6 +5368,29 @@ function threadReplyTurns(replies) {
   return turns;
 }
 
+/**
+ * One line inside an opened thinking stream: a quiet tool cue for the known
+ * run phases, or a plain thought line for anything the protocol did not name.
+ */
+function thinkingLineHtml(milestone) {
+  const text = String(milestone ?? "");
+  const cues = {
+    Starting: "play",
+    "Reading code": "search",
+    Planning: "sparkle",
+    "Writing code": "code",
+    Testing: "play",
+    Finishing: "check",
+  };
+  const iconName = /^Editing /u.test(text) ? "file" : cues[text];
+  if (iconName !== undefined) {
+    return `<p class="tt-line tt-cue">${icon(iconName)}<span>${esc(
+      text,
+    )}</span></p>`;
+  }
+  return `<p class="tt-line tt-thought">${esc(text)}</p>`;
+}
+
 /** One turn's narration, with state independent from every other turn. */
 function threadThinkingBlock(rootId, turn, index) {
   // The opening task title already names the thread, so do not repeat it in
@@ -5419,17 +5459,17 @@ function threadThinkingBlock(rootId, turn, index) {
           : `${seconds}s`;
     label = `Thought for ${duration}`;
   }
+  // Header + stream, no bordered box: the open state should read as the
+  // extended output itself, not as chrome bolted onto the thread.
   const html = `<details class="thread-thinking"${
     // Every turn starts folded. Its independent key still keeps an explicit
     // reader choice stable as more progress arrives for this turn alone.
     state.thinkingOpen[key] === true ? " open" : ""
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
-      <span class="tt-caret">${icon("chevronRight")}</span>
-      <span class="tt-label">${esc(label)}</span></summary>
-    <div class="tt-body">${milestones
-      .map((milestone) => `<p>${esc(milestone)}</p>`)
-      .join("")}</div>
+      <span class="tt-label">${esc(label)}</span>
+      <span class="tt-caret">${icon("chevronRight")}</span></summary>
+    <div class="tt-body">${milestones.map(thinkingLineHtml).join("")}</div>
   </details>`;
   return {
     html,

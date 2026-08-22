@@ -221,6 +221,13 @@ svg.ui-icon {
   border: 3px solid transparent;
 }
 
+/* WebKit paints a solid corner where the vertical and horizontal tracks meet.
+   On a dark panel that default is a bright square — most visible at the foot
+   of `.chan-scroll`, where it reads as a stray tile above the account row. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -4752,11 +4759,17 @@ button.chip.lg:hover {
   color: var(--text-3);
 }
 
-/* The one thing that scrolls in this column. */
+/* The one thing that scrolls in this column. Horizontal overflow is clipped
+   so WebKit never reserves a dual-axis corner above the account foot. */
 .chan-scroll {
+  overflow-x: hidden;
   overflow-y: auto;
   min-height: 0;
   padding: 4px 0 14px;
+}
+
+.chan-scroll::-webkit-scrollbar {
+  height: 0;
 }
 
 /* A section heading, and the "+" that adds to the list under it — the single
@@ -5786,7 +5799,7 @@ button.chip.lg:hover {
      agree about this column. Spelling it out is what stops them drifting
      apart when any of those three numbers moves. */
   --cmsg-body-x: 52px;
-  --cmsg-stem-x: 23px;
+  --cmsg-stem-x: 20px;
   /* And the colour of that line, flattened. The connector is one stroke drawn
      in several pieces — a stem for each grouped row, a final segment, and the
      quarter turn into every thread link — and the pieces deliberately overlap
@@ -5884,8 +5897,8 @@ button.chip.lg:hover {
 /* Where the stem stops is the whole of whether the turn reads as one clean
    line. The route's foot is the foot of the thread link itself — see the
    `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
-   out of this sum. `bottom: 20px` ends the stem at the top tangent of the
-   ten-pixel turn below. The old hook carried a seven-pixel upright
+   out of this sum. `bottom: 22px` ends the stem at the top tangent of the
+   twelve-pixel turn below. The old hook carried a seven-pixel upright
    over this stem and the final segment deliberately ended inside it; that
    double-painted the connector at every branch and left a dark, swollen join.
    The stem and turn now meet once, edge to edge, so the stroke keeps one
@@ -5902,7 +5915,7 @@ button.chip.lg:hover {
   position: absolute;
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
-  bottom: 20px;
+  bottom: 22px;
   border-left: 2px solid var(--cmsg-stem);
   pointer-events: none;
 }
@@ -6091,11 +6104,9 @@ button.chip.lg:hover {
 
 /* ------------------------------------------------------------ profiles ---- */
 
-/* Every face in the app hangs its card off one of these — a roster row, a
-   message, wherever somebody is drawn. `position: relative` is the whole of
-   the anchoring, and it is also what fixes the card that could never be
-   reached: the card is a *child* of the face, so a pointer that has moved on
-   to the card has not left the face, and the hover does not lapse under it. */
+/* Every face in the app owns its card — a roster row, a message, wherever
+   somebody is drawn. Keeping the card as a child means a pointer can travel
+   from the face into the card without the hover lapsing under it. */
 .pcard-anchor {
   position: relative;
   display: inline-flex;
@@ -6122,8 +6133,9 @@ button.chip.lg:hover {
    pointer crosses it without ever being over nothing, which is exactly what
    used to close the card the instant somebody reached for it. */
 .pcard-pop {
-  position: absolute;
-  left: -6px;
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
   z-index: 60;
   display: block;
   padding: 7px 0;
@@ -6138,28 +6150,6 @@ button.chip.lg:hover {
     visibility 0.1s ease 0.1s;
 }
 
-/* Down from a roster row, up from a message — where the room is in the
-   ordinary case. `data-profile-flip` is set by `positionProfileCard` in
-   app.js for the cases a stylesheet cannot see: the last row of a long list
-   has nothing under it, and the first line of a thread has nothing over it. */
-.pcard-anchor[data-profile-dir="down"] .pcard-pop {
-  top: 100%;
-}
-
-.pcard-anchor[data-profile-dir="up"] .pcard-pop {
-  bottom: 100%;
-}
-
-.pcard-anchor[data-profile-dir="down"][data-profile-flip] .pcard-pop {
-  top: auto;
-  bottom: 100%;
-}
-
-.pcard-anchor[data-profile-dir="up"][data-profile-flip] .pcard-pop {
-  bottom: auto;
-  top: 100%;
-}
-
 /* The opening delay is short but not nothing: a transcript is a column of
    faces a pointer crosses on its way to the scrollbar, and a card that
    appeared instantly would flash open and shut the whole way down. */
@@ -6169,6 +6159,19 @@ button.chip.lg:hover {
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0.16s;
+}
+
+/* Only one card may stay opaque. Fixed pops keep their last seat when the
+   pointer moves on, and the delayed fade-out otherwise leaves two identities
+   stacked on the same place — the mash-up of banners and names. */
+body:has(.pcard-anchor:is(:hover, :focus-within))
+  .pcard-anchor:not(:hover):not(:focus-within)
+  > .pcard-pop {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s;
+  transition-duration: 0s;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -6184,12 +6187,15 @@ button.chip.lg:hover {
    deciding whether to open the rest. */
 .pcard {
   display: block;
-  width: 246px;
+  width: min(246px, var(--profile-max-width, calc(100vw - 20px)));
+  max-height: var(--profile-max-height, calc(100dvh - 34px));
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
   background: var(--bg-panel);
   box-shadow: var(--shadow-pop);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   font-weight: 400;
   text-align: left;
   text-decoration: none;
@@ -6327,11 +6333,14 @@ button.chip.lg:hover {
    stay this short. */
 .pcard-open {
   display: block;
+  width: 100%;
   margin-top: 12px;
   padding: 7px 10px;
+  border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   color: var(--text);
+  font-family: inherit;
   font-size: 11.5px;
   font-weight: 500;
   text-align: center;
@@ -6341,6 +6350,11 @@ button.chip.lg:hover {
 
 .pcard-open:hover {
   background: var(--bg-hover);
+}
+
+.pcard-open:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
 }
 
 @media (hover: none) {
@@ -6706,12 +6720,12 @@ button.chip.lg:hover {
 }
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
-   ten-pixel rounded turn starts at the stem's tangent instead of laying a
-   second upright over it; the nine-pixel gap gives the stroke and replier face
-   the same quiet breathing room as the avatar and stem above. Where the turn
-   does still meet the stem it meets it in
-   the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
-   the rest of the line.
+   twelve-pixel quarter turn starts at the stem's tangent instead of laying a
+   second upright over it; the twelve-pixel gap gives the stroke and replier
+   face a little more breathing room than the tight channel path had, matching
+   the open thread panel's quiet spacing. Where the turn does still meet the
+   stem it meets it in the opaque `--cmsg-stem`, so the corner keeps the weight
+   and the shade of the rest of the line.
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
@@ -6723,22 +6737,22 @@ button.chip.lg:hover {
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
 
-   Top and height are read together: the difference between them (10 - 8) is
-   what puts the horizontal run two pixels below the link's middle. The
-   slightly oval bend keeps the turn soft without making it geometrically
-   perfect, which suits the hand-drawn faces beside it. */
+   Top and height are read together: the difference between them (12 - 10) is
+   what puts the horizontal run two pixels below the link's middle. Matching
+   the height to the radius removes any straight upright and keeps the same
+   circular corner the open thread panel already uses. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
   box-sizing: border-box;
-  top: calc(50% - 8px);
+  top: calc(50% - 10px);
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
   width: 20px;
-  height: 10px;
+  height: 12px;
   border-left: 2px solid var(--cmsg-stem);
   border-bottom: 2px solid var(--cmsg-stem);
-  border-bottom-left-radius: 12px 9px;
-  border-bottom-right-radius: 3px 2px;
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 2px;
   pointer-events: none;
 }
 
@@ -6749,7 +6763,7 @@ button.chip.lg:hover {
   content: "";
   position: absolute;
   top: 50%;
-  right: calc(100% + 8px);
+  right: calc(100% + 10px);
   width: 2px;
   height: 2px;
   border-radius: 50%;
@@ -6831,18 +6845,21 @@ button.chip.lg:hover {
   }
 }
 
-/* Words arriving, one just behind the last: each starts a little low, a
-   little out of focus, and settles. The stagger is set per word by the render
-   loop — see `playTextReveal` in app.js, which is also what decides that a
-   block is new to the reader in the first place — so the stylesheet only has
-   to describe what one word does.
+/* Words arriving, one just behind the last: each starts a little low and
+   faint, and settles. Opacity and transform only — nothing here asks the
+   browser to redraw the glyphs themselves, which is what lets a long message
+   put a hundred of these on screen at once without the text going soft or the
+   frames going long. The stagger is set per word by the render loop — see
+   `playTextReveal` in app.js, which is also what decides that a block is new
+   to the reader in the first place — so the stylesheet only has to describe
+   what one word does.
 
-   `inline-block` is what lets a word be moved and blurred at all; the spaces
-   between them are left as plain text, so lines break and copy exactly as
-   they did before anything was wrapped. */
+   `inline-block` is what lets a word be moved at all; the spaces between them
+   are left as plain text, so lines break and copy exactly as they did before
+   anything was wrapped. */
 .text-reveal-word {
   display: inline-block;
-  animation: text-reveal-in 460ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation: text-reveal-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
   /* Set per word by the render loop, and negative for a word part-way
      through: a redraw lands in the middle of most arrivals, and a negative
      delay is what carries the animation on from where it was rather than
@@ -6855,19 +6872,17 @@ button.chip.lg:hover {
    its own on purpose: `.cmsg-image` is the block that reserves the picture's
    box, and overriding that here would move the message as it came in. */
 .text-reveal-media {
-  animation: text-reveal-in 460ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation: text-reveal-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
   animation-delay: var(--reveal-delay, 0ms);
 }
 
 @keyframes text-reveal-in {
   from {
     opacity: 0;
-    filter: blur(4px);
-    transform: translateY(3px);
+    transform: translateY(2px);
   }
   to {
     opacity: 1;
-    filter: blur(0);
     transform: none;
   }
 }
@@ -7379,10 +7394,10 @@ button.chip.lg:hover {
 }
 
 /* The agent's account of what it did, foldable because it is often the longest
-   thing in the thread. Deliberately identical to `.thread-thinking` — they sit
-   inches apart in the same thread, and two disclosures that behave the same
-   should not look like two different mechanisms. Open by default, because
-   unlike thinking this one is the answer. */
+   thing in the thread. Shares the same caret and summary mechanics as
+   `.thread-thinking`, but keeps a quiet left rail so the finished write-up
+   still reads as a document rather than a live status stream. Open by
+   default, because unlike thinking this one is the answer. */
 .thread-summary {
   margin: 2px 0 6px;
   border-left: 2px solid var(--line, #262b3a);
@@ -7940,6 +7955,59 @@ button.chip.lg:hover {
   color: var(--text-2);
   font-size: 15px;
   line-height: 1.62;
+}
+
+.agent-spec .aspec-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.agent-spec .aspec-action {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.agent-spec .aspec-action svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-spec .aspec-action:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.agent-spec .aspec-action:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+.agent-spec .aspec-action-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.agent-spec .aspec-action-primary:hover {
+  border-color: color-mix(in srgb, var(--accent) 88%, #000);
+  background: color-mix(in srgb, var(--accent) 88%, #000);
 }
 
 .agent-spec .aspec-sub {
@@ -10642,24 +10710,23 @@ dialog.modal[open]::backdrop {
   }
 }
 
-/* A task's running commentary. Most of a thread by volume and the least of
-   what somebody opening it wants first, so it folds away — open while the
-   work is still going, because then the latest step is the point. */
+/* A task's running commentary as a quiet inline status stream: one muted
+   header, then thought or tool-cue lines when opened. No bordered disclosure
+   chrome — the open state should look like extended output, not a sidebar rail. */
 .thread-thinking {
-  margin: 2px 0 6px;
-  border-left: 2px solid var(--line, #262b3a);
-  padding-left: 10px;
+  margin: 4px 0 10px;
 }
 
 .thread-thinking > summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   cursor: pointer;
   list-style: none;
-  padding: 5px 2px;
+  padding: 2px 0;
   color: var(--text-3, #8b93a7);
   font-size: 0.84rem;
+  line-height: 1.35;
   user-select: none;
 }
 
@@ -11485,25 +11552,41 @@ dialog.modal[open]::backdrop {
   font-weight: 500;
 }
 
-/* Thinking, as one passage rather than as a stack of messages from somebody
-   who will not stop talking. Each held line becomes a paragraph inside one
-   block, which is how it arrived in the agent's head before it arrived as
-   events in ours. */
+/* Open thinking: a short stack of status lines, not a boxed transcript. */
 .thread-thinking .tt-body {
-  padding: 2px 0 4px 10px;
-  border-left: 2px solid var(--border-soft);
-  margin-left: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 2px;
+  margin: 0;
 }
 
-.thread-thinking .tt-body p {
-  margin: 0 0 6px;
+.thread-thinking .tt-line {
+  margin: 0;
   font-size: 13px;
-  line-height: 1.55;
-  color: var(--text-2);
+  line-height: 1.5;
 }
 
-.thread-thinking .tt-body p:last-child {
-  margin-bottom: 0;
+.thread-thinking .tt-thought {
+  color: var(--text-2, #b6bdd0);
+}
+
+.thread-thinking .tt-cue {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3, #8b93a7);
+}
+
+.thread-thinking .tt-cue .ui-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  opacity: 0.85;
+}
+
+.thread-thinking .tt-cue span {
+  min-width: 0;
 }
 
 /* --------------------------------------------------------- colour wheel ---- */

@@ -719,6 +719,14 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.doesNotMatch(userMenu, /value: "settings"|label: "Settings"/u);
   assert.match(css, /\.chan-sidebar-foot \{[\s\S]{0,180}grid-template-columns: minmax\(0, 1fr\) auto;/u);
   assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
+  // The roster scroller must not paint WebKit's dual-axis corner above the
+  // account row — a bright square and hairline that sat on the dark panel.
+  assert.match(css, /::-webkit-scrollbar-corner \{\s*background: transparent;/u);
+  assert.match(
+    css,
+    /\.chan-scroll \{\s*overflow-x: hidden;\s*overflow-y: auto;/u,
+  );
+  assert.match(css, /\.chan-scroll::-webkit-scrollbar \{\s*height: 0;/u);
   assert.match(css, /@media \(max-width: 600px\)[\s\S]*\.chan-settings \{\s*width: 44px;\s*height: 44px;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
@@ -1084,8 +1092,8 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
   assert.notEqual(channelEndCap, undefined, "the final branch should close the path");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
-  assert.match(channelElbow ?? "", /border-bottom-right-radius: 3px 2px;/u);
-  assert.match(channelElbow ?? "", /border-bottom-left-radius: 12px 9px;/u);
+  assert.match(channelElbow ?? "", /border-bottom-right-radius: 2px;/u);
+  assert.match(channelElbow ?? "", /border-bottom-left-radius: 12px;/u);
   assert.match(panelBranch ?? "", /border-bottom-right-radius: 2px;/u);
   assert.match(panelBranch ?? "", /border-bottom-left-radius: 11px;/u);
   // The channel's line is drawn in pieces that overlap on purpose, so it can
@@ -1113,7 +1121,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
-  assert.match(channelEnd ?? "", /bottom: 20px;/u);
+  assert.match(channelEnd ?? "", /bottom: 22px;/u);
   assert.match(
     css,
     /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
@@ -1124,7 +1132,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
     /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 39px;/u,
     "a single-task connector should use the same separated start",
   );
-  // Written from the column variables rather than as the 9px they work out
+  // Written from the column variables rather than as the 12px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
   // drifting apart when any of those three numbers moves.
   assert.match(
@@ -1138,21 +1146,26 @@ test("a reply carries a quiet visual path back to its root", async () => {
   // border box, or the stroke hangs outside that width and the
   // turn steps sideways where it should read as one line.
   assert.match(channelElbow ?? "", /box-sizing: border-box;/u);
-  const stemLeft = Number(/left: (-?\d+)px;/u.exec(channelEnd ?? "")?.[1]);
-  const elbowGap = Number(
-    /right: calc\(100% \+ (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
-  );
+  const bodyX = Number(/--cmsg-body-x: (\d+)px;/u.exec(css)?.[1]);
+  const stemX = Number(/--cmsg-stem-x: (\d+)px;/u.exec(css)?.[1]);
   const elbowWidth = Number(/width: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  assert.equal(bodyX, 52, "the body column stays the avatar gutter");
+  assert.equal(stemX, 20, "the stem sits a little further left for spacing");
   assert.equal(
-    elbowGap + elbowWidth,
-    -stemLeft,
+    bodyX - stemX - elbowWidth,
+    12,
+    "the elbow should leave twelve pixels between the stem and the link",
+  );
+  assert.equal(
+    bodyX - stemX,
+    elbowWidth + 12,
     "the elbow's upright should sit in the stem's own column",
   );
   assert.match(channelEndCap ?? "", /width: 2px;/u);
   assert.match(channelEndCap ?? "", /height: 2px;/u);
   assert.match(channelEndCap ?? "", /border-radius: 50%;/u);
   assert.match(channelEndCap ?? "", /background: var\(--cmsg-stem\);/u);
-  assert.match(channelEndCap ?? "", /right: calc\(100% \+ 8px\);/u);
+  assert.match(channelEndCap ?? "", /right: calc\(100% \+ 10px\);/u);
   // The hook is only the quarter turn: a straight upright here would be
   // painted on top of the shared stem and make every branch visibly thicker.
   // The 20px face and two pixels of vertical padding put the link's midpoint
@@ -1162,7 +1175,15 @@ test("a reply carries a quiet visual path back to its root", async () => {
     /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
   );
   const elbowHeight = Number(/height: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
-  assert.equal(elbowHeight, 10, "the hook should stay a compact turn");
+  const elbowRadius = Number(
+    /border-bottom-left-radius: (\d+)px;/u.exec(channelElbow ?? "")?.[1],
+  );
+  assert.equal(elbowHeight, 12, "the hook should stay a compact turn");
+  assert.equal(
+    elbowHeight,
+    elbowRadius,
+    "the hook should be a circular corner like the open thread panel",
+  );
   assert.equal(
     stemEnd,
     elbowTop,
@@ -3709,14 +3730,26 @@ test("each task turn puts its own compact thinking below its prompt and starts c
 
 test("thinking disclosures show only useful status and deduplicated milestones", async () => {
   const source = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
   const activityStart = source.indexOf("function threadActivityLabel(entry)");
   const activityEnd = source.indexOf("\n/**", activityStart);
-  const thinkingStart = source.indexOf("function threadThinkingBlock");
-  const thinkingEnd = source.indexOf("\n/**", thinkingStart);
+  const thinkingStart = source.indexOf("function thinkingLineHtml");
+  const thinkingEnd = source.indexOf("\n/**", source.indexOf("function threadThinkingBlock"));
   assert.notEqual(activityStart, -1);
   assert.notEqual(activityEnd, -1);
   assert.notEqual(thinkingStart, -1);
   assert.notEqual(thinkingEnd, -1);
+  assert.doesNotMatch(
+    styles,
+    /\.thread-thinking\s*\{[^}]*border-left:/u,
+    "thinking must stay unboxed — no disclosure rail",
+  );
+  assert.doesNotMatch(
+    styles,
+    /\.thread-thinking\s+\.tt-body\s*\{[^}]*border-left:/u,
+    "the open stream must not grow a second left border",
+  );
+  assert.match(styles, /\.tt-line\.?|\.tt-cue|\.tt-thought/u);
 
   type Reply = {
     kind: string;
@@ -3763,6 +3796,7 @@ test("thinking disclosures show only useful status and deduplicated milestones",
   );
   assert.match(active.html, /class="tt-label">Thinking<\/span>/u);
   assert.doesNotMatch(active.html, /class="tt-count"/u);
+  assert.match(active.html, /class="tt-line tt-cue"/u);
 
   const completed = renderThinking(
     "root",
@@ -3841,16 +3875,23 @@ test("thinking disclosures show only useful status and deduplicated milestones",
   ];
   let previous = -1;
   for (const milestone of milestones) {
-    const markup = `<p>${milestone}</p>`;
-    const position = compact.html.indexOf(markup);
+    const position = compact.html.indexOf(milestone);
     assert.ok(position > previous, `${milestone} should stay in order`);
     assert.equal(
-      compact.html.split(markup).length - 1,
+      compact.html.split(milestone).length - 1,
       1,
       `${milestone} should appear once`,
     );
     previous = position;
   }
+  assert.match(
+    compact.html,
+    /class="tt-line tt-cue"><span>Reading code<\/span>/u,
+  );
+  assert.match(
+    compact.html,
+    /class="tt-line tt-thought">Checking an unfamiliar reply shape<\/p>/u,
+  );
   assert.equal(compact.html.includes("Task: Keep the thread concise"), false);
   assert.deepEqual(
     compact.visible.map((reply) => reply.kind),
@@ -4786,7 +4827,7 @@ test("agent details use the reference profile with supported controls", async ()
 
   // The visual hierarchy follows the supplied agent profile: a large identity,
   // introductory copy, connected-setting pills, and checked capability rows.
-  assert.match(spec, /agentFace\(agent, 68\)/u);
+  assert.match(spec, /statusAgentFace\(agent, 68, repositoryId\)/u);
   assert.match(spec, /class="aspec-description"/u);
   assert.match(spec, /<h3 class="aspec-label">Works with<\/h3>/u);
   assert.match(spec, /<h3 class="aspec-label">Capabilities<\/h3>/u);
@@ -4799,6 +4840,27 @@ test("agent details use the reference profile with supported controls", async ()
   assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(680px, 64vw\)/su);
   assert.match(css, /\.agent-spec \.aspec-chip\s*\{/u);
   assert.match(css, /\.agent-spec \.aspec-capability\s*\{/u);
+
+  // Conversation destinations are visible controls on the landing page, not
+  // icon-only knowledge hidden in the panel header. Private chat keeps the
+  // existing owner/personal rule; history is available for every agent.
+  assert.match(
+    spec,
+    /const canChatPrivately = agent\.mine === true && agent\.visibility !== "org";/u,
+  );
+  assert.match(
+    spec,
+    /canChatPrivately[\s\S]*?<button type="button" class="aspec-action aspec-action-primary"[\s\S]*?data-act="agent-panel-tab" data-value="chat">[\s\S]*?<span>Message<\/span>/u,
+  );
+  assert.match(
+    spec,
+    /<button type="button" class="aspec-action" data-act="agent-panel-tab"[\s\S]*?data-value="history">[\s\S]*?<span>History<\/span>/u,
+  );
+  assert.match(css, /\.agent-spec \.aspec-action\s*\{/u);
+  assert.match(css, /\.agent-spec \.aspec-action:focus-visible\s*\{/u);
+  // The retired wrapper was the stray centred hairline/box above the profile.
+  assert.doesNotMatch(panel, /class="agent-panel-head"/u);
+  assert.doesNotMatch(css, /^\.agent-panel-head\s*\{/mu);
 
   // Only a real assignment becomes the primary-colour bubble. Its own copy,
   // state line, mark, and history control remain legible on that solid surface.
@@ -5189,8 +5251,10 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(chats, /class="pcard-sub"/u);
   assert.match(chats, /class="pcard-section-label"/u);
   assert.match(chats, /label: "View full profile"/u);
-  assert.match(chats, /label: unread > 0 \? `Open messages · \$\{unread\}` : "Open conversation"/u);
-  assert.match(chats, /<span class="pcard-open" role="button" tabindex="-1"/u);
+  assert.match(chats, /label: unread > 0 \? `Message · \$\{unread\} unread` : "Message"/u);
+  assert.match(chats, /<span class="pcard-pop"><span class="pcard" role="group"/u);
+  assert.match(chats, /<button type="button" class="pcard-open"/u);
+  assert.doesNotMatch(chats, /class="pcard-open" role="button"/u);
   assert.match(browser, /case "agent-panel-open":/u);
   assert.match(browser, /case "dm-open":/u);
   // A colour somebody chose reaches a `style` attribute, so it is matched
@@ -5205,12 +5269,23 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(anchor ?? "", /position: relative/u);
   const pop = /\n\.pcard-pop \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(pop, undefined, "the card has a shape rule");
+  assert.match(pop ?? "", /position: fixed/u);
+  assert.match(pop ?? "", /top: -10000px/u);
+  assert.match(pop ?? "", /left: -10000px/u);
   assert.match(pop ?? "", /padding: 7px 0/u);
+  assert.match(pop ?? "", /opacity: 0/u);
   assert.match(pop ?? "", /visibility: hidden/u);
   assert.match(pop ?? "", /pointer-events: none/u);
   assert.match(
     css,
     /\.pcard-anchor:hover > \.pcard-pop,\n\.pcard-anchor:focus-within > \.pcard-pop \{[\s\S]*?visibility: visible;\s*pointer-events: auto;[\s\S]*?transition-delay/u,
+  );
+  // Fixed cards outlive their hover for a beat; exclusivity snaps every other
+  // one shut the instant a new face is held open, so two identities cannot
+  // stack as a single garbled card.
+  assert.match(
+    css,
+    /body:has\(\.pcard-anchor:is\(:hover, :focus-within\)\)\s*\.pcard-anchor:not\(:hover\):not\(:focus-within\)\s*>\s*\.pcard-pop \{[\s\S]*?opacity: 0;[\s\S]*?transition-duration: 0s;/u,
   );
   // No ring drawn round the face at the same time: the card opening is the
   // answer to the hover, and the outline was the same news twice.
@@ -5220,16 +5295,35 @@ test("one profile card describes people and agents wherever a face is drawn", as
   );
   assert.doesNotMatch(css, /\.cmsg-identity:hover \.(avatar|agent-face)/u);
 
-  // Direction is a preference the stylesheet states and the browser overrides
-  // only where the surface has no room — the last row of a long roster has
-  // nothing under it.
-  assert.match(css, /\.pcard-anchor\[data-profile-dir="down"\] \.pcard-pop \{\n {2}top: 100%;/u);
-  assert.match(css, /\.pcard-anchor\[data-profile-dir="up"\] \.pcard-pop \{\n {2}bottom: 100%;/u);
+  // Placement is measured in both axes and fixed outside scroll clipping. It
+  // follows the visual viewport, intersects every clipping ancestor, clamps
+  // its size and coordinates, and is refreshed if that geometry changes.
+  assert.doesNotMatch(css, /\.pcard-anchor\[data-profile-dir=/u);
+  assert.match(
+    css,
+    /width: min\(246px, var\(--profile-max-width, calc\(100vw - 20px\)\)\);/u,
+  );
+  assert.match(css, /max-height: var\(--profile-max-height/u);
+  assert.match(css, /overflow-y: auto/u);
   assert.match(browser, /function positionProfileCard\(event\)/u);
-  assert.match(browser, /anchor\.toggleAttribute\("data-profile-flip", flip\)/u);
+  assert.match(browser, /card\.style\.left =/u);
+  assert.match(browser, /card\.style\.top =/u);
+  assert.match(browser, /clip\.right - PROFILE_CARD_MARGIN - width/u);
+  assert.match(browser, /clip\.bottom - PROFILE_CARD_MARGIN - height/u);
+  assert.match(
+    browser,
+    /anchor\.toggleAttribute\("data-profile-flip", opensDown !== prefersDown\)/u,
+  );
   assert.match(browser, /function clippingBoundsFor\(node\)/u);
+  assert.match(browser, /const viewport = window\.visualViewport;/u);
+  assert.match(browser, /style\.overflowX/u);
+  assert.match(browser, /style\.overflowY/u);
   assert.match(browser, /document\.addEventListener\("mouseover", positionProfileCard\)/u);
   assert.match(browser, /document\.addEventListener\("focusin", positionProfileCard\)/u);
+  assert.match(browser, /document\.addEventListener\("scroll", positionProfileCard, true\)/u);
+  assert.match(browser, /window\.addEventListener\("resize", positionProfileCard\)/u);
+  assert.match(browser, /window\.visualViewport\?\.addEventListener\("resize", positionProfileCard\)/u);
+  assert.match(browser, /window\.visualViewport\?\.addEventListener\("scroll", positionProfileCard\)/u);
 
   // On a touch screen the tap on a message face is already the action; the
   // roster keeps its card and only loses the width that assumed a sidebar.

@@ -106,7 +106,7 @@ test("live status copy keeps sweeping instead of arriving", async () => {
   assert.match(sweep ?? "", /background-clip: text;/u);
 });
 
-test("a word settles from blurred and low, and holds still under reduced motion", async () => {
+test("a word settles from faint and low, and holds still under reduced motion", async () => {
   const css = await publicFile("styles.css");
   const word = /\n\.text-reveal-word \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(word, undefined, "a word should have its own rule");
@@ -116,8 +116,12 @@ test("a word settles from blurred and low, and holds still under reduced motion"
 
   const frames = /@keyframes text-reveal-in \{([\s\S]*?)\n\}\n/u.exec(css)?.[1];
   assert.match(frames ?? "", /opacity: 0;/u);
-  assert.match(frames ?? "", /filter: blur\(4px\);/u);
-  assert.match(frames ?? "", /transform: translateY\(3px\);/u);
+  assert.match(frames ?? "", /transform: translateY\(2px\);/u);
+  // Opacity and transform are the two things a browser can animate without
+  // touching the glyphs. A filter is not: blurring a word forces it to be
+  // redrawn every frame, and a long message has a hundred of them going at
+  // once, which is both the cost and the mushiness this leaves behind.
+  assert.doesNotMatch(frames ?? "", /filter:/u);
 
   assert.match(
     css,
@@ -134,22 +138,32 @@ test("a long arrival hurries rather than dragging on", async () => {
     `"use strict";\n${app.slice(
       app.indexOf("const REVEAL_STAGGER_MS"),
       app.indexOf("const revealSeen = new Map()"),
-    )}\nreturn { revealStaggerFor, REVEAL_STAGGER_MS, REVEAL_MAX_TOTAL_MS };`,
+    )}\nreturn { revealStaggerFor, REVEAL_STAGGER_MS, REVEAL_MAX_TOTAL_MS, REVEAL_WORD_MS };`,
   )() as {
     revealStaggerFor: (count: number) => number;
     REVEAL_STAGGER_MS: number;
     REVEAL_MAX_TOTAL_MS: number;
+    REVEAL_WORD_MS: number;
   };
   const spread = (count: number): number =>
     (count - 1) * pace.revealStaggerFor(count);
+  // What the reader actually waits through: the last word starts at the end
+  // of the spread and still has its own settle to play.
+  const whole = (count: number): number => spread(count) + pace.REVEAL_WORD_MS;
 
   // A lone word has nothing to wait for.
   assert.equal(spread(1), 0);
 
-  // A short line keeps the opening pace: a handful of words are still a beat
-  // apart, which is the whole reason the effect reads as words arriving.
+  // A short line is as near to nothing as it can be while still reading as
+  // words arriving: the handful of words are a fraction of a beat apart and
+  // the whole thing is done before it can be studied.
   assert.equal(pace.revealStaggerFor(4) <= pace.REVEAL_STAGGER_MS, true);
-  assert.equal(spread(4) < 100, true, "a few words should be over at once");
+  assert.equal(spread(4) < 60, true, "a few words should be over at once");
+  assert.equal(
+    whole(24) < 450,
+    true,
+    "a short-to-middling message should be finished in a glance",
+  );
 
   // Longer means faster per word, not merely more of the same — this is what
   // keeps a long answer from being read out at the pace of a short one.
@@ -170,6 +184,11 @@ test("a long arrival hurries rather than dragging on", async () => {
       spread(count) < pace.REVEAL_MAX_TOTAL_MS,
       true,
       "no arrival should outlast the ceiling",
+    );
+    assert.equal(
+      whole(count) < 700,
+      true,
+      "even the longest answer should be there in well under a second",
     );
   }
 });
@@ -249,7 +268,7 @@ test("an image arrives on the same schedule as the words around it", async () =>
   const css = await publicFile("styles.css");
   const media = /\n\.text-reveal-media \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(media, undefined, "a picture should have its own rule");
-  assert.match(media ?? "", /animation: text-reveal-in 460ms/u);
+  assert.match(media ?? "", /animation: text-reveal-in 220ms/u);
   assert.match(media ?? "", /animation-delay: var\(--reveal-delay, 0ms\);/u);
   assert.doesNotMatch(media ?? "", /display:/u);
   assert.match(
