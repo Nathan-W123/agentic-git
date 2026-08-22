@@ -1084,8 +1084,8 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
   assert.notEqual(channelEndCap, undefined, "the final branch should close the path");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
-  assert.match(channelElbow ?? "", /border-bottom-right-radius: 3px 2px;/u);
-  assert.match(channelElbow ?? "", /border-bottom-left-radius: 12px 9px;/u);
+  assert.match(channelElbow ?? "", /border-bottom-right-radius: 2px;/u);
+  assert.match(channelElbow ?? "", /border-bottom-left-radius: 12px;/u);
   assert.match(panelBranch ?? "", /border-bottom-right-radius: 2px;/u);
   assert.match(panelBranch ?? "", /border-bottom-left-radius: 11px;/u);
   // The channel's line is drawn in pieces that overlap on purpose, so it can
@@ -1113,7 +1113,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
-  assert.match(channelEnd ?? "", /bottom: 20px;/u);
+  assert.match(channelEnd ?? "", /bottom: 22px;/u);
   assert.match(
     css,
     /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
@@ -1124,7 +1124,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
     /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 39px;/u,
     "a single-task connector should use the same separated start",
   );
-  // Written from the column variables rather than as the 9px they work out
+  // Written from the column variables rather than as the 12px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
   // drifting apart when any of those three numbers moves.
   assert.match(
@@ -1138,21 +1138,26 @@ test("a reply carries a quiet visual path back to its root", async () => {
   // border box, or the stroke hangs outside that width and the
   // turn steps sideways where it should read as one line.
   assert.match(channelElbow ?? "", /box-sizing: border-box;/u);
-  const stemLeft = Number(/left: (-?\d+)px;/u.exec(channelEnd ?? "")?.[1]);
-  const elbowGap = Number(
-    /right: calc\(100% \+ (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
-  );
+  const bodyX = Number(/--cmsg-body-x: (\d+)px;/u.exec(css)?.[1]);
+  const stemX = Number(/--cmsg-stem-x: (\d+)px;/u.exec(css)?.[1]);
   const elbowWidth = Number(/width: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  assert.equal(bodyX, 52, "the body column stays the avatar gutter");
+  assert.equal(stemX, 20, "the stem sits a little further left for spacing");
   assert.equal(
-    elbowGap + elbowWidth,
-    -stemLeft,
+    bodyX - stemX - elbowWidth,
+    12,
+    "the elbow should leave twelve pixels between the stem and the link",
+  );
+  assert.equal(
+    bodyX - stemX,
+    elbowWidth + 12,
     "the elbow's upright should sit in the stem's own column",
   );
   assert.match(channelEndCap ?? "", /width: 2px;/u);
   assert.match(channelEndCap ?? "", /height: 2px;/u);
   assert.match(channelEndCap ?? "", /border-radius: 50%;/u);
   assert.match(channelEndCap ?? "", /background: var\(--cmsg-stem\);/u);
-  assert.match(channelEndCap ?? "", /right: calc\(100% \+ 8px\);/u);
+  assert.match(channelEndCap ?? "", /right: calc\(100% \+ 10px\);/u);
   // The hook is only the quarter turn: a straight upright here would be
   // painted on top of the shared stem and make every branch visibly thicker.
   // The 20px face and two pixels of vertical padding put the link's midpoint
@@ -1162,7 +1167,15 @@ test("a reply carries a quiet visual path back to its root", async () => {
     /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
   );
   const elbowHeight = Number(/height: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
-  assert.equal(elbowHeight, 10, "the hook should stay a compact turn");
+  const elbowRadius = Number(
+    /border-bottom-left-radius: (\d+)px;/u.exec(channelElbow ?? "")?.[1],
+  );
+  assert.equal(elbowHeight, 12, "the hook should stay a compact turn");
+  assert.equal(
+    elbowHeight,
+    elbowRadius,
+    "the hook should be a circular corner like the open thread panel",
+  );
   assert.equal(
     stemEnd,
     elbowTop,

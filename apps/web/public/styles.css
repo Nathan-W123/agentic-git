@@ -5786,7 +5786,7 @@ button.chip.lg:hover {
      agree about this column. Spelling it out is what stops them drifting
      apart when any of those three numbers moves. */
   --cmsg-body-x: 52px;
-  --cmsg-stem-x: 23px;
+  --cmsg-stem-x: 20px;
   /* And the colour of that line, flattened. The connector is one stroke drawn
      in several pieces — a stem for each grouped row, a final segment, and the
      quarter turn into every thread link — and the pieces deliberately overlap
@@ -5884,8 +5884,8 @@ button.chip.lg:hover {
 /* Where the stem stops is the whole of whether the turn reads as one clean
    line. The route's foot is the foot of the thread link itself — see the
    `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
-   out of this sum. `bottom: 20px` ends the stem at the top tangent of the
-   ten-pixel turn below. The old hook carried a seven-pixel upright
+   out of this sum. `bottom: 22px` ends the stem at the top tangent of the
+   twelve-pixel turn below. The old hook carried a seven-pixel upright
    over this stem and the final segment deliberately ended inside it; that
    double-painted the connector at every branch and left a dark, swollen join.
    The stem and turn now meet once, edge to edge, so the stroke keeps one
@@ -5902,7 +5902,7 @@ button.chip.lg:hover {
   position: absolute;
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
-  bottom: 20px;
+  bottom: 22px;
   border-left: 2px solid var(--cmsg-stem);
   pointer-events: none;
 }
@@ -6706,12 +6706,12 @@ button.chip.lg:hover {
 }
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
-   ten-pixel rounded turn starts at the stem's tangent instead of laying a
-   second upright over it; the nine-pixel gap gives the stroke and replier face
-   the same quiet breathing room as the avatar and stem above. Where the turn
-   does still meet the stem it meets it in
-   the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
-   the rest of the line.
+   twelve-pixel quarter turn starts at the stem's tangent instead of laying a
+   second upright over it; the twelve-pixel gap gives the stroke and replier
+   face a little more breathing room than the tight channel path had, matching
+   the open thread panel's quiet spacing. Where the turn does still meet the
+   stem it meets it in the opaque `--cmsg-stem`, so the corner keeps the weight
+   and the shade of the rest of the line.
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
@@ -6723,22 +6723,22 @@ button.chip.lg:hover {
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
 
-   Top and height are read together: the difference between them (10 - 8) is
-   what puts the horizontal run two pixels below the link's middle. The
-   slightly oval bend keeps the turn soft without making it geometrically
-   perfect, which suits the hand-drawn faces beside it. */
+   Top and height are read together: the difference between them (12 - 10) is
+   what puts the horizontal run two pixels below the link's middle. Matching
+   the height to the radius removes any straight upright and keeps the same
+   circular corner the open thread panel already uses. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
   box-sizing: border-box;
-  top: calc(50% - 8px);
+  top: calc(50% - 10px);
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
   width: 20px;
-  height: 10px;
+  height: 12px;
   border-left: 2px solid var(--cmsg-stem);
   border-bottom: 2px solid var(--cmsg-stem);
-  border-bottom-left-radius: 12px 9px;
-  border-bottom-right-radius: 3px 2px;
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 2px;
   pointer-events: none;
 }
 
@@ -6749,7 +6749,7 @@ button.chip.lg:hover {
   content: "";
   position: absolute;
   top: 50%;
-  right: calc(100% + 8px);
+  right: calc(100% + 10px);
   width: 2px;
   height: 2px;
   border-radius: 50%;
