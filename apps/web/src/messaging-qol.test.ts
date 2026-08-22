@@ -83,10 +83,16 @@ test("the unread line is taken before opening the room marks it read", async () 
   // A first visit is not a backlog somebody fell behind on.
   assert.match(data, /readAt > 0 && countChannelSince\(repositoryId, readAt, false\) > 0/u);
 
-  // Drawn once, at the first message somebody else sent after that moment,
-  // and never over search results — those are scattered hits, not a
-  // transcript with a boundary in it.
-  assert.match(chats, /const mark = query === "" \? channelUnreadMark\(repositoryId\) : undefined/u);
+  // Drawn once, at the first message somebody else sent after that moment.
+  //
+  // This used to pin the `query === ""` guard that suppressed the mark over
+  // search results. Message search is gone and its `query` went with it, so
+  // the guard was a read of a variable that no longer existed — the assertion
+  // was holding a ReferenceError in place, and `messageList` threw on every
+  // channel that had messages in it. What matters is that the mark is taken
+  // here, before opening the room overwrites it; the source it is taken from
+  // is not the point.
+  assert.match(chats, /const mark = channelUnreadMark\(repositoryId\)/u);
   assert.match(chats, /class="chan-unread" id="chan-unread"/u);
   assert.match(chats, /!markDrawn &&[\s\S]{0,80}Date\.parse\(item\.at \?\? ""\) > mark/u);
   assert.match(css, /\.chan-unread \{/u);
