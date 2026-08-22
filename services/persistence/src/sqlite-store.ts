@@ -3500,6 +3500,24 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .run(content, messageId, repositoryId);
   }
 
+  public async setChannelReplyContent(
+    repositoryId: string,
+    messageId: string,
+    replyId: string,
+    content: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `UPDATE channel_message_replies SET content = ?
+         WHERE id = ? AND message_id = ?
+           AND EXISTS (
+             SELECT 1 FROM channel_messages
+             WHERE id = ? AND repository_id = ?
+           )`,
+      )
+      .run(content, replyId, messageId, messageId, repositoryId);
+  }
+
   public async addChannelReply(
     input: AddChannelReplyInput,
   ): Promise<ChannelReply> {

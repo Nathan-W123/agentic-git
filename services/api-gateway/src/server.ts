@@ -23,6 +23,7 @@ import type {
   AuditorCursor,
   ChannelChangedFile,
   ChannelMessage,
+  ChannelReply,
   CoordinationStore,
   Organization,
   OrganizationRole,
@@ -756,7 +757,7 @@ const PENDING_BUSY_PREFIX = "pending:";
  * message was durable long before.
  */
 const QUESTION_TIMEOUT_MS = 180000;
-/** The thread title and opening reasoning, asked for together. */
+/** The thread title and opening intent, asked for together. */
 const OPENING_TIMEOUT_MS = 120000;
 /**
  * How long `/plan` is allowed to think before it has to answer.
@@ -11517,7 +11518,7 @@ export class ApiGateway {
       // Inside the thread, not beside it: the channel already says who took
       // this, and the detail belongs where somebody following the work will
       // look for it.
-      // The thread gets a name and the agent's own opening reasoning, both
+      // The thread gets a name and the agent's own opening intent, both
       // from one call so the wait is paid once. A task id says nothing to the
       // person who asked; "Task: architecture for chess" does.
       // Which work this thread is the story of. Recorded rather than only
@@ -11532,7 +11533,7 @@ export class ApiGateway {
       // and composing it must not sit in front of the work itself. It remains
       // an ordinary agent reply (rather than folded progress) because it is
       // addressed to the person who assigned the task.
-      await this.appendChannelThreadReply({
+      const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
         messageId: threadRootId,
@@ -11553,6 +11554,7 @@ export class ApiGateway {
             error instanceof Error ? error.message : String(error)
           }\n`,
         );
+        return undefined;
       });
       // Started against the queued task, not after the opening line is
       // written. `planOpening` is a model call allowed two whole minutes, and
@@ -11701,7 +11703,7 @@ export class ApiGateway {
         // From zero: the task is new, so nothing already in the log carries
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
-        // Nothing held yet. The title and the agent's first thoughts are a
+        // Nothing held yet. The title and the agent's opening intent are a
         // caption on a run that has already started, and waiting for them here
         // put a two-minute model call in front of the person who asked. They
         // are pushed in below when they land; if the run says something
@@ -11718,15 +11720,31 @@ export class ApiGateway {
         // turn a one-line outcome into a full progress transcript.
         threaded: continuing !== undefined,
       });
-      // Filled in when the model gets round to it. `pending` is read at flush
-      // time, so a late arrival is still narrated in order — and one that
-      // never arrives costs the run nothing.
+      // Filled in when the model gets round to it. The fixed acknowledgement
+      // has already done its job by then, so replace that same reply with the
+      // agent's actual intent rather than leaving a generic promise above a
+      // duplicate progress paragraph. If no usable intent arrives, the fixed
+      // line remains and the thoughts can still accompany the eventual task
+      // title when narration opens.
       void openingPromise
-        .then((opening) => {
+        .then(async (opening) => {
+          let contextualized = false;
+          const intent = opening.thoughts.join("\n").trim();
+          if (acknowledgement !== undefined && intent.length > 0) {
+            contextualized = await this.updateChannelThreadReplyContent({
+              projectId,
+              repositoryId,
+              messageId: threadRootId,
+              replyId: acknowledgement.id,
+              content: intent,
+            })
+              .then(() => true)
+              .catch(() => false);
+          }
           const watched = this.watchedChannelTasks.get(task.id);
           watched?.pending.unshift(
             `Task: ${opening.title}`,
-            ...opening.thoughts,
+            ...(contextualized ? [] : opening.thoughts),
           );
         })
         .catch(() => undefined);
@@ -11801,14 +11819,14 @@ export class ApiGateway {
   }
 
   /**
-   * The thread's name and the agent's opening reasoning.
+   * The thread's name and the agent's opening intent.
    *
    * One call for both, because each costs the same wait and the person is
-   * watching an empty thread until it lands. The reasoning is the agent's
-   * own — what it makes of the request and what it intends to look at first
-   * — rather than a description of the pipeline, which is what the audit
-   * narration afterwards already provides. Falls back to the request itself
-   * as a title and no reasoning, which is worse but never blank.
+   * watching an empty thread until it lands. The intent is the agent's own —
+   * what it will inspect, change, and verify — rather than a description of
+   * the pipeline, which is what the audit narration afterwards already
+   * provides. Falls back to the request itself as a title and no intent,
+   * which is worse but never blank.
    */
   private async planOpening(
     candidate: ChannelMentionCandidate,
@@ -11818,10 +11836,10 @@ export class ApiGateway {
       candidate,
       "You have just been asked to do the following in a software project.\n" +
         "Reply with a short title on the first line — under six words, no " +
-        "punctuation at the end — then two or three lines of your actual " +
-        "first thoughts: what is being asked, what you want to check in the " +
-        "repository, and how you would break it up. Write them as you would " +
-        "think them, one per line, no bullets or numbering.\n\nRequest: " +
+        "punctuation at the end — then one or two concise first-person lines " +
+        "that tell the person what you are going to inspect, change, and " +
+        "verify. Be specific to their request, use future-tense action rather " +
+        "than restating the request, and use no bullets or numbering.\n\nRequest: " +
         objective,
       OPENING_TIMEOUT_MS,
       true,
@@ -11839,7 +11857,7 @@ export class ApiGateway {
         title === undefined || title.length > 80
           ? summariseObjective(objective)
           : title,
-      // Bounded: a model that ignores "two or three lines" must not turn the
+      // Bounded: a model that ignores "one or two lines" must not turn the
       // thread into an essay before the work has even started.
       thoughts: thoughts.slice(0, 4).map((line) => line.slice(0, 300)),
     };
@@ -16685,14 +16703,43 @@ export class ApiGateway {
      * reads differently and counts differently — see `ChannelEntryKind`.
      */
     kind?: "agent" | "progress" | "system" | "outcome" | "user" | "plan";
-  }): Promise<void> {
-    await this.options.store.addChannelReply({
+  }): Promise<ChannelReply> {
+    const reply = await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
       messageId: input.messageId,
       kind: input.kind ?? "agent",
       authorId: input.authorId,
       content: input.content,
     });
+    await this.options.store.appendAudit(undefined, {
+      type: "channel_message_posted",
+      data: {
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+      },
+    });
+    return reply;
+  }
+
+  /**
+   * Finalizes a reply whose identity was published before its wording was.
+   * The same channel event is emitted as for a new reply so connected clients
+   * reconcile the thread without inventing a second message.
+   */
+  private async updateChannelThreadReplyContent(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    replyId: string;
+    content: string;
+  }): Promise<void> {
+    await this.options.store.setChannelReplyContent(
+      input.repositoryId,
+      input.messageId,
+      input.replyId,
+      input.content,
+    );
     await this.options.store.appendAudit(undefined, {
       type: "channel_message_posted",
       data: {

@@ -1684,6 +1684,18 @@ export interface CoordinationStore {
     messageId: string,
     content: string,
   ): Promise<void>;
+  /**
+   * Replaces what one reply says without moving it within its thread.
+   *
+   * The repository and root ids are part of the write boundary so a reply id
+   * learned in one room cannot be used to change another room's history.
+   */
+  setChannelReplyContent(
+    repositoryId: string,
+    messageId: string,
+    replyId: string,
+    content: string,
+  ): Promise<void>;
   addChannelReply(input: AddChannelReplyInput): Promise<ChannelReply>;
   getChannelMessage(
     repositoryId: string,
