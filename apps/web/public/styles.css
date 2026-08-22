@@ -10531,16 +10531,31 @@ dialog.modal[open]::backdrop {
   height: 13px;
 }
 
-/* One thread in the pullout, as a card: glyph, name, one metadata line,
-   chevron. It was three stacked lines plus an avatar plus a delete button that
-   fell onto a fourth line of its own, on a divider-ruled list — five bands of
-   chrome per thread. Cards separated by space need no rules between them, and
-   the delete button now sits on the row it belongs to. */
+/* Live work stays in a short stack; completed work becomes a wrapping run of
+   pills underneath. This keeps the state that still needs attention prominent
+   without making every finished thread consume the width of the panel. */
+.thread-list-active {
+  display: grid;
+  gap: 6px;
+}
+
+.thread-list-finished {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.thread-list-active + .thread-list-finished {
+  padding-top: 9px;
+  margin-top: 9px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .thread-item-row {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-bottom: 8px;
 }
 
 /* The trash stays out of the way until the row is under the pointer; on touch,
@@ -10565,10 +10580,10 @@ dialog.modal[open]::backdrop {
 .thread-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 0;
   border-radius: var(--radius);
   background: var(--bg-card);
@@ -10580,6 +10595,89 @@ dialog.modal[open]::backdrop {
 
 .thread-item:hover {
   background: var(--bg-card-2);
+}
+
+.thread-item:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+/* A completed thread is one compact, single-line destination. The full title,
+   author, reply count, time and status remain in its accessible label and
+   tooltip; the pill keeps only the title and author visible. */
+.thread-list-finished .thread-item-row {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.thread-item-ended {
+  flex: 0 1 auto;
+  max-width: 260px;
+  padding: 5px 9px;
+  gap: 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-inset);
+}
+
+.thread-item-ended.thread-item-managed {
+  padding-right: 30px;
+}
+
+.thread-item-ended:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-card-2);
+}
+
+.thread-item-ended .ti-done {
+  display: inline-flex;
+  flex: none;
+  color: var(--green);
+}
+
+.thread-item-ended .ti-done svg {
+  width: 13px;
+  height: 13px;
+}
+
+.thread-list-finished .thread-item-ended .ti-who {
+  flex: none;
+  max-width: 72px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.thread-item-ended .ti-who::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--text-4);
+}
+
+/* The per-thread delete action occupies the pill's reserved trailing space,
+   so hidden actions do not turn every compact item back into a wide row. */
+.thread-list-finished .thread-item-row > .icon-btn {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: 3px;
+  width: 22px;
+  height: 22px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: var(--bg-inset);
+}
+
+.thread-item-pending {
+  box-shadow: inset 2px 0 0 var(--border-strong);
+}
+
+.ti-pending {
+  flex: none;
+  color: var(--text-3);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 /* The thread an agent is working on right now. The list is a log of finished
@@ -11029,35 +11127,47 @@ dialog.modal[open]::backdrop {
 
 .thread-item .ti-main {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   flex: 1;
   min-width: 0;
 }
 
-/* The name the agent gave the task carries the card. Wrapped to two lines
-   rather than truncated at one: a task name is a sentence, and the half of it
-   that fits is rarely the half that identifies the work. */
+/* A summary never grows taller because its task name is long. The full name
+   remains in the button's label and tooltip. */
 .thread-item .ti-text {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
   color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Who, then how much — metadata, in the size and colour that says so. */
+/* Current phase, then who and how much — one quiet metadata line. */
 .thread-item .ti-meta {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   font-size: 11.5px;
+  line-height: 1.3;
   min-width: 0;
 }
 
+.thread-item .ti-activity {
+  flex: 0 1 110px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread-item .ti-who {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -11067,6 +11177,12 @@ dialog.modal[open]::backdrop {
 .thread-item .ti-count {
   color: var(--text-4);
   flex: none;
+}
+
+.thread-item-ended .ti-text {
+  flex: 0 1 auto;
+  font-size: 12.5px;
+  font-weight: 500;
 }
 
 /* Thinking, as one passage rather than as a stack of messages from somebody

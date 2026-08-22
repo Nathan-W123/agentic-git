@@ -4021,6 +4021,13 @@ test("working thread summaries carry a concise sweeping activity", async () => {
     "Testing",
   );
 
+  const listStart = source.indexOf("function threadListPanel(repositoryId)");
+  const list = source.slice(
+    listStart,
+    source.indexOf("\n/**\n * Your own agent", listStart),
+  );
+  assert.match(list, /class="ti-activity text-sweep"/u);
+
   const sweep = /\n\.cmsg-thread-link \.ctl-activity \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(sweep ?? "", /animation: thread-activity-sweep/u);
   assert.match(sweep ?? "", /background-clip: text;/u);
@@ -4029,6 +4036,100 @@ test("working thread summaries carry a concise sweeping activity", async () => {
     css,
     /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-activity \{\n {4}animation: none;/u,
   );
+  const sharedSweep = /\n\.text-sweep \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(sharedSweep ?? "", /animation: thread-activity-sweep/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.text-sweep \{\n {4}animation: none;/u,
+  );
+});
+
+test("ended threads wrap as compact pills without live activity motion", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const listStart = chats.indexOf("function threadListPanel(repositoryId)");
+  const list = chats.slice(
+    listStart,
+    chats.indexOf("\n/**\n * Your own agent", listStart),
+  );
+  const finishedMarkup = list.slice(
+    list.indexOf("if (finished)"),
+    list.indexOf('class="thread-item${working', list.indexOf("if (finished)")),
+  );
+
+  assert.match(finishedMarkup, /class="thread-item thread-item-ended/u);
+  assert.match(finishedMarkup, /class="ti-done"/u);
+  assert.doesNotMatch(finishedMarkup, /ti-activity|text-sweep/u);
+  const wrap = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(wrap ?? "", /display: flex;/u);
+  assert.match(wrap ?? "", /flex-wrap: wrap;/u);
+  const pill = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(pill ?? "", /border-radius: 999px;/u);
+  assert.match(pill ?? "", /max-width: 260px;/u);
+});
+
+test("long thread titles stay on one compact line", async () => {
+  const css = await publicFile("styles.css");
+  const title = /\n\.thread-item \.ti-text \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(title ?? "", /min-width: 0;/u);
+  assert.match(title ?? "", /overflow: hidden;/u);
+  assert.match(title ?? "", /text-overflow: ellipsis;/u);
+  assert.match(title ?? "", /white-space: nowrap;/u);
+  assert.doesNotMatch(title ?? "", /line-clamp/u);
+  const row =
+    /\n\.thread-list-finished \.thread-item-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(row ?? "", /max-width: 100%;/u);
+});
+
+test("thread list keeps unfinished work ahead of ended threads", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const listStart = chats.indexOf("function threadListPanel(repositoryId)");
+  const list = chats.slice(
+    listStart,
+    chats.indexOf("\n/**\n * Your own agent", listStart),
+  );
+
+  assert.match(list, /const working = threadIsWorking\(entry\);/u);
+  assert.match(list, /const waiting = threadAwaitsGoAhead\(entry\);/u);
+  assert.match(list, /const ended =\s*!working &&\s*!waiting &&/u);
+  assert.match(list, /\(entry\.replies \?\? \[\]\)\.some\(isThreadEnding\)/u);
+  assert.match(
+    list,
+    /const active = summaries\.filter\(\(summary\) => !summary\.ended\);/u,
+  );
+  assert.match(
+    list,
+    /const ended = summaries\.filter\(\(summary\) => summary\.ended\);/u,
+  );
+  assert.ok(
+    list.indexOf('class="thread-list-active"') <
+      list.indexOf('class="thread-list-finished"'),
+    "unfinished summaries should render before the completed pills",
+  );
+  assert.match(list, /: "Pending";/u);
+});
+
+test("compact thread summaries keep accessible thread navigation", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const listStart = chats.indexOf("function threadListPanel(repositoryId)");
+  const list = chats.slice(
+    listStart,
+    chats.indexOf("\n/**\n * Your own agent", listStart),
+  );
+  const openCase = app.slice(
+    app.indexOf('case "channel-thread-open"'),
+    app.indexOf('case "thread-composer-focus"'),
+  );
+
+  assert.equal(
+    list.match(/data-act="channel-thread-open"/gu)?.length,
+    2,
+    "both active rows and ended pills should open their thread",
+  );
+  assert.match(list, /aria-label="\$\{esc\(`Open completed thread:/u);
+  assert.match(list, /aria-label="\$\{esc\(`Open thread:/u);
+  assert.match(openCase, /openThreadPanel\(value\);/u);
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {

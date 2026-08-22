@@ -3878,13 +3878,102 @@ function threadListPanel(repositoryId) {
     )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
+  const summaries = threads.map((entry) => {
+    const working = threadIsWorking(entry);
+    const waiting = threadAwaitsGoAhead(entry);
+    const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+    const ended =
+      !working &&
+      !waiting &&
+      (["integrated", "failed", "cancelled"].includes(task?.status) ||
+        (entry.replies ?? []).some(isThreadEnding));
+    return { entry, working, waiting, ended };
+  });
+  const active = summaries.filter((summary) => !summary.ended);
+  const ended = summaries.filter((summary) => summary.ended);
+  const manageable = canManageRepository(repositoryId);
+  const renderThread = ({ entry, working, waiting }, finished = false) => {
+    const replies = planTranscriptReplies(entry);
+    const titled = threadTitleReply(entry);
+    const count = replies.filter(
+      (reply) => reply.kind !== "progress" && reply !== titled,
+    ).length;
+    const author =
+      threadLastAgentAuthor(entry, repositoryId) ??
+      channelAuthor(repositoryId, entry);
+    const title = threadTitle(entry);
+    const status = working
+      ? threadActivityLabel(entry)
+      : waiting
+        ? "Waiting for you"
+        : finished
+          ? "Completed"
+          : "Pending";
+    const said = threadSaidCount(count);
+    const context = `${status} — ${title} — ${author.name}, ${said} — started ${clockTime(entry.at)}`;
+    if (finished) {
+      return `<div class="thread-item-row">
+        <button type="button" class="thread-item thread-item-ended${manageable ? " thread-item-managed" : ""}"
+          title="${esc(context)}"
+          aria-label="${esc(`Open completed thread: ${title}. ${author.name}, ${said}.`)}"
+          data-act="channel-thread-open" data-value="${esc(entry.id)}">
+          <span class="ti-done" aria-hidden="true">${icon("check")}</span>
+          <span class="ti-text">${esc(title)}</span>
+          <span class="ti-who">${esc(author.name)}</span>
+        </button>
+        ${
+          manageable
+            ? iconButton("trash", {
+                act: "channel-thread-delete",
+                value: entry.id,
+                title: "Delete this thread",
+                small: true,
+              })
+            : ""
+        }
+      </div>`;
+    }
+    return `<div class="thread-item-row">
+      <button type="button" class="thread-item${working ? " thread-item-active" : ""}${waiting ? " thread-item-held" : ""}${!working && !waiting ? " thread-item-pending" : ""}"
+        title="${esc(context)}"
+        aria-label="${esc(`Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
+        data-act="channel-thread-open" data-value="${esc(entry.id)}">
+        <span class="ti-main">
+          <span class="ti-text">${esc(title)}</span>
+          <span class="ti-meta">
+            ${
+              working
+                ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
+                : waiting
+                  ? `<span class="ti-held">Waiting for you</span>`
+                  : `<span class="ti-pending">Pending</span>`
+            }
+            <span class="ti-who">${esc(author.name)}</span>
+            <span class="ti-count">${esc(said)}</span>
+            ${working ? threadRunMark(entry, repositoryId, author) : ""}
+          </span>
+        </span>
+        <span class="ti-go">${icon("chevronRight")}</span>
+      </button>
+      ${
+        manageable
+          ? iconButton("trash", {
+              act: "channel-thread-delete",
+              value: entry.id,
+              title: "Delete this thread",
+              small: true,
+            })
+          : ""
+      }
+    </div>`;
+  };
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
       ${panelKind("Threads")}
       <span class="spacer"></span>
       ${
-        threads.length === 0 || !canManageRepository(repositoryId)
+        threads.length === 0 || !manageable
           ? ""
           : iconButton("trash", {
               act: "channel-threads-clear",
@@ -3898,95 +3987,20 @@ function threadListPanel(repositoryId) {
       ${
         threads.length === 0
           ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
-          : threads
-              .map((entry) => {
-                const replies = planTranscriptReplies(entry);
-                const titled = threadTitleReply(entry);
-                // Thinking is the run talking to itself; it has never been a
-                // reply and should not be counted as one here either. The
-                // title reply is the thread's name, not a message in it.
-                const count = replies.filter(
-                  (reply) => reply.kind !== "progress" && reply !== titled,
-                ).length;
-                // The agent that worked the thread, not the person whose
-                // message it hangs under. Every row in a channel one person
-                // asks in carried that same person's name, which answered a
-                // question nobody scanning a work log has; the useful name is
-                // the colleague who did — or is doing — the work. Falls back
-                // to the root author only for a thread no agent has spoken in
-                // yet, where there is no better answer.
-                const author =
-                  threadLastAgentAuthor(entry, repositoryId) ??
-                  channelAuthor(repositoryId, entry);
-                // The one thing a log of finished work cannot say for itself:
-                // which of these is still moving. Marked from the task's own
-                // status, the same signal that keeps the agent's typing dots
-                // up in the channel, so the two never disagree about who is
-                // working.
-                const working = threadIsWorking(entry);
-                // The other half of the same question. A held thread is not
-                // working and not finished, and without this it read as the
-                // latter — a row somebody had already dealt with — which is
-                // precisely the thread that needs them.
-                const held = threadAwaitsGoAhead(entry);
-                // The subject leads: somebody scanning this log is looking
-                // for a piece of work, and the agent's name told them which
-                // colleague — the wrong first question. Who and how much
-                // demote to one quiet line beneath, and the clock time goes
-                // to the row's tooltip: the list is newest-first, so the
-                // ordering already answers "when" for anybody scanning it.
-                //
-                // No leading glyph either. Every row carried the same terminal
-                // mark: fifty identical icons down a list are a texture rather
-                // than information, and this one was actively misleading — a
-                // thread is a conversation about a piece of work, not a shell
-                // session, so the mark promised a log of command output. There
-                // was nothing meaningful to put in its place. The author's face
-                // was the obvious candidate, but a thread is rooted in the
-                // message that asked for the work, so that column would have
-                // been the same person's avatar the whole way down. The name
-                // leads instead, and the one thing worth spotting at a glance —
-                // which thread is running — is already carried by the accent
-                // wash and leading edge of `.thread-item-active`.
-                return `<div class="thread-item-row">
-                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}${held ? " thread-item-held" : ""}"
-                    title="${esc(
-                      working
-                        ? `Working now — started ${clockTime(entry.at)}`
-                        : held
-                          ? `Waiting for your go-ahead — started ${clockTime(entry.at)}`
-                          : clockTime(entry.at),
-                    )}"
-                    data-act="channel-thread-open" data-value="${esc(entry.id)}">
-                    <span class="ti-main">
-                      <span class="ti-text">${esc(threadTitle(entry))}</span>
-                      <span class="ti-meta">
-                        <span class="ti-who">${esc(author.name)}</span>
-                        <span class="ti-count">${esc(threadSaidCount(count))}</span>
-                        ${
-                          working
-                            ? threadRunMark(entry, repositoryId, author)
-                            : held
-                              ? `<span class="ti-held">Waiting for you</span>`
-                              : ""
-                        }
-                      </span>
-                    </span>
-                    <span class="ti-go">${icon("chevronRight")}</span>
-                  </button>
-                  ${
-                    canManageRepository(repositoryId)
-                      ? iconButton("trash", {
-                          act: "channel-thread-delete",
-                          value: entry.id,
-                          title: "Delete this thread",
-                          small: true,
-                        })
-                      : ""
-                  }
-                </div>`;
-              })
-              .join("")
+          : `${
+              active.length === 0
+                ? ""
+                : `<div class="thread-list-active" aria-label="Active threads">
+                    ${active.map((summary) => renderThread(summary)).join("")}
+                  </div>`
+            }
+            ${
+              ended.length === 0
+                ? ""
+                : `<div class="thread-list-finished" aria-label="Completed threads">
+                    ${ended.map((summary) => renderThread(summary, true)).join("")}
+                  </div>`
+            }`
       }
     </div>
   </aside>`;
