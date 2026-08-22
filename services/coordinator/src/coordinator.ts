@@ -3228,11 +3228,41 @@ export class Coordinator {
       // The worker path has split like this since partial admission shipped.
       // This one validated the raw changeset against the reduced plan, so the
       // same run succeeded or failed on which executor happened to pick it up.
+      //
+      // The index goes with it, which is what makes a withheld *symbol* mean
+      // anything here. `splitChangeSet` can only divide a file at the hunks
+      // that reach a withheld symbol if something can say where that symbol
+      // lives, and it is deliberately pessimistic when nothing can: an
+      // unlocatable symbol is treated as touched by every hunk, so the whole
+      // file is held back rather than promoted on an assumption. Calling this
+      // without the index therefore did not disable hunk-level division so
+      // much as guarantee its worst case — every symbol-level withholding
+      // collapsed to a whole-file deferral, on the one executor this
+      // deployment actually runs. The division logic was right and tested the
+      // whole time; nothing ever handed it the answer it needed.
+      //
+      // Fetched only when a symbol was actually withheld. The file-level case
+      // is settled by the plan alone, the common case defers nothing at all,
+      // and the index is cached per revision — the wave has already built this
+      // one — so the lookup is a hit rather than a second parse of the tree.
+      const deferredResources = entry.admission?.deferredResources ?? [];
+      const symbolIndex = deferredResources.some(
+        (resource) => resource.resourceType === "symbol",
+      )
+        ? await this.intelligence.index(input.repository, waveVersion.revision)
+        : undefined;
       const split =
-        entry.admission === undefined ||
-        (entry.admission.deferredResources ?? []).length === 0
+        entry.admission === undefined || deferredResources.length === 0
           ? undefined
-          : splitChangeSet(entry.plan, entry.admission, changeSet);
+          : splitChangeSet(
+              entry.plan,
+              entry.admission,
+              changeSet,
+              symbolIndex === undefined
+                ? undefined
+                : (file) =>
+                    this.intelligence.symbolRangesInFile(symbolIndex, file),
+            );
       if (split !== undefined && split.escaped.length > 0) {
         throw new ScopeExpansionError(split.escaped);
       }
