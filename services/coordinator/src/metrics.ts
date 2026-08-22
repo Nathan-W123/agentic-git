@@ -81,6 +81,47 @@ export interface ApprovalMetrics {
   averageDecisionMs: number | undefined;
 }
 
+/**
+ * What coordination let happen, rather than what it prevented.
+ *
+ * Every other number here is about contention — predictions, rework, holds.
+ * These are the opposite, and they are the only ones that describe the thing
+ * this system does that a lock does not: two tasks working the same file at
+ * the same time, and a file handed back before its holder finished.
+ *
+ * They are also the only numbers here that can be stated without a
+ * counterfactual. "Collisions prevented" cannot be derived from an audit
+ * chain — see {@link ConflictMetrics.confirmedByOwnHold} for why — but a
+ * partial admission is an event that happened, and so is a release.
+ */
+export interface SharingMetrics {
+  /** Admissions that granted part of a plan and withheld the rest. */
+  partialAdmissions: number;
+  /**
+   * Of those, the ones that withheld something finer than a whole file.
+   *
+   * The distinction worth reporting: withholding a file is what any lease can
+   * do, and withholding a function inside a granted file is not.
+   */
+  withinFileAdmissions: number;
+  /** Distinct files granted to one task while another worked inside them. */
+  filesSharedBetweenTasks: number;
+  /** Times a task handed resources back while it was still running. */
+  releases: number;
+  /** Distinct files handed back mid-run. */
+  releasedFiles: number;
+  /**
+   * Tasks that were held behind a blocker and started after that blocker
+   * gave something up.
+   *
+   * Ordering is the whole of the claim: the task was refused, its blocker
+   * released, and only then was it admitted. It does not prove the release
+   * is *why* it started — a lease could have lapsed in the same window — so
+   * it is reported as a sequence observed, not a cause established.
+   */
+  pickupsAfterRelease: number;
+}
+
 export interface CostMetrics {
   /** Total remote execution time across all work leases, in milliseconds. */
   leaseRuntimeMs: number;
@@ -96,6 +137,7 @@ export interface CoordinationMetrics {
    */
   window: { events: number; toSequence: number };
   conflicts: ConflictMetrics;
+  sharing: SharingMetrics;
   rework: ReworkMetrics;
   throughput: ThroughputMetrics;
   approvals: ApprovalMetrics;
@@ -177,6 +219,17 @@ export async function computeCoordinationMetrics(
   let replansRequested = 0;
   let integrationFailures = 0;
 
+  let partialAdmissions = 0;
+  let withinFileAdmissions = 0;
+  let releases = 0;
+  const sharedFiles = new Set<string>();
+  const releasedFilePaths = new Set<string>();
+  /** Tasks currently refused, and who they named as the reason. */
+  const heldBehind = new Map<string, Set<string>>();
+  /** Tasks that have released something since somebody was held behind them. */
+  const releasedSince = new Set<string>();
+  const pickedUp = new Set<string>();
+
   for (const { event } of events) {
     const taskId = event.taskId;
     switch (event.type) {
@@ -203,16 +256,78 @@ export async function computeCoordinationMetrics(
       }
       case "plan_admitted": {
         const status = event.data["status"];
+        if (event.data["partial"] === true) {
+          partialAdmissions += 1;
+          const withheld = Array.isArray(event.data["deferredResources"])
+            ? (event.data["deferredResources"] as unknown[])
+            : [];
+          // A withheld symbol means the file it lives in was granted to this
+          // task while somebody else was working inside it. A withheld file
+          // means only that the file was kept whole, which every lease does.
+          const finerThanFile = withheld.some(
+            (entry) =>
+              typeof entry === "object" &&
+              entry !== null &&
+              (entry as { resourceType?: unknown }).resourceType === "symbol",
+          );
+          if (finerThanFile) {
+            withinFileAdmissions += 1;
+            for (const file of event.data["grantedFiles"] as unknown[] ?? []) {
+              if (typeof file === "string") {
+                sharedFiles.add(file);
+              }
+            }
+          }
+        }
+        if (
+          taskId !== undefined &&
+          (status === "approved" || status === "approved_with_constraints") &&
+          [...(heldBehind.get(taskId) ?? [])].some((blocker) =>
+            releasedSince.has(blocker),
+          )
+        ) {
+          // Held, then its blocker gave something up, then admitted — in that
+          // order. Recorded once per task however many times it resubmits.
+          pickedUp.add(taskId);
+        }
         if (
           (status === "blocked" || status === "sequenced") &&
           taskId !== undefined
         ) {
+          const blockedBy = Array.isArray(event.data["blockedBy"])
+            ? (event.data["blockedBy"] as unknown[])
+            : [];
+          const named = heldBehind.get(taskId) ?? new Set<string>();
+          for (const blocker of blockedBy) {
+            if (typeof blocker === "string") {
+              named.add(blocker);
+            }
+          }
+          heldBehind.set(taskId, named);
           // Deliberately NOT contention. This is the scheduler's own answer to
           // a prediction, and counting it as evidence for that prediction made
           // every hold self-confirming — arbitration marking its own homework.
           // It lands in its own bucket (`confirmedByOwnHold`) so the number
           // that survives is the contention nobody here authored.
           deferredTasks.add(taskId);
+        }
+        break;
+      }
+      case "ownership_released":
+      case "blanket_claim_frozen": {
+        // Both are a holder giving ground back while it is still running: one
+        // because the agent said so, one because a repository-wide claim
+        // narrowed to what its holder had actually taken.
+        releases += 1;
+        for (const file of (Array.isArray(event.data["files"])
+          ? (event.data["files"] as unknown[])
+          : [])) {
+          if (typeof file === "string") {
+            releasedFilePaths.add(file);
+          }
+        }
+        if (taskId !== undefined) {
+          releasedSince.add(taskId);
         }
         break;
       }
@@ -375,6 +490,14 @@ export async function computeCoordinationMetrics(
       falsePositives,
       openPredictions,
       unpredictedContention,
+    },
+    sharing: {
+      partialAdmissions,
+      withinFileAdmissions,
+      filesSharedBetweenTasks: sharedFiles.size,
+      releases,
+      releasedFiles: releasedFilePaths.size,
+      pickupsAfterRelease: pickedUp.size,
     },
     rework: {
       replansRequested,
