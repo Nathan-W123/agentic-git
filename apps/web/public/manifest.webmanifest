@@ -1,6 +1,6 @@
 {
-  "name": "Lattice",
-  "short_name": "Lattice",
+  "name": "Kumi",
+  "short_name": "Kumi",
   "description": "Coordination for humans and coding agents on one live codebase.",
   "start_url": "/",
   "display": "standalone",

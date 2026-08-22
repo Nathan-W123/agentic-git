@@ -51,7 +51,7 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * The local subset of Coolicons v4.1 selected for Lattice's interface.
+ * The local subset of Coolicons v4.1 selected for Kumi's interface.
  * Coolicons is by Kryston Schwarze and licensed under CC BY 4.0:
  * https://github.com/krystonschwarze/coolicons/tree/v4.1
  * https://creativecommons.org/licenses/by/4.0/
@@ -60,7 +60,7 @@ export function imeComposing(event) {
  * and available when the control plane is offline. The shared wrapper preserves
  * Coolicons' 24px grid, two-pixel rounded stroke and `currentColor` behaviour,
  * while keeping every interface mark decorative to assistive technology.
- * Product-only concepts (agents and the Lattice network) use that same grid and
+ * Product-only concepts (agents and the Kumi network) use that same grid and
  * optical weight rather than introducing a second visual language.
  */
 const S = (body, extra = "") =>
@@ -301,7 +301,7 @@ if (typeof document !== "undefined") {
 /**
  * The product mark: two loops woven through each other.
  *
- * A lattice is the interlocking, so the mark is the interlocking and nothing
+ * The interlocking is the mark, so the symbol needs nothing
  * else — no face, no badge, no enclosing shape. Two identical rounded loops
  * crossed at a right angle read as four lobes and a weave, which is the whole
  * idea in the fewest possible strokes.

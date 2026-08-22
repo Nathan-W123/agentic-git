@@ -16,8 +16,8 @@ from a customer-hosted or on-premises environment. See
 [instructions.md](instructions.md) for the authoritative scope, phases, and
 architecture rules.
 
-**Where does repository code live?** Today, Lattice keeps its copy of the
-repository on the machine where Lattice is running—not automatically in the
+**Where does repository code live?** Today, Kumi keeps its copy of the
+repository on the machine where Kumi is running—not automatically in the
 cloud. Agents work on temporary copies, and GitHub is updated only when someone
 explicitly exports the repository.
 

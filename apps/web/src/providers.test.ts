@@ -1120,9 +1120,9 @@ test("the streaming runner spawns the child in the environment it was handed", a
   const seen: string[] = [];
   const staged = await streamProcess(
     process.execPath,
-    ["-e", "console.log(process.env['LATTICE_STAGED_HOME'] ?? '<unset>')"],
+    ["-e", "console.log(process.env['KUMI_STAGED_HOME'] ?? '<unset>')"],
     {
-      env: { ...process.env, LATTICE_STAGED_HOME: "/staged/codex-home" },
+      env: { ...process.env, KUMI_STAGED_HOME: "/staged/codex-home" },
       timeoutMs: 30_000,
     },
     (line) => seen.push(line),
@@ -2125,7 +2125,7 @@ function fakeCallSignStore() {
 }
 
 test("a name survives losing the connections file", async () => {
-  // The reported bug: reload into Lattice and every agent in every channel is
+  // The reported bug: reload into Kumi and every agent in every channel is
   // "Claude (Nathan)" again. The names only ever lived in
   // `secrets/provider-connections.json`, on the control plane's own disk, so
   // a deployment whose filesystem does not outlive a restart came back with

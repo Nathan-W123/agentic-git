@@ -136,10 +136,10 @@ test("a message is delivered with its envelope, headers, and body", async (t) =>
       username: "postmaster",
       password: "secret",
     },
-    "Lattice <no-reply@relay.test>",
+    "Kumi <no-reply@relay.test>",
     {
       to: "forgetful@example.com",
-      subject: "Reset your Lattice password",
+      subject: "Reset your Kumi password",
       text: "Open this link:\nhttp://localhost/#reset/pwr_1.secret\n",
     },
   );
@@ -152,8 +152,8 @@ test("a message is delivered with its envelope, headers, and body", async (t) =>
   // The display name belongs in the header, never in the envelope.
   assert.equal(conversation.includes("MAIL FROM:<no-reply@relay.test>"), true);
   assert.equal(conversation.includes("RCPT TO:<forgetful@example.com>"), true);
-  assert.match(spoken, /^Subject: Reset your Lattice password$/mu);
-  assert.match(spoken, /^From: Lattice <no-reply@relay.test>$/mu);
+  assert.match(spoken, /^Subject: Reset your Kumi password$/mu);
+  assert.match(spoken, /^From: Kumi <no-reply@relay.test>$/mu);
   assert.match(spoken, /#reset\/pwr_1\.secret/u);
   assert.equal(conversation.includes("QUIT"), true);
 });
@@ -182,7 +182,7 @@ test("with no relay configured the message is logged rather than lost", async ()
 
   await mailer({
     to: "forgetful@example.com",
-    subject: "Reset your Lattice password",
+    subject: "Reset your Kumi password",
     text: "http://localhost/#reset/pwr_1.secret",
   });
 
@@ -279,22 +279,22 @@ test("an HTTP mail API is used in preference to SMTP, and carries the key", asyn
     apiUrl: api.url,
     apiKey: "test-key",
     smtpUrl: `smtp://127.0.0.1:${String(relay.port)}`,
-    from: "Lattice <no-reply@example.com>",
+    from: "Kumi <no-reply@example.com>",
   });
   await mailer({
     to: "new@example.com",
-    subject: "Confirm your Lattice account",
-    text: "Your Lattice confirmation code is 123456.",
+    subject: "Confirm your Kumi account",
+    text: "Your Kumi confirmation code is 123456.",
   });
 
   assert.equal(api.requests.length, 1);
   const sent = api.requests[0];
   assert.equal(sent?.authorization, "Bearer test-key");
   assert.deepEqual(sent?.body, {
-    from: "Lattice <no-reply@example.com>",
+    from: "Kumi <no-reply@example.com>",
     to: ["new@example.com"],
-    subject: "Confirm your Lattice account",
-    text: "Your Lattice confirmation code is 123456.",
+    subject: "Confirm your Kumi account",
+    text: "Your Kumi confirmation code is 123456.",
   });
   // The SMTP relay is untouched: one transport sends, not both.
   await relay.idle();

@@ -345,7 +345,7 @@ export async function sendMail(
       buildMessage(
         message,
         from,
-        `${Date.now().toString(36)}.${process.pid.toString(36)}@lattice`,
+        `${Date.now().toString(36)}.${process.pid.toString(36)}@kumi`,
         new Date().toUTCString(),
       ),
     );

@@ -296,7 +296,7 @@ export async function connectRepository(rerender) {
   const values = await showModal({
     title: "Import from GitHub",
     subtitle:
-      "The repository and its history are imported into Lattice. Credentials stay in the control plane, never the browser.",
+      "The repository and its history are imported into Kumi. Credentials stay in the control plane, never the browser.",
     confirm: "Import",
     body: `<label class="field">
         <span>GitHub repository</span>

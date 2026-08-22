@@ -62,7 +62,7 @@ test("the loading shell is painted before boot waits and leaves on every outcome
   assert.match(boot, /if \(failure\.status === 401\) \{[\s\S]{0,120}showAuth\(\);/u);
   assert.match(boot, /state\.loadError = failure\.message;/u);
   assert.match(boot, /showApp\(\);\s*applyHash\(\);\s*render\(\);/u);
-  assert.match(app, /"Lattice could not load",\s*state\.loadError/u);
+  assert.match(app, /"Kumi could not load",\s*state\.loadError/u);
 
   // Both destinations replace the status surface rather than leaving a busy
   // region hidden beside the authenticated or signed-out UI. This is DOM-only

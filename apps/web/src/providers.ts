@@ -2449,7 +2449,7 @@ export class ProviderChatService {
         params: {
           clientInfo: {
             name: "coord-web",
-            title: "Lattice",
+            title: "Kumi",
             version: "0.0.0",
           },
         },
@@ -3212,7 +3212,7 @@ export class ProviderChatService {
         400,
         "unsupported_flow",
         `${PROVIDER_NAMES[flow.provider]} approves in the browser and takes ` +
-          "no code back in Lattice",
+          "no code back in Kumi",
       );
     }
     if (flow.status !== "pending") {
