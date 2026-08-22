@@ -1920,6 +1920,31 @@ test("working agent faces fill the mark itself with the run's progress", async (
   assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
   assert.doesNotMatch(row, /statusDot\(/u);
 
+  // One run, one mark, wherever it is met. The sidebar roster above, the room's
+  // thread summary and the thread list all hand the same face the same reading
+  // of the same run, so the answer to "how far along" does not change shape
+  // between the three places somebody looks for it.
+  const runMark = chats.slice(
+    chats.indexOf("function threadRunMark(entry, repositoryId, fallbackAuthor)"),
+    chats.indexOf("function threadListPanel(repositoryId)"),
+  );
+  assert.notEqual(runMark, "", "a thread row should draw a run of its own");
+  assert.match(runMark, /threadWorkingAuthor\(entry, repositoryId\) \?\? fallbackAuthor/u);
+  assert.match(runMark, /threadProgress\(entry\) \?\? 0/u);
+  assert.match(
+    runMark,
+    /agentFace\(author\.agent, 16, \{\s*status: "working",\s*progress,\s*\}\)/u,
+    "a running thread row fills the agent's own mark, not a dot of its own",
+  );
+  // The bare dot is the fallback for a run whose agent is not known yet, and
+  // nothing else: the row markup reaches it only through the mark above.
+  const list = chats.slice(
+    chats.indexOf("function threadListPanel(repositoryId)"),
+    chats.indexOf("function threadPanel(repositoryId, selectedMessageId)"),
+  );
+  assert.doesNotMatch(list, /ti-live/u);
+  assert.match(list, /threadRunMark\(entry, repositoryId, author\)/u);
+
   // The status badge is drawn whether or not a run is going: progress moved
   // off it, so it is no longer the thing being replaced while work happens.
   assert.match(ui, /<i class="presence presence-\$\{presence\}"><\/i>/u);
@@ -3930,14 +3955,23 @@ test("the run fills the agent working, at the front of the stack", async () => {
   assert.notEqual(fill, undefined, "a working portrait in a stack should brighten");
   assert.match(fill ?? "", /opacity: calc\(0\.5 \+ var\(--run, 0\) \* 0\.005\);/u);
 
-  const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
-    .exec(css)?.[1];
+  // The badge on a filling face is the one `agentFace` already draws, halved
+  // for the stack — not a second dot painted beside it, which was the same
+  // colour and size but static while every other live mark breathed.
+  assert.doesNotMatch(
+    css,
+    /\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{/u,
+    "the stack should reuse the face's own badge rather than draw its own",
+  );
+  const dot =
+    /\n\.cmsg-thread-link \.ctl-faces \.ctl-working \.presence \{([\s\S]*?)\n\}/u
+      .exec(css)?.[1];
   assert.notEqual(dot, undefined, "a filling face still carries its coding dot");
+  assert.match(dot ?? "", /display: block;/u);
   assert.match(dot ?? "", /width: 5px;/u);
   assert.match(dot ?? "", /height: 5px;/u);
-  assert.match(dot ?? "", /background: var\(--green\);/u);
-  assert.match(dot ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
-  assert.doesNotMatch(dot ?? "", /animation:/u);
+  assert.match(dot ?? "", /border-width: 1px;/u);
+  assert.match(dot ?? "", /border-color: var\(--bg-chat\);/u);
 
   // Every kind of participant gets the same surface-coloured cutout. Agent
   // marks are not `.avatar`s, so putting the ring on portraits alone lets two

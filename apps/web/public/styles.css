@@ -6799,8 +6799,8 @@ button.chip.lg:hover {
   border: 0;
 }
 
-/* A presence dot on a 20px face in a stack is a third of the face, and it is
-   answering a question nobody asked of a thread summary. */
+/* A presence dot on every 20px face in a stack is a third of each face, and it
+   is answering a question nobody asked of the people who merely spoke here. */
 .cmsg-thread-link .ctl-faces .presence {
   display: none;
 }
@@ -6815,18 +6815,20 @@ button.chip.lg:hover {
   align-items: center;
 }
 
-.cmsg-thread-link .ctl-faces .ctl-working::before {
-  content: "";
-  position: absolute;
-  right: 0;
+/* The face's own badge rather than one drawn beside it. It used to be a
+   `::before` on this wrapper: the same colour and size, but static, so the one
+   live signal in a room breathed everywhere except here. Halved and given the
+   chat surface's cutout the way the room's own faces are, it is now literally
+   the badge `agentFace` draws, on the clock every other live mark keeps. */
+.cmsg-thread-link .ctl-faces .ctl-working .presence {
+  display: block;
+  right: -1px;
   bottom: 1px;
   z-index: 2;
   width: 5px;
   height: 5px;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 1px var(--bg-chat);
-  pointer-events: none;
+  border-width: 1px;
+  border-color: var(--bg-chat);
 }
 
 /* An agent face in the stack fills itself, so nothing is drawn around it here.
@@ -10618,6 +10620,27 @@ dialog.modal[open]::backdrop {
   .thread-item-active .ti-live {
     animation: none;
   }
+}
+
+/* What a running row actually carries, whenever the agent on it is known: the
+   same mark filling clockwise that the roster and the room both draw, at the
+   size a line of metadata allows. The dot above is now only the fallback for a
+   thread no agent has spoken in yet. Three places showed the same run three
+   different ways — a filling mark, a filling mark with a frozen badge, and
+   this, a bare dot in a colour of its own that said nothing about how far the
+   work had got. Now they read alike, so a glance costs nothing to relearn. */
+.thread-item .ti-run {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+}
+
+/* Halved and hair-ringed, exactly as a face in the room transcript is. */
+.thread-item .ti-run .presence {
+  right: -1px;
+  width: 5px;
+  height: 5px;
+  border-width: 1px;
 }
 
 /* The held counterpart of `.thread-item-active`. Same shape — a wash and a

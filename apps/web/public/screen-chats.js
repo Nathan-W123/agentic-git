@@ -3836,6 +3836,29 @@ function chanTreePanel(repositoryId) {
   </aside>`;
 }
 
+/**
+ * The run on a thread row, drawn the way every other surface draws one.
+ *
+ * A row used to carry a bare accent dot here while the roster and the room
+ * both showed the agent's own mark filling clockwise, so the same run read as
+ * three different things depending on where somebody happened to be looking.
+ * It is the mark here too now, fed by the same reading of the narration the
+ * room's summary uses, so a glance anywhere answers "how far along" the same
+ * way. The dot survives only for a working thread whose agent is not yet
+ * known, where there is no mark to fill.
+ */
+function threadRunMark(entry, repositoryId, fallbackAuthor) {
+  const author = threadWorkingAuthor(entry, repositoryId) ?? fallbackAuthor;
+  const progress = threadProgress(entry) ?? 0;
+  if (author?.agent === undefined) {
+    return `<span class="ti-live"><span class="sr-only">Working</span></span>`;
+  }
+  return `<span class="ti-run">${agentFace(author.agent, 16, {
+    status: "working",
+    progress,
+  })}<span class="sr-only">Working, ${progress}% done</span></span>`;
+}
+
 function threadListPanel(repositoryId) {
   // Newest first, and "newest" means the last thing to happen in the thread
   // rather than when it started — a thread somebody added to five minutes ago
@@ -3942,7 +3965,7 @@ function threadListPanel(repositoryId) {
                         <span class="ti-count">${esc(threadSaidCount(count))}</span>
                         ${
                           working
-                            ? `<span class="ti-live"><span class="sr-only">Working</span></span>`
+                            ? threadRunMark(entry, repositoryId, author)
                             : held
                               ? `<span class="ti-held">Waiting for you</span>`
                               : ""
