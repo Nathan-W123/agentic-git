@@ -3749,11 +3749,14 @@ export class Coordinator {
             if (stopped !== undefined) {
               throw new Error(stopped);
             }
+            // Read out here rather than inside the callback. `answer` is a
+            // `let` the loop reassigns, so its narrowing to the deferred
+            // variant does not survive into a closure — the value could have
+            // changed by the time the callback runs, as far as the compiler
+            // is concerned.
+            const retryAfterMs = answer.retryAfterMs;
             await new Promise((resolve) =>
-              setTimeout(
-                resolve,
-                Math.max(1, Math.min(1_000, answer.retryAfterMs)),
-              ),
+              setTimeout(resolve, Math.max(1, Math.min(1_000, retryAfterMs))),
             );
           }
         } while (answer.outcome === "deferred");
