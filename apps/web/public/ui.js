@@ -1003,6 +1003,11 @@ export function agentFace(agent, size = 34, indicator = {}) {
   // carries the mark, so one glyph says both things — the shape says which
   // vendor, the colour says whose.
   //
+  // A run is drawn as the mark filling up rather than as anything travelling
+  // around it: the mark below is left dark and low, and the same mark is drawn
+  // again on top, clipped to the sector the run has reached, so the logo
+  // itself brightens clockwise until it is whole at 100%.
+  //
   // The size travels as a custom property rather than as an `sz-${size}`
   // class. The class only ever worked for sizes somebody had hand-written a
   // rule for — 28, 34 and 40 — and callers ask for 20, 24, 30 and 32 as well.
@@ -1018,7 +1023,7 @@ export function agentFace(agent, size = 34, indicator = {}) {
       agent?.name ?? AGENTS[kind].label,
     )}">${vendorMark(kind)}<i class="presence presence-${presence}"></i>${
       working
-        ? '<i class="agent-run" aria-label="Working"></i>'
+        ? `<i class="agent-run" aria-label="Working">${vendorMark(kind)}</i>`
         : ""
     }</span>`;
 }

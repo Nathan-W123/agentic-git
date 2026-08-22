@@ -1390,16 +1390,24 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
   const faces = ordered
     .slice(0, 3)
     .map((author, index) => {
+      // The one being measured is handed the run, so its mark fills up with
+      // the progress the same way it does everywhere else. Nothing is drawn
+      // around it here.
+      const running = working !== undefined && index === 0;
       const face =
         author.agent !== undefined
-          ? agentFace(author.agent, 20)
+          ? agentFace(
+              author.agent,
+              20,
+              running ? { status: "working", progress } : {},
+            )
           : avatar(
               author.name,
               20,
               author.name,
               author.name === currentUserName() ? myAvatar() : undefined,
             );
-      return working !== undefined && index === 0
+      return running
         ? `<span class="ctl-working" style="--run:${progress}"
             title="${progress}% by phase">${face}<span class="sr-only">Working, ${progress}% done</span></span>`
         : face;
@@ -6089,16 +6097,47 @@ function autocompleteSnapshot() {
   );
 }
 
+/**
+ * Fits a composer to its message, up to a small scrolling window.
+ *
+ * Highlighted channel and thread fields share their first row with the two
+ * controls. Once their text wraps, `.is-multiline` restores the normal
+ * stacked layout and the field grows with it. Measuring from the live node is
+ * important: the wrap point changes with the width of the thread panel.
+ */
+function resizeComposer(node) {
+  const composer = node.closest?.(".composer");
+  node.style.height = "auto";
+  const field = composer?.querySelector?.(".composer-field");
+  const compact = field !== null && field !== undefined;
+  if (compact) {
+    composer.classList.remove("is-multiline");
+  }
+
+  const multiline =
+    node.value !== "" &&
+    (node.value.includes("\n") || (compact && node.scrollHeight > node.clientHeight));
+  composer?.classList.toggle("is-multiline", multiline);
+
+  if (node.value !== "" && (!compact || multiline)) {
+    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+  }
+  node.style.overflowY = node.scrollHeight > 148 ? "auto" : "hidden";
+  paintComposerMirror(node);
+}
+
+/** Sizes every newly rendered composer, including drafts restored from state. */
+export function resizeComposers(root = document) {
+  for (const node of root.querySelectorAll(".composer textarea")) {
+    resizeComposer(node);
+  }
+}
+
 /** Updates the live layers around a composer without rebuilding the screen. */
 export function updateComposerPresentation(node, target) {
   const before = autocompleteSnapshot();
   updateMentionState(node, target);
-  paintComposerMirror(node);
-
-  node.style.height = "auto";
-  if (node.value !== "") {
-    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
-  }
+  resizeComposer(node);
 
   if (autocompleteSnapshot() !== before) {
     paintComposerSuggestions(activeChannelId());

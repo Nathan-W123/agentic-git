@@ -202,6 +202,7 @@ import {
   pickSlashCommand,
   reactionPicker,
   renderChats,
+  resizeComposers,
   rosterMenuItems,
   personMenuItems,
   restoreChannelAnchor,
@@ -4845,6 +4846,11 @@ function renderNow() {
       ${screen()}
     </div>
   </div>`;
+
+  // Drafts can be restored without producing an input event. Size them from
+  // their real rendered width so short messages keep the compact row while
+  // wrapped messages reopen to the height they need.
+  resizeComposers(root);
 
   restoreSettingsScroll(savedSettingsScroll);
   // What the swap turned out to have opened or closed. Before the transcript

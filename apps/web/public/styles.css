@@ -1009,41 +1009,29 @@ svg.ui-icon {
   border: 2px solid var(--bg-card);
 }
 
-/* Progress is read around the agent itself, not around the status badge. The
-   run sweeps clockwise as a pie-chart ring circling the mark, and the mark is
-   what it fills: a task at 0% shows the face at half strength, and it comes
-   up to full as the ring closes. The status dot stays exactly where it was —
-   it says what the agent is, the ring says how far the work has got. */
+/* Progress is the mark itself filling up, not anything drawn around it. The
+   mark underneath is left dark and low; the same mark is drawn again on top
+   and clipped to the sector the run has reached, so the logo brightens
+   clockwise like a pie chart and is whole only when the work is done. The
+   status dot stays exactly where it was — it says what the agent is, the fill
+   says how far the work has got. */
 .agent-face .agent-run {
   position: absolute;
-  inset: -2px;
+  inset: 0;
   z-index: 0;
-  border-radius: 50%;
-  background: conic-gradient(
-    var(--green) calc(var(--run, 0) * 1%),
-    var(--border-strong) 0
-  );
-  /* The disc is masked back to a ring so the sweep never paints over the
-     face. Everything inside the stroke is cut away rather than covered, which
-     keeps the mark's own opacity the only thing saying how far along it is. */
-  -webkit-mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 2px)
-  );
-  mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 2px)
-  );
+  display: block;
+  -webkit-mask: conic-gradient(#000 calc(var(--run, 0) * 1%), transparent 0);
+  mask: conic-gradient(#000 calc(var(--run, 0) * 1%), transparent 0);
   pointer-events: none;
 }
 
-/* Half-lit at nothing done, fully lit at done. The mark is the progress bar's
-   own fill, so a glance at the face alone already says roughly how far a run
-   has got, before anyone reads the ring around it. */
-.agent-face-working svg {
-  opacity: calc(0.5 + var(--run, 0) * 0.005);
+/* Dark and barely there with nothing done, and lifting a little as the fill
+   grows, so even the unfilled part of the mark says roughly how far along a
+   run is. Only the mark directly in the face is dimmed — the copy inside the
+   sweep is the bright one. */
+.agent-face-working > svg {
+  opacity: calc(0.24 + var(--run, 0) * 0.0016);
+  filter: saturate(0.6) brightness(0.8);
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -2721,6 +2709,43 @@ svg.ui-icon {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* The channel and thread composers start as a single, control-height row.
+   Their highlighted text needs the extra wrapper that identifies them here;
+   private-agent composers keep the roomier toolbar below the field because
+   they also carry model and effort selectors. JavaScript adds
+   `.is-multiline` only when the text actually wraps, at which point the
+   regular field-over-toolbar layout below takes over. */
+.composer:has(.composer-field):not(.is-multiline) {
+  position: relative;
+  min-height: 50px;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-field {
+  min-height: 50px;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-field textarea,
+.composer:has(.composer-field):not(.is-multiline) .composer-mirror {
+  min-height: 50px;
+  padding-left: 54px;
+  padding-right: 54px;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-bar {
+  position: absolute;
+  z-index: 1;
+  inset: 4px 8px;
+  min-height: 42px;
+  padding: 0;
+  pointer-events: none;
+}
+
+.composer:has(.composer-field):not(.is-multiline) .composer-bar button,
+.composer:has(.composer-field):not(.is-multiline) .composer-bar label,
+.composer:has(.composer-field):not(.is-multiline) .composer-bar select {
+  pointer-events: auto;
+}
+
 /* Focus stays quiet enough that the card does not turn into an alert. */
 .composer:focus-within {
   border-color: var(--accent-line);
@@ -2824,6 +2849,7 @@ svg.ui-icon {
   line-height: 1.55;
   min-height: 58px;
   max-height: 164px;
+  overflow-y: auto;
 }
 
 /* Only the composer that actually has a mirror under it.
@@ -5946,22 +5972,6 @@ button.chip.lg:hover {
   border-width: 1px;
 }
 
-/* The ring travels around a face rather than beside it, so a smaller face in
-   the transcript only needs a thinner stroke, not a smaller badge. */
-.cmsg-row .cmsg-avatar .agent-face .agent-run {
-  inset: -1.5px;
-  -webkit-mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 1.5px),
-    #000 calc(100% - 1.5px)
-  );
-  mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 1.5px),
-    #000 calc(100% - 1.5px)
-  );
-}
-
 /* Threads reuse the room transcript markup, but the status badge on a face
    there needs more presence than the halved room size — one and a half times
    the room badge, and only inside the thread panel so group chats stay as they
@@ -5969,20 +5979,6 @@ button.chip.lg:hover {
 .thread-panel .cmsg-row .cmsg-avatar .agent-face .presence {
   width: 7.5px;
   height: 7.5px;
-}
-
-.thread-panel .cmsg-row .cmsg-avatar .agent-face .agent-run {
-  inset: -2px;
-  -webkit-mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 2px)
-  );
-  mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 2px)
-  );
 }
 
 .cmsg-row .cmsg-body {
@@ -6706,33 +6702,9 @@ button.chip.lg:hover {
   pointer-events: none;
 }
 
-.cmsg-thread-link .ctl-faces .ctl-working::after {
-  content: "";
-  position: absolute;
-  inset: -2px;
-  z-index: 1;
-  border-radius: 50%;
-  background: conic-gradient(
-    var(--green) calc(var(--run, 0) * 1%),
-    var(--border-strong) 0
-  );
-  -webkit-mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 1.5px),
-    #000 calc(100% - 1.5px)
-  );
-  mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 1.5px),
-    #000 calc(100% - 1.5px)
-  );
-  pointer-events: none;
-}
-
-/* And the face inside it fills with the run, half-lit at nothing done and
-   fully lit when the ring closes — a thread's progress is legible from the
-   stack alone. */
-.cmsg-thread-link .ctl-faces .ctl-working > .agent-face,
+/* An agent face in the stack fills itself, so nothing is drawn around it here.
+   A person's avatar has no mark to fill, so it keeps the plain ramp: dim with
+   nothing done, whole when the run is. */
 .cmsg-thread-link .ctl-faces .ctl-working > .avatar {
   opacity: calc(0.5 + var(--run, 0) * 0.005);
 }
