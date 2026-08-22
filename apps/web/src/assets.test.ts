@@ -5276,9 +5276,12 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(pop ?? "", /opacity: 0/u);
   assert.match(pop ?? "", /visibility: hidden/u);
   assert.match(pop ?? "", /pointer-events: none/u);
+  // The delay may keep accidental passes quiet, but a visible profile is
+  // always fully opaque rather than fading through the transcript beneath it.
+  assert.match(pop ?? "", /opacity 0s linear 0\.1s/u);
   assert.match(
     css,
-    /\.pcard-anchor:hover > \.pcard-pop,\n\.pcard-anchor:focus-within > \.pcard-pop \{[\s\S]*?visibility: visible;\s*pointer-events: auto;[\s\S]*?transition-delay/u,
+    /\.pcard-anchor:hover > \.pcard-pop,\n\.pcard-anchor:focus-within > \.pcard-pop \{[\s\S]*?opacity: 1;\s*visibility: visible;\s*pointer-events: auto;[\s\S]*?transition-delay/u,
   );
   // Fixed cards outlive their hover for a beat; exclusivity snaps every other
   // one shut the instant a new face is held open, so two identities cannot

@@ -6145,9 +6145,12 @@ button.chip.lg:hover {
   /* The delay in the base rule is the one that runs on the way *out*: a
      pointer crossing a column of faces must not leave a trail of cards behind
      it, and one that clips the corner of a card must not lose it. */
+  /* Delay the state change without fading the whole surface through partial
+     opacity. The card now appears and leaves as one solid panel, while the
+     delay still prevents incidental pointer passes from flashing it open. */
   transition:
-    opacity 0.1s ease 0.1s,
-    visibility 0.1s ease 0.1s;
+    opacity 0s linear 0.1s,
+    visibility 0s linear 0.1s;
 }
 
 /* The opening delay is short but not nothing: a transcript is a column of
@@ -6162,7 +6165,7 @@ button.chip.lg:hover {
 }
 
 /* Only one card may stay opaque. Fixed pops keep their last seat when the
-   pointer moves on, and the delayed fade-out otherwise leaves two identities
+   pointer moves on, and the delayed hide otherwise leaves two identities
    stacked on the same place — the mash-up of banners and names. */
 body:has(.pcard-anchor:is(:hover, :focus-within))
   .pcard-anchor:not(:hover):not(:focus-within)
