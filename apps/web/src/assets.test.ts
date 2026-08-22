@@ -1944,6 +1944,13 @@ test("working agent faces fill the mark itself with the run's progress", async (
     .exec(css)?.[1];
   assert.notEqual(faceFillSweep, undefined, "a live fill should carry a sweep");
   assert.match(faceFillSweep ?? "", /mask-size: 250% 100%;/u);
+  assert.equal(
+    (faceFillSweep ?? "").match(
+      /#000 0 38%,\s+rgba\(0, 0, 0, 0\.4\) 48%,\s+#000 58% 100%/gu,
+    )?.length,
+    2,
+    "both mask forms should dim the travelling band instead of brightening it",
+  );
   assert.match(
     faceFillSweep ?? "",
     /animation: agent-run-sweep 2\.4s ease-in-out infinite;/u,
