@@ -6398,10 +6398,16 @@ button.chip.lg:hover {
 
 /* The repliers, overlapped. `avatar-stack` already carries the overlap for
    portraits; agent faces are vendor marks rather than `.avatar`s, so the same
-   pull has to be spelled out for whatever the stack actually holds. The ring
-   is the chat surface's own colour, which is what makes overlapping faces read
-   as separate rather than as one smudge. */
+   pull has to be spelled out for whatever the stack actually holds. Every
+   direct child gets a backing and ring in the chat surface's own colour.
+   Drawing the ring as a shadow instead of an avatar border gives people and
+   agents the same circular cutout without changing either icon's size, so
+   both faces remain legible where they cross. */
 .cmsg-thread-link .ctl-faces > * {
+  position: relative;
+  border-radius: 50%;
+  background: var(--bg-chat);
+  box-shadow: 0 0 0 2px var(--bg-chat);
   margin-right: -6px;
 }
 
@@ -6410,7 +6416,7 @@ button.chip.lg:hover {
 }
 
 .cmsg-thread-link .ctl-faces .avatar {
-  border: 2px solid var(--bg-chat);
+  border: 0;
 }
 
 /* A presence dot on a 20px face in a stack is a third of the face, and it is

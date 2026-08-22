@@ -3614,6 +3614,20 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.doesNotMatch(ring ?? "", /mask:/u);
   assert.doesNotMatch(ring ?? "", /width:/u);
   assert.doesNotMatch(ring ?? "", /height:/u);
+
+  // Every kind of participant gets the same surface-coloured cutout. Agent
+  // marks are not `.avatar`s, so putting the ring on portraits alone lets two
+  // agent icons collapse into one shape when the stack overlaps.
+  const stackedFace =
+    /\n\.cmsg-thread-link \.ctl-faces > \* \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(stackedFace, undefined, "stacked faces should share a ring");
+  assert.match(stackedFace ?? "", /border-radius: 50%;/u);
+  assert.match(stackedFace ?? "", /background: var\(--bg-chat\);/u);
+  assert.match(
+    stackedFace ?? "",
+    /box-shadow: 0 0 0 2px var\(--bg-chat\);/u,
+    "the chat surface should visibly separate overlapping reply icons",
+  );
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {
