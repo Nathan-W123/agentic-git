@@ -148,12 +148,16 @@ That is what turns "wait for total.js" into "take total.js except lines 40–80"
 The rule is deliberately reluctant, because a claim narrower than the truth
 hands another task lines this one will edit:
 
-- **A file the plan named is the plan's, all of it.** An agent told to edit a
-  file edits it wherever it needs to, including the lines between the symbols
-  an index can name and lines that did not exist when the index was built.
-  This is also why deriving a narrower claim from the plan's *symbols* would be
-  illusory: enrichment already makes a plan that names a file claim that file's
-  symbols, so the derived ranges would cover it anyway.
+- **A file the plan named is the plan's, all of it** — while there is anything
+  else to grant. An agent told to edit a file edits it wherever it needs to,
+  including the lines between the symbols an index can name and lines that did
+  not exist when the index was built. This is also why deriving a narrower
+  claim from the plan's *symbols* is usually illusory: enrichment already makes
+  a plan that names a file claim that file's symbols, so the derived ranges
+  cover it anyway. The one exception is
+  [below](#when-every-file-the-plan-named-is-contested), where the derived
+  ranges demonstrably do *not* cover the file and the alternative is admitting
+  nothing at all.
 - **A file a misnamed path grounds to is the same case.** The plan meant to
   edit that whole file; it just called it something else.
 - **A file the plan reaches only because verification mapped a symbol onto code
@@ -168,6 +172,33 @@ parsed, the whole file is the answer again and the file is withheld as before.
 The candidate side has one more requirement: it must have *declared* the path.
 What a division holds back are hunks of a patch on that path, and a path the
 plan only reached through a misname is not one any patch will carry.
+
+### When every file the plan named is contested
+
+Withholding contested files answers nothing when the plan named nothing else:
+the reduced plan is empty, and until now that was the end of it — the task
+waited, however far apart the two were working. Two agents in different
+functions of one very long file are exactly that shape, and it is the shape
+most worth splitting.
+
+So when, and only when, dropping the contested paths would leave the plan with
+no file at all, the paths are kept and the holders' symbols are withheld
+inside them instead. Three things have to hold, and each is about the split
+being checkable rather than merely announced:
+
+- every file being granted parses, so "did this patch reach into that symbol"
+  has an answer for all of them;
+- every holder is visible, holds no frozen claim over the path, and every
+  symbol it declares can be placed somewhere among the files it declared — an
+  unplaced symbol is one it may be about to write at a line nobody can predict;
+- the holders' ranges leave a hole in what the index describes. This is the
+  answer to the objection above: where enrichment's derived ranges cover every
+  line the index placed, what would be granted is the space past the last one,
+  which is permission to append to a file that is entirely somebody else's. In
+  that case the plan waits, as it did before.
+
+The candidate side is unchanged: it must have declared each path itself, since
+a division holds back hunks of a patch and a misnamed path carries none.
 
 ### How it is enforced
 
@@ -212,9 +243,11 @@ this measures.
 
 The recorded numbers in [README.md](README.md) and
 [live-evidence.md](live-evidence.md) stand. Every pair where at least one side
-declared the shared path scores and leases exactly as it did: the ranged path
-is reachable only when both sides' claims are bounded, and a plan that named a
-file is never bounded. No lease exists now that did not exist before except a
+declared the shared path scores and leases exactly as it did, unless the
+candidate named nothing that was not contested — the ranged path is reachable
+only when both sides' claims are bounded, and a plan that named a file is
+bounded only in the last-resort case
+[above](#when-every-file-the-plan-named-is-contested). No lease exists now that did not exist before except a
 ranged one on a file a plan reached only through grounding, and a ranged lease
 cannot refuse anything a whole-file lease would have let through.
 

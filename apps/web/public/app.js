@@ -197,7 +197,6 @@ import {
   pickSlashCommand,
   reactionPicker,
   renderChats,
-  roleMenuItems,
   rosterMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
@@ -1144,36 +1143,29 @@ function notificationBell() {
  * The screens the account menu is the way into.
  *
  * Both account buttons — the topbar avatar and the channel sidebar's foot —
- * open the same menu, so this is one change point for both. Each destination
- * was a live screen or panel with no door: the routes existed, the screens
- * rendered, `go-notifications` was even a case in the action handler, and
- * nothing anywhere navigated to any of them.
+ * open the same menu, so this is one change point for both.
  *
- * The counts are read here rather than carried in state, so a number in this
+ * Notifications is deliberately not one of them any more. Pressing your own
+ * name is how you reach your own things, and a backlog of everything every
+ * agent has done is not that; it is still the bell in the topbar and still
+ * reachable by name in the quick switcher.
+ *
+ * My Agents is absent for the same reason it always was: a roster of agent
+ * connections is not the account's own things either, and it keeps the quick
+ * switcher and the channel agent menu's "Connect agents" as its doors.
+ *
+ * The count is read here rather than carried in state, so a number in this
  * menu cannot disagree with the list it sits above.
  */
 function accountDestinations() {
-  const unread = unreadCount();
   const dms = dmUnreadTotal();
   return [
-    {
-      act: "go-notifications",
-      label: "Notifications",
-      iconName: "bell",
-      ...(unread === 0 ? {} : { hint: `${unread} unread` }),
-    },
     {
       act: "dm-list",
       label: "Direct messages",
       iconName: "chatBubble",
       ...(dms === 0 ? {} : { hint: `${dms} unread` }),
     },
-    // My Agents is deliberately absent. This menu is the account's own
-    // things — what is waiting for you and who is writing to you — and a
-    // roster of agent connections is not that. The screen keeps its other
-    // doors: the quick switcher by name, and the channel agent menu's
-    // "Connect agents" (into Settings) while this account has connected
-    // nothing.
   ];
 }
 
@@ -1516,77 +1508,6 @@ function commitAgentRename(providerId, name) {
   state.settingsRenamingId = undefined;
   render();
   void renameAgent(providerId, name).then(() => render());
-}
-
-/**
- * Writes one channel's role for one agent, from the details tab's inline
- * field.
- *
- * The repository is read off the field rather than taken from the open
- * channel: the tab lists every room the agent belongs to, and the whole point
- * of the list is that a role is per repository — the same agent can be the
- * reviewer here and the migration hand next door.
- *
- * `defaultValue` is moved to the committed text because Enter and the blur it
- * causes both arrive, and a second write would be a second request saying the
- * same thing.
- */
-function commitChannelRole(input) {
-  const agentId = input.dataset.value;
-  const repositoryId = input.dataset.repo;
-  if (!agentId || !repositoryId || input.value === input.defaultValue) {
-    return;
-  }
-  const role = input.value.trim();
-  input.defaultValue = role;
-  setChannelAgentSetting(repositoryId, agentId, "role", role, render);
-  render();
-}
-
-/**
- * Which role field opened the picker.
- *
- * A menu item carries one value — the role — and the field it was opened from
- * is the rest of the address. Remembered here rather than packed into that
- * value because an agent id already contains a colon and a repository id is
- * free text, so any separator chosen for them would be one somebody could
- * type.
- */
-let roleMenuTarget;
-
-/** The role field the picker was opened from, if it is still on screen. */
-function openRoleInput() {
-  if (roleMenuTarget === undefined) {
-    return null;
-  }
-  return (
-    $$("[data-act='agent-role-input']").find(
-      (node) =>
-        node.dataset.value === roleMenuTarget.agentId &&
-        node.dataset.repo === roleMenuTarget.repositoryId,
-    ) ?? null
-  );
-}
-
-/**
- * Writes a role chosen from the picker, exactly as typing it would.
- *
- * The field is set first so it never disagrees with what was just picked in
- * the frame before the redraw, and `defaultValue` moves with it so the blur
- * that follows does not send the same word a second time.
- */
-function pickChannelRole(role) {
-  const target = roleMenuTarget;
-  if (target === undefined) {
-    return;
-  }
-  const input = openRoleInput();
-  if (input !== null) {
-    input.value = role;
-    input.defaultValue = role;
-  }
-  setChannelAgentSetting(target.repositoryId, target.agentId, "role", role, render);
-  render();
 }
 
 function appearanceCard() {
@@ -6021,36 +5942,6 @@ document.addEventListener("click", (event) => {
         })
         .catch((error) => toast(error.message, "error"));
       return;
-    /*
-     * The role field's picker. The field itself still takes any words — this
-     * only offers the two the server acts on, so nobody has to know their
-     * exact spelling to use them.
-     */
-    case "agent-role-menu": {
-      const items = roleMenuItems(value, node.dataset.repo);
-      if (items.length === 0) {
-        return;
-      }
-      roleMenuTarget = { agentId: value, repositoryId: node.dataset.repo };
-      showMenu(node, items);
-      return;
-    }
-    case "agent-role-pick": {
-      // `closePopover` returns focus to the chevron, which the redraw inside
-      // `pickChannelRole` then replaces — so the menu goes first.
-      closePopover();
-      pickChannelRole(value ?? "");
-      roleMenuTarget = undefined;
-      return;
-    }
-    case "agent-role-custom": {
-      const input = openRoleInput();
-      closePopover();
-      roleMenuTarget = undefined;
-      input?.focus();
-      input?.select();
-      return;
-    }
     case "agent-switch":
     case "agent-menu": {
       // Was folded in with the navigation cases below, so the three dots on
@@ -6550,14 +6441,6 @@ document.addEventListener("submit", (event) => {
       const input = $("[data-act='settings-rename-input']", form);
       if (input !== null) {
         commitAgentRename(form.dataset.value, input.value);
-      }
-      return;
-    }
-    /** The details tab's role field: Enter commits, blur commits the same. */
-    case "agent-role-form": {
-      const input = $("[data-act='agent-role-input']", form);
-      if (input !== null) {
-        commitChannelRole(input);
       }
       return;
     }
@@ -7075,19 +6958,9 @@ document.addEventListener("keydown", (event) => {
     render();
     return;
   }
-  // Escape abandons a half-typed role and puts the saved one back, which a
-  // plain revert of the field's value is: `defaultValue` is what was last
-  // committed.
-  if (act === "agent-role-input" && event.key === "Escape") {
-    event.preventDefault();
-    node.value = node.defaultValue;
-    node.blur();
-    return;
-  }
   if (
     (act === "channel-rename-input" ||
-      act === "settings-rename-input" ||
-      act === "agent-role-input") &&
+      act === "settings-rename-input") &&
     event.key === "Enter" &&
     !imeComposing(event)
   ) {
@@ -7100,30 +6973,11 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("focusout", (event) => {
   const node = event.target;
   const act = node?.dataset?.act;
-  // The Settings rename is the same bargain — clicking away commits rather
-  // than discards — but it writes account-wide and has no role field beside
-  // it, so it commits on its own here.
+  // The Settings rename commits when focus leaves the account-wide field.
   if (act === "settings-rename-input") {
     const providerId = node.dataset.value;
     if (providerId && state.settingsRenamingId === providerId) {
       commitAgentRename(providerId, node.value);
-    }
-    return;
-  }
-  // The role field on the details tab makes the same bargain: clicking away
-  // is how most edits to it end, and losing one because it was never
-  // "submitted" would be the field quietly discarding work.
-  if (act === "agent-role-input") {
-    // Unless the click that took focus away was the chevron beside it. That
-    // opens the picker, and committing here would redraw the field — taking
-    // the button the menu is anchored to out of the page before the click
-    // that opens it lands. Whatever was half-typed is still in the field and
-    // still commits on the next blur.
-    if (event.relatedTarget?.dataset?.act === "agent-role-menu") {
-      return;
-    }
-    if (node.isConnected) {
-      commitChannelRole(node);
     }
     return;
   }

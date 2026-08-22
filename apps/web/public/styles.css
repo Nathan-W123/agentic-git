@@ -6396,12 +6396,75 @@ button.chip.lg:hover {
   text-decoration: underline;
 }
 
+/* The reply count stays the way into the thread; this quiet second line says
+   what the live agent is doing without repeating the detailed narration in
+   the room. It is constrained to one line because a phase is a glance, not a
+   second message. */
+.cmsg-thread-link .ctl-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.cmsg-thread-link .ctl-summary-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* A narrow highlight travels through the letters while the task is live. The
+   base and highlight both come from the theme, so the sweep remains legible
+   on light and dark chat surfaces and with a custom accent. */
+.cmsg-thread-link .ctl-activity {
+  max-width: min(220px, 45vw);
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  background: linear-gradient(
+    100deg,
+    var(--text-4) 0 38%,
+    var(--text) 48%,
+    var(--text-4) 58% 100%
+  );
+  background-position: 100% 0;
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thread-activity-sweep 2.4s ease-in-out infinite;
+}
+
+@keyframes thread-activity-sweep {
+  to {
+    background-position: -150% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmsg-thread-link .ctl-activity {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
 /* The repliers, overlapped. `avatar-stack` already carries the overlap for
    portraits; agent faces are vendor marks rather than `.avatar`s, so the same
-   pull has to be spelled out for whatever the stack actually holds. The ring
-   is the chat surface's own colour, which is what makes overlapping faces read
-   as separate rather than as one smudge. */
+   pull has to be spelled out for whatever the stack actually holds. Every
+   direct child gets a backing and ring in the chat surface's own colour.
+   Drawing the ring as a shadow instead of an avatar border gives people and
+   agents the same circular cutout without changing either icon's size, so
+   both faces remain legible where they cross. */
 .cmsg-thread-link .ctl-faces > * {
+  position: relative;
+  border-radius: 50%;
+  background: var(--bg-chat);
+  box-shadow: 0 0 0 2px var(--bg-chat);
   margin-right: -6px;
 }
 
@@ -6410,7 +6473,7 @@ button.chip.lg:hover {
 }
 
 .cmsg-thread-link .ctl-faces .avatar {
-  border: 2px solid var(--bg-chat);
+  border: 0;
 }
 
 /* A presence dot on a 20px face in a stack is a third of the face, and it is
@@ -7437,42 +7500,6 @@ button.chip.lg:hover {
   flex: none;
 }
 
-/* Everywhere else this agent works, on the same hairline rows: the channel is
-   the label and the role in it is the editable value. */
-.agent-spec .aspec-channels .aspec-row-label {
-  font-weight: 600;
-  color: var(--text-2);
-}
-
-.agent-spec .aspec-role {
-  flex: 1;
-  min-width: 0;
-  padding: 4px 7px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  text-align: right;
-}
-
-.agent-spec .aspec-role::placeholder {
-  color: var(--text-3);
-}
-
-.agent-spec .aspec-role:hover {
-  border-color: var(--border-soft);
-}
-
-.agent-spec .aspec-role:focus {
-  outline: none;
-  border-color: var(--accent-line);
-  background: var(--bg-inset);
-  color: var(--text);
-  text-align: left;
-}
-
 .agent-spec .aspec-note {
   margin-top: 8px;
   color: var(--text-3);
@@ -7746,66 +7773,6 @@ button.chip.lg:hover {
   text-transform: capitalize;
 }
 
-/* Input and picker travel together, so the pair is what the row sizes. */
-.agent-spec .aspec-role-field {
-  display: flex;
-  min-width: 0;
-  flex: 0 1 230px;
-  align-items: center;
-  gap: 2px;
-}
-
-.agent-spec .aspec-role {
-  flex: 0 1 230px;
-  padding: 7px 10px;
-  border-color: var(--border-soft);
-  background: var(--bg-card);
-  font-size: 13px;
-}
-
-.agent-spec .aspec-role-field .aspec-role {
-  flex: 1 1 auto;
-}
-
-.agent-spec .aspec-role-pick {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  place-items: center;
-}
-
-.agent-spec .aspec-role-pick:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.agent-spec .aspec-role-pick:focus-visible {
-  border-color: var(--accent-line);
-  color: var(--text);
-  outline: none;
-}
-
-.agent-spec .aspec-role-pick svg {
-  width: 13px;
-  height: 13px;
-}
-
-.agent-spec .aspec-role:hover {
-  border-color: var(--border-strong);
-}
-
-.agent-spec .aspec-role:focus {
-  border-color: var(--accent-line);
-  background: var(--bg-inset);
-}
-
 .agent-spec .aspec-nav {
   padding: 6px 8px;
   border: 1px solid transparent;
@@ -7889,15 +7856,6 @@ button.chip.lg:hover {
   .agent-spec .aspec-capability {
     align-items: flex-start;
     flex-wrap: wrap;
-  }
-
-  .agent-spec .aspec-role-field {
-    flex-basis: calc(100% - 36px);
-    margin-left: 36px;
-  }
-
-  .agent-spec .aspec-role {
-    text-align: left;
   }
 
   .agent-spec .aspec-current-task .aspec-nav {

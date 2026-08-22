@@ -3541,7 +3541,10 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     `"use strict";\n${slice("function threadParticipants(replies", "\n/**")}\n${slice(
       "function threadWorkingAuthor(entry",
       "\n/*",
-    )}\n${slice("function threadSummaryLink(entry", "\n/**")}\nreturn threadSummaryLink;`,
+    )}\n${slice("function threadActivityLabel(entry", "\n/**")}\n${slice(
+      "function threadSummaryLink(entry",
+      "\n/**",
+    )}\nreturn threadSummaryLink;`,
   )(
     () => undefined,
     () => false,
@@ -3577,6 +3580,11 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     "the ring should carry the run's position",
   );
   assert.match(
+    running,
+    /<span class="ctl-activity">Starting<\/span>/u,
+    "a live thread should say what the agent is doing",
+  );
+  assert.match(
     running.slice(running.indexOf("ctl-faces")),
     /ctl-working[\s\S]*?<face>claude<\/face>[\s\S]*?<avatar>Ada<\/avatar>/u,
     "the agent still working should be ringed and first in the stack",
@@ -3591,6 +3599,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   // people spoke in.
   const idle = summary({ id: "m1", replies }, replies, "repo-1", undefined);
   assert.doesNotMatch(idle, /ctl-working/u);
+  assert.doesNotMatch(idle, /ctl-activity/u);
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
   // A pie over the whole face rather than a badge in its corner: the wedge
@@ -3614,6 +3623,63 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.doesNotMatch(ring ?? "", /mask:/u);
   assert.doesNotMatch(ring ?? "", /width:/u);
   assert.doesNotMatch(ring ?? "", /height:/u);
+
+  // Every kind of participant gets the same surface-coloured cutout. Agent
+  // marks are not `.avatar`s, so putting the ring on portraits alone lets two
+  // agent icons collapse into one shape when the stack overlaps.
+  const stackedFace =
+    /\n\.cmsg-thread-link \.ctl-faces > \* \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(stackedFace, undefined, "stacked faces should share a ring");
+  assert.match(stackedFace ?? "", /border-radius: 50%;/u);
+  assert.match(stackedFace ?? "", /background: var\(--bg-chat\);/u);
+  assert.match(
+    stackedFace ?? "",
+    /box-shadow: 0 0 0 2px var\(--bg-chat\);/u,
+    "the chat surface should visibly separate overlapping reply icons",
+  );
+});
+
+test("working thread summaries carry a concise sweeping activity", async () => {
+  const source = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const start = source.indexOf("function threadActivityLabel(entry)");
+  const end = source.indexOf("\n/**", start);
+  assert.notEqual(start, -1, "the activity selector should exist");
+  assert.notEqual(end, -1, "the activity selector should have a boundary");
+  const activity = Function(
+    "threadReplyTurns",
+    `"use strict";\n${source.slice(start, end)}\nreturn threadActivityLabel;`,
+  )((replies: unknown[]) => [{ replies }]) as (entry: {
+    replies: Array<{ kind: string; content: string }>;
+  }) => string;
+
+  assert.equal(
+    activity({
+      replies: [{ kind: "progress", content: "Reading the repository and working out a plan…" }],
+    }),
+    "Reading code",
+  );
+  assert.equal(
+    activity({
+      replies: [{ kind: "progress", content: "Working on apps/web/public/styles.css…" }],
+    }),
+    "Editing styles.css",
+  );
+  assert.equal(
+    activity({
+      replies: [{ kind: "progress", content: "Finished editing. Validating…" }],
+    }),
+    "Testing",
+  );
+
+  const sweep = /\n\.cmsg-thread-link \.ctl-activity \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(sweep ?? "", /animation: thread-activity-sweep/u);
+  assert.match(sweep ?? "", /background-clip: text;/u);
+  assert.match(css, /@keyframes thread-activity-sweep/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-activity \{\n {4}animation: none;/u,
+  );
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {
@@ -4040,7 +4106,7 @@ test("the spec tab is where an agent is made org-wide or kept personal", async (
   );
 });
 
-test("agent details use the reference profile without dropping existing controls", async () => {
+test("agent details use the reference profile with supported controls", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const spec = chats.slice(
@@ -4096,14 +4162,12 @@ test("agent details use the reference profile without dropping existing controls
     /\.aspec-current-task-active \.aspec-nav \{[\s\S]*?background: rgba\(0, 0, 0, 0\.14\);/u,
   );
 
-  // Every interactive or informative part of the former details page remains
-  // on the single scrolling surface, including owner-only and read-only paths.
+  // The remaining interactive and informative parts stay on the single
+  // scrolling surface, including owner-only and read-only paths.
   for (const action of [
     "channel-agent-visibility",
     "channel-agent-model",
     "channel-agent-effort",
-    "agent-role-form",
-    "agent-role-input",
     "agent-panel-tab",
     "agent-usage-refresh",
   ]) {
@@ -4111,13 +4175,13 @@ test("agent details use the reference profile without dropping existing controls
   }
   assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
   assert.match(spec, /data-value="history" title="Task history"/u);
-  assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository, member \}\)/u);
+  assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository \}\)/u);
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
   assert.match(spec, /const readOnly =/u);
 });
 
-test("the role field offers the two reserved roles without stopping anyone typing one", async () => {
+test("agent details omit roles while keeping channel membership", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
@@ -4125,53 +4189,23 @@ test("the role field offers the two reserved roles without stopping anyone typin
     chats.indexOf("function agentSpec(agent, repositoryId)"),
     chats.indexOf("function agentPanel()"),
   );
-  const menu = chats.slice(
-    chats.indexOf("const RESERVED_ROLES = ["),
-    chats.indexOf("const AGENT_STATUS_TITLE"),
-  );
+  for (const source of [spec, app]) {
+    assert.doesNotMatch(source, /agent-role-(?:form|input|menu|pick|custom)/u);
+  }
+  assert.doesNotMatch(chats, /roleMenuItems|RESERVED_ROLES|INVESTIGATOR_ROLE/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-role/u);
 
-  // The field is still a field: free text, same commit contract as before.
-  assert.match(spec, /class="aspec-role" data-act="agent-role-input"/u);
-  // With a picker beside it, drawn only where the server would accept one.
-  assert.match(spec, /canManageRepository\(repository\.id\)/u);
-  assert.match(spec, /data-act="agent-role-menu"/u);
-  assert.match(css, /\.agent-spec \.aspec-role-field\s*\{/u);
-  assert.match(css, /\.agent-spec \.aspec-role-pick\s*\{/u);
-
-  // Both reserved names, spelled the way the server compares them.
-  assert.match(chats, /const INVESTIGATOR_ROLE = "investigator"/u);
-  assert.match(menu, /value: AUDITOR_ROLE/u);
-  assert.match(menu, /value: INVESTIGATOR_ROLE/u);
-  // A personal agent cannot hold either, so the entry says so rather than
-  // waiting for the server to refuse it.
-  assert.match(menu, /agent\.visibility !== "org"/u);
-  assert.match(menu, /disabled: personal \|\| current === role\.value/u);
-  // And the menu always leaves a way back to plain typing.
-  assert.match(menu, /act: "agent-role-custom"/u);
-  assert.match(menu, /export function roleMenuItems\(agentId, repositoryId\)/u);
-
-  // Picking one writes through the same setting path a typed role does.
-  assert.match(app, /case "agent-role-menu":/u);
-  assert.match(app, /roleMenuItems\(value, node\.dataset\.repo\)/u);
-  assert.match(app, /showMenu\(node, items\)/u);
+  assert.match(spec, /const channelAssignment = \(repository\)/u);
+  assert.match(spec, /Channel membership/u);
   assert.match(
-    app,
-    /setChannelAgentSetting\(target\.repositoryId, target\.agentId, "role", role, render\)/u,
-  );
-  // Opening the picker must not commit-and-redraw the field out from under
-  // the click that opens it.
-  assert.match(
-    app,
-    /event\.relatedTarget\?\.dataset\?\.act === "agent-role-menu"/u,
+    spec,
+    /\.map\(\(\{ repository \}\) => channelAssignment\(repository\)\)/u,
   );
 });
 
-test("a typed role survives the redraw that commits it", async () => {
-  // Once the roster has resolved, `channelAgentsFor` used to take role only
-  // from that answer. Committing a typed role writes the local override and
-  // redraws before the roster is fetched again — so the field went blank
-  // on Enter unless the override is read here the same way model and effort
-  // already are.
+test("repository role overrides survive roster refreshes", async () => {
+  // Roles still affect task dispatch and roster presentation outside agent
+  // details, so a local override must continue to beat stale roster data.
   const data = await publicFile("data.js");
   const body = data.slice(
     data.indexOf("export function channelAgentsFor"),

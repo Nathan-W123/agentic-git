@@ -1165,24 +1165,138 @@ test("the granted lease on a shared file excludes the holder's lines", () => {
   ]);
 });
 
-test("a holder that named the file still takes all of it", () => {
+/** A holder that simply named the file, as most plans do. */
+function declaringHolder(
+  symbols: readonly string[] = ["orderTotal"],
+): AgentPlan {
+  return plan("task_b", {
+    expectedFiles: ["src/pricing/total.js"],
+    expectedSymbols: [...symbols],
+  });
+}
+
+test("a holder that named the file still takes all of it while there is anything else to grant", () => {
   // Nothing here is narrower than a path. An agent told to edit a file edits
   // it wherever it needs to, including lines no index placed, so reading a
   // limit into that claim would hand the candidate lines the holder will use.
+  // The candidate named a second file, so withholding the contested path is
+  // already an answer and the finer reading below is never reached.
+  const admission = admit(
+    plan("task_a", {
+      objective: "render a currency prefix when a price is displayed",
+      expectedFiles: ["src/pricing/total.js", "src/format/currency.js"],
+      expectedSymbols: ["showPrice"],
+    }),
+    [declaringHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/format/currency.js",
+    "symbol:showPrice",
+  ]);
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["file:src/pricing/total.js"],
+  );
+});
+
+/**
+ * Splitting a file both plans named.
+ *
+ * Withholding contested paths answers nothing when the candidate named
+ * nothing else: the reduced plan is empty and the task waits, however far
+ * apart the two are working. That is the ordinary shape of the collision —
+ * two agents in different functions of one very long file — so it is the one
+ * worth drawing the line inside rather than around.
+ */
+
+test("two plans working on different functions of one file both run", () => {
   const admission = admit(
     sharedFileCandidate(),
-    [
-      plan("task_b", {
-        expectedFiles: ["src/pricing/total.js"],
-        expectedSymbols: ["orderTotal"],
-      }),
-    ],
+    [declaringHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  // The path is granted to both. What the candidate does not get is the forty
+  // lines the holder's own function occupies.
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/pricing/total.js",
+    "symbol:formatTotal",
+  ]);
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["symbol:orderTotal"],
+  );
+  assert.deepEqual(admission.deferredResources?.[0]?.locations, [
+    { file: "src/pricing/total.js", startLine: 40, endLine: 80 },
+  ]);
+  assert.deepEqual(admission.deferredResources?.[0]?.heldBy, ["task_b"]);
+  // The lease is the durable half of it, and it says the same thing.
+  const lease = admission.ownershipGrants.find(
+    (entry) => entry.resourceType === "file",
+  );
+  assert.deepEqual(lease?.ranges, [
+    { startLine: 1, endLine: 39 },
+    { startLine: 81, endLine: Number.MAX_SAFE_INTEGER },
+  ]);
+});
+
+test("a holder with a symbol the index cannot place keeps the whole file", () => {
+  // `roundingRule` is nowhere in the file task_b named, so task_b may be about
+  // to write it at a line nobody can predict. Its footprint is not known to be
+  // smaller than the file and the candidate waits, as it always did.
+  const admission = admit(
+    sharedFileCandidate(),
+    [declaringHolder(["orderTotal", "roundingRule"])],
     new PlanAdmissionController(),
     placed(),
   );
 
   assert.equal(admission.status, "sequenced");
   assert.deepEqual(admission.blockedBy, ["task_b"]);
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("a holder that occupies every line the index placed keeps the file", () => {
+  // The file is nothing but the holder's function, so "the rest of it" is the
+  // space after the last line anyone can place. Granting that is permission to
+  // append to a file whose every known line is somebody else's, which is the
+  // illusory split the enriched symbol claim would otherwise produce.
+  const admission = admit(
+    sharedFileCandidate(),
+    [declaringHolder()],
+    new PlanAdmissionController(),
+    {
+      symbolRangesInFile: () => [
+        { name: "orderTotal", startLine: 1, endLine: 80 },
+      ],
+    },
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("a file both plans named is not split when it cannot be read", () => {
+  // No line positions, so "did this patch touch the holder's function" has no
+  // answer, and a withholding the control plane cannot check is not one.
+  const admission = admit(
+    sharedFileCandidate(),
+    [declaringHolder()],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: () => undefined },
+  );
+
+  assert.equal(admission.status, "sequenced");
   assert.equal(admission.deferredResources, undefined);
 });
 

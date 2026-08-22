@@ -271,6 +271,84 @@ function occupiedSpans(
   return placed.size < reaching.size ? undefined : found;
 }
 
+/**
+ * The lines a plan's own declared symbols occupy inside a file it declared.
+ *
+ * {@link occupiedSpans} deliberately reads a declared path as the whole file,
+ * and that stays the ordinary reading: an agent told to edit a file edits it
+ * wherever it needs to, so narrowing every such claim to the symbols the plan
+ * happened to list would hand away lines its holder will use. This asks the
+ * other question — where *inside* a declared file does this plan actually
+ * work — and there is exactly one caller, for the one case where the answer
+ * to the ordinary question is "then nobody else runs at all".
+ *
+ * It answers only when the answer is complete. Every symbol the plan declares
+ * has to be placeable somewhere among the files it declared: a symbol the
+ * index cannot find is one the plan is about to write from scratch, at a line
+ * nobody can predict, and a footprint with an unplaced symbol in it is not
+ * known to be smaller than the file.
+ */
+function declaredSpans(
+  plan: AgentPlan,
+  file: string,
+  locate: (file: string) => readonly NamedRange[] | undefined,
+): readonly NamedRange[] | undefined {
+  const complete = completeAgentPlan(plan);
+  const files = uniqueRepositoryPaths(complete.expectedFiles);
+  if (!files.includes(file) || complete.expectedSymbols.length === 0) {
+    return undefined;
+  }
+  const referents = plan.grounding?.symbolReferents ?? [];
+  // A declaration stands for its referent where verification found one, and
+  // for itself where it did not.
+  const wanted = complete.expectedSymbols.map((symbol) => {
+    const resolved = referents
+      .filter((entry) => entry.declared === symbol)
+      .map((entry) => entry.resolved.toLowerCase());
+    return resolved.length === 0 ? [symbol.toLowerCase()] : resolved;
+  });
+  const placed = new Set<string>();
+  for (const declared of files) {
+    const ranges = locate(declared);
+    if (ranges === undefined) {
+      return undefined;
+    }
+    for (const range of ranges) {
+      placed.add(range.name.toLowerCase());
+    }
+  }
+  if (wanted.some((names) => !names.every((name) => placed.has(name)))) {
+    return undefined;
+  }
+  const occupies = new Set(wanted.flat());
+  return (locate(file) ?? []).filter((range) =>
+    occupies.has(range.name.toLowerCase()),
+  );
+}
+
+/**
+ * Whether what a holder leaves of a file is a share of it or only its tail.
+ *
+ * Reading a declared file as its declared symbols is only honest where those
+ * symbols do not add up to the file. Enrichment makes a plan that names a file
+ * claim every symbol in it, so on a file that is nothing but declarations the
+ * derived ranges cover the whole thing and what would be "granted" is the
+ * space past the last line anyone placed — permission to append to a file
+ * whose every known line belongs to somebody else, arbitrated against nothing.
+ * That is the illusory split, and this is what declines it: the holders have
+ * to leave a hole in what the index describes, not merely an end to it.
+ */
+function leavesGround(
+  placed: readonly NamedRange[],
+  withheld: readonly LineRange[],
+): boolean {
+  const known = placed.reduce((end, range) => Math.max(end, range.endLine), 0);
+  return (
+    known > 0 &&
+    subtractRanges([{ startLine: 1, endLine: known }], withheld).length > 0
+  );
+}
+
 /** A contested file the candidate can still be granted the rest of. */
 interface PartiallyHeldFile {
   file: string;
@@ -366,6 +444,44 @@ export function deferralConstraints(
           "; edits elsewhere in those files are yours to make",
       ),
   ];
+}
+
+/**
+ * The decision a successful split returns.
+ *
+ * Both splits end the same way and have to: the difference between them is
+ * where the line was drawn, not what a partial admission means once it is
+ * drawn. One shape here is what keeps the audit trail and the agent-facing
+ * constraints identical whichever half produced them.
+ */
+function partiallyAdmitted(
+  whole: PlanAdmission,
+  partial: PlanAdmission,
+  reduced: AgentPlan,
+  deferred: readonly DeferredResource[],
+): PlanAdmission {
+  return {
+    ...partial,
+    status: "approved_with_constraints",
+    // Not blocked: this holder is executing. What is held up is named
+    // per-resource in `deferredResources`, alongside who holds it.
+    blockedBy: [],
+    deferredResources: [...deferred],
+    constraints: [...partial.constraints, ...deferralConstraints(deferred)],
+    conflicts: [
+      ...partial.conflicts,
+      ...whole.conflicts.filter(structuralConflict),
+    ],
+    explanation:
+      `Partially admitted: granted ${reduced.expectedFiles.join(", ")}; ` +
+      `deferred ` +
+      deferred
+        .map(
+          (resource) =>
+            `${resource.resourceId} (held by ${resource.heldBy.join(", ")})`,
+        )
+        .join(", "),
+  };
 }
 
 export class PlanAdmissionController {
@@ -559,10 +675,13 @@ export class PlanAdmissionController {
     ];
     let reduced =
       deferred.length === 0 ? input.plan : reducePlanScope(input.plan, deferred);
-    // Nothing left to work on: the holder would burn an agent run to produce
-    // an empty changeset, which is strictly worse than waiting its turn.
+    // Nothing left to work on at path granularity — every file this plan
+    // named is held by somebody. Dropping them all would leave an agent run
+    // producing an empty changeset, which is strictly worse than waiting its
+    // turn, so the only thing left to try is a line drawn inside the files
+    // rather than around them.
     if (reduced.expectedFiles.length === 0) {
-      return undefined;
+      return this.admitWithinFiles(input, whole, contested);
     }
     let partial =
       deferred.length === 0
@@ -587,28 +706,144 @@ export class PlanAdmissionController {
     if (!planAdmissionApproved(partial) || deferred.length === 0) {
       return undefined;
     }
-    const granted = reduced.expectedFiles.join(", ");
-    return {
-      ...partial,
-      status: "approved_with_constraints",
-      // Not blocked: this holder is executing. What is held up is named
-      // per-resource in `deferredResources`, alongside who holds it.
-      blockedBy: [],
-      deferredResources: deferred,
-      constraints: [...partial.constraints, ...deferralConstraints(deferred)],
-      conflicts: [
-        ...partial.conflicts,
-        ...whole.conflicts.filter(structuralConflict),
-      ],
-      explanation:
-        `Partially admitted: granted ${granted}; deferred ` +
-        deferred
-          .map(
-            (resource) =>
-              `${resource.resourceId} (held by ${resource.heldBy.join(", ")})`,
-          )
-          .join(", "),
-    };
+    return partiallyAdmitted(whole, partial, reduced, deferred);
+  }
+
+  /**
+   * The last thing tried before a plan is made to wait: granting the contested
+   * paths themselves and withholding only the lines their holders occupy.
+   *
+   * Withholding whole files answers nothing when every file the plan named is
+   * contested, and that is not a corner — it is the case worth splitting most.
+   * Two tasks working on different functions of one seven-thousand-line file
+   * collide on the path and nowhere else, and arbitration that can only reason
+   * about paths has nothing to offer them but a queue.
+   *
+   * What this reads differently is a holder's claim on a file it declared.
+   * Everywhere else that claim is the whole path, and deliberately so; here
+   * the alternative is not a slightly smaller grant but no grant at all, so
+   * the holder is held to the lines the index actually places its declared
+   * symbols at. The standing objection to reading a declared file that way is
+   * that enrichment makes a plan naming a file claim every symbol in it, so
+   * the derived ranges would cover the file and the grant would be illusory —
+   * which is exactly the condition {@link leavesGround} declines on. Where
+   * they do not cover it, the hole they leave is real and the candidate can
+   * work in it.
+   *
+   * Everything else is unchanged, because the result is enforced by the same
+   * machinery: withheld symbols with locations, divided out of the granted
+   * file's patch at the hunk. Wherever the index cannot answer — an unreadable
+   * file among those being granted, a holder whose symbols it cannot place, a
+   * path the candidate only reached through a misname — this offers nothing
+   * and the plan waits, exactly as it does today. An instruction the control
+   * plane cannot check is not one.
+   */
+  private admitWithinFiles(
+    input: PlanAdmissionInput,
+    whole: PlanAdmission,
+    contested: readonly DeferredResource[],
+  ): PlanAdmission | undefined {
+    const locate = input.symbolRangesInFile;
+    if (locate === undefined || contested.length === 0) {
+      return undefined;
+    }
+    // Every declared file is still being granted here — that is the point —
+    // so every one of them has to be readable. One that is not withdraws the
+    // option entirely: half an answer is not one.
+    const granted = uniqueRepositoryPaths(input.plan.expectedFiles);
+    if (
+      granted.length === 0 ||
+      granted.some((file) => locate(file) === undefined)
+    ) {
+      return undefined;
+    }
+    const declared = new Set(granted);
+    const misnamed = new Set(
+      (input.plan.grounding?.fileReferents ?? []).map((entry) => entry.declared),
+    );
+    const shared: PartiallyHeldFile[] = [];
+    const occupied = new Map<TaskId, Map<string, readonly LineRange[]>>();
+
+    for (const entry of contested) {
+      const file = entry.resourceId;
+      // A path the plan only reached through a misname carries no patch to
+      // divide, and a contested file that cannot be shared is a file lost —
+      // which is what emptied the reduced plan to begin with. Either way there
+      // is no split here, only the wait the caller already decided on.
+      if (
+        !declared.has(file) ||
+        misnamed.has(file) ||
+        entry.heldBy.length === 0
+      ) {
+        return undefined;
+      }
+      const spans: NamedRange[] = [];
+      for (const holder of entry.heldBy) {
+        const active = input.active.find((plan) => plan.taskId === holder);
+        // A claim is a statement about what a task is allowed to reach rather
+        // than about what it declared, so a frozen claim over this path has no
+        // lines to withhold and takes the file whole.
+        const held =
+          active === undefined || claimCoversPath(active.plan, file)
+            ? undefined
+            : declaredSpans(active.plan, file, locate);
+        if (held === undefined || held.length === 0) {
+          return undefined;
+        }
+        spans.push(...held);
+        const byFile =
+          occupied.get(holder) ?? new Map<string, readonly LineRange[]>();
+        byFile.set(file, normalizeRanges(held));
+        occupied.set(holder, byFile);
+      }
+      shared.push({
+        file,
+        ranges: normalizeRanges(spans),
+        symbols: withheldSymbolsFor(file, spans, entry),
+      });
+    }
+
+    // Granting a plan the tail of a file whose every placed line is somebody
+    // else's is not a split, and it is what the enriched symbol claim produces
+    // on a file made only of declarations. At least one of these files has to
+    // leave real ground behind, or the plan waits as it did before.
+    if (
+      !shared.some((entry) =>
+        leavesGround(locate(entry.file) ?? [], entry.ranges),
+      )
+    ) {
+      return undefined;
+    }
+    const within = this.occupancy(
+      input,
+      new Map(shared.map((entry) => [entry.file, entry.ranges])),
+      occupied,
+    );
+    let deferred = shared.flatMap((entry) => entry.symbols);
+    if (deferred.length === 0) {
+      return undefined;
+    }
+    let reduced = reducePlanScope(input.plan, deferred);
+    let partial = this.decide(reduced, input, within, true);
+    // The holders' lines were not the whole of it: something the candidate
+    // declares in its own right is held too. Same finer withholding as the
+    // path-level split, under the same enforceability test.
+    if (!planAdmissionApproved(partial)) {
+      const symbols = this.contestedSymbols(input, reduced, within);
+      if (symbols.length === 0) {
+        return undefined;
+      }
+      deferred = [...deferred, ...symbols];
+      reduced = reducePlanScope(input.plan, deferred);
+      if (reduced.expectedFiles.length === 0) {
+        return undefined;
+      }
+      partial = this.decide(reduced, input, within, true);
+    }
+    if (!planAdmissionApproved(partial)) {
+      return undefined;
+    }
+    return partiallyAdmitted(whole, partial, reduced, deferred);
   }
 
   /**
@@ -689,10 +924,25 @@ export class PlanAdmissionController {
   private occupancy(
     input: PlanAdmissionInput,
     narrowed: ReadonlyMap<string, readonly LineRange[]> = new Map(),
+    occupied: ReadonlyMap<
+      TaskId,
+      ReadonlyMap<string, readonly LineRange[]>
+    > = new Map(),
   ): FileOccupancy {
     const locate = input.symbolRangesInFile;
     const candidate = input.plan.taskId;
     return (plan, file) => {
+      // A holder's side of a sub-file split. Its lease has to say the same
+      // lines the candidate's withholding says, or the candidate would be
+      // granted a remainder the holder's own claim still covers whole and
+      // ownership would refuse the very split that was just decided.
+      const stated =
+        plan.taskId === candidate
+          ? undefined
+          : occupied.get(plan.taskId)?.get(file);
+      if (stated !== undefined) {
+        return normalizeRanges(stated);
+      }
       const spans = occupiedSpans(plan, file, locate);
       const held = plan.taskId === candidate ? narrowed.get(file) : undefined;
       if (held === undefined || held.length === 0) {
