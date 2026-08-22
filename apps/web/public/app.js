@@ -99,6 +99,7 @@ import {
   unreadCount,
   dmUnreadTotal,
   memberName,
+  memberRole,
   personOnline,
   loadEarlierChannelMessages,
   loadChannelMessage,
@@ -2410,31 +2411,57 @@ async function renameRepositoryAction(repositoryId) {
   }
 }
 
-/**
- * Promote, demote, or remove somebody organization-wide, from the "..." on
- * their roster row.
- *
- * One function for the three because they differ only in what they ask and
- * what they call: each confirms first — a role change reaches every
- * repository the organization owns — and each re-renders afterwards so the
- * roster agrees with what just happened.
- */
-async function memberRoleAction(userId, role) {
+/** Changes an organization member's role, or a guest's repository grant. */
+async function memberRoleAction(repositoryId, userId) {
   const name = memberName(userId) ?? userId;
-  const promoting = role === "admin" || role === "owner";
-  const confirmed = await showModal({
-    title: promoting ? `Promote ${name} to ${role}?` : `Demote ${name} to ${role}?`,
-    subtitle: promoting
-      ? "They will be able to manage people and settings across the organization."
-      : "They keep their access to the organization's repositories, without managing people.",
-    confirm: promoting ? "Promote" : "Demote",
+  const organizationRole = memberRole(userId);
+  const current =
+    organizationRole ??
+    (state.repositoryGrants[repositoryId] ?? []).find(
+      (grant) => grant.userId === userId,
+    )?.role;
+  const values = await showModal({
+    title: `Change ${name}'s role`,
+    subtitle:
+      organizationRole === undefined
+        ? `This role applies to ${repositoryId}.`
+        : "This role applies across every repository they can reach through this organization.",
+    confirm: "Change role",
+    body: `<label class="field">
+        <span>Role</span>
+        <select class="input" name="role">
+          ${INVITE_ROLES.map(
+            (role) => `<option value="${esc(role.value)}"${
+              role.value === current ? " selected" : ""
+            }>${esc(role.label)} — ${esc(role.detail)}</option>`,
+          ).join("")}
+        </select>
+      </label>`,
   });
-  if (confirmed === undefined) {
+  if (values === undefined) {
+    return;
+  }
+  const role = String(values.role ?? "");
+  if (role === current) {
+    closePopover();
     return;
   }
   try {
-    await updateMemberRole(userId, role);
-    toast(promoting ? `${name} is now an ${role}` : `${name} is now a ${role}`, "ok");
+    if (organizationRole === undefined) {
+      await setRepositoryGrant(repositoryId, userId, role);
+      const person = (state.channelPeople[repositoryId] ?? []).find(
+        (entry) => (entry.user?.id ?? entry.userId ?? entry.id) === userId,
+      );
+      if (person !== undefined) {
+        person.role = role;
+      }
+      delete state.repositoryGrants[repositoryId];
+      await ensureRepositoryGrants(repositoryId, render);
+    } else {
+      await updateMemberRole(userId, role);
+    }
+    const label = INVITE_ROLES.find((option) => option.value === role)?.label ?? role;
+    toast(`${name} is now ${label}`, "ok");
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -2443,20 +2470,45 @@ async function memberRoleAction(userId, role) {
   }
 }
 
-/** Removing somebody from the organization outright. */
-async function removeMemberAction(userId) {
+/** Removes an organization member or repository-only guest from KUMI. */
+async function removeMemberAction(repositoryId, userId) {
   const name = memberName(userId) ?? userId;
+  const organizationRole = memberRole(userId);
   const confirmed = await showModal({
-    title: `Remove ${name}?`,
+    title: `Remove ${name} from KUMI?`,
     subtitle:
-      "They lose access to every repository this organization owns. Their messages stay in the channels they wrote them in.",
-    confirm: "Remove",
+      organizationRole === undefined
+        ? `They lose access to ${repositoryId}. Their messages stay in the channels they wrote them in.`
+        : "They lose access to every repository this organization owns. Their messages stay in the channels they wrote them in.",
+    confirm: "Remove from KUMI",
   });
   if (confirmed === undefined) {
     return;
   }
   try {
-    await removeMember(userId);
+    if (organizationRole === undefined) {
+      await revokeRepositoryGrant(repositoryId, userId);
+      state.channelPeople[repositoryId] = (
+        state.channelPeople[repositoryId] ?? []
+      ).filter(
+        (person) =>
+          (person.user?.id ?? person.userId ?? person.id) !== userId,
+      );
+      delete state.repositoryGrants[repositoryId];
+    } else {
+      await removeMember(userId);
+      if (
+        (state.repositoryGrants[repositoryId] ?? []).some(
+          (grant) => grant.userId === userId,
+        )
+      ) {
+        // Organization membership and repository grants are additive. Clear
+        // the visible repository grant too, or a promoted co-owner would stay
+        // in this room immediately after being removed from KUMI.
+        await revokeRepositoryGrant(repositoryId, userId);
+        delete state.repositoryGrants[repositoryId];
+      }
+    }
     toast(`Removed ${name}`, "ok");
   } catch (error) {
     toast(error.message, "error");
@@ -2538,8 +2590,22 @@ async function promoteRepositoryOwnerAction(repositoryId, userId) {
 /** Revoking a repository-scoped grant on someone else's behalf. */
 async function revokeRepositoryGrantAction(repositoryId, userId) {
   try {
-    await revokeRepositoryGrant(repositoryId, userId);
-    toast("Co-owner access removed", "ok");
+    if (memberRole(userId) === undefined) {
+      // A repository-only guest would disappear entirely if their sole grant
+      // were revoked. Demotion keeps them in KUMI as a developer; the
+      // dedicated Remove action is what takes the grant away altogether.
+      await setRepositoryGrant(repositoryId, userId, "developer");
+      const person = (state.channelPeople[repositoryId] ?? []).find(
+        (entry) => (entry.user?.id ?? entry.userId ?? entry.id) === userId,
+      );
+      if (person !== undefined) {
+        person.role = "developer";
+      }
+      toast("Demoted from co-owner to Developer", "ok");
+    } else {
+      await revokeRepositoryGrant(repositoryId, userId);
+      toast("Co-owner access removed", "ok");
+    }
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -6247,24 +6313,27 @@ document.addEventListener("click", (event) => {
       void renameRepositoryAction(value);
       return;
     /**
-     * The People row's promote / demote / remove. `value` carries the target
-     * role for the two role changes (`${userId}:${role}`) so the menu that
-     * was drawn is what gets applied, rather than a second lookup that could
-     * disagree with it by the time it is clicked.
+     * Organization role changes and removal from the People row. The role is
+     * chosen in the dialog; the menu value only needs to identify the person.
      */
-    case "member-promote":
-    case "member-demote": {
+    case "member-role": {
       closePopover();
       const separatorIndex = value.indexOf(":");
-      const userId = value.slice(0, separatorIndex);
-      const role = value.slice(separatorIndex + 1);
-      void memberRoleAction(userId, role);
+      void memberRoleAction(
+        value.slice(0, separatorIndex),
+        value.slice(separatorIndex + 1),
+      );
       return;
     }
-    case "member-remove":
+    case "member-remove": {
       closePopover();
-      void removeMemberAction(value);
+      const separatorIndex = value.indexOf(":");
+      void removeMemberAction(
+        value.slice(0, separatorIndex),
+        value.slice(separatorIndex + 1),
+      );
       return;
+    }
     case "channel-grant-promote": {
       // People-row menus pass `${repositoryId}:${userId}`; the legacy picker
       // path still accepts a bare repository id.
