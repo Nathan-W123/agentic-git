@@ -3129,3 +3129,144 @@ test("a deferred waiter plans against the holder's in-progress edits", async () 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Writes fixed replacement text over a seeded file, so a test can control
+ * exactly which lines a run's patch touches.
+ *
+ * `TestAgent` writes one short string over the whole file, which produces a
+ * single hunk. Hunk-level division only means anything when a patch has
+ * several, some reaching a withheld symbol and some clear of it.
+ */
+class RewritingAgent extends TestAgent {
+  public constructor(
+    agentId: string,
+    plan: AgentPlan,
+    repository: CanonicalRepository,
+    workspaces: WorkspaceManager,
+    private readonly file: string,
+    private readonly contents: string,
+  ) {
+    super(agentId, plan, repository, workspaces, "");
+  }
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    await super.sendContext(sessionId, context);
+    await writeFile(
+      path.join(context.workspacePath, this.file),
+      this.contents,
+      "utf8",
+    );
+  }
+}
+
+/** Three functions, spaced so an edit in each lands in its own diff hunk. */
+function symbolModule(alpha: string, withheld: string, omega: string): string {
+  const gap = "\n".repeat(9);
+  return (
+    `export function alpha(): number {\n  return ${alpha};\n}\n${gap}` +
+    `export function withheld(): number {\n  return ${withheld};\n}\n${gap}` +
+    `export function omega(): number {\n  return ${omega};\n}\n`
+  );
+}
+
+test("a withheld symbol costs its hunks, not the whole file", async () => {
+  // The division itself is covered in partial-admission.test.ts, against a
+  // supplied symbol index. This is about the wiring: `splitChangeSet` is
+  // pessimistic when nothing can locate the withheld symbol — it treats every
+  // hunk as touching it — so a caller that omits the index does not fall back
+  // to file-level behaviour, it falls back to the *worst* case and hands the
+  // whole file back. The remote-worker path passed an index from the start
+  // and this one did not, so hunk-level admission worked or did not purely by
+  // which executor picked the task up, and this deployment only runs this one.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-symbol-test-"));
+
+  try {
+    const sourcePath = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(sourcePath);
+    await mkdir(path.join(sourcePath, "src"), { recursive: true });
+    await writeFile(
+      path.join(sourcePath, "src", "mod.ts"),
+      symbolModule("1", "2", "3"),
+      "utf8",
+    );
+    await repositories.commitAll(sourcePath, "seed");
+    const repository = await repositories.importLocalRepository(
+      sourcePath,
+      path.join(root, "canonical.git"),
+      "fixture",
+    );
+    const workspaces = new GitWorktreeWorkspaceManager(
+      repositories.getGitClient(),
+    );
+
+    // All three functions edited; only `withheld` belongs to somebody else.
+    const agent = new RewritingAgent(
+      "agent_a",
+      plan("task_a", ["src/mod.ts"]),
+      repository,
+      workspaces,
+      "src/mod.ts",
+      symbolModule("11", "22", "33"),
+    );
+
+    const result = await new Coordinator({
+      repositories,
+      workspaces,
+      planAuthority: {
+        async admit(request) {
+          return {
+            outcome: "admitted",
+            plan: request.plan,
+            admission: {
+              status: "approved_with_constraints",
+              taskId: request.task.id,
+              planRevision: 1,
+              baseRevision: "b".repeat(40),
+              ownershipGrants: [],
+              constraints: [],
+              blockedBy: [],
+              conflicts: [],
+              deferredResources: [
+                {
+                  resourceType: "symbol",
+                  resourceId: "withheld",
+                  heldBy: ["task_elsewhere"],
+                  reason: "held by task_elsewhere",
+                },
+              ],
+              explanation: "withheld() is leased to task_elsewhere",
+              decidedAt: new Date().toISOString(),
+            },
+          };
+        },
+      },
+    }).run({
+      repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+
+    // The two clear edits landed and the trespassing one did not. Reading
+    // canonical rather than the split: what matters is which bytes are in the
+    // repository, not what the bookkeeping said about them.
+    const head = await repositories.readFile(
+      repository,
+      result.canonicalVersion.revision,
+      "src/mod.ts",
+    );
+    assert.match(head, /return 11;/u, "the hunk before the withheld symbol");
+    assert.match(head, /return 33;/u, "the hunk after the withheld symbol");
+    assert.match(head, /return 2;/u, "the withheld symbol is untouched");
+    assert.doesNotMatch(head, /return 22;/u, "the withheld edit did not land");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
