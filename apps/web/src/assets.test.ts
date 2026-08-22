@@ -663,7 +663,7 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   );
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
-    chats.indexOf("function chanSearchRow"),
+    chats.indexOf("function threadParticipants"),
   );
 
   // The control stays with the surface it changes; the conversation header
@@ -857,112 +857,27 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
   assert.doesNotMatch(foldAction, /\brender\(\)/u);
 });
 
-test("the pink tools toggle animates without replacing its node", async () => {
+test("channel message search and its empty tool tray are absent", async () => {
   const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
-  const action = app.slice(
-    app.indexOf('case "chan-tools-toggle"'),
-    app.indexOf('case "agent-panel-open"'),
-  );
 
-  assert.match(
-    chats,
-    /class="icon-btn chan-tools-toggle\$\{[\s\S]{0,100}state\.chanToolsOpen === true \? " on" : ""/u,
-  );
-  assert.match(
-    css,
-    /\.icon-btn \{[\s\S]{0,260}transition: background 0\.15s ease, color 0\.15s ease;/u,
-  );
-  assert.match(
-    css,
-    /\.icon-btn\.on \{\s*background: var\(--accent-wash\);\s*color: var\(--accent-bright\);/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools-toggle svg \{\s*transition: transform 0\.15s ease;/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools-toggle\.on svg \{\s*transform: rotate\(-90deg\);/u,
-  );
+  for (const source of [app, data, chats]) {
+    assert.doesNotMatch(source, /chanMsgQuery|chanMsgSearchOpen/u);
+  }
+  assert.doesNotMatch(app, /channel-msg-search|chan-tools-toggle|ag\.chantools/u);
+  assert.doesNotMatch(app, /Search the messages in this channel/u);
+  assert.doesNotMatch(chats, /channel-msg-search|chan-search|chan-tools/u);
+  assert.doesNotMatch(chats, /function matchesQuery|function chanSearchRow/u);
+  assert.doesNotMatch(data, /chanToolsOpen|ag\.chantools/u);
+  assert.doesNotMatch(css, /\.chan-search|\.chan-tools|chan-tool-(?:in|out)/u);
 
-  // The header itself must redraw because opening the fold adds its tools.
-  // Reattaching the clicked button in its old state before applying `on`
-  // gives both the pink treatment and the arrow a real before/after to tween.
-  assert.match(action, /const toggle = node;/u);
-  assert.match(action, /state\.chanToolsOpen = open;[\s\S]*?\brender\(\);/u);
-  assert.match(action, /replacement\.replaceWith\(toggle\);/u);
-  assert.match(action, /void toggle\.offsetWidth;/u);
-  assert.match(action, /toggle\.classList\.toggle\("on", open\);/u);
-  assert.match(action, /toggle\.setAttribute\("aria-expanded", String\(open\)\);/u);
-  assert.match(
-    action,
-    /toggle\.setAttribute\("title", open \? "Hide tools" : "Show tools"\);/u,
-  );
-});
-
-test("the header tools come out of the arrow and fold back into it", async () => {
-  const app = await publicFile("app.js");
-  const css = await publicFile("styles.css");
-
-  // A screen is one `innerHTML` assignment, so the tray is a new element on
-  // every render and a bare CSS animation would replay the reveal whenever
-  // anything redrew. It joins the surfaces the render loop decides for.
-  const surfaces = app.slice(
-    app.indexOf("const MOTION_SURFACES = ["),
-    app.indexOf("/** Whether each surface was on screen"),
-  );
-  assert.match(
-    surfaces,
-    /selector: "\.chan-tools",\s*parent: "\.chan-head",\s*enter: "tools-entering",\s*leave: "tools-leaving",/u,
-  );
-
-  // A tray on its way out has to go back beside the arrow it is retreating
-  // into, not appended past it on the far side.
-  assert.match(surfaces, /place: \(parent, node\) => \{[\s\S]{0,200}toggle\.before\(node\);/u);
-  const play = app.slice(
-    app.indexOf("function playSurfaceMotion"),
-    app.indexOf("function animateOnce"),
-  );
-  assert.match(
-    play,
-    /if \(surface\.place === undefined\) \{\s*parent\.append\(closed\);\s*\} else \{\s*surface\.place\(parent, closed\);/u,
-  );
-
-  // Out of the arrow rather than in place: each icon starts the distance it
-  // sits from the arrow away from itself, and the row is staggered so it
-  // unfolds from that one point.
-  assert.match(
-    css,
-    /\.chan-tools\.tools-entering > \* \{\s*--tool-shift: 42px;\s*animation: chan-tool-out/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools\.tools-entering > \*:nth-last-child\(2\) \{\s*--tool-shift: 74px;\s*animation-delay: 0\.03s;/u,
-  );
-  assert.match(
-    css,
-    /\.chan-tools\.tools-leaving > \*:nth-child\(2\) \{\s*animation-delay: 0\.03s;/u,
-  );
-  assert.match(
-    css,
-    /@keyframes chan-tool-out \{\s*from \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
-  );
-  assert.match(
-    css,
-    /@keyframes chan-tool-in \{\s*to \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
-  );
-
-  // The stagger has to finish inside the fallback timer that drops a closing
-  // surface, or the tray outlives its own exit.
-  assert.match(css, /animation: chan-tool-in 0\.18s/u);
-  assert.match(css, /\.chan-tools\.tools-leaving > \*:nth-child\(n \+ 5\) \{\s*animation-delay: 0\.12s;/u);
-
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{\s*\.chan-tools\.tools-entering > \* \{\s*animation: none;\s*\}[\s\S]{0,320}\.chan-tools\.tools-leaving \{\s*display: none;/u,
-  );
+  // The transcript still renders every loaded message and keeps its ordinary
+  // empty state now that no query can narrow the list.
+  assert.match(chats, /const entries = channelMessagesFor\(repositoryId\);/u);
+  assert.match(chats, /"No messages yet"/u);
+  assert.match(chats, /\$\{messageList\(repositoryId\)\}/u);
 });
 
 test("the phone drawer is dragged out under the finger, not toggled", async () => {
@@ -4012,7 +3927,7 @@ test("people and agents render directly without a main branch node", async () =>
   );
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
-    chats.indexOf("function chanSearchRow"),
+    chats.indexOf("function threadParticipants"),
   );
 
   assert.match(sidebar, /section\("People", "invite-repo"/u);
@@ -4741,11 +4656,11 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
 
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
-    chats.indexOf("function chanSearchRow"),
+    chats.indexOf("function threadParticipants"),
   );
-  // The tools tray keeps search; the info / exclamation control is gone —
-  // channel info is still reached from the sidebar brand.
-  assert.match(header, /data-act="channel-msg-search-toggle"/u);
+  // Search and the info / exclamation control are gone; channel info is still
+  // reached from the sidebar brand.
+  assert.doesNotMatch(header, /channel-msg-search|icon\("search"\)/u);
   assert.doesNotMatch(header, /iconButton\("info"/u);
   assert.doesNotMatch(header, /act: "channel-info"/u);
   assert.match(chats, /data-act="channel-info"/u);

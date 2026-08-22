@@ -3047,7 +3047,6 @@ function openSwitcher() {
 function openShortcutSheet() {
   const pairs = [
     ["Ctrl / ⌘ + K", "Go to a channel, a person, or a screen"],
-    ["/", "Search the messages in this channel"],
     ["?", "This list"],
     ["Esc", "Close whatever is stacked over the conversation"],
     ["Enter", "Send; Shift + Enter starts a new line"],
@@ -3123,7 +3122,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   // The single-key shortcuts, and only when the keyboard is not somebody's
-  // sentence. A composer must go on receiving "/" and "?" as characters.
+  // sentence. A composer must go on receiving "?" as a character.
   if (typingSomewhere(event.target) || event.metaKey || event.ctrlKey || event.altKey) {
     return;
   }
@@ -3131,12 +3130,6 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     openShortcutSheet();
     return;
-  }
-  if (event.key === "/" && state.route === "chats" && activeChannelId()) {
-    event.preventDefault();
-    state.chanMsgSearchOpen = true;
-    render();
-    document.querySelector("[data-act='channel-msg-search']")?.focus();
   }
 });
 
@@ -4083,27 +4076,6 @@ const MOTION_SURFACES = [
     parent: ".code-shell",
     enter: "scrim-entering",
     leave: "scrim-leaving",
-  },
-  // The channel header's tool tray, which comes out of the arrow beside it
-  // and folds back into it. The arrow is what a reader clicked, so the icons
-  // travel to and from that one point rather than fading where they stand.
-  //
-  // Where it goes back matters here in a way it does not for a panel:
-  // appended, a tray on its way out would reappear on the far side of the
-  // arrow it is supposed to be retreating into, which is why `place` exists.
-  {
-    selector: ".chan-tools",
-    parent: ".chan-head",
-    enter: "tools-entering",
-    leave: "tools-leaving",
-    place: (parent, node) => {
-      const toggle = parent.querySelector(".chan-tools-toggle");
-      if (toggle === null) {
-        parent.append(node);
-        return;
-      }
-      toggle.before(node);
-    },
   },
 ];
 
@@ -5770,37 +5742,6 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
-    case "chan-tools-toggle": {
-      const toggle = node;
-      const focused = document.activeElement === toggle;
-      const open = !(state.chanToolsOpen === true);
-      state.chanToolsOpen = open;
-      // Kept, the same way `chan-collapse-toggle` keeps its own fold. Opening
-      // the tools is a statement about how this reader works rather than
-      // about this visit, and re-hiding them on every load made it a choice
-      // to make again every time instead of once.
-      persist("ag.chantools", open);
-
-      // Opening the fold changes which tools are in the header, so the rest
-      // of the screen still needs its ordinary render. Keep this button,
-      // though: a replacement already wearing its final class has no previous
-      // state for the button colour or arrow rotation to transition from.
-      render();
-      const replacement = document.querySelector(".chan-tools-toggle");
-      if (replacement !== null) {
-        replacement.replaceWith(toggle);
-        // Establish the retained button's old style after reattaching it,
-        // then move it to the new state so the existing CSS transition runs.
-        void toggle.offsetWidth;
-        toggle.classList.toggle("on", open);
-        toggle.setAttribute("aria-expanded", String(open));
-        toggle.setAttribute("title", open ? "Hide tools" : "Show tools");
-        if (focused) {
-          toggle.focus();
-        }
-      }
-      return;
-    }
     case "agent-panel-open":
       // Any agent in the room, not only your own, and its specification first. The
       // private-chat entry above stays as it was: that one is a deliberate
@@ -6040,17 +5981,6 @@ document.addEventListener("click", (event) => {
       );
       return;
     }
-    case "channel-msg-search-toggle":
-      state.chanMsgSearchOpen = !state.chanMsgSearchOpen;
-      if (!state.chanMsgSearchOpen) {
-        state.chanMsgQuery = "";
-      }
-      render();
-      if (state.chanMsgSearchOpen) {
-        $("[data-act='channel-msg-search']")?.focus();
-      }
-      return;
-
     case "files-menu":
       showMenu(node, [
         { act: "files-refresh", label: "Refresh files", iconName: "refresh" },
@@ -7067,17 +6997,6 @@ document.addEventListener("input", (event) => {
     render();
     if (focused) {
       const next = $("[data-act='channel-search']");
-      next?.focus();
-      next?.setSelectionRange(next.value.length, next.value.length);
-    }
-    return;
-  }
-  if (act === "channel-msg-search") {
-    state.chanMsgQuery = node.value;
-    const focused = document.activeElement === node;
-    render();
-    if (focused) {
-      const next = $("[data-act='channel-msg-search']");
       next?.focus();
       next?.setSelectionRange(next.value.length, next.value.length);
     }
