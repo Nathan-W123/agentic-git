@@ -520,18 +520,37 @@ export class LeasePlanAuthority implements PlanAuthority {
       .map((candidate) => candidate.id)
       .sort();
     const changes = await request.observe();
-    if (changes.length === 0) {
-      // Nothing has been written yet, so there is nothing to narrow *to*. A
-      // freeze here would not narrow the claim, it would erase it: the holder
-      // would be left claiming no files at all at the exact moment somebody
-      // else needs the repository, and the arriving task would be admitted
-      // straight into the files the holder is about to write. Keeping the
-      // claim whole refuses that arrival — which is what a repository-wide
-      // claim means — and the next tick freezes it properly, as soon as there
-      // is behaviour to freeze.
+    // Nothing written yet is not a reason to keep the whole repository.
+    //
+    // It used to be. A freeze on no observed writes would not narrow the
+    // claim, it would erase it — the holder left claiming nothing at the
+    // exact moment somebody else needs the repository, and the arrival
+    // admitted straight into files the holder is about to write. So the claim
+    // was kept whole until the holder's first edit.
+    //
+    // The flaw was treating "has written nothing" as a brief startup blip. It
+    // is the entire span between an agent starting and its first edit, which
+    // for a real coding agent is however long it spends reading — and every
+    // arrival in that window was refused everything, which is most of why
+    // partial admission so rarely got the chance to do anything.
+    //
+    // What is used instead is a declaration rather than an observation: the
+    // anchored estimate the coordinator granted this claim against, built
+    // from paths, directories and symbols the objective actually named. A
+    // task whose objective could not produce one is never granted a blanket
+    // claim at all, so an empty list here means an older claim from before
+    // this existed, and those still wait for the first write.
+    const narrowTo =
+      changes.length > 0
+        ? changes
+        : request.estimatedFiles.map((path) => ({
+            path,
+            status: "modified" as const,
+          }));
+    if (narrowTo.length === 0) {
       return undefined;
     }
-    const frozen = freezePlanFromWorkingChanges(request.plan, changes);
+    const frozen = freezePlanFromWorkingChanges(request.plan, narrowTo);
     const admission: PlanAdmission = this.admissions.admit({
       plan: frozen,
       agentId: request.task.agentId,

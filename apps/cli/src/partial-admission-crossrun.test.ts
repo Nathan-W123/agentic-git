@@ -119,13 +119,18 @@ const AGENT = [
   "    // write. So an agent that blocks before its first write pins the whole",
   "    // repository, and nothing can be partially admitted behind it. Writing",
   "    // first is what a real agent mid-edit looks like.",
-  '    for (const file of field("WRITE")) {',
-  "      const target = path.join(message.workspacePath, file);",
-  '      const previous = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";',
-  '      fs.writeFileSync(target, previous + "# " + started.taskId + "\\n", "utf8");',
+  '    const blockFirst = started.objective.includes("BLOCKFIRST");',
+  "    function writeAll() {",
+  '      for (const file of field("WRITE")) {',
+  "        const target = path.join(message.workspacePath, file);",
+  '        const previous = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";',
+  '        fs.writeFileSync(target, previous + "# " + started.taskId + "\\n", "utf8");',
+  "      }",
   "    }",
+  "    if (!blockFirst) writeAll();",
   '    mark("executing-" + started.taskId);',
   '    waitForSignal("release-" + started.taskId);',
+  "    if (blockFirst) writeAll();",
   "    send({",
   '      type: "done",',
   "      symbolsChanged: [],",
@@ -319,6 +324,97 @@ test("a partially overlapping plan is admitted for its free files, across runs",
       [SHARED_FILE],
       "The narrowed claim should keep exactly what the holder had written",
     );
+  } finally {
+    if (first !== undefined) {
+      await releaseSignal(harness.signalsPath, `release-${first.id}`);
+    }
+    if (second !== undefined) {
+      await releaseSignal(harness.signalsPath, `release-${second.id}`);
+    }
+    await Promise.allSettled([runOne, runTwo]);
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a holder still reading is narrowed by its objective, not by its writes", async () => {
+  // The case the first draft of the test above timed out on, and the reason
+  // partial admission so rarely got a chance: a repository-wide claim could
+  // only be narrowed to files the holder had already written, so the whole
+  // span between an agent starting and its first edit — however long it
+  // spends reading — refused every arrival everything.
+  //
+  // The holder here never writes until released, which is what a real agent
+  // reading its way into a problem looks like from the outside. Nothing it
+  // has done can narrow its claim; only what it said it would do can.
+  const harness = await createHarness();
+  const store = harness.project.openStore();
+  await store.createUser({
+    email: "reading@example.com",
+    displayName: "Reading",
+    passwordDigest: "digest",
+  });
+  let runOne: Promise<unknown> | undefined;
+  let runTwo: Promise<unknown> | undefined;
+  let first: { id: string } | undefined;
+  let second: { id: string } | undefined;
+
+  try {
+    const repository = await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "reading",
+    });
+
+    first = await taskSubmit(harness.project, store, {
+      // Names real repository paths, which is what makes the estimate
+      // anchored — an objective that named nothing real would be refused the
+      // blanket claim outright and would plan instead, which is the other
+      // half of the same rule.
+      objective: `edit ${SHARED_FILE} and a.py BLOCKFIRST FILES:${SHARED_FILE},a.py WRITE:${SHARED_FILE}`,
+    });
+    runOne = runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+    });
+    await awaitSignal(
+      harness.signalsPath,
+      `executing-${first.id}`,
+      120_000,
+      "The first task never reached execution.",
+    );
+
+    second = await taskSubmit(harness.project, store, {
+      objective: `edit b.py FILES:b.py WRITE:b.py`,
+    });
+    runTwo = runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+    });
+
+    await awaitSignal(
+      harness.signalsPath,
+      `executing-${second.id}`,
+      90_000,
+      "The second task never started. The first had written nothing, so its " +
+        "claim could only have been narrowed by what its objective declared " +
+        "— which is the whole point of estimating it.",
+    );
+
+    await releaseSignal(harness.signalsPath, `release-${first.id}`);
+    await releaseSignal(harness.signalsPath, `release-${second.id}`);
+    await Promise.all([runOne, runTwo]);
+
+    const events = await store.listAuditEvents();
+    const firstId = first.id;
+    const frozen = events.find(
+      (entry) =>
+        entry.event.type === "blanket_claim_frozen" &&
+        entry.event.taskId === firstId,
+    );
+    assert.ok(
+      frozen !== undefined,
+      "The claim was never narrowed, so the second task got in some other way.",
+    );
+    // Both files the objective named, and nothing the holder had touched —
+    // because it had touched nothing.
+    assert.deepEqual(frozen.event.data["files"], ["a.py", SHARED_FILE]);
   } finally {
     if (first !== undefined) {
       await releaseSignal(harness.signalsPath, `release-${first.id}`);
