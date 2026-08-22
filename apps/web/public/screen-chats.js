@@ -2486,7 +2486,32 @@ function channelMessageSkeleton(repositoryId) {
   </div>`;
 }
 
+/**
+ * The transcript when its first read failed, rather than a shell forever.
+ *
+ * A loading skeleton and a refused read looked identical: the shell renders
+ * until `channelLoaded` names the repository, and a read that failed never
+ * named it. Saying so — with the status, and a way to ask again — is the
+ * difference between a room that is loading and a room that is broken.
+ */
+function channelLoadFailure(repositoryId) {
+  const failure = state.channelFailed[repositoryId] ?? {};
+  const status =
+    failure.status === undefined ? "" : ` (${String(failure.status)})`;
+  return `<div class="chan-messages" id="chan-messages" role="status"
+    aria-live="polite" data-scroll-key="channel:${esc(repositoryId)}">${emptyState(
+      "chatBubble",
+      "This channel could not be loaded",
+      `${failure.message ?? "The request did not complete"}${status}`,
+      `<button type="button" class="btn btn-sm" data-act="channel-retry-load"
+        data-value="${esc(repositoryId)}">Try again</button>`,
+    )}</div>`;
+}
+
 function messageList(repositoryId) {
+  if (state.channelFailed[repositoryId] !== undefined) {
+    return channelLoadFailure(repositoryId);
+  }
   if (!state.channelLoaded.has(repositoryId)) {
     return channelMessageSkeleton(repositoryId);
   }
@@ -2556,13 +2581,16 @@ function messageList(repositoryId) {
     timeline.push({ entry, inlineReplyTo: undefined, at: entry.at });
   }
   timeline.push(...pending.slice(next));
-  const threadPaths = messageThreadPaths(timeline, query === "");
+  // Always the whole transcript now. These three lines carried a `query`
+  // that message search used to define; search is gone and the variable went
+  // with it, but the reads stayed — so `messageList` threw ReferenceError on
+  // every channel that had anything in it, the render died, and the room kept
+  // whatever was painted before it. That was the loading skeleton, which is
+  // why a working channel appeared to load forever.
+  const threadPaths = messageThreadPaths(timeline, true);
   let lastDay = "";
   // Where this visit found the room, as a timestamp — see `snapshotChannelRead`.
-  // Suppressed while searching: the results are hits scattered through history,
-  // not a transcript, and "New messages" drawn across them would be pointing at
-  // a boundary that does not exist in what is on screen.
-  const mark = query === "" ? channelUnreadMark(repositoryId) : undefined;
+  const mark = channelUnreadMark(repositoryId);
   const mine = currentUserId() || "you";
   let markDrawn = mark === undefined;
   const rows = timeline.map((item, index) => {
@@ -2595,12 +2623,11 @@ function messageList(repositoryId) {
         messageRow(entry, repositoryId, { inlineReplyTo: item.inlineReplyTo })
       );
     }
-    // Search results are independent hits rather than a faithful transcript;
-    // always name them so filtering an intervening author cannot create a
-    // group that did not exist in the channel.
-    const compact =
-      query === "" &&
-      continuesUserMessageGroup(timeline[index - 1], item, startsNewDay);
+    const compact = continuesUserMessageGroup(
+      timeline[index - 1],
+      item,
+      startsNewDay,
+    );
     return (
       separator +
       messageRow(entry, repositoryId, {

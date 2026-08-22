@@ -190,6 +190,17 @@ export const state = {
   channelLoaded: new Set(),
   channelLoadingId: undefined,
   /**
+   * Why a channel's first read failed, by repository id.
+   *
+   * The transcript renders a loading shell until `channelLoaded` names it, so
+   * a read that fails and says nothing is indistinguishable from one still in
+   * flight — the room loads forever. Only a 401 or a 500 ever reached the
+   * user; every other answer, and every network failure, was swallowed and
+   * left the skeleton up. This is what the shell reads to show the failure
+   * instead, and it carries the status so the next report says which one.
+   */
+  channelFailed: {},
+  /**
    * Whether the server has older roots than the ones loaded, per repository.
    *
    * Set from whether the last page came back full: a short page is the end of
@@ -3454,17 +3465,34 @@ function channelCursor(entry) {
 }
 
 async function loadChannel(repositoryId) {
-  const response = await apiOptional(
-    // An explicit page size rather than the server's default. The route has
-    // read `limit` and `before` all along; the client asked for neither, so
-    // the transcript was permanently the newest fifty roots with no way to
-    // reach anything older.
-    channelPath(repositoryId, `/messages?limit=${CHANNEL_PAGE}`),
-    undefined,
-  );
-  if (response === undefined) {
+  // Deliberately not `apiOptional`. That helper answers "absent" for anything
+  // but a 401 or a 500, which is right for a capability a deployment may not
+  // have — and wrong here, where the channel definitely exists and a failure
+  // to read it is news. Catching it directly is what lets the reason reach
+  // the screen instead of becoming a permanent loading shell.
+  let response;
+  try {
+    response = await api(
+      // An explicit page size rather than the server's default. The route has
+      // read `limit` and `before` all along; the client asked for neither, so
+      // the transcript was permanently the newest fifty roots with no way to
+      // reach anything older.
+      channelPath(repositoryId, `/messages?limit=${CHANNEL_PAGE}`),
+    );
+  } catch (error) {
+    state.channelFailed[repositoryId] = {
+      message: error?.message ?? "The channel could not be loaded",
+      ...(error?.status === undefined ? {} : { status: error.status }),
+    };
     return false;
   }
+  if (response === undefined) {
+    state.channelFailed[repositoryId] = {
+      message: "The channel returned no response",
+    };
+    return false;
+  }
+  delete state.channelFailed[repositoryId];
   // Taken before the replacement, and only for a channel that has been read
   // once already. An unresolved empty list is loading state, not a timeline
   // anything happened in.
@@ -3514,12 +3542,21 @@ async function loadChannel(repositoryId) {
  * it for the server's actual history, including the genuine empty state when
  * the first successful response contains no messages.
  */
-export async function ensureChannelMessages(repositoryId, rerender) {
+export async function ensureChannelMessages(repositoryId, rerender, retry = false) {
+  if (retry) {
+    delete state.channelFailed[repositoryId];
+  }
   if (
     !repositoryId ||
     !state.projectId ||
     state.channelLoaded.has(repositoryId) ||
-    state.channelLoadingId === repositoryId
+    state.channelLoadingId === repositoryId ||
+    // A read that already failed is not attempted again on every render.
+    // `channelLoadingId` is cleared in the `finally` below, so without this
+    // the shell re-asked for a channel it had just been refused, once per
+    // repaint, for as long as the room was open. The retry button is how a
+    // person asks for another go.
+    state.channelFailed[repositoryId] !== undefined
   ) {
     return;
   }

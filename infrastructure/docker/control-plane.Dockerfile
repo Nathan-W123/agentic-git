@@ -129,18 +129,35 @@ RUN apt-get update \
 # any) belongs to that bump rather than to whoever happened to deploy next.
 ARG CLAUDE_CODE_VERSION=2.1.235
 ARG CODEX_VERSION=0.147.0
-ARG GEMINI_CLI_VERSION=latest
-ARG COPILOT_CLI_VERSION=latest
+# Pinned for the reason stated above, which these two were not. Left at
+# `latest` they resolved whatever had been published that minute and ran its
+# postinstall binary download, so a release cut an hour ago failed a deploy of
+# a commit that built yesterday — "failed to build image" with nothing in the
+# diff to explain it, which is exactly the failure the pinning note describes.
+ARG GEMINI_CLI_VERSION=0.56.0
+ARG COPILOT_CLI_VERSION=1.0.80
+# Claude and Codex are the agents this deployment runs on, so a failure to
+# install one is a failure worth stopping the build for.
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @openai/codex@${CODEX_VERSION} \
+  && npm cache clean --force \
+  && claude --version \
+  && codex --version
+# Gemini and Copilot are not. Neither is reachable for an ordinary account any
+# more — Google withdrew the Gemini CLI's sign-in from personal accounts, and
+# Copilot needs a GitHub token rather than its own login — so an image that
+# ships without one is missing an option the connect screen already reports as
+# unavailable, which is a far better outcome than the API gateway and web app
+# failing to deploy because a vendor published a bad release.
+RUN npm install -g \
       @google/gemini-cli@${GEMINI_CLI_VERSION} \
       @github/copilot@${COPILOT_CLI_VERSION} \
   && npm cache clean --force \
-  && claude --version \
-  && codex --version \
-  && gemini --version \
-  && copilot --version
+  || echo "Gemini/Copilot CLI install failed; continuing without them"; \
+  gemini --version || echo "Gemini CLI unavailable in this image"; \
+  copilot --version || echo "Copilot CLI unavailable in this image"; \
+  true
 # Cursor and Kiro publish their CLIs through vendor installers rather than the
 # npm registry. Install into the image once, then expose the results to the
 # unprivileged runtime user. Their sign-in state is never stored in this
