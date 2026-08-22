@@ -221,6 +221,13 @@ svg.ui-icon {
   border: 3px solid transparent;
 }
 
+/* WebKit paints a solid corner where the vertical and horizontal tracks meet.
+   On a dark panel that default is a bright square — most visible at the foot
+   of `.chan-scroll`, where it reads as a stray tile above the account row. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -4752,11 +4759,17 @@ button.chip.lg:hover {
   color: var(--text-3);
 }
 
-/* The one thing that scrolls in this column. */
+/* The one thing that scrolls in this column. Horizontal overflow is clipped
+   so WebKit never reserves a dual-axis corner above the account foot. */
 .chan-scroll {
+  overflow-x: hidden;
   overflow-y: auto;
   min-height: 0;
   padding: 4px 0 14px;
+}
+
+.chan-scroll::-webkit-scrollbar {
+  height: 0;
 }
 
 /* A section heading, and the "+" that adds to the list under it — the single
@@ -6146,6 +6159,19 @@ button.chip.lg:hover {
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0.16s;
+}
+
+/* Only one card may stay opaque. Fixed pops keep their last seat when the
+   pointer moves on, and the delayed fade-out otherwise leaves two identities
+   stacked on the same place — the mash-up of banners and names. */
+body:has(.pcard-anchor:is(:hover, :focus-within))
+  .pcard-anchor:not(:hover):not(:focus-within)
+  > .pcard-pop {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s;
+  transition-duration: 0s;
 }
 
 @media (prefers-reduced-motion: reduce) {

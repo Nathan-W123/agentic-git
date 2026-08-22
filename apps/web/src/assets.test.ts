@@ -719,6 +719,14 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.doesNotMatch(userMenu, /value: "settings"|label: "Settings"/u);
   assert.match(css, /\.chan-sidebar-foot \{[\s\S]{0,180}grid-template-columns: minmax\(0, 1fr\) auto;/u);
   assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
+  // The roster scroller must not paint WebKit's dual-axis corner above the
+  // account row — a bright square and hairline that sat on the dark panel.
+  assert.match(css, /::-webkit-scrollbar-corner \{\s*background: transparent;/u);
+  assert.match(
+    css,
+    /\.chan-scroll \{\s*overflow-x: hidden;\s*overflow-y: auto;/u,
+  );
+  assert.match(css, /\.chan-scroll::-webkit-scrollbar \{\s*height: 0;/u);
   assert.match(css, /@media \(max-width: 600px\)[\s\S]*\.chan-settings \{\s*width: 44px;\s*height: 44px;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
@@ -5271,6 +5279,13 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(
     css,
     /\.pcard-anchor:hover > \.pcard-pop,\n\.pcard-anchor:focus-within > \.pcard-pop \{[\s\S]*?visibility: visible;\s*pointer-events: auto;[\s\S]*?transition-delay/u,
+  );
+  // Fixed cards outlive their hover for a beat; exclusivity snaps every other
+  // one shut the instant a new face is held open, so two identities cannot
+  // stack as a single garbled card.
+  assert.match(
+    css,
+    /body:has\(\.pcard-anchor:is\(:hover, :focus-within\)\)\s*\.pcard-anchor:not\(:hover\):not\(:focus-within\)\s*>\s*\.pcard-pop \{[\s\S]*?opacity: 0;[\s\S]*?transition-duration: 0s;/u,
   );
   // No ring drawn round the face at the same time: the card opening is the
   // answer to the hover, and the outline was the same news twice.
