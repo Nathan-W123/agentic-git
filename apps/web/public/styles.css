@@ -5945,6 +5945,25 @@ button.chip.lg:hover {
   height: 3px;
 }
 
+/* Threads reuse the room transcript markup, but the status badge on a face
+   there needs more presence than the halved room size — one and a half times
+   the room badge, and only inside the thread panel so group chats stay as they
+   are. */
+.thread-panel .cmsg-row .cmsg-avatar .agent-face .presence {
+  width: 7.5px;
+  height: 7.5px;
+}
+
+.thread-panel .cmsg-row .cmsg-avatar .agent-face .agent-run {
+  width: 7.5px;
+  height: 7.5px;
+}
+
+.thread-panel .cmsg-row .cmsg-avatar .agent-face .agent-run::after {
+  width: 4.5px;
+  height: 4.5px;
+}
+
 .cmsg-row .cmsg-body {
   min-width: 0;
   flex: 1;
