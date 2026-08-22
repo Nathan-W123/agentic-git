@@ -114,9 +114,9 @@ test("the initial document paints an accessible loading shell", async () => {
   assert.doesNotMatch(html, /id="app-root"[^>]* hidden/u);
   assert.match(
     html,
-    /class="boot-shell" role="status" aria-live="polite"[\s\S]{0,100}aria-label="Loading Lattice"/u,
+    /class="boot-shell" role="status" aria-live="polite"[\s\S]{0,100}aria-label="Loading Kumi"/u,
   );
-  assert.match(html, /class="sr-only">Loading Lattice…<\/span>/u);
+  assert.match(html, /class="sr-only">Loading Kumi…<\/span>/u);
 
   // The script owns the same shape after the document paint, then clears the
   // busy state only when it has a real application or signed-out surface.
@@ -2086,11 +2086,14 @@ test("the user icon defaults to salmon", async () => {
   assert.match(ui.slice(start, end), /background:#D88973/u);
 });
 
-test("the product is named Lattice throughout the browser surface", async () => {
+test("the product is named Kumi throughout the browser surface", async () => {
   // The wordmark sits in the chat sidebar's crown, which is rendered by the
   // chats screen rather than the shell.
-  assert.match(await publicFile("screen-chats.js"), /<b>Lattice<\/b>/u);
-  assert.match(await publicFile("index.html"), /<title>Lattice<\/title>/u);
+  assert.match(
+    await publicFile("screen-chats.js"),
+    /title="Kumi" aria-label="Kumi"/u,
+  );
+  assert.match(await publicFile("index.html"), /<title>Kumi<\/title>/u);
   for (const file of [
     "app.js",
     "screen-chats.js",
@@ -2101,6 +2104,7 @@ test("the product is named Lattice throughout the browser surface", async () => 
   ]) {
     const source = await publicFile(file);
     assert.equal(/Agentic/u.test(source), false, `${file} still says Agentic`);
+    assert.equal(/Lattice/u.test(source), false, `${file} still says Lattice`);
     // The earlier spelling was one letter short, which is exactly the kind of
     // rename a search-and-replace leaves half-finished.
     assert.equal(
@@ -3303,11 +3307,11 @@ test("the invite screen names the product, not only the team", async () => {
   // somebody chose — an organization named after some product reads as that
   // product unless this screen says which one it actually is.
   assert.match(body, /organizationName/u);
-  assert.match(body, /on Lattice/u);
+  assert.match(body, /on Kumi/u);
 });
 
 /**
- * An invitation sent to somebody who is already on Lattice — a second team, a
+ * An invitation sent to somebody who is already on Kumi — a second team, a
  * second repository — must not dead-end on a form that cannot succeed.
  *
  * The address is taken, so "choose a password" can only ever be refused with

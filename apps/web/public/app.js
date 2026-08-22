@@ -1,5 +1,5 @@
 /**
- * Lattice — control room entry point.
+ * Kumi — control room entry point.
  *
  * The shell, the router, and the one delegated event listener live here;
  * every screen is a module that returns markup. Rendering is whole-screen and
@@ -393,7 +393,7 @@ let typingSweep;
  * Rendered on the auth shell because the recipient may have no account yet —
  * that is what an invitation is for — so it has to work before there is
  * anything to sign in to. It cannot only work that way, though: an
- * invitation sent to somebody who is already on Lattice is the ordinary case
+ * invitation sent to somebody who is already on Kumi is the ordinary case
  * for a second team or a second repository, and offering that person nothing
  * but "choose a password" is a dead end, because the address is taken and the
  * only account it could belong to is theirs.
@@ -439,7 +439,7 @@ function renderInvite() {
                organization called after a product reads as that product
                unless the product says so itself. -->
           <p>You have been invited to
-            <b>${esc(invite.organizationName)}</b> on Lattice as a
+            <b>${esc(invite.organizationName)}</b> on Kumi as a
             ${esc(invite.role)}. ${
               signIn
                 ? "Sign in and the invitation is yours."
@@ -504,7 +504,7 @@ function renderInvite() {
                 ? "No account yet?"
                 : `No account for ${esc(invite.email)} yet?`
             } <a class="link-muted" href="#" data-act="invite-mode" data-value="join">Create one</a>.`
-          : `Already have a Lattice account? <a class="link-muted" href="#" data-act="invite-mode" data-value="signin">Sign in instead</a>.`
+          : `Already have a Kumi account? <a class="link-muted" href="#" data-act="invite-mode" data-value="signin">Sign in instead</a>.`
       }</p>
     </div>
   </main>`;
@@ -569,7 +569,7 @@ function renderAuth() {
               ? "Set up your control room"
               : register
                 ? "Create your account"
-                : "Sign in to Lattice"
+                : "Sign in to Kumi"
           }</h1>
           <p>${
             bootstrap
@@ -1625,7 +1625,7 @@ function appearanceCard() {
   const agentColor = myAgentColor();
   return `<section class="card">
     <div class="panel-head"><div><h3>Appearance</h3>
-      <p>How Lattice looks to you, and how your agents look to everyone</p></div></div>
+      <p>How Kumi looks to you, and how your agents look to everyone</p></div></div>
 
     <div class="set-row">
       <span class="sr-body">
@@ -4675,8 +4675,8 @@ function renderLoadingShell(root = $("#app-root")) {
   root.hidden = false;
   root.setAttribute("aria-busy", "true");
   root.innerHTML = `<div class="boot-shell" role="status" aria-live="polite"
-    aria-label="Loading Lattice">
-    <span class="sr-only">Loading Lattice…</span>
+    aria-label="Loading Kumi">
+    <span class="sr-only">Loading Kumi…</span>
     <div class="boot-skeleton-rail" aria-hidden="true">
       <span class="skeleton boot-skeleton-mark"></span>
       <span class="skeleton boot-skeleton-rail-button"></span>
@@ -4722,7 +4722,7 @@ function renderNow() {
     root.innerHTML = `<div class="app"><div class="main">
       <div class="page" role="alert">${emptyState(
         "cloud",
-        "Lattice could not load",
+        "Kumi could not load",
         state.loadError,
       )}</div></div></div>`;
     return;

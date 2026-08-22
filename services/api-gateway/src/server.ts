@@ -4348,7 +4348,7 @@ export class ApiGateway {
         try {
           await this.mailer({
             to: issued.user.email,
-            subject: "Reset your Lattice password",
+            subject: "Reset your Kumi password",
             text:
               `Hello ${issued.user.displayName},\n\n` +
               `Somebody asked to reset the password for this account. ` +

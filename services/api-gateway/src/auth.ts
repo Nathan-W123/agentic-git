@@ -635,9 +635,9 @@ export class AuthService {
     try {
       await this.registrationMailer({
         to: email,
-        subject: "Confirm your Lattice account",
+        subject: "Confirm your Kumi account",
         text: [
-          `Your Lattice confirmation code is ${code}.`,
+          `Your Kumi confirmation code is ${code}.`,
           "",
           `It expires at ${expiresAt}.`,
           "If you did not request this account, you can ignore this message.",

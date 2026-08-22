@@ -53,7 +53,7 @@ it to show as verified. With an SMTP relay it means using the address tied to
 the relay account.
 
 Set that address as `COORD_MAIL_FROM`. A display name is allowed:
-`Lattice <no-reply@example.com>`.
+`Kumi <no-reply@example.com>`.
 
 Leaving it unset means `no-reply@<the mail host>`, which almost every provider
 refuses to send as — so treat `COORD_MAIL_FROM` as required, not optional.
@@ -67,14 +67,14 @@ and the API key is sent as `Authorization: Bearer …`:
 ```
 COORD_MAIL_API_URL=https://api.resend.com/emails
 COORD_MAIL_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxx
-COORD_MAIL_FROM=Lattice <no-reply@your-domain.example>
+COORD_MAIL_FROM=Kumi <no-reply@your-domain.example>
 ```
 
 For an SMTP relay instead:
 
 ```
 COORD_SMTP_URL=smtp://user:password@smtp.example.com:587
-COORD_MAIL_FROM=Lattice <no-reply@your-domain.example>
+COORD_MAIL_FROM=Kumi <no-reply@your-domain.example>
 ```
 
 `smtp://…:587` negotiates STARTTLS when the relay offers it; `smtps://…:465`

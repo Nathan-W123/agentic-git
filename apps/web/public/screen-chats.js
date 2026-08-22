@@ -133,7 +133,7 @@ function channelRail(activeRepositoryId) {
   );
   return `<nav class="channel-rail" aria-label="Channels">
     <button type="button" class="channel-rail-brand" data-act="nav" data-value="chats"
-      title="Lattice" aria-label="Lattice">${brandMark(28)}</button>
+      title="Kumi" aria-label="Kumi">${brandMark(28)}</button>
     <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
       title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
       aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
@@ -1444,7 +1444,7 @@ const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
 
 /**
  * Protocol notices still carry their legacy symbol so older clients can
- * recognise them. The symbol is not shown: Lattice renders the matching mark
+ * recognise them. The symbol is not shown: Kumi renders the matching mark
  * from the shared icon set, just like every other interface glyph.
  */
 const NOTICE_ICONS = [
