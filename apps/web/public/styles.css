@@ -5794,11 +5794,10 @@ button.chip.lg:hover {
      `--border-strong` is translucent, so each of those overlaps painted the
      stroke twice and showed as a darker, discoloured tick exactly where the
      line should read as continuous: at every row join and at every hook.
-     Mixed against the ground it is drawn on, the stroke is the same colour it
-     has always been — `--border-strong` is 28% of `--muted`, and the room's
-     tint is the surface the transcript is painted on — but it can now cross
-     itself as often as the pieces need to without changing shade. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--room-tint));
+     Mixed against the ground it is drawn on, the stroke stays opaque enough
+     to cross itself without changing shade. Eighteen percent keeps it behind
+     the message and faces instead of reading as another piece of content. */
+  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--room-tint));
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -5831,15 +5830,7 @@ button.chip.lg:hover {
   background: var(--bg-hover);
   /* An opaque stroke has to follow the surface under it, or the line would
      stay at the room's shade while the row it crosses lightens. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--bg-hover));
-}
-
-/* The light theme's `--border-strong` is already opaque — nothing there
-   composites twice — so the connector takes it directly rather than mixing a
-   second version of the same colour. */
-:root[data-theme="light"] .cmsg-row,
-:root[data-theme="light"] .cmsg-row:hover {
-  --cmsg-stem: var(--border-strong);
+  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--bg-hover));
 }
 
 /* Consecutive lines from one person read as a single message group. Keep the
@@ -5871,16 +5862,16 @@ button.chip.lg:hover {
   left: var(--cmsg-stem-x);
   top: -1px;
   bottom: -1px;
-  border-left: 3px solid var(--cmsg-stem);
-  border-top-left-radius: 2px;
+  border-left: 2px solid var(--cmsg-stem);
+  border-top-left-radius: 3px;
   pointer-events: none;
 }
 
-/* Every grouped path leaves from the bottom centre of its 32px avatar,
-   regardless of the height of that first message. Start at the face's lower
-   edge so the three-pixel stem meets the avatar without painting into it. */
+/* Every grouped path leaves from beneath its 32px avatar, regardless of the
+   height of that first message. A small break keeps the connector from
+   looking attached to the face and gives the quieter stroke room to begin. */
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
-  top: 42px;
+  top: 48px;
 }
 
 /* The final row owns a wrapper that stops immediately after the thread link.
@@ -5894,7 +5885,7 @@ button.chip.lg:hover {
    line. The route's foot is the foot of the thread link itself — see the
    `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
    out of this sum. `bottom: 20px` ends the stem at the top tangent of the
-   eleven-pixel quarter turn below. The old hook carried a seven-pixel upright
+   ten-pixel turn below. The old hook carried a seven-pixel upright
    over this stem and the final segment deliberately ended inside it; that
    double-painted the connector at every branch and left a dark, swollen join.
    The stem and turn now meet once, edge to edge, so the stroke keeps one
@@ -5912,13 +5903,13 @@ button.chip.lg:hover {
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
   bottom: 20px;
-  border-left: 3px solid var(--cmsg-stem);
+  border-left: 2px solid var(--cmsg-stem);
   pointer-events: none;
 }
 
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
   .cmsg-thread-route::before {
-  top: 33px;
+  top: 39px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -6715,7 +6706,7 @@ button.chip.lg:hover {
 }
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
-   eleven-pixel quarter turn starts at the stem's tangent instead of laying a
+   ten-pixel rounded turn starts at the stem's tangent instead of laying a
    second upright over it; the nine-pixel gap gives the stroke and replier face
    the same quiet breathing room as the avatar and stem above. Where the turn
    does still meet the stem it meets it in
@@ -6724,18 +6715,18 @@ button.chip.lg:hover {
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
-   own three-pixel left stroke hung *outside* the declared width and pushed
-   the whole corner three pixels further left than the stem it turns out of —
+   own left stroke hangs *outside* the declared width and pushes the whole
+   corner further left than the stem it turns out of —
    a visible step where the two should be one line. Sized by the border box,
    the gap plus the 20px of elbow put that stroke in the connector's own
    column, exactly where the stem above it stands: the gap is read from
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
 
-   Top and height are read together: the difference between them (11 - 8) is
-   what puts the horizontal run three pixels below the link's middle, where it
-   has always sat. Matching the height to the radius removes the straight
-   upright entirely, leaving only the turn that branches from the stem. */
+   Top and height are read together: the difference between them (10 - 8) is
+   what puts the horizontal run two pixels below the link's middle. The
+   slightly oval bend keeps the turn soft without making it geometrically
+   perfect, which suits the hand-drawn faces beside it. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
@@ -6743,15 +6734,15 @@ button.chip.lg:hover {
   top: calc(50% - 8px);
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
   width: 20px;
-  height: 11px;
-  border-left: 3px solid var(--cmsg-stem);
-  border-bottom: 3px solid var(--cmsg-stem);
-  border-bottom-left-radius: 11px;
-  border-bottom-right-radius: 2px;
+  height: 10px;
+  border-left: 2px solid var(--cmsg-stem);
+  border-bottom: 2px solid var(--cmsg-stem);
+  border-bottom-left-radius: 12px 9px;
+  border-bottom-right-radius: 3px 2px;
   pointer-events: none;
 }
 
-/* The last turn closes the path with a round cap. At the same three pixels as
+/* The last turn closes the path with a round cap. At the same two pixels as
    the stroke it reads as a softened endpoint rather than a new marker, but it
    keeps the bottom branch from being mistaken for one more continuation. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
@@ -6759,8 +6750,8 @@ button.chip.lg:hover {
   position: absolute;
   top: 50%;
   right: calc(100% + 8px);
-  width: 3px;
-  height: 3px;
+  width: 2px;
+  height: 2px;
   border-radius: 50%;
   background: var(--cmsg-stem);
   pointer-events: none;

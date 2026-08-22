@@ -1084,50 +1084,45 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
   assert.notEqual(channelEndCap, undefined, "the final branch should close the path");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
-  for (const branch of [channelElbow, panelBranch]) {
-    assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
-    assert.match(branch ?? "", /border-bottom-left-radius: 11px;/u);
-  }
+  assert.match(channelElbow ?? "", /border-bottom-right-radius: 3px 2px;/u);
+  assert.match(channelElbow ?? "", /border-bottom-left-radius: 12px 9px;/u);
+  assert.match(panelBranch ?? "", /border-bottom-right-radius: 2px;/u);
+  assert.match(panelBranch ?? "", /border-bottom-left-radius: 11px;/u);
   // The channel's line is drawn in pieces that overlap on purpose, so it can
   // only be painted in an opaque colour: `--border-strong` is translucent, and
   // every doubled pixel — each row join, each hook — showed as a darker patch
   // in a line that is meant to read as one continuous stroke. The panel's
   // branch is a single stroke that crosses nothing, so it keeps the token.
   for (const piece of [channelStem, channelEnd, channelElbow]) {
-    assert.match(piece ?? "", /border-left: 3px solid var\(--cmsg-stem\);/u);
+    assert.match(piece ?? "", /border-left: 2px solid var\(--cmsg-stem\);/u);
     assert.doesNotMatch(piece ?? "", /--border-strong/u);
   }
-  assert.match(channelElbow ?? "", /border-bottom: 3px solid var\(--cmsg-stem\);/u);
+  assert.match(channelElbow ?? "", /border-bottom: 2px solid var\(--cmsg-stem\);/u);
   assert.match(panelBranch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
   assert.match(panelBranch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
   // Flattened against the surface the stroke is drawn on rather than given a
-  // new value of its own, so the line keeps the shade `--border-strong` has
-  // always resolved to — and follows the row when hovering lightens it.
+  // translucent value of its own, so overlaps keep one shade and the line
+  // follows the row when hovering lightens it.
   assert.match(
     css,
-    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 28%, var\(--room-tint\)\);/u,
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 18%, var\(--room-tint\)\);/u,
   );
   assert.match(
     css,
-    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 28%, var\(--bg-hover\)\);/u,
-  );
-  assert.match(
-    css,
-    /:root\[data-theme="light"\] \.cmsg-row,\n:root\[data-theme="light"\] \.cmsg-row:hover \{\n  --cmsg-stem: var\(--border-strong\);/u,
-    "the light theme's strong border is already opaque",
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 18%, var\(--bg-hover\)\);/u,
   );
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 20px;/u);
   assert.match(
     css,
-    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 40px;/u,
-    "the connector should flow directly from the avatar",
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
+    "the connector should leave a small gap beneath the avatar",
   );
   assert.match(
     css,
-    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 31px;/u,
-    "a single-task connector should use the same continuous start",
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 39px;/u,
+    "a single-task connector should use the same separated start",
   );
   // Written from the column variables rather than as the 9px they work out
   // to, which is what keeps the stem, the elbow and the final segment from
@@ -1140,7 +1135,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   // The elbow turns out of the stem, so its own upright has to stand in the
   // stem's column. It is placed from its right edge, which means the gap plus
   // its width must land on the stem's offset — and it must be measured by the
-  // border box, or the three-pixel stroke hangs outside that width and the
+  // border box, or the stroke hangs outside that width and the
   // turn steps sideways where it should read as one line.
   assert.match(channelElbow ?? "", /box-sizing: border-box;/u);
   const stemLeft = Number(/left: (-?\d+)px;/u.exec(channelEnd ?? "")?.[1]);
@@ -1153,8 +1148,8 @@ test("a reply carries a quiet visual path back to its root", async () => {
     -stemLeft,
     "the elbow's upright should sit in the stem's own column",
   );
-  assert.match(channelEndCap ?? "", /width: 3px;/u);
-  assert.match(channelEndCap ?? "", /height: 3px;/u);
+  assert.match(channelEndCap ?? "", /width: 2px;/u);
+  assert.match(channelEndCap ?? "", /height: 2px;/u);
   assert.match(channelEndCap ?? "", /border-radius: 50%;/u);
   assert.match(channelEndCap ?? "", /background: var\(--cmsg-stem\);/u);
   assert.match(channelEndCap ?? "", /right: calc\(100% \+ 8px\);/u);
@@ -1167,14 +1162,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
     /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
   );
   const elbowHeight = Number(/height: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
-  const elbowRadius = Number(
-    /border-bottom-left-radius: (\d+)px;/u.exec(channelElbow ?? "")?.[1],
-  );
-  assert.equal(
-    elbowHeight,
-    elbowRadius,
-    "the hook should have no overlapping upright",
-  );
+  assert.equal(elbowHeight, 10, "the hook should stay a compact turn");
   assert.equal(
     stemEnd,
     elbowTop,
@@ -1182,8 +1170,8 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.equal(
     elbowHeight - elbowTop,
-    3,
-    "the elbow's horizontal run should stay three pixels below the link's middle",
+    2,
+    "the elbow's horizontal run should stay two pixels below the link's middle",
   );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
