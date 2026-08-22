@@ -5877,10 +5877,10 @@ button.chip.lg:hover {
 }
 
 /* Every grouped path leaves from the bottom centre of its 32px avatar,
-   regardless of the height of that first message. Tucking the stem one pixel
-   into the face removes the floating gap while keeping the join smooth. */
+   regardless of the height of that first message. Start at the face's lower
+   edge so the three-pixel stem meets the avatar without painting into it. */
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
-  top: 40px;
+  top: 42px;
 }
 
 /* The final row owns a wrapper that stops immediately after the thread link.
@@ -5918,7 +5918,7 @@ button.chip.lg:hover {
 
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
   .cmsg-thread-route::before {
-  top: 31px;
+  top: 33px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
