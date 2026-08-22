@@ -3891,6 +3891,91 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: channel reply content is finalized in place within its thread`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_reply_update",
+        path: "/reply-update.git",
+        branch: "main",
+      });
+      await store.saveRepository({
+        id: "repo_reply_update_other",
+        path: "/reply-update-other.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "reply-update@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const root = await store.appendChannelMessage({
+        repositoryId: "repo_reply_update",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Please tighten the retry policy.",
+      });
+      const siblingRoot = await store.appendChannelMessage({
+        repositoryId: "repo_reply_update",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "An unrelated thread.",
+      });
+      const reply = await store.addChannelReply({
+        repositoryId: "repo_reply_update",
+        messageId: root.id,
+        kind: "agent",
+        authorId: alice.id,
+        content: "I've taken this task and I'm working on it.",
+      });
+
+      // All three identities bound the update. A real reply id is not enough
+      // to rewrite it through another repository or another thread root.
+      await store.setChannelReplyContent(
+        "repo_reply_update_other",
+        root.id,
+        reply.id,
+        "Wrong repository.",
+      );
+      await store.setChannelReplyContent(
+        "repo_reply_update",
+        siblingRoot.id,
+        reply.id,
+        "Wrong thread.",
+      );
+      assert.equal(
+        (
+          await store.getChannelMessage(
+            "repo_reply_update",
+            root.id,
+            alice.id,
+          )
+        )?.replies[0]?.content,
+        reply.content,
+      );
+
+      const intent =
+        "I'll inspect the retry callers, update the policy, and verify it.";
+      await store.setChannelReplyContent(
+        "repo_reply_update",
+        root.id,
+        reply.id,
+        intent,
+      );
+      const updated = (
+        await store.getChannelMessage(
+          "repo_reply_update",
+          root.id,
+          alice.id,
+        )
+      )?.replies[0];
+      assert.deepEqual(updated, { ...reply, content: intent });
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a repository channel threads, reacts, and tracks per-viewer state`, async () => {
     const { store, cleanup } = await backend.open();
     try {

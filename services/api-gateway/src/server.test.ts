@@ -3980,7 +3980,7 @@ test("an org-wide agent accepts a stranger's @mention and dispatches under the o
   );
 });
 
-test("dispatch immediately acknowledges the task without a model call", async (t) => {
+test("dispatch immediately acknowledges, then contextualizes the same reply", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -3991,6 +3991,11 @@ test("dispatch immediately acknowledges the task without a model call", async (t
     { provider: "anthropic", visibility: "org" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text =
+    "Repair token refresh\n" +
+    "I'll inspect the refresh flow, update the retry behavior, and verify it with focused tests.";
+  // The acknowledgement must not wait for this contextual opening to finish.
+  runtime.chatAnswer.delayMs = 500;
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -4005,12 +4010,75 @@ test("dispatch immediately acknowledges the task without a model call", async (t
     speech[0]?.content,
     "I've taken this task and I'm working on it.",
   );
+  const acknowledgementId = speech[0]?.id;
+  const acknowledgementCreatedAt = speech[0]?.createdAt;
+  const auditCountBeforeContext = (await runtime.store.listAudit()).filter(
+    (event) =>
+      event.type === "channel_message_posted" &&
+      event.data["messageId"] === posted.data.message.id,
+  ).length;
   assert.equal(runtime.submittedTasks.length, 1);
   assert.ok(
     runtime.chatPrompts.every(
       (entry) => !/only the acknowledgement|picking it up/iu.test(entry.prompt),
     ),
     JSON.stringify(runtime.chatPrompts),
+  );
+
+  const intent =
+    "I'll inspect the refresh flow, update the retry behavior, and verify it with focused tests.";
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return agentSpeech(listed.data.messages)[0]?.content === intent;
+  }, "the generic acknowledgement was not contextualized");
+  const contextualized = agentSpeech(
+    (await owner.request(`${base}/messages`)).data.messages,
+  );
+  assert.equal(contextualized.length, 1);
+  assert.equal(contextualized[0]?.id, acknowledgementId);
+  assert.equal(contextualized[0]?.createdAt, acknowledgementCreatedAt);
+  assert.equal(contextualized[0]?.content, intent);
+  const auditCountAfterContext = (await runtime.store.listAudit()).filter(
+    (event) =>
+      event.type === "channel_message_posted" &&
+      event.data["messageId"] === posted.data.message.id,
+  ).length;
+  assert.equal(auditCountAfterContext, auditCountBeforeContext + 1);
+});
+
+test("dispatch keeps the generic acknowledgement when opening context fails", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ack-context-failure");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.fail = "opening unavailable";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the token refresh" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () =>
+      runtime.chatPrompts.some((entry) =>
+        entry.prompt.includes("Reply with a short title on the first line"),
+      ),
+    "the contextual opening was not attempted",
+  );
+
+  const speech = agentSpeech(
+    (await owner.request(`${base}/messages`)).data.messages,
+  );
+  assert.equal(speech.length, 1);
+  assert.equal(
+    speech[0]?.content,
+    "I've taken this task and I'm working on it.",
   );
 });
 

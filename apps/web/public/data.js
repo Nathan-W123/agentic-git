@@ -3223,7 +3223,7 @@ function agentIsWorking(agent, repositoryId) {
     // line can never disagree about who is working.
     if (
       entry.provider === (agent.provider ?? agent.id) &&
-      (agent.mine === true || String(agent.id) === `${entry.userId}:${entry.provider}`)
+      agentOwnerId(agent) === entry.userId
     ) {
       return true;
     }

@@ -987,35 +987,40 @@ svg.ui-icon {
 
 /* Live work keeps the ordinary green status dot and adds progress around it.
    The ring starts on its quiet track and fills clockwise; it stays in the
-   corner so progress never paints over the agent mark itself. */
+   corner so progress never paints over the agent mark itself. The surface
+   ring that lifts it off the mark is a single pixel: any thicker and the
+   white read as the widest band in the badge, which made the one-pixel
+   progress stroke inside it look like a hairline mistake. */
 .agent-face .agent-run {
   position: absolute;
-  right: -3px;
-  bottom: -1px;
+  right: -2px;
+  bottom: 0;
   z-index: 1;
   display: grid;
   place-items: center;
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
     var(--border-strong) 0
   );
-  box-shadow: 0 0 0 2px var(--bg-card);
+  box-shadow: 0 0 0 1px var(--bg-card);
   pointer-events: none;
 }
 
-/* The solid centre says what the ring is measuring: green means coding. The
-   surface-coloured gap keeps the dot and the progress stroke as two readings. */
+/* The solid centre says what the ring is measuring: green means coding. It is
+   lit rather than breathing — the ring beside it is already the moving part,
+   and a dot that faded underneath a filling ring read as two clocks running
+   against each other. The surface-coloured gap keeps the static dot and the
+   one-pixel progress stroke as two readings. */
 .agent-face .agent-run::after {
   content: "";
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 2px var(--bg-card);
-  animation: status-breathe 2.4s ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--bg-card);
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -6614,31 +6619,30 @@ button.chip.lg:hover {
 .cmsg-thread-link .ctl-faces .ctl-working::before {
   content: "";
   position: absolute;
-  right: 1px;
-  bottom: 3px;
+  right: 0;
+  bottom: 2px;
   z-index: 2;
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 2px var(--bg-chat);
-  animation: status-breathe 2.4s ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--bg-chat);
   pointer-events: none;
 }
 
 .cmsg-thread-link .ctl-faces .ctl-working::after {
   content: "";
   position: absolute;
-  right: -3px;
-  bottom: -1px;
-  width: 15px;
-  height: 15px;
+  right: -2px;
+  bottom: 0;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: conic-gradient(
     var(--green) calc(var(--run, 0) * 1%),
     var(--border-strong) 0
   );
-  box-shadow: 0 0 0 2px var(--bg-chat);
+  box-shadow: 0 0 0 1px var(--bg-chat);
   pointer-events: none;
 }
 
@@ -8506,8 +8510,6 @@ body.resizing-panel {
 @media (prefers-reduced-motion: reduce) {
   .agent-face svg,
   .agent-face svg *,
-  .agent-face .agent-run::after,
-  .cmsg-thread-link .ctl-faces .ctl-working::before,
   .status-working,
   .presence-online {
     animation: none;

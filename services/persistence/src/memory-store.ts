@@ -2479,6 +2479,22 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return copy(reply);
   }
 
+  public async setChannelReplyContent(
+    repositoryId: string,
+    messageId: string,
+    replyId: string,
+    content: string,
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    const reply = message.replies.find((candidate) => candidate.id === replyId);
+    if (reply !== undefined) {
+      reply.content = content;
+    }
+  }
+
   public async getChannelMessage(
     repositoryId: string,
     messageId: string,

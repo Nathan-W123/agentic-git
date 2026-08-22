@@ -1507,12 +1507,6 @@ test("motion is restrained, reducible, and off when an agent is not there", asyn
     css,
     /\.agent-face\[data-presence="offline"\] svg,\s*\.agent-face\[data-presence="offline"\] svg \* \{\s*animation: none;/u,
   );
-  const reduced = [...css.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/gu)]
-    .map((match) => match[1] ?? "")
-    .find((block) => block.includes(".agent-face .agent-run::after"));
-  assert.notEqual(reduced, undefined, "the coding dot should honour reduced motion");
-  assert.match(reduced ?? "", /\.cmsg-thread-link \.ctl-faces \.ctl-working::before,/u);
-  assert.match(reduced ?? "", /animation: none;/u);
 });
 
 /**
@@ -1626,7 +1620,13 @@ type LivenessModule = {
     agentBusy: Record<string, { expiresAt: number; at: number }>;
   };
   agentStatus: (
-    agent: { id: string; provider: string; userId: string; visibility: string },
+    agent: {
+      id: string;
+      provider: string;
+      userId: string;
+      visibility: string;
+      mine?: boolean;
+    },
     repositoryId: string,
   ) => string;
   noteAgentBusy: (frame: {
@@ -1744,6 +1744,36 @@ test("a busy frame whose task never arrives is not ten minutes of dots", async (
   );
 });
 
+test("a teammate's busy frame leaves this account's same-provider agent idle", async () => {
+  const data = await liveness();
+  data.state.tasks = [];
+  data.state.agentBusy = {};
+  data.noteAgentBusy({
+    repositoryId: "repo",
+    userId: "u2",
+    provider: "openai",
+    taskId: "task-u2",
+  });
+
+  assert.equal(
+    data.agentStatus({ ...LIVENESS_AGENT, mine: true }, "repo"),
+    "idle",
+    "the viewer's Codex must not inherit a teammate's busy frame",
+  );
+  assert.equal(
+    data.agentStatus(
+      {
+        id: "u2:openai",
+        provider: "openai",
+        userId: "u2",
+        visibility: "org",
+      },
+      "repo",
+    ),
+    "working",
+  );
+});
+
 test("a connected agent is not painted as a working one", async () => {
   const data = await publicFile("data.js");
   const chat = await publicFile("chat.js");
@@ -1800,18 +1830,25 @@ test("working agent faces put progress around their green status dot", async () 
     faceRing ?? "",
     /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.match(faceRing ?? "", /right: -3px;/u);
-  assert.match(faceRing ?? "", /bottom: -1px;/u);
-  assert.match(faceRing ?? "", /width: 15px;/u);
-  assert.match(faceRing ?? "", /height: 15px;/u);
+  assert.match(faceRing ?? "", /right: -2px;/u);
+  assert.match(faceRing ?? "", /bottom: 0;/u);
+  assert.match(faceRing ?? "", /width: 13px;/u);
+  assert.match(faceRing ?? "", /height: 13px;/u);
+  // One pixel of surface around the badge, not two: the outer rim is the
+  // separation, never the widest band in the mark.
+  assert.match(faceRing ?? "", /box-shadow: 0 0 0 1px var\(--bg-card\);/u);
   assert.doesNotMatch(faceRing ?? "", /#f3efe8|inset: -1px/u);
 
   const faceDot = /\.agent-face \.agent-run::after \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(faceDot, undefined, "live progress should keep a status dot");
-  assert.match(faceDot ?? "", /width: 7px;/u);
-  assert.match(faceDot ?? "", /height: 7px;/u);
+  const idleDot = /\.agent-face \.presence \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(idleDot ?? "", /width: 9px;/u);
+  assert.match(idleDot ?? "", /height: 9px;/u);
+  assert.match(faceDot ?? "", /width: 9px;/u);
+  assert.match(faceDot ?? "", /height: 9px;/u);
   assert.match(faceDot ?? "", /background: var\(--green\);/u);
-  assert.match(faceDot ?? "", /box-shadow: 0 0 0 2px var\(--bg-card\);/u);
+  assert.match(faceDot ?? "", /box-shadow: 0 0 0 1px var\(--bg-card\);/u);
+  assert.doesNotMatch(faceDot ?? "", /animation:/u);
 
   const progress = data.slice(
     data.indexOf("export function agentWorkingProgress"),
@@ -3542,19 +3579,21 @@ test("the run is a ring on the agent working, at the front of the stack", async 
     ring ?? "",
     /conic-gradient\(\s*var\(--green\) calc\(var\(--run, 0\) \* 1%\),\s*var\(--border-strong\) 0/u,
   );
-  assert.match(ring ?? "", /right: -3px;/u);
-  assert.match(ring ?? "", /bottom: -1px;/u);
-  assert.match(ring ?? "", /width: 15px;/u);
-  assert.match(ring ?? "", /height: 15px;/u);
+  assert.match(ring ?? "", /right: -2px;/u);
+  assert.match(ring ?? "", /bottom: 0;/u);
+  assert.match(ring ?? "", /width: 13px;/u);
+  assert.match(ring ?? "", /height: 13px;/u);
+  assert.match(ring ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
   assert.doesNotMatch(ring ?? "", /#f3efe8|inset: -1px/u);
 
   const dot = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::before \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
   assert.notEqual(dot, undefined, "the progress ring should surround a coding dot");
-  assert.match(dot ?? "", /width: 7px;/u);
-  assert.match(dot ?? "", /height: 7px;/u);
+  assert.match(dot ?? "", /width: 9px;/u);
+  assert.match(dot ?? "", /height: 9px;/u);
   assert.match(dot ?? "", /background: var\(--green\);/u);
-  assert.match(dot ?? "", /box-shadow: 0 0 0 2px var\(--bg-chat\);/u);
+  assert.match(dot ?? "", /box-shadow: 0 0 0 1px var\(--bg-chat\);/u);
+  assert.doesNotMatch(dot ?? "", /animation:/u);
 
   // Every kind of participant gets the same surface-coloured cutout. Agent
   // marks are not `.avatar`s, so putting the ring on portraits alone lets two
