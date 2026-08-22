@@ -729,6 +729,11 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   // Channels and their pictures live in the dedicated rail. Collapsing the
   // adjacent tool/roster sidebar cannot hide that navigation surface.
   assert.match(chats, /function channelPictureMarkup/u);
+  assert.match(
+    chats,
+    /function channelPictureMarkup[\s\S]*?const label = repositoryLabel\(repositoryId\);[\s\S]*?const initials =\s*label\s*\.split/u,
+    "an unset channel picture should follow the repository's current display name",
+  );
   assert.match(chats, /function channelRail/u);
   assert.match(chats, /class="channel-rail" aria-label="Channels"/u);
   assert.match(chats, /data-act="channel-picture-pick"/u);

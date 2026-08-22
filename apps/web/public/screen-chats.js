@@ -117,8 +117,9 @@ function channelPictureMarkup(repositoryId, size = 34) {
   if (picture !== undefined) {
     return `<img class="channel-picture" src="${esc(picture)}" alt="" width="${size}" height="${size}">`;
   }
+  const label = repositoryLabel(repositoryId);
   const initials =
-    repositoryId
+    label
       .split(/[-_\s]+/u)
       .filter(Boolean)
       .slice(0, 2)
