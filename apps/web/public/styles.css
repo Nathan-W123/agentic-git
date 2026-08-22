@@ -6033,27 +6033,21 @@ button.chip.lg:hover {
   margin-top: 1px;
 }
 
-/* The status badge on a face in the transcript, at half the size the roster
-   gives it. The sidebar's dot is read down a column of names and is sized for
-   that; in the room it sits on the one face at the head of a message, where
-   the same dot read as a bead stuck to the mark. Halved here and nowhere
-   else, so the side tab keeps the size it was asked to keep. The surface ring
-   halves with it: a one-pixel band around a 5px badge is the reading the
-   two-pixel band gave the 9px one. */
+/* The status badge on a face in the transcript, smaller than the size the
+   roster gives it. The sidebar's dot is read down a column of names and is
+   sized for that; in the room it sits on the one face at the head of a
+   message. It used to be halved to 5px, which on a 32px face read as a speck
+   rather than a status — the thread panel had already had to override it back
+   up, and that size is the one this transcript wants too, so the room now
+   carries it directly and threads simply inherit it. The side tab and the
+   reply stack keep the sizes they were asked to keep, below. The surface ring
+   stays a one-pixel band, which is the reading the two-pixel band gives the
+   9px badge. */
 .cmsg-row .cmsg-avatar .agent-face .presence {
   right: -1px;
-  width: 5px;
-  height: 5px;
-  border-width: 1px;
-}
-
-/* Threads reuse the room transcript markup, but the status badge on a face
-   there needs more presence than the halved room size — one and a half times
-   the room badge, and only inside the thread panel so group chats stay as they
-   are. */
-.thread-panel .cmsg-row .cmsg-avatar .agent-face .presence {
   width: 7.5px;
   height: 7.5px;
+  border-width: 1px;
 }
 
 .cmsg-row .cmsg-body {
@@ -6962,9 +6956,9 @@ button.chip.lg:hover {
 
 /* The face's own badge rather than one drawn beside it. It used to be a
    `::before` on this wrapper: the same colour and size, but static, so the one
-   live signal in a room breathed everywhere except here. Halved and given the
-   chat surface's cutout the way the room's own faces are, it is now literally
-   the badge `agentFace` draws, on the clock every other live mark keeps. */
+   live signal in a room breathed everywhere except here. Halved for the stack
+   and given the chat surface's cutout, it is now literally the badge
+   `agentFace` draws, on the clock every other live mark keeps. */
 .cmsg-thread-link .ctl-faces .ctl-working .presence {
   display: block;
   right: -1px;
@@ -11046,7 +11040,9 @@ dialog.modal[open]::backdrop {
   align-self: center;
 }
 
-/* Halved and hair-ringed, exactly as a face in the room transcript is. */
+/* Halved and hair-ringed. The room transcript's own badge has since grown,
+   but this one sits on a 20px face in a list of tabs rather than at the head
+   of a message, and at that size it is already read. */
 .thread-item .ti-run .presence {
   right: -1px;
   width: 5px;

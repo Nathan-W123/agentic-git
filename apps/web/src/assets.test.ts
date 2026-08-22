@@ -2049,7 +2049,7 @@ test("working agent faces fill the mark itself with the run's progress", async (
   assert.match(faceFill ?? "", /filter: saturate\(0\.6\) brightness\(0\.8\);/u);
 
   // The ordinary status dot keeps the roster's size, and the transcript keeps
-  // its halved one — none of that moved when progress left the badge.
+  // its smaller one — none of that moved when progress left the badge.
   const idleDot = /\.agent-face \.presence \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(idleDot ?? "", /width: 9px;/u);
   assert.match(idleDot ?? "", /height: 9px;/u);
@@ -2057,8 +2057,8 @@ test("working agent faces fill the mark itself with the run's progress", async (
   const roomDot = /\.cmsg-row \.cmsg-avatar \.agent-face \.presence \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
   assert.notEqual(roomDot, undefined, "a face in a room sizes its own dot");
-  assert.match(roomDot ?? "", /width: 5px;/u);
-  assert.match(roomDot ?? "", /height: 5px;/u);
+  assert.match(roomDot ?? "", /width: 7\.5px;/u);
+  assert.match(roomDot ?? "", /height: 7\.5px;/u);
   assert.match(roomDot ?? "", /border-width: 1px;/u);
 
   // The fill is the mark, so a smaller face needs no rule of its own for it.
@@ -2067,12 +2067,15 @@ test("working agent faces fill the mark itself with the run's progress", async (
     /\.cmsg-row \.cmsg-avatar \.agent-face \.agent-run \{/u,
   );
 
-  const threadDot =
-    /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.presence \{([\s\S]*?)\n\}/u
-      .exec(css)?.[1];
-  assert.notEqual(threadDot, undefined, "a face in a thread sizes its own dot");
-  assert.match(threadDot ?? "", /width: 7\.5px;/u);
-  assert.match(threadDot ?? "", /height: 7\.5px;/u);
+  // Threads reuse the room transcript markup and now want the same badge the
+  // room does, so the panel no longer sizes one of its own — the override that
+  // used to lift a halved room dot back up would be a rule restating what it
+  // inherits.
+  assert.doesNotMatch(
+    css,
+    /\.thread-panel \.cmsg-row \.cmsg-avatar \.agent-face \.presence \{/u,
+    "a face in a thread should inherit the room's badge size",
+  );
 
   assert.doesNotMatch(
     css,
