@@ -308,6 +308,42 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a repository can be renamed without its id moving`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      assert.equal(
+        (await store.getRepository(REPOSITORY.id))?.displayName,
+        undefined,
+      );
+
+      await store.renameRepository(REPOSITORY.id, "Widgets");
+      const renamed = await store.getRepository(REPOSITORY.id);
+      assert.equal(renamed?.displayName, "Widgets");
+      // The id is the handle every other row is keyed by, so it never moves.
+      assert.equal(renamed?.id, REPOSITORY.id);
+      assert.equal(renamed?.path, REPOSITORY.path);
+
+      // A rename is an edit, unlike `saveRepository`, which is
+      // first-insert-wins on every backend.
+      await store.saveRepository(REPOSITORY);
+      assert.equal(
+        (await store.getRepository(REPOSITORY.id))?.displayName,
+        "Widgets",
+      );
+
+      // Clearing puts it back to being called by its id.
+      await store.renameRepository(REPOSITORY.id, undefined);
+      assert.equal(
+        (await store.getRepository(REPOSITORY.id))?.displayName,
+        undefined,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a save that omits provenance is not a remapping`, async () => {
     // Every run on a GitHub-imported repository used to fail here.
     // `canonical()` in worker-operations narrows a stored repository to

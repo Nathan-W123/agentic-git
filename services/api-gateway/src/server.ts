@@ -6160,6 +6160,44 @@ export class ApiGateway {
       return;
     }
 
+    // Renaming a repository. Only what it is *called* changes: the id stays
+    // the key every row and the mirror directory on disk are addressed by,
+    // so a rename here can never orphan history the way changing the id
+    // would. Gated exactly as deletion is — `manage_project` through the
+    // ordinary pipeline, or the repository's own creator.
+    //
+    // An empty name is a clear rather than an error: it puts the repository
+    // back to being called by its id, which is the only way to undo a rename
+    // without inventing the old name again.
+    if (repositoryMatch !== undefined && method === "PATCH") {
+      const [projectId = "", repositoryId = ""] = repositoryMatch;
+      await this.authorizeRepositoryOwnerAction(
+        principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+      const body = objectBody(await this.readJson(request));
+      // `min: 0` because clearing is expressed as an empty name rather than
+      // as a second route; anything else is still validated and trimmed.
+      const requested = stringField(body["name"], "name", { min: 0, max: 80 });
+      const displayName =
+        requested === undefined || requested === "" ? undefined : requested;
+      await this.options.store.renameRepository(repositoryId, displayName);
+      await this.options.store.appendAudit(undefined, {
+        type: "repository_renamed",
+        data: {
+          projectId,
+          repositoryId,
+          ...(displayName === undefined ? {} : { displayName }),
+          actorId: principal.user.id,
+        },
+      });
+      const repository = await this.options.store.getRepository(repositoryId);
+      this.sendJson(response, 200, { repository });
+      return;
+    }
+
     // Repository-scoped grants: promoting an existing organization member to
     // full capabilities on *this one repository* ("co-owner"), without
     // touching their organization-wide role. Gated the same way deletion is —

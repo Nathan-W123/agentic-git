@@ -1923,10 +1923,37 @@ export function canManageRepository(repositoryId) {
   ) {
     return true;
   }
-  const role = state.principal?.memberships?.find(
+  return canManageOrganization();
+}
+
+/**
+ * The signed-in user's organization-wide role in the organization this
+ * project belongs to, or undefined when their access comes from a
+ * repository grant instead.
+ */
+export function currentOrganizationRole() {
+  return state.principal?.memberships?.find(
     (membership) => membership.organizationId === state.project?.organizationId,
   )?.role;
+}
+
+/**
+ * Whether this account may change who else is in the organization — the
+ * `manage_members` permission an admin or owner holds, which is what the
+ * server checks on the member routes the roster menu calls.
+ */
+export function canManageOrganization() {
+  const role = currentOrganizationRole();
   return role === "admin" || role === "owner";
+}
+
+/** Somebody else's organization-wide role, from the loaded member list. */
+export function memberRole(userId) {
+  // The same two shapes `memberName` reads: the member list nests the
+  // account under `user`, and some rows carry only a flat id.
+  return state.members.find(
+    (member) => (member.user?.id ?? member.userId ?? member.id) === userId,
+  )?.role;
 }
 
 /**
@@ -1940,10 +1967,7 @@ export function canManageRepository(repositoryId) {
  * organization role reaching this project at all — can actually leave.
  */
 export function canLeaveRepository() {
-  const role = state.principal?.memberships?.find(
-    (membership) => membership.organizationId === state.project?.organizationId,
-  )?.role;
-  return role === undefined;
+  return currentOrganizationRole() === undefined;
 }
 
 export function currentUserName() {
@@ -4538,6 +4562,44 @@ export async function deleteRepository(repositoryId) {
 }
 
 /**
+ * Renames a repository — what it is *called*, not what it is keyed by.
+ *
+ * The id stays the handle: it addresses the channel, every task and run, and
+ * the mirror on disk, so changing it would be a migration rather than a
+ * rename. An empty name clears the display name, putting the repository back
+ * to being called by its id.
+ */
+export async function renameRepository(repositoryId, name) {
+  const trimmed = String(name ?? "").trim();
+  const response = await api(repositoryPath(repositoryId), {
+    method: "PATCH",
+    body: { name: trimmed },
+  });
+  const repository = state.repositories.find((repo) => repo.id === repositoryId);
+  if (repository !== undefined) {
+    // Applied locally as well as refetched, so the name in the header and the
+    // channel list changes on the same frame the modal closes on.
+    if (trimmed === "") {
+      delete repository.displayName;
+    } else {
+      repository.displayName = response?.repository?.displayName ?? trimmed;
+    }
+  }
+  return response?.repository;
+}
+
+/**
+ * What to call a repository on screen: its display name once somebody has
+ * renamed it, and its id — which is what every repository is called until
+ * then — otherwise.
+ */
+export function repositoryLabel(repositoryId) {
+  const repository = state.repositories.find((repo) => repo.id === repositoryId);
+  const name = String(repository?.displayName ?? "").trim();
+  return name === "" ? repositoryId : name;
+}
+
+/**
  * Removes the signed-in user's own access to a repository held through a
  * grant. Throws with `error.code === "org_membership_reaches_repository"`
  * when access instead comes from an organization role — see
@@ -4787,6 +4849,65 @@ export async function revokeRepositoryGrant(repositoryId, userId) {
     repositoryPath(repositoryId, `/grants/${encodeURIComponent(userId)}`),
     { method: "DELETE" },
   );
+}
+
+/** Re-reads the organization's member list after a role change or removal. */
+async function reloadMembers() {
+  if (!state.organizationId) {
+    return;
+  }
+  const response = await apiOptional(
+    `/organizations/${encodeURIComponent(state.organizationId)}/members`,
+    { members: [] },
+  );
+  state.members = response.members ?? [];
+}
+
+/**
+ * Changes somebody's organization-wide role — what promote and demote mean
+ * for a person rather than for one repository.
+ *
+ * The server refuses a role above the caller's own, and refuses demoting the
+ * last owner (`last_owner`), so this reports what came back rather than
+ * deciding either question here.
+ */
+export async function updateMemberRole(userId, role) {
+  await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/members/${encodeURIComponent(userId)}`,
+    { method: "PATCH", body: { role } },
+  );
+  // The roster draws its rows from the cached room lists rather than from the
+  // member list, so the new role goes there too — otherwise the line under
+  // the name still says what they were until the next fetch.
+  for (const people of Object.values(state.channelPeople)) {
+    for (const person of people) {
+      if ((person.user?.id ?? person.userId ?? person.id) === userId) {
+        person.role = role;
+      }
+    }
+  }
+  await reloadMembers();
+}
+
+/**
+ * Removes somebody from the organization outright — every repository it
+ * owns, not one channel. Repository-scoped grants they hold are theirs to
+ * lose separately; see {@link revokeRepositoryGrant}.
+ */
+export async function removeMember(userId) {
+  await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  );
+  // The room lists are what the roster actually draws, and they are cached
+  // per repository — without this the person stayed in the sidebar until the
+  // next fetch, which reads as the removal having failed.
+  for (const [repositoryId, people] of Object.entries(state.channelPeople)) {
+    state.channelPeople[repositoryId] = people.filter(
+      (person) => (person.user?.id ?? person.userId ?? person.id) !== userId,
+    );
+  }
+  await reloadMembers();
 }
 
 export function markChannelRead(repositoryId) {

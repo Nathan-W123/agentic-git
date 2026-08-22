@@ -334,8 +334,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
   public async saveRepository(repository: StoredRepository): Promise<void> {
     await this.query(
       `INSERT INTO repositories
-         (id, path, branch, first_seen_at, provider, remote_url, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (id, path, branch, first_seen_at, provider, remote_url, created_by,
+          display_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO NOTHING`,
       [
         repository.id,
@@ -345,6 +346,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         repository.provider ?? "local",
         repository.remoteUrl ?? null,
         repository.createdBy ?? null,
+        repository.displayName ?? null,
       ],
     );
     const existing = await this.getRepository(repository.id);
@@ -1693,6 +1695,16 @@ export class PostgresCoordinationStore implements CoordinationStore {
   public async listRepositories(): Promise<StoredRepository[]> {
     const rows = await this.rows("SELECT * FROM repositories ORDER BY id");
     return rows.map((row) => this.toRepository(row));
+  }
+
+  public async renameRepository(
+    id: string,
+    displayName: string | undefined,
+  ): Promise<void> {
+    await this.query(
+      "UPDATE repositories SET display_name = $1 WHERE id = $2",
+      [displayName ?? null, id],
+    );
   }
 
   public async getRepository(
@@ -4151,6 +4163,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const provider = optionalText(row, "provider");
     const remoteUrl = optionalText(row, "remote_url");
     const createdBy = optionalText(row, "created_by");
+    const displayName = optionalText(row, "display_name");
     return {
       id: text(row, "id"),
       path: text(row, "path"),
@@ -4160,6 +4173,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         : { provider: provider as "git" | "github" }),
       ...(remoteUrl === undefined ? {} : { remoteUrl }),
       ...(createdBy === undefined ? {} : { createdBy }),
+      ...(displayName === undefined ? {} : { displayName }),
     };
   }
 

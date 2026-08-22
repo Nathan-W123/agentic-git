@@ -8051,6 +8051,73 @@ async function loginAs(
   return client;
 }
 
+test("a repository can be renamed without its id moving, and only by somebody who may manage it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "renamable-repo");
+  const repoPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/renamable-repo`;
+
+  const renamed = await owner.request(repoPath, {
+    method: "PATCH",
+    body: { name: "Lattice Web" },
+  });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  assert.equal(renamed.data.repository.displayName, "Lattice Web");
+  // The id is what every other row and route addresses, so it never moves.
+  assert.equal(renamed.data.repository.id, "renamable-repo");
+  assert.equal(
+    (await runtime.store.getRepository("renamable-repo"))?.displayName,
+    "Lattice Web",
+  );
+  const events = await runtime.store.listAuditEvents({
+    types: ["repository_renamed"],
+  });
+  assert.equal(events.length, 1);
+
+  // An empty name is a clear rather than an error: back to being called by
+  // the id, which is the only way to undo a rename.
+  const cleared = await owner.request(repoPath, {
+    method: "PATCH",
+    body: { name: "" },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+  assert.equal(cleared.data.repository.displayName, undefined);
+  assert.equal(
+    (await runtime.store.getRepository("renamable-repo"))?.displayName,
+    undefined,
+  );
+
+  const tooLong = await owner.request(repoPath, {
+    method: "PATCH",
+    body: { name: "x".repeat(81) },
+  });
+  assert.equal(tooLong.status, 400);
+
+  // A developer who neither created it nor holds manage_project is refused,
+  // exactly as they are for deletion.
+  const developer = await runtime.store.createUser({
+    email: "renamer-dev@example.com",
+    displayName: "Renamer Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: developer.id,
+    role: "developer",
+  });
+  const devClient = await loginAs(runtime.origin, developer.email);
+  const refused = await devClient.request(repoPath, {
+    method: "PATCH",
+    body: { name: "Not Mine" },
+  });
+  assert.equal(refused.status, 403);
+  assert.equal(
+    (await runtime.store.getRepository("renamable-repo"))?.displayName,
+    undefined,
+  );
+});
+
 test("a repository's creator can delete it without manage_project, but a colleague who did not create it cannot", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
