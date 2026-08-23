@@ -1496,9 +1496,7 @@ function githubCard() {
 function agentsCard() {
   const agents = myAgents();
   return `<section class="card">
-    <div class="panel-head"><div><h3>Agents</h3>
-      <p>What this deployment offers, and which of them you have connected —
-        one row per provider, usable in every channel you join it to</p></div></div>
+    <div class="panel-head"><div><h3>Agents</h3></div></div>
     ${
       agents.length === 0
         ? `<div class="set-row"><span class="sr-body">
@@ -1550,10 +1548,6 @@ function agentsCard() {
                   }
                   <div class="sr-sub${state_.cls}">${esc(state_.text)}${
                     agent.detail ? ` — ${esc(agent.detail)}` : ""
-                  }${
-                    renaming
-                      ? " — this name is what it answers to in every repository"
-                      : ""
                   }</div>
                 </span>
                 <span class="sr-ctl">
