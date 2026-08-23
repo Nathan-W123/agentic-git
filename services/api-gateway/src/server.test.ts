@@ -27,6 +27,7 @@ import {
   explainAnswerFailure,
   looksLikeTaskRequest,
   narrateTaskEvent,
+  parseAnswerTaskDirective,
   parseAutoClaimVerdict,
   readsAsEchoOfRequest,
   reportedFreshTokens,
@@ -121,6 +122,8 @@ interface TestRuntime {
   }>;
   chatAnswer: {
     text?: string;
+    /** A channel-answer reply when it needs routing syntax of its own. */
+    channelAnswerText?: string;
     fail?: string;
     delayMs?: number;
     streamEvents?: Array<Record<string, unknown>>;
@@ -497,8 +500,12 @@ async function startRuntime(
     if (chatAnswer.fail !== undefined) {
       throw new Error(chatAnswer.fail);
     }
+    const responseText =
+      /This final line is private routing data/u.test(asked)
+        ? (chatAnswer.channelAnswerText ?? chatAnswer.text)
+        : chatAnswer.text;
     return {
-      ...(chatAnswer.text === undefined ? {} : { text: chatAnswer.text }),
+      ...(responseText === undefined ? {} : { text: responseText }),
       ...(chatAnswer.thinking === undefined
         ? {}
         : { thinking: chatAnswer.thinking }),
@@ -5152,7 +5159,8 @@ test("a question about repository files is answered in the channel, not turned i
     { provider: "anthropic", visibility: "personal" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
-  runtime.chatAnswer.text = "The API gateway handles channel questions.";
+  runtime.chatAnswer.text =
+    "The API gateway handles channel questions.\nANSWER_TASK: NONE";
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -5169,8 +5177,80 @@ test("a question about repository files is answered in the channel, not turned i
     (message) => message.kind === "agent",
   );
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.equal(
+    agentMessages[0]?.content,
+    "The API gateway handles channel questions.",
+  );
+  assert.doesNotMatch(String(agentMessages[0]?.content), /ANSWER_TASK/u);
   assert.deepEqual(agentMessages[0].replies ?? [], []);
   assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
+});
+
+test("a question answer that proposes a repository change starts one scoped task and announces the handoff", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "answer-proposes-task");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.channelAnswerText =
+    "The retry routes currently have no cap, so malformed clients can loop forever.\n" +
+    "ANSWER_TASK: Add a three-attempt cap to retry routes and cover it with API gateway tests";
+  // The task-opening call is separate from the answer and should not repeat
+  // the answer's private routing line.
+  runtime.chatAnswer.text =
+    "Cap retry routes\nI will update the retry guard and verify its route tests.";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Claude (Owner) should retry routes cap malformed clients?",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const [task] = runtime.submittedTasks;
+  assert.equal(
+    task?.objective,
+    "Add a three-attempt cap to retry routes and cover it with API gateway tests",
+  );
+  assert.equal(task?.conversationId, posted.data.message.id);
+  assert.equal(runtime.runCalls.length, 1);
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const root = (listed.data.messages as any[]).find(
+      (message) => message.id === posted.data.message.id,
+    );
+    return root?.replies?.some(
+      (reply: any) =>
+        /update the retry guard|taken this task and.*working on it/iu.test(
+          String(reply.content),
+        ),
+    ) === true;
+  }, "the answer's task handoff was never announced");
+
+  const listed = await owner.request(`${base}/messages`);
+  const visibleAnswer = (listed.data.messages as any[]).find(
+    (message) =>
+      message.kind === "agent" &&
+      message.content.startsWith("The retry routes currently"),
+  );
+  assert.equal(
+    visibleAnswer?.content,
+    "The retry routes currently have no cap, so malformed clients can loop forever.",
+  );
+  const allVisible = (listed.data.messages as any[])
+    .flatMap((message) => [
+      String(message.content),
+      ...(message.replies ?? []).map((reply: any) => String(reply.content)),
+    ])
+    .join("\n");
+  assert.doesNotMatch(allVisible, /ANSWER_TASK/u);
 });
 
 test("an agent's answer carries a reference to the message it answers", async (t) => {
@@ -7096,6 +7176,51 @@ test("/dnc is answered without announcing the constraint and files no task", asy
   assert.match(prompt, /without mentioning `\/dnc`/u);
   assert.match(prompt, /calling it a do-not-code request/u);
   assert.match(prompt, /The message: @Claude \(Owner\) rework the retry loop/u);
+});
+
+test("/dnc and @agents answers never auto-dispatch suggested work", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "answer-task-guards");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.channelAnswerText =
+    "The retry loop should use a bounded backoff.\n" +
+    "ANSWER_TASK: Bound the retry loop and add regression coverage";
+
+  const readOnly = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @Claude (Owner) should the retry loop be bounded?" },
+  });
+  assert.equal(readOnly.status, 201, JSON.stringify(readOnly.data));
+
+  const broadcast = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@agents should the retry loop be bounded?" },
+  });
+  assert.equal(broadcast.status, 201, JSON.stringify(broadcast.data));
+
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  const answers = (listed.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(answers.length, 2, JSON.stringify(listed.data.messages));
+  assert.ok(
+    answers.every(
+      (message) =>
+        message.content === "The retry loop should use a bounded backoff.",
+    ),
+    JSON.stringify(answers),
+  );
+  assert.ok(
+    answers.every((message) => !String(message.content).includes("ANSWER_TASK")),
+    JSON.stringify(answers),
+  );
 });
 
 test("/dnc prompt permits read-only shell inspection but forbids edits", async (t) => {
@@ -14721,6 +14846,48 @@ test("a newer account's workspace never displaces the owner's own", async (t) =>
 });
 
 /* ------------------------------------------- unaddressed message verdict --- */
+
+test("missing, malformed, or no-task answer directives fail closed without exposing control markers", () => {
+  assert.deepEqual(parseAnswerTaskDirective("The route is in server.ts."), {
+    answer: "The route is in server.ts.",
+    taskObjective: undefined,
+  });
+  assert.deepEqual(
+    parseAnswerTaskDirective(
+      "The retry loop is bounded.\nANSWER_TASK: NONE",
+    ),
+    {
+      answer: "The retry loop is bounded.",
+      taskObjective: undefined,
+    },
+  );
+  assert.equal(
+    parseAnswerTaskDirective(
+      "The retry loop is bounded.\nANSWER_TASK: NO_TASK.",
+    ).taskObjective,
+    undefined,
+  );
+
+  for (const malformed of [
+    "The retry loop is bounded.\nANSWER_TASK add tests",
+    "The retry loop is bounded.\nANSWER_TASK:",
+    "The retry loop is bounded.\nANSWER_TASK:: Add tests",
+    "The retry loop is bounded.\nANSWER_TASK: Add tests\nMore detail follows.",
+    "The retry loop is bounded.\nANSWER_TASK: Add tests\nANSWER_TASK: Add more tests",
+    "The retry loop is bounded.\nANSWER_TASK: Add tests ANSWER_TASK: Add more tests",
+    "The retry loop is bounded. ANSWER_TASK: Add tests",
+  ]) {
+    const parsed = parseAnswerTaskDirective(malformed);
+    assert.equal(parsed.taskObjective, undefined, malformed);
+    assert.doesNotMatch(parsed.answer ?? "", /ANSWER_TASK/u, malformed);
+  }
+
+  // A directive without an answer is not enough to spend an account either.
+  assert.deepEqual(parseAnswerTaskDirective("ANSWER_TASK: Add tests"), {
+    answer: undefined,
+    taskObjective: undefined,
+  });
+});
 
 /**
  * What an agent decides about a message nobody addressed to it.

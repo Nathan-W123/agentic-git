@@ -2392,6 +2392,75 @@ export function parseAutoClaimVerdict(text: string | undefined): AutoClaimVerdic
 }
 
 /**
+ * Separates the answer somebody should see from an optional task suggestion.
+ *
+ * A task is accepted only from one well-formed directive on the final
+ * non-empty line. Missing, malformed, duplicated and explicitly empty
+ * directives all fail closed. Any line containing the private marker is
+ * still removed from the visible answer, including malformed output: a
+ * provider formatting mistake must not leak coordinator syntax into chat.
+ */
+export function parseAnswerTaskDirective(text: string | undefined): {
+  answer: string | undefined;
+  taskObjective: string | undefined;
+} {
+  if (text === undefined) {
+    return { answer: undefined, taskObjective: undefined };
+  }
+
+  const lines = text.split("\n");
+  const directives: Array<{ index: number; value: string | undefined }> = [];
+  const visible: string[] = [];
+  const marker = /\bANSWER_TASK\b/iu;
+  const exact = /^\s*ANSWER_TASK\s*:\s*(.*?)\s*$/iu;
+
+  for (const [index, line] of lines.entries()) {
+    const at = line.search(marker);
+    if (at < 0) {
+      visible.push(line);
+      continue;
+    }
+
+    // Preserve any prose before a marker the provider accidentally appended
+    // to an answer line, but never the marker or anything after it.
+    const before = line.slice(0, at).trimEnd();
+    if (before.trim().length > 0) {
+      visible.push(before);
+    }
+    const match = exact.exec(line);
+    directives.push({ index, value: match?.[1]?.trim() });
+    if ((line.match(/\bANSWER_TASK\b/giu)?.length ?? 0) > 1) {
+      // Two markers crammed onto one line are still two competing
+      // directives, not one unusually long objective.
+      directives.push({ index, value: undefined });
+    }
+  }
+
+  const answer = visible.join("\n").trim() || undefined;
+  let finalNonEmpty = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if ((lines[index] ?? "").trim().length > 0) {
+      finalNonEmpty = index;
+      break;
+    }
+  }
+  const only = directives.length === 1 ? directives[0] : undefined;
+  const value = only?.value;
+  const taskObjective =
+    answer !== undefined &&
+    only?.index === finalNonEmpty &&
+    value !== undefined &&
+    value.length > 0 &&
+    value.length <= 2_000 &&
+    /^[\p{L}\p{N}]/u.test(value) &&
+    !/^(?:none|no[_ -]?task)(?:\b|$)/iu.test(value)
+      ? value
+      : undefined;
+
+  return { answer, taskObjective };
+}
+
+/**
  * How long the "is this a request" check may take.
  *
  * Short on purpose: it runs between somebody pressing send and the channel
@@ -11678,11 +11747,16 @@ export class ApiGateway {
     referencedMessageId?: string;
     /**
      * Distinguishes an explicit @mention from an auto-claim in the audit
-     * trail. Both paths submit through this exact method and the exact same
-     * `submitTask` call below — see `maybeAutoClaimTask` — differing only in
-     * how the candidate was chosen.
+     * trail. Every path submits through this exact method and the exact same
+     * `submitTask` call below — see `maybeAutoClaimTask` and the question
+     * answer handoff — differing only in how the candidate was chosen.
      */
-    trigger?: "mention" | "auto_claim" | "audit_fix" | "conversation";
+    trigger?:
+      | "mention"
+      | "auto_claim"
+      | "audit_fix"
+      | "conversation"
+      | "answer_followup";
     /**
      * Lean room context for a proactive dispatch.
      *
@@ -11791,8 +11865,8 @@ export class ApiGateway {
     // to have been ignored while those steps run.
     //
     // No task exists yet, so this is keyed on the agent instead. The frame
-    // below carries the real id and supersedes it; the question path never
-    // submits anything, and lets it lapse.
+    // below carries the real id and supersedes it; an answer with no suggested
+    // follow-up task simply lets this pending frame lapse.
     if (input.queueAfterCurrent !== true) {
       this.webSockets.broadcastTransient(projectId, {
         type: "channel-agent-busy",
@@ -11812,8 +11886,10 @@ export class ApiGateway {
     // channel, like a message from a colleague.
     // Provider chat receives a temporary read-only checkout of this channel's
     // canonical repository. Questions can therefore be answered from the
-    // files without becoming coordinated edit tasks; requests for code still
-    // continue through the task path below.
+    // files without treating the question itself as an edit task. If that
+    // answer identifies a concrete change, its private directive comes back
+    // through this method once more with a scoped objective for the ordinary
+    // task path below.
     //
     // Not applied to work the unaddressed path decided on. That decision was
     // already made, by a model, with the room in front of it, and its three
@@ -11826,9 +11902,10 @@ export class ApiGateway {
       input.queueAfterCurrent !== true &&
       input.forceQuestion !== true &&
       input.trigger !== "auto_claim" &&
+      input.trigger !== "answer_followup" &&
       readsAsQuestion(content)
     ) {
-      await this.answerInChannel(
+      const taskObjective = await this.answerInChannel(
         candidate,
         content,
         projectId,
@@ -11836,6 +11913,19 @@ export class ApiGateway {
         input.referencedMessageId,
         input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
       );
+      if (taskObjective !== undefined) {
+        await this.dispatchOneMention({
+          projectId,
+          repositoryId,
+          content,
+          objective: taskObjective,
+          senderId,
+          candidate,
+          referencedMessageId: input.referencedMessageId,
+          trigger: "answer_followup",
+          ...(input.brief === true ? { brief: true } : {}),
+        });
+      }
       return;
     }
 
@@ -11851,6 +11941,7 @@ export class ApiGateway {
     // is an ordinary task this agent can take.
     if (
       input.forceQuestion !== true &&
+      input.trigger !== "answer_followup" &&
       SYSTEM_PACKAGE_INSTALL_RE.test(content)
     ) {
       await this.appendChannelEntry({
@@ -12527,11 +12618,11 @@ export class ApiGateway {
   }
 
   /**
-   * Answers a message that is not a request for work.
+   * Answers a message that is not itself a request for work.
    *
-   * Posted flat in the channel, with no thread and no task: a thread is for
-   * following work, and creating one for "what are you working on?" leaves an
-   * empty container that never closes. This is the same shape as the
+   * The answer is posted flat in the channel. A caller may separately turn a
+   * valid returned objective into a task; callers with read-only or broadcast
+   * semantics simply ignore it. This is the same answer shape as the
    * one-to-one panel — a chat completion on the agent owner's credential —
    * just addressed to a room instead of a person.
    */
@@ -12547,7 +12638,7 @@ export class ApiGateway {
      * other instructions rather than mixed into the sender's message.
      */
     directive?: string,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const answer = await this.askAgent(
       candidate,
       `${agentIdentity(candidate)}\n\n` +
@@ -12559,7 +12650,13 @@ export class ApiGateway {
         "run shell commands that only read — and say plainly " +
         "when a file is absent or unreadable rather than guessing. Do not " +
         "claim to have changed or started anything: coding requests use the " +
-        "separate task path. Describe existing work from the list below. Each " +
+        "separate task path. If inspecting the repository shows that a " +
+        "concrete code change should be made to resolve this message, add " +
+        "`ANSWER_TASK: <a self-contained, scoped imperative " +
+        "objective>\` as the final line. Otherwise add `" +
+        "ANSWER_TASK: NONE`. This final line is private routing " +
+        "data: put it on its own line and do not mention or explain it in " +
+        "the answer. Describe existing work from the list below. Each " +
         "task below is labelled with what has actually happened to it; a task " +
         "labelled done is finished, whatever else you remember about it.\n\n" +
         (await this.agentWorkContext(repositoryId, candidate)) +
@@ -12572,10 +12669,11 @@ export class ApiGateway {
     // confidently they are worded — see {@link readsAsEchoOfRequest}. Caught
     // here rather than only asked against in the prompt, because the prompt is
     // a request and this is the last place before it reaches the channel.
+    const parsed = parseAnswerTaskDirective(answer.text);
     const said =
-      answer.text !== undefined && readsAsEchoOfRequest(question, answer.text)
+      parsed.answer !== undefined && readsAsEchoOfRequest(question, parsed.answer)
         ? undefined
-        : answer.text;
+        : parsed.answer;
     await this.appendChannelEntry({
       projectId,
       repositoryId,
@@ -12588,6 +12686,7 @@ export class ApiGateway {
           : ECHOED_REQUEST_REPLY),
       ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     });
+    return said === undefined ? undefined : parsed.taskObjective;
   }
 
   /**
