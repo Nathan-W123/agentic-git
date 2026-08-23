@@ -2787,6 +2787,17 @@ export class ProviderChatService {
         userId === undefined
           ? undefined
           : await this.ownCredential(userId, "openai").catch(() => undefined);
+      // Captured rather than swallowed. Opening the caller's credential home
+      // can fail outright — most often as "not connected" — and that error is
+      // the whole answer to why the card is empty. It used to be discarded by
+      // the catch below, and the card then blamed the account's quota for a
+      // connection that was never there.
+      let obstacle: string | undefined =
+        userId !== undefined && credential === undefined
+          ? "No Codex connection is stored for this account, so the quota " +
+            "was asked of whatever login this machine carries rather than " +
+            "of you. Connect Codex above to read your own."
+          : undefined;
       const inHome = await this.withCompletionEnv(
         userId,
         "openai",
@@ -2820,7 +2831,16 @@ export class ProviderChatService {
           // home is gone, and the question would be about the host's login.
           return { obstacle: await this.codexQuotaObstacle(env) };
         },
-      ).catch(() => undefined);
+      ).catch((error: unknown) => {
+        obstacle =
+          error instanceof ProviderChatError && error.code === "not_connected"
+            ? "This account is not connected to Codex here, so there is no " +
+              "account to ask for a quota. Connect it from the row above."
+            : `The Codex quota could not be read: ${
+                error instanceof Error ? error.message : String(error)
+              }`;
+        return undefined;
+      });
       if (inHome?.report !== undefined) {
         return inHome.report;
       }
@@ -2841,6 +2861,7 @@ export class ProviderChatService {
         windows: [],
         unavailableReason:
           inHome?.obstacle ??
+          obstacle ??
           "Codex reported no quota for this account, and no Codex session " +
             "has recorded rate limits on this machine yet. An account billed " +
             "by API key reports no subscription quota at all.",

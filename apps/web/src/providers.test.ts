@@ -2954,6 +2954,68 @@ test("a refusal is not read as a confirmation", () => {
   assert.equal(saysSignedIn("Signed in as nathan@example.com"), true);
 });
 
+test("a connection failure is the answer, not a quota of zero", async () => {
+  // The remaining way to reach the blanket sentence: opening the caller's
+  // credential home fails, the whole in-home block is skipped, and the card
+  // reported an account quota for a connection that was never established.
+  const harness = await createHarness();
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("disconnected-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-disconnected",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    // Delegating rather than spread: a spread of a class instance keeps none
+    // of its prototype methods, and the reader needs the real ones.
+    credentials: new Proxy(store, {
+      get: (target, property) => {
+        if (property === "openCredentialHome") {
+          return async () => undefined;
+        }
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+    runner: scriptedRunner({}),
+  });
+
+  const report = await service.usage({
+    provider: "openai",
+    userId: "disconnected-user",
+  });
+  assert.deepEqual(report.windows, []);
+  assert.match(report.unavailableReason ?? "", /not connected to Codex/u);
+  assert.doesNotMatch(report.unavailableReason ?? "", /reported no quota/u);
+});
+
+test("a caller with no stored connection is told whose quota was read", async () => {
+  // A host-login deployment legitimately has no per-user credential, and the
+  // read still happens — but against the machine's login, not this person's.
+  // Saying so is the difference between "you have no quota" and "that was not
+  // your account".
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "--version"
+          ? output("codex-cli 0.146.0")
+          : args[0] === "login"
+            ? output("Logged in using ChatGPT")
+            : output(""),
+    }),
+  });
+
+  const report = await service.usage({
+    provider: "openai",
+    userId: "no-connection-user",
+  });
+  assert.match(report.unavailableReason ?? "", /rather than of you/u);
+});
+
 test("an empty usage card says what is actually in the way", async () => {
   // One sentence used to cover four situations — the CLI missing, signed out,
   // too old, or an account with genuinely no subscription quota — and it
