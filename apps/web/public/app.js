@@ -5799,7 +5799,17 @@ function selectDirectMessage(event) {
     return;
   }
   state.dmSelectedMessageId = next;
-  render();
+  // Selecting a message only changes two classes. Rebuilding the whole app
+  // here also replaces the conversation's scroller; when another side panel
+  // precedes this one, that scroller has no captured anchor and starts again
+  // at the first message. Keep the durable choice in state for later polls,
+  // and paint this interaction on the existing rows.
+  for (const selected of document.querySelectorAll(".dm-msg.dm-selected")) {
+    selected.classList.remove("dm-selected");
+  }
+  if (next !== undefined) {
+    row.classList.add("dm-selected");
+  }
 }
 
 /**

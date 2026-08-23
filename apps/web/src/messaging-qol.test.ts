@@ -700,6 +700,17 @@ test("a private conversation stacks, and shows one message's time and delete at 
   assert.match(select, /row\.dataset\.dmMessage/u);
   assert.match(select, /chosen === state\.dmSelectedMessageId \? undefined : chosen/u);
   assert.match(select, /state\.dmSelectedMessageId = next;/u);
+  // Revealing a message's controls must not replace its scroll container.
+  // The selected id still survives future polls through state, while the
+  // immediate interaction only updates the rows that are already in place.
+  assert.match(select, /document\.querySelectorAll\("\.dm-msg\.dm-selected"\)/u);
+  assert.match(select, /selected\.classList\.remove\("dm-selected"\)/u);
+  assert.match(select, /row\.classList\.add\("dm-selected"\)/u);
+  assert.doesNotMatch(
+    select,
+    /\brender\(\)/u,
+    "selecting a private message must not rebuild and reset its scroller",
+  );
   // Only for a press that does nothing else, so a reply or a delete is not
   // re-rendered out from under its own click.
   assert.match(
