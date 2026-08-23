@@ -4417,6 +4417,55 @@ const TASK_ICON = {
   open: "dotsHorizontal",
 };
 
+/** Statuses that no longer need attention in the history list. */
+const FINISHED_HISTORY_STATUS = new Set([
+  "integrated",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Split one agent's history into work that still needs attention and work
+ * that has already landed. Keeps each half in the newest-first order
+ * `agentHistoryRows` already established.
+ */
+function agentHistorySections(rows) {
+  const active = [];
+  const finished = [];
+  for (const row of rows) {
+    if (FINISHED_HISTORY_STATUS.has(row.task.status)) {
+      finished.push(row);
+    } else {
+      active.push(row);
+    }
+  }
+  return { active, finished };
+}
+
+/**
+ * One compact history line: status mark, one-line summary, when it ran.
+ * Opens the thread when the task was talked about in the channel.
+ */
+function agentHistoryRow({ task, message }) {
+  const iconName = TASK_ICON[task.status] ?? "info";
+  // A description of the work, not the words that asked for it. The
+  // request is still here — on the row's tooltip, with its role preamble
+  // taken off, for the reader who wants to know exactly what was said.
+  const line = taskSummaryLine(task, message);
+  const full = withoutRolePreamble(task.objective).trim();
+  const open =
+    message === undefined
+      ? ""
+      : ` role="button" tabindex="0" data-act="channel-thread-open"
+          data-value="${esc(message.id)}"`;
+  return `<div class="agent-history-row ${esc(task.status)}"${open}
+    title="${esc(full)}">
+    <span class="ah-glyph">${icon(iconName)}</span>
+    <span class="ah-objective">${esc(line)}</span>
+    <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
+  </div>`;
+}
+
 function agentHistory(agent, repositoryId) {
   const rows = agentHistoryRows(agent, repositoryId);
   if (rows.length === 0) {
@@ -4426,27 +4475,23 @@ function agentHistory(agent, repositoryId) {
       `${esc(agent.name.split(" ")[0])} has not been asked for anything in this repository.`,
     )}</div>`;
   }
-  return `<div class="agent-history scroll">${rows
-    .map(({ task, message }) => {
-      const iconName = TASK_ICON[task.status] ?? "info";
-      // A description of the work, not the words that asked for it. The
-      // request is still here — on the row's tooltip, with its role preamble
-      // taken off, for the reader who wants to know exactly what was said.
-      const line = taskSummaryLine(task, message);
-      const full = withoutRolePreamble(task.objective).trim();
-      const open =
-        message === undefined
-          ? ""
-          : ` role="button" tabindex="0" data-act="channel-thread-open"
-              data-value="${esc(message.id)}"`;
-      return `<div class="agent-history-row ${esc(task.status)}"${open}
-        title="${esc(full)}">
-        <span class="ah-glyph">${icon(iconName)}</span>
-        <span class="ah-objective">${esc(line)}</span>
-        <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
-      </div>`;
-    })
-    .join("")}</div>`;
+  const { active, finished } = agentHistorySections(rows);
+  return `<div class="agent-history scroll">
+    ${
+      active.length === 0
+        ? ""
+        : `<div class="agent-history-active" aria-label="Active">
+            ${active.map(agentHistoryRow).join("")}
+          </div>`
+    }
+    ${
+      finished.length === 0
+        ? ""
+        : `<div class="agent-history-finished" aria-label="Finished">
+            ${finished.map(agentHistoryRow).join("")}
+          </div>`
+    }
+  </div>`;
 }
 
 /** Every loaded room this exact agent belongs to, with that room's overrides. */

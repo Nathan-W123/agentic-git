@@ -4801,6 +4801,41 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.match(panel, /headerAction\("history", "history", "Task history"\)/u);
 });
 
+test("agent history is a dense active-then-finished task list", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const historyStart = chats.indexOf("const TASK_ICON = {");
+  const historyEnd = chats.indexOf(
+    "/** Every loaded room this exact agent belongs to",
+    historyStart,
+  );
+  assert.notEqual(historyStart, -1);
+  assert.notEqual(historyEnd, -1);
+  const history = chats.slice(historyStart, historyEnd);
+  assert.match(history, /function agentHistorySections\(rows\)/u);
+  assert.match(history, /function agentHistoryRow\(\{ task, message \}\)/u);
+  assert.match(history, /FINISHED_HISTORY_STATUS/u);
+  assert.match(history, /"integrated"/u);
+  assert.match(history, /"failed"/u);
+  assert.match(history, /"cancelled"/u);
+  // Still one line of summary, status, and a way into the thread.
+  assert.match(history, /taskSummaryLine\(task, message\)/u);
+  assert.match(history, /data-act="channel-thread-open"/u);
+  assert.match(history, /class="agent-history-row \$\{esc\(task\.status\)\}"/u);
+  assert.match(history, /class="ah-objective"/u);
+  assert.match(history, /class="ah-when"/u);
+  // Active work above finished work, same quiet split the thread list uses.
+  assert.match(history, /agentHistorySections\(rows\)/u);
+  assert.match(history, /class="agent-history-active"/u);
+  assert.match(history, /class="agent-history-finished"/u);
+  assert.match(history, /aria-label="Active"/u);
+  assert.match(history, /aria-label="Finished"/u);
+  assert.match(css, /\.agent-history-active \+ \.agent-history-finished/u);
+  assert.match(css, /\.agent-history-finished \.agent-history-row/u);
+  assert.match(css, /\.agent-history-row \{[^}]*padding:\s*4px 12px/su);
+  assert.match(css, /\.agent-history-row \{[^}]*font-size:\s*12px/su);
+});
+
 test("the spec tab is where an agent is made org-wide or kept personal", async () => {
   const app = await browserSource();
   const chats = await publicFile("screen-chats.js");
