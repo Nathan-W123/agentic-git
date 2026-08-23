@@ -305,10 +305,10 @@ function declaredSpans(
   // function it came for, and has every hunk deferred back out again. The
   // split fired and bought nothing.
   //
-  // `declaredSymbols` is the same plan's pre-enrichment words. Absent means
+  // `declared.symbols` is the same plan's pre-enrichment words. Absent means
   // the plan was never enriched, so `expectedSymbols` is already those words;
   // empty means the agent named no symbols, which still takes the file whole.
-  const claimed = plan.declaredSymbols ?? complete.expectedSymbols;
+  const claimed = plan.declared?.symbols ?? complete.expectedSymbols;
   if (!files.includes(file)) {
     return undefined;
   }
@@ -480,7 +480,7 @@ interface PartiallyHeldFile {
  * Whether a holder named this symbol itself, rather than inheriting it.
  *
  * Only meaningful for symbols, and only for an enriched plan: `undefined`
- * `declaredSymbols` means nothing widened this plan, so `expectedSymbols` is
+ * `declared.symbols` means nothing widened this plan, so `expectedSymbols` is
  * already what the agent asked for and every entry in it counts.
  */
 function holdsSymbolItself(
@@ -488,11 +488,11 @@ function holdsSymbolItself(
   plan: AgentPlan,
   resourceId: string,
 ): boolean {
-  if (resourceType !== "symbol" || plan.declaredSymbols === undefined) {
+  if (resourceType !== "symbol" || plan.declared?.symbols === undefined) {
     return true;
   }
   const wanted = resourceId.toLowerCase();
-  return plan.declaredSymbols.some((name) => name.toLowerCase() === wanted);
+  return plan.declared.symbols.some((name) => name.toLowerCase() === wanted);
 }
 
 /** One withheld resource per symbol a holder occupies in a shared file. */
@@ -1717,12 +1717,20 @@ export class PlanAdmissionController {
       const blockedBy = blocking.map((assessment) =>
         otherTask(assessment, taskId),
       );
+      // Named, the way the sequenced line beside it names things.
+      //
+      // This said `task_3f60… (100)` and nothing else — a task id and a
+      // number, with no way to tell whether the hundred was five real file
+      // collisions or one spurious match on a naming convention. A refusal
+      // nobody can check is a refusal nobody can argue with, and the harder
+      // refusal of the two was the one saying less.
       const collisions = blocking
         .map(
           (assessment) =>
-            `${otherTask(assessment, taskId)} (${assessment.score})`,
+            `${otherTask(assessment, taskId)} (${assessment.score}) — ` +
+            assessment.explanation,
         )
-        .join(", ");
+        .join("; ");
       if (exhausted) {
         return {
           ...shared,

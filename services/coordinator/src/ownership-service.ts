@@ -125,11 +125,11 @@ export class DefaultOwnershipPolicy implements OwnershipPolicy {
       // in there, and arbitration reads them. `observe` keeps the evidence
       // and drops the reservation, since it is compatible with every mode.
       //
-      // Absent `declaredSymbols` means nothing widened this plan, so every
+      // Absent `declared.symbols` means nothing widened this plan, so every
       // symbol on it is the agent's own.
       ...(() => {
         const own = new Set(
-          (plan.declaredSymbols ?? complete.expectedSymbols).map((name) =>
+          (plan.declared?.symbols ?? complete.expectedSymbols).map((name) =>
             name.toLowerCase(),
           ),
         );

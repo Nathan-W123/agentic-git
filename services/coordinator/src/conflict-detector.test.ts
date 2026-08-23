@@ -685,3 +685,81 @@ test("the opposing-action reading still sees the verbs relatedness discards", ()
     true,
   );
 });
+
+test("two plans do not collide on their files' naming conventions", () => {
+  // The shape a real refusal had. A frontend task and a coordinator task
+  // share no file, but enrichment fills every `expected*` list from the
+  // contents of the files each declared — and those contents are largely
+  // conventions. A "schema" is anything ending in Schema, Entity, Model,
+  // Record, Payload, Input or Migration; a "service" anything ending in
+  // Service, Client, Repository, Gateway or Worker. So two files that have
+  // never met collide on a suffix, at forty points a time, and land past the
+  // block threshold without overlapping anywhere at all.
+  const enriched = (
+    taskId: string,
+    file: string,
+  ): AgentPlan => ({
+    ...plan(taskId, [file]),
+    expectedSchemas: ["DraftPayload"],
+    expectedServices: ["ChannelClient"],
+    expectedApis: ["GET /messages"],
+    // What the agent itself asked for: none of the above.
+    declared: {
+      symbols: [],
+      apis: [],
+      schemas: [],
+      configKeys: [],
+      tests: [],
+      services: [],
+    },
+  });
+  const detector = new ConflictDetector();
+
+  const declared = detector.assess(
+    enriched("task_dm", "apps/web/public/app.js"),
+    enriched("task_coord", "services/coordinator/src/plan-admission.ts"),
+  );
+  assert.equal(declared, undefined, "nothing either agent asked for collides");
+
+  // Without the agent's own words there is nothing to tell a claim from a
+  // convention, and the same pair blocks.
+  const strip = (candidate: AgentPlan): AgentPlan => {
+    const { declared: _declared, ...rest } = candidate;
+    return rest;
+  };
+  const guessed = detector.assess(
+    strip(enriched("task_dm", "apps/web/public/app.js")),
+    strip(enriched("task_coord", "services/coordinator/src/plan-admission.ts")),
+  );
+  assert.equal(guessed?.disposition, "block");
+});
+
+test("a resource both agents actually named still collides", () => {
+  // The fix must not make arbitration blind. What an agent declared itself is
+  // a real claim and is scored exactly as before.
+  const shared = (taskId: string, file: string): AgentPlan => ({
+    ...plan(taskId, [file]),
+    expectedSchemas: ["OrderRecord", "NoiseInput"],
+    declared: { schemas: ["OrderRecord"] },
+  });
+  const assessment = new ConflictDetector().assess(
+    shared("task_a", "src/a.ts"),
+    shared("task_b", "src/b.ts"),
+  );
+  assert.ok(assessment !== undefined);
+  assert.match(assessment.explanation, /schema_overlap: OrderRecord/u);
+  // And only that one: `NoiseInput` was enrichment's, not the agent's.
+  assert.doesNotMatch(assessment.explanation, /NoiseInput/u);
+});
+
+test("a blocked plan is told what it collided with", () => {
+  // This read `task_3f60… (100)` and nothing else — an id and a number, with
+  // no way to tell five real file collisions from one spurious suffix match.
+  const heavy = (taskId: string): AgentPlan => ({
+    ...plan(taskId, ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/e.ts"]),
+  });
+  const assessment = new ConflictDetector().assess(heavy("task_a"), heavy("task_b"));
+  assert.ok(assessment !== undefined);
+  assert.equal(assessment.disposition, "block");
+  assert.match(assessment.explanation, /file_overlap: src\/a\.ts/u);
+});
