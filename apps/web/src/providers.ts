@@ -446,33 +446,65 @@ export function parseCodexRateLimits(
   contents: string,
 ): ProviderUsageReport | undefined {
   const marker = '"rate_limits":';
-  const at = contents.lastIndexOf(marker);
-  if (at === -1) {
+  if (!contents.includes(marker)) {
     return undefined;
   }
-  // The object runs to the end of its own JSON line.
-  const lineEnd = contents.indexOf("\n", at);
-  const line = contents.slice(
-    contents.lastIndexOf("\n", at) + 1,
-    lineEnd === -1 ? undefined : lineEnd,
-  );
-  let limits:
-    | {
-        primary?: CodexRateWindow | null;
-        secondary?: CodexRateWindow | null;
-        plan_type?: string | null;
-      }
-    | undefined;
-  try {
-    const event = JSON.parse(line) as Record<string, unknown>;
-    const found = findRateLimits(event);
-    limits = found as typeof limits;
-  } catch {
-    return undefined;
+  type CodexRateLimits = {
+    primary?: CodexRateWindow | null;
+    secondary?: CodexRateWindow | null;
+    plan_type?: string | null;
+  };
+  // Newest reading of each window, not the newest event.
+  //
+  // A session emits `rate_limits` repeatedly, and the payloads are not always
+  // complete: an event can carry the weekly window and not the five-hour one.
+  // Reading only the last occurrence meant one partial event at the end of a
+  // rollout discarded a figure that was sitting a few lines above it, and the
+  // card showed a week with no five hours beside it. Each window is now taken
+  // from the most recent event that actually reported it.
+  let limits: CodexRateLimits | undefined;
+  const freshest: CodexRateLimits = {};
+  const lines = contents.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === undefined || !line.includes(marker)) {
+      continue;
+    }
+    let found: CodexRateLimits | undefined;
+    try {
+      found = findRateLimits(
+        JSON.parse(line) as Record<string, unknown>,
+      ) as CodexRateLimits | undefined;
+    } catch {
+      continue;
+    }
+    if (found === undefined) {
+      continue;
+    }
+    limits ??= found;
+    if (
+      freshest.primary == null &&
+      typeof found.primary?.used_percent === "number"
+    ) {
+      freshest.primary = found.primary;
+    }
+    if (
+      freshest.secondary == null &&
+      typeof found.secondary?.used_percent === "number"
+    ) {
+      freshest.secondary = found.secondary;
+    }
+    if (freshest.plan_type == null && typeof found.plan_type === "string") {
+      freshest.plan_type = found.plan_type;
+    }
+    if (freshest.primary != null && freshest.secondary != null) {
+      break;
+    }
   }
   if (limits === undefined) {
     return undefined;
   }
+  limits = { ...limits, ...freshest };
   const windows: ProviderUsageWindow[] = [];
   for (const [name, window] of [
     ["primary", limits.primary],

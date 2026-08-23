@@ -21,6 +21,7 @@ import {
   parseCursorUsage,
   saysSignedIn,
   parseCodexAppServerRateLimits,
+  parseCodexRateLimits,
   parseCodexStatusRateLimits,
   parseCodexJsonl,
   streamProcess,
@@ -2952,6 +2953,57 @@ test("a refusal is not read as a confirmation", () => {
 
   assert.equal(saysSignedIn("Logged in using ChatGPT"), true);
   assert.equal(saysSignedIn("Signed in as nathan@example.com"), true);
+});
+
+test("a five-hour window survives a later event that omits it", async () => {
+  // Codex emits rate_limits repeatedly through a session and the payloads are
+  // not always complete. Reading only the last occurrence let one partial
+  // event at the end of a rollout discard a figure sitting a few lines above
+  // it, and the card showed a week with no five hours beside it.
+  const rollout = [
+    JSON.stringify({ type: "message", text: "…" }),
+    JSON.stringify({
+      type: "token_count",
+      rate_limits: {
+        primary: { used_percent: 34, window_minutes: 300, resets_at: 1_785_902_966 },
+        secondary: { used_percent: 5, window_minutes: 10_080 },
+        plan_type: "pro",
+      },
+    }),
+    // Later, and weekly only.
+    JSON.stringify({
+      type: "token_count",
+      rate_limits: { secondary: { used_percent: 9, window_minutes: 10_080 } },
+    }),
+  ].join("\n");
+
+  const report = parseCodexRateLimits(rollout);
+  assert.ok(report !== undefined);
+  assert.deepEqual(
+    report.windows.map((window) => [window.label, window.percentUsed]),
+    [
+      // The five-hour figure is kept from where it was last reported...
+      ["5 hours", 34],
+      // ...and the weekly one is the newer of the two readings, not the older.
+      ["week", 9],
+    ],
+  );
+  assert.equal(report.planType, "pro");
+});
+
+test("a window nobody ever reported stays absent", async () => {
+  // The other half: this must not invent a window, only stop losing one.
+  const report = parseCodexRateLimits(
+    JSON.stringify({
+      type: "token_count",
+      rate_limits: { secondary: { used_percent: 9, window_minutes: 10_080 } },
+    }),
+  );
+
+  assert.deepEqual(
+    report?.windows.map((window) => window.label),
+    ["week"],
+  );
 });
 
 test("a teammate sees an org-wide agent's usage, and never a personal one's", async () => {
