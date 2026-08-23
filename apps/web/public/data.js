@@ -3016,7 +3016,16 @@ export function channelAgentsFor(repositoryId) {
       .filter((entry) => typeof entry.name === "string" && entry.name.length > 0)
       .map((entry) => [
         `${entry.userId}:${entry.provider}`,
-        { name: entry.name, role: entry.role ?? "" },
+        {
+          name: entry.name,
+          role: entry.role ?? "",
+          // These are already resolved by the gateway with the same
+          // specific-over-legacy precedence as the name. Dropping them here
+          // made the profile say "Default" even after a channel had selected
+          // a concrete model and reasoning level.
+          model: entry.model,
+          effort: entry.effort,
+        },
       ]),
   );
   return [...mine, ...others].map((raw) => {
@@ -3040,8 +3049,8 @@ export function channelAgentsFor(repositoryId) {
         ...agent,
         name: server.name,
         role: local?.role ?? server.role,
-        model: local?.model ?? agent.model,
-        effort: local?.effort ?? agent.effort,
+        model: local?.model ?? server.model ?? agent.model,
+        effort: local?.effort ?? server.effort ?? agent.effort,
       };
     }
     // Before the roster resolves — the "paint immediately" floor — and for an

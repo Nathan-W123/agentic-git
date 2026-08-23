@@ -6217,18 +6217,16 @@ button.chip.lg:hover {
   z-index: 60;
   display: block;
   padding: 7px 0;
-  opacity: 0;
   visibility: hidden;
   pointer-events: none;
   /* The delay in the base rule is the one that runs on the way *out*: a
      pointer crossing a column of faces must not leave a trail of cards behind
      it, and one that clips the corner of a card must not lose it. */
-  /* Delay the state change without fading the whole surface through partial
-     opacity. The card now appears and leaves as one solid panel, while the
-     delay still prevents incidental pointer passes from flashing it open. */
-  transition:
-    opacity 0s linear 0.1s,
-    visibility 0s linear 0.1s;
+  /* Visibility only — never opacity. Opacity on this wrapper made some GPUs
+     composite the card as a translucent layer, so chat text showed through
+     a card that was meant to be solid; the bug was browser-specific because
+     it depends on how each engine batches fixed layers. */
+  transition: visibility 0s linear 0.1s;
 }
 
 /* The opening delay is short but not nothing: a transcript is a column of
@@ -6236,7 +6234,6 @@ button.chip.lg:hover {
    appeared instantly would flash open and shut the whole way down. */
 .pcard-anchor:hover > .pcard-pop,
 .pcard-anchor:focus-within > .pcard-pop {
-  opacity: 1;
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0.16s;
@@ -6248,7 +6245,6 @@ button.chip.lg:hover {
 body:has(.pcard-anchor:is(:hover, :focus-within))
   .pcard-anchor:not(:hover):not(:focus-within)
   > .pcard-pop {
-  opacity: 0;
   visibility: hidden;
   pointer-events: none;
   transition-delay: 0s;
@@ -6273,6 +6269,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
   background: var(--bg-panel);
+  isolation: isolate;
   box-shadow: var(--shadow-pop);
   overflow-x: hidden;
   overflow-y: auto;
@@ -7992,92 +7989,145 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   color: var(--text-2);
 }
 
-/* The details landing page follows the supplied profile reference: one large
-   identity, a short introduction, connected-setting pills, and quiet checked
-   capability rows. Existing controls still live in the page instead of being
-   pushed into another settings surface. */
+/* The full agent page borrows the reference profile's two-part composition:
+   a banner-backed identity card on the left and a compact activity/settings
+   pane on the right. The right side is deliberately dense enough to fit at a
+   normal laptop height; the page only becomes a scroller when the viewport or
+   a user-resized panel genuinely cannot hold it. */
 .agent-spec {
-  padding: clamp(30px, 4vw, 48px) clamp(24px, 5vw, 56px) 48px;
+  container-type: inline-size;
+  padding: 16px;
+  background: var(--bg);
 }
 
 .agent-spec .aspec-content {
+  display: grid;
   width: 100%;
-  max-width: 780px;
+  max-width: 980px;
+  min-height: 100%;
   margin: 0 auto;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(390px, 1.28fr);
+  gap: 14px;
+  align-content: center;
 }
 
-.agent-spec .aspec-head {
-  display: block;
-  margin-bottom: 36px;
+.agent-spec .aspec-identity-card,
+.agent-spec .aspec-pane {
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-card);
+}
+
+.agent-spec .aspec-identity-card {
+  align-self: stretch;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.agent-spec .aspec-banner {
+  height: clamp(84px, 16vh, 116px);
+  background:
+    radial-gradient(circle at 86% 18%, rgb(255 255 255 / 12%) 0 3px, transparent 4px),
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--aspec-accent, var(--accent)) 58%, var(--surface-2)),
+      color-mix(in srgb, var(--aspec-accent, var(--accent)) 16%, var(--surface-2))
+    );
+}
+
+.agent-spec .aspec-identity-body {
+  padding: 0 18px 18px;
 }
 
 .agent-spec .aspec-face {
-  margin-bottom: 22px;
+  position: relative;
+  display: flex;
+  width: fit-content;
+  margin: -40px 0 10px;
+  padding: 4px;
+  border-radius: 50%;
+  background: var(--bg-panel);
 }
 
 .agent-spec .aspec-face .status-dot {
-  right: -2px;
-  bottom: 2px;
+  right: 4px;
+  bottom: 5px;
+  width: 10px;
+  height: 10px;
+  border: 3px solid var(--bg-panel);
 }
 
-.agent-spec .aspec-head h2 {
+.agent-spec .aspec-identity-body h2 {
   margin: 0;
   color: var(--text);
-  font-size: clamp(30px, 4vw, 38px);
+  font-size: clamp(24px, 4.5cqi, 32px);
   font-weight: 680;
   line-height: 1.12;
   letter-spacing: -0.035em;
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-.agent-spec .aspec-description {
-  max-width: 680px;
-  margin: 14px 0 10px;
+.agent-spec .aspec-handle {
+  margin-top: 3px;
   color: var(--text-2);
-  font-size: 15px;
-  line-height: 1.62;
+  font-size: 12.5px;
+}
+
+.agent-spec .aspec-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 13px;
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+.agent-spec .aspec-status .status-dot {
+  position: static;
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border: 0;
 }
 
 .agent-spec .aspec-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 9px;
-  margin-top: 18px;
+  gap: 8px;
+  margin-top: 15px;
 }
 
 .agent-spec .aspec-action {
   display: inline-flex;
-  min-height: 38px;
+  min-width: 0;
+  min-height: 36px;
+  flex: 1;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border: 1px solid var(--border-soft);
-  border-radius: 999px;
+  gap: 7px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
   background: var(--bg-card);
   color: var(--text);
-  font-family: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
+  font: 600 12px/1 var(--font);
   cursor: pointer;
-  transition:
-    border-color 0.12s ease,
-    background 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .agent-spec .aspec-action svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
 }
 
 .agent-spec .aspec-action:hover {
-  border-color: var(--border);
+  border-color: var(--border-strong);
   background: var(--bg-hover);
 }
 
-.agent-spec .aspec-action:focus-visible {
+.agent-spec .aspec-action:focus-visible,
+.agent-spec .aspec-native-select:focus-visible,
+.agent-spec .aspec-activity[role="button"]:focus-visible {
   outline: 2px solid var(--accent-line);
   outline-offset: 2px;
 }
@@ -8085,7 +8135,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .agent-spec .aspec-action-primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
 }
 
 .agent-spec .aspec-action-primary:hover {
@@ -8093,242 +8143,335 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   background: color-mix(in srgb, var(--accent) 88%, #000);
 }
 
-.agent-spec .aspec-sub {
-  margin-top: 0;
-  color: var(--text-3);
-  font-size: 11.5px;
+.agent-spec .aspec-profile-facts {
+  display: grid;
+  gap: 11px;
+  margin-top: 18px;
+  padding-top: 15px;
+  border-top: 1px solid var(--border-soft);
 }
 
-.agent-spec .aspec-section {
-  margin-bottom: 34px;
+.agent-spec .aspec-profile-facts div {
+  display: grid;
+  gap: 2px;
 }
 
-.agent-spec .aspec-section:last-child {
-  margin-bottom: 0;
-}
-
-.agent-spec .aspec-label {
-  margin: 0;
-  color: var(--text);
-  font-size: 16px;
-  font-weight: 620;
-  line-height: 1.3;
-  text-transform: none;
-  letter-spacing: -0.012em;
-}
-
-.agent-spec .aspec-section > .aspec-label {
-  display: block;
-  margin-bottom: 15px;
-}
-
-.agent-spec .aspec-label-row {
-  min-height: 26px;
-  margin-bottom: 13px;
-}
-
-.agent-spec .aspec-count {
-  display: inline-grid;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
-  place-items: center;
-  border: 1px solid var(--border-soft);
-  border-radius: 999px;
-  color: var(--text-3);
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-.agent-spec .aspec-chip-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.agent-spec .aspec-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 42px;
-  max-width: 100%;
-  padding: 8px 13px;
-  border: 1px solid var(--border-soft);
-  border-radius: 999px;
-  background: var(--bg-card);
-  color: var(--text);
-}
-
-.agent-spec .aspec-chip-label {
-  flex: none;
+.agent-spec .aspec-profile-facts span {
   color: var(--text-3);
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.065em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
-.agent-spec .aspec-chip-value {
-  display: inline-flex;
-  align-items: center;
+.agent-spec .aspec-profile-facts strong {
   min-width: 0;
-}
-
-.agent-spec .aspec-chip-text {
-  min-width: 0;
-  color: var(--text);
-  font-size: 13px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.agent-spec .aspec-chip .mini-select {
-  max-width: 190px;
-  padding: 0;
-  background: transparent;
-  color: var(--text);
-  font-size: 13px;
-}
-
-.agent-spec .aspec-chip .mini-select:hover {
-  background: transparent;
-}
-
-.agent-spec .aspec-chip .mini-select select {
-  max-width: 158px;
-  color: var(--text);
-  font-size: 13px;
-  text-align: right;
-}
-
-.agent-spec .aspec-capabilities {
-  border-top: 1px solid var(--border-soft);
-}
-
-.agent-spec .aspec-capability {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-height: 66px;
-  margin: 0;
-  padding: 13px 2px;
-  border: 0;
-  border-bottom: 1px solid var(--border-soft);
-  background: transparent;
-}
-
-.agent-spec .aspec-capability-mark {
+.agent-spec .aspec-main {
   display: grid;
-  width: 22px;
-  height: 22px;
-  flex: none;
-  place-items: center;
-  color: var(--text-3);
-}
-
-.agent-spec .aspec-capability-mark svg {
-  width: 15px;
-  height: 15px;
-}
-
-.agent-spec .aspec-capability-copy {
-  display: flex;
-  flex: 1;
   min-width: 0;
-  flex-direction: column;
-  gap: 3px;
+  gap: 10px;
+  align-content: center;
 }
 
-.agent-spec .aspec-capability-title {
-  color: var(--text);
-  font-size: 13.5px;
-  line-height: 1.4;
-}
-
-.agent-spec .aspec-capability-meta {
-  color: var(--text-3);
-  font-size: 11.5px;
-  line-height: 1.4;
-  text-transform: capitalize;
-}
-
-/* A task that exists is the live assignment this profile is about, so it
-   becomes one accent surface instead of another grey capability row. The
-   available-for-work fallback keeps the unmodified row above. */
-.agent-spec .aspec-current-task-active {
-  margin-top: 10px;
+.agent-spec .aspec-pane {
+  min-width: 0;
   padding: 13px 14px;
-  border-bottom: 0;
-  border-radius: 14px;
-  background: var(--accent);
-  color: #fff;
 }
 
-/* Only when the channel message is known — same rule as history rows — so an
-   inert idle row never looks clickable. */
-.agent-spec .aspec-current-task-active[role="button"] {
-  cursor: pointer;
+.agent-spec .aspec-pane-head {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
-.agent-spec .aspec-current-task-active[role="button"]:hover {
-  background: color-mix(in srgb, var(--accent) 88%, #000);
+.agent-spec .aspec-pane-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
 }
 
-.agent-spec .aspec-current-task-active[role="button"]:focus-visible {
-  outline: 2px solid #fff;
-  outline-offset: 2px;
+.agent-spec .aspec-activity-pane > .aspec-pane-title {
+  margin-bottom: 10px;
 }
 
-.agent-spec .aspec-current-task-active .aspec-capability-mark,
-.agent-spec .aspec-current-task-active .aspec-capability-title,
-.agent-spec .aspec-current-task-active .aspec-capability-meta {
-  color: #fff;
-}
-
-.agent-spec .aspec-current-task-active .aspec-capability-meta {
-  opacity: 0.78;
-}
-
-.agent-spec .aspec-note {
-  margin-top: 10px;
-  color: var(--text-3);
-  font-size: 11.5px;
-  line-height: 1.55;
-}
-
-.agent-spec .aspec-usage-card {
-  padding: 14px 15px;
-  border: 1px solid var(--border-soft);
-  border-radius: 14px;
+.agent-spec .aspec-activity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   background: var(--bg-card);
 }
 
+.agent-spec .aspec-activity.is-active {
+  border-color: color-mix(
+    in srgb,
+    var(--aspec-accent, var(--accent)) 34%,
+    var(--border)
+  );
+  background: color-mix(
+    in srgb,
+    var(--aspec-accent, var(--accent)) 10%,
+    var(--bg-card)
+  );
+}
+
+.agent-spec .aspec-activity[role="button"] {
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.agent-spec .aspec-activity[role="button"]:hover {
+  border-color: var(--aspec-accent, var(--accent));
+  background: color-mix(
+    in srgb,
+    var(--aspec-accent, var(--accent)) 15%,
+    var(--bg-card)
+  );
+}
+
+.agent-spec .aspec-activity-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--bg-card-2);
+  color: var(--aspec-accent, var(--accent));
+}
+
+.agent-spec .aspec-activity-mark svg {
+  width: 17px;
+  height: 17px;
+}
+
+.agent-spec .aspec-activity-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.agent-spec .aspec-activity-copy strong,
+.agent-spec .aspec-activity-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-activity-copy strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.agent-spec .aspec-activity-copy span {
+  color: var(--text-3);
+  font-size: 10.5px;
+  text-transform: capitalize;
+}
+
+.agent-spec .aspec-editing,
+.agent-spec .aspec-count {
+  display: inline-grid;
+  min-height: 20px;
+  padding: 2px 7px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.agent-spec .aspec-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 10px;
+}
+
+.agent-spec .aspec-field {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.agent-spec .aspec-field-label {
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.agent-spec .aspec-native-select,
+.agent-spec .aspec-field-value {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: 500 12px/1.35 var(--font);
+}
+
+.agent-spec .aspec-native-select {
+  appearance: auto;
+  cursor: pointer;
+}
+
+.agent-spec .aspec-native-select:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-card-2);
+}
+
+.agent-spec .aspec-field-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-field-hint {
+  color: var(--text-4);
+  font-size: 9.5px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-settings-pane > .aspec-note {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.agent-spec .aspec-bottom-grid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(130px, 0.72fr) minmax(190px, 1.28fr);
+  gap: 10px;
+}
+
+.agent-spec .aspec-channel-list {
+  display: flex;
+  max-height: 58px;
+  flex-wrap: wrap;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.agent-spec .aspec-channel-chip {
+  display: inline-flex;
+  min-width: 0;
+  height: 24px;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-note {
+  margin-top: 7px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.agent-spec .aspec-usage-card {
+  min-width: 0;
+}
+
+.agent-spec .aspec-usage {
+  gap: 7px;
+}
+
+.agent-spec .aspec-usage-head {
+  margin-bottom: 4px;
+  font-size: 10.5px;
+}
+
 .agent-spec .aspec-meter {
+  height: 5px;
   background: var(--bg-inset);
+}
+
+.agent-spec .aspec-usage-reset,
+.agent-spec .aspec-usage-plan,
+.agent-spec .aspec-usage-source {
+  margin-top: 2px;
+  font-size: 9.5px;
+}
+
+@container (max-width: 650px) {
+  .agent-spec .aspec-content {
+    grid-template-columns: 1fr;
+    align-content: start;
+  }
+
+  .agent-spec .aspec-identity-card {
+    align-self: auto;
+  }
+
+  .agent-spec .aspec-banner {
+    height: 92px;
+  }
+
+  .agent-spec .aspec-profile-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (max-width: 430px) {
+  .agent-spec .aspec-settings,
+  .agent-spec .aspec-bottom-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-spec .aspec-field-hint {
+    white-space: normal;
+  }
 }
 
 @media (max-width: 600px) {
   .agent-spec {
-    padding: 26px 20px 36px;
+    padding: 12px;
   }
 
-  .agent-spec .aspec-head {
-    margin-bottom: 30px;
+  .agent-spec .aspec-content {
+    display: block;
   }
 
-  .agent-spec .aspec-head h2 {
-    font-size: 30px;
+  .agent-spec .aspec-identity-card,
+  .agent-spec .aspec-main {
+    margin-bottom: 10px;
   }
 
-  .agent-spec .aspec-chip {
-    width: 100%;
-    justify-content: space-between;
-  }
-
-  .agent-spec .aspec-capability {
-    align-items: flex-start;
-    flex-wrap: wrap;
+  .agent-spec .aspec-main {
+    display: grid;
   }
 }
 
@@ -8533,8 +8676,8 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
    remembered drag still wins through --panel-w, and the shared phone rule
    below still makes every panel full-width on narrow screens. */
 .agent-detail-panel {
-  width: var(--panel-w, min(680px, 64vw));
-  min-width: min(420px, 100%);
+  width: var(--panel-w, min(820px, 76vw));
+  min-width: min(520px, 100%);
 }
 
 .panel-grip {
