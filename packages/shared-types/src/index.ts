@@ -1573,6 +1573,36 @@ export function claimCoversPath(
   );
 }
 
+/**
+ * Whether a claim makes its holder *occupy* a path, for arbitration.
+ *
+ * The narrower reading of {@link claimCoversPath}. A blanket claim occupies
+ * the repository, as it always did. A frozen claim occupies only the files its
+ * holder actually declared: its directories say "new files I may create here",
+ * not "every existing file under here is mine". A directory-only match — the
+ * path lives under a claimed directory but is named nowhere in the plan — is
+ * therefore free for somebody else to take, which is the whole point: one task
+ * touching one file in a directory must not queue up everybody else behind the
+ * other seventeen.
+ *
+ * The cost is deliberate. A holder that later reaches into a file granted away
+ * is refused when it tries to widen, and that task fails. Reaching for what you
+ * never named is the rarer accident; being locked out of a directory somebody
+ * else brushed against was the common one.
+ */
+export function claimOccupiesPath(
+  plan: Pick<AgentPlan, "claim" | "expectedFiles">,
+  file: string,
+): boolean {
+  if (plan.claim === undefined) {
+    return false;
+  }
+  if (plan.claim.kind === "blanket") {
+    return true;
+  }
+  return plan.expectedFiles.includes(file);
+}
+
 function isPlanClaim(value: unknown): value is PlanClaim {
   if (typeof value !== "object" || value === null) {
     return false;

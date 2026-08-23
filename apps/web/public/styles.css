@@ -53,6 +53,11 @@
   --accent-wash: color-mix(in srgb, var(--salmon) 12%, transparent);
   --accent-wash-strong: color-mix(in srgb, var(--salmon) 20%, transparent);
   --accent-line: color-mix(in srgb, var(--salmon) 38%, transparent);
+  /* The words written on a surface filled with the accent, rather than tinted
+     by it. `applyTheme` replaces this with whichever of near-white and
+     near-black actually reads against the chosen colour; the default here is
+     the answer for the salmon above. */
+  --accent-ink: #141312;
 
   /* The second colour, for the other half of a pair. Overwritten by
      `applyTheme` from the account, like the primary above it; these are the
@@ -1022,14 +1027,16 @@ svg.ui-icon {
   pointer-events: none;
 }
 
-/* The filled sector reads as a run still going rather than as a frozen
-   fraction, so it carries the same travelling highlight the live status copy
+/* The unfilled mark reads as a run still going rather than as a frozen
+   remainder, so it carries the same travelling highlight the live status copy
    does — see `.text-sweep`, same gradient shape and same clock. A band of the
-   bright copy is held back as it passes, letting the dark mark underneath show
-   through, which is what makes the glimmer a wave across the fill rather than
-   the whole fill pulsing. Masking the inner mark rather than tinting it keeps
-   the fill in the owner's colour at every point of the sweep. */
-.agent-face .agent-run > svg {
+   dark copy is held back as it passes, which is what makes the glimmer a wave
+   across the unbrightened part of the logo rather than across the bright fill.
+   Masking the base mark rather than tinting it keeps the dim sector in the
+   owner's colour at every point of the sweep. The bright fill above stays solid. */
+.agent-face-working > svg {
+  opacity: calc(0.24 + var(--run, 0) * 0.0016);
+  filter: saturate(0.6) brightness(0.8);
   -webkit-mask-image: linear-gradient(
     100deg,
     #000 0 38%,
@@ -1056,23 +1063,14 @@ svg.ui-icon {
   }
 }
 
-/* Nothing travelling, so nothing is held back either: the fill goes back to
-   being the plain bright sector. */
+/* Nothing travelling, so nothing is held back either: the dim mark goes back
+   to being the plain unfilled sector under a solid bright fill. */
 @media (prefers-reduced-motion: reduce) {
-  .agent-face .agent-run > svg {
+  .agent-face-working > svg {
     animation: none;
     -webkit-mask-image: none;
     mask-image: none;
   }
-}
-
-/* Dark and barely there with nothing done, and lifting a little as the fill
-   grows, so even the unfilled part of the mark says roughly how far along a
-   run is. Only the mark directly in the face is dimmed — the copy inside the
-   sweep is the bright one. */
-.agent-face-working > svg {
-  opacity: calc(0.24 + var(--run, 0) * 0.0016);
-  filter: saturate(0.6) brightness(0.8);
 }
 
 /* Working, so it breathes — see `.status-working`, which this is the smaller
@@ -5263,9 +5261,21 @@ button.chip.lg:hover {
   overflow-wrap: anywhere;
 }
 
+/* Yours in the colour you chose, not in the greys around it. A neutral bubble
+   on a neutral ground was the one thing in the conversation that never said
+   which side of it you were on, and the accent is already what this interface
+   means by "you". `--accent-ink` rather than white: the wheel allows yellows
+   and limes that white simply disappears into. */
 .dm-mine .dm-bubble {
-  background: var(--surface-3);
-  color: var(--text);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* A link inside your own bubble sits on the accent, so it cannot also be the
+   accent. It carries the ink and keeps the underline to stay a link. */
+.dm-mine .dm-bubble a {
+  color: var(--accent-ink);
+  text-decoration: underline;
 }
 
 .dm-time {

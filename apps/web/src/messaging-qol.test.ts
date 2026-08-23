@@ -647,3 +647,24 @@ test("the command picker offers every command it has", async () => {
   // before the cut was removed, so nothing about the layout had to change.
   assert.match(css, /max-height: min\(180px, 30vh\);\s*\n\s*overflow-y: auto;/u);
 });
+
+test("a sent private message is painted in the chosen accent", async () => {
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  // The outgoing bubble was a neutral surface, so the one place a person
+  // looks to tell their own words from the other side's said nothing that
+  // the greys around it did not already say.
+  assert.match(css, /\.dm-mine \.dm-bubble \{\s*\n\s*background: var\(--accent\);/u);
+  assert.match(css, /\.dm-mine \.dm-bubble \{[^}]*color: var\(--accent-ink\);/u);
+
+  // Filled with the accent, the bubble needs an ink that is not the accent.
+  // A hardcoded white would be unreadable on the yellows and limes the wheel
+  // allows, so the theme picks whichever extreme actually reads on it.
+  assert.match(app, /root\.setProperty\("--accent-ink", accentInk\(accent\)\);/u);
+  const ink = slice(app, "function accentInk(", "\n}");
+  assert.match(ink, /contrastRatio\("#ffffff", accent\) >= contrastRatio\("#141312", accent\)/u);
+  // And a standing value in the stylesheet, for the frame before the theme
+  // has been applied.
+  assert.match(css, /--accent-ink: #141312;/u);
+});

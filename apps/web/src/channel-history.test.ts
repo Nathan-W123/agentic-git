@@ -90,6 +90,41 @@ test("the first page asks for a size, and records whether there is more", async 
   );
 });
 
+test("opening a direct-message history starts at its newest messages", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+
+  const scroll = slice(
+    chats,
+    "export function scrollDirectMessageToLatest() {",
+    "\n/**\n * The first message this visit had not seen",
+  );
+  assert.match(scroll, /document\.querySelector\("\.dm-body"\)/u);
+  assert.match(scroll, /list\.scrollTop = list\.scrollHeight/u);
+  assert.match(scroll, /settled === list/u);
+  assert.match(scroll, /settled\.scrollTop = settled\.scrollHeight/u);
+
+  const load = slice(
+    app,
+    "function loadOpenedDirectMessage(userId) {",
+    "\nfunction navigate(route)",
+  );
+  assert.equal(
+    (load.match(/scrollDirectMessageToLatest\(\)/gu) ?? []).length,
+    2,
+    "cached and freshly loaded history should both land at the bottom",
+  );
+  assert.match(load, /loadDmThread\(userId\)/u);
+  assert.match(load, /state\.activeDm !== userId/u);
+
+  for (const action of [
+    slice(app, 'case "switch-person":', '\n    case "switch-screen":'),
+    slice(app, 'case "dm-open":', '\n    case "mention-agents-insert":'),
+  ]) {
+    assert.match(action, /render\(\);\s*loadOpenedDirectMessage\(value\);/u);
+  }
+});
+
 test("earlier pages are read through the cursor, deduped, and survive a reconcile", async () => {
   const data = await publicFile("data.js");
   const loader = slice(

@@ -97,6 +97,7 @@ import {
   toggleChannelReaction,
   toggleFavourite,
   dmUnreadTotal,
+  isDirectMessagePerson,
   memberName,
   memberRole,
   personOnline,
@@ -209,6 +210,7 @@ import {
   personMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
+  scrollDirectMessageToLatest,
   startPlannedWork,
   submitComposerMessage,
   submitThreadReply,
@@ -2759,6 +2761,12 @@ function applyTheme() {
     withAlpha(accent, light ? 0.28 : 0.2),
   );
   root.setProperty("--accent-line", withAlpha(accent, light ? 0.5 : 0.38));
+  // The words written *on* the accent, for the surfaces that are filled with
+  // it rather than tinted by it — a sent private message being the one people
+  // read most. White is right for a deep blue and unreadable on a chosen
+  // yellow, so this asks which of the theme's own two extremes actually reads
+  // against the colour somebody picked instead of assuming either.
+  root.setProperty("--accent-ink", accentInk(accent));
   // The second colour, derived exactly as the first is so the two behave
   // identically under both themes. Fewer variants, deliberately: a secondary
   // that grew its own dim, bright and strong-wash would be a second theme
@@ -2847,6 +2855,22 @@ function readableOn(accent, ground, target) {
     }
   }
   return mix(accent, "#000000", 0.8);
+}
+
+/**
+ * The readable ink for text sitting on a filled accent.
+ *
+ * Not a search, because there are only two answers worth having: near-white
+ * and near-black are the two colours a filled bubble can carry without
+ * inventing a third tone the palette does not have. Whichever stands further
+ * off the accent wins, which lands white on a deep blue and black on the
+ * yellows and limes the wheel also allows — the case a hardcoded `#fff` got
+ * wrong every time.
+ */
+function accentInk(accent) {
+  return contrastRatio("#ffffff", accent) >= contrastRatio("#141312", accent)
+    ? "#ffffff"
+    : "#141312";
 }
 
 /* ------------------------------------------------------------- router ---- */
@@ -5301,6 +5325,105 @@ function renderNow() {
   }
 }
 
+/**
+ * Opens a person-to-person direct message and closes any agent private-chat
+ * panel that was beside it. Agent threads stay on `agent-chat-open`; this
+ * entry is only for people.
+ */
+function openUserDirectMessage(userId) {
+  state.activeDm = userId;
+  state.activeAgentPanel = undefined;
+  clearRightPanel("agent");
+  state.dmDraft = "";
+  state.dmReplyMessageId = undefined;
+  moveRightPanel("dm", "right");
+  setChanDrawer(false);
+}
+
+/**
+ * Who this account can write to privately — people, and only people.
+ *
+ * Two halves. The conversations already going come first, ordered by what
+ * is waiting in them, and everyone else on the project follows, so the
+ * menu is a way to *start* a private conversation and not only a list of
+ * the ones that happen to exist. "No conversations yet" was a dead end:
+ * the one state in which somebody most needs this menu was the one state
+ * in which it offered nothing to press.
+ *
+ * Agents are deliberately not here, and are filtered out rather than
+ * merely not added — a direct message is between two accounts. Talking to
+ * your own agent is `agent-chat-open`, which opens beside the channel
+ * instead of taking the room away, and an org agent's whole point is that
+ * it works where the team can see it. Both are reached from the roster.
+ */
+function showDirectMessageMenu(node) {
+  const conversations = [...state.dmConversations]
+    .filter((conversation) => isDirectMessagePerson(conversation.userId))
+    .sort(
+      (left, right) => Number(right.unread ?? 0) - Number(left.unread ?? 0),
+    );
+  const talking = new Set(
+    conversations.map((conversation) => conversation.userId),
+  );
+  // Everyone reachable who has not been written to yet. `dmPeople` is the
+  // project's whole room as the server counts it — memberships plus
+  // repository grants — and it arrives with the inbox above.
+  const others = state.dmPeople.filter(
+    (person) => isDirectMessagePerson(person.id) && !talking.has(person.id),
+  );
+  const rows = [
+    ...conversations.slice(0, 12).map((conversation) => ({
+      act: "dm-open",
+      value: conversation.userId,
+      label: memberName(conversation.userId) ?? conversation.userId,
+      iconName: "chatBubble",
+      ...(Number(conversation.unread ?? 0) === 0
+        ? {}
+        : { hint: `${conversation.unread} unread` }),
+    })),
+    ...(conversations.length > 0 && others.length > 0
+      ? [{ separator: true }]
+      : []),
+    ...others.slice(0, 12).map((person) => ({
+      act: "dm-open",
+      value: person.id,
+      label: person.name ?? memberName(person.id) ?? person.id,
+      iconName: "users",
+      hint: personOnline(person.id) ? "Here now" : "Send a message",
+    })),
+  ];
+  showMenu(
+    node,
+    rows.length === 0
+      ? [
+          {
+            act: "noop",
+            label: "Nobody else on this project yet",
+            disabled: true,
+          },
+        ]
+      : rows,
+  );
+}
+
+/**
+ * Opens the already-cached history at its newest message, then does the same
+ * once the server's current history replaces it. Ordinary renders continue
+ * through the anchor restore, so scrolling up afterwards is still respected.
+ */
+function loadOpenedDirectMessage(userId) {
+  scrollDirectMessageToLatest();
+  void loadDmThread(userId).then(() => {
+    // A slower request for the conversation just left must not move the one
+    // that replaced it.
+    if (state.activeDm !== userId) {
+      return;
+    }
+    render();
+    scrollDirectMessageToLatest();
+  });
+}
+
 function navigate(route) {
   // A link or a stored route from before Code and Coordinator were folded into
   // the channel lands here; chats is the landing view, so it is the fallback.
@@ -5649,12 +5772,9 @@ document.addEventListener("click", (event) => {
     case "switch-person":
       closeSwitcher();
       navigate("chats");
-      state.activeDm = value;
-      state.activeAgentPanel = undefined;
-      state.dmDraft = "";
-      state.dmReplyMessageId = undefined;
+      openUserDirectMessage(value);
       render();
-      void loadDmThread(value).then(() => render());
+      loadOpenedDirectMessage(value);
       return;
     case "switch-screen":
       closeSwitcher();
@@ -5662,75 +5782,10 @@ document.addEventListener("click", (event) => {
       return;
     /**
      * Who this account can write to privately — people, and only people.
-     *
-     * Two halves. The conversations already going come first, ordered by what
-     * is waiting in them, and everyone else on the project follows, so the
-     * menu is a way to *start* a private conversation and not only a list of
-     * the ones that happen to exist. "No conversations yet" was a dead end:
-     * the one state in which somebody most needs this menu was the one state
-     * in which it offered nothing to press.
-     *
-     * Agents are deliberately not here, and are filtered out rather than
-     * merely not added — a direct message is between two accounts. Talking to
-     * your own agent is `agent-chat-open`, which opens beside the channel
-     * instead of taking the room away, and an org agent's whole point is that
-     * it works where the team can see it. Both are reached from the roster.
+     * Built by {@link showDirectMessageMenu}.
      */
     case "dm-list": {
-      const me = currentUserId();
-      // By id, because that is what a conversation and a roster row agree on.
-      // An id that belongs to an agent is by definition not a person's, so
-      // this can only ever remove the wrong kind of row.
-      const agentIds = new Set(state.agents.map((agent) => agent.id));
-      const isPerson = (userId) =>
-        userId !== "" && userId !== me && !agentIds.has(userId);
-      const conversations = [...state.dmConversations]
-        .filter((conversation) => isPerson(conversation.userId))
-        .sort(
-          (left, right) => Number(right.unread ?? 0) - Number(left.unread ?? 0),
-        );
-      const talking = new Set(
-        conversations.map((conversation) => conversation.userId),
-      );
-      // Everyone reachable who has not been written to yet. `dmPeople` is the
-      // project's whole room as the server counts it — memberships plus
-      // repository grants — and it arrives with the inbox above.
-      const others = state.dmPeople.filter(
-        (person) => isPerson(person.id) && !talking.has(person.id),
-      );
-      const rows = [
-        ...conversations.slice(0, 12).map((conversation) => ({
-          act: "dm-open",
-          value: conversation.userId,
-          label: memberName(conversation.userId) ?? conversation.userId,
-          iconName: "chatBubble",
-          ...(Number(conversation.unread ?? 0) === 0
-            ? {}
-            : { hint: `${conversation.unread} unread` }),
-        })),
-        ...(conversations.length > 0 && others.length > 0
-          ? [{ separator: true }]
-          : []),
-        ...others.slice(0, 12).map((person) => ({
-          act: "dm-open",
-          value: person.id,
-          label: person.name ?? memberName(person.id) ?? person.id,
-          iconName: "users",
-          hint: personOnline(person.id) ? "Here now" : "Send a message",
-        })),
-      ];
-      showMenu(
-        node,
-        rows.length === 0
-          ? [
-              {
-                act: "noop",
-                label: "Nobody else on this project yet",
-                disabled: true,
-              },
-            ]
-          : rows,
-      );
+      showDirectMessageMenu(node);
       return;
     }
     case "repo-menu":
@@ -6386,11 +6441,9 @@ document.addEventListener("click", (event) => {
     case "dm-open":
       state.activeDm = value;
       state.dmDraft = "";
-      state.dmReplyMessageId = undefined;
-      moveRightPanel("dm", "right");
-      setChanDrawer(false);
+      openUserDirectMessage(value);
       render();
-      void loadDmThread(value).then(() => render());
+      loadOpenedDirectMessage(value);
       return;
     // Starts an "@agents …" or "@everyone …" message rather than sending one:
     // the person still says what they want asked or told; this only saves

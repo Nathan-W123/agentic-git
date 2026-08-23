@@ -26,7 +26,7 @@ import {
 } from "@coord/repository-service";
 import {
   assertAgentPlan,
-  claimCoversPath,
+  claimOccupiesPath,
   createId,
   describeError,
   mergePlanScope,
@@ -447,9 +447,10 @@ function planClaimedResources(plan: AgentPlan): Map<string, PlanResourceRef> {
  * every other axis are compared the same way files are — a task queued behind
  * a symbol is waiting just as long as one queued behind a file.
  *
- * A frozen or blanket claim is read through {@link claimCoversPath} as well as
- * through its file list: a claim covers directories the holder has not named
- * file by file, and those are exactly the paths a waiter is refused for.
+ * A claim is read through {@link claimOccupiesPath} as well as through its
+ * file list: a blanket claim holds the repository, while a frozen one holds
+ * only what its plan names — the directories it carries are room for files
+ * nobody has written yet, so a waiter is not refused for those.
  */
 export function contestedPlanResources(
   holder: AgentPlan,
@@ -488,7 +489,7 @@ export function contestedPlanResources(
     for (const resourceId of wanted ?? []) {
       const covered =
         held.has(planResourceKey(resourceType, resourceId)) ||
-        (resourceType === "file" && claimCoversPath(holder, resourceId));
+        (resourceType === "file" && claimOccupiesPath(holder, resourceId));
       if (covered) {
         contested[bucket].push(resourceId);
       }
