@@ -1121,7 +1121,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
-  assert.match(channelEnd ?? "", /bottom: 22px;/u);
+  assert.match(
+    channelEnd ?? "",
+    /bottom: calc\(var\(--cmsg-face\) \/ 2 \+ 2px \+ 11px\);/u,
+    "the stem's foot should be measured from the face it turns into",
+  );
   assert.match(
     css,
     /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
@@ -1168,9 +1172,16 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelEndCap ?? "", /right: calc\(100% \+ 10px\);/u);
   // The hook is only the quarter turn: a straight upright here would be
   // painted on top of the shared stem and make every branch visibly thicker.
-  // The 20px face and two pixels of vertical padding put the link's midpoint
-  // twelve pixels above the route's foot.
-  const stemEnd = Number(/bottom: (\d+)px;/u.exec(channelEnd ?? "")?.[1]) - 12;
+  // Every piece of the join is measured from the replier's face — the one
+  // part of the summary whose height never changes — rather than from a line
+  // box that gains a second line whenever an agent is working.
+  const faceSize = Number(/--cmsg-face: (\d+)px;/u.exec(css)?.[1]);
+  assert.equal(faceSize, 20, "the branch turns into the 20px replier face");
+  const stemEnd = Number(
+    /bottom: calc\(var\(--cmsg-face\) \/ 2 \+ 2px \+ (\d+)px\);/u.exec(
+      channelEnd ?? "",
+    )?.[1],
+  );
   const elbowTop = Number(
     /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
   );
@@ -1189,10 +1200,19 @@ test("a reply carries a quiet visual path back to its root", async () => {
     elbowTop,
     "the final stem should stop at the hook's tangent",
   );
+  // A two-pixel stroke whose lower pixel is the link's middle is a stroke
+  // centred on it, and the faces are the only thing that middle is measured
+  // from — so the line crosses the replier's face on its own centre rather
+  // than leaving the face hanging below it.
   assert.equal(
     elbowHeight - elbowTop,
-    2,
-    "the elbow's horizontal run should stay two pixels below the link's middle",
+    1,
+    "the elbow's horizontal run should be centred on the replier's face",
+  );
+  assert.match(
+    channelEndCap ?? "",
+    /top: calc\(50% - 1px\);/u,
+    "the round cap should close the run on that same centre line",
   );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);

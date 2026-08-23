@@ -5805,6 +5805,14 @@ button.chip.lg:hover {
      apart when any of those three numbers moves. */
   --cmsg-body-x: 52px;
   --cmsg-stem-x: 20px;
+  /* And the face the path turns into. Every branch ends beside a 20px replier
+     face, and the turn, its round cap and the foot of the final stem are all
+     measured from that face's centre line rather than from the summary's line
+     box: the summary grows a second line whenever an agent is working, and a
+     line box that changes height moved the stroke off the picture it points
+     at. The face is the one part of the link whose size never changes, so it
+     is what the connector is aimed at. */
+  --cmsg-face: 20px;
   /* And the colour of that line, flattened. The connector is one stroke drawn
      in several pieces — a stem for each grouped row, a final segment, and the
      quarter turn into every thread link — and the pieces deliberately overlap
@@ -5902,8 +5910,12 @@ button.chip.lg:hover {
 /* Where the stem stops is the whole of whether the turn reads as one clean
    line. The route's foot is the foot of the thread link itself — see the
    `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
-   out of this sum. `bottom: 22px` ends the stem at the top tangent of the
-   twelve-pixel turn below. The old hook carried a seven-pixel upright
+   out of this sum. Half the face plus the link's two pixels of padding is
+   where that face's centre sits above the foot; eleven pixels higher is the
+   top tangent of the twelve-pixel turn below, which is where the stem stops.
+   Written against `--cmsg-face` rather than as a bare `22px`, the foot moves
+   with the face if the face is ever resized instead of quietly parting from
+   the corner it is supposed to meet. The old hook carried a seven-pixel upright
    over this stem and the final segment deliberately ended inside it; that
    double-painted the connector at every branch and left a dark, swollen join.
    The stem and turn now meet once, edge to edge, so the stroke keeps one
@@ -5920,7 +5932,7 @@ button.chip.lg:hover {
   position: absolute;
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
-  bottom: 22px;
+  bottom: calc(var(--cmsg-face) / 2 + 2px + 11px);
   border-left: 2px solid var(--cmsg-stem);
   pointer-events: none;
 }
@@ -6745,15 +6757,20 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
 
-   Top and height are read together: the difference between them (12 - 10) is
-   what puts the horizontal run two pixels below the link's middle. Matching
-   the height to the radius removes any straight upright and keeps the same
-   circular corner the open thread panel already uses. */
+   Top and height are read together: the difference between them (12 - 11) is
+   the one pixel of the two-pixel stroke that falls below the link's middle,
+   which is to say the run is centred on it. The faces are the only thing
+   centred in that link (`align-items`), so its middle is their middle: the
+   stroke now crosses the replier's face on its own centre line instead of a
+   pixel under it, and the face no longer hangs out of the bottom of the line
+   it is supposed to sit on. Matching the height to the radius removes any
+   straight upright and keeps the same circular corner the open thread panel
+   already uses. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
   box-sizing: border-box;
-  top: calc(50% - 10px);
+  top: calc(50% - 11px);
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
   width: 20px;
   height: 12px;
@@ -6766,11 +6783,14 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 
 /* The last turn closes the path with a round cap. At the same two pixels as
    the stroke it reads as a softened endpoint rather than a new marker, but it
-   keeps the bottom branch from being mistaken for one more continuation. */
+   keeps the bottom branch from being mistaken for one more continuation.
+   Lifted the one pixel that centres a two-pixel dot on the middle it is
+   named after, so the cap and the run it closes are the same line rather
+   than two strokes a pixel apart. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
   content: "";
   position: absolute;
-  top: 50%;
+  top: calc(50% - 1px);
   right: calc(100% + 10px);
   width: 2px;
   height: 2px;
