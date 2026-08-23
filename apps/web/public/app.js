@@ -1634,9 +1634,6 @@ function appearanceCard() {
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">Profile picture</div>
-        <div class="sr-sub">Shown wherever your initials appear. Stored in this
-          browser only — the account has no field for a picture yet, so it will
-          not follow you to another machine.</div>
       </span>
       <span class="sr-action avatar-pick">
         ${avatar(currentUserName(), 40, currentUserName(), myAvatar())}
