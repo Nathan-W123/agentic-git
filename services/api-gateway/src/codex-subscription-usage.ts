@@ -562,7 +562,20 @@ export async function readCodexAppServerSubscriptionUsage(
   }
 }
 
-/** Native status with the app-server retained as a compatibility fallback. */
+/**
+ * The account's quota windows, from the interface OpenAI documents for this.
+ *
+ * The app-server is asked first. `account/rateLimits/read` over stdio JSON-RPC
+ * is the supported way for a client to read this, and it answers in the shape
+ * it promises. `codex --status` is a display surface: it happens to emit JSON
+ * today, and nothing says the next release keeps the field names it uses.
+ *
+ * This used to run the other way round, with the documented interface labelled
+ * the compatibility fallback. Both orders work, because a source that fails to
+ * answer falls through to the other — but only this order fails safe. Reading
+ * the display first means a rename inside it is preferred over the contract,
+ * and the wrong answer is the one that parses.
+ */
 export async function readCodexSubscriptionUsage(
   options: {
     command?: string;
@@ -574,17 +587,20 @@ export async function readCodexSubscriptionUsage(
   } = {},
 ): Promise<CodexRateLimitSnapshot | undefined> {
   const appServerArgs = options.appServerArgs ?? options.args;
-  const status = await readCodexStatusSubscriptionUsage({
-    ...(options.command === undefined ? {} : { command: options.command }),
-    ...(options.statusArgs === undefined ? {} : { args: options.statusArgs }),
-    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-  });
-  if (status !== undefined) {
-    return status;
-  }
-  return await readCodexAppServerSubscriptionUsage({
+  const appServer = await readCodexAppServerSubscriptionUsage({
     ...(options.command === undefined ? {} : { command: options.command }),
     ...(appServerArgs === undefined ? {} : { args: appServerArgs }),
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+  });
+  if (appServer !== undefined) {
+    return appServer;
+  }
+  // Kept for a CLI whose app-server does not answer — an older build, or one
+  // where the handshake is unavailable. A display read is better than no
+  // reading at all; it is only worse than the contract.
+  return await readCodexStatusSubscriptionUsage({
+    ...(options.command === undefined ? {} : { command: options.command }),
+    ...(options.statusArgs === undefined ? {} : { args: options.statusArgs }),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   });
 }

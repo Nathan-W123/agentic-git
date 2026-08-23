@@ -15,6 +15,7 @@ import {
   currentUserName,
   loadProviderOptions,
   myAvatar,
+  providerAllowsCustomModel,
   providerEffortOptions,
   providerModelOptions,
   state,
@@ -28,6 +29,7 @@ import {
   esc,
   icon,
   iconButton,
+  miniEditable,
   miniSelect,
   toast,
 } from "./ui.js";
@@ -244,7 +246,20 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
         })}
         ${contextRing(contextPercentFor(agent?.id), true)}
         <span class="spacer"></span>
-        ${miniSelect("chat-model", models, agent?.model ?? "", "Model")}
+        ${
+          models.length > 0
+            ? miniSelect("chat-model", models, agent?.model ?? "", "Model")
+            : providerAllowsCustomModel(agent?.id)
+              ? miniEditable(
+                  "chat-model",
+                  agent?.model ?? "",
+                  "Model",
+                  "Nothing lists what this account may use, so a model id " +
+                    "typed here is passed through as given; empty runs the " +
+                    "CLI's own default.",
+                )
+              : ""
+        }
         ${miniSelect("chat-effort", efforts, agent?.effort ?? "", "Reasoning effort")}
         <button class="send-btn" type="submit" title="Send"${
           busy || !ready ? " disabled" : ""

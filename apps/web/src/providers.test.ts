@@ -273,10 +273,9 @@ test("a sign-in's model list is kept, so the account's own models replace the su
   // Before: nothing reported, so the picker runs on suggestions.
   const before = await service.options({ provider: "openai" });
   assert.equal(before.models, null);
-  // Nothing offered before the account reports one — a suggested model name
-  // is a guess about someone else's entitlements, and the point of this test
-  // is what replaces it, not that a placeholder was there first.
-  assert.equal((before.suggestedModels ?? []).length, 0);
+  // The CLI's documented ids stand in until the account reports its own. The
+  // point of this test is what replaces them.
+  assert.ok((before.suggestedModels ?? []).length > 0);
 
   // A sign-in leaves a model list behind in its throwaway home.
   const flowHome = path.join(harness.home, "throwaway-device-home");
@@ -348,12 +347,28 @@ test("openai with no cached model list stays usable instead of refusing everythi
   const options = await service.options({ provider: "openai" });
   assert.equal(options.models, null);
   assert.equal(options.allowCustomModel, true);
-  assert.deepEqual(options.notes, []);
-  // No suggested model names at all. A suggestion here is a guess about
-  // somebody else's entitlements, and offering it in a picker reads as
-  // offering something available — which is how a ChatGPT-account Codex came
-  // to be set to a model it answers 400 for and fails at planning time.
-  assert.equal((options.suggestedModels ?? []).length, 0);
+  // The CLI's documented ids, offered rather than withheld. This used to send
+  // none of them, reasoning that a suggestion is a guess about somebody
+  // else's entitlements — true, and the right answer to `gpt-5`, which a
+  // ChatGPT-account Codex answers 400 for. But the conclusion was too wide:
+  // it left anybody who did not already know an id unable to name a model at
+  // all. A guess that fails at planning with the CLI's own words is
+  // recoverable; an empty control is not even wrong.
+  assert.deepEqual(options.suggestedModels?.map((model) => model.id), [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    // The older ids an account may still be on, so a deployment the newest
+    // names fail for is not left picking between six dead options and typing.
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+  ]);
+  // And never mistakable for the account's own answer.
+  assert.match(
+    (options.notes ?? []).join(" "),
+    /has not cached a model list/u,
+  );
   // Reasoning levels stay: fixed vocabulary the CLI defines, not entitlements
   // that vary by account, so suggesting them cannot mislead the same way.
   assert.ok((options.suggestedEfforts ?? []).length > 0);
@@ -410,14 +425,15 @@ test("every provider offers a model list to pick from, cached or not", async () 
   for (const provider of ["anthropic", "openai", "google"] as const) {
     const options = await service.options({ provider });
     const models = options.models ?? options.suggestedModels ?? [];
-    // Codex is the exception, and deliberately: with no cached list there is
-    // nothing to offer that is not a guess about this account's entitlements,
-    // and a guess presented as a choice is how an account was set to a model
-    // it answers 400 for. It gets a free-text field instead.
+    // Codex with no cached list is no longer the exception: it offers the
+    // CLI's documented ids, keeps free text beside them, and says in its note
+    // that they are suggestions rather than what the account reported.
     if (provider === "openai" && options.models === null) {
       assert.equal(options.allowCustomModel, true);
-      assert.deepEqual(options.notes, []);
-      continue;
+      assert.match(
+        (options.notes ?? []).join(" "),
+        /has not cached a model list/u,
+      );
     }
     assert.ok(
       models.length > 0,
@@ -2915,6 +2931,35 @@ test("cursor usage falls back to plain status, and stays unavailable when there 
   const report = await missing.usage({ provider: "cursor" });
   assert.deepEqual(report.windows, []);
   assert.match(report.unavailableReason ?? "", /cursor/iu);
+});
+
+test("cursor prefers its structured status over the printed one", async () => {
+  // The test above covers `--format json` failing. It does not cover both
+  // answering, which is the case that decides which source is the contract —
+  // the same gap the Codex reader had, where the order was only ever
+  // exercised by a failure and would have passed reversed.
+  //
+  // So both answer here, and they disagree on purpose. The printed status is
+  // a display: its wording is free to move between releases, and preferring
+  // it would let a relabelling there outrank the structured answer.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args.includes("--format")
+        ? output(
+            JSON.stringify({ loggedIn: true, plan: "pro", quota: { usedPercent: 42 } }),
+          )
+        : output(
+            ["Logged in: yes", "Plan: business", "Usage this month: 99% used"].join(
+              "\n",
+            ),
+          )) as ProcessRunner,
+  });
+
+  const report = await service.usage({ provider: "cursor" });
+  assert.equal(report.planType, "pro");
+  assert.equal(report.windows[0]?.percentUsed, 42);
 });
 
 test("an account with no models reads as no list rather than a bad one", () => {
