@@ -159,7 +159,9 @@ export class LeasePlanAuthority implements PlanAuthority {
       return { outcome: "admitted", plan: request.plan };
     }
 
-    const { active, approvedLeaseIds } = await this.executingPlans(lease);
+    const executing = await this.executingPlans(lease);
+    const { approvedLeaseIds } = executing;
+    let active = executing.active;
     if (active.length === 0) {
       // Nothing else is executing here. The plan still has to be recorded —
       // that record is what the *next* arrival arbitrates against, and
@@ -179,7 +181,32 @@ export class LeasePlanAuthority implements PlanAuthority {
     // expensive step in the control plane to reach a foregone conclusion
     // would make every arrival behind a blanket holder cost more than the
     // plan it is waiting for.
-    const blanket = active.find((entry) => isBlanketClaim(entry.plan));
+    let blanket = active.find((entry) => isBlanketClaim(entry.plan));
+    if (blanket !== undefined && blanket.plan.expectedFiles.length > 0) {
+      // The arrival is what narrows it, not the holder's own timer.
+      //
+      // A repository-wide claim used to be given back only when its holder
+      // next looked — a poll on the coordinator side — so an arrival landed
+      // in the gap and was refused for as long as that gap lasted, then
+      // waited out its own retry on top. Two agents on unrelated files
+      // queued for tens of seconds for no reason either of them could see.
+      //
+      // The claim carries the estimate it was granted against, so this is
+      // decidable here and now: narrow the holder to what its objective said
+      // it would touch, and arbitrate this plan against that instead of
+      // refusing it. If the write is refused somebody else got there first,
+      // and the claim stands — the refusal below is still the answer.
+      const narrowed = await this.narrowBlanketHolder(
+        blanket,
+        request.baseVersion.sequence,
+      );
+      if (narrowed !== undefined) {
+        active = active.map((entry) =>
+          entry.taskId === blanket?.taskId ? narrowed : entry,
+        );
+        blanket = undefined;
+      }
+    }
     if (blanket !== undefined) {
       const explanation =
         `Task ${blanket.taskId} holds a repository-wide claim; it is ` +
@@ -461,7 +488,13 @@ export class LeasePlanAuthority implements PlanAuthority {
     if (others.length > 0) {
       return undefined;
     }
-    const plan = blanketPlan(request.task);
+    // Recorded on the claim so the next arrival can narrow it on contact
+    // instead of waiting out the holder's poll and its own retry.
+    const plan = blanketPlan(
+      request.task,
+      undefined,
+      request.estimatedFiles,
+    );
     const admission = this.admissions.admit({
       plan,
       agentId: request.task.agentId,
@@ -864,6 +897,91 @@ export class LeasePlanAuthority implements PlanAuthority {
    * write whose view has since changed, which is what stops two runs
    * arbitrating at the same moment from both being approved.
    */
+  /**
+   * Narrows a repository-wide holder to the estimate it was granted against.
+   *
+   * Called by the task that wants the room, not by the one holding it. The
+   * holder's own narrowing runs on a poll, and an arrival is not willing to
+   * wait for it — that gap, plus the arrival's own retry interval, was most
+   * of why two agents on unrelated files still queued.
+   *
+   * Written under the same compare-and-swap every admission uses, against the
+   * approvals observed a moment ago. A refused write means the picture moved
+   * while this was being decided, and the caller keeps the claim it saw.
+   *
+   * Returns the narrowed plan to arbitrate against, or nothing when the claim
+   * still stands.
+   */
+  private async narrowBlanketHolder(
+    holder: ActivePlan,
+    baseVersion: number,
+  ): Promise<ActivePlan | undefined> {
+    const leases = await this.store.listWorkLeases({ status: "active" });
+    const held = leases.find(
+      (candidate) => candidate.taskId === holder.taskId,
+    );
+    if (held === undefined || held.plan === undefined) {
+      return undefined;
+    }
+    const frozen = freezePlanFromWorkingChanges(
+      holder.plan,
+      holder.plan.expectedFiles.map((path) => ({
+        path,
+        status: "modified" as const,
+      })),
+    );
+    const admission = this.admissions.admit({
+      plan: frozen,
+      agentId: holder.agentId,
+      baseRevision: held.baseRevision,
+      baseVersion,
+      // A narrowing of a claim that covered the repository cannot collide
+      // with anything: everything it keeps, it already held.
+      active: [],
+      planRevision: (held.plan.admission.planRevision ?? 1) + 1,
+    });
+    if (!planAdmissionApproved(admission)) {
+      return undefined;
+    }
+    const saved = await this.store.saveWorkLeasePlan({
+      leaseId: held.id,
+      submission: { plan: frozen, admission },
+      // Everything else approved in this repository — the holder's own lease
+      // excluded, since that is the one being rewritten.
+      observedApprovedLeaseIds: leases
+        .filter(
+          (candidate) =>
+            candidate.id !== held.id &&
+            candidate.repositoryId === held.repositoryId &&
+            candidate.plan !== undefined &&
+            planAdmissionApproved(candidate.plan.admission),
+        )
+        .map((candidate) => candidate.id)
+        .sort(),
+      // The same legitimate rewrite the holder's own freeze performs: this is
+      // narrower than what was granted, so nobody's decision is invalidated.
+      replaceApproved: true,
+    });
+    if (saved.outcome !== "saved") {
+      return undefined;
+    }
+    await this.store.appendAudit(undefined, {
+      type: "blanket_claim_frozen",
+      taskId: holder.taskId,
+      data: {
+        repositoryId: held.repositoryId,
+        leaseId: held.id,
+        files: frozen.expectedFiles,
+        directories:
+          frozen.claim?.kind === "frozen" ? frozen.claim.directories : [],
+        // Says who asked, because this narrowing is not the holder noticing
+        // anything — somebody else needed the room and took it.
+        narrowedOnArrival: true,
+      },
+    });
+    return { ...holder, plan: frozen };
+  }
+
   private async executingPlans(
     lease: WorkLease,
   ): Promise<{ active: ActivePlan[]; approvedLeaseIds: string[] }> {

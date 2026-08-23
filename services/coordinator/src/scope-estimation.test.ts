@@ -5,6 +5,7 @@ import type { IndexedFile, RepositoryIndex } from "@coord/code-intelligence";
 
 import {
   estimateScope,
+  likelySymbolsIn,
   moduleRootFor,
   moduleRootsFrom,
 } from "./scope-estimation.js";
@@ -247,4 +248,101 @@ test("the estimate is capped and reports the cap", () => {
   );
   assert.equal(estimate.files.length, 5);
   assert.ok(estimate.notes.some((note) => note.includes("kept the 5 strongest")));
+});
+
+/**
+ * Reading an objective for the declarations it is about.
+ *
+ * Names are taken from a real file two agents actually collided on, because
+ * the cases that matter are the ones real names produce: a house prefix
+ * nobody writes in prose, and a pair of declarations that share every word
+ * they have.
+ */
+const CHANNEL_DECLARATIONS = [
+  { name: "chanHeader" },
+  { name: "chanSidebar" },
+  { name: "agentHistory" },
+  { name: "agentHistoryRows" },
+  { name: "pinnedBanner" },
+  { name: "threadPanel" },
+  { name: "threadReplyChip" },
+  { name: "threadListPanel" },
+  { name: "renderChats" },
+];
+
+test("an objective claims the declarations it is about, prefix and all", () => {
+  // "chan" is a house prefix and will never appear in prose. Requiring every
+  // fragment of the name would find nothing here, which is the whole file.
+  assert.deepEqual(
+    likelySymbolsIn(
+      "remove the header's notification bell and its unused spacing",
+      CHANNEL_DECLARATIONS,
+    ),
+    ["chanHeader"],
+  );
+});
+
+test("two declarations that are the same piece of work are both claimed", () => {
+  // `agentHistory` and `agentHistoryRows` share every word. Requiring a
+  // fragment unique to one would claim neither, and they are one job.
+  assert.deepEqual(
+    likelySymbolsIn(
+      "agent history looks really bloated, make it clean",
+      CHANNEL_DECLARATIONS,
+    ),
+    ["agentHistory", "agentHistoryRows"],
+  );
+});
+
+test("an objective about nothing in the file claims nothing", () => {
+  // The safe answer, and the one that was already being given: no claim here
+  // means the caller keeps the whole file, exactly as before.
+  assert.deepEqual(likelySymbolsIn("make the app better", CHANNEL_DECLARATIONS), []);
+  assert.deepEqual(likelySymbolsIn("", CHANNEL_DECLARATIONS), []);
+  assert.deepEqual(likelySymbolsIn("fix the header", []), []);
+});
+
+test("a word most of the file shares is evidence about nothing", () => {
+  // "thread" is in three of these and would drag all of them in. A fragment
+  // stops being evidence once it stops pointing at a small part of the file.
+  const wide = Array.from({ length: 40 }, (_, index) => ({
+    name: `threadThing${String(index)}`,
+  }));
+  assert.deepEqual(likelySymbolsIn("rework the thread rendering", wide), []);
+});
+
+test("a name written out in full is claimed however common its words are", () => {
+  assert.deepEqual(
+    likelySymbolsIn("renderChats is doing too much", CHANNEL_DECLARATIONS),
+    ["renderChats"],
+  );
+});
+
+test("the name an objective accounts for wins over one it brushes", () => {
+  // Taken from a real collision. "the header's notification bell" mentions
+  // both words, and both `notificationBell` and a header function are
+  // plausible from names alone — but one of them is the whole request and the
+  // other is a fragment of it. Keeping both claims a function nobody was
+  // going to touch, which costs whoever wanted it a turn.
+  assert.deepEqual(
+    likelySymbolsIn("remove the header's notification bell", [
+      { name: "notificationBell" },
+      { name: "renderHeader" },
+      { name: "headerTitle" },
+      { name: "unreadCount" },
+    ]),
+    ["notificationBell"],
+  );
+});
+
+test("a terse objective still finds the declaration it named", () => {
+  // What a person actually types. Two words, both of them in one name.
+  assert.deepEqual(
+    likelySymbolsIn("get rid of this notif bell", [
+      { name: "notificationBell" },
+      { name: "chanHeader" },
+      { name: "threadPanel" },
+    ]),
+    ["notificationBell"],
+  );
 });

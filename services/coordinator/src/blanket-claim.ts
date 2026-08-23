@@ -19,11 +19,26 @@ import {
 export function blanketPlan(
   task: TaskDefinition,
   grantedAt: string = new Date().toISOString(),
+  /**
+   * Where the objective said this task was going, carried on the claim.
+   *
+   * A repository-wide claim is answered before the index is built, because
+   * there is nothing to arbitrate against something covering everything — so
+   * an arrival behind one used to be refused outright and told to come back.
+   * Recording the estimate here is what gives that arrival something to be
+   * decided against: it can narrow the claim to this on the spot rather than
+   * waiting out the holder's own poll.
+   *
+   * It does not narrow the claim by itself. `claimCoversPath` still reads a
+   * blanket claim as the whole repository, which is what keeps the holder
+   * safe until somebody actually needs the room.
+   */
+  estimatedFiles: readonly string[] = [],
 ): AgentPlan {
   return {
     taskId: task.id,
     objective: task.objective,
-    expectedFiles: [],
+    expectedFiles: [...estimatedFiles],
     expectedSymbols: [],
     dependencies: [],
     commands: [...task.validationCommands],

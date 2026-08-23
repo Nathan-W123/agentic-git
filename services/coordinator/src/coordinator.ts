@@ -835,6 +835,16 @@ export interface BlanketClaimRequest {
   repository: CanonicalRepository;
   projectId?: string;
   baseVersion: CanonicalVersion;
+  /**
+   * Where the objective said this task would go.
+   *
+   * Recorded on the claim rather than used to narrow it. The claim still
+   * covers the repository — that is what keeps a holder safe while nobody
+   * else needs the room — but an arrival can now read this and narrow the
+   * claim to it on the spot, instead of being refused until the holder's own
+   * poll gets round to noticing.
+   */
+  estimatedFiles: readonly string[];
 }
 
 /** A blanket claim, and the worktree read that decides what it becomes. */
@@ -1775,6 +1785,7 @@ export class Coordinator {
                     ? {}
                     : { projectId: input.projectId }),
                   baseVersion: version,
+                  estimatedFiles,
                 })
               : undefined;
           if (claim !== undefined && acceptClaim !== undefined) {
