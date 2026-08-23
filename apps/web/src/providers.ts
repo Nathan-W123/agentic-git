@@ -862,14 +862,22 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
   ],
-  // Only the -codex ids. The bare ones are real models but not for this
-  // door: Codex on a ChatGPT account 400s them ("The 'gpt-5' model is not
-  // supported when using Codex with a ChatGPT account"), and a suggestion
-  // that stores a guaranteed failure is a trap with a label. API-key
-  // accounts get the CLI's own reported list and never see this fallback.
+  // The three the Codex CLI documents as its own ids, newest first. Shown
+  // only where the CLI has cached nothing, and never in place of a real list:
+  // an account that reports its own models never sees these.
+  //
+  // These are not the `-codex` suffixed names this list used to hold. That
+  // rule came from `gpt-5` 400ing on a ChatGPT-account Codex ("The 'gpt-5'
+  // model is not supported when using Codex with a ChatGPT account"), and it
+  // is not known here whether these three carry the same split. They are
+  // offered as suggestions rather than as a reported list — `optionsNote`
+  // says which the reader is looking at — and a wrong one fails at planning
+  // with the CLI's own words rather than silently. The cure is the cache: the
+  // moment it exists these are gone.
   openai: [
-    { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
-    { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini" },
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
   ],
   google: [
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
@@ -889,7 +897,7 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
  */
 const SUGGESTED_EFFORTS: Record<ProviderId, string[]> = {
   anthropic: [...CLAUDE_EFFORTS],
-  openai: ["minimal", "low", "medium", "high", "xhigh"],
+  openai: ["none", "low", "medium", "high", "xhigh", "max"],
   google: [],
   cursor: [],
   copilot: [],
@@ -4167,22 +4175,34 @@ export class ProviderChatService {
         // at all. The value reaches `codex exec -m <model>` unaltered either
         // way, exactly as it does for Claude.
         allowCustomModel: models === undefined,
-        // No suggested model names. A suggestion here is a guess about
-        // somebody else's account, and picking one from a list reads as
-        // picking something available — which is how "gpt-5" came to be
-        // selected on a ChatGPT-account Codex that answers
-        // `The 'gpt-5' model is not supported when using Codex with a ChatGPT
-        // account` and fails the task at planning time. A name nobody can
-        // check is worse offered than withheld: typing one is at least an
-        // explicit guess, and the field still accepts one.
+        // Suggested names, where the CLI has cached none of its own. This
+        // used to send nothing at all, on the reasoning that a suggestion is
+        // a guess about somebody else's account — true, and it was the right
+        // answer to `gpt-5`, which 400s on a ChatGPT-account Codex. But the
+        // conclusion drawn from it was too wide. An empty control is not a
+        // careful answer to an uncertain one: it leaves somebody who does not
+        // already know an id with no way to name a model at all, which is the
+        // state this shipped in. A named guess that fails at planning with
+        // the CLI's own message is recoverable; a control with nothing in it
+        // is not even wrong.
         //
-        // Reasoning levels are kept. They are fixed vocabulary the CLI defines
-        // rather than entitlements that vary by account, so suggesting them
-        // cannot mislead the same way.
+        // What keeps it honest is that these never masquerade as reported.
+        // `suggestedModels` and `models` are mutually exclusive, and
+        // `providerOptionsNote` tells the reader which they have.
         ...(models === undefined
-          ? { suggestedEfforts: [...SUGGESTED_EFFORTS.openai] }
+          ? {
+              suggestedModels: [...SUGGESTED_MODELS.openai],
+              suggestedEfforts: [...SUGGESTED_EFFORTS.openai],
+            }
           : {}),
-        notes: [],
+        notes:
+          models === undefined
+            ? [
+                "Codex has not cached a model list on this machine, so these " +
+                  "are the CLI's documented ids rather than what this account " +
+                  "reports. Any other id can be typed instead.",
+              ]
+            : [],
       };
     }
     if (input.provider === "anthropic") {

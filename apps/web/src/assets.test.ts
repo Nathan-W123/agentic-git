@@ -6037,3 +6037,30 @@ test("a provider with no model list still lets a model be named", async () => {
   // And it is styled as the control beside it rather than as a raw input.
   assert.match(styles, /\.mini-select\.mini-editable input/u);
 });
+
+test("Codex offers its documented ids when the account reports none", async () => {
+  // The list existed and was wired to nothing: SUGGESTED_MODELS.openai was
+  // read by no branch, so an account whose CLI had cached nothing got an
+  // empty control. A guess that fails at planning with the CLI's own words is
+  // recoverable; a control with nothing in it is not even wrong.
+  const providers = await readFile(
+    path.join(packageRoot, "src", "providers.ts"),
+    "utf8",
+  );
+
+  assert.match(providers, /suggestedModels: \[\.\.\.SUGGESTED_MODELS\.openai\]/u);
+  for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+    assert.match(providers, new RegExp(`id: "${id}"`, "u"));
+  }
+  // The levels the CLI takes, both ends included.
+  assert.match(
+    providers,
+    /openai: \["none", "low", "medium", "high", "xhigh", "max"\]/u,
+  );
+  // And never presented as the account's own answer: a reported list and a
+  // suggested one are mutually exclusive, so the note can say which it is.
+  assert.match(
+    providers,
+    /Codex has not cached a model list on this machine/u,
+  );
+});
