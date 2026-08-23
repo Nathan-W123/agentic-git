@@ -1450,12 +1450,10 @@ function githubCard() {
     // for a thing that cannot be done here would only invite a dead click.
     return "";
   }
-  const credential = github?.credential;
-  const broken = credential?.unusableReason;
+  const broken = github?.credential?.unusableReason;
   const connected = github?.connected === true;
   return `<section class="card">
-    <div class="panel-head"><div><h3>GitHub</h3>
-      <p>The account a push of your tasks runs as</p></div></div>
+    <div class="panel-head"><div><h3>GitHub</h3></div></div>
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">${
@@ -1463,17 +1461,6 @@ function githubCard() {
             ? `Connected as ${esc(github.login ?? "you")}`
             : "Not connected"
         }</div>
-        <div class="sr-sub${broken ? " sr-warn" : ""}">${esc(
-          broken
-            ? broken
-            : connected
-              ? `Personal access token ending …${credential?.hint ?? ""}. ` +
-                "Pushes an agent runs for you authenticate as this token."
-              : github === undefined
-                ? "Checking…"
-                : "When an agent pushes for you, it pushes as you. Connect " +
-                  "your GitHub account to make that possible.",
-        )}</div>
       </span>
       <span class="sr-ctl">
         <button class="btn btn-sm" data-act="${
