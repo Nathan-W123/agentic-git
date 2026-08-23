@@ -209,3 +209,33 @@ test("deleting a repository requires typing the confirmation phrase", async () =
   assert.notEqual(checked, -1);
   assert.ok(checked < sent, "the phrase is checked before the delete is sent");
 });
+
+test("agent identity and membership controls belong only to its owner", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const menu = slice(
+    chats,
+    "export function rosterMenuItems(agentId)",
+    "function chanSidebar",
+  );
+
+  assert.match(
+    menu,
+    /if \(agent\.mine === true\) \{\s*items\.push\(\{\s*act: "channel-settings-toggle"/u,
+  );
+  assert.match(
+    menu,
+    /if \(agent\.mine === true\) \{\s*items\.push\(\{\s*act: "channel-agent-remove"/u,
+  );
+  assert.doesNotMatch(menu, /channel-agent-remove-any/u);
+
+  const removal = slice(
+    app,
+    "async function removeChannelAgentAction(agentId)",
+    "async function leaveRepositoryAction",
+  );
+  assert.match(removal, /agent\?\.mine !== true/u);
+  assert.doesNotMatch(removal, /removeAny|removeChannelAgentForUser/u);
+  assert.doesNotMatch(data, /removeChannelAgentForUser/u);
+});

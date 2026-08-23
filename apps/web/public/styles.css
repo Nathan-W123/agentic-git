@@ -4934,13 +4934,6 @@ button.chip.lg:hover {
     margin-left: 6px;
   }
 
-  /* The private-message reply is the same hover-only reveal as the channel's
-     message actions, and needs the same treatment for fingers. */
-  .dm-msg .dm-msg-actions {
-    opacity: 1 !important;
-    pointer-events: auto !important;
-  }
-
   /* The platform's tap flash is a grey-blue rectangle in somebody else's
      palette, drawn over rows that already have hover treatments in ours.
      Zeroed only here, where the :active states below take over the job —
@@ -5239,6 +5232,18 @@ button.chip.lg:hover {
   align-items: flex-end;
 }
 
+/* A run from one person is one stack rather than a column of separate
+   bubbles: the lines close up on the `.dm-body` gap, and the corner where
+   they meet squares off so the run reads as one block of speech. */
+.dm-msg.dm-compact {
+  margin-top: -6px;
+}
+
+.dm-msg.dm-compact .dm-bubble {
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+}
+
 .dm-bubble {
   padding: 8px 11px;
   border-radius: var(--radius-sm);
@@ -5273,19 +5278,32 @@ button.chip.lg:hover {
   opacity: 0.62;
 }
 
-/* The reply affordance on a private message: revealed on hover the way the
-   channel's message actions are, and sitting where the bubble points — after
-   theirs, before mine — so it never overlaps the words it acts on. */
+/* The clock and the reply-and-delete bar belong to the message a reader has
+   actually asked about, and to no other. Both are taken out of the layout
+   rather than faded: they are a row each under a message that is usually one
+   short line itself, so leaving them laid out and invisible would spend the
+   height anyway — and revealing them on a pointer crossing the panel would
+   shove the whole conversation under the reader's eye.
+
+   Focus landing anywhere inside a message — a link in the words, an image
+   it carries — counts as asking about that message too, so a reader moving
+   through the conversation by keyboard is not left without its controls. */
+.dm-msg .dm-time,
 .dm-msg .dm-msg-actions {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
+  display: none;
 }
 
-.dm-msg:hover .dm-msg-actions,
+.dm-msg.dm-selected .dm-time,
+.dm-msg:focus-within .dm-time {
+  display: block;
+}
+
+/* Sitting where the bubble points — after theirs, before mine — so it never
+   overlaps the words it acts on. */
+.dm-msg.dm-selected .dm-msg-actions,
 .dm-msg:focus-within .dm-msg-actions {
-  opacity: 1;
-  pointer-events: auto;
+  display: flex;
+  align-items: center;
 }
 
 /* The usage figures are a section of the profile card now (see `.pcard`), so
@@ -7909,36 +7927,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   text-transform: capitalize;
 }
 
-/* The way through to everything this agent has been asked for here. A text
-   control on the heading's own line rather than a full-width bordered button
-   under the task: the panel header carries the same move as an icon, and two
-   boxes saying "History" on one screen is one too many. */
-.agent-spec .aspec-nav {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  padding: 3px 4px;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-3);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-  transition: color 0.13s ease, background 0.13s ease;
-}
-
-.agent-spec .aspec-nav:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.agent-spec .aspec-nav svg {
-  width: 13px;
-  height: 13px;
-  flex: none;
-}
-
 .agent-spec .aspec-note {
   margin-top: 8px;
   color: var(--text-3);
@@ -8265,17 +8253,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   text-transform: capitalize;
 }
 
-.agent-spec .aspec-nav {
-  padding: 6px 8px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  font-size: 11.5px;
-}
-
-.agent-spec .aspec-nav:hover {
-  border-color: var(--border-soft);
-}
-
 /* A task that exists is the live assignment this profile is about, so it
    becomes one accent surface instead of another grey capability row. The
    available-for-work fallback keeps the unmodified row above. */
@@ -8305,23 +8282,12 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 
 .agent-spec .aspec-current-task-active .aspec-capability-mark,
 .agent-spec .aspec-current-task-active .aspec-capability-title,
-.agent-spec .aspec-current-task-active .aspec-capability-meta,
-.agent-spec .aspec-current-task-active .aspec-nav {
+.agent-spec .aspec-current-task-active .aspec-capability-meta {
   color: #fff;
 }
 
 .agent-spec .aspec-current-task-active .aspec-capability-meta {
   opacity: 0.78;
-}
-
-.agent-spec .aspec-current-task-active .aspec-nav {
-  border-color: rgba(255, 255, 255, 0.18);
-  background: rgba(0, 0, 0, 0.14);
-}
-
-.agent-spec .aspec-current-task-active .aspec-nav:hover {
-  border-color: rgba(255, 255, 255, 0.34);
-  background: rgba(0, 0, 0, 0.22);
 }
 
 .agent-spec .aspec-note {
@@ -8363,10 +8329,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   .agent-spec .aspec-capability {
     align-items: flex-start;
     flex-wrap: wrap;
-  }
-
-  .agent-spec .aspec-current-task .aspec-nav {
-    margin-left: 36px;
   }
 }
 
@@ -11121,7 +11083,7 @@ dialog.modal[open]::backdrop {
   outline-offset: 1px;
 }
 
-/* Completed work uses the same card geometry as active, pending, and held.
+/* Completed work uses the same multi-line card as active, pending, and held.
    Quieter fill and a green check carry the finished state; the full title,
    author, reply count, and time remain in the accessible label and tooltip. */
 .thread-item-ended {
@@ -11141,19 +11103,6 @@ dialog.modal[open]::backdrop {
 .thread-item-ended .ti-done svg {
   width: 13px;
   height: 13px;
-}
-
-.thread-list-finished .thread-item-ended .ti-who {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-size: 11.5px;
-  color: var(--text-3);
-}
-
-.thread-item-ended .ti-who::before {
-  content: "·";
-  margin-right: 5px;
-  color: var(--text-4);
 }
 
 .thread-item-pending {
@@ -11668,8 +11617,6 @@ dialog.modal[open]::backdrop {
 }
 
 .thread-item-ended .ti-text {
-  flex: 1 1 auto;
-  min-width: 0;
   font-weight: 500;
   color: var(--text-2);
 }
