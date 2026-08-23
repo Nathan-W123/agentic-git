@@ -925,6 +925,11 @@ export class CodeIntelligenceService {
       // somewhere as a claim — so all of them need the agent's own words kept.
       declared: plan.declared ?? {
         symbols: [...plan.expectedSymbols],
+        // Widened below with every file this plan's files import and every
+        // symbol they reference, so the agent's own list has to be kept: an
+        // enriched dependency crossing another plan's resources is worth
+        // twenty-five points, and neither agent asked for any of it.
+        dependencies: [...plan.dependencies],
         apis: [...(plan.expectedApis ?? [])],
         schemas: [...(plan.expectedSchemas ?? [])],
         configKeys: [...(plan.expectedConfigKeys ?? [])],
