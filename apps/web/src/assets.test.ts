@@ -5512,6 +5512,19 @@ test("one profile card describes people and agents wherever a face is drawn", as
     /body:has\(\.pcard-anchor:is\(:hover, :focus-within\)\)\s*\.pcard-anchor:not\(:hover\):not\(:focus-within\)\s*>\s*\.pcard-pop \{[\s\S]*?visibility: hidden;[\s\S]*?transition-duration: 0s;/u,
   );
   assert.match(/\n\.pcard \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "", /isolation: isolate/u);
+  const card = /\n\.pcard \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(card, /background(-color)?: var\(--surface-1\)/u);
+  assert.match(card, /opacity: 1/u);
+  const body = /\n\.pcard-body \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(body, /background: var\(--surface-1\)/u);
+  assert.match(
+    css,
+    /\.cmsg-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
+  );
+  assert.match(
+    css,
+    /\.roster-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
+  );
   // No ring drawn round the face at the same time: the card opening is the
   // answer to the hover, and the outline was the same news twice.
   assert.match(

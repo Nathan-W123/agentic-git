@@ -5130,6 +5130,14 @@ button.chip.lg:hover {
   transition: background 0.13s ease;
 }
 
+/* A fixed card still paints inside its row's stacking context when an
+   ancestor carries a transform. Lift the row that owns the open card so
+   siblings beneath it cannot paint over the pop. */
+.roster-row:has(.pcard-anchor:is(:hover, :focus-within)) {
+  position: relative;
+  z-index: 2;
+}
+
 /* A profile card opens *below* the row and inside the roster's own width.
    `.chan-scroll` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways
@@ -5870,6 +5878,10 @@ button.chip.lg:hover {
   contain: layout;
 }
 
+.cmsg-row:has(.pcard-anchor:is(:hover, :focus-within)) {
+  z-index: 2;
+}
+
 .cmsg-row:hover {
   /* An opaque stroke has to follow the surface under it, or the line would
      stay at the room's shade while the row it crosses lightens. */
@@ -6268,7 +6280,9 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   max-height: var(--profile-max-height, calc(100dvh - 34px));
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
-  background: var(--bg-panel);
+  background: var(--surface-1);
+  background-color: var(--surface-1);
+  opacity: 1;
   isolation: isolate;
   box-shadow: var(--shadow-pop);
   overflow-x: hidden;
@@ -6297,6 +6311,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .pcard-body {
   display: block;
   padding: 0 13px 13px;
+  background: var(--surface-1);
 }
 
 /* Breaking out of the crown, as the reference does. The ring is the card's
@@ -6312,7 +6327,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   margin: -22px 0 6px;
   padding: 3px;
   border-radius: 50%;
-  background: var(--bg-panel);
+  background: var(--surface-1);
 }
 
 .pcard-face .status-dot {
