@@ -2933,6 +2933,35 @@ test("cursor usage falls back to plain status, and stays unavailable when there 
   assert.match(report.unavailableReason ?? "", /cursor/iu);
 });
 
+test("cursor prefers its structured status over the printed one", async () => {
+  // The test above covers `--format json` failing. It does not cover both
+  // answering, which is the case that decides which source is the contract —
+  // the same gap the Codex reader had, where the order was only ever
+  // exercised by a failure and would have passed reversed.
+  //
+  // So both answer here, and they disagree on purpose. The printed status is
+  // a display: its wording is free to move between releases, and preferring
+  // it would let a relabelling there outrank the structured answer.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args.includes("--format")
+        ? output(
+            JSON.stringify({ loggedIn: true, plan: "pro", quota: { usedPercent: 42 } }),
+          )
+        : output(
+            ["Logged in: yes", "Plan: business", "Usage this month: 99% used"].join(
+              "\n",
+            ),
+          )) as ProcessRunner,
+  });
+
+  const report = await service.usage({ provider: "cursor" });
+  assert.equal(report.planType, "pro");
+  assert.equal(report.windows[0]?.percentUsed, 42);
+});
+
 test("an account with no models reads as no list rather than a bad one", () => {
   assert.deepEqual(parseCursorModelList("No models available for this account."), []);
   assert.deepEqual(parseCursorModelList(""), []);
