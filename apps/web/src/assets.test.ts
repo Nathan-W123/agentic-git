@@ -1318,6 +1318,22 @@ test("an agent roster is personal, not a project-wide list", async () => {
   assert.equal(/state\.agents/u.test(body), false);
 });
 
+test("Settings Agents rows show the provider, then Connected as the call sign", async () => {
+  const app = await publicFile("app.js");
+  const start = app.indexOf("function agentsCard()");
+  assert.notEqual(start, -1);
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+  // Title is the vendor label (Claude), not the kumi name that used to sit
+  // there and hide which provider the row was for.
+  assert.match(body, /sr-title.*\$\{esc\(agentLabelOf\(agent\.id\)\)\}/u);
+  // A named connection says who it is connected as — the call sign — rather
+  // than the opaque "you".
+  assert.match(
+    body,
+    /agent\.hasName === true\s*\?\s*`Connected as \$\{agent\.name\}`\s*:\s*"Connected as you"/u,
+  );
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may

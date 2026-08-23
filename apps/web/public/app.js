@@ -1504,11 +1504,15 @@ function agentsCard() {
                deployment.</div></span></div>`
         : agents
             .map((agent) => {
-              // The owner suffix is dropped from a vendor-label fallback
-              // ("Claude (Nathan)" reads as "Claude" in your own settings),
+              // The row title is the vendor people say ("Claude"), not the
+              // call sign. The call sign belongs on the status line below —
+              // "Connected as Hera" — so both facts stay visible at once
+              // instead of the name swallowing the provider.
+              // Rename still edits the call sign: the owner suffix is dropped
+              // from a vendor-label fallback ("Claude (Nathan)" → "Claude")
               // but never from a name somebody chose — an agent called
               // "Athena (night shift)" keeps every word of it.
-              const label =
+              const callSign =
                 agent.hasName === true
                   ? agent.name
                   : agent.name.replace(/\s*\(.*\)$/u, "");
@@ -1526,7 +1530,13 @@ function agentsCard() {
               const state_ = agent.needsReconnect
                 ? { text: "Sign-in expired", cls: " sr-warn" }
                 : agent.mine
-                  ? { text: "Connected as you", cls: "" }
+                  ? {
+                      text:
+                        agent.hasName === true
+                          ? `Connected as ${agent.name}`
+                          : "Connected as you",
+                      cls: "",
+                    }
                   : agent.hostAccount
                     ? {
                         text: "Available on this deployment — using this machine's account",
@@ -1541,10 +1551,10 @@ function agentsCard() {
                           data-value="${esc(agent.id)}">
                           <input class="input" data-act="settings-rename-input"
                             data-value="${esc(agent.id)}" maxlength="40"
-                            aria-label="Agent name" value="${esc(label)}">
+                            aria-label="Agent name" value="${esc(callSign)}">
                           <button class="btn btn-sm btn-primary" type="submit">Save</button>
                         </form>`
-                      : `<div class="sr-title">${esc(label)}</div>`
+                      : `<div class="sr-title">${esc(agentLabelOf(agent.id))}</div>`
                   }
                   <div class="sr-sub${state_.cls}">${esc(state_.text)}${
                     agent.detail ? ` — ${esc(agent.detail)}` : ""
