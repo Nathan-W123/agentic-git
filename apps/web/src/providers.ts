@@ -2161,200 +2161,6 @@ export function parseCursorModelList(stdout: string): ProviderModelOption[] {
   return models;
 }
 
-/** How long `status` may take before the usage card stops waiting for it. */
-export const CURSOR_STATUS_TIMEOUT_MS = 8_000;
-
-/** Keys whose value is a secret, an internal handle, or otherwise unreadable. */
-const CURSOR_STATUS_SKIP =
-  /token|secret|password|credential|cookie|apikey|api_key|(^|_)id$|uuid|path|dir$|home$/iu;
-
-/** `usedPercent` -> `Used percent`, `logged_in` -> `Logged in`. */
-function cursorNoteLabel(key: string): string {
-  const words = key
-    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
-    .replace(/[_-]+/gu, " ")
-    .trim()
-    .toLowerCase();
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
-/** A scalar as a person reads it; anything else is not a note. */
-function cursorNoteValue(value: unknown): string | undefined {
-  if (typeof value === "boolean") {
-    return value ? "yes" : "no";
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? String(value) : undefined;
-  }
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed.length === 0 || trimmed.length > 120 ? undefined : trimmed;
-}
-
-function cursorPercent(value: unknown): number | undefined {
-  const percent = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(percent) && percent >= 0 && percent <= 100
-    ? percent
-    : undefined;
-}
-
-/**
- * Reads `status --format json`, and the plain text the CLI prints without that
- * flag, into a usage report.
- *
- * Cursor is not Codex: its status command answers with the account the CLI is
- * signed in as, its plan and its version, and it publishes no subscription
- * percentage unless the account has one. So a percentage becomes a window
- * where there is one, and everything else the CLI said is kept as its own
- * lines — which is the honest form of "this is what Cursor reports", rather
- * than a quota bar derived from figures Cursor never gave.
- */
-export function parseCursorUsage(stdout: string): ProviderUsageReport {
-  const source = "cursor status, as reported by the signed-in account";
-  const text = stripAnsi(stdout);
-  const windows: ProviderUsageWindow[] = [];
-  const notes: string[] = [];
-  let planType: string | undefined;
-
-  const takePlan = (key: string, value: unknown): boolean => {
-    if (
-      planType !== undefined ||
-      !/^(plan|plan_?type|subscription|tier)$/iu.test(key) ||
-      typeof value !== "string" ||
-      value.trim().length === 0
-    ) {
-      return false;
-    }
-    planType = value.trim();
-    return true;
-  };
-  const takeWindow = (key: string, label: string, value: unknown): boolean => {
-    if (!/percent|percentage/iu.test(key)) {
-      return false;
-    }
-    const percent = cursorPercent(value);
-    if (percent === undefined) {
-      return false;
-    }
-    windows.push({ label, percentUsed: percent });
-    return true;
-  };
-  const takeNote = (key: string, value: unknown): void => {
-    const readable = cursorNoteValue(value);
-    if (readable === undefined || notes.length >= 8) {
-      return;
-    }
-    notes.push(`${cursorNoteLabel(key)}: ${readable}`);
-  };
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.trim());
-  } catch {
-    const opened = text.indexOf("{");
-    const closed = text.lastIndexOf("}");
-    if (opened !== -1 && closed > opened) {
-      try {
-        parsed = JSON.parse(text.slice(opened, closed + 1));
-      } catch {
-        parsed = undefined;
-      }
-    }
-  }
-
-  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-    // Two levels: the flags Cursor reports about the account sit at the top,
-    // and anything it groups (a plan, a quota) sits one object below. Deeper
-    // than that is structure this cannot claim to understand.
-    const visit = (value: Record<string, unknown>, group: string): void => {
-      for (const [key, entry] of Object.entries(value)) {
-        const label = group === "" ? key : `${group} ${key}`;
-        if (
-          typeof entry === "object" &&
-          entry !== null &&
-          !Array.isArray(entry) &&
-          group === ""
-        ) {
-          visit(entry as Record<string, unknown>, key);
-          continue;
-        }
-        if (CURSOR_STATUS_SKIP.test(key)) {
-          continue;
-        }
-        if (
-          takeWindow(key, cursorNoteLabel(group === "" ? key : group), entry) ||
-          takePlan(key, entry)
-        ) {
-          continue;
-        }
-        takeNote(label, entry);
-      }
-    };
-    visit(parsed as Record<string, unknown>, "");
-  } else if (
-    // A CLI too old for `--format json` answers with its own usage text, and
-    // that text is not an account: read as fields it would become a card full
-    // of "Error: unknown option", which reads as a report rather than as the
-    // nothing it is.
-    !/unknown (?:option|argument|flag)|unrecognized (?:option|argument)|invalid option/iu.test(
-      text,
-    )
-  ) {
-    for (const raw of text.split(/\r?\n/u)) {
-      const line = raw.trim();
-      if (line.length === 0) {
-        continue;
-      }
-      const percentLine = /^(.+?):\s*(\d{1,3})%(?:\s*used)?\b/u.exec(line);
-      if (percentLine !== null) {
-        const percent = cursorPercent(Number(percentLine[2]));
-        if (percent !== undefined) {
-          windows.push({
-            label: (percentLine[1] as string).trim(),
-            percentUsed: percent,
-          });
-          continue;
-        }
-      }
-      const field = /^([A-Za-z][A-Za-z0-9 _-]{0,40}):\s*(.+)$/u.exec(line);
-      if (
-        field === null ||
-        CURSOR_STATUS_SKIP.test(field[1] as string) ||
-        // Diagnostics and help are about the command, not about the account.
-        /^(error|warning|warn|usage|help|tip|note|hint)$/iu.test(
-          (field[1] as string).trim(),
-        )
-      ) {
-        continue;
-      }
-      if (takePlan((field[1] as string).trim(), field[2])) {
-        continue;
-      }
-      takeNote((field[1] as string).trim(), field[2]);
-    }
-  }
-
-  if (windows.length === 0 && notes.length === 0 && planType === undefined) {
-    return {
-      source,
-      windows: [],
-      unavailableReason: /not (?:logged|signed) ?in|please (?:log|sign) ?in/iu.test(
-        text,
-      )
-        ? "The Cursor CLI is signed out, so it had no account to report on."
-        : "The cursor CLI reported nothing about this account. Its status command publishes no subscription percentage.",
-    };
-  }
-  return {
-    source,
-    windows,
-    ...(notes.length === 0 ? {} : { notes }),
-    ...(planType === undefined ? {} : { planType }),
-  };
-}
-
 /** Whether a URL is on one of the hosts this vendor signs in through. */
 function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
   if (hosts === undefined || hosts.length === 0) {
@@ -2783,11 +2589,17 @@ export class ProviderChatService {
       void withheld;
       return report;
     }
-    if (
-      input.provider !== "anthropic" &&
-      input.provider !== "openai" &&
-      input.provider !== "cursor"
-    ) {
+    if (input.provider === "cursor") {
+      // Cursor's CLI publishes no subscription figure: asking it produced a
+      // card of account facts rather than a quota, so the honest answer is
+      // that there is nothing to report, without running anything to find out.
+      return {
+        source: PROVIDER_NAMES.cursor,
+        windows: [],
+        unavailableReason: "Cursor usage not reported.",
+      };
+    }
+    if (input.provider !== "anthropic" && input.provider !== "openai") {
       return {
         source: PROVIDER_NAMES[input.provider],
         windows: [],
@@ -2806,12 +2618,6 @@ export class ProviderChatService {
       // two minutes, so reopening the page did not actually run the quota
       // command the page exists to surface.
       return await this.codexUsage(input.userId);
-    }
-    if (input.provider === "cursor") {
-      // Uncached for the same reason: the specification page asks again every
-      // time it opens, and answering that request from a stored figure would
-      // not run the command the page opened to run.
-      return await this.cursorUsage(input.userId);
     }
     const cached = this.usageCache.get(usageKey);
     if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) {
@@ -3003,19 +2809,6 @@ export class ProviderChatService {
   }
 
   /**
-   * What Cursor's own CLI says about the account it is signed in as.
-   *
-   * `status` is what the Cursor CLI publishes about an account, it runs no
-   * model turn, and it is asked inside the caller's own credential home --
-   * the same home their runs use, so the answer is about the account those
-   * runs spend rather than whatever login the host happens to carry.
-   *
-   * `--format json` is asked for first because that is the answer worth
-   * parsing, and the bare `status` is the fallback: a CLI that does not know
-   * the flag prints its own usage text instead of an account, which
-   * {@link parseCursorUsage} reports as nothing rather than as a quota.
-   */
-  /**
    * Runs a browser CLI, trying the names it may be installed under.
    *
    * The winner is remembered, so the second name costs one extra spawn per
@@ -3054,76 +2847,6 @@ export class ProviderChatService {
       return last;
     }
     throw thrown ?? new Error(`${spec.command} is not installed here`);
-  }
-
-  private async cursorUsage(userId?: string): Promise<ProviderUsageReport> {
-    const spec = browserCliSpec("cursor") as BrowserCliSpec;
-    const source = "cursor status, as reported by the signed-in account";
-    let home: CredentialHome | undefined;
-    try {
-      if (userId !== undefined) {
-        const store = await this.credentialStore();
-        home = await store.openCredentialHome({
-          userId,
-          vendor: "cursor",
-          baseEnv: sanitizeChildEnv(process.env),
-          // Shared, as the model list read is: two of these may overlap and
-          // neither writes anything into the home.
-          mode: "shared",
-        });
-      }
-      const ask = async (
-        args: readonly string[],
-      ): Promise<ProviderUsageReport | undefined> => {
-        try {
-          const output = await this.runBrowserCli(
-            spec,
-            [...spec.prefixArgs, ...args],
-            {
-              timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
-              maxOutputBytes: 262_144,
-              ...(home === undefined ? {} : { env: home.env }),
-            },
-          );
-          // Read whatever the exit code: the CLI exits non-zero merely for
-          // being signed out, while still printing the status it was asked
-          // for. Some builds print that status on stderr.
-          return parseCursorUsage(
-            output.stdout.trim() === "" ? output.stderr : output.stdout,
-          );
-        } catch {
-          // A missing binary, or a deadline. Neither is an answer, and the
-          // fallback below is still worth trying.
-          return undefined;
-        }
-      };
-      try {
-        const asJson = await ask(["status", "--format", "json"]);
-        if (asJson !== undefined && asJson.unavailableReason === undefined) {
-          return asJson;
-        }
-        const asText = await ask(["status"]);
-        return (
-          (asText?.unavailableReason === undefined ? asText : undefined) ??
-          asJson ??
-          asText ?? {
-            source,
-            windows: [],
-            unavailableReason:
-              "The cursor CLI could not be asked for its status on this machine.",
-          }
-        );
-      } finally {
-        await home?.close();
-      }
-    } catch (error) {
-      return {
-        source,
-        windows: [],
-        unavailableReason:
-          error instanceof Error ? error.message : String(error),
-      };
-    }
   }
 
   /** Native status first, with the app-server retained for older CLIs. */
