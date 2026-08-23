@@ -672,3 +672,85 @@ export function estimateScope(
     notes,
   };
 }
+
+/**
+ * Which declarations in one file an objective is likely to be about.
+ *
+ * The gap this fills is the one that makes everything finer than a file
+ * unreachable in practice. Arbitration decides whether two plans want the
+ * same *code* rather than the same path by asking what each occupies inside a
+ * file — and a plan that named the file and no declarations occupies all of
+ * it, by definition. Agents name files far more reliably than they name
+ * functions, so that is the common case rather than the corner, and it makes
+ * a whole-file lock the normal outcome however good the splitting is.
+ *
+ * So where an agent did not say, this reads its objective the same way
+ * {@link estimateScope} reads one for files: the words that survive stop-word
+ * filtering, matched against the names the index actually placed in the file.
+ *
+ * What counts as a match is decided by how rare a fragment is *in this file*,
+ * which is the only measure that works on real names. Requiring every
+ * fragment of a name would miss `chanHeader` for an objective about a header,
+ * because "chan" is a house prefix no one writing prose will use. Requiring a
+ * fragment unique to one declaration would miss `agentHistory`, because
+ * `agentHistoryRows` sits beside it sharing every word it has — and those two
+ * are the same piece of work, so claiming both is right rather than a
+ * failure. A fragment a handful of declarations share is evidence about that
+ * handful; one that half the file shares is evidence about nothing.
+ *
+ * Empty means the objective said nothing about this file's contents, which
+ * callers must read as "occupies all of it" — the answer they already had.
+ * This never widens a claim: it only narrows one that would be the whole file.
+ */
+export function likelySymbolsIn(
+  objective: string,
+  placed: readonly { name: string }[],
+  options: { minTokenLength?: number } = {},
+): string[] {
+  const minTokenLength = options.minTokenLength ?? 3;
+  const lowered = objective.toLowerCase();
+  const words = new Set(
+    lowered
+      .split(/[^A-Za-z0-9_]+/u)
+      .flatMap((word) => objectiveTokens(word, minTokenLength)),
+  );
+  if (words.size === 0 || placed.length === 0) {
+    return [];
+  }
+
+  const frequency = new Map<string, number>();
+  for (const entry of placed) {
+    for (const token of new Set(indexTokens(entry.name, minTokenLength))) {
+      frequency.set(token, (frequency.get(token) ?? 0) + 1);
+    }
+  }
+  // A fragment is evidence while it still points at a small part of the file.
+  // Scaled rather than fixed, so it means the same thing in a file of twenty
+  // declarations as in one of two hundred, with a floor so a small file does
+  // not make every fragment decisive.
+  const ceiling = Math.max(3, Math.round(placed.length * 0.05));
+
+  const claimed: string[] = [];
+  for (const entry of placed) {
+    // The whole name written out is unambiguous however common its parts are.
+    if (lowered.includes(entry.name.toLowerCase())) {
+      claimed.push(entry.name);
+      continue;
+    }
+    const tokens = [...new Set(indexTokens(entry.name, minTokenLength))];
+    if (
+      tokens.some((token) => {
+        const shared = frequency.get(token) ?? 0;
+        // A fragment every declaration in the file carries has not chosen
+        // between them — "total" in a file of `orderTotal` and `formatTotal`
+        // is the file's subject, not a claim on half of it. The proportional
+        // ceiling alone cannot see this, because its floor is larger than a
+        // small file.
+        return words.has(token) && shared > 0 && shared < placed.length && shared <= ceiling;
+      })
+    ) {
+      claimed.push(entry.name);
+    }
+  }
+  return claimed.sort();
+}

@@ -1472,3 +1472,56 @@ test("a plan reaching only its own lines of a file runs beside the holder", () =
   assert.equal(admission.status, "approved");
   assert.equal(admission.deferredResources, undefined);
 });
+
+test("a holder that named a file and no functions still shares it", () => {
+  // The shape production actually produces, and the reason symbol-level
+  // arbitration never fired on a real repository: agents name files reliably
+  // and functions rarely, and a plan with no declarations occupies the whole
+  // file by definition — so the whole file was the only thing anyone else
+  // could be told about.
+  //
+  // Both of these named `total.js` and neither named a function. Their
+  // objectives are about different halves of it.
+  const holder: AgentPlan = plan("task_b", {
+    objective: "round the order total before it is stored",
+    expectedFiles: ["src/pricing/total.js"],
+    expectedSymbols: [],
+  });
+  const admission = admit(
+    plan("task_a", {
+      objective: "format the total for display with a currency prefix",
+      expectedFiles: ["src/pricing/total.js"],
+      expectedSymbols: [],
+    }),
+    [holder],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  const withheld = (admission.deferredResources ?? []).map(
+    (resource) => resource.resourceId,
+  );
+  // The holder's half, read out of its objective. `formatTotal` is what the
+  // candidate came for and is not among them.
+  assert.equal(withheld.includes("orderTotal"), true);
+  assert.equal(withheld.includes("formatTotal"), false);
+});
+
+test("a holder whose objective matches nothing keeps the whole file", () => {
+  // The guess only ever narrows a claim that would have been the entire file.
+  // When it has nothing to say, the answer is the one that was already given.
+  const admission = admit(
+    sharedFileCandidate(),
+    [
+      plan("task_b", {
+        objective: "general cleanup",
+        expectedFiles: ["src/pricing/total.js"],
+        expectedSymbols: [],
+      }),
+    ],
+    new PlanAdmissionController(),
+    placed(),
+  );
+  assert.equal(admission.status, "sequenced");
+});

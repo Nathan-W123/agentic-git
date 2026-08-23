@@ -34,6 +34,7 @@ import {
   OwnershipService,
   type PlanFileClaim,
 } from "./ownership-service.js";
+import { likelySymbolsIn } from "./scope-estimation.js";
 import {
   WHOLE_FILE,
   normalizeRanges,
@@ -308,8 +309,44 @@ function declaredSpans(
   // the plan was never enriched, so `expectedSymbols` is already those words;
   // empty means the agent named no symbols, which still takes the file whole.
   const claimed = plan.declaredSymbols ?? complete.expectedSymbols;
-  if (!files.includes(file) || claimed.length === 0) {
+  if (!files.includes(file)) {
     return undefined;
+  }
+  if (claimed.length === 0) {
+    // Named the file and no declarations, which is what agents mostly do.
+    // Read literally that occupies the whole file, and the whole file is then
+    // the only thing anyone else can be told — which is how a repository with
+    // working symbol-level arbitration still queues everybody.
+    //
+    // So where the agent did not say, its objective is asked instead. This is
+    // a guess and is treated as one: it only ever narrows a claim that would
+    // otherwise be the entire file, an objective that matches nothing keeps
+    // that file exactly as before, and the insertion zones go with it because
+    // a task that named no declarations is the likeliest of all to add one.
+    const all = locate(file) ?? [];
+    const guessed = likelySymbolsIn(
+      // The agent's own phrasing where it wrote one: `intent` is a sentence
+      // about this task, and the objective is often the request echoed back.
+      `${plan.objective} ${complete.intent}`,
+      all,
+    );
+    if (guessed.length === 0) {
+      return undefined;
+    }
+    const wantedNames = new Set(guessed.map((name: string) => name.toLowerCase()));
+    const own = all.filter((range) =>
+      wantedNames.has(range.name.toLowerCase()),
+    );
+    const zones = insertionZones(all);
+    const first = guessed[0] ?? "pending declaration";
+    return [
+      ...own,
+      ...zones.map((zone) => ({
+        name: first,
+        startLine: zone.startLine,
+        endLine: zone.endLine,
+      })),
+    ];
   }
   const referents = plan.grounding?.symbolReferents ?? [];
   // A declaration stands for its referent where verification found one, and
