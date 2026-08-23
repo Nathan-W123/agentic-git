@@ -751,6 +751,18 @@ test("codex usage asks the account for its quota before reading session records"
   assert.equal(report.windows[0]?.label, "5 hours");
   assert.ok((report.windows[0]?.resetsAt ?? "").length > 0);
   assert.equal(report.windows[1]?.label, "week");
+
+  // Opening the agent specification again must reach the native quota read
+  // again; a service cache here would make the browser's refresh ineffective.
+  const reopened = await service.usage({
+    provider: "openai",
+    userId: "usage-user",
+  });
+  assert.equal(reopened.windows[0]?.percentUsed, 12.5);
+  assert.deepEqual(seen, [
+    ["app-server", "--stdio"],
+    ["app-server", "--stdio"],
+  ]);
 });
 
 test("the codex quota answer is read in either spelling, and nothing is invented", () => {

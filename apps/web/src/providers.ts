@@ -986,7 +986,7 @@ const CLI_TIMEOUT_MS = 240_000;
  * trivial prompt, so it gets a far shorter deadline than a real completion.
  */
 const CREDENTIAL_PROBE_TIMEOUT_MS = 90_000;
-/** Usage moves slowly; re-probing on every render would be wasteful. */
+/** Claude usage moves slowly; re-probing it on every render would be wasteful. */
 const USAGE_CACHE_MS = 120_000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // Square brackets appear in real Claude Code model values (e.g. the
@@ -2284,16 +2284,12 @@ export class ProviderChatService {
     // of their own, which is the shared login the container itself carries.
     const usageKey = `${input.userId ?? "host"}:${input.provider}`;
     if (input.provider === "openai") {
-      const cachedCodex = this.usageCache.get(usageKey);
-      if (
-        cachedCodex !== undefined &&
-        Date.now() - cachedCodex.at < USAGE_CACHE_MS
-      ) {
-        return cachedCodex.report;
-      }
-      const report = await this.codexUsage(input.userId);
-      this.usageCache.set(usageKey, { at: Date.now(), report });
-      return report;
+      // The browser deliberately asks again whenever the agent specification
+      // opens. Honour that request all the way through to Codex: caching here
+      // made a fresh HTTP request return the previous app-server answer for
+      // two minutes, so reopening the page did not actually run the quota
+      // command the page exists to surface.
+      return await this.codexUsage(input.userId);
     }
     const cached = this.usageCache.get(usageKey);
     if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) {
