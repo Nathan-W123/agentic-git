@@ -4429,12 +4429,16 @@ test("ended threads wrap as compact pills without live activity motion", async (
   assert.match(finishedMarkup, /class="thread-item thread-item-ended/u);
   assert.match(finishedMarkup, /class="ti-done"/u);
   assert.doesNotMatch(finishedMarkup, /ti-activity|text-sweep/u);
-  const wrap = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(wrap ?? "", /display: flex;/u);
-  assert.match(wrap ?? "", /flex-wrap: wrap;/u);
-  const pill = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(pill ?? "", /border-radius: 999px;/u);
-  assert.match(pill ?? "", /max-width: 260px;/u);
+  const finished = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  const active = /\n\.thread-list-active \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(finished ?? "", /display: grid;/u);
+  assert.match(active ?? "", /display: grid;/u);
+  assert.doesNotMatch(finished ?? "", /flex-wrap:/u);
+  const card = /\n\.thread-item \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(card ?? "", /border-radius: var\(--radius\);/u);
+  const ended = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.doesNotMatch(ended ?? "", /border-radius:\s*999px/u);
+  assert.doesNotMatch(ended ?? "", /max-width:\s*260px/u);
 });
 
 test("long thread titles stay on one compact line", async () => {
@@ -4445,8 +4449,7 @@ test("long thread titles stay on one compact line", async () => {
   assert.match(title ?? "", /text-overflow: ellipsis;/u);
   assert.match(title ?? "", /white-space: nowrap;/u);
   assert.doesNotMatch(title ?? "", /line-clamp/u);
-  const row =
-    /\n\.thread-list-finished \.thread-item-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  const row = /\n\.thread-item-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(row ?? "", /max-width: 100%;/u);
 });
 
