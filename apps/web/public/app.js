@@ -3813,6 +3813,8 @@ function setPinnedMessagesOpen(open) {
     return;
   }
   banner.classList.toggle("open", next);
+  banner.setAttribute("aria-hidden", String(!next));
+  banner.toggleAttribute("inert", !next);
   banner
     .querySelector(".chan-pins-head")
     ?.setAttribute("aria-expanded", String(next));

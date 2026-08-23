@@ -367,7 +367,16 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
   assert.match(chats, /const open = state\.pinsOpen === true/u);
   assert.match(chats, /chan-pins\$\{open \? " open" : ""\}/u);
+  assert.match(chats, /aria-hidden="\$\{!open\}"\$\{open \? "" : " inert"\}/u);
+  assert.match(chats, /class="chan-pins-surface"/u);
   assert.match(chats, /chan-pins-list-frame" aria-hidden="\$\{!open\}"/u);
+  assert.match(app, /banner\.setAttribute\("aria-hidden", String\(!next\)\)/u);
+  assert.match(app, /banner\.toggleAttribute\("inert", !next\)/u);
+  assert.match(styles, /\.chan-pins \{[\s\S]*grid-template-rows: 0fr/u);
+  assert.match(styles, /\.chan-pins \{[\s\S]*visibility: hidden/u);
+  assert.match(styles, /\.chan-pins \{[\s\S]*border-bottom: 0 solid/u);
+  assert.match(styles, /\.chan-pins\.open \{[\s\S]*grid-template-rows: 1fr/u);
+  assert.match(styles, /\.chan-pins-surface \{[\s\S]*min-height: 0/u);
   assert.match(styles, /\.chan-pins-list-frame \{[\s\S]*grid-template-rows: 0fr/u);
   assert.match(
     styles,

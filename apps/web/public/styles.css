@@ -5472,11 +5472,34 @@ button.chip.lg:hover {
 }
 
 /* What the channel decided not to lose: a slim shelf between the toolbar
-   and the messages. One header line collapsed; a bounded, scrollable list
-   open — many pins must never squeeze the conversation itself out. */
+   and the messages. The whole shelf folds away when its header shortcut is
+   off; open, its bounded list must never squeeze the conversation itself out. */
 .chan-pins {
-  border-bottom: 1px solid var(--border-soft);
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  overflow: hidden;
+  opacity: 0;
+  border-bottom: 0 solid var(--border-soft);
   background: var(--bg-card-2);
+  transition:
+    grid-template-rows 220ms ease,
+    opacity 150ms ease,
+    border-bottom-width 220ms ease,
+    visibility 0s linear 220ms;
+}
+
+.chan-pins.open {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  opacity: 1;
+  border-bottom-width: 1px;
+  transition-delay: 0s;
+}
+
+.chan-pins-surface {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chan-pins-head {
@@ -5532,6 +5555,7 @@ button.chip.lg:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .chan-pins,
   .chan-pins-head [data-icon="chevronDown"],
   .chan-pins-list-frame {
     transition: none;

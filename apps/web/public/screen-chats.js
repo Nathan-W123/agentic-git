@@ -6416,8 +6416,8 @@ export function submitComposerMessage(rerender) {
  * The banner reads from the server-fed pinned list rather than the loaded
  * transcript, because a pin exists precisely so a message survives the room
  * moving on — a banner that only knew the current page would forget exactly
- * the pins it was for. Collapsible to one line, because pins are a shelf,
- * not a second conversation.
+ * the pins it was for. The header shortcut reveals the whole shelf; while it
+ * is off, the shelf leaves no partial row behind in the conversation.
  */
 function pinnedBanner(repositoryId) {
   const pins = state.channelPins[repositoryId] ?? [];
@@ -6427,16 +6427,18 @@ function pinnedBanner(repositoryId) {
     return `<div hidden></div>`;
   }
   const open = state.pinsOpen === true;
-  return `<div class="chan-pins${open ? " open" : ""}">
-    <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
-      aria-expanded="${open}">
-      ${icon("pin")}
-      <span>${pins.length} pinned</span>
-      <span class="spacer"></span>
-      ${icon("chevronDown")}
-    </button>
-    <div class="chan-pins-list-frame" aria-hidden="${!open}"${open ? "" : " inert"}>
-      <div class="chan-pins-list">${pins
+  return `<div class="chan-pins${open ? " open" : ""}"
+    aria-hidden="${!open}"${open ? "" : " inert"}>
+    <div class="chan-pins-surface">
+      <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
+        aria-expanded="${open}">
+        ${icon("pin")}
+        <span>${pins.length} pinned</span>
+        <span class="spacer"></span>
+        ${icon("chevronDown")}
+      </button>
+      <div class="chan-pins-list-frame" aria-hidden="${!open}"${open ? "" : " inert"}>
+        <div class="chan-pins-list">${pins
         .map((entry) => {
           const title = threadTitle(entry) || "(no text)";
           const pinner =
@@ -6459,6 +6461,7 @@ function pinnedBanner(repositoryId) {
               </div>`;
         })
         .join("")}</div>
+      </div>
     </div>
   </div>`;
 }
