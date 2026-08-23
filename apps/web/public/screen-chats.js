@@ -60,6 +60,7 @@ api,
   providerEffortOptions,
   providerModelOptions,
   providerAllowsCustomModel,
+  usageKey,
   providerOptionsNote,
   repositoryLabel,
   saveChannelDraft,
@@ -254,19 +255,28 @@ function usageAccountLine(report) {
 }
 
 /**
- * The usage figures for one of this account's own agents, as one section of
- * its profile card.
+ * Whose account a usage question is about, or nothing for your own.
  *
- * Only for this account's own agents: the usage route reports the *caller's*
- * account, so showing it beside a teammate's agent would put your consumption
- * under their name. Rendered from state rather than fetched on open, so the
- * first hover shows "Checking…" and every later one is instant.
+ * A teammate's agent used to be skipped entirely, because the route reported
+ * the *caller's* account and showing that beside somebody else's agent would
+ * have put your consumption under their name. The route takes an owner now,
+ * so the question can be asked correctly instead of not at all — and whether
+ * it is answered is the service's decision, made on the connection's own
+ * visibility.
+ */
+function usageOwner(agent) {
+  return agent.mine === true ? undefined : (agent.userId ?? undefined);
+}
+
+/**
+ * The usage figures for an agent, as one section of its profile card.
+ *
+ * Rendered from state rather than fetched on open, so the first hover shows
+ * "Checking…" and every later one is instant.
  */
 function usageBlock(agent) {
-  if (agent.mine !== true) {
-    return "";
-  }
-  const report = state.providerUsage[agent.id];
+  const report =
+    state.providerUsage[usageKey(agent.id, usageOwner(agent))];
   let body;
   if (report === undefined || report.loading === true) {
     body = `<span class="rr-usage-empty">Checking usage…</span>`;
@@ -1226,7 +1236,13 @@ function rosterRow(agent) {
           "rr-avatar",
           "down",
           statusAgentFace(agent, 22, activeChannelId()),
-          { "data-hover": "agent-usage", "data-hover-value": agent.id },
+          {
+            "data-hover": "agent-usage",
+            "data-hover-value": agent.id,
+            ...(usageOwner(agent) === undefined
+              ? {}
+              : { "data-hover-owner": usageOwner(agent) }),
+          },
         )
       }
       <span class="rr-body">
@@ -4521,10 +4537,14 @@ function agentChannelAssignments(agent, repositoryId) {
 }
 
 function agentUsage(agent) {
-  if (agent.mine !== true) {
-    return `<div class="aspec-note">Usage is private to the agent's owner.</div>`;
-  }
-  const report = state.providerUsage[agent.provider ?? agent.id];
+  // No longer refused here. An agent whose connection is org-wide is one
+  // anybody in the room may put to work, and how much of its quota is left
+  // decides whether doing so accomplishes anything. The service still
+  // withholds a personal connection's figures, and says so in its own words.
+  const report =
+    state.providerUsage[
+      usageKey(agent.provider ?? agent.id, usageOwner(agent))
+    ];
   if (report === undefined || report.loading === true) {
     return `<div class="aspec-note">Checking usage…</div>`;
   }
@@ -4784,16 +4804,13 @@ function agentSpec(agent, repositoryId) {
       <section class="aspec-section aspec-usage-section">
         <div class="aspec-label-row">
           <h3 class="aspec-label">Usage</h3>
-          ${
-            agent.mine === true
-              ? iconButton("refresh", {
-                  act: "agent-usage-refresh",
-                  value: providerId,
-                  title: "Check usage again",
-                  small: true,
-                })
-              : ""
-          }
+          ${iconButton("refresh", {
+            act: "agent-usage-refresh",
+            value: providerId,
+            title: "Check usage again",
+            small: true,
+            data: { owner: usageOwner(agent) ?? "" },
+          })}
         </div>
         <div class="aspec-usage-card">${agentUsage(agent)}</div>
       </section>
