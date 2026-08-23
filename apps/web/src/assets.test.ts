@@ -3435,53 +3435,23 @@ test("channel messages compact only an uninterrupted run from one person", async
   );
 });
 
-test("desktop channel message hover uses one smoothly moving highlight", async () => {
+test("desktop channel messages use the sidebar's ordinary row hover", async () => {
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
 
-  assert.match(
-    app,
-    /function positionChannelMessageHoverHighlight\(event\)[\s\S]*?\(hover: hover\) and \(pointer: fine\)[\s\S]*?#chan-messages > \.cmsg-row:not\(\.cmsg-system\)[\s\S]*?--cmsg-hover-y[\s\S]*?row\.offsetTop/u,
-    "desktop hover should position a shared surface from the active row",
-  );
-  assert.match(
-    app,
-    /function clearChannelMessageHoverHighlight\(event\)[\s\S]*?event\.relatedTarget[\s\S]*?nextRow\?\.parentElement === list[\s\S]*?return;[\s\S]*?classList\.remove\("is-visible"\)/u,
-    "moving between rows should preserve the surface while leaving clears it",
-  );
-  assert.match(
-    app,
-    /document\.addEventListener\("mouseover", positionChannelMessageHoverHighlight\);/u,
-  );
-  assert.match(
-    app,
-    /document\.addEventListener\("mouseout", clearChannelMessageHoverHighlight\);/u,
-  );
+  assert.doesNotMatch(app, /ChannelMessageHoverHighlight/u);
+  assert.doesNotMatch(css, /\.cmsg-hover-highlight/u);
 
-  const highlight = /\.cmsg-hover-highlight \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.notEqual(highlight, undefined, "the shared hover surface should exist");
-  assert.match(highlight ?? "", /background: var\(--bg-hover\);/u);
+  const row = /\.cmsg-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(row ?? "", /transition: background 0\.13s ease;/u);
   assert.match(
-    highlight ?? "",
-    /transform: translate3d\([\s\S]*?var\(--cmsg-hover-y, 0\)/u,
-  );
-  assert.match(
-    highlight ?? "",
-    /transform 0\.18s cubic-bezier\(0\.2, 0\.8, 0\.2, 1\)/u,
-    "the same surface should travel rather than teleport between rows",
-  );
-  assert.doesNotMatch(
     css,
-    /\.cmsg-row:hover \{\s*background:/u,
-    "individual rows should no longer repaint their own desktop hover",
+    /@media \(hover: hover\) \{\s*\.cmsg-row:not\(\.cmsg-system\):hover \{[\s\S]*?background: var\(--bg-hover\);/u,
+    "each message should paint the same simple hover ground as a sidebar row",
   );
   assert.match(
     css,
-    /@media \(hover: none\) \{[\s\S]*?\.cmsg-hover-highlight \{\s*display: none;/u,
-  );
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.cmsg-hover-highlight \{\s*transition: none;/u,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.cmsg-row \{\s*transition: none;/u,
   );
 });
 

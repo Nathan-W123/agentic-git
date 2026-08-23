@@ -5864,6 +5864,7 @@ button.chip.lg:hover {
   margin: 0 -8px;
   border-radius: var(--radius-sm);
   position: relative;
+  transition: background 0.13s ease;
   /* The transcript is not windowed — every message a channel has loaded is a
      real row in the document, and the scroll restore walks all of them
      measuring rectangles on every render. `layout` tells the engine each row
@@ -5882,52 +5883,17 @@ button.chip.lg:hover {
   z-index: 2;
 }
 
-.cmsg-row:hover {
-  /* An opaque stroke has to follow the surface under it, or the line would
-     stay at the room's shade while the row it crosses lightens. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--bg-hover));
-}
-
-/* One surface travels behind the desktop transcript instead of each row
-   painting a separate hover background. Its geometry is written by the two
-   delegated hover handlers in app.js, so compact and full rows can share the
-   same movement without changing their own layout or action targets. */
-.cmsg-hover-highlight {
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: -1;
-  width: var(--cmsg-hover-width, 0);
-  height: var(--cmsg-hover-height, 0);
-  border-radius: var(--radius-sm);
-  background: var(--bg-hover);
-  opacity: 0;
-  pointer-events: none;
-  transform: translate3d(
-    var(--cmsg-hover-x, 0),
-    var(--cmsg-hover-y, 0),
-    0
-  );
-  transition:
-    transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
-    width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
-    height 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
-    opacity 0.1s ease;
-  will-change: transform, width, height;
-}
-
-.cmsg-hover-highlight.is-visible {
-  opacity: 1;
-}
-
-@media (hover: none) {
-  .cmsg-hover-highlight {
-    display: none;
+@media (hover: hover) {
+  .cmsg-row:not(.cmsg-system):hover {
+    /* An opaque stroke has to follow the surface under it, or the line would
+       stay at the room's shade while the row it crosses lightens. */
+    --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--bg-hover));
+    background: var(--bg-hover);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cmsg-hover-highlight {
+  .cmsg-row {
     transition: none;
   }
 }
