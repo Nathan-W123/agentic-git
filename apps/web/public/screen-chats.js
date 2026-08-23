@@ -6057,6 +6057,21 @@ export function scrollChannel() {
   }
 }
 
+/** Shows the newest part of a direct-message history when it is opened. */
+export function scrollDirectMessageToLatest() {
+  const list = document.querySelector(".dm-body");
+  if (list === null) {
+    return;
+  }
+  list.scrollTop = list.scrollHeight;
+  requestAnimationFrame(() => {
+    const settled = document.querySelector(".dm-body");
+    if (settled === list) {
+      settled.scrollTop = settled.scrollHeight;
+    }
+  });
+}
+
 /**
  * The first message this visit had not seen, or the bottom when there is none.
  *

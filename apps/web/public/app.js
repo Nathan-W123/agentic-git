@@ -209,6 +209,7 @@ import {
   personMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
+  scrollDirectMessageToLatest,
   startPlannedWork,
   submitComposerMessage,
   submitThreadReply,
@@ -5301,6 +5302,24 @@ function renderNow() {
   }
 }
 
+/**
+ * Opens the already-cached history at its newest message, then does the same
+ * once the server's current history replaces it. Ordinary renders continue
+ * through the anchor restore, so scrolling up afterwards is still respected.
+ */
+function loadOpenedDirectMessage(userId) {
+  scrollDirectMessageToLatest();
+  void loadDmThread(userId).then(() => {
+    // A slower request for the conversation just left must not move the one
+    // that replaced it.
+    if (state.activeDm !== userId) {
+      return;
+    }
+    render();
+    scrollDirectMessageToLatest();
+  });
+}
+
 function navigate(route) {
   // A link or a stored route from before Code and Coordinator were folded into
   // the channel lands here; chats is the landing view, so it is the fallback.
@@ -5654,7 +5673,7 @@ document.addEventListener("click", (event) => {
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
       render();
-      void loadDmThread(value).then(() => render());
+      loadOpenedDirectMessage(value);
       return;
     case "switch-screen":
       closeSwitcher();
@@ -6390,7 +6409,7 @@ document.addEventListener("click", (event) => {
       moveRightPanel("dm", "right");
       setChanDrawer(false);
       render();
-      void loadDmThread(value).then(() => render());
+      loadOpenedDirectMessage(value);
       return;
     // Starts an "@agents …" or "@everyone …" message rather than sending one:
     // the person still says what they want asked or told; this only saves
