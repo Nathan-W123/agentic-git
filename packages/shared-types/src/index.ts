@@ -354,6 +354,19 @@ export interface DeferredResource {
   heldBy: TaskId[];
   reason: string;
   /**
+   * Whether this deferral is a consequence of another one in the same set
+   * rather than a loss in its own right.
+   *
+   * Withholding a file withholds everything inside it, and each of those is
+   * recorded here so enforcement can check them one by one. They are not
+   * further things the plan lost — they are the same loss, counted again for
+   * every symbol, route and schema the file happened to contain. Anything
+   * reporting a deferral to a person wants the ones without this: a plan of
+   * five files told its room it had lost 969 things, which was more things
+   * than the repository has files.
+   */
+  implied?: boolean;
+  /**
    * Where this resource sits inside files the plan *was* granted, when the
    * index could locate it.
    *

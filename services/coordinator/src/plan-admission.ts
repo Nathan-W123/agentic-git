@@ -1224,6 +1224,7 @@ export class PlanAdmissionController {
           heldBy: file.heldBy,
           reason:
             `claimed only through the deferred file ${file.resourceId}`,
+          implied: true,
         });
       }
     }
@@ -1284,18 +1285,22 @@ export class PlanAdmissionController {
       },
       occupancy,
     );
-    return contested.filter((resource) => {
-      const referents = grounding.symbolReferents.filter(
-        (entry) => entry.declared === resource.resourceId,
-      );
-      return (
-        referents.length > 0 &&
-        !located.has(resource.resourceId.toLowerCase()) &&
-        referents.every(
-          (entry) => !located.has(entry.resolved.toLowerCase()),
-        )
-      );
-    });
+    return contested
+      .filter((resource) => {
+        const referents = grounding.symbolReferents.filter(
+          (entry) => entry.declared === resource.resourceId,
+        );
+        return (
+          referents.length > 0 &&
+          !located.has(resource.resourceId.toLowerCase()) &&
+          referents.every(
+            (entry) => !located.has(entry.resolved.toLowerCase()),
+          )
+        );
+      })
+      // Withheld alongside the files that made them contested, as the name
+      // says, so they travel with those files rather than counting beside them.
+      .map((resource) => ({ ...resource, implied: true }));
   }
 
   /** Declared files that executing work is holding, with who holds each. */
