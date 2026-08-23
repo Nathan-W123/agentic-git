@@ -3006,14 +3006,15 @@ test("a window nobody ever reported stays absent", async () => {
   );
 });
 
-test("a teammate sees an org-wide agent's usage, and never a personal one's", async () => {
+test("a teammate sees an agent's usage whether or not the connection is shared", async () => {
   // Usage was refused for anybody but the owner, which was one answer to a
   // real question — the route reported the *caller's* account, so showing it
   // beside somebody else's agent would have put your consumption under their
-  // name. The route takes an owner now, so the rule can be the one the rest
-  // of the roster already uses: an org-wide connection is one anybody may put
-  // to work, and how much of its quota is left decides whether doing so
-  // accomplishes anything. A personal connection is shared with nobody.
+  // name. The route takes an owner now, so the figure shown beside an agent
+  // is that agent's own, and everyone in the room may read it: how much of a
+  // quota is left decides whether @mentioning that agent accomplishes
+  // anything, and that is true of a personal connection too. The money on the
+  // owner's account is the one thing that stays behind.
   const harness = await createHarness();
   const store = await UserCredentialStore.open(
     path.join(harness.project.directory, "secrets"),
@@ -3049,18 +3050,23 @@ test("a teammate sees an org-wide agent's usage, and never a personal one's", as
             : output("", 2, "error")) as ProcessRunner,
   });
 
-  // Personal by default: a teammate is told, in the service's own words.
-  const refused = await service.usage({
+  // Personal by default, and readable all the same: the windows are the
+  // owner's, not the watcher's.
+  const personal = await service.usage({
     provider: "openai",
     userId: "watcher-user",
     ownerId: "owner-user",
   });
-  assert.deepEqual(refused.windows, []);
-  assert.match(refused.unavailableReason ?? "", /visible only to/u);
+  assert.equal(personal.unavailableReason, undefined);
+  assert.deepEqual(
+    personal.windows.map((window) => window.percentUsed),
+    [61, 8],
+  );
+  assert.equal(personal.creditBalance, undefined);
 
-  // Set where `listConnectionsFor` reads it. Going through `setSettings`
-  // would need a connections record too, and the rule under test is about the
-  // credential's visibility, not about how it came to be set.
+  // Set where `listConnectionsFor` reads it. Sharing the credential changes
+  // whose account a teammate's prompt spends; it does not change what this
+  // route answers.
   await store.put("owner-user", "codex", {
     kind: "api_key",
     secret: "sk-openai-owner",

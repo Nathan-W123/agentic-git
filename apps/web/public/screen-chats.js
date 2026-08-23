@@ -263,23 +263,31 @@ function usageAccountLine(report) {
  * not found" printed where a percentage belongs. One helper because the card
  * and the specification both need the answer and must not drift apart on it.
  */
-function usageProviderId(agent) {
+export function usageProviderId(agent) {
   return agent?.provider ?? String(agent?.id ?? "").split(":").at(-1) ?? "";
 }
 
 /**
- * The usage figures for one of this account's own agents, as one section of
- * its profile card.
+ * Whose account an agent's usage is read from, when it is not the caller's.
  *
  * A teammate's agent used to be skipped entirely, because the route reported
  * the *caller's* account and showing that beside somebody else's agent would
  * have put your consumption under their name. The route takes an owner now,
- * so the question can be asked correctly instead of not at all — and whether
- * it is answered is the service's decision, made on the connection's own
- * visibility.
+ * so the question is asked correctly instead of not at all, and every agent
+ * in the room answers it — how much of an agent's quota is left is what says
+ * whether @mentioning it will get any work done.
  */
-function usageOwner(agent) {
+export function usageOwner(agent) {
   return agent.mine === true ? undefined : (agent.userId ?? undefined);
+}
+
+/**
+ * Where this agent's usage is kept in state. Keyed by owner as well as
+ * vendor, so two people's agents of the same vendor never show each other's
+ * figures — the same key `ensureProviderUsage` files the answer under.
+ */
+function usageStateKey(agent) {
+  return usageKey(usageProviderId(agent), usageOwner(agent));
 }
 
 /**
@@ -289,10 +297,7 @@ function usageOwner(agent) {
  * "Checking…" and every later one is instant.
  */
 function usageBlock(agent) {
-  if (agent.mine !== true) {
-    return "";
-  }
-  const report = state.providerUsage[usageProviderId(agent)];
+  const report = state.providerUsage[usageStateKey(agent)];
   let body;
   if (report === undefined || report.loading === true) {
     body = `<span class="rr-usage-empty">Checking usage…</span>`;
@@ -418,10 +423,13 @@ function agentProfile(agent, repositoryId) {
     facts,
     usage: usageBlock(agent),
     // What the card's usage section is keyed by, so whatever draws the face
-    // can start the fetch that fills it. Only for one's own agent: the route
-    // answers for the caller's account, and asking it for a teammate's agent
-    // spends a request whose answer this card would never show.
-    ...(agent.mine === true ? { usageProviderId: providerId } : {}),
+    // can start the fetch that fills it. Every agent carries it, teammates'
+    // included, with the owner alongside so the request asks about the
+    // account the card is displaying rather than about whoever is looking.
+    usageProviderId: providerId,
+    ...(usageOwner(agent) === undefined
+      ? {}
+      : { usageOwnerId: usageOwner(agent) }),
     action: {
       act: "agent-panel-open",
       value: String(agent.id ?? ""),
@@ -1224,19 +1232,20 @@ function rosterRow(agent) {
       ${
         // `data-hover` is what starts the usage fetch the card's own section
         // reads — see `requestUsageForHoverTarget` in app.js. Keyed by the
-        // vendor, not the agent, and only for one's own agent: the route
-        // reports the caller's account and refuses anything else.
+        // vendor, not the agent, and carried by every row: the route takes
+        // the owner beside it, so a teammate's agent reports its own account.
         profileAnchor(
           agentProfile(agent, activeChannelId()),
           "rr-avatar",
           "down",
           statusAgentFace(agent, 22, activeChannelId()),
-          agent.mine === true
-            ? {
-                "data-hover": "agent-usage",
-                "data-hover-value": usageProviderId(agent),
-              }
-            : {},
+          {
+            "data-hover": "agent-usage",
+            "data-hover-value": usageProviderId(agent),
+            ...(usageOwner(agent) === undefined
+              ? {}
+              : { "data-hover-owner": usageOwner(agent) }),
+          },
         )
       }
       <span class="rr-body">
@@ -2334,6 +2343,9 @@ function identityWrap(identity, content, withCard = false) {
       : {
           "data-hover": "agent-usage",
           "data-hover-value": identity.usageProviderId,
+          ...(identity.usageOwnerId === undefined
+            ? {}
+            : { "data-hover-owner": identity.usageOwnerId }),
         }),
   };
   // The card hangs off the face and not off the name as well. Both are the
@@ -4557,10 +4569,7 @@ function agentChannelAssignments(agent, repositoryId) {
 }
 
 function agentUsage(agent) {
-  if (agent.mine !== true) {
-    return `<div class="aspec-note">Usage is private to the agent's owner.</div>`;
-  }
-  const report = state.providerUsage[usageProviderId(agent)];
+  const report = state.providerUsage[usageStateKey(agent)];
   if (report === undefined || report.loading === true) {
     return `<div class="aspec-note">Checking usage…</div>`;
   }
@@ -4824,14 +4833,22 @@ function agentSpec(agent, repositoryId) {
             <div class="aspec-pane-head">
               <h3 class="aspec-pane-title">Usage</h3>
               ${
-                agent.mine === true
-                  ? iconButton("refresh", {
-                      act: "agent-usage-refresh",
-                      value: providerId,
-                      title: "Check usage again",
-                      small: true,
-                    })
-                  : ""
+                // Every agent's card can ask again, not only one's own. The
+                // owner rides along so the second reading is of the same
+                // account the first one was of.
+                iconButton("refresh", {
+                  act: "agent-usage-refresh",
+                  // The same vendor id the card reads its figures under, so
+                  // asking again refills the entry that is on screen.
+                  value: usageProviderId(agent),
+                  title: "Check usage again",
+                  small: true,
+                  data: {
+                    ...(usageOwner(agent) === undefined
+                      ? {}
+                      : { owner: usageOwner(agent) }),
+                  },
+                })
               }
             </div>
             <div class="aspec-usage-card">${agentUsage(agent)}</div>
