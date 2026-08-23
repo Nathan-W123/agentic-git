@@ -1575,31 +1575,33 @@ export function claimCoversPath(
 }
 
 /**
- * Whether a claim reserves a path *against everybody else*.
+ * Whether a claim makes its holder *occupy* a path, for arbitration.
  *
- * The narrow half of a pair with {@link claimCoversPath}, and the asymmetry is
- * the whole point. A frozen claim widens the files its holder was observed
- * touching out to the directories they live in, so a task interrupted halfway
- * through a sweep can finish it. That is a statement about what the holder may
- * write. It is not a statement that everything else in those directories is
- * spoken for, and reading it as one is how a task editing a single file in a
- * directory of eighteen refuses the other seventeen to every arrival.
+ * The narrower reading of {@link claimCoversPath}. A blanket claim occupies
+ * the repository, as it always did. A frozen claim occupies only the files its
+ * holder actually declared: its directories say "new files I may create here",
+ * not "every existing file under here is mine". A directory-only match — the
+ * path lives under a claimed directory but is named nowhere in the plan — is
+ * therefore free for somebody else to take, which is the whole point: one task
+ * touching one file in a directory must not queue up everybody else behind the
+ * other seventeen.
  *
- * So arbitration asks this instead. A blanket claim still reserves the whole
- * repository, because nobody has narrowed it yet and there is nothing else to
- * go on. A frozen claim reserves only the paths it actually names. A file its
- * holder reaches later is not quietly taken either: it leaves the reservation,
- * so it goes back through admission the moment it is written and is granted
- * unless somebody else got there first.
+ * The cost is deliberate. A holder that later reaches into a file granted away
+ * is refused when it tries to widen, and that task fails. Reaching for what you
+ * never named is the rarer accident; being locked out of a directory somebody
+ * else brushed against was the common one.
  */
-export function claimReservesPath(plan: AgentPlan, file: string): boolean {
+export function claimOccupiesPath(
+  plan: Pick<AgentPlan, "claim" | "expectedFiles">,
+  file: string,
+): boolean {
   if (plan.claim === undefined) {
     return false;
   }
   if (plan.claim.kind === "blanket") {
     return true;
   }
-  return arbitrationFiles(plan).includes(file);
+  return plan.expectedFiles.includes(file);
 }
 
 function isPlanClaim(value: unknown): value is PlanClaim {

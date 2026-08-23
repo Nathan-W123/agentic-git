@@ -1,6 +1,7 @@
 import type { CoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
+  type PushBranchNamer,
   type PushToRemoteResult,
   type RemoteRepositoryCredentials,
   type SyncFromRemoteResult,
@@ -35,6 +36,14 @@ export interface RepoPushOptions {
    * the operator's shell *is* the identity.
    */
   credentials?: RemoteRepositoryCredentials;
+  /**
+   * Names the branch with a local model, when the caller runs one.
+   *
+   * The dashboard passes the same small model that writes the catch-up
+   * popup's sentences. The CLI passes nothing and keeps the deterministic
+   * name, because a shell command should not stop to load a model.
+   */
+  branchNamer?: PushBranchNamer;
 }
 
 /**
@@ -103,6 +112,9 @@ export async function repoPush(
       ...(options.allowUnverifiedUpstream === undefined
         ? {}
         : { allowUnverifiedUpstream: options.allowUnverifiedUpstream }),
+      ...(options.branchNamer === undefined
+        ? {}
+        : { branchNamer: options.branchNamer }),
       ...(credentials === undefined ? {} : { credentials }),
     },
   );

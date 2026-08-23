@@ -123,6 +123,7 @@ test("a channel offers renaming and deleting its repository", async () => {
   assert.match(menu, /act: "channel-rename-repo"/u);
   assert.match(menu, /act: "channel-delete-repo"/u);
   assert.match(menu, /canManageRepository\(value\)/u);
+  assert.match(menu, /canDeleteRepository\(value\)/u);
 
   assert.match(app, /async function renameRepositoryAction\(repositoryId\)/u);
   assert.match(app, /case "channel-rename-repo":/u);
@@ -133,4 +134,78 @@ test("a channel offers renaming and deleting its repository", async () => {
   assert.match(data, /method: "PATCH",\n {4}body: \{ name: trimmed \}/u);
   assert.match(data, /export function repositoryLabel\(repositoryId\)/u);
   assert.match(chats, /repositoryLabel\(repositoryId \?\? ""\)/u);
+});
+
+test("the channel menu offers delete repository only to owners and co-owners", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+
+  // Renaming and deleting are gated separately now: an administrator, or the
+  // person who created the repository, may still rename it, but deleting it
+  // asks for ownership — the organization's owner, or a co-owner holding an
+  // `owner` grant on this repository.
+  const menu = slice(app, 'case "channel-menu":', 'case "channel-agent-menu"');
+  const rename = slice(menu, 'canManageRepository(value)', 'canDeleteRepository(value)');
+  assert.doesNotMatch(rename, /act: "channel-delete-repo"/u);
+  const remove = slice(menu, 'canDeleteRepository(value)', ']);');
+  assert.match(remove, /act: "channel-delete-repo"/u);
+  assert.doesNotMatch(remove, /act: "channel-rename-repo"/u);
+
+  // The same rule in the repository menu and in the channel-info popover.
+  const repoMenu = slice(app, 'case "repo-menu":', 'case "repo-sync":');
+  assert.match(repoMenu, /canDeleteRepository\(value\)/u);
+  const popover = slice(
+    chats,
+    "export function channelInfoPopoverHtml(repositoryId)",
+    "renderChats",
+  );
+  assert.match(popover, /const canDelete = canDeleteRepository\(repositoryId\)/u);
+  assert.match(popover, /canDelete\s*\n\s*\? `<button[^`]*channel-delete-repo/u);
+
+  // The helper itself: an organization owner, or an `owner` grant on this
+  // exact repository. Admins and the creator are deliberately not enough.
+  const guard = slice(
+    data,
+    "export function canDeleteRepository(repositoryId)",
+    "/**",
+  );
+  assert.match(guard, /currentOrganizationRole\(\) === "owner"/u);
+  assert.match(guard, /currentRepositoryGrantRole\(repositoryId\) === "owner"/u);
+  assert.doesNotMatch(guard, /createdBy/u);
+
+  // Those grants have to be read for everyone, or a co-owner — whose only
+  // claim is the grant — would never be offered the control.
+  const ensure = slice(
+    data,
+    "export async function ensureRepositoryGrants(repositoryId, rerender)",
+    "/**",
+  );
+  assert.doesNotMatch(ensure, /canManageRepository/u);
+});
+
+test("deleting a repository requires typing the confirmation phrase", async () => {
+  const app = await publicFile("app.js");
+
+  const action = slice(
+    app,
+    "async function deleteRepositoryAction(repositoryId)",
+    "async function renameRepositoryAction(repositoryId)",
+  );
+  // The phrase is whatever the repository is called on screen — a renamed
+  // repository asks for its new name — so it cannot be typed out of habit for
+  // the wrong repository.
+  assert.match(action, /const label = repositoryLabel\(repositoryId\);/u);
+  assert.match(action, /const phrase = `yesiwanttodelete\$\{label\.replace\(/u);
+  assert.match(action, /name="confirmation"/u);
+  // Mismatched input says so and stops — the request is never sent.
+  assert.match(
+    action,
+    /values\.confirmation[\s\S]*!==[\s\S]*phrase\.toLowerCase\(\)[\s\S]*?return;/u,
+  );
+  const sent = action.indexOf("await deleteRepository(repositoryId)");
+  const checked = action.indexOf("values.confirmation");
+  assert.notEqual(sent, -1);
+  assert.notEqual(checked, -1);
+  assert.ok(checked < sent, "the phrase is checked before the delete is sent");
 });

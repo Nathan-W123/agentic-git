@@ -103,6 +103,46 @@ test("a thread reply carries its images to the server", async () => {
   assert.match(data, /threadAttaching: 0,/u);
 });
 
+test("attachment clicks open the image over the conversation", async () => {
+  const app = await publicFile("app.js");
+  const action = app.slice(app.indexOf("function actionOf("));
+  assert.match(action, /closest\("\.cmsg-image"\)/u);
+  assert.match(action, /querySelector\("img\[data-attachment\]"\)/u);
+  assert.match(action, /act: "image-preview"/u);
+  assert.match(action, /case "image-preview": \{/u);
+  assert.match(action, /event\.preventDefault\(\);[\s\S]*?void showModal\(\{/u);
+});
+
+test("the image modal is escaped and bounded by the viewport", async () => {
+  const ui = await publicFile("ui.js");
+  const styles = await publicFile("styles.css");
+  const modal = ui.slice(ui.indexOf("export function showModal("));
+  assert.match(modal, /image,[\s\S]*?class="modal-card modal-image-card"/u);
+  assert.match(modal, /src="\$\{esc\(image\.src\)\}"/u);
+  assert.match(modal, /alt="\$\{esc\(image\.alt\)\}"/u);
+  assert.match(styles, /\.modal-image \{[\s\S]*?max-width: calc\(100vw - 32px\);/u);
+  assert.match(styles, /\.modal-image \{[\s\S]*?max-height: calc\(100vh - 32px\);/u);
+});
+
+test("the image modal closes from its edge, Escape, or close control", async () => {
+  const ui = await publicFile("ui.js");
+  const modal = ui.slice(ui.indexOf("export function showModal("));
+  assert.match(modal, /<form method="dialog" class="modal-card modal-image-card"/u);
+  assert.match(modal, /class="icon-btn modal-image-close"[^>]*value="cancel"/u);
+  assert.match(modal, /event\.target === dialog[\s\S]*?dialog\.close\("cancel"\)/u);
+  assert.match(modal, /returnFocus\.focus\(\);/u);
+  assert.match(modal, /dialog\.showModal\(\);/u);
+});
+
+test("ordinary modal confirmation still returns its form values", async () => {
+  const ui = await publicFile("ui.js");
+  const modal = ui.slice(ui.indexOf("export function showModal("));
+  assert.match(modal, /dialog\.returnValue !== "confirm"/u);
+  assert.match(modal, /for \(const field of \$\$\("\[name\]", dialog\)\)/u);
+  assert.match(modal, /field\.type === "checkbox" \? field\.checked : field\.value/u);
+  assert.match(modal, /value="confirm" type="submit"/u);
+});
+
 test("an attachment has to be the image it says it is", async (t) => {
   // The stored extension used to come from the uploader's declared
   // `Content-Type` and nothing else, so anything at all could be kept as a

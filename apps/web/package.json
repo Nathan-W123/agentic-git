@@ -21,6 +21,7 @@
     "@coord/collab": "*",
     "@coord/coordinator": "*",
     "@coord/integration-service": "*",
+    "@coord/local-triage": "*",
     "@coord/persistence": "*",
     "@coord/repository-service": "*",
     "@coord/shared-types": "*",

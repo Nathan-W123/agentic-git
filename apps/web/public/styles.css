@@ -53,6 +53,11 @@
   --accent-wash: color-mix(in srgb, var(--salmon) 12%, transparent);
   --accent-wash-strong: color-mix(in srgb, var(--salmon) 20%, transparent);
   --accent-line: color-mix(in srgb, var(--salmon) 38%, transparent);
+  /* The words written on a surface filled with the accent, rather than tinted
+     by it. `applyTheme` replaces this with whichever of near-white and
+     near-black actually reads against the chosen colour; the default here is
+     the answer for the salmon above. */
+  --accent-ink: #141312;
 
   /* The second colour, for the other half of a pair. Overwritten by
      `applyTheme` from the account, like the primary above it; these are the
@@ -219,6 +224,13 @@ svg.ui-icon {
   background: #2f3448;
   background-clip: padding-box;
   border: 3px solid transparent;
+}
+
+/* WebKit paints a solid corner where the vertical and horizontal tracks meet.
+   On a dark panel that default is a bright square — most visible at the foot
+   of `.chan-scroll`, where it reads as a stray tile above the account row. */
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 :focus-visible {
@@ -694,16 +706,6 @@ svg.ui-icon {
 
 /* ------------------------------------------------------------- brand ---- */
 
-/* The mark takes its size from the `width`/`height` the caller passes to
-   `brandMark` — 28 in the channel rail's crown, 54 on the sign-in card. It
-   used to be pinned to 34px here, which is neither, and every caller that
-   asked for another size was quietly overruled unless it also had a rule of
-   its own.
-
-   A square box is the badge: the wordmark is sliced from its left edge, so
-   what a caller asking for one gets is the K. The whole word is a different
-   call — `brandWordmark`, which the auth shell uses. */
-.brand-mark,
 .brand-wordmark {
   flex: none;
 }
@@ -1025,25 +1027,27 @@ svg.ui-icon {
   pointer-events: none;
 }
 
-/* The filled sector reads as a run still going rather than as a frozen
-   fraction, so it carries the same travelling highlight the live status copy
+/* The unfilled mark reads as a run still going rather than as a frozen
+   remainder, so it carries the same travelling highlight the live status copy
    does — see `.text-sweep`, same gradient shape and same clock. A band of the
-   bright copy is held back as it passes, letting the dark mark underneath show
-   through, which is what makes the glimmer a wave across the fill rather than
-   the whole fill pulsing. Masking the inner mark rather than tinting it keeps
-   the fill in the owner's colour at every point of the sweep. */
-.agent-face .agent-run > svg {
+   dark copy is held back as it passes, which is what makes the glimmer a wave
+   across the unbrightened part of the logo rather than across the bright fill.
+   Masking the base mark rather than tinting it keeps the dim sector in the
+   owner's colour at every point of the sweep. The bright fill above stays solid. */
+.agent-face-working > svg {
+  opacity: calc(0.24 + var(--run, 0) * 0.0016);
+  filter: saturate(0.6) brightness(0.8);
   -webkit-mask-image: linear-gradient(
     100deg,
-    rgba(0, 0, 0, 0.4) 0 38%,
-    #000 48%,
-    rgba(0, 0, 0, 0.4) 58% 100%
+    #000 0 38%,
+    rgba(0, 0, 0, 0.4) 48%,
+    #000 58% 100%
   );
   mask-image: linear-gradient(
     100deg,
-    rgba(0, 0, 0, 0.4) 0 38%,
-    #000 48%,
-    rgba(0, 0, 0, 0.4) 58% 100%
+    #000 0 38%,
+    rgba(0, 0, 0, 0.4) 48%,
+    #000 58% 100%
   );
   -webkit-mask-size: 250% 100%;
   mask-size: 250% 100%;
@@ -1059,30 +1063,20 @@ svg.ui-icon {
   }
 }
 
-/* Nothing travelling, so nothing is held back either: the fill goes back to
-   being the plain bright sector. */
+/* Nothing travelling, so nothing is held back either: the dim mark goes back
+   to being the plain unfilled sector under a solid bright fill. */
 @media (prefers-reduced-motion: reduce) {
-  .agent-face .agent-run > svg {
+  .agent-face-working > svg {
     animation: none;
     -webkit-mask-image: none;
     mask-image: none;
   }
 }
 
-/* Dark and barely there with nothing done, and lifting a little as the fill
-   grows, so even the unfilled part of the mark says roughly how far along a
-   run is. Only the mark directly in the face is dimmed — the copy inside the
-   sweep is the bright one. */
-.agent-face-working > svg {
-  opacity: calc(0.24 + var(--run, 0) * 0.0016);
-  filter: saturate(0.6) brightness(0.8);
-}
-
-/* Working, so it breathes — see `.status-working`, which this is the smaller
+/* Working — solid green; see `.status-working`, which this is the smaller
    sibling of. `online` here means running a task, not merely connected. */
 .presence-online {
   background: var(--green);
-  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 .presence-idle {
@@ -1575,17 +1569,12 @@ svg.ui-icon {
   background: var(--bg);
 }
 
-.boot-skeleton-mark,
 .boot-skeleton-rail-button {
   display: block;
   width: 40px;
   height: 40px;
   flex: none;
   border-radius: var(--radius-lg);
-}
-
-.boot-skeleton-mark {
-  margin-bottom: 6px;
 }
 
 .boot-skeleton-sidebar {
@@ -1732,7 +1721,6 @@ svg.ui-icon {
     padding: 8px 6px;
   }
 
-  .boot-skeleton-mark,
   .boot-skeleton-rail-button {
     width: 40px;
   }
@@ -2825,10 +2813,10 @@ svg.ui-icon {
   pointer-events: auto;
 }
 
-/* Focus stays quiet enough that the card does not turn into an alert. */
+/* Focus stays quiet: a stronger neutral edge, no accent wash ring. */
 .composer:focus-within {
-  border-color: var(--accent-line);
-  box-shadow: 0 0 0 2px var(--accent-wash);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card);
 }
 
 /* Utilities lead and send closes the bottom row. */
@@ -4543,7 +4531,6 @@ button.chip.lg:hover {
   border-right: 1px solid var(--border-soft);
 }
 
-.channel-rail-brand,
 .channel-rail-toggle,
 .channel-rail-new,
 .channel-rail-button {
@@ -4556,7 +4543,6 @@ button.chip.lg:hover {
   transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
 }
 
-.channel-rail-brand:hover,
 .channel-rail-toggle:hover,
 .channel-rail-new:hover,
 .channel-rail-button:hover {
@@ -4565,7 +4551,6 @@ button.chip.lg:hover {
   border-radius: var(--radius-sm);
 }
 
-.channel-rail-brand:focus-visible,
 .channel-rail-toggle:focus-visible,
 .channel-rail-new:focus-visible,
 .channel-rail-button:focus-visible {
@@ -4752,11 +4737,17 @@ button.chip.lg:hover {
   color: var(--text-3);
 }
 
-/* The one thing that scrolls in this column. */
+/* The one thing that scrolls in this column. Horizontal overflow is clipped
+   so WebKit never reserves a dual-axis corner above the account foot. */
 .chan-scroll {
+  overflow-x: hidden;
   overflow-y: auto;
   min-height: 0;
   padding: 4px 0 14px;
+}
+
+.chan-scroll::-webkit-scrollbar {
+  height: 0;
 }
 
 /* A section heading, and the "+" that adds to the list under it — the single
@@ -4950,15 +4941,6 @@ button.chip.lg:hover {
     pointer-events: auto !important;
   }
 
-  /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
-     `rosterRow` in screen-chats.js, which gives the avatar a `tabindex` so a
-     tap can focus it. This only removes the width clamp that assumed the
-     card was opening beside a mouse pointer inside a 268px sidebar; the
-     sidebar can be much narrower than that once it is a phone drawer. */
-  .rr-usage {
-    max-width: calc(100vw - 32px);
-  }
-
   /* The platform's tap flash is a grey-blue rectangle in somebody else's
      palette, drawn over rows that already have hover treatments in ours.
      Zeroed only here, where the :active states below take over the job —
@@ -5140,7 +5122,7 @@ button.chip.lg:hover {
 /* One list closed on its own heading, folded by the same `1fr` -> `0fr` the
    whole-panel collapse uses. Clipped only here, never at rest: an agent's
    usage card opens below its row and reaches past the bottom of the list, so
-   a list that cropped while open would swallow it (see `.rr-usage`). */
+   a list that cropped while open would swallow it (see `.pcard-pop`). */
 .chan-roster.chan-roster-closed {
   grid-template-rows: 0fr;
   overflow: hidden;
@@ -5155,12 +5137,13 @@ button.chip.lg:hover {
   transition: background 0.13s ease;
 }
 
-/* The usage card opens *below* the row and inside the roster's own width.
+/* A profile card opens *below* the row and inside the roster's own width.
    `.chan-scroll` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways
-   out of the sidebar is not merely off-panel, it is invisible. */
-/* Anchored to the avatar, not the row: the card is about the agent, and a
-   row-wide trigger meant it opened while reaching for rename or remove. */
+   out of the sidebar is not merely off-panel, it is invisible. Anchored to
+   the avatar rather than the row for the same reason on the other axis: a
+   row-wide trigger opened it while somebody was reaching for rename or
+   remove. The shape of the card itself is `.pcard`. */
 .rr-avatar {
   position: relative;
   display: inline-flex;
@@ -5182,20 +5165,9 @@ button.chip.lg:hover {
   box-sizing: content-box;
 }
 
-/* Green: a person is here, or an agent is mid-task. */
+/* Green: a person is here, or an agent is mid-task. Solid — no fade. */
 .status-working {
   background: var(--ok, #22c55e);
-  /*
-   * Breathing rather than lit. A dot that is simply on says "this agent
-   * exists"; one that fades says "this agent is doing something right now",
-   * which is the thing somebody watching a channel actually wants to know —
-   * and it is the only state here that changes on its own, so it is the only
-   * one that earns motion.
-   *
-   * Opacity alone, and never to nothing: the dot has to stay findable at the
-   * bottom of the fade, or a glance at the wrong moment reads as offline.
-   */
-  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 @keyframes status-breathe {
@@ -5277,9 +5249,21 @@ button.chip.lg:hover {
   overflow-wrap: anywhere;
 }
 
+/* Yours in the colour you chose, not in the greys around it. A neutral bubble
+   on a neutral ground was the one thing in the conversation that never said
+   which side of it you were on, and the accent is already what this interface
+   means by "you". `--accent-ink` rather than white: the wheel allows yellows
+   and limes that white simply disappears into. */
 .dm-mine .dm-bubble {
-  background: var(--surface-3);
-  color: var(--text);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* A link inside your own bubble sits on the accent, so it cannot also be the
+   accent. It carries the ink and keeps the underline to stay a link. */
+.dm-mine .dm-bubble a {
+  color: var(--accent-ink);
+  text-decoration: underline;
 }
 
 .dm-time {
@@ -5304,37 +5288,8 @@ button.chip.lg:hover {
   pointer-events: auto;
 }
 
-.rr-usage {
-  position: absolute;
-  /* Width is stated, not inherited. Anchoring moved to the avatar so the card
-     opens from the agent rather than the whole row — but the avatar is about
-     thirty pixels wide, and stretching to its edges squeezed the card into a
-     column barely wider than the face, wrapping every label to one word a
-     line. It opens from the avatar's left edge at the width the content
-     needs, still inside the sidebar so nothing clips it. */
-  left: 0;
-  width: 232px;
-  top: calc(100% + 2px);
-  z-index: 40;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 9px;
-  background: var(--bg-panel);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 34%);
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 0.12s ease,
-    visibility 0.12s ease;
-  pointer-events: none;
-}
-
-.rr-avatar:hover .rr-usage,
-.rr-avatar:focus-within .rr-usage {
-  opacity: 1;
-  visibility: visible;
-}
-
+/* The usage figures are a section of the profile card now (see `.pcard`), so
+   what is left here is only how one window is drawn. */
 .rr-usage-row {
   display: flex;
   align-items: center;
@@ -5376,6 +5331,7 @@ button.chip.lg:hover {
 .rr-usage-plan,
 .rr-usage-src,
 .rr-usage-empty {
+  display: block;
   margin-top: 4px;
   font-size: 10.5px;
   line-height: 1.45;
@@ -5514,11 +5470,34 @@ button.chip.lg:hover {
 }
 
 /* What the channel decided not to lose: a slim shelf between the toolbar
-   and the messages. One header line collapsed; a bounded, scrollable list
-   open — many pins must never squeeze the conversation itself out. */
+   and the messages. The whole shelf folds away when its header shortcut is
+   off; open, its bounded list must never squeeze the conversation itself out. */
 .chan-pins {
-  border-bottom: 1px solid var(--border-soft);
-  background: var(--bg-card-2);
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  overflow: hidden;
+  opacity: 0;
+  border-bottom: 0 solid var(--border-soft);
+  background: var(--bg);
+  transition:
+    grid-template-rows 220ms ease,
+    opacity 150ms ease,
+    border-bottom-width 220ms ease,
+    visibility 0s linear 220ms;
+}
+
+.chan-pins.open {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  opacity: 1;
+  border-bottom-width: 1px;
+  transition-delay: 0s;
+}
+
+.chan-pins-surface {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chan-pins-head {
@@ -5574,6 +5553,7 @@ button.chip.lg:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .chan-pins,
   .chan-pins-head [data-icon="chevronDown"],
   .chan-pins-list-frame {
     transition: none;
@@ -5663,6 +5643,8 @@ button.chip.lg:hover {
   overflow-y: auto;
   min-height: 0;
   padding: 12px 24px 20px;
+  position: relative;
+  isolation: isolate;
 }
 
 .chan-messages-loading {
@@ -5822,7 +5804,15 @@ button.chip.lg:hover {
      agree about this column. Spelling it out is what stops them drifting
      apart when any of those three numbers moves. */
   --cmsg-body-x: 52px;
-  --cmsg-stem-x: 23px;
+  --cmsg-stem-x: 20px;
+  /* And the face the path turns into. Every branch ends beside a 20px replier
+     face, and the turn, its round cap and the foot of the final stem are all
+     measured from that face's centre line rather than from the summary's line
+     box: the summary grows a second line whenever an agent is working, and a
+     line box that changes height moved the stroke off the picture it points
+     at. The face is the one part of the link whose size never changes, so it
+     is what the connector is aimed at. */
+  --cmsg-face: 20px;
   /* And the colour of that line, flattened. The connector is one stroke drawn
      in several pieces — a stem for each grouped row, a final segment, and the
      quarter turn into every thread link — and the pieces deliberately overlap
@@ -5830,11 +5820,10 @@ button.chip.lg:hover {
      `--border-strong` is translucent, so each of those overlaps painted the
      stroke twice and showed as a darker, discoloured tick exactly where the
      line should read as continuous: at every row join and at every hook.
-     Mixed against the ground it is drawn on, the stroke is the same colour it
-     has always been — `--border-strong` is 28% of `--muted`, and the room's
-     tint is the surface the transcript is painted on — but it can now cross
-     itself as often as the pieces need to without changing shade. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--room-tint));
+     Mixed against the ground it is drawn on, the stroke stays opaque enough
+     to cross itself without changing shade. Eighteen percent keeps it behind
+     the message and faces instead of reading as another piece of content. */
+  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--room-tint));
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -5864,18 +5853,53 @@ button.chip.lg:hover {
 }
 
 .cmsg-row:hover {
-  background: var(--bg-hover);
   /* An opaque stroke has to follow the surface under it, or the line would
      stay at the room's shade while the row it crosses lightens. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 28%, var(--bg-hover));
+  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--bg-hover));
 }
 
-/* The light theme's `--border-strong` is already opaque — nothing there
-   composites twice — so the connector takes it directly rather than mixing a
-   second version of the same colour. */
-:root[data-theme="light"] .cmsg-row,
-:root[data-theme="light"] .cmsg-row:hover {
-  --cmsg-stem: var(--border-strong);
+/* One surface travels behind the desktop transcript instead of each row
+   painting a separate hover background. Its geometry is written by the two
+   delegated hover handlers in app.js, so compact and full rows can share the
+   same movement without changing their own layout or action targets. */
+.cmsg-hover-highlight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: -1;
+  width: var(--cmsg-hover-width, 0);
+  height: var(--cmsg-hover-height, 0);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(
+    var(--cmsg-hover-x, 0),
+    var(--cmsg-hover-y, 0),
+    0
+  );
+  transition:
+    transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    height 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.1s ease;
+  will-change: transform, width, height;
+}
+
+.cmsg-hover-highlight.is-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .cmsg-hover-highlight {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmsg-hover-highlight {
+    transition: none;
+  }
 }
 
 /* Consecutive lines from one person read as a single message group. Keep the
@@ -5907,14 +5931,14 @@ button.chip.lg:hover {
   left: var(--cmsg-stem-x);
   top: -1px;
   bottom: -1px;
-  border-left: 3px solid var(--cmsg-stem);
-  border-top-left-radius: 2px;
+  border-left: 2px solid var(--cmsg-stem);
+  border-top-left-radius: 3px;
   pointer-events: none;
 }
 
-/* Every grouped path leaves its avatar from the same point, eight pixels below
-   the 32px face, regardless of the height of that first message. The small
-   break keeps the connector visually separate from the face. */
+/* Every grouped path leaves from beneath its 32px avatar, regardless of the
+   height of that first message. A small break keeps the connector from
+   looking attached to the face and gives the quieter stroke room to begin. */
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
   top: 48px;
 }
@@ -5929,8 +5953,12 @@ button.chip.lg:hover {
 /* Where the stem stops is the whole of whether the turn reads as one clean
    line. The route's foot is the foot of the thread link itself — see the
    `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
-   out of this sum. `bottom: 20px` ends the stem at the top tangent of the
-   eleven-pixel quarter turn below. The old hook carried a seven-pixel upright
+   out of this sum. Half the face plus the link's two pixels of padding is
+   where that face's centre sits above the foot; eleven pixels higher is the
+   top tangent of the twelve-pixel turn below, which is where the stem stops.
+   Written against `--cmsg-face` rather than as a bare `22px`, the foot moves
+   with the face if the face is ever resized instead of quietly parting from
+   the corner it is supposed to meet. The old hook carried a seven-pixel upright
    over this stem and the final segment deliberately ended inside it; that
    double-painted the connector at every branch and left a dark, swollen join.
    The stem and turn now meet once, edge to edge, so the stroke keeps one
@@ -5947,14 +5975,14 @@ button.chip.lg:hover {
   position: absolute;
   left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
   top: -2px;
-  bottom: 20px;
-  border-left: 3px solid var(--cmsg-stem);
+  bottom: calc(var(--cmsg-face) / 2 + 2px + 11px);
+  border-left: 2px solid var(--cmsg-stem);
   pointer-events: none;
 }
 
 .cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
   .cmsg-thread-route::before {
-  top: 41px;
+  top: 39px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -6069,27 +6097,21 @@ button.chip.lg:hover {
   margin-top: 1px;
 }
 
-/* The status badge on a face in the transcript, at half the size the roster
-   gives it. The sidebar's dot is read down a column of names and is sized for
-   that; in the room it sits on the one face at the head of a message, where
-   the same dot read as a bead stuck to the mark. Halved here and nowhere
-   else, so the side tab keeps the size it was asked to keep. The surface ring
-   halves with it: a one-pixel band around a 5px badge is the reading the
-   two-pixel band gave the 9px one. */
+/* The status badge on a face in the transcript, smaller than the size the
+   roster gives it. The sidebar's dot is read down a column of names and is
+   sized for that; in the room it sits on the one face at the head of a
+   message. It used to be halved to 5px, which on a 32px face read as a speck
+   rather than a status — the thread panel had already had to override it back
+   up, and that size is the one this transcript wants too, so the room now
+   carries it directly and threads simply inherit it. The side tab and the
+   reply stack keep the sizes they were asked to keep, below. The surface ring
+   stays a one-pixel band, which is the reading the two-pixel band gives the
+   9px badge. */
 .cmsg-row .cmsg-avatar .agent-face .presence {
   right: -1px;
-  width: 5px;
-  height: 5px;
-  border-width: 1px;
-}
-
-/* Threads reuse the room transcript markup, but the status badge on a face
-   there needs more presence than the halved room size — one and a half times
-   the room badge, and only inside the thread panel so group chats stay as they
-   are. */
-.thread-panel .cmsg-row .cmsg-avatar .agent-face .presence {
   width: 7.5px;
   height: 7.5px;
+  border-width: 1px;
 }
 
 .cmsg-row .cmsg-body {
@@ -6134,110 +6156,282 @@ button.chip.lg:hover {
   text-underline-offset: 2px;
 }
 
-.cmsg-row .cmsg-avatar .cmsg-identity:hover .avatar,
-.cmsg-row .cmsg-avatar .cmsg-identity:hover .agent-face {
-  outline: 2px solid var(--accent-bright);
-  outline-offset: 1px;
-}
-
 .cmsg-row .cmsg-identity:focus-visible {
   outline: 2px solid var(--accent-bright);
   outline-offset: 2px;
   border-radius: 6px;
 }
 
-/* Who somebody is, on the way past. Same mechanism as the roster's
-   `.rr-usage` — rendered with the row, revealed by CSS — with one addition:
-   a delay before it opens. The roster is a short list somebody points at
-   deliberately; a transcript is a column of names a pointer crosses on its
-   way to the scrollbar, and a card that appeared instantly would flash open
-   and shut the whole way down. Closing stays immediate. */
-.profile-card {
-  position: absolute;
-  left: 0;
-  /* Upward, unlike the roster's card, because a transcript is pinned to its
-     newest line: the message most likely to be pointed at is the last one,
-     and a card opening below it would open past the bottom of the scroller
-     into the composer. Above it there is always the conversation. */
-  bottom: calc(100% + 6px);
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 216px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-  background: var(--bg-panel);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 38%);
-  font-weight: 400;
-  text-decoration: none;
-  opacity: 0;
-  visibility: hidden;
-  transition:
-    opacity 0.12s ease,
-    visibility 0.12s ease;
-  pointer-events: none;
-}
+/* ------------------------------------------------------------ profiles ---- */
 
-.cmsg-identity:hover .profile-card,
-.cmsg-identity:focus-within .profile-card {
-  opacity: 1;
-  visibility: visible;
-  transition-delay: 0.28s;
-}
-
-.profile-card-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-}
-
-/* The dot inside is absolutely positioned against the face, the way it is
-   everywhere else a face carries one. */
-.profile-card-face {
+/* Every face in the app owns its card — a roster row, a message, wherever
+   somebody is drawn. Keeping the card as a child means a pointer can travel
+   from the face into the card without the hover lapsing under it. */
+.pcard-anchor {
   position: relative;
   display: inline-flex;
   flex: none;
 }
 
-.profile-card-id {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
+/* No ring on the way past. The card opening is the answer to a hover; an
+   outline drawn round the face at the same time is the same news twice, and
+   it is the one thing on this interaction nobody asked for. The keyboard
+   keeps a ring of its own, because there it is the only signal there is. */
+.pcard-anchor:hover .avatar,
+.pcard-anchor:hover .agent-face {
+  outline: none;
 }
 
-.profile-card-name {
-  font-size: 13px;
+.pcard-anchor:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* The bridge. The card sits inside a transparent box a little taller than
+   itself, so the gap between the face and the card belongs to the card — the
+   pointer crosses it without ever being over nothing, which is exactly what
+   used to close the card the instant somebody reached for it. */
+.pcard-pop {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  z-index: 60;
+  display: block;
+  padding: 7px 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  /* The delay in the base rule is the one that runs on the way *out*: a
+     pointer crossing a column of faces must not leave a trail of cards behind
+     it, and one that clips the corner of a card must not lose it. */
+  /* Delay the state change without fading the whole surface through partial
+     opacity. The card now appears and leaves as one solid panel, while the
+     delay still prevents incidental pointer passes from flashing it open. */
+  transition:
+    opacity 0s linear 0.1s,
+    visibility 0s linear 0.1s;
+}
+
+/* The opening delay is short but not nothing: a transcript is a column of
+   faces a pointer crosses on its way to the scrollbar, and a card that
+   appeared instantly would flash open and shut the whole way down. */
+.pcard-anchor:hover > .pcard-pop,
+.pcard-anchor:focus-within > .pcard-pop {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0.16s;
+}
+
+/* Only one card may stay opaque. Fixed pops keep their last seat when the
+   pointer moves on, and the delayed hide otherwise leaves two identities
+   stacked on the same place — the mash-up of banners and names. */
+body:has(.pcard-anchor:is(:hover, :focus-within))
+  .pcard-anchor:not(:hover):not(:focus-within)
+  > .pcard-pop {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s;
+  transition-duration: 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pcard-pop {
+    transition: none;
+  }
+}
+
+/* Shaped after the reference profile popout: a coloured crown, the face
+   breaking out of it, the name and the one line that identifies it, then a
+   short column of labelled facts and the way through to the whole page.
+   Deliberately short — everything on it is what somebody needs *before*
+   deciding whether to open the rest. */
+.pcard {
+  display: block;
+  width: min(246px, var(--profile-max-width, calc(100vw - 20px)));
+  max-height: var(--profile-max-height, calc(100dvh - 34px));
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-pop);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-weight: 400;
+  text-align: left;
+  text-decoration: none;
+  cursor: default;
+}
+
+/* Whoever's colour this is: an agent carries its owner's, a person carries
+   their own, and anybody who has chosen none gets the theme's accent. The
+   only large block of colour on the card, which is what lets the rest of it
+   stay quiet. */
+.pcard-banner {
+  display: block;
+  height: 42px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--pcard-accent, var(--accent)) 42%, var(--surface-2)),
+    color-mix(in srgb, var(--pcard-accent, var(--accent)) 12%, var(--surface-2))
+  );
+}
+
+.pcard-body {
+  display: block;
+  padding: 0 13px 13px;
+}
+
+/* Breaking out of the crown, as the reference does. The ring is the card's
+   own background, so the face reads as sitting on the card rather than
+   punched through it. */
+.pcard-face {
+  position: relative;
+  /* A block-level flex box rather than an inline one: inline sits on a text
+     baseline, and the descender space under a 52px face is a band of empty
+     card nobody put there. */
+  display: flex;
+  width: fit-content;
+  margin: -22px 0 6px;
+  padding: 3px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+}
+
+.pcard-face .status-dot {
+  right: 2px;
+  bottom: 2px;
+  width: 9px;
+  height: 9px;
+  border-width: 2px;
+}
+
+.pcard-name {
+  display: block;
+  font-size: 14.5px;
   font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.profile-card-detail,
-.profile-card-status {
-  font-size: 11px;
+/* The one line that tells two of them apart — an address for a person, the
+   vendor and owner for an agent. */
+.pcard-sub {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.profile-card-hint {
-  font-size: 11px;
-  color: var(--accent-bright);
-  border-top: 1px solid var(--border-soft);
-  padding-top: 6px;
+.pcard-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
 }
 
-/* No pointer, no hover: on a touch screen the tap *is* the action, and a card
-   that opens under the finger it was opened by only hides what it describes.
-   The button underneath keeps working — this removes the card, not the tap. */
+/* The dot means what it means everywhere else — the palette lives in
+   `.status-dot` and its four colours, and only the placement changes: pinned
+   to the corner of a face, and simply sitting in a line of text here. */
+.pcard-status .status-dot {
+  position: static;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border: 0;
+}
+
+.pcard-rule {
+  display: block;
+  height: 1px;
+  margin: 11px 0 1px;
+  background: var(--border-soft);
+}
+
+/* One fact: what it is, then what it says. The small label is what keeps a
+   short column of these readable without a rule between every pair. */
+.pcard-section {
+  display: block;
+  margin-top: 8px;
+}
+
+.pcard-section-label {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+/* Two lines at most. A card is a summary, and the objective an agent is
+   working through is the one field here long enough to turn it into a page. */
+.pcard-section-body {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.pcard-usage {
+  display: block;
+  margin-top: 4px;
+}
+
+/* The way through to everything this card left out, which is what lets it
+   stay this short. */
+.pcard-open {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.pcard-open:hover {
+  background: var(--bg-hover);
+}
+
+.pcard-open:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
 @media (hover: none) {
-  .profile-card {
+  /* A finger has no hover, and the tap on a face *is* the action — so in a
+     transcript the card would open under the finger that already opened the
+     page behind it. The roster keeps its card, where a tap focuses the face
+     and the row's own destination is the "…" beside it; it only loses the
+     width that assumed a sidebar to open inside. */
+  .cmsg-identity .pcard-pop {
     display: none;
+  }
+
+  .pcard {
+    max-width: calc(100vw - 32px);
   }
 }
 
@@ -6589,52 +6783,60 @@ button.chip.lg:hover {
 }
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
-   eleven-pixel quarter turn starts at the stem's tangent instead of laying a
-   second upright over it; the nine-pixel gap gives the stroke and replier face
-   the same quiet breathing room as the avatar and stem above. Where the turn
-   does still meet the stem it meets it in
-   the opaque `--cmsg-stem`, so the corner keeps the weight and the shade of
-   the rest of the line.
+   twelve-pixel quarter turn starts at the stem's tangent instead of laying a
+   second upright over it; the twelve-pixel gap gives the stroke and replier
+   face a little more breathing room than the tight channel path had, matching
+   the open thread panel's quiet spacing. Where the turn does still meet the
+   stem it meets it in the opaque `--cmsg-stem`, so the corner keeps the weight
+   and the shade of the rest of the line.
 
    `border-box` is what makes the turn seamless rather than decorative. The
    elbow is placed from its right edge, so under the default content box its
-   own three-pixel left stroke hung *outside* the declared width and pushed
-   the whole corner three pixels further left than the stem it turns out of —
+   own left stroke hangs *outside* the declared width and pushes the whole
+   corner further left than the stem it turns out of —
    a visible step where the two should be one line. Sized by the border box,
    the gap plus the 20px of elbow put that stroke in the connector's own
    column, exactly where the stem above it stands: the gap is read from
    `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
    fall out of step with the stems either side of it.
 
-   Top and height are read together: the difference between them (11 - 8) is
-   what puts the horizontal run three pixels below the link's middle, where it
-   has always sat. Matching the height to the radius removes the straight
-   upright entirely, leaving only the turn that branches from the stem. */
+   Top and height are read together: the difference between them (12 - 11) is
+   the one pixel of the two-pixel stroke that falls below the link's middle,
+   which is to say the run is centred on it. The faces are the only thing
+   centred in that link (`align-items`), so its middle is their middle: the
+   stroke now crosses the replier's face on its own centre line instead of a
+   pixel under it, and the face no longer hangs out of the bottom of the line
+   it is supposed to sit on. Matching the height to the radius removes any
+   straight upright and keeps the same circular corner the open thread panel
+   already uses. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
   box-sizing: border-box;
-  top: calc(50% - 8px);
+  top: calc(50% - 11px);
   right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
   width: 20px;
-  height: 11px;
-  border-left: 3px solid var(--cmsg-stem);
-  border-bottom: 3px solid var(--cmsg-stem);
-  border-bottom-left-radius: 11px;
+  height: 12px;
+  border-left: 2px solid var(--cmsg-stem);
+  border-bottom: 2px solid var(--cmsg-stem);
+  border-bottom-left-radius: 12px;
   border-bottom-right-radius: 2px;
   pointer-events: none;
 }
 
-/* The last turn closes the path with a round cap. At the same three pixels as
+/* The last turn closes the path with a round cap. At the same two pixels as
    the stroke it reads as a softened endpoint rather than a new marker, but it
-   keeps the bottom branch from being mistaken for one more continuation. */
+   keeps the bottom branch from being mistaken for one more continuation.
+   Lifted the one pixel that centres a two-pixel dot on the middle it is
+   named after, so the cap and the run it closes are the same line rather
+   than two strokes a pixel apart. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
   content: "";
   position: absolute;
-  top: 50%;
-  right: calc(100% + 8px);
-  width: 3px;
-  height: 3px;
+  top: calc(50% - 1px);
+  right: calc(100% + 10px);
+  width: 2px;
+  height: 2px;
   border-radius: 50%;
   background: var(--cmsg-stem);
   pointer-events: none;
@@ -6714,18 +6916,21 @@ button.chip.lg:hover {
   }
 }
 
-/* Words arriving, one just behind the last: each starts a little low, a
-   little out of focus, and settles. The stagger is set per word by the render
-   loop — see `playTextReveal` in app.js, which is also what decides that a
-   block is new to the reader in the first place — so the stylesheet only has
-   to describe what one word does.
+/* Words arriving, one just behind the last: each starts a little low and
+   faint, and settles. Opacity and transform only — nothing here asks the
+   browser to redraw the glyphs themselves, which is what lets a long message
+   put a hundred of these on screen at once without the text going soft or the
+   frames going long. The stagger is set per word by the render loop — see
+   `playTextReveal` in app.js, which is also what decides that a block is new
+   to the reader in the first place — so the stylesheet only has to describe
+   what one word does.
 
-   `inline-block` is what lets a word be moved and blurred at all; the spaces
-   between them are left as plain text, so lines break and copy exactly as
-   they did before anything was wrapped. */
+   `inline-block` is what lets a word be moved at all; the spaces between them
+   are left as plain text, so lines break and copy exactly as they did before
+   anything was wrapped. */
 .text-reveal-word {
   display: inline-block;
-  animation: text-reveal-in 460ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation: text-reveal-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
   /* Set per word by the render loop, and negative for a word part-way
      through: a redraw lands in the middle of most arrivals, and a negative
      delay is what carries the animation on from where it was rather than
@@ -6733,15 +6938,22 @@ button.chip.lg:hover {
   animation-delay: var(--reveal-delay, 0ms);
 }
 
+/* A picture arrives with the words it was posted beside, on the same clock and
+   in its own place in the order — see `revealWords`. It has no `display` of
+   its own on purpose: `.cmsg-image` is the block that reserves the picture's
+   box, and overriding that here would move the message as it came in. */
+.text-reveal-media {
+  animation: text-reveal-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
 @keyframes text-reveal-in {
   from {
     opacity: 0;
-    filter: blur(4px);
-    transform: translateY(3px);
+    transform: translateY(2px);
   }
   to {
     opacity: 1;
-    filter: blur(0);
     transform: none;
   }
 }
@@ -6766,6 +6978,10 @@ button.chip.lg:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .text-reveal-word {
+    animation: none;
+  }
+
+  .text-reveal-media {
     animation: none;
   }
 
@@ -6799,8 +7015,8 @@ button.chip.lg:hover {
   border: 0;
 }
 
-/* A presence dot on a 20px face in a stack is a third of the face, and it is
-   answering a question nobody asked of a thread summary. */
+/* A presence dot on every 20px face in a stack is a third of each face, and it
+   is answering a question nobody asked of the people who merely spoke here. */
 .cmsg-thread-link .ctl-faces .presence {
   display: none;
 }
@@ -6815,18 +7031,20 @@ button.chip.lg:hover {
   align-items: center;
 }
 
-.cmsg-thread-link .ctl-faces .ctl-working::before {
-  content: "";
-  position: absolute;
-  right: 0;
+/* The face's own badge rather than one drawn beside it. It used to be a
+   `::before` on this wrapper: the same colour and size, but static, so the one
+   live signal in a room breathed everywhere except here. Halved for the stack
+   and given the chat surface's cutout, it is now literally the badge
+   `agentFace` draws, on the clock every other live mark keeps. */
+.cmsg-thread-link .ctl-faces .ctl-working .presence {
+  display: block;
+  right: -1px;
   bottom: 1px;
   z-index: 2;
   width: 5px;
   height: 5px;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 1px var(--bg-chat);
-  pointer-events: none;
+  border-width: 1px;
+  border-color: var(--bg-chat);
 }
 
 /* An agent face in the stack fills itself, so nothing is drawn around it here.
@@ -7247,10 +7465,10 @@ button.chip.lg:hover {
 }
 
 /* The agent's account of what it did, foldable because it is often the longest
-   thing in the thread. Deliberately identical to `.thread-thinking` — they sit
-   inches apart in the same thread, and two disclosures that behave the same
-   should not look like two different mechanisms. Open by default, because
-   unlike thinking this one is the answer. */
+   thing in the thread. Shares the same caret and summary mechanics as
+   `.thread-thinking`, but keeps a quiet left rail so the finished write-up
+   still reads as a document rather than a live status stream. Open by
+   default, because unlike thinking this one is the answer. */
 .thread-summary {
   margin: 2px 0 6px;
   border-left: 2px solid var(--line, #262b3a);
@@ -7418,19 +7636,32 @@ button.chip.lg:hover {
 
 /* One agent's work in this repository. Sits in the middle row of
    `.thread-panel`'s grid, which is the row that stretches, so the list
-   scrolls rather than pushing anything off the bottom. */
+   scrolls rather than pushing anything off the bottom. Active work stays
+   in a tight stack; finished work sits quieter underneath. */
 .agent-history {
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 0;
+  padding: 4px 0;
+}
+
+.agent-history-active,
+.agent-history-finished {
+  display: grid;
+}
+
+.agent-history-active + .agent-history-finished {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-soft);
 }
 
 .agent-history-row {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  padding: 7px 14px;
-  font-size: 13px;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  line-height: 1.35;
   border-left: 2px solid transparent;
 }
 
@@ -7450,14 +7681,14 @@ button.chip.lg:hover {
   display: grid;
   place-items: center;
   align-self: center;
-  width: 12px;
+  width: 11px;
   flex: none;
   color: var(--text-3);
 }
 
 .agent-history-row .ah-glyph .ui-icon {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
 }
 
 .agent-history-row.integrated .ah-glyph {
@@ -7487,7 +7718,18 @@ button.chip.lg:hover {
 .agent-history-row .ah-when {
   flex: none;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Finished work keeps the same row shape but reads as archive: softer type
+   and quieter marks. */
+.agent-history-finished .agent-history-row {
+  color: var(--text-2);
+}
+
+.agent-history-finished .agent-history-row .ah-glyph {
+  opacity: 0.72;
 }
 
 /* ---------------------------------------------------- agent spec (details) --
@@ -7810,6 +8052,59 @@ button.chip.lg:hover {
   line-height: 1.62;
 }
 
+.agent-spec .aspec-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.agent-spec .aspec-action {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.agent-spec .aspec-action svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-spec .aspec-action:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.agent-spec .aspec-action:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+.agent-spec .aspec-action-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.agent-spec .aspec-action-primary:hover {
+  border-color: color-mix(in srgb, var(--accent) 88%, #000);
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+
 .agent-spec .aspec-sub {
   margin-top: 0;
   color: var(--text-3);
@@ -7991,6 +8286,21 @@ button.chip.lg:hover {
   border-radius: 14px;
   background: var(--accent);
   color: #fff;
+}
+
+/* Only when the channel message is known — same rule as history rows — so an
+   inert idle row never looks clickable. */
+.agent-spec .aspec-current-task-active[role="button"] {
+  cursor: pointer;
+}
+
+.agent-spec .aspec-current-task-active[role="button"]:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+
+.agent-spec .aspec-current-task-active[role="button"]:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
 
 .agent-spec .aspec-current-task-active .aspec-capability-mark,
@@ -8706,9 +9016,7 @@ body.resizing-panel {
 
 @media (prefers-reduced-motion: reduce) {
   .agent-face svg,
-  .agent-face svg *,
-  .status-working,
-  .presence-online {
+  .agent-face svg * {
     animation: none;
   }
 }
@@ -9102,6 +9410,174 @@ dialog.modal[open]::backdrop {
   gap: 9px;
 }
 
+/* Posted images use the same native dialog as decisions, but without turning
+   a picture into a card full of confirmation chrome. The image owns the
+   surface and stays inside the viewport at every aspect ratio. */
+.modal-image-card {
+  position: relative;
+  display: block;
+  width: auto;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.modal-image {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  object-fit: contain;
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-pop);
+}
+
+.modal-image-close {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  right: 10px;
+  color: #fff;
+  background: rgba(5, 7, 12, 0.68);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.modal-image-close:hover {
+  color: #fff;
+  background: rgba(5, 7, 12, 0.84);
+}
+
+/* The first step of Add Agent. Providers stay in one stable list after a
+   connection; connected rows quiet down instead of disappearing, so adding a
+   second agent never looks like the first one replaced it. */
+.agent-provider-picker {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.agent-provider-choice {
+  position: relative;
+  min-width: 0;
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 2px 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease;
+}
+
+.agent-provider-choice:hover:not(.is-connected):not(.is-disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.agent-provider-choice:has(input:checked) {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
+.agent-provider-choice:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.agent-provider-choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.agent-provider-mark {
+  grid-row: 1 / 3;
+  align-self: center;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-bright);
+}
+
+.agent-provider-mark svg {
+  width: 24px;
+  height: 24px;
+}
+
+.agent-provider-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agent-provider-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agent-provider-copy small {
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.agent-provider-state {
+  color: var(--accent-bright);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.agent-provider-choice.is-connected,
+.agent-provider-choice.is-disabled {
+  cursor: default;
+  background: var(--bg-card);
+  border-color: var(--border-soft);
+}
+
+.agent-provider-choice.is-connected .agent-provider-mark,
+.agent-provider-choice.is-connected .agent-provider-state {
+  color: var(--green);
+}
+
+.agent-provider-choice.is-connected .agent-provider-copy,
+.agent-provider-choice.is-disabled {
+  opacity: 0.7;
+}
+
+.agent-provider-empty {
+  grid-column: 1 / -1;
+  color: var(--text-3);
+  padding: 12px 0;
+}
+
+@media (max-width: 520px) {
+  .agent-provider-picker {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Attribution pills: the rendered 3dicons object, then a short label, in a
    row that reads inline with the text above it. Sized off the label so one
    pill is never taller than the line it belongs to. */
@@ -9402,7 +9878,7 @@ dialog.modal[open]::backdrop {
   /* Clipped while the fold is running, and only then. An agent's usage card
      opens below its row and the last row's card reaches past the bottom of
      the list, so a list that clipped at rest would swallow it (see
-     `.rr-usage`). The rail clips as well, where the lists are folded away and
+     `.pcard-pop`). The rail clips as well, where the lists are folded away and
      nothing in them can be reached anyway. */
   .chats-shell.chan-folding .chan-roster,
   .chats-shell.chan-collapsed .chan-roster {
@@ -9832,7 +10308,6 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
-  .channel-rail-brand,
   .channel-rail-new,
   .channel-rail-button {
     width: 40px;
@@ -9885,7 +10360,11 @@ dialog.modal[open]::backdrop {
      exactly where it was. See the phone drawer drag in app.js. */
   .chan-sidebar {
     position: fixed;
-    top: 0;
+    /* Below the banner, like the rail it slides over: a drawer that started
+       at the top of the screen covered the channel's own name and the
+       actions button while it was open, so the header the drawer belongs to
+       disappeared the moment it was used. */
+    top: var(--chan-head-h);
     bottom: 0;
     left: 0;
     width: 86vw;
@@ -9906,6 +10385,14 @@ dialog.modal[open]::backdrop {
     will-change: transform;
   }
 
+  /* The status-bar inset is the banner's to pay now — see `.chan-head`
+     above. Two classes deep to outrank the blanket safe-area rule further
+     down the file, which still applies to the panels that do start at the
+     top of the viewport. */
+  .chats-shell .chan-sidebar {
+    padding-top: 0;
+  }
+
   .chats-shell.roster-open .chan-sidebar {
     transform: none;
   }
@@ -9923,7 +10410,10 @@ dialog.modal[open]::backdrop {
   .chan-sidebar-scrim {
     display: block;
     position: fixed;
-    inset: 0;
+    /* Everything the drawer covers, and nothing above it: the banner stays
+       lit and tappable, so closing the drawer is not the only thing the top
+       of the screen can do while it is open. */
+    inset: var(--chan-head-h) 0 0;
     z-index: 75;
     background: rgba(4, 5, 9, 0.5);
     opacity: 0;
@@ -9944,21 +10434,69 @@ dialog.modal[open]::backdrop {
     transition: none;
   }
 
-  /* The header carries a lot on desktop — title, counts, an avatar stack,
-     five toggle buttons, and now the two navigation buttons above. Wrapping
-     rather than shrinking everything to illegibility: the title stays on
-     its own line and the toggle buttons get a second row. The avatar stack
-     is dropped rather than shrunk further — it is a decorative echo of the
-     roster, which the new channels button now opens directly. */
-  .chan-head {
-    flex-wrap: wrap;
-    row-gap: 8px;
-    padding: 10px 12px;
+  /* One banner across the whole phone, with everything else underneath it.
+     The header used to be a column-width strip starting where the channel
+     rail ended, so the top of the screen read as two unrelated bars: a rail
+     running past the status bar on the left, a title beside it. And because
+     it wrapped, the channel actions button dropped to a second row on the
+     left — a menu at the bottom-left of a header is not where a thumb looks
+     for it.
+
+     Fixed and full-bleed instead: the title, the counts and the actions
+     button share one row spanning the viewport, the button sits at the top
+     right where the spacer pushes it, and `.chats-shell` pays back the
+     height it no longer occupies in flow as padding — which is what drops
+     the rail, the conversation and the drawer below it.
+
+     Selectors are `.chats-shell`-prefixed on purpose: the base `.chan-head`
+     padding and the safe-area top-up further down this file are both one
+     class deep and both come later, so a bare `.chan-head` rule here is
+     outranked and silently does nothing. The inset is folded into the
+     height and paid as padding here instead. */
+  .chats-shell {
+    --chan-head-h: calc(52px + var(--safe-top));
+    padding-top: var(--chan-head-h);
+  }
+
+  .chats-shell .chan-head {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    /* Under the drawer (76) and its scrim (75), and under a full-screen
+       `.thread-panel` (72), which takes over the whole phone and owns its
+       own header while it is open. Above everything in the conversation
+       column, which is what it is a banner over. */
+    z-index: 70;
+    height: var(--chan-head-h);
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: var(--safe-top) 8px 0 10px;
   }
 
   .chan-head .spacer {
-    flex: 1 0 100%;
-    height: 0;
+    flex: 1;
+    height: auto;
+  }
+
+  /* The channel is already named, in the widest type on the row; the small
+     bubble beside the name was spending 19px plus a gap saying so again. */
+  .chats-shell .chan-head .ch-hash {
+    display: none;
+  }
+
+  /* Whatever room is left after the two buttons, and no more — a long
+     channel name otherwise pushes the actions button off the right edge
+     rather than being cut where it runs out of banner. */
+  .chats-shell .chan-head .ch-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chats-shell .chan-head .ch-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Same shape of overflow as the header, and the same fix: the counts and
@@ -10327,24 +10865,23 @@ dialog.modal[open]::backdrop {
   }
 }
 
-/* A task's running commentary. Most of a thread by volume and the least of
-   what somebody opening it wants first, so it folds away — open while the
-   work is still going, because then the latest step is the point. */
+/* A task's running commentary as a quiet inline status stream: one muted
+   header, then thought or tool-cue lines when opened. No bordered disclosure
+   chrome — the open state should look like extended output, not a sidebar rail. */
 .thread-thinking {
-  margin: 2px 0 6px;
-  border-left: 2px solid var(--line, #262b3a);
-  padding-left: 10px;
+  margin: 4px 0 10px;
 }
 
 .thread-thinking > summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   cursor: pointer;
   list-style: none;
-  padding: 5px 2px;
+  padding: 2px 0;
   color: var(--text-3, #8b93a7);
   font-size: 0.84rem;
+  line-height: 1.35;
   user-select: none;
 }
 
@@ -10514,16 +11051,31 @@ dialog.modal[open]::backdrop {
   height: 13px;
 }
 
-/* One thread in the pullout, as a card: glyph, name, one metadata line,
-   chevron. It was three stacked lines plus an avatar plus a delete button that
-   fell onto a fourth line of its own, on a divider-ruled list — five bands of
-   chrome per thread. Cards separated by space need no rules between them, and
-   the delete button now sits on the row it belongs to. */
+/* Live work stays in a short stack; completed work becomes a wrapping run of
+   pills underneath. This keeps the state that still needs attention prominent
+   without making every finished thread consume the width of the panel. */
+.thread-list-active {
+  display: grid;
+  gap: 6px;
+}
+
+.thread-list-finished {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.thread-list-active + .thread-list-finished {
+  padding-top: 9px;
+  margin-top: 9px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .thread-item-row {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-bottom: 8px;
 }
 
 /* The trash stays out of the way until the row is under the pointer; on touch,
@@ -10548,10 +11100,10 @@ dialog.modal[open]::backdrop {
 .thread-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 0;
   border-radius: var(--radius);
   background: var(--bg-card);
@@ -10563,6 +11115,89 @@ dialog.modal[open]::backdrop {
 
 .thread-item:hover {
   background: var(--bg-card-2);
+}
+
+.thread-item:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+/* A completed thread is one compact, single-line destination. The full title,
+   author, reply count, time and status remain in its accessible label and
+   tooltip; the pill keeps only the title and author visible. */
+.thread-list-finished .thread-item-row {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.thread-item-ended {
+  flex: 0 1 auto;
+  max-width: 260px;
+  padding: 5px 9px;
+  gap: 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-inset);
+}
+
+.thread-item-ended.thread-item-managed {
+  padding-right: 30px;
+}
+
+.thread-item-ended:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-card-2);
+}
+
+.thread-item-ended .ti-done {
+  display: inline-flex;
+  flex: none;
+  color: var(--green);
+}
+
+.thread-item-ended .ti-done svg {
+  width: 13px;
+  height: 13px;
+}
+
+.thread-list-finished .thread-item-ended .ti-who {
+  flex: none;
+  max-width: 72px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.thread-item-ended .ti-who::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--text-4);
+}
+
+/* The per-thread delete action occupies the pill's reserved trailing space,
+   so hidden actions do not turn every compact item back into a wide row. */
+.thread-list-finished .thread-item-row > .icon-btn {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: 3px;
+  width: 22px;
+  height: 22px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: var(--bg-inset);
+}
+
+.thread-item-pending {
+  box-shadow: inset 2px 0 0 var(--border-strong);
+}
+
+.ti-pending {
+  flex: none;
+  color: var(--text-3);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 /* The thread an agent is working on right now. The list is a log of finished
@@ -10585,8 +11220,7 @@ dialog.modal[open]::backdrop {
    edged, so the word was the third thing on the row saying the same thing,
    and it pushed the reply count around as threads started and stopped. The
    word survives for screen readers, where there is no wash and no edge to
-   read. Same fade as `.status-working`, so every live signal in the app
-   breathes on one clock. */
+   read. Same fade clock as other live signals in the app. */
 .thread-item-active .ti-live {
   flex: none;
   align-self: center;
@@ -10603,6 +11237,29 @@ dialog.modal[open]::backdrop {
   .thread-item-active .ti-live {
     animation: none;
   }
+}
+
+/* What a running row actually carries, whenever the agent on it is known: the
+   same mark filling clockwise that the roster and the room both draw, at the
+   size a line of metadata allows. The dot above is now only the fallback for a
+   thread no agent has spoken in yet. Three places showed the same run three
+   different ways — a filling mark, a filling mark with a frozen badge, and
+   this, a bare dot in a colour of its own that said nothing about how far the
+   work had got. Now they read alike, so a glance costs nothing to relearn. */
+.thread-item .ti-run {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+}
+
+/* Halved and hair-ringed. The room transcript's own badge has since grown,
+   but this one sits on a 20px face in a list of tabs rather than at the head
+   of a message, and at that size it is already read. */
+.thread-item .ti-run .presence {
+  right: -1px;
+  width: 5px;
+  height: 5px;
+  border-width: 1px;
 }
 
 /* The held counterpart of `.thread-item-active`. Same shape — a wash and a
@@ -10991,35 +11648,47 @@ dialog.modal[open]::backdrop {
 
 .thread-item .ti-main {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   flex: 1;
   min-width: 0;
 }
 
-/* The name the agent gave the task carries the card. Wrapped to two lines
-   rather than truncated at one: a task name is a sentence, and the half of it
-   that fits is rarely the half that identifies the work. */
+/* A summary never grows taller because its task name is long. The full name
+   remains in the button's label and tooltip. */
 .thread-item .ti-text {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
   color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Who, then how much — metadata, in the size and colour that says so. */
+/* Current phase, then who and how much — one quiet metadata line. */
 .thread-item .ti-meta {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   font-size: 11.5px;
+  line-height: 1.3;
   min-width: 0;
 }
 
+.thread-item .ti-activity {
+  flex: 0 1 110px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread-item .ti-who {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -11031,25 +11700,47 @@ dialog.modal[open]::backdrop {
   flex: none;
 }
 
-/* Thinking, as one passage rather than as a stack of messages from somebody
-   who will not stop talking. Each held line becomes a paragraph inside one
-   block, which is how it arrived in the agent's head before it arrived as
-   events in ours. */
+.thread-item-ended .ti-text {
+  flex: 0 1 auto;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* Open thinking: a short stack of status lines, not a boxed transcript. */
 .thread-thinking .tt-body {
-  padding: 2px 0 4px 10px;
-  border-left: 2px solid var(--border-soft);
-  margin-left: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 2px;
+  margin: 0;
 }
 
-.thread-thinking .tt-body p {
-  margin: 0 0 6px;
+.thread-thinking .tt-line {
+  margin: 0;
   font-size: 13px;
-  line-height: 1.55;
-  color: var(--text-2);
+  line-height: 1.5;
 }
 
-.thread-thinking .tt-body p:last-child {
-  margin-bottom: 0;
+.thread-thinking .tt-thought {
+  color: var(--text-2, #b6bdd0);
+}
+
+.thread-thinking .tt-cue {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3, #8b93a7);
+}
+
+.thread-thinking .tt-cue .ui-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  opacity: 0.85;
+}
+
+.thread-thinking .tt-cue span {
+  min-width: 0;
 }
 
 /* --------------------------------------------------------- colour wheel ---- */

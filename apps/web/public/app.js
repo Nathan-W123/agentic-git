@@ -55,6 +55,7 @@ import {
   activeChannelId,
   canLeaveRepository,
   canManageRepository,
+  canDeleteRepository,
   closeChannelFile,
   loadChannelFile,
   moveChannelFile,
@@ -96,8 +97,8 @@ import {
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
-  unreadCount,
   dmUnreadTotal,
+  isDirectMessagePerson,
   memberName,
   memberRole,
   personOnline,
@@ -162,6 +163,7 @@ import {
   renderAgents,
   retryTask,
   selectAgent,
+  startAddAgentFlow,
 } from "./screen-agents.js";
 import {
   readAll,
@@ -209,6 +211,7 @@ import {
   personMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
+  scrollDirectMessageToLatest,
   startPlannedWork,
   submitComposerMessage,
   submitThreadReply,
@@ -1140,32 +1143,9 @@ function topbar() {
         ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
         : ""
     }
-    ${notificationBell()}
     <button class="account-btn" data-act="user-menu" title="${esc(user)}"
       >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
   </header>`;
-}
-
-/**
- * The way into Notifications, and the count that makes it worth pressing.
- *
- * The route, the screen, its filters, `unreadCount()` and even a
- * `go-notifications` case in the action handler all existed already; nothing
- * anywhere emitted the action, so the screen could only be reached by typing
- * its hash. This is the button — which is also what makes the comment on
- * `agentNameForTask` ("which the bell badge asks for on every render") a
- * description of the product again rather than archaeology.
- */
-function notificationBell() {
-  const unread = unreadCount();
-  return `<button type="button" class="icon-btn bell" data-act="go-notifications"
-    title="Notifications" aria-label="${
-      unread === 0 ? "Notifications" : `Notifications, ${unread} unread`
-    }">${icon("bell")}${
-      unread === 0
-        ? ""
-        : `<span class="dot-badge">${esc(String(unread > 99 ? "99+" : unread))}</span>`
-    }</button>`;
 }
 
 /**
@@ -1176,8 +1156,8 @@ function notificationBell() {
  *
  * Notifications is deliberately not one of them any more. Pressing your own
  * name is how you reach your own things, and a backlog of everything every
- * agent has done is not that; it is still the bell in the topbar and still
- * reachable by name in the quick switcher.
+ * agent has done is not that; it remains reachable by name in the quick
+ * switcher.
  *
  * My Agents is absent for the same reason it always was: a roster of agent
  * connections is not the account's own things either, and it keeps the quick
@@ -1470,12 +1450,10 @@ function githubCard() {
     // for a thing that cannot be done here would only invite a dead click.
     return "";
   }
-  const credential = github?.credential;
-  const broken = credential?.unusableReason;
+  const broken = github?.credential?.unusableReason;
   const connected = github?.connected === true;
   return `<section class="card">
-    <div class="panel-head"><div><h3>GitHub</h3>
-      <p>The account a push of your tasks runs as</p></div></div>
+    <div class="panel-head"><div><h3>GitHub</h3></div></div>
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">${
@@ -1483,17 +1461,6 @@ function githubCard() {
             ? `Connected as ${esc(github.login ?? "you")}`
             : "Not connected"
         }</div>
-        <div class="sr-sub${broken ? " sr-warn" : ""}">${esc(
-          broken
-            ? broken
-            : connected
-              ? `Personal access token ending …${credential?.hint ?? ""}. ` +
-                "Pushes an agent runs for you authenticate as this token."
-              : github === undefined
-                ? "Checking…"
-                : "When an agent pushes for you, it pushes as you. Connect " +
-                  "your GitHub account to make that possible.",
-        )}</div>
       </span>
       <span class="sr-ctl">
         <button class="btn btn-sm" data-act="${
@@ -1529,9 +1496,7 @@ function githubCard() {
 function agentsCard() {
   const agents = myAgents();
   return `<section class="card">
-    <div class="panel-head"><div><h3>Agents</h3>
-      <p>What this deployment offers, and which of them you have connected —
-        one row per provider, usable in every channel you join it to</p></div></div>
+    <div class="panel-head"><div><h3>Agents</h3></div></div>
     ${
       agents.length === 0
         ? `<div class="set-row"><span class="sr-body">
@@ -1539,11 +1504,15 @@ function agentsCard() {
                deployment.</div></span></div>`
         : agents
             .map((agent) => {
-              // The owner suffix is dropped from a vendor-label fallback
-              // ("Claude (Nathan)" reads as "Claude" in your own settings),
+              // The row title is the vendor people say ("Claude"), not the
+              // call sign. The call sign belongs on the status line below —
+              // "Connected as Hera" — so both facts stay visible at once
+              // instead of the name swallowing the provider.
+              // Rename still edits the call sign: the owner suffix is dropped
+              // from a vendor-label fallback ("Claude (Nathan)" → "Claude")
               // but never from a name somebody chose — an agent called
               // "Athena (night shift)" keeps every word of it.
-              const label =
+              const callSign =
                 agent.hasName === true
                   ? agent.name
                   : agent.name.replace(/\s*\(.*\)$/u, "");
@@ -1561,7 +1530,13 @@ function agentsCard() {
               const state_ = agent.needsReconnect
                 ? { text: "Sign-in expired", cls: " sr-warn" }
                 : agent.mine
-                  ? { text: "Connected as you", cls: "" }
+                  ? {
+                      text:
+                        agent.hasName === true
+                          ? `Connected as ${agent.name}`
+                          : "Connected as you",
+                      cls: "",
+                    }
                   : agent.hostAccount
                     ? {
                         text: "Available on this deployment — using this machine's account",
@@ -1576,17 +1551,13 @@ function agentsCard() {
                           data-value="${esc(agent.id)}">
                           <input class="input" data-act="settings-rename-input"
                             data-value="${esc(agent.id)}" maxlength="40"
-                            aria-label="Agent name" value="${esc(label)}">
+                            aria-label="Agent name" value="${esc(callSign)}">
                           <button class="btn btn-sm btn-primary" type="submit">Save</button>
                         </form>`
-                      : `<div class="sr-title">${esc(label)}</div>`
+                      : `<div class="sr-title">${esc(agentLabelOf(agent.id))}</div>`
                   }
                   <div class="sr-sub${state_.cls}">${esc(state_.text)}${
                     agent.detail ? ` — ${esc(agent.detail)}` : ""
-                  }${
-                    renaming
-                      ? " — this name is what it answers to in every repository"
-                      : ""
                   }</div>
                 </span>
                 <span class="sr-ctl">
@@ -1654,9 +1625,6 @@ function appearanceCard() {
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">Profile picture</div>
-        <div class="sr-sub">Shown wherever your initials appear. Stored in this
-          browser only — the account has no field for a picture yet, so it will
-          not follow you to another machine.</div>
       </span>
       <span class="sr-action avatar-pick">
         ${avatar(currentUserName(), 40, currentUserName(), myAvatar())}
@@ -1675,26 +1643,18 @@ function appearanceCard() {
     ${colourRow(
       "set-accent",
       "Primary colour",
-      `Accents, highlights, and the active state across the interface. Only
-       you see this.`,
       accent,
     )}
 
     ${colourRow(
       "set-accent-secondary",
       "Secondary colour",
-      `The other half of a pair: the second way into a repository, the far end
-       of a progress bar, the thread beside a channel. Somewhere the interface
-       shows two things and only one of them was coloured.`,
       myAccentSecondary(),
     )}
 
     ${colourRow(
       "set-agent-color",
       "Your agents' colour",
-      `Every agent you connect is drawn in this colour, on shared views too —
-       so your teammates can tell your agents from theirs. The mark says which
-       vendor; the colour says whose.`,
       agentColor,
       `<div class="doodle-preview" style="color:${esc(agentColor)}">
         ${[
@@ -1720,8 +1680,6 @@ function appearanceCard() {
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">Default colours</div>
-        <div class="sr-sub">Restore the original primary, secondary, and agent
-          colours.</div>
       </span>
       <span class="sr-ctl">
         <button type="button" class="btn btn-quiet" data-act="colours-reset">
@@ -1744,12 +1702,11 @@ function appearanceCard() {
  * `state.openWheel` holds one act at a time, so opening a second wheel closes
  * the first rather than stacking them.
  */
-function colourRow(act, title, sub, current, extra = "") {
+function colourRow(act, title, current, extra = "") {
   const open = state.openWheel === act;
   return `<div class="set-row">
       <span class="sr-body">
         <div class="sr-title">${title}</div>
-        <div class="sr-sub">${sub}</div>
       </span>
       <span class="sr-ctl colour-pick">
         <span class="colour-dot" style="background:${esc(current)}"></span>
@@ -2354,23 +2311,44 @@ async function toggleAuditingAction(repositoryId, paused) {
 /**
  * Deleting a repository outright.
  *
- * Irreversible: cascades the repository's own channel and grants, and is
- * refused server-side while a task or run still references it. The
- * confirmation says so, rather than reading like an ordinary remove.
+ * Irreversible: cascades the repository's own channel and grants, and takes
+ * the execution history with it. A single confirm button is too easy to hit
+ * by reflex for something nobody can undo, so this asks for the repository's
+ * name to be typed out — `yesiwanttodelete<name>` — and refuses anything
+ * else. The name is whatever the repository is called on screen right now, so
+ * a renamed repository asks for its new name rather than its id; spaces are
+ * dropped so the phrase stays one word. Matched case-insensitively and
+ * trimmed: the phrase is there to make the person read what they are
+ * deleting, not to catch a stray capital.
+ *
+ * Only owners and co-owners are offered the control at all (see
+ * `canDeleteRepository`), and the server refuses anyone else regardless.
  */
 async function deleteRepositoryAction(repositoryId) {
-  const confirmed = await showModal({
+  const label = repositoryLabel(repositoryId);
+  const phrase = `yesiwanttodelete${label.replace(/\s+/gu, "")}`;
+  const values = await showModal({
     title: "Delete this repository?",
-    subtitle: `This permanently deletes ${repositoryId}, its chat history, and its repository-scoped grants. This cannot be undone.`,
+    subtitle: `This permanently deletes ${label}, its chat history, and its repository-scoped grants. This cannot be undone.`,
     confirm: "Delete repository",
+    body: `<label class="field">
+        <span>Type <code>${esc(phrase)}</code> to confirm</span>
+        <input class="input" name="confirmation" autocomplete="off"
+          autocapitalize="off" spellcheck="false" required autofocus
+          placeholder="${esc(phrase)}">
+      </label>`,
   });
-  if (confirmed === undefined) {
+  if (values === undefined) {
+    return;
+  }
+  if (String(values.confirmation ?? "").trim().toLowerCase() !== phrase.toLowerCase()) {
+    toast(`Type ${phrase} exactly to delete this repository`, "error");
     return;
   }
   try {
     await deleteRepository(repositoryId);
     closePopover();
-    toast(`Deleted ${repositoryId}`, "ok");
+    toast(`Deleted ${label}`, "ok");
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -2782,6 +2760,12 @@ function applyTheme() {
     withAlpha(accent, light ? 0.28 : 0.2),
   );
   root.setProperty("--accent-line", withAlpha(accent, light ? 0.5 : 0.38));
+  // The words written *on* the accent, for the surfaces that are filled with
+  // it rather than tinted by it — a sent private message being the one people
+  // read most. White is right for a deep blue and unreadable on a chosen
+  // yellow, so this asks which of the theme's own two extremes actually reads
+  // against the colour somebody picked instead of assuming either.
+  root.setProperty("--accent-ink", accentInk(accent));
   // The second colour, derived exactly as the first is so the two behave
   // identically under both themes. Fewer variants, deliberately: a secondary
   // that grew its own dim, bright and strong-wash would be a second theme
@@ -2870,6 +2854,22 @@ function readableOn(accent, ground, target) {
     }
   }
   return mix(accent, "#000000", 0.8);
+}
+
+/**
+ * The readable ink for text sitting on a filled accent.
+ *
+ * Not a search, because there are only two answers worth having: near-white
+ * and near-black are the two colours a filled bubble can carry without
+ * inventing a third tone the palette does not have. Whichever stands further
+ * off the accent wins, which lands white on a deep blue and black on the
+ * yellows and limes the wheel also allows — the case a hardcoded `#fff` got
+ * wrong every time.
+ */
+function accentInk(accent) {
+  return contrastRatio("#ffffff", accent) >= contrastRatio("#141312", accent)
+    ? "#ffffff"
+    : "#141312";
 }
 
 /* ------------------------------------------------------------- router ---- */
@@ -3561,12 +3561,153 @@ function requestUsageForHoverTarget(event) {
 }
 document.addEventListener("mouseover", requestUsageForHoverTarget);
 // `:hover` never matches on a touch screen, so the card above has nothing to
-// reveal it there — `rosterRow` (screen-chats.js) gives `.rr-avatar` a
-// `tabindex`, and `.rr-avatar:focus-within .rr-usage` (styles.css) already
-// shows the card on focus exactly as it does on hover. This is what supplies
-// the data for a tap the same way the listener above supplies it for a
-// pointer.
+// reveal it there — `profileAnchor` (screen-chats.js) gives every face a
+// `tabindex`, and `.pcard-anchor:focus-within .pcard-pop` (styles.css)
+// already shows the card on focus exactly as it does on hover. This is what
+// supplies the data for a tap the same way the listener above supplies it
+// for a pointer.
 document.addEventListener("focusin", requestUsageForHoverTarget);
+
+/**
+ * How much clear space a profile card wants past its own height before it is
+ * willing to open in the direction it prefers.
+ */
+const PROFILE_CARD_MARGIN = 10;
+
+/**
+ * Put a fixed profile card at viewport coordinates, even when its anchor
+ * establishes a fixed-position containing block.
+ *
+ * Message rows use layout containment and the roster animates with a
+ * transform. Both make a nested `position: fixed` element local to the row
+ * instead of the viewport, so assigning viewport coordinates directly adds
+ * the row's own offset and leaves the card far away from the face. Measuring
+ * where that first assignment actually landed gives us the offset to remove.
+ */
+function placeProfileCard(card, left, top) {
+  card.style.left = `${left}px`;
+  card.style.top = `${top}px`;
+  const placed = card.getBoundingClientRect();
+  card.style.left = `${left + (left - placed.left)}px`;
+  card.style.top = `${top + (top - placed.top)}px`;
+}
+
+/**
+ * The geometry of a profile card that a stylesheet cannot decide.
+ *
+ * Each card states the direction it would rather open — down from a roster
+ * row, up from a message, because that is where the room is in the ordinary
+ * case. What a rule cannot know is whether that room exists for *this* face:
+ * the last agent in a long roster has nothing under it, and the first message
+ * in a thread has nothing over it, and a card opening into either is a card
+ * clipped in half by whatever is doing the scrolling.
+ *
+ * So the preference stands and this only overrides it, by intersecting the
+ * viewport with every surface that can crop the face. The fixed card then
+ * gets a bounded width, height and position in that visible rectangle.
+ */
+function positionProfileCard(event) {
+  const target = event?.target;
+  const hovered =
+    target instanceof Element ? target.closest("[data-profile-dir]") : null;
+  const anchors =
+    hovered === null
+      ? document.querySelectorAll(
+          ".pcard-anchor:hover, .pcard-anchor:focus-within",
+        )
+      : [hovered];
+  anchors.forEach((anchor) => {
+    const card = anchor.querySelector(":scope > .pcard-pop");
+    if (card === null) {
+      return;
+    }
+    const box = anchor.getBoundingClientRect();
+    const clip = clippingBoundsFor(anchor);
+    const maxHeight = Math.max(
+      1,
+      clip.bottom - clip.top - PROFILE_CARD_MARGIN * 2 - 14,
+    );
+    const maxWidth = Math.max(
+      1,
+      clip.right - clip.left - PROFILE_CARD_MARGIN * 2,
+    );
+    card.style.setProperty("--profile-max-height", `${maxHeight}px`);
+    card.style.setProperty("--profile-max-width", `${maxWidth}px`);
+
+    const height = card.offsetHeight;
+    const width = card.offsetWidth;
+    const below = clip.bottom - box.bottom - PROFILE_CARD_MARGIN;
+    const above = box.top - clip.top - PROFILE_CARD_MARGIN;
+    const prefersDown = anchor.dataset.profileDir !== "up";
+    const opensDown =
+      prefersDown
+        ? below >= height
+          ? true
+          : above >= height
+            ? false
+            : below >= above
+        : above >= height
+          ? false
+          : below >= height
+            ? true
+            : below > above;
+    const minLeft = clip.left + PROFILE_CARD_MARGIN;
+    const maxLeft = Math.max(
+      minLeft,
+      clip.right - PROFILE_CARD_MARGIN - width,
+    );
+    const minTop = clip.top + PROFILE_CARD_MARGIN;
+    const maxTop = Math.max(
+      minTop,
+      clip.bottom - PROFILE_CARD_MARGIN - height,
+    );
+    const desiredTop = opensDown ? box.bottom : box.top - height;
+    const desiredLeft = Math.min(maxLeft, Math.max(minLeft, box.left - 6));
+    placeProfileCard(
+      card,
+      desiredLeft,
+      Math.min(maxTop, Math.max(minTop, desiredTop)),
+    );
+    anchor.toggleAttribute("data-profile-flip", opensDown !== prefersDown);
+  });
+}
+
+/** The intersection of everything that can crop the card and the viewport. */
+function clippingBoundsFor(node) {
+  const viewport = window.visualViewport;
+  const offsetLeft = viewport?.offsetLeft || 0;
+  const offsetTop = viewport?.offsetTop || 0;
+  const bounds = {
+    left: offsetLeft,
+    top: offsetTop,
+    right: offsetLeft + (viewport?.width || window.innerWidth),
+    bottom: offsetTop + (viewport?.height || window.innerHeight),
+  };
+  for (
+    let parent = node.parentElement;
+    parent !== null && parent !== document.body;
+    parent = parent.parentElement
+  ) {
+    const style = window.getComputedStyle(parent);
+    const box = parent.getBoundingClientRect();
+    if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) {
+      bounds.left = Math.max(bounds.left, box.left);
+      bounds.right = Math.min(bounds.right, box.right);
+    }
+    if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) {
+      bounds.top = Math.max(bounds.top, box.top);
+      bounds.bottom = Math.min(bounds.bottom, box.bottom);
+    }
+  }
+  return bounds;
+}
+
+document.addEventListener("mouseover", positionProfileCard);
+document.addEventListener("focusin", positionProfileCard);
+document.addEventListener("scroll", positionProfileCard, true);
+window.addEventListener("resize", positionProfileCard);
+window.visualViewport?.addEventListener("resize", positionProfileCard);
+window.visualViewport?.addEventListener("scroll", positionProfileCard);
 
 /* -------------------------------------------------- phone swipe ---- */
 /*
@@ -3636,6 +3777,12 @@ let drawerDrag;
 const CHAN_FOLD_MS = 380;
 let chanFoldTimer;
 
+/* How long the pinned shelf takes to fold away, in milliseconds: the longest
+   leg of the `.chan-pins` transition in styles.css. The redraw that removes
+   the shelf from the document waits this out so the fold is seen. */
+const PINS_FOLD_MS = 240;
+let pinsFoldTimer;
+
 /**
  * Say that the sidebar is mid-fold, for as long as it is.
  *
@@ -3658,34 +3805,72 @@ function markChanFolding(shell) {
 }
 
 /**
- * Opens or closes the pinned-message shelf without replacing the chat screen.
- * Keeping the existing nodes in place gives the list and chevron a before and
- * after state for their CSS transitions.
+ * Opens or closes the pinned-message shelf.
+ *
+ * Closed, the shelf is not in the document at all: a folded-away banner that
+ * still existed left a line of itself above the conversation, and the point of
+ * the header shortcut is that pins are out of the way until they are asked
+ * for. Opening therefore draws the screen and then replays the unfold from the
+ * collapsed state, and closing folds the nodes that are already there before a
+ * redraw takes them out — so both directions still animate.
  */
 function setPinnedMessagesOpen(open) {
   const next = open === true;
   state.pinsOpen = next;
+  paintPinnedMessagesShortcut(next);
+
+  if (next) {
+    render();
+    requestAnimationFrame(() => {
+      const shelf = document.querySelector(".chan-pins");
+      if (shelf === null || state.pinsOpen !== true) {
+        return;
+      }
+      shelf.classList.remove("open");
+      // Reading the height commits the folded state, so adding the class back
+      // is a change the transition can run over rather than a no-op.
+      void shelf.offsetHeight;
+      shelf.classList.add("open");
+    });
+    return;
+  }
 
   const banner = document.querySelector(".chan-pins");
   if (banner === null) {
     return;
   }
-  banner.classList.toggle("open", next);
+  banner.classList.remove("open");
+  banner.setAttribute("aria-hidden", "true");
+  banner.toggleAttribute("inert", true);
   banner
     .querySelector(".chan-pins-head")
-    ?.setAttribute("aria-expanded", String(next));
+    ?.setAttribute("aria-expanded", "false");
   const list = banner.querySelector(".chan-pins-list-frame");
-  list?.setAttribute("aria-hidden", String(!next));
-  list?.toggleAttribute("inert", !next);
+  list?.setAttribute("aria-hidden", "true");
+  list?.toggleAttribute("inert", true);
+  clearTimeout(pinsFoldTimer);
+  pinsFoldTimer = setTimeout(() => {
+    if (state.pinsOpen !== true) {
+      render();
+    }
+  }, PINS_FOLD_MS);
+}
 
+/**
+ * Keeps the header's pin shortcut telling the truth about the shelf. It lives
+ * outside the toggle above because the shortcut is there whether or not the
+ * channel has any pins to show yet.
+ */
+function paintPinnedMessagesShortcut(open) {
   const shortcut = document.querySelector(".ch-pins-toggle");
-  if (shortcut !== null) {
-    const title = next ? "Hide pinned messages" : "Show pinned messages";
-    shortcut.classList.toggle("on", next);
-    shortcut.title = title;
-    shortcut.setAttribute("aria-label", title);
-    shortcut.setAttribute("aria-pressed", String(next));
+  if (shortcut === null) {
+    return;
   }
+  const title = open ? "Hide pinned messages" : "Show pinned messages";
+  shortcut.classList.toggle("on", open);
+  shortcut.title = title;
+  shortcut.setAttribute("aria-label", title);
+  shortcut.setAttribute("aria-pressed", String(open));
 }
 
 function setChanDrawer(open) {
@@ -4515,26 +4700,62 @@ function animateOnce(node, className, drop) {
 /* -------------------------------------------------------- text arrival ---- */
 
 /**
- * The pace an answer arrives at: how far apart consecutive words start, and
+ * The pace an answer opens at: how far apart the first few words start, and
  * how long each one takes to settle.
  *
- * Near the speed of a sentence being read aloud. Slower and the reader is
- * waiting for words they can already half-see; faster and nothing has
- * visibly happened at all.
+ * Deliberately short. The effect is meant to be noticed at the edge of
+ * attention and then be over — a line or two should read as one soft settle
+ * rather than as a sentence being spelled out. Anything slower and the reader
+ * is waiting on words they can already half-see.
  *
  * The word's own duration is stated here as well as in `.text-reveal-word`,
  * because this is what decides when an arrival is over and stops being
  * resumed; the stylesheet is what actually plays it.
  */
-const REVEAL_STAGGER_MS = 26;
-const REVEAL_WORD_MS = 460;
+const REVEAL_STAGGER_MS = 18;
+const REVEAL_WORD_MS = 220;
 
 /**
- * Where the stagger stops. A long answer would otherwise hold its last
- * paragraph back for the better part of a minute, so past this many words the
- * remainder simply stands there — by then the arrival has been read.
+ * The longest an arrival is ever spread over, however much was said.
+ *
+ * A reader takes the effect in from the first line; after that every extra
+ * moment is spent watching text that is already written appear at walking
+ * pace. So a long answer is not simply the opening pace repeated — it is the
+ * same words, much closer together: the more there is to say, the quicker it
+ * is said, and the ceiling here plus one word's settle is the longest any
+ * message can hold the reader.
  */
-const REVEAL_MAX_WORDS = 160;
+const REVEAL_MAX_TOTAL_MS = 420;
+
+/**
+ * How far apart consecutive words start, given how many there are.
+ *
+ * A short line is barely staggered at all: a handful of words are a fraction
+ * of a beat apart, which is enough to read as arriving and little enough to
+ * be finished before it can be studied. From there the gap closes off
+ * smoothly — the spread approaches `REVEAL_MAX_TOTAL_MS` without ever
+ * reaching it — so a paragraph lands in under half a second and a wall of
+ * text is done inside two thirds of one. Nothing is truncated and there is no
+ * cliff where a longer message suddenly stops animating; it just arrives
+ * faster the more of it there is.
+ */
+function revealStaggerFor(count) {
+  if (count <= 1) {
+    return 0;
+  }
+  return (
+    REVEAL_MAX_TOTAL_MS /
+    (count - 1 + REVEAL_MAX_TOTAL_MS / REVEAL_STAGGER_MS)
+  );
+}
+
+/**
+ * How many words are taken apart at all. Past this the remainder is left as
+ * plain text: by then it is far below the fold, and at the pace a message
+ * this long arrives at, the tail is landing within a few milliseconds of
+ * itself anyway — a span apiece costs more than the effect is worth.
+ */
+const REVEAL_MAX_WORDS = 120;
 
 /** How many arrivals are remembered before the oldest are let go. */
 const REVEAL_MEMORY = 800;
@@ -4615,7 +4836,7 @@ function playTextReveal(root) {
       continue;
     }
     const elapsed = now - started;
-    if (elapsed < REVEAL_MAX_WORDS * REVEAL_STAGGER_MS + REVEAL_WORD_MS) {
+    if (elapsed < REVEAL_MAX_TOTAL_MS + REVEAL_WORD_MS) {
       revealWords(block, elapsed);
     }
   }
@@ -4663,6 +4884,153 @@ function insideSkipped(node, root) {
 }
 
 /**
+ * A picture posted with the message.
+ *
+ * An attachment is part of the body rather than something beside it —
+ * `messageBody` in screen-chats.js puts it inside the very block the words
+ * are in — so it belongs to the same arrival. The link is what carries the
+ * picture's box; the bare image is the fallback for anywhere one is written
+ * without it.
+ */
+function revealIsMedia(element) {
+  return (
+    element.classList.contains("cmsg-image") ||
+    (String(element.nodeName).toUpperCase() === "IMG" &&
+      element.hasAttribute("data-attachment"))
+  );
+}
+
+/**
+ * The outermost thing around this node that arrives in one piece, if any.
+ *
+ * A picture is not read word by word, and neither is a span of code inside a
+ * sentence: each is one thing that appears, so each takes a single place in
+ * the schedule instead of being split or — as both were — left out of it
+ * altogether and shown whole while the words around them were still coming
+ * in.
+ *
+ * Outermost, because a picture is a link around an image: counting it twice
+ * would leave one copy waiting on the other in the middle of the message.
+ */
+function revealWholeOf(node, block) {
+  let found = null;
+  for (
+    let step = node;
+    step !== null && step !== block;
+    step = step.parentNode
+  ) {
+    if (
+      step instanceof Element &&
+      (revealIsMedia(step) || String(step.nodeName).toUpperCase() === "CODE")
+    ) {
+      found = step;
+    }
+  }
+  return found;
+}
+
+/**
+ * Wraps each piece of a block in its own element so it can come in on its own
+ * delay, resuming `elapsed` milliseconds into the sequence.
+ *
+ * A negative delay is what does the resuming: the browser starts an animation
+ * that far through rather than waiting, so a redraw two hundred milliseconds
+ * into an arrival carries on from two hundred milliseconds instead of
+ * replaying the opening. Whitespace is left as it was, which is what keeps
+ * wrapping, selection and copied text identical to the markup underneath.
+ *
+ * A piece is usually a word, but the message is what arrives, not only its
+ * prose: a picture posted with it takes a place in the same schedule, which
+ * is also what gives a message of nothing but a picture an arrival at all.
+ *
+ * The block is the body and stops there. The quoted line above a reply, the
+ * reactions under it and the buttons beside it are the room's furniture
+ * rather than anything that was said, so they stay where they are — see the
+ * `data-reveal` key in screen-chats.js for what a block is.
+ */
+function revealWords(block, elapsed) {
+  // One pass in reading order over the text and the elements together, so a
+  // picture between two paragraphs arrives between them rather than before or
+  // after everything else.
+  const walker = document.createTreeWalker(
+    block,
+    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+  );
+  const parts = [];
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node instanceof Element) {
+      if (revealWholeOf(node, block) === node && !insideSkipped(node, block)) {
+        parts.push(node);
+      }
+      continue;
+    }
+    const text = node.nodeValue ?? "";
+    if (
+      text.trim() !== "" &&
+      !insideSkipped(node, block) &&
+      revealWholeOf(node, block) === null
+    ) {
+      parts.push(node);
+    }
+  }
+  // Wrapped first and timed second: the stagger depends on how many pieces
+  // there turned out to be, and that is only known once the last one is in
+  // hand.
+  const revealedPings = new Set();
+  const words = [];
+  for (const part of parts) {
+    if (part instanceof Element) {
+      // Kept however long the message runs to. A picture or a piece of code
+      // is a handful of nodes at most, and one of them standing at full
+      // strength beside a sentence that is still arriving is the whole thing
+      // this is here to prevent.
+      part.classList.add(
+        revealIsMedia(part) ? "text-reveal-media" : "text-reveal-word",
+      );
+      words.push(part);
+      continue;
+    }
+    if (words.length >= REVEAL_MAX_WORDS) {
+      continue;
+    }
+    const ping = revealPingOf(part, block);
+    if (ping !== null) {
+      if (revealedPings.has(ping)) {
+        continue;
+      }
+      revealedPings.add(ping);
+      ping.classList.add("text-reveal-word");
+      words.push(ping);
+      continue;
+    }
+    const pieces = String(part.nodeValue).split(/(\s+)/u);
+    const holder = document.createDocumentFragment();
+    for (const piece of pieces) {
+      if (piece === "") {
+        continue;
+      }
+      if (piece.trim() === "" || words.length >= REVEAL_MAX_WORDS) {
+        holder.append(piece);
+        continue;
+      }
+      const word = document.createElement("span");
+      word.className = "text-reveal-word";
+      word.textContent = piece;
+      holder.append(word);
+      words.push(word);
+    }
+    part.replaceWith(holder);
+  }
+  const step = revealStaggerFor(words.length);
+  for (const [index, word] of words.entries()) {
+    word.style.setProperty(
+      "--reveal-delay",
+      `${Math.round(index * step - elapsed)}ms`,
+    );
+  }
+}
+
+/**
  * A posted ping or slash command, if this text node belongs to one.
  *
  * Those spans carry a coloured wash. Splitting them word by word would leave
@@ -4682,69 +5050,6 @@ function revealPingOf(node, block) {
     parent = parent.parentNode;
   }
   return null;
-}
-
-/**
- * Wraps each word of a block in its own element so it can come in on its own
- * delay, resuming `elapsed` milliseconds into the sequence.
- *
- * A negative delay is what does the resuming: the browser starts an animation
- * that far through rather than waiting, so a redraw two hundred milliseconds
- * into an arrival carries on from two hundred milliseconds instead of
- * replaying the opening. Whitespace is left as it was, which is what keeps
- * wrapping, selection and copied text identical to the markup underneath.
- */
-function revealWords(block, elapsed) {
-  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-  const texts = [];
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-    const words = node.nodeValue ?? "";
-    if (words.trim() !== "" && !insideSkipped(node, block)) {
-      texts.push(node);
-    }
-  }
-  const revealedPings = new Set();
-  let index = 0;
-  for (const node of texts) {
-    if (index >= REVEAL_MAX_WORDS) {
-      break;
-    }
-    const ping = revealPingOf(node, block);
-    if (ping !== null) {
-      if (revealedPings.has(ping)) {
-        continue;
-      }
-      revealedPings.add(ping);
-      ping.classList.add("text-reveal-word");
-      ping.style.setProperty(
-        "--reveal-delay",
-        `${Math.round(index * REVEAL_STAGGER_MS - elapsed)}ms`,
-      );
-      index += 1;
-      continue;
-    }
-    const pieces = String(node.nodeValue).split(/(\s+)/u);
-    const holder = document.createDocumentFragment();
-    for (const piece of pieces) {
-      if (piece === "") {
-        continue;
-      }
-      if (piece.trim() === "" || index >= REVEAL_MAX_WORDS) {
-        holder.append(piece);
-        continue;
-      }
-      const word = document.createElement("span");
-      word.className = "text-reveal-word";
-      word.style.setProperty(
-        "--reveal-delay",
-        `${Math.round(index * REVEAL_STAGGER_MS - elapsed)}ms`,
-      );
-      word.textContent = piece;
-      holder.append(word);
-      index += 1;
-    }
-    node.replaceWith(holder);
-  }
 }
 
 export function render() {
@@ -4835,7 +5140,6 @@ function renderLoadingShell(root = $("#app-root")) {
     aria-label="Loading Kumi">
     <span class="sr-only">Loading Kumi…</span>
     <div class="boot-skeleton-rail" aria-hidden="true">
-      <span class="skeleton boot-skeleton-mark"></span>
       <span class="skeleton boot-skeleton-rail-button"></span>
       <span class="skeleton boot-skeleton-rail-button"></span>
       <span class="skeleton boot-skeleton-rail-button"></span>
@@ -5062,6 +5366,105 @@ function renderNow() {
   }
 }
 
+/**
+ * Opens a person-to-person direct message and closes any agent private-chat
+ * panel that was beside it. Agent threads stay on `agent-chat-open`; this
+ * entry is only for people.
+ */
+function openUserDirectMessage(userId) {
+  state.activeDm = userId;
+  state.activeAgentPanel = undefined;
+  clearRightPanel("agent");
+  state.dmDraft = "";
+  state.dmReplyMessageId = undefined;
+  moveRightPanel("dm", "right");
+  setChanDrawer(false);
+}
+
+/**
+ * Who this account can write to privately — people, and only people.
+ *
+ * Two halves. The conversations already going come first, ordered by what
+ * is waiting in them, and everyone else on the project follows, so the
+ * menu is a way to *start* a private conversation and not only a list of
+ * the ones that happen to exist. "No conversations yet" was a dead end:
+ * the one state in which somebody most needs this menu was the one state
+ * in which it offered nothing to press.
+ *
+ * Agents are deliberately not here, and are filtered out rather than
+ * merely not added — a direct message is between two accounts. Talking to
+ * your own agent is `agent-chat-open`, which opens beside the channel
+ * instead of taking the room away, and an org agent's whole point is that
+ * it works where the team can see it. Both are reached from the roster.
+ */
+function showDirectMessageMenu(node) {
+  const conversations = [...state.dmConversations]
+    .filter((conversation) => isDirectMessagePerson(conversation.userId))
+    .sort(
+      (left, right) => Number(right.unread ?? 0) - Number(left.unread ?? 0),
+    );
+  const talking = new Set(
+    conversations.map((conversation) => conversation.userId),
+  );
+  // Everyone reachable who has not been written to yet. `dmPeople` is the
+  // project's whole room as the server counts it — memberships plus
+  // repository grants — and it arrives with the inbox above.
+  const others = state.dmPeople.filter(
+    (person) => isDirectMessagePerson(person.id) && !talking.has(person.id),
+  );
+  const rows = [
+    ...conversations.slice(0, 12).map((conversation) => ({
+      act: "dm-open",
+      value: conversation.userId,
+      label: memberName(conversation.userId) ?? conversation.userId,
+      iconName: "chatBubble",
+      ...(Number(conversation.unread ?? 0) === 0
+        ? {}
+        : { hint: `${conversation.unread} unread` }),
+    })),
+    ...(conversations.length > 0 && others.length > 0
+      ? [{ separator: true }]
+      : []),
+    ...others.slice(0, 12).map((person) => ({
+      act: "dm-open",
+      value: person.id,
+      label: person.name ?? memberName(person.id) ?? person.id,
+      iconName: "users",
+      hint: personOnline(person.id) ? "Here now" : "Send a message",
+    })),
+  ];
+  showMenu(
+    node,
+    rows.length === 0
+      ? [
+          {
+            act: "noop",
+            label: "Nobody else on this project yet",
+            disabled: true,
+          },
+        ]
+      : rows,
+  );
+}
+
+/**
+ * Opens the already-cached history at its newest message, then does the same
+ * once the server's current history replaces it. Ordinary renders continue
+ * through the anchor restore, so scrolling up afterwards is still respected.
+ */
+function loadOpenedDirectMessage(userId) {
+  scrollDirectMessageToLatest();
+  void loadDmThread(userId).then(() => {
+    // A slower request for the conversation just left must not move the one
+    // that replaced it.
+    if (state.activeDm !== userId) {
+      return;
+    }
+    render();
+    scrollDirectMessageToLatest();
+  });
+}
+
 function navigate(route) {
   // A link or a stored route from before Code and Coordinator were folded into
   // the channel lands here; chats is the landing view, so it is the fallback.
@@ -5263,7 +5666,14 @@ function answerQuestionStep(choice) {
 
 function actionOf(event) {
   const node = event.target.closest("[data-act]");
-  return node === null ? undefined : { node, act: node.dataset.act, value: node.dataset.value };
+  if (node !== null) {
+    return { node, act: node.dataset.act, value: node.dataset.value };
+  }
+  const attachment = event.target.closest(".cmsg-image");
+  if (attachment === null || attachment.querySelector("img[data-attachment]") === null) {
+    return undefined;
+  }
+  return { node: attachment, act: "image-preview", value: undefined };
 }
 
 /**
@@ -5296,6 +5706,69 @@ function selectMobileChannelMessage(event) {
   }
 }
 
+/**
+ * Moves one shared desktop hover surface to the message under the pointer.
+ *
+ * Painting every row's own background makes the highlight disappear from one
+ * message and appear on the next. Keeping one surface in the transcript lets
+ * CSS interpolate its position and height instead, including between compact
+ * and full message rows. Touch keeps the selected-row interaction above and
+ * reduced-motion readers keep the surface without its travel animation.
+ */
+function positionChannelMessageHoverHighlight(event) {
+  if (!window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+    return;
+  }
+  const row =
+    event.target.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  const list = row?.parentElement ?? null;
+  if (row === null || list?.id !== "chan-messages") {
+    return;
+  }
+
+  let highlight = list.querySelector(":scope > .cmsg-hover-highlight");
+  if (highlight === null) {
+    highlight = document.createElement("div");
+    highlight.className = "cmsg-hover-highlight";
+    highlight.setAttribute("aria-hidden", "true");
+    list.append(highlight);
+  }
+  highlight.style.setProperty("--cmsg-hover-x", `${row.offsetLeft}px`);
+  highlight.style.setProperty("--cmsg-hover-y", `${row.offsetTop}px`);
+  highlight.style.setProperty("--cmsg-hover-width", `${row.offsetWidth}px`);
+  highlight.style.setProperty("--cmsg-hover-height", `${row.offsetHeight}px`);
+  highlight.classList.add("is-visible");
+}
+
+/** Hides the shared surface only after the pointer leaves message rows. */
+function clearChannelMessageHoverHighlight(event) {
+  const row =
+    event.target.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  const list = row?.parentElement ?? null;
+  if (row === null || list?.id !== "chan-messages") {
+    return;
+  }
+  const nextRow =
+    event.relatedTarget?.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  // Moving directly to another message leaves the surface alive so the next
+  // mouseover changes its geometry and CSS can animate from the old row.
+  if (nextRow?.parentElement === list) {
+    return;
+  }
+  list
+    .querySelector(":scope > .cmsg-hover-highlight")
+    ?.classList.remove("is-visible");
+}
+
+document.addEventListener("mouseover", positionChannelMessageHoverHighlight);
+document.addEventListener("mouseout", clearChannelMessageHoverHighlight);
+
 document.addEventListener("click", (event) => {
   // This runs before action lookup because an ordinary message body has no
   // `data-act`: selecting it is still a complete interaction on touch.
@@ -5316,6 +5789,21 @@ document.addEventListener("click", (event) => {
   }
 
   switch (act) {
+    case "image-preview": {
+      event.preventDefault();
+      const image = node.querySelector("img[data-attachment]");
+      if (image === null) {
+        return;
+      }
+      void showModal({
+        title: "Image preview",
+        image: {
+          src: image.currentSrc || image.src,
+          alt: image.alt,
+        },
+      });
+      return;
+    }
     case "nav":
       event.preventDefault();
       navigate(value);
@@ -5388,12 +5876,9 @@ document.addEventListener("click", (event) => {
     case "switch-person":
       closeSwitcher();
       navigate("chats");
-      state.activeDm = value;
-      state.activeAgentPanel = undefined;
-      state.dmDraft = "";
-      state.dmReplyMessageId = undefined;
+      openUserDirectMessage(value);
       render();
-      void loadDmThread(value).then(() => render());
+      loadOpenedDirectMessage(value);
       return;
     case "switch-screen":
       closeSwitcher();
@@ -5401,75 +5886,10 @@ document.addEventListener("click", (event) => {
       return;
     /**
      * Who this account can write to privately — people, and only people.
-     *
-     * Two halves. The conversations already going come first, ordered by what
-     * is waiting in them, and everyone else on the project follows, so the
-     * menu is a way to *start* a private conversation and not only a list of
-     * the ones that happen to exist. "No conversations yet" was a dead end:
-     * the one state in which somebody most needs this menu was the one state
-     * in which it offered nothing to press.
-     *
-     * Agents are deliberately not here, and are filtered out rather than
-     * merely not added — a direct message is between two accounts. Talking to
-     * your own agent is `agent-chat-open`, which opens beside the channel
-     * instead of taking the room away, and an org agent's whole point is that
-     * it works where the team can see it. Both are reached from the roster.
+     * Built by {@link showDirectMessageMenu}.
      */
     case "dm-list": {
-      const me = currentUserId();
-      // By id, because that is what a conversation and a roster row agree on.
-      // An id that belongs to an agent is by definition not a person's, so
-      // this can only ever remove the wrong kind of row.
-      const agentIds = new Set(state.agents.map((agent) => agent.id));
-      const isPerson = (userId) =>
-        userId !== "" && userId !== me && !agentIds.has(userId);
-      const conversations = [...state.dmConversations]
-        .filter((conversation) => isPerson(conversation.userId))
-        .sort(
-          (left, right) => Number(right.unread ?? 0) - Number(left.unread ?? 0),
-        );
-      const talking = new Set(
-        conversations.map((conversation) => conversation.userId),
-      );
-      // Everyone reachable who has not been written to yet. `dmPeople` is the
-      // project's whole room as the server counts it — memberships plus
-      // repository grants — and it arrives with the inbox above.
-      const others = state.dmPeople.filter(
-        (person) => isPerson(person.id) && !talking.has(person.id),
-      );
-      const rows = [
-        ...conversations.slice(0, 12).map((conversation) => ({
-          act: "dm-open",
-          value: conversation.userId,
-          label: memberName(conversation.userId) ?? conversation.userId,
-          iconName: "chatBubble",
-          ...(Number(conversation.unread ?? 0) === 0
-            ? {}
-            : { hint: `${conversation.unread} unread` }),
-        })),
-        ...(conversations.length > 0 && others.length > 0
-          ? [{ separator: true }]
-          : []),
-        ...others.slice(0, 12).map((person) => ({
-          act: "dm-open",
-          value: person.id,
-          label: person.name ?? memberName(person.id) ?? person.id,
-          iconName: "users",
-          hint: personOnline(person.id) ? "Here now" : "Send a message",
-        })),
-      ];
-      showMenu(
-        node,
-        rows.length === 0
-          ? [
-              {
-                act: "noop",
-                label: "Nobody else on this project yet",
-                disabled: true,
-              },
-            ]
-          : rows,
-      );
+      showDirectMessageMenu(node);
       return;
     }
     case "repo-menu":
@@ -5493,6 +5913,12 @@ document.addEventListener("click", (event) => {
         ...(canManageRepository(value)
           ? [
               { act: "channel-rename-repo", value, label: "Rename repository…", iconName: "pencil" },
+            ]
+          : []),
+        // Deleting asks for more than managing does: an owner, or a co-owner
+        // of this repository. An admin who may rename it is not offered it.
+        ...(canDeleteRepository(value)
+          ? [
               {
                 act: "channel-delete-repo",
                 value,
@@ -6125,11 +6551,9 @@ document.addEventListener("click", (event) => {
     case "dm-open":
       state.activeDm = value;
       state.dmDraft = "";
-      state.dmReplyMessageId = undefined;
-      moveRightPanel("dm", "right");
-      setChanDrawer(false);
+      openUserDirectMessage(value);
       render();
-      void loadDmThread(value).then(() => render());
+      loadOpenedDirectMessage(value);
       return;
     // Starts an "@agents …" or "@everyone …" message rather than sending one:
     // the person still says what they want asked or told; this only saves
@@ -6634,35 +7058,10 @@ document.addEventListener("click", (event) => {
         })
         .catch((error) => toast(error.message, "error"));
       return;
-    case "agent-add": {
-      // Which agent to connect is the user's decision. Silently picking the
-      // first unconnected provider made "Add Agent" a lottery on a screen
-      // whose whole subject is which agents are yours.
-      // Offered on whether *you* have connected it, not on whether the host
-      // machine happens to be signed in. Filtering on `connected` hid every
-      // provider the host was logged into, which on a developer's own machine
-      // is usually all of them — so "Add agent" reported that everything was
-      // already connected while the user had connected nothing.
-      const choices = state.providers.filter(
-        (entry) => entry.ownCredential === undefined,
-      );
-      if (choices.length === 0) {
-        toast("You have connected every available agent.");
-        return;
-      }
-      showMenu(
-        node,
-        choices.map((entry) => ({
-          act: "agent-connect",
-          value: entry.id,
-          label: entry.connected
-            ? `Connect your own ${agentLabelOf(entry.id)}`
-            : `Connect ${agentLabelOf(entry.id)}`,
-          iconName: "robot",
-        })),
-      );
+    case "agent-add":
+      closePopover();
+      void startAddAgentFlow(render);
       return;
-    }
     case "agent-disconnect":
       void api(`/chat/providers/${encodeURIComponent(value)}`, {
         method: "DELETE",
@@ -6869,11 +7268,11 @@ document.addEventListener("click", (event) => {
               },
             ]
           : []),
-        // Renaming and deleting are the admin's counterparts: somebody whose
-        // access is organization-wide cannot leave a repository, but can
-        // rename or remove it. Without these the menu had nothing to offer
-        // them at all. A rename changes only what the repository is called —
-        // the id keeps addressing the channel, its tasks and its files.
+        // Renaming is the admin's counterpart: somebody whose access is
+        // organization-wide cannot leave a repository, but can rename it.
+        // Without this the menu had nothing to offer them at all. A rename
+        // changes only what the repository is called — the id keeps
+        // addressing the channel, its tasks and its files.
         ...(canManageRepository(value)
           ? [
               {
@@ -6882,6 +7281,13 @@ document.addEventListener("click", (event) => {
                 label: `Rename #${repositoryLabel(value)}`,
                 iconName: "pencil",
               },
+            ]
+          : []),
+        // Deleting is not: it is irreversible and takes everyone else's
+        // history with it, so only an owner or a co-owner of this repository
+        // is offered it.
+        ...(canDeleteRepository(value)
+          ? [
               {
                 act: "channel-delete-repo",
                 value,
@@ -6933,34 +7339,39 @@ document.addEventListener("click", (event) => {
               .map((agent) => agent.id)
           : [],
       );
-      const connected = myAgents().filter((agent) => agent.connected === true);
-      showMenu(
-        anchor,
-        connected.length === 0
-          ? [
-              // Connection lives in Settings (`agentsCard`), not on My Agents.
-              // Sending somebody who has none there is the only way the plus
-              // on this heading can finish what it started.
-              {
-                act: "nav",
-                value: "settings",
-                label: "Connect agents",
-                iconName: "robot",
-              },
-            ]
-          : connected.map((agent) => ({
-              // Carries the repository too: this menu can be opened from a
-              // channel that is not the one currently on screen, and adding
-              // to whichever happens to be open would be silently wrong.
-              act: "channel-agent-pick",
-              value: `${value}|${agent.id}`,
-              label: inChannel.has(agent.id)
-                ? `${agent.name} · already here`
-                : agent.name,
-              iconName: "robot",
-              disabled: inChannel.has(agent.id),
-            })),
+      const connected = myAgents().filter(
+        (agent) => agent.mine === true && agent.connected === true,
       );
+      const canConnectAnother = state.providers.some(
+        (provider) =>
+          provider.ownCredential === undefined &&
+          (provider.signInFlow !== undefined ||
+            (provider.acceptedCredentialKinds ?? []).length > 0),
+      );
+      showMenu(anchor, [
+        ...connected.map((agent) => ({
+          // Carries the repository too: this menu can be opened from a
+          // channel that is not the one currently on screen, and adding
+          // to whichever happens to be open would be silently wrong.
+          act: "channel-agent-pick",
+          value: `${value}|${agent.id}`,
+          label: inChannel.has(agent.id)
+            ? `${agent.name} · already here`
+            : agent.name,
+          iconName: "robot",
+          disabled: inChannel.has(agent.id),
+        })),
+        {
+          // Always leave a way forward. Previously one connected agent that
+          // was already in the room filled this menu with a single disabled
+          // row, so the plus button could no longer start another connection.
+          act: "agent-add",
+          label: canConnectAnother
+            ? "Connect another agent"
+            : "View agent connections",
+          iconName: "plus",
+        },
+      ]);
       return;
     }
     /**

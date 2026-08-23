@@ -63,6 +63,7 @@ import {
   createId,
   describeError,
   projectBudgets,
+  readsAsReportRequest,
   ROLE_CONTEXT_PREFIX,
   withoutRoleContext,
   type ApprovalStatus,
@@ -1902,7 +1903,7 @@ const INTERROGATIVE_RE =
  * for requests that actually ask to build, fix, audit, or change something.
  */
 const ANSWER_REQUEST_RE =
-  /^(?:(?:give|show|tell)\s+me\s+(?:an?\s+)?(?:summary|overview)\b|summari[sz]e\b|describe\b|explain\b|outline\b|(?:an?\s+)?(?:summary|overview)\b)/iu;
+  /^(?:(?:give|show|tell)\s+me\s+(?:an?\s+)?(?:summary|overview)\b|summari[sz]e\b|describe\b|explain\b|outline\b|(?:an?\s+)?(?:summary|overview)\b|(?:status|progress)\s+report\b)/iu;
 
 /**
  * Whether a message addressed to an agent by name asks for an answer rather
@@ -6119,9 +6120,12 @@ export class ApiGateway {
       return;
     }
 
-    // Deleting a repository. Gated on `manage_project` through the ordinary
-    // role/grant pipeline, with the repository's own creator getting a
-    // second path in — see `authorizeRepositoryOwnerAction`'s doc comment.
+    // Deleting a repository. Ownership, and nothing weaker: an organization
+    // owner, or somebody holding an `owner` grant on this repository — the
+    // co-owner the People row promotes. Administrators and the repository's
+    // own creator can still rename it and manage its grants, but deletion
+    // takes everyone else's work with it, so it is not theirs to do. See
+    // `authorizeRepositoryDeletion`.
     //
     // Everything scoped to the repository is cascade-deleted by
     // `removeRepository` — the shared channel, the grants, and the execution
@@ -6140,11 +6144,10 @@ export class ApiGateway {
     );
     if (repositoryMatch !== undefined && method === "DELETE") {
       const [projectId = "", repositoryId = ""] = repositoryMatch;
-      const repository = await this.authorizeRepositoryOwnerAction(
+      const repository = await this.authorizeRepositoryDeletion(
         principal,
         projectId,
         repositoryId,
-        "manage_project",
       );
       await this.performOperation("repository_deletion_failed", async () => {
         if (this.options.operations.deleteRepository === undefined) {
@@ -10013,10 +10016,14 @@ export class ApiGateway {
   }
 
   /**
-   * Authorizes a repository-scoped administrative action (deleting the
-   * repository, changing who holds a repository-scoped grant on it) with a
-   * second path in for the repository's creator, alongside the ordinary
-   * role/grant permission check.
+   * Authorizes a repository-scoped administrative action (renaming it,
+   * changing who holds a repository-scoped grant on it) with a second path
+   * in for the repository's creator, alongside the ordinary role/grant
+   * permission check.
+   *
+   * Deletion is deliberately not one of these — it is irreversible and takes
+   * everyone else's history with it, so it asks for ownership through
+   * {@link authorizeRepositoryDeletion} instead.
    *
    * The creator path is additive, never a substitute: an organization admin
    * who did not create a repository must not lose the ability to administer
@@ -10078,6 +10085,61 @@ export class ApiGateway {
       assertTokenScope(principal, permission);
       return repository;
     }
+    if (
+      !(await this.options.store.projectHasRepository(projectId, repositoryId))
+    ) {
+      throw new HttpError(404, "not_found", "Repository was not found");
+    }
+    const repository = await this.options.store.getRepository(repositoryId);
+    if (repository === undefined) {
+      throw new HttpError(404, "not_found", "Repository was not found");
+    }
+    return repository;
+  }
+
+  /**
+   * Authorizes deleting a repository — ownership, and nothing weaker.
+   *
+   * Deletion is not an ordinary administrative action: it cascades the
+   * channel, the grants and the whole execution history, and nobody it
+   * belongs to can undo it. So it is deliberately *not* routed through
+   * {@link authorizeRepositoryOwnerAction}, which admits anyone holding
+   * `manage_project` (an organization admin) and the repository's own
+   * creator. Renaming and grant management keep that wider door; deletion
+   * does not.
+   *
+   * Who is left is exactly the two the interface calls owners: an
+   * organization owner, and the holder of an `owner` grant on this
+   * repository — the "co-owner" the People row promotes. Both surface as an
+   * effective role of `owner` from {@link authorizeRepository}, which
+   * composes the organization role with the grant on this exact repository,
+   * so asking it for `manage_project` and then insisting the role that
+   * passed was `owner` is the whole check. A system administrator is an
+   * owner everywhere by the same function's reckoning.
+   *
+   * Returns the repository so callers do not have to fetch it twice.
+   */
+  private async authorizeRepositoryDeletion(
+    principal: AuthenticatedPrincipal,
+    projectId: string,
+    repositoryId: string,
+  ): Promise<StoredRepository> {
+    const { role } = await authorizeRepository(
+      this.options.store,
+      principal,
+      projectId,
+      repositoryId,
+      "manage_project",
+    );
+    if (role !== "owner") {
+      throw new HttpError(
+        403,
+        "forbidden",
+        "Only an owner or co-owner of this repository can delete it",
+      );
+    }
+    // Checked after the role, so somebody who may not delete anything here
+    // cannot use the answer to learn which repositories a project holds.
     if (
       !(await this.options.store.projectHasRepository(projectId, repositoryId))
     ) {
@@ -11014,11 +11076,13 @@ export class ApiGateway {
   /**
    * Previously integrated work that is unmistakably the request being made.
    *
-   * Only successful tasks qualify. An open, failed, cancelled, queued or
-   * planned task still needs an agent, and a request made inside a thread is
-   * an explicit continuation rather than a duplicate. The overlap bar is
-   * intentionally higher than automatic thread merging: a second task is
-   * cheaper than incorrectly claiming that a change already exists.
+   * Only work with a recorded canonical promotion qualifies. `integrated` is
+   * also the terminal status for a report that changed nothing, so the status
+   * alone is not evidence that anything was implemented. An open, failed,
+   * cancelled, queued or planned task still needs an agent, and a request made
+   * inside a thread is an explicit continuation rather than a duplicate. The
+   * overlap bar is intentionally higher than automatic thread merging: a
+   * second task is cheaper than incorrectly claiming that a change exists.
    */
   private async findCompletedWorkReference(input: {
     projectId: string;
@@ -11041,9 +11105,11 @@ export class ApiGateway {
       /\b(?:undo(?:ne|ing)?|revert(?:s|ed|ing)?|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|disabl(?:e|es|ed|ing))\b/iu.test(
         text,
       );
-    let best:
-      | { task: SubmittedTask; root: ChannelMessage | undefined; score: number }
-      | undefined;
+    const matches: Array<{
+      task: SubmittedTask;
+      root: ChannelMessage | undefined;
+      score: number;
+    }> = [];
     for (const task of recentFirst(tasks)) {
       if (task.status !== "integrated") {
         continue;
@@ -11071,10 +11137,27 @@ export class ApiGateway {
         textOverlap(request, objective),
         rootRequest === "" ? 0 : textOverlap(request, rootRequest),
       );
-      if (score < 0.6 || (best !== undefined && score <= best.score)) {
+      if (score < 0.6) {
         continue;
       }
-      best = { task, root, score };
+      matches.push({ task, root, score });
+    }
+    matches.sort((left, right) => right.score - left.score);
+    let best:
+      | { task: SubmittedTask; root: ChannelMessage | undefined; score: number }
+      | undefined;
+    for (const match of matches) {
+      // Reports and no-op runs finish as `integrated` too. The promotion is
+      // the durable fact that canonical actually moved for this task; without
+      // one, saying the requested change already exists would be a guess.
+      if (
+        (await this.revisionsForTask(input.repositoryId, match.task.id).catch(
+          () => undefined,
+        )) !== undefined
+      ) {
+        best = match;
+        break;
+      }
     }
     if (best === undefined) {
       return undefined;
@@ -11259,6 +11342,11 @@ export class ApiGateway {
       input.planOnly !== true &&
       input.queueAfterCurrent !== true &&
       input.forceQuestion !== true &&
+      // This shortcut is only safe for an explicit change request. Reports
+      // and audits are time-sensitive answers, while vague instructions need
+      // the agent to read context before deciding what, if anything, exists.
+      looksLikeTaskRequest(content) &&
+      !readsAsReportRequest(withoutMentions(content)) &&
       !readsAsQuestion(content) &&
       !asksAboutWork(withoutMentions(content)) &&
       !SYSTEM_PACKAGE_INSTALL_RE.test(content)

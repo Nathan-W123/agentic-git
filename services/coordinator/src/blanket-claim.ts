@@ -64,9 +64,9 @@ export function blanketPlan(
  *
  * They widen what this holder may write, and nothing more. Arbitration reads
  * the files, so the rest of a directory stays available to everybody else and
- * the fourth file is re-admitted when it is actually written rather than
- * reserved on the chance that it will be. See `claimReservesPath`, which is
- * where that distinction lives.
+ * the fourth file is re-admitted when it is actually written rather than held
+ * on the chance that it will be. See `claimOccupiesPath`, which is where that
+ * distinction lives.
  */
 export function freezePlanFromWorkingChanges(
   plan: AgentPlan,

@@ -26,7 +26,7 @@ import {
 } from "@coord/repository-service";
 import {
   assertAgentPlan,
-  claimReservesPath,
+  claimOccupiesPath,
   createId,
   describeError,
   mergePlanScope,
@@ -446,11 +446,10 @@ function planClaimedResources(plan: AgentPlan): Map<string, PlanResourceRef> {
  * every other axis are compared the same way files are — a task queued behind
  * a symbol is waiting just as long as one queued behind a file.
  *
- * A blanket claim is read through {@link claimReservesPath} as well as through
- * its file list, because a claim nobody has narrowed yet reserves everything.
- * A frozen one contests only the paths its holder actually names — the
- * directories a freeze widens to say what that holder may write, not what
- * every arrival is refused.
+ * A claim is read through {@link claimOccupiesPath} as well as through its
+ * file list: a blanket claim holds the repository, while a frozen one holds
+ * only what its plan names — the directories it carries are room for files
+ * nobody has written yet, so a waiter is not refused for those.
  */
 export function contestedPlanResources(
   holder: AgentPlan,
@@ -489,7 +488,7 @@ export function contestedPlanResources(
     for (const resourceId of wanted ?? []) {
       const covered =
         held.has(planResourceKey(resourceType, resourceId)) ||
-        (resourceType === "file" && claimReservesPath(holder, resourceId));
+        (resourceType === "file" && claimOccupiesPath(holder, resourceId));
       if (covered) {
         contested[bucket].push(resourceId);
       }
@@ -4733,17 +4732,17 @@ export class Coordinator {
     if (entry.plan.claim?.kind !== "frozen") {
       return;
     }
-    // Measured against what the claim reserves, not against what it permits.
-    // The directories a freeze widens to are what let this holder write here
-    // without asking; they are not a reservation, so somebody else may have
-    // been granted this path in the meantime. Sending it back through
-    // admission is what turns that into an answer instead of a silent second
-    // writer.
+    // Measured against what the claim occupies, not against what it permits.
+    // The directories a freeze carries are what let this holder write here
+    // without asking, and arbitration stopped treating them as a hold — so a
+    // path under one may since have been granted to somebody else. Reading
+    // them here too would let this holder write it anyway, with nothing
+    // anywhere saying two tasks had authored the same file.
     const escaped = [
       ...new Set(
         changeSet.patches
           .map((patch) => patch.path)
-          .filter((file) => !claimReservesPath(entry.plan, file)),
+          .filter((file) => !claimOccupiesPath(entry.plan, file)),
       ),
     ].sort();
     if (escaped.length === 0) {

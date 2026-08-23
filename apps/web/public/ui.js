@@ -107,7 +107,7 @@ export const ICONS = {
     '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/>',
   ),
   gear: S(
-    '<circle cx="12" cy="12" r="3.2"/><path d="M12 3.2v2.3M12 18.5v2.3M20.8 12h-2.3M5.5 12H3.2M18.2 5.8l-1.7 1.7M7.5 16.5l-1.7 1.7M18.2 18.2l-1.7-1.7M7.5 7.5 5.8 5.8"/>',
+    '<circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   ),
   search: S('<circle cx="10.9" cy="10.9" r="6.5"/><path d="m15.7 15.7 3.9 3.9"/>'),
   plus: S('<path d="M12 5.4v13.2M5.4 12h13.2"/>'),
@@ -477,24 +477,15 @@ if (typeof document !== "undefined") {
 }
 
 /**
- * The letters of the KUMI wordmark, shared by the badge and the full word.
- *
- * One drawing serves both places the mark appears, because two drawings
- * drift: the badge is literally the wordmark's first letter. `brandMark`
- * slices a square viewport out of the left edge and gets the K; the sign-in
- * card calls `brandWordmark` and gets all four letters.
+ * The letters of the full KUMI wordmark used on the auth shell.
  *
  * The letters are stroked polylines rather than filled outlines, because that
  * is what they are — one constant weight, flat cuts, no curves anywhere. The
  * K's arms run past the vertex into the stem so their ends are hidden under
- * it, which is also how the raster icons are drawn; a joint that only exists
- * in one of the two would not survive the next edit.
+ * it.
  *
- * `currentColor` throughout: the mark takes the colour of the text beside it,
- * so it is right on dark and light without a second definition. mark.svg and
- * scripts/render-brand-icons.mjs carry the same K for the surfaces that can
- * read neither this file nor `currentColor`, and a change to the mark belongs
- * in all three together.
+ * `currentColor` throughout: the wordmark takes the colour of the text beside
+ * it, so it is right on dark and light without a second definition.
  */
 const BRAND_LETTERS = `<path d="M8.3 8V40"/>
     <path d="M42 11 13.5 24 42 37"/>
@@ -504,28 +495,15 @@ const BRAND_LETTERS = `<path d="M8.3 8V40"/>
     <path d="M102.3 10.5 123 30l20.7-19.5"/>
     <path d="M158.3 8V40"/>`;
 
-/** The badge: a square viewport sliced off the wordmark, so only the K shows. */
-export function brandMark(size = 34) {
-  return `<svg class="brand-mark" width="${size}" height="${size}"
-    viewBox="0 0 168 48" preserveAspectRatio="xMinYMid slice"
-    fill="none" stroke="currentColor" stroke-width="6.6"
-    stroke-linecap="butt" stroke-linejoin="miter" aria-hidden="true">
-    ${BRAND_LETTERS}
-  </svg>`;
-}
-
 /**
  * The whole word, for the surfaces with room for it — the sign-in card and
  * everything else on the auth shell.
  *
- * The height is derived from the width rather than left to CSS: the badge's
- * `slice` cuts the word down to the K the moment the box is anywhere near
- * square, so a stylesheet rule that fails to land — or a caller that forgets
- * one — silently shows a giant letter instead of the name. Asking for a
- * width here is enough to be sure of the 3.5:1 the letters were drawn at,
- * and `meet` means the word is never cropped even if something else sizes
- * the box. `aria-label` rather than `aria-hidden`: read out, this one is the
- * product's name, not decoration beside a heading that already says it.
+ * The height is derived from the width rather than left to CSS. Asking for a
+ * width here is enough to preserve the 3.5:1 aspect ratio the letters were
+ * drawn at, and `meet` means the word is never cropped if something else
+ * sizes the box. `aria-label` rather than `aria-hidden`: read out, this one is
+ * the product's name, not decoration beside a heading that already says it.
  */
 export function brandWordmark(width = 120) {
   const height = Math.round((width / 3.5) * 100) / 100;
@@ -1613,22 +1591,51 @@ export function toast(message, tone = "") {
 /* -------------------------------------------------------------- modal ---- */
 
 /** One application modal, as a native <dialog> so focus and Esc are free. */
-export function showModal({ title, subtitle = "", body = "", confirm = "Confirm", cancel = "Cancel" }) {
+export function showModal({
+  title,
+  subtitle = "",
+  body = "",
+  confirm = "Confirm",
+  cancel = "Cancel",
+  image,
+}) {
   const dialog = $("#modal");
+  const returnFocus = document.activeElement;
   return new Promise((resolve) => {
-    dialog.innerHTML = `<form method="dialog" class="modal-card">
-      <div>
-        <h3>${esc(title)}</h3>
-        ${subtitle ? `<p class="modal-sub">${esc(subtitle)}</p>` : ""}
-      </div>
-      ${body}
-      <div class="modal-actions">
-        <button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>
-        <button class="btn btn-primary" value="confirm" type="submit">${esc(confirm)}</button>
-      </div>
-    </form>`;
+    dialog.returnValue = "";
+    if (image) {
+      dialog.setAttribute("aria-labelledby", "modal-image-title");
+    } else {
+      dialog.removeAttribute("aria-labelledby");
+    }
+    dialog.innerHTML = image
+      ? `<form method="dialog" class="modal-card modal-image-card">
+          <h3 class="sr-only" id="modal-image-title">${esc(title)}</h3>
+          <button class="icon-btn modal-image-close" value="cancel" type="submit" aria-label="Close image preview">${icon("close")}</button>
+          <img class="modal-image" src="${esc(image.src)}" alt="${esc(image.alt)}">
+        </form>`
+      : `<form method="dialog" class="modal-card">
+          <div>
+            <h3>${esc(title)}</h3>
+            ${subtitle ? `<p class="modal-sub">${esc(subtitle)}</p>` : ""}
+          </div>
+          ${body}
+          <div class="modal-actions">
+            <button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>
+            <button class="btn btn-primary" value="confirm" type="submit">${esc(confirm)}</button>
+          </div>
+        </form>`;
+    const onBackdropClick = (event) => {
+      if (image && event.target === dialog) {
+        dialog.close("cancel");
+      }
+    };
     const onClose = () => {
       dialog.removeEventListener("close", onClose);
+      dialog.removeEventListener("click", onBackdropClick);
+      if (image && returnFocus instanceof HTMLElement && returnFocus.isConnected) {
+        returnFocus.focus();
+      }
       if (dialog.returnValue !== "confirm") {
         resolve(undefined);
         return;
@@ -1640,6 +1647,7 @@ export function showModal({ title, subtitle = "", body = "", confirm = "Confirm"
       }
       resolve(values);
     };
+    dialog.addEventListener("click", onBackdropClick);
     dialog.addEventListener("close", onClose);
     dialog.showModal();
   });

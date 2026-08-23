@@ -1,6 +1,6 @@
 import {
   arbitrationFiles,
-  claimReservesPath,
+  claimOccupiesPath,
   completeAgentPlan,
   isBlanketClaim,
   planAdmissionApproved,
@@ -911,11 +911,11 @@ export class PlanAdmissionController {
       const spans: NamedRange[] = [];
       for (const holder of entry.heldBy) {
         const active = input.active.find((plan) => plan.taskId === holder);
-        // A claim is a statement about what a task is allowed to reach rather
-        // than about what it declared, so a claim that reserves this path has
-        // no lines to withhold and takes the file whole.
+        // A claim that occupies this path is a statement about what a task is
+        // allowed to reach rather than about what it declared, so it has no
+        // lines to withhold and takes the file whole.
         const held =
-          active === undefined || claimReservesPath(active.plan, file)
+          active === undefined || claimOccupiesPath(active.plan, file)
             ? undefined
             : declaredSpans(active.plan, file, locate);
         if (held === undefined || held.length === 0) {
@@ -996,7 +996,7 @@ export class PlanAdmissionController {
     const blocking = others.filter(
       (entry) =>
         isBlanketClaim(entry.plan) ||
-        wanted.some((file) => claimReservesPath(entry.plan, file)),
+        wanted.some((file) => claimOccupiesPath(entry.plan, file)),
     );
     if (blocking.length === 0) {
       return undefined;
@@ -1027,7 +1027,7 @@ export class PlanAdmissionController {
           "Executing work holds " +
           blocking
             .flatMap((entry) =>
-              wanted.filter((file) => claimReservesPath(entry.plan, file)),
+              wanted.filter((file) => claimOccupiesPath(entry.plan, file)),
             )
             .filter((value, index, all) => all.indexOf(value) === index)
             .sort()
@@ -1317,18 +1317,17 @@ export class PlanAdmissionController {
       contested.map((entry) => [entry.resourceId, entry]),
     );
 
-    // What a frozen claim reserves is the files its holder was observed
-    // touching, which the freeze wrote into a plan nobody re-planned. Conflict
-    // scoring reaches those through grounding as well as through the raw list,
-    // so add them explicitly to the same contested-resource set partial
-    // admission already knows how to reduce and enforce, rather than trusting
-    // two spellings of a path to agree.
+    // A frozen claim occupies the files its holder declared, and only those:
+    // the directories it also carries are room for files nobody has written
+    // yet, not a hold over every existing path beneath them. Add the occupied
+    // ones explicitly to the same contested-resource set partial admission
+    // already knows how to reduce and enforce.
     for (const file of uniqueRepositoryPaths(input.plan.expectedFiles)) {
       for (const holder of input.active) {
         if (
           holder.taskId === input.plan.taskId ||
           holder.plan.claim?.kind !== "frozen" ||
-          !claimReservesPath(holder.plan, file)
+          !claimOccupiesPath(holder.plan, file)
         ) {
           continue;
         }

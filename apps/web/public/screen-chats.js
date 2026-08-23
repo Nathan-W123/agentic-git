@@ -24,6 +24,7 @@ import {
   agentsThinkingIn,
 api,
   canDeleteChannelEntry,
+  canDeleteRepository,
   canLeaveRepository,
   canManageOrganization,
   canManageRepository,
@@ -85,7 +86,6 @@ import {
 import {
   agentFace,
   agentLabelOf,
-  brandMark,
   avatar,
   chime,
   clockTime,
@@ -136,8 +136,6 @@ function channelRail(activeRepositoryId) {
     left.id.localeCompare(right.id),
   );
   return `<nav class="channel-rail" aria-label="Channels">
-    <button type="button" class="channel-rail-brand" data-act="nav" data-value="chats"
-      title="Kumi" aria-label="Kumi">${brandMark(28)}</button>
     <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
       title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
       aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
@@ -239,48 +237,319 @@ function usageAccountLine(report) {
 }
 
 /**
- * The hover card for one roster entry.
+ * The usage figures for one of this account's own agents, as one section of
+ * its profile card.
  *
  * Only for this account's own agents: the usage route reports the *caller's*
  * account, so showing it beside a teammate's agent would put your consumption
  * under their name. Rendered from state rather than fetched on open, so the
  * first hover shows "Checking…" and every later one is instant.
  */
-function usageTip(agent) {
+function usageBlock(agent) {
   if (agent.mine !== true) {
     return "";
   }
   const report = state.providerUsage[agent.id];
   let body;
   if (report === undefined || report.loading === true) {
-    body = `<div class="rr-usage-empty">Checking usage…</div>`;
+    body = `<span class="rr-usage-empty">Checking usage…</span>`;
   } else if (report.unavailableReason !== undefined) {
-    body = `<div class="rr-usage-empty">${esc(report.unavailableReason)}</div>`;
+    body = `<span class="rr-usage-empty">${esc(report.unavailableReason)}</span>`;
   } else if ((report.windows ?? []).length === 0) {
-    body = `<div class="rr-usage-empty">No usage reported.</div>`;
+    body = `<span class="rr-usage-empty">No usage reported.</span>`;
   } else {
     body = `${report.windows
       .map((window) => {
         const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
-        return `<div class="rr-usage-row">
+        return `<span class="rr-usage-row">
           <span class="rr-usage-label">${esc(window.label)}</span>
           <span class="rr-usage-bar"><i style="width:${percent}%"></i></span>
           <span class="rr-usage-pct">${Math.round(percent)}%</span>
-        </div>${
+        </span>${
           usageResetText(window) === ""
             ? ""
-            : `<div class="rr-usage-reset">${esc(usageResetText(window))}</div>`
+            : `<span class="rr-usage-reset">${esc(usageResetText(window))}</span>`
         }`;
       })
       .join("")}
       ${
         usageAccountLine(report) === ""
           ? ""
-          : `<div class="rr-usage-plan">${esc(usageAccountLine(report))}</div>`
+          : `<span class="rr-usage-plan">${esc(usageAccountLine(report))}</span>`
       }
-      ${report.source === undefined ? "" : `<div class="rr-usage-src">${esc(report.source)}</div>`}`;
+      ${report.source === undefined ? "" : `<span class="rr-usage-src">${esc(report.source)}</span>`}`;
   }
-  return `<div class="rr-usage" role="tooltip">${body}</div>`;
+  return `<span class="pcard-section">
+    <span class="pcard-section-label">Usage</span>
+    <span class="pcard-usage">${body}</span>
+  </span>`;
+}
+
+/* ------------------------------------------------------------ profiles ---- */
+
+/**
+ * A colour somebody chose, or nothing.
+ *
+ * The value ends up in a `style` attribute, so it is matched against the exact
+ * shape a colour picker stores rather than escaped and hoped for: anything
+ * else is dropped and the card falls back to the theme's own accent. Same
+ * reasoning as `safeColor` in ui.js, which guards the faces.
+ */
+const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/iu;
+
+function safeAccent(value) {
+  return typeof value === "string" && HEX_COLOR.test(value.trim())
+    ? value.trim()
+    : undefined;
+}
+
+/** "Aug 2, 2019", or nothing when the record does not carry a date. */
+function joinedDate(value) {
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+  const when = new Date(value);
+  return Number.isNaN(when.getTime())
+    ? ""
+    : when.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+}
+
+/**
+ * One person's record in this room, under either shape it arrives in.
+ *
+ * The organization member list nests the account under `user`; the room's own
+ * people list flattens it to `id`/`name`. `personRow` reads both, and so must
+ * anything that wants the same facts from a different surface.
+ */
+function personRecord(repositoryId, userId) {
+  return channelPeopleFor(repositoryId).find(
+    (candidate) =>
+      (candidate.user?.id ?? candidate.userId ?? candidate.id ?? "") === userId,
+  );
+}
+
+/**
+ * Everything a profile card says about one agent.
+ *
+ * Assembled from state alone — no request, nothing to wait for — so the same
+ * description serves the roster, the transcript and anywhere else a face is
+ * drawn, and the three cannot drift apart on what an agent is.
+ */
+function agentProfile(agent, repositoryId) {
+  const status = agentStatus(agent, repositoryId);
+  const progress = agentWorkingProgress(agent, repositoryId);
+  const providerId = agent.provider ?? agent.id;
+  const owner =
+    agent.mine === true
+      ? "Your agent"
+      : `${memberName(agent.userId ?? "")}'s agent`;
+  // The work it has in hand, preferring this room's but never calling an agent
+  // idle while it is visibly busy in another channel — the same order
+  // `agentSpec` resolves in.
+  const agentTasks = [...activeTasks(), ...waitingTasks()].filter((candidate) =>
+    taskBelongsToAgent(candidate, agent),
+  );
+  const task =
+    agentTasks.find((candidate) => candidate.repositoryId === repositoryId) ??
+    agentTasks[0];
+  const facts = [];
+  if (task !== undefined) {
+    const taskRepositoryId = task.repositoryId ?? repositoryId;
+    facts.push({
+      // Only what is true of it right now. A queued task described as work in
+      // hand is the one line on this card somebody would act on and be wrong.
+      label: status === "working" ? "Working on" : "Waiting to start",
+      value: taskSummaryLine(
+        task,
+        channelMessagesFor(taskRepositoryId).find(
+          (entry) => entry.taskId === task.id,
+        ),
+      ),
+    });
+  }
+  facts.push({
+    label: "Role here",
+    value: String(agent.role ?? "").trim() || "No role set",
+  });
+  facts.push({ label: "Model", value: String(agent.model ?? "").trim() || "Default" });
+  facts.push({
+    label: "Who may task it",
+    value: agent.visibility === "org" ? "Anyone in the org" : "Only its owner",
+  });
+  return {
+    kind: "agent",
+    name: agent.name,
+    face: statusAgentFace(agent, 52, repositoryId),
+    accent: safeAccent(agent.color),
+    // The vendor behind it and whose account pays for it: the two facts that
+    // decide what an agent can be asked for, said before anything else.
+    subtitle: `${agentLabelOf(providerId)} · ${owner}`,
+    status,
+    statusText:
+      status === "working" && Number.isFinite(progress)
+        ? `${AGENT_STATUS_TITLE[status]} · ${Math.round(progress)}%`
+        : (AGENT_STATUS_TITLE[status] ?? ""),
+    facts,
+    usage: usageBlock(agent),
+    action: {
+      act: "agent-panel-open",
+      value: String(agent.id ?? ""),
+      label: "View full profile",
+    },
+    label: `Open details for ${agent.name}`,
+  };
+}
+
+/**
+ * Everything a profile card says about one person.
+ *
+ * Deliberately the same shape as an agent's. A channel's participants are
+ * people and agents side by side, and a reader who has learned where the role
+ * sits on one card should not have to learn it again on the other.
+ */
+function personProfile(userId, name, repositoryId) {
+  const me = userId === currentUserId();
+  const record = personRecord(repositoryId, userId);
+  const online = me || personOnline(userId);
+  const unread = dmUnreadFrom(userId);
+  const coOwner = (state.repositoryGrants[repositoryId] ?? []).some(
+    (grant) => grant.userId === userId && grant.role === "owner",
+  );
+  // A repository owner grant is presented as the title people chose in the
+  // menu, exactly as the row under the name does it; the organization role is
+  // the floor for everyone who has not been given one here.
+  const role = coOwner
+    ? "Co-owner"
+    : String(record?.role ?? memberRole(userId) ?? "").trim();
+  const facts = [];
+  if (role !== "") {
+    facts.push({ label: "Role", value: capitalised(role) });
+  }
+  const joined = joinedDate(record?.user?.createdAt ?? record?.createdAt);
+  if (joined !== "") {
+    facts.push({ label: "Member since", value: joined });
+  }
+  if (unread > 0) {
+    facts.push({
+      label: "Waiting",
+      value: `${unread} unread message${unread === 1 ? "" : "s"}`,
+    });
+  }
+  const status = online ? "working" : "away";
+  return {
+    kind: "person",
+    name: `${name}${me ? " (you)" : ""}`,
+    face: `${avatar(name, 52, name, me ? myAvatar() : undefined)}${statusDot(
+      status,
+      "",
+    )}`,
+    accent: safeAccent(record?.user?.appearance?.accent),
+    // The address is the one thing that tells two people with the same
+    // display name apart, which is the whole job of a handle here.
+    subtitle: String(record?.user?.email ?? "").trim(),
+    status,
+    statusText: me ? "You're here" : online ? "Here now" : "Away",
+    facts,
+    usage: "",
+    // Nothing to open with yourself — the same reasoning that makes your own
+    // roster row a label rather than a button.
+    action: me
+      ? undefined
+      : {
+          act: "dm-open",
+          value: userId,
+          label: unread > 0 ? `Message · ${unread} unread` : "Message",
+        },
+    label: me
+      ? `Your profile`
+      : `Open your conversation with ${name}`,
+  };
+}
+
+/**
+ * Who somebody is, without leaving what you were reading to find out.
+ *
+ * Rendered with the row and revealed by CSS, so no pointer tracking and no
+ * request is involved in reading one — everything on it is already in state
+ * for the roster's sake. The card is a real surface rather than a tooltip:
+ * it sits inside its own anchor, so a pointer can travel from the face into
+ * the card without the hover ever lapsing, and the last line is the way
+ * through to the full page when the summary is not enough.
+ *
+ * Shaped after the reference profile popout: a coloured crown, the face
+ * breaking out of it, name and handle, then a short column of labelled facts
+ * — the ones somebody actually needs before deciding whether to open the
+ * whole thing.
+ */
+function profileCard(profile) {
+  if (profile === undefined) {
+    return "";
+  }
+  const facts = profile.facts.filter(({ value }) => String(value ?? "") !== "");
+  const hasDetail = facts.length > 0 || profile.usage !== "";
+  return `<span class="pcard-pop"><span class="pcard" role="group"
+    aria-label="${esc(profile.name)} profile"${
+    profile.accent === undefined ? "" : ` style="--pcard-accent:${profile.accent}"`
+  }>
+    <span class="pcard-banner"></span>
+    <span class="pcard-body">
+      <span class="pcard-face">${profile.face}</span>
+      <span class="pcard-name">${esc(profile.name)}</span>
+      ${
+        profile.subtitle === ""
+          ? ""
+          : `<span class="pcard-sub">${esc(profile.subtitle)}</span>`
+      }
+      <span class="pcard-status">
+        <span class="status-dot status-${esc(profile.status)}"></span>
+        ${esc(profile.statusText)}
+      </span>
+      ${hasDetail ? `<span class="pcard-rule"></span>` : ""}
+      ${facts
+        .map(
+          (fact) => `<span class="pcard-section">
+            <span class="pcard-section-label">${esc(fact.label)}</span>
+            <span class="pcard-section-body">${esc(fact.value)}</span>
+          </span>`,
+        )
+        .join("")}
+      ${profile.usage}
+      ${
+        profile.action === undefined
+          ? ""
+          : `<button type="button" class="pcard-open"
+              data-act="${esc(profile.action.act)}"
+              data-value="${esc(profile.action.value)}">${esc(
+                profile.action.label,
+              )}</button>`
+      }
+    </span>
+  </span></span>`;
+}
+
+/**
+ * The face somebody points at, and the card it opens.
+ *
+ * `data-profile-dir` is the direction the card prefers; `positionProfileCard`
+ * in app.js measures the visible surface, flips when needed, and keeps every
+ * edge of the card inside it.
+ */
+function profileAnchor(profile, cls, direction, content, options = {}) {
+  return `<span class="${cls} pcard-anchor" data-profile-dir="${direction}"
+    tabindex="0" aria-label="${esc(profile.label)}"${attributeList(
+      options,
+    )}>${content}${profileCard(profile)}</span>`;
+}
+
+/** Attributes an anchor was handed, written out in one place. */
+function attributeList(options) {
+  return Object.entries(options)
+    .map(([name, value]) => ` ${name}="${esc(String(value))}"`)
+    .join("");
 }
 
 /**
@@ -767,20 +1036,28 @@ function personRow(person) {
         ? ""
         : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}"`
     }>
-      <span class="rr-avatar">
-        ${avatar(name, 22, name, me ? myAvatar() : undefined)}
-        ${
-          // Your own dot is green whenever you can see it: the page being
-          // open is what "here" means, and a roster where everyone else has
-          // a status and you have none reads as broken rather than modest.
-          me
-            ? statusDot("working", "You're here")
-            : statusDot(
-                online ? "working" : "away",
-                online ? `${name} is here` : `${name} is away`,
-              )
-        }
-      </span>
+      ${
+        // The same card an agent's face carries, from the same builders. A
+        // roster in which only half the faces answer "who is this" is a
+        // roster that has to be learned twice.
+        profileAnchor(
+          personProfile(userId, name, repositoryId),
+          "rr-avatar",
+          "down",
+          `${avatar(name, 22, name, me ? myAvatar() : undefined)}${
+            // Your own dot is green whenever you can see it: the page being
+            // open is what "here" means, and a roster where everyone else
+            // has a status and you have none reads as broken rather than
+            // modest.
+            me
+              ? statusDot("working", "You're here")
+              : statusDot(
+                  online ? "working" : "away",
+                  online ? `${name} is here` : `${name} is away`,
+                )
+          }`,
+        )
+      }
       <span class="rr-body">
         <div class="rr-name">${esc(name)}${me ? " (you)" : ""}</div>
         ${
@@ -916,12 +1193,17 @@ function rosterRow(agent) {
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
-      <span class="rr-avatar" data-hover="agent-usage"
-        data-hover-value="${esc(agent.id)}" tabindex="0"
-        aria-label="Open details for ${esc(agent.name)}">
-        ${usageTip(agent)}
-        ${statusAgentFace(agent, 22, activeChannelId())}
-      </span>
+      ${
+        // `data-hover` is what starts the usage fetch the card's own section
+        // reads — see `requestUsageForHoverTarget` in app.js.
+        profileAnchor(
+          agentProfile(agent, activeChannelId()),
+          "rr-avatar",
+          "down",
+          statusAgentFace(agent, 22, activeChannelId()),
+          { "data-hover": "agent-usage", "data-hover-value": agent.id },
+        )
+      }
       <span class="rr-body">
         ${
           settingsOpen
@@ -1450,12 +1732,14 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
 const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
 
 /**
- * Workflow markers the plan panel already communicates by changing state.
+ * Agent workflow markers the plan panel already communicates by changing
+ * state.
  *
  * They remain in the stored thread for the gateway to resume and audit the
  * run, but repeating them in the conversation makes approving one plan look
- * like four separate replies. The expiry marker is deliberately absent: it
- * is an outcome somebody still needs to see.
+ * like several system notices. Exact user approvals ("go ahead") stay visible
+ * — they are the person's own words. The expiry marker is deliberately
+ * absent: it is an outcome somebody still needs to see.
  */
 const PLAN_LIFECYCLE_REPLY_PREFIXES = [
   HOLD_NOTICE_PREFIX,
@@ -1470,9 +1754,8 @@ function planTranscriptReplies(root, replies = root?.replies ?? []) {
   }
   return replies.filter((reply) => {
     const content = String(reply.content ?? "").trim();
-    return !(
-      (reply.kind === "user" && content.toLowerCase() === "go ahead") ||
-      PLAN_LIFECYCLE_REPLY_PREFIXES.some((prefix) => content.startsWith(prefix))
+    return !PLAN_LIFECYCLE_REPLY_PREFIXES.some((prefix) =>
+      content.startsWith(prefix),
     );
   });
 }
@@ -1961,69 +2244,26 @@ const AGENT_AUTHORED_KINDS = new Set(["agent", "progress", "outcome"]);
  * thing wherever it is pressed: a person opens the conversation with them, an
  * agent opens its panel.
  *
+ * One description, built by the same two functions the roster uses, so a face
+ * says the same things about somebody wherever it is met.
+ *
  * `undefined` for the reader's own lines and for authors the room cannot name
- * at all. There is no conversation with yourself to open, and a card headed by
- * an empty id is worse than no card — the same reasoning that makes your own
- * `personRow` a label rather than a button.
+ * at all. A card headed by an empty id is worse than no card — the same
+ * reasoning that makes your own `personRow` a label rather than a button.
  */
 function authorIdentity(repositoryId, entry, author) {
   if (author.agent !== undefined) {
-    const status = agentStatus(author.agent, repositoryId);
-    return {
-      kind: "agent",
-      act: "agent-panel-open",
-      value: String(author.agent.id ?? ""),
-      name: author.name,
-      face: statusAgentFace(author.agent, 38, repositoryId),
-      // What the agent is here for, which is the line its roster row leads
-      // with too. "Your agent" is worth saying on a shared transcript: whose
-      // an agent is decides who may task it.
-      detail: [
-        String(author.agent.role ?? "").trim(),
-        author.agent.mine === true ? "Your agent" : "",
-      ]
-        .filter((part) => part !== "")
-        .join(" · "),
-      status,
-      statusText: AGENT_STATUS_TITLE[status] ?? "",
-      label: `Open details for ${author.name}`,
-      hint: "Open agent details",
-    };
+    return agentProfile(author.agent, repositoryId);
   }
   const userId = String(entry.authorId ?? "");
-  if (
-    userId === "" ||
-    userId === "you" ||
-    userId === currentUserId() ||
-    AGENT_AUTHORED_KINDS.has(entry.kind)
-  ) {
+  if (userId === "" || userId === "you" || AGENT_AUTHORED_KINDS.has(entry.kind)) {
     return undefined;
   }
-  // Both roster shapes, exactly as `personRow` reads them: the organization
-  // list nests the account under `user`, the room's own people list flattens
-  // it. Reading only one is what used to leave a name as "Someone".
-  const person = channelPeopleFor(repositoryId).find(
-    (candidate) =>
-      (candidate.user?.id ?? candidate.userId ?? candidate.id ?? "") === userId,
-  );
-  const online = personOnline(userId);
-  const unread = dmUnreadFrom(userId);
-  return {
-    kind: "person",
-    act: "dm-open",
-    value: userId,
-    name: author.name,
-    face: avatar(author.name, 38, author.name),
-    detail: String(person?.role ?? "").trim(),
-    status: online ? "working" : "away",
-    statusText: online ? "Here now" : "Away",
-    label: `Open your conversation with ${author.name}`,
-    hint: unread > 0 ? `Open messages · ${unread} unread` : "Send a message",
-  };
+  return personProfile(userId, author.name, repositoryId);
 }
 
 /**
- * A face or a name, wrapped in the button that opens whoever it belongs to.
+ * A face or a name, wrapped in the anchor that opens whoever it belongs to.
  *
  * A wrapper inside the existing avatar and name rather than those elements
  * themselves: the picture keeps its place in the row's layout and the name
@@ -2031,57 +2271,40 @@ function authorIdentity(repositoryId, entry, author) {
  * is exactly the thing somebody aimed at. Content back untouched when there
  * is nobody to open — a tab stop that does nothing is worse than no tab stop.
  *
+ * Upward, unlike the roster's card, because a transcript is pinned to its
+ * newest line: the message most likely to be pointed at is the last one, and
+ * a card opening below it would open into the composer.
+ *
  * A span with `role=button` rather than a `<button>`, because a real button
  * inside the message's own controls is markup a browser will not keep. The
  * keyboard is served by `role=button` plus `data-act` and the delegated
  * handler in `app.js` that exists for exactly that pair.
  */
-function identityWrap(identity, content) {
+function identityWrap(identity, content, withCard = false) {
   if (identity === undefined) {
     return content;
   }
-  return `<span class="cmsg-identity" role="button" tabindex="0"
-    data-act="${esc(identity.act)}" data-value="${esc(identity.value)}"
-    aria-label="${esc(identity.label)}">${content}${profileCard(identity)}</span>`;
+  const action = identity.action;
+  const attributes = {
+    ...(action === undefined
+      ? {}
+      : { role: "button", "data-act": action.act, "data-value": action.value }),
+  };
+  // The card hangs off the face and not off the name as well. Both are the
+  // same anchor and either would carry it, but a transcript draws this markup
+  // once per message and twice per author line — a second copy of the whole
+  // card in every row is a page of markup nobody can see, for a gesture the
+  // face beside it already answers.
+  return withCard
+    ? profileAnchor(identity, "cmsg-identity", "up", content, attributes)
+    : plainAnchor(identity, "cmsg-identity", content, attributes);
 }
 
-/**
- * Who somebody is, without leaving the conversation to find out.
- *
- * CSS-driven exactly like the roster's `.rr-usage`: rendered with the message
- * and revealed by `:hover`/`:focus-within`, so no pointer tracking and no
- * request is involved in reading one. Everything on it is already in state
- * for the roster's sake, so a hover costs nothing a render did not cost
- * anyway.
- */
-function profileCard(identity) {
-  if (identity === undefined) {
-    return "";
-  }
-  return `<span class="profile-card" role="tooltip">
-    <span class="profile-card-head">
-      <span class="profile-card-face">${identity.face}${
-        identity.kind === "agent"
-          ? ""
-          : statusDot(
-              identity.status,
-              // No tooltip on the dot: the line under it already says this
-              // in words, and nested native tooltips obscure the card.
-              "",
-            )
-      }</span>
-      <span class="profile-card-id">
-        <span class="profile-card-name">${esc(identity.name)}</span>
-        ${
-          identity.detail === ""
-            ? ""
-            : `<span class="profile-card-detail">${esc(identity.detail)}</span>`
-        }
-      </span>
-    </span>
-    <span class="profile-card-status">${esc(identity.statusText)}</span>
-    <span class="profile-card-hint">${esc(identity.hint)}</span>
-  </span>`;
+/** The same press without the card — see `identityWrap`. */
+function plainAnchor(profile, cls, content, options = {}) {
+  return `<span class="${cls}" tabindex="0" aria-label="${esc(
+    profile.label,
+  )}"${attributeList(options)}>${content}</span>`;
 }
 
 /** The face a message is drawn with, at whatever size is asked for. */
@@ -2233,6 +2456,7 @@ function messageRow(
         : `<span class="cmsg-avatar">${identityWrap(
             identity,
             authorFace(author, 32, repositoryId),
+            true,
           )}</span>`
     }
     <div class="cmsg-body">
@@ -3377,7 +3601,7 @@ function composer(repositoryId) {
           enterkeyhint="send"
           placeholder="${
             state.composerThreadId === undefined
-              ? `Message #${esc(repositoryId ?? "")}`
+              ? `Message #${esc(repositoryLabel(repositoryId ?? ""))}`
               : replyTarget?.kind === "user" &&
                   replyTarget.taskId === undefined
                 ? "Write a reply..."
@@ -3836,6 +4060,29 @@ function chanTreePanel(repositoryId) {
   </aside>`;
 }
 
+/**
+ * The run on a thread row, drawn the way every other surface draws one.
+ *
+ * A row used to carry a bare accent dot here while the roster and the room
+ * both showed the agent's own mark filling clockwise, so the same run read as
+ * three different things depending on where somebody happened to be looking.
+ * It is the mark here too now, fed by the same reading of the narration the
+ * room's summary uses, so a glance anywhere answers "how far along" the same
+ * way. The dot survives only for a working thread whose agent is not yet
+ * known, where there is no mark to fill.
+ */
+function threadRunMark(entry, repositoryId, fallbackAuthor) {
+  const author = threadWorkingAuthor(entry, repositoryId) ?? fallbackAuthor;
+  const progress = threadProgress(entry) ?? 0;
+  if (author?.agent === undefined) {
+    return `<span class="ti-live"><span class="sr-only">Working</span></span>`;
+  }
+  return `<span class="ti-run">${agentFace(author.agent, 16, {
+    status: "working",
+    progress,
+  })}<span class="sr-only">Working, ${progress}% done</span></span>`;
+}
+
 function threadListPanel(repositoryId) {
   // Newest first, and "newest" means the last thing to happen in the thread
   // rather than when it started — a thread somebody added to five minutes ago
@@ -3855,13 +4102,102 @@ function threadListPanel(repositoryId) {
     )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
+  const summaries = threads.map((entry) => {
+    const working = threadIsWorking(entry);
+    const waiting = threadAwaitsGoAhead(entry);
+    const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+    const ended =
+      !working &&
+      !waiting &&
+      (["integrated", "failed", "cancelled"].includes(task?.status) ||
+        (entry.replies ?? []).some(isThreadEnding));
+    return { entry, working, waiting, ended };
+  });
+  const active = summaries.filter((summary) => !summary.ended);
+  const ended = summaries.filter((summary) => summary.ended);
+  const manageable = canManageRepository(repositoryId);
+  const renderThread = ({ entry, working, waiting }, finished = false) => {
+    const replies = planTranscriptReplies(entry);
+    const titled = threadTitleReply(entry);
+    const count = replies.filter(
+      (reply) => reply.kind !== "progress" && reply !== titled,
+    ).length;
+    const author =
+      threadLastAgentAuthor(entry, repositoryId) ??
+      channelAuthor(repositoryId, entry);
+    const title = threadTitle(entry);
+    const status = working
+      ? threadActivityLabel(entry)
+      : waiting
+        ? "Waiting for you"
+        : finished
+          ? "Completed"
+          : "Pending";
+    const said = threadSaidCount(count);
+    const context = `${status} — ${title} — ${author.name}, ${said} — started ${clockTime(entry.at)}`;
+    if (finished) {
+      return `<div class="thread-item-row">
+        <button type="button" class="thread-item thread-item-ended${manageable ? " thread-item-managed" : ""}"
+          title="${esc(context)}"
+          aria-label="${esc(`Open completed thread: ${title}. ${author.name}, ${said}.`)}"
+          data-act="channel-thread-open" data-value="${esc(entry.id)}">
+          <span class="ti-done" aria-hidden="true">${icon("check")}</span>
+          <span class="ti-text">${esc(title)}</span>
+          <span class="ti-who">${esc(author.name)}</span>
+        </button>
+        ${
+          manageable
+            ? iconButton("trash", {
+                act: "channel-thread-delete",
+                value: entry.id,
+                title: "Delete this thread",
+                small: true,
+              })
+            : ""
+        }
+      </div>`;
+    }
+    return `<div class="thread-item-row">
+      <button type="button" class="thread-item${working ? " thread-item-active" : ""}${waiting ? " thread-item-held" : ""}${!working && !waiting ? " thread-item-pending" : ""}"
+        title="${esc(context)}"
+        aria-label="${esc(`Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
+        data-act="channel-thread-open" data-value="${esc(entry.id)}">
+        <span class="ti-main">
+          <span class="ti-text">${esc(title)}</span>
+          <span class="ti-meta">
+            ${
+              working
+                ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
+                : waiting
+                  ? `<span class="ti-held">Waiting for you</span>`
+                  : `<span class="ti-pending">Pending</span>`
+            }
+            <span class="ti-who">${esc(author.name)}</span>
+            <span class="ti-count">${esc(said)}</span>
+            ${working ? threadRunMark(entry, repositoryId, author) : ""}
+          </span>
+        </span>
+        <span class="ti-go">${icon("chevronRight")}</span>
+      </button>
+      ${
+        manageable
+          ? iconButton("trash", {
+              act: "channel-thread-delete",
+              value: entry.id,
+              title: "Delete this thread",
+              small: true,
+            })
+          : ""
+      }
+    </div>`;
+  };
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
       ${panelKind("Threads")}
       <span class="spacer"></span>
       ${
-        threads.length === 0 || !canManageRepository(repositoryId)
+        threads.length === 0 || !manageable
           ? ""
           : iconButton("trash", {
               act: "channel-threads-clear",
@@ -3875,95 +4211,20 @@ function threadListPanel(repositoryId) {
       ${
         threads.length === 0
           ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
-          : threads
-              .map((entry) => {
-                const replies = planTranscriptReplies(entry);
-                const titled = threadTitleReply(entry);
-                // Thinking is the run talking to itself; it has never been a
-                // reply and should not be counted as one here either. The
-                // title reply is the thread's name, not a message in it.
-                const count = replies.filter(
-                  (reply) => reply.kind !== "progress" && reply !== titled,
-                ).length;
-                // The agent that worked the thread, not the person whose
-                // message it hangs under. Every row in a channel one person
-                // asks in carried that same person's name, which answered a
-                // question nobody scanning a work log has; the useful name is
-                // the colleague who did — or is doing — the work. Falls back
-                // to the root author only for a thread no agent has spoken in
-                // yet, where there is no better answer.
-                const author =
-                  threadLastAgentAuthor(entry, repositoryId) ??
-                  channelAuthor(repositoryId, entry);
-                // The one thing a log of finished work cannot say for itself:
-                // which of these is still moving. Marked from the task's own
-                // status, the same signal that keeps the agent's typing dots
-                // up in the channel, so the two never disagree about who is
-                // working.
-                const working = threadIsWorking(entry);
-                // The other half of the same question. A held thread is not
-                // working and not finished, and without this it read as the
-                // latter — a row somebody had already dealt with — which is
-                // precisely the thread that needs them.
-                const held = threadAwaitsGoAhead(entry);
-                // The subject leads: somebody scanning this log is looking
-                // for a piece of work, and the agent's name told them which
-                // colleague — the wrong first question. Who and how much
-                // demote to one quiet line beneath, and the clock time goes
-                // to the row's tooltip: the list is newest-first, so the
-                // ordering already answers "when" for anybody scanning it.
-                //
-                // No leading glyph either. Every row carried the same terminal
-                // mark: fifty identical icons down a list are a texture rather
-                // than information, and this one was actively misleading — a
-                // thread is a conversation about a piece of work, not a shell
-                // session, so the mark promised a log of command output. There
-                // was nothing meaningful to put in its place. The author's face
-                // was the obvious candidate, but a thread is rooted in the
-                // message that asked for the work, so that column would have
-                // been the same person's avatar the whole way down. The name
-                // leads instead, and the one thing worth spotting at a glance —
-                // which thread is running — is already carried by the accent
-                // wash and leading edge of `.thread-item-active`.
-                return `<div class="thread-item-row">
-                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}${held ? " thread-item-held" : ""}"
-                    title="${esc(
-                      working
-                        ? `Working now — started ${clockTime(entry.at)}`
-                        : held
-                          ? `Waiting for your go-ahead — started ${clockTime(entry.at)}`
-                          : clockTime(entry.at),
-                    )}"
-                    data-act="channel-thread-open" data-value="${esc(entry.id)}">
-                    <span class="ti-main">
-                      <span class="ti-text">${esc(threadTitle(entry))}</span>
-                      <span class="ti-meta">
-                        <span class="ti-who">${esc(author.name)}</span>
-                        <span class="ti-count">${esc(threadSaidCount(count))}</span>
-                        ${
-                          working
-                            ? `<span class="ti-live"><span class="sr-only">Working</span></span>`
-                            : held
-                              ? `<span class="ti-held">Waiting for you</span>`
-                              : ""
-                        }
-                      </span>
-                    </span>
-                    <span class="ti-go">${icon("chevronRight")}</span>
-                  </button>
-                  ${
-                    canManageRepository(repositoryId)
-                      ? iconButton("trash", {
-                          act: "channel-thread-delete",
-                          value: entry.id,
-                          title: "Delete this thread",
-                          small: true,
-                        })
-                      : ""
-                  }
-                </div>`;
-              })
-              .join("")
+          : `${
+              active.length === 0
+                ? ""
+                : `<div class="thread-list-active" aria-label="Active threads">
+                    ${active.map((summary) => renderThread(summary)).join("")}
+                  </div>`
+            }
+            ${
+              ended.length === 0
+                ? ""
+                : `<div class="thread-list-finished" aria-label="Completed threads">
+                    ${ended.map((summary) => renderThread(summary, true)).join("")}
+                  </div>`
+            }`
       }
     </div>
   </aside>`;
@@ -4157,6 +4418,55 @@ const TASK_ICON = {
   open: "dotsHorizontal",
 };
 
+/** Statuses that no longer need attention in the history list. */
+const FINISHED_HISTORY_STATUS = new Set([
+  "integrated",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Split one agent's history into work that still needs attention and work
+ * that has already landed. Keeps each half in the newest-first order
+ * `agentHistoryRows` already established.
+ */
+function agentHistorySections(rows) {
+  const active = [];
+  const finished = [];
+  for (const row of rows) {
+    if (FINISHED_HISTORY_STATUS.has(row.task.status)) {
+      finished.push(row);
+    } else {
+      active.push(row);
+    }
+  }
+  return { active, finished };
+}
+
+/**
+ * One compact history line: status mark, one-line summary, when it ran.
+ * Opens the thread when the task was talked about in the channel.
+ */
+function agentHistoryRow({ task, message }) {
+  const iconName = TASK_ICON[task.status] ?? "info";
+  // A description of the work, not the words that asked for it. The
+  // request is still here — on the row's tooltip, with its role preamble
+  // taken off, for the reader who wants to know exactly what was said.
+  const line = taskSummaryLine(task, message);
+  const full = withoutRolePreamble(task.objective).trim();
+  const open =
+    message === undefined
+      ? ""
+      : ` role="button" tabindex="0" data-act="channel-thread-open"
+          data-value="${esc(message.id)}"`;
+  return `<div class="agent-history-row ${esc(task.status)}"${open}
+    title="${esc(full)}">
+    <span class="ah-glyph">${icon(iconName)}</span>
+    <span class="ah-objective">${esc(line)}</span>
+    <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
+  </div>`;
+}
+
 function agentHistory(agent, repositoryId) {
   const rows = agentHistoryRows(agent, repositoryId);
   if (rows.length === 0) {
@@ -4166,27 +4476,23 @@ function agentHistory(agent, repositoryId) {
       `${esc(agent.name.split(" ")[0])} has not been asked for anything in this repository.`,
     )}</div>`;
   }
-  return `<div class="agent-history scroll">${rows
-    .map(({ task, message }) => {
-      const iconName = TASK_ICON[task.status] ?? "info";
-      // A description of the work, not the words that asked for it. The
-      // request is still here — on the row's tooltip, with its role preamble
-      // taken off, for the reader who wants to know exactly what was said.
-      const line = taskSummaryLine(task, message);
-      const full = withoutRolePreamble(task.objective).trim();
-      const open =
-        message === undefined
-          ? ""
-          : ` role="button" tabindex="0" data-act="channel-thread-open"
-              data-value="${esc(message.id)}"`;
-      return `<div class="agent-history-row ${esc(task.status)}"${open}
-        title="${esc(full)}">
-        <span class="ah-glyph">${icon(iconName)}</span>
-        <span class="ah-objective">${esc(line)}</span>
-        <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
-      </div>`;
-    })
-    .join("")}</div>`;
+  const { active, finished } = agentHistorySections(rows);
+  return `<div class="agent-history scroll">
+    ${
+      active.length === 0
+        ? ""
+        : `<div class="agent-history-active" aria-label="Active">
+            ${active.map(agentHistoryRow).join("")}
+          </div>`
+    }
+    ${
+      finished.length === 0
+        ? ""
+        : `<div class="agent-history-finished" aria-label="Finished">
+            ${finished.map(agentHistoryRow).join("")}
+          </div>`
+    }
+  </div>`;
 }
 
 /** Every loaded room this exact agent belongs to, with that room's overrides. */
@@ -4296,6 +4602,7 @@ function agentSpec(agent, repositoryId) {
   // Model and reasoning are the agent's own credential spending its owner's
   // account, so only that owner picks them; a teammate reads what was chosen.
   const providerId = agent.provider ?? agent.id;
+  const canChatPrivately = agent.mine === true && agent.visibility !== "org";
   const models = agent.mine === true ? providerModelOptions(providerId) : [];
   const efforts =
     agent.mine === true
@@ -4356,6 +4663,13 @@ function agentSpec(agent, repositoryId) {
   const elsewhere = assignments.filter(
     ({ repository }) => repository.id !== repositoryId,
   );
+  // Same doorway as a history row: the live assignment opens its thread.
+  // Idle ("Available for new work") stays inert — there is nowhere to go.
+  const openCurrentTask =
+    taskMessage === undefined
+      ? ""
+      : ` role="button" tabindex="0" data-act="channel-thread-open"
+          data-value="${esc(taskMessage.id)}" title="Open this task's thread"`;
   return `<div class="agent-spec">
     <div class="aspec-content">
       <section class="aspec-head">
@@ -4366,18 +4680,34 @@ function agentSpec(agent, repositoryId) {
         <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
           repositoryId,
         )}${agent.mine ? " · Your agent" : ""}</div>
+        <p class="aspec-description">${esc(agentLabelOf(providerId))} agent ${
+          agent.mine ? "connected to your account" : "shared with this channel"
+        }.</p>
+        <div class="aspec-actions">
+          ${
+            canChatPrivately
+              ? `<button type="button" class="aspec-action aspec-action-primary"
+                  data-act="agent-panel-tab" data-value="chat">
+                  ${icon("chatBubble")}<span>Message</span></button>`
+              : ""
+          }
+          <button type="button" class="aspec-action" data-act="agent-panel-tab"
+            data-value="history">${icon("history")}<span>History</span></button>
+        </div>
       </section>
 
       <section class="aspec-section">
+        <h3 class="aspec-label">Works with</h3>
         ${configuration}
         ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
       </section>
 
       <section class="aspec-section">
+        <h3 class="aspec-label">Capabilities</h3>
         <div class="aspec-capabilities">
           <div class="aspec-capability aspec-current-task${
             task === undefined ? "" : " aspec-current-task-active"
-          }">
+          }"${openCurrentTask}>
             <span class="aspec-capability-mark">${icon("check")}</span>
             <span class="aspec-capability-copy">
               <span class="aspec-capability-title">${
@@ -4620,7 +4950,17 @@ function dmPanel() {
     <header class="thread-head">
       ${panelKind("Direct")}
       <span class="dm-head-name">
-        ${avatar(name, 20)}
+        ${
+          // The same card their roster row carries. A conversation opened from
+          // a search or a notification is the one place somebody is read
+          // without the sidebar entry that would otherwise explain them.
+          profileAnchor(
+            personProfile(userId, name, repositoryId),
+            "dm-head-face",
+            "down",
+            avatar(name, 20),
+          )
+        }
         ${esc(name)}
         ${statusDot(online ? "working" : "away", online ? "Here" : "Away")}
       </span>
@@ -5071,57 +5411,112 @@ function threadReplyTurns(replies) {
   return turns;
 }
 
+/**
+ * One line inside an opened thinking stream: a quiet tool cue for the known
+ * run phases, or a plain thought line for anything the protocol did not name.
+ */
+function thinkingLineHtml(milestone) {
+  const text = String(milestone ?? "");
+  const cues = {
+    Starting: "play",
+    "Reading code": "search",
+    Planning: "sparkle",
+    "Writing code": "code",
+    Testing: "play",
+    Finishing: "check",
+  };
+  const iconName = /^Editing /u.test(text) ? "file" : cues[text];
+  if (iconName !== undefined) {
+    return `<p class="tt-line tt-cue">${icon(iconName)}<span>${esc(
+      text,
+    )}</span></p>`;
+  }
+  return `<p class="tt-line tt-thought">${esc(text)}</p>`;
+}
+
 /** One turn's narration, with state independent from every other turn. */
 function threadThinkingBlock(rootId, turn, index) {
-  // A task title belongs to the fold only when it opens this turn. A later
-  // agent reply that happens to begin "Task:" is something the agent said to
-  // the reader and must stay visible.
+  // The opening task title already names the thread, so do not repeat it in
+  // the disclosure. A later agent reply that happens to begin "Task:" is
+  // something the agent said to the reader and must stay visible.
   const [first, ...rest] = turn.replies;
   const titleLine = /^Task: /u.test(String(first?.content ?? ""))
     ? first
     : undefined;
   const body = titleLine === undefined ? turn.replies : rest;
   const steps = body.filter(isThreadThinking);
-  if (steps.length === 0 && titleLine === undefined) {
-    return { html: "", visible: body };
+  const visible = body.filter((reply) => !isThreadThinking(reply));
+  if (steps.length === 0) {
+    return { html: "", visible };
   }
 
   const key = `${rootId}:thinking:${index}`;
-  // Silent at zero. A task that has been stated and not yet worked on has a
-  // block holding the request alone, and "0 steps" reads as a failure rather
-  // than work that has not started.
-  const count =
-    steps.length === 0
-      ? ""
-      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  const milestones = [];
+  for (const step of steps) {
+    const lines = String(step.content ?? "")
+      .split(/\n+/u)
+      .map((line) => line.replace(/\s+/gu, " ").trim())
+      .filter((line) => line.length > 0);
+    for (const line of lines) {
+      // Use the same small phase vocabulary as the collapsed channel row.
+      // Anything outside that known protocol stays verbatim in the expanded
+      // disclosure, so compacting the routine narration never loses a useful
+      // or unexpected update.
+      const phase = threadActivityLabel({
+        replies: [{ ...step, content: line }],
+      });
+      const known =
+        phase !== "Starting" ||
+        /starting on the code|Starting on |execution started/iu.test(line);
+      const milestone = known ? phase : line;
+      if (!milestones.includes(milestone)) {
+        milestones.push(milestone);
+      }
+    }
+  }
+  if (milestones.length === 0) {
+    return { html: "", visible };
+  }
+
+  const ending = [...body].reverse().find(isThreadEnding);
+  const startedAt = steps
+    .map((reply) => Date.parse(String(reply.at ?? "")))
+    .find((at) => Number.isFinite(at));
+  const finishedAt = Date.parse(String(ending?.at ?? ""));
+  let label = ending === undefined ? "Thinking" : "Thought";
+  if (
+    ending !== undefined &&
+    startedAt !== undefined &&
+    Number.isFinite(finishedAt) &&
+    finishedAt >= startedAt
+  ) {
+    const elapsed = Math.max(1, Math.round((finishedAt - startedAt) / 1000));
+    const hours = Math.floor(elapsed / 3600);
+    const minutes = Math.floor((elapsed % 3600) / 60);
+    const seconds = elapsed % 60;
+    const duration =
+      hours > 0
+        ? `${hours}h${minutes > 0 ? ` ${minutes}m` : ""}`
+        : minutes > 0
+          ? `${minutes}m${seconds > 0 ? ` ${seconds}s` : ""}`
+          : `${seconds}s`;
+    label = `Thought for ${duration}`;
+  }
+  // Header + stream, no bordered box: the open state should read as the
+  // extended output itself, not as chrome bolted onto the thread.
   const html = `<details class="thread-thinking"${
     // Every turn starts folded. Its independent key still keeps an explicit
     // reader choice stable as more progress arrives for this turn alone.
     state.thinkingOpen[key] === true ? " open" : ""
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
-      <span class="tt-caret">${icon("chevronRight")}</span>
-      <span class="tt-label">Thinking</span>
-      <span class="tt-count">${esc(count)}</span></summary>
-    <div class="tt-body">${
-      titleLine === undefined
-        ? ""
-        : `<p class="tt-task">${esc(
-            String(titleLine.content ?? "")
-              .replace(/^Task:\s*/u, "")
-              .trim(),
-          )}</p>`
-    }${steps
-      .map((reply) => String(reply.content ?? "").trim())
-      .filter((text) => text.length > 0)
-      .join("\n")
-      .split(/\n+/u)
-      .map((line) => `<p>${esc(line)}</p>`)
-      .join("")}</div>
+      <span class="tt-label">${esc(label)}</span>
+      <span class="tt-caret">${icon("chevronRight")}</span></summary>
+    <div class="tt-body">${milestones.map(thinkingLineHtml).join("")}</div>
   </details>`;
   return {
     html,
-    visible: body.filter((reply) => !isThreadThinking(reply)),
+    visible,
   };
 }
 
@@ -5496,7 +5891,10 @@ export function channelInfoPopoverHtml(repositoryId) {
   const repository = state.repositories.find((repo) => repo.id === repositoryId);
   const roster = channelAgentsFor(repositoryId);
   const addable = addableAgents(repositoryId);
-  const canManage = canManageRepository(repositoryId);
+  // Deleting asks for ownership rather than for management: an organization
+  // owner, or a co-owner of this repository. Somebody who may rename it and
+  // moderate it is not offered the one control nobody can undo.
+  const canDelete = canDeleteRepository(repositoryId);
   const canLeave = canLeaveRepository();
   // Stats moved to Settings (`channelStatsCard`); co-owner promote / demote /
   // remove moved to People-row menus (`personMenuItems`). Channel info keeps
@@ -5554,7 +5952,7 @@ export function channelInfoPopoverHtml(repositoryId) {
     }
     <div class="pop-block pop-block-danger">
       ${
-        canManage
+        canDelete
           ? `<button type="button" class="btn btn-sm btn-danger" data-act="channel-delete-repo" data-value="${esc(repositoryId)}">
                ${icon("close")} Delete repository
              </button>`
@@ -5661,6 +6059,21 @@ export function scrollChannel() {
     followingChannel = true;
     paintJumpToLatest();
   }
+}
+
+/** Shows the newest part of a direct-message history when it is opened. */
+export function scrollDirectMessageToLatest() {
+  const list = document.querySelector(".dm-body");
+  if (list === null) {
+    return;
+  }
+  list.scrollTop = list.scrollHeight;
+  requestAnimationFrame(() => {
+    const settled = document.querySelector(".dm-body");
+    if (settled === list) {
+      settled.scrollTop = settled.scrollHeight;
+    }
+  });
 }
 
 /**
@@ -6067,27 +6480,28 @@ export function submitComposerMessage(rerender) {
  * The banner reads from the server-fed pinned list rather than the loaded
  * transcript, because a pin exists precisely so a message survives the room
  * moving on — a banner that only knew the current page would forget exactly
- * the pins it was for. Collapsible to one line, because pins are a shelf,
- * not a second conversation.
+ * the pins it was for. Closed, the shelf is not drawn at all — no collapsed
+ * row, no rule, no reserved height — so the header's pin shortcut, beside the
+ * people and agent counts, is the only thing that brings it back.
  */
 function pinnedBanner(repositoryId) {
   const pins = state.channelPins[repositoryId] ?? [];
-  if (pins.length === 0) {
+  if (pins.length === 0 || state.pinsOpen !== true) {
     // The same no-op the search row uses, so the column's child list keeps
-    // its shape whether or not anything is pinned.
+    // its shape whether or not the shelf is showing.
     return `<div hidden></div>`;
   }
-  const open = state.pinsOpen === true;
-  return `<div class="chan-pins${open ? " open" : ""}">
-    <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
-      aria-expanded="${open}">
-      ${icon("pin")}
-      <span>${pins.length} pinned</span>
-      <span class="spacer"></span>
-      ${icon("chevronDown")}
-    </button>
-    <div class="chan-pins-list-frame" aria-hidden="${!open}"${open ? "" : " inert"}>
-      <div class="chan-pins-list">${pins
+  return `<div class="chan-pins open" aria-hidden="false">
+    <div class="chan-pins-surface">
+      <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
+        aria-expanded="true">
+        ${icon("pin")}
+        <span>${pins.length} pinned</span>
+        <span class="spacer"></span>
+        ${icon("chevronDown")}
+      </button>
+      <div class="chan-pins-list-frame" aria-hidden="false">
+        <div class="chan-pins-list">${pins
         .map((entry) => {
           const title = threadTitle(entry) || "(no text)";
           const pinner =
@@ -6110,6 +6524,7 @@ function pinnedBanner(repositoryId) {
               </div>`;
         })
         .join("")}</div>
+      </div>
     </div>
   </div>`;
 }
