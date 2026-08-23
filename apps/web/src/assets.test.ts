@@ -6071,7 +6071,12 @@ test("Codex offers its documented ids when the account reports none", async () =
   );
 
   assert.match(providers, /suggestedModels: \[\.\.\.SUGGESTED_MODELS\.openai\]/u);
-  for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+  for (const id of [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.3-codex",
+  ]) {
     assert.match(providers, new RegExp(`id: "${id}"`, "u"));
   }
   // The levels the CLI takes, both ends included.

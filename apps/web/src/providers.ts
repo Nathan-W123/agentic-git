@@ -1044,7 +1044,8 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
   ],
-  // The three the Codex CLI documents as its own ids, newest first. Shown
+  // What the Codex CLI documents, newest first. gpt-5.1-codex and
+  // gpt-5.2-codex, which this list used to hold, are deprecated. Shown
   // only where the CLI has cached nothing, and never in place of a real list:
   // an account that reports its own models never sees these.
   //
@@ -1060,6 +1061,15 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
     { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
     { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
     { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+    // Still reachable "depending on your account/API configuration", and kept
+    // for exactly that reason: the three above carry no -codex suffix, and it
+    // was a bare id that a ChatGPT-account Codex refused last time. If that
+    // split still holds, an account the newest names fail for has something
+    // in the list that works rather than an empty answer — and the last of
+    // these is suffixed the old safe way.
+    { id: "gpt-5.5", label: "GPT-5.5" },
+    { id: "gpt-5.4", label: "GPT-5.4" },
+    { id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
   ],
   google: [
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },

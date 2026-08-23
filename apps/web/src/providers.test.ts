@@ -354,10 +354,16 @@ test("openai with no cached model list stays usable instead of refusing everythi
   // it left anybody who did not already know an id unable to name a model at
   // all. A guess that fails at planning with the CLI's own words is
   // recoverable; an empty control is not even wrong.
-  assert.deepEqual(
-    options.suggestedModels?.map((model) => model.id),
-    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-  );
+  assert.deepEqual(options.suggestedModels?.map((model) => model.id), [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    // The older ids an account may still be on, so a deployment the newest
+    // names fail for is not left picking between six dead options and typing.
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+  ]);
   // And never mistakable for the account's own answer.
   assert.match(
     (options.notes ?? []).join(" "),
