@@ -271,6 +271,34 @@ export function parseAgentEvent(value: unknown): AgentEvent {
         message: requireString(record, "message", "progress event"),
         occurredAt,
       };
+    case "scope_release_requested":
+      // The counterpart of `scope_change_requested`, and it was missing: an
+      // agent on this adapter could ask for more scope but never hand any
+      // back, so a custom CLI agent could only ever release its files by
+      // ending. The vendor adapters have carried this since the release path
+      // shipped; this one silently did not.
+      return {
+        event: "scope_release_requested",
+        ...(typeof record["requestId"] === "string"
+          ? { requestId: record["requestId"] }
+          : {}),
+        releasedFiles: optionalStringArray(
+          record,
+          "releasedFiles",
+          "scope release event",
+        ),
+        ...(record["releasedSymbols"] === undefined
+          ? {}
+          : {
+              releasedSymbols: optionalStringArray(
+                record,
+                "releasedSymbols",
+                "scope release event",
+              ),
+            }),
+        reason: requireString(record, "reason", "scope release event"),
+        occurredAt,
+      };
     case "scope_change_requested":
       return {
         event: "scope_change_requested",
