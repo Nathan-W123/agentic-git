@@ -6,7 +6,11 @@ import {
   type ProcessOptions,
   type ProcessOutput,
 } from "@coord/repository-service";
-import type { ChangeSet, FilePatchStatus } from "@coord/shared-types";
+import type {
+  ChangeSet,
+  FilePatchStatus,
+  LineRange,
+} from "@coord/shared-types";
 
 import type { EgressBinding } from "./egress-gateway.js";
 import type { CredentialMount } from "./vendor-credentials.js";
@@ -402,6 +406,12 @@ export class DockerWorkspaceManager
     workspace: TaskWorkspace,
   ): Promise<Array<{ path: string; status: FilePatchStatus }>> {
     return (await this.worktrees.listWorkingChanges?.(workspace)) ?? [];
+  }
+
+  public async listWorkingRanges(
+    workspace: TaskWorkspace,
+  ): Promise<Array<{ path: string; ranges: LineRange[] }>> {
+    return (await this.worktrees.listWorkingRanges?.(workspace)) ?? [];
   }
 
   public resolveWorkspacePath(_workspace: TaskWorkspace): string {

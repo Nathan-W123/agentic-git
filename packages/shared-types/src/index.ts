@@ -195,11 +195,35 @@ export interface BlanketPlanClaim {
  * cost is that the arriving task is admitted to a little less than it could
  * strictly have had.
  */
+/** Where a frozen holder has actually been writing inside one file. */
+export interface TouchedFileRanges {
+  file: string;
+  /** Line ranges on the current side of the file, as observed. */
+  ranges: LineRange[];
+}
+
 export interface FrozenPlanClaim {
   kind: "frozen";
   /** Repository-relative directory prefixes, each ending in `/`. */
   directories: string[];
   frozenAt: string;
+  /**
+   * The lines this holder has been seen editing, per file, when the freeze
+   * could read them.
+   *
+   * A frozen plan is the one kind of plan nobody wrote: it is assembled from
+   * a worktree, so it declares no symbols and never can. Arbitration reads a
+   * holder's declarations to work out which part of a file it occupies, found
+   * none here, and had no choice but to hand over the whole file — which meant
+   * a holder that came through the blanket freeze could never be split around,
+   * whatever the waiter declared. These are what it has instead of
+   * declarations: not a claim about intent, an observation about lines.
+   *
+   * Absent where the freeze had nothing to observe — a claim narrowed from an
+   * objective estimate rather than from writes — and the whole file stands, as
+   * it did before.
+   */
+  touched?: TouchedFileRanges[];
 }
 
 export type PlanClaim = BlanketPlanClaim | FrozenPlanClaim;
@@ -353,6 +377,19 @@ export interface DeferredResource {
   /** Executing tasks that hold the resource right now. */
   heldBy: TaskId[];
   reason: string;
+  /**
+   * Whether this deferral is a consequence of another one in the same set
+   * rather than a loss in its own right.
+   *
+   * Withholding a file withholds everything inside it, and each of those is
+   * recorded here so enforcement can check them one by one. They are not
+   * further things the plan lost — they are the same loss, counted again for
+   * every symbol, route and schema the file happened to contain. Anything
+   * reporting a deferral to a person wants the ones without this: a plan of
+   * five files told its room it had lost 969 things, which was more things
+   * than the repository has files.
+   */
+  implied?: boolean;
   /**
    * Where this resource sits inside files the plan *was* granted, when the
    * index could locate it.
@@ -1604,6 +1641,35 @@ export function claimOccupiesPath(
   return plan.expectedFiles.includes(file);
 }
 
+function isTouchedFileRanges(value: unknown): value is TouchedFileRanges[] {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => {
+      if (typeof entry !== "object" || entry === null) {
+        return false;
+      }
+      const touched = entry as { file?: unknown; ranges?: unknown };
+      return (
+        typeof touched.file === "string" &&
+        touched.file.length > 0 &&
+        Array.isArray(touched.ranges) &&
+        touched.ranges.every((range) => {
+          if (typeof range !== "object" || range === null) {
+            return false;
+          }
+          const lines = range as { startLine?: unknown; endLine?: unknown };
+          return (
+            typeof lines.startLine === "number" &&
+            typeof lines.endLine === "number" &&
+            lines.startLine >= 1 &&
+            lines.endLine >= lines.startLine
+          );
+        })
+      );
+    })
+  );
+}
+
 function isPlanClaim(value: unknown): value is PlanClaim {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -1613,6 +1679,7 @@ function isPlanClaim(value: unknown): value is PlanClaim {
     grantedAt?: unknown;
     frozenAt?: unknown;
     directories?: unknown;
+    touched?: unknown;
   };
   if (claim.kind === "blanket") {
     return typeof claim.grantedAt === "string";
@@ -1621,7 +1688,10 @@ function isPlanClaim(value: unknown): value is PlanClaim {
     claim.kind === "frozen" &&
     typeof claim.frozenAt === "string" &&
     isStringArray(claim.directories) &&
-    claim.directories.every((directory) => directory.endsWith("/"))
+    claim.directories.every((directory) => directory.endsWith("/")) &&
+    // Checked rather than trusted: a plan is read back out of storage, and
+    // these lines decide how much of a file another task is allowed to have.
+    (claim.touched === undefined || isTouchedFileRanges(claim.touched))
   );
 }
 

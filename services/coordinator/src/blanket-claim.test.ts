@@ -14,6 +14,7 @@ import {
 import {
   blanketPlan,
   freezePlanFromWorkingChanges,
+  frozenTouchedRanges,
 } from "./blanket-claim.js";
 import { PlanAdmissionController } from "./plan-admission.js";
 import {
@@ -269,4 +270,126 @@ test("a frozen claim partially admits a plan with work outside its directories",
     active: [{ taskId: TASK.id, agentId: "agent-a", plan: frozen }],
   });
   assert.equal(beside.status, "approved");
+});
+
+/**
+ * Where the index says three functions live in one file, for the tests below.
+ * The middle one is what a frozen holder is caught working in.
+ */
+const PLACED = [
+  { name: "renderChannel", startLine: 100, endLine: 200 },
+  { name: "renameAgent", startLine: 300, endLine: 400 },
+  { name: "agentIdentityFor", startLine: 500, endLine: 600 },
+];
+const BIG_FILE = "services/api-gateway/src/server.ts";
+
+function askAgainstFrozen(frozen: AgentPlan): ReturnType<
+  PlanAdmissionController["admit"]
+> {
+  return new PlanAdmissionController().admit({
+    plan: {
+      ...plan("task_waiter", [BIG_FILE]),
+      expectedSymbols: ["renameAgent", "agentIdentityFor"],
+    },
+    agentId: "agent-b",
+    baseRevision: "a".repeat(40),
+    baseVersion: 1,
+    active: [{ taskId: TASK.id, agentId: "agent-a", plan: frozen }],
+    symbolRangesInFile: (file) => (file === BIG_FILE ? PLACED : undefined),
+    resourcesInFile: (file) =>
+      file === BIG_FILE
+        ? PLACED.map((span) => ({
+            resourceType: "symbol" as const,
+            resourceId: span.name,
+          }))
+        : [],
+  });
+}
+
+test("a freeze keeps the lines it was shown, and says nothing where it saw none", () => {
+  const watched = freezePlanFromWorkingChanges(blanketPlan(TASK), [
+    { path: BIG_FILE, status: "modified", ranges: [{ startLine: 120, endLine: 140 }] },
+    // Observed as changed, but nowhere located inside — a created file has no
+    // base to diff against.
+    { path: "src/brand-new.ts", status: "added" },
+  ]);
+
+  assert.deepEqual(frozenTouchedRanges(watched, BIG_FILE), [
+    { startLine: 120, endLine: 140 },
+  ]);
+  // The absence has to read as "anywhere in this file", never as "nowhere".
+  assert.equal(frozenTouchedRanges(watched, "src/brand-new.ts"), undefined);
+
+  const unwatched = freezePlanFromWorkingChanges(blanketPlan(TASK), [
+    { path: BIG_FILE, status: "modified" },
+  ]);
+  assert.equal(unwatched.claim?.kind === "frozen" ? unwatched.claim.touched : "x", undefined);
+  assert.equal(frozenTouchedRanges(unwatched, BIG_FILE), undefined);
+});
+
+test("a frozen holder that was watched can be split around", () => {
+  // The thing that could not happen before. A plan frozen from a worktree
+  // declares no symbols and never will, so arbitration had nothing to bound
+  // it with and handed over every file whole — which for a repository whose
+  // largest file is most of its backend meant one holder stopped everybody.
+  const decided = askAgainstFrozen(
+    freezePlanFromWorkingChanges(blanketPlan(TASK), [
+      { path: BIG_FILE, status: "modified", ranges: [{ startLine: 120, endLine: 140 }] },
+    ]),
+  );
+
+  assert.equal(decided.status, "approved_with_constraints");
+  assert.deepEqual(
+    decided.deferredResources?.map((resource) => resource.resourceId),
+    ["renderChannel"],
+  );
+  // And the waiter really gets the file: what it is told to avoid is the one
+  // function the holder is inside.
+  assert.deepEqual(
+    decided.ownershipGrants
+      .filter((grant) => grant.resourceType === "file")
+      .map((grant) => grant.resourceId),
+    [BIG_FILE],
+  );
+});
+
+test("an edit that lands outside every symbol still takes the whole file", () => {
+  // Imports, top-level statements, the space between functions. An edit no
+  // name contains is an edit this cannot bound, and a claim narrower than the
+  // truth hands another task lines the holder will overwrite.
+  const decided = askAgainstFrozen(
+    freezePlanFromWorkingChanges(blanketPlan(TASK), [
+      { path: BIG_FILE, status: "modified", ranges: [{ startLine: 50, endLine: 55 }] },
+    ]),
+  );
+
+  assert.equal(decided.status, "sequenced");
+  assert.deepEqual(decided.blockedBy, [TASK.id]);
+});
+
+test("a freeze nobody watched behaves exactly as it did before", () => {
+  const decided = askAgainstFrozen(
+    freezePlanFromWorkingChanges(blanketPlan(TASK), [
+      { path: BIG_FILE, status: "modified" },
+    ]),
+  );
+
+  assert.equal(decided.status, "sequenced");
+  assert.deepEqual(decided.blockedBy, [TASK.id]);
+});
+
+test("a holder watched inside a function the waiter wants keeps that function", () => {
+  const decided = askAgainstFrozen(
+    freezePlanFromWorkingChanges(blanketPlan(TASK), [
+      { path: BIG_FILE, status: "modified", ranges: [{ startLine: 310, endLine: 320 }] },
+    ]),
+  );
+
+  // Still a split, not a stop: the waiter declared two symbols and only one of
+  // them is spoken for.
+  assert.equal(decided.status, "approved_with_constraints");
+  assert.deepEqual(
+    decided.deferredResources?.map((resource) => resource.resourceId),
+    ["renameAgent"],
+  );
 });
