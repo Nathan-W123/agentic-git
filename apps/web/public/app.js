@@ -55,6 +55,7 @@ import {
   activeChannelId,
   canLeaveRepository,
   canManageRepository,
+  canDeleteRepository,
   closeChannelFile,
   loadChannelFile,
   moveChannelFile,
@@ -2333,17 +2334,34 @@ async function toggleAuditingAction(repositoryId, paused) {
 /**
  * Deleting a repository outright.
  *
- * Irreversible: cascades the repository's own channel and grants, and is
- * refused server-side while a task or run still references it. The
- * confirmation says so, rather than reading like an ordinary remove.
+ * Irreversible: cascades the repository's own channel and grants, and takes
+ * the execution history with it. A single confirm button is too easy to hit
+ * by reflex for something nobody can undo, so this asks for the repository's
+ * name to be typed out — `yesiwanttodelete<id>` — and refuses anything else.
+ * Matched case-insensitively and trimmed: the phrase is there to make the
+ * person read what they are deleting, not to catch a stray capital.
+ *
+ * Only owners and co-owners are offered the control at all (see
+ * `canDeleteRepository`), and the server refuses anyone else regardless.
  */
 async function deleteRepositoryAction(repositoryId) {
-  const confirmed = await showModal({
+  const phrase = `yesiwanttodelete${repositoryId}`;
+  const values = await showModal({
     title: "Delete this repository?",
     subtitle: `This permanently deletes ${repositoryId}, its chat history, and its repository-scoped grants. This cannot be undone.`,
     confirm: "Delete repository",
+    body: `<label class="field">
+        <span>Type <code>${esc(phrase)}</code> to confirm</span>
+        <input class="input" name="confirmation" autocomplete="off"
+          autocapitalize="off" spellcheck="false" required autofocus
+          placeholder="${esc(phrase)}">
+      </label>`,
   });
-  if (confirmed === undefined) {
+  if (values === undefined) {
+    return;
+  }
+  if (String(values.confirmation ?? "").trim().toLowerCase() !== phrase.toLowerCase()) {
+    toast(`Type ${phrase} exactly to delete this repository`, "error");
     return;
   }
   try {
@@ -5851,6 +5869,12 @@ document.addEventListener("click", (event) => {
         ...(canManageRepository(value)
           ? [
               { act: "channel-rename-repo", value, label: "Rename repository…", iconName: "pencil" },
+            ]
+          : []),
+        // Deleting asks for more than managing does: an owner, or a co-owner
+        // of this repository. An admin who may rename it is not offered it.
+        ...(canDeleteRepository(value)
+          ? [
               {
                 act: "channel-delete-repo",
                 value,
@@ -7200,11 +7224,11 @@ document.addEventListener("click", (event) => {
               },
             ]
           : []),
-        // Renaming and deleting are the admin's counterparts: somebody whose
-        // access is organization-wide cannot leave a repository, but can
-        // rename or remove it. Without these the menu had nothing to offer
-        // them at all. A rename changes only what the repository is called —
-        // the id keeps addressing the channel, its tasks and its files.
+        // Renaming is the admin's counterpart: somebody whose access is
+        // organization-wide cannot leave a repository, but can rename it.
+        // Without this the menu had nothing to offer them at all. A rename
+        // changes only what the repository is called — the id keeps
+        // addressing the channel, its tasks and its files.
         ...(canManageRepository(value)
           ? [
               {
@@ -7213,6 +7237,13 @@ document.addEventListener("click", (event) => {
                 label: `Rename #${repositoryLabel(value)}`,
                 iconName: "pencil",
               },
+            ]
+          : []),
+        // Deleting is not: it is irreversible and takes everyone else's
+        // history with it, so only an owner or a co-owner of this repository
+        // is offered it.
+        ...(canDeleteRepository(value)
+          ? [
               {
                 act: "channel-delete-repo",
                 value,

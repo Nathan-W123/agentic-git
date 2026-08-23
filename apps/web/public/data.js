@@ -1901,7 +1901,8 @@ export function activeChannelId() {
 
 /**
  * Whether the signed-in user can administer this repository directly —
- * delete it, or manage who holds a repository-scoped grant on it.
+ * rename it, or manage who holds a repository-scoped grant on it. Deleting
+ * it is a stricter question, asked through {@link canDeleteRepository}.
  *
  * Mirrors the server's `authorizeRepositoryOwnerAction`: the repository's
  * own creator, or an organization role of admin/owner (where
@@ -1924,6 +1925,42 @@ export function canManageRepository(repositoryId) {
     return true;
   }
   return canManageOrganization();
+}
+
+/**
+ * The signed-in user's repository-scoped grant role on one repository, or
+ * undefined when they hold none — or when the grants have not been read yet,
+ * which `ensureRepositoryGrants` does as the chats screen loads.
+ */
+export function currentRepositoryGrantRole(repositoryId) {
+  const me = currentUserId();
+  if (me === "") {
+    return undefined;
+  }
+  return (state.repositoryGrants[repositoryId] ?? []).find(
+    (grant) => grant.userId === me,
+  )?.role;
+}
+
+/**
+ * Whether the signed-in user may delete this repository outright.
+ *
+ * Deliberately narrower than {@link canManageRepository}: deleting is
+ * irreversible and takes the channel, the grants and the history with it, so
+ * the server (`authorizeRepositoryDeletion`) asks for ownership rather than
+ * for `manage_project`. An organization owner has it; so does a co-owner —
+ * somebody holding an `owner` grant on this repository. An admin, or the
+ * person who created it, can still rename it and manage who is on it.
+ */
+export function canDeleteRepository(repositoryId) {
+  const repository = state.repositories.find((repo) => repo.id === repositoryId);
+  if (repository === undefined) {
+    return false;
+  }
+  return (
+    currentOrganizationRole() === "owner" ||
+    currentRepositoryGrantRole(repositoryId) === "owner"
+  );
 }
 
 /**
@@ -3986,16 +4023,14 @@ export async function ensureChannelRoster(repositoryId, rerender) {
  * (like the roster); callers that just changed a grant clear the entry first
  * so the next ensure re-reads.
  *
- * Skipped for anyone who cannot manage the repository: the fetch would
- * succeed (the route only requires `view`) but nothing would render it, so
- * asking is wasted work for the common case of an ordinary collaborator.
+ * Read for every member of the channel, not only for people who can already
+ * manage it. A co-owner is *defined* by holding one of these grants, and
+ * `canDeleteRepository` has no other way to find out — gating the fetch on
+ * being a manager would hide the delete control from exactly the people the
+ * grant was created to give it to.
  */
 export async function ensureRepositoryGrants(repositoryId, rerender) {
-  if (
-    !repositoryId ||
-    !canManageRepository(repositoryId) ||
-    state.repositoryGrants[repositoryId] !== undefined
-  ) {
+  if (!repositoryId || state.repositoryGrants[repositoryId] !== undefined) {
     return;
   }
   // Claimed before the request so a second render in the same tick does not

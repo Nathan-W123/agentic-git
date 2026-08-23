@@ -24,6 +24,7 @@ import {
   agentsThinkingIn,
 api,
   canDeleteChannelEntry,
+  canDeleteRepository,
   canLeaveRepository,
   canManageOrganization,
   canManageRepository,
@@ -5890,7 +5891,10 @@ export function channelInfoPopoverHtml(repositoryId) {
   const repository = state.repositories.find((repo) => repo.id === repositoryId);
   const roster = channelAgentsFor(repositoryId);
   const addable = addableAgents(repositoryId);
-  const canManage = canManageRepository(repositoryId);
+  // Deleting asks for ownership rather than for management: an organization
+  // owner, or a co-owner of this repository. Somebody who may rename it and
+  // moderate it is not offered the one control nobody can undo.
+  const canDelete = canDeleteRepository(repositoryId);
   const canLeave = canLeaveRepository();
   // Stats moved to Settings (`channelStatsCard`); co-owner promote / demote /
   // remove moved to People-row menus (`personMenuItems`). Channel info keeps
@@ -5948,7 +5952,7 @@ export function channelInfoPopoverHtml(repositoryId) {
     }
     <div class="pop-block pop-block-danger">
       ${
-        canManage
+        canDelete
           ? `<button type="button" class="btn btn-sm btn-danger" data-act="channel-delete-repo" data-value="${esc(repositoryId)}">
                ${icon("close")} Delete repository
              </button>`
