@@ -60,6 +60,8 @@ api,
   postChannelReply,
   providerEffortOptions,
   providerModelOptions,
+  providerAllowsCustomModel,
+  usageKey,
   providerOptionsNote,
   repositoryLabel,
   saveChannelDraft,
@@ -269,10 +271,22 @@ function usageProviderId(agent) {
  * The usage figures for one of this account's own agents, as one section of
  * its profile card.
  *
- * Only for this account's own agents: the usage route reports the *caller's*
- * account, so showing it beside a teammate's agent would put your consumption
- * under their name. Rendered from state rather than fetched on open, so the
- * first hover shows "Checking…" and every later one is instant.
+ * A teammate's agent used to be skipped entirely, because the route reported
+ * the *caller's* account and showing that beside somebody else's agent would
+ * have put your consumption under their name. The route takes an owner now,
+ * so the question can be asked correctly instead of not at all — and whether
+ * it is answered is the service's decision, made on the connection's own
+ * visibility.
+ */
+function usageOwner(agent) {
+  return agent.mine === true ? undefined : (agent.userId ?? undefined);
+}
+
+/**
+ * The usage figures for an agent, as one section of its profile card.
+ *
+ * Rendered from state rather than fetched on open, so the first hover shows
+ * "Checking…" and every later one is instant.
  */
 function usageBlock(agent) {
   if (agent.mine !== true) {

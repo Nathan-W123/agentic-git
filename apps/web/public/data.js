@@ -890,6 +890,24 @@ export function providerModelOptions(providerId) {
 }
 
 /**
+ * Whether a name typed by hand reaches this provider.
+ *
+ * The server has always sent `allowCustomModel`, and nothing here read it. It
+ * is how a provider says "I cannot list what is available, but I will pass
+ * through whatever you name" — true for Codex wherever its CLI has not cached
+ * a list, and for Cursor always. Absent or false means the list is the whole
+ * of what may be chosen.
+ */
+export function providerAllowsCustomModel(providerId) {
+  const loaded = state.providerOptions[providerId];
+  return (
+    loaded !== undefined &&
+    loaded !== null &&
+    loaded.allowCustomModel === true
+  );
+}
+
+/**
  * The reasoning levels available, for one model.
  *
  * Two shapes, because the vendors answer differently. Claude's levels are the
@@ -958,23 +976,33 @@ export async function loadProviderOptions(providerId) {
  * every time a pointer crosses a row. `undefined` means "not asked yet";
  * a stored `unavailableReason` is an answer and stops further asking.
  */
-export async function ensureProviderUsage(providerId, rerender) {
-  if (!providerId || state.providerUsage[providerId] !== undefined) {
-    return state.providerUsage[providerId];
+export function usageKey(providerId, ownerId) {
+  // Keyed by owner as well as vendor, because the roster asks this for other
+  // people's agents too. Keyed by vendor alone, the first teammate's figures
+  // would be handed to every other agent of the same vendor in the room.
+  return ownerId ? `${ownerId}:${providerId}` : providerId;
+}
+
+export async function ensureProviderUsage(providerId, rerender, ownerId) {
+  const key = usageKey(providerId, ownerId);
+  if (!providerId || state.providerUsage[key] !== undefined) {
+    return state.providerUsage[key];
   }
-  state.providerUsage[providerId] = { loading: true };
+  state.providerUsage[key] = { loading: true };
   try {
     const response = await api(
-      `/chat/providers/${encodeURIComponent(providerId)}/usage`,
+      `/chat/providers/${encodeURIComponent(providerId)}/usage${
+        ownerId ? `?owner=${encodeURIComponent(ownerId)}` : ""
+      }`,
     );
-    state.providerUsage[providerId] = response.usage ?? {
+    state.providerUsage[key] = response.usage ?? {
       unavailableReason: "This deployment reported no usage.",
     };
   } catch (error) {
-    state.providerUsage[providerId] = { unavailableReason: error.message };
+    state.providerUsage[key] = { unavailableReason: error.message };
   }
   rerender?.();
-  return state.providerUsage[providerId];
+  return state.providerUsage[key];
 }
 
 /**
@@ -987,12 +1015,12 @@ export async function ensureProviderUsage(providerId, rerender) {
  * say "look again", and it is deliberately only reachable from a button
  * somebody pressed.
  */
-export async function refreshProviderUsage(providerId, rerender) {
+export async function refreshProviderUsage(providerId, rerender, ownerId) {
   if (!providerId) {
     return undefined;
   }
-  delete state.providerUsage[providerId];
-  return await ensureProviderUsage(providerId, rerender);
+  delete state.providerUsage[usageKey(providerId, ownerId)];
+  return await ensureProviderUsage(providerId, rerender, ownerId);
 }
 
 export async function applyProviderSetting(providerId, field, value) {

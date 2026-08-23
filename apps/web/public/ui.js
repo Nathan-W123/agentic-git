@@ -1324,6 +1324,30 @@ export function miniSelect(act, options, current, title = "") {
     <select data-act="${act}">${body}</select>${icon("chevronDown")}</span>`;
 }
 
+/**
+ * A model nobody can enumerate, typed instead of picked.
+ *
+ * {@link miniSelect} renders nothing at all with no options, which is right
+ * for a list still loading and wrong for a provider that will never have one.
+ * Codex reports its models from a cache its own CLI writes on this machine;
+ * where that cache does not exist the server sends no list and sets
+ * `allowCustomModel` — "there is nothing to choose from, and a name typed here
+ * is passed through unaltered". Nothing in the browser read that flag, so the
+ * one provider that most needed a way to name a model showed a read-only
+ * "Default" and the choice the backend was ready to accept could not be made
+ * anywhere.
+ *
+ * Commits on `change`, so it saves on blur or Enter rather than per keystroke,
+ * and reaches the same handler the select does. Emptying it clears the choice,
+ * which is how every one of these controls returns to the default.
+ */
+export function miniEditable(act, current, placeholder, title = "") {
+  return `<span class="mini-select mini-editable" title="${esc(title)}">
+    <input data-act="${esc(act)}" type="text" value="${esc(current ?? "")}"
+      placeholder="${esc(placeholder)}" spellcheck="false"
+      autocapitalize="off" autocorrect="off" autocomplete="off" /></span>`;
+}
+
 export function segmented(act, options, current) {
   return `<span class="seg">${options
     .map(
@@ -1364,12 +1388,23 @@ export function tabs(act, items, current) {
  */
 export function iconButton(
   name,
-  { act = "", title = "", value = "", small = false, cls = "" } = {},
+  { act = "", title = "", value = "", small = false, cls = "", data = {} } = {},
 ) {
   return `<button type="button" class="icon-btn${small ? " sm" : ""}${
     cls ? ` ${cls}` : ""
   }"${act ? ` data-act="${act}"` : ""}${
     value ? ` data-value="${esc(value)}"` : ""
+  }${
+    // Extra data attributes, for a button whose action needs more than one
+    // value. The usage refresh needs to say whose account it is asking about
+    // as well as which vendor, and anything passed here used to be dropped
+    // on the floor by this destructure.
+    Object.entries(data)
+      .filter(([, attribute]) => attribute !== undefined && attribute !== "")
+      .map(([attribute, attributeValue]) =>
+        ` data-${attribute}="${esc(String(attributeValue))}"`,
+      )
+      .join("")
   } title="${esc(title)}" aria-label="${esc(title)}">${icon(name)}</button>`;
 }
 

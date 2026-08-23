@@ -223,17 +223,55 @@ test("startup failures, malformed output, and timeouts stay unavailable", async 
   assert.ok(Date.now() - startedAt < 1_000);
 });
 
-test("status failures retain the app-server fallback", async () => {
+test("the documented interface answers, and the display is not consulted", async () => {
+  // Both sources can answer, and they disagree on purpose: the app-server
+  // reports 9%, the status read would report 77%. Whichever number comes back
+  // is the one this prefers. It has to be the app-server's — `--status` is a
+  // display whose field names are free to move between releases, and reading
+  // it first would mean a rename there quietly outranks the contract.
   const snapshot = await readCodexSubscriptionUsage({
     command: process.execPath,
-    statusArgs: ["-e", "process.exit(2);"],
+    statusArgs: [
+      "-e",
+      `process.stdout.write(${JSON.stringify(
+        JSON.stringify({
+          rate_limits: {
+            primary: { used_percent: 77, window_duration_mins: 300 },
+            secondary: { used_percent: 77, window_duration_mins: 10080 },
+          },
+        }),
+      )});`,
+    ],
     appServerArgs: ["-e", successfulAppServer],
     timeoutMs: 1_000,
   });
 
   assert.equal(snapshot?.primary.usedPercent, 9);
-  assert.equal(snapshot?.secondary.usedPercent, 31);
   assert.equal(snapshot?.planType, "team");
+});
+
+test("an app-server that cannot answer falls back to the status read", async () => {
+  // Older builds, or a handshake that is unavailable. A display read beats no
+  // reading at all; it is only worse than the contract.
+  const snapshot = await readCodexSubscriptionUsage({
+    command: process.execPath,
+    appServerArgs: ["-e", "process.exit(2);"],
+    statusArgs: [
+      "-e",
+      `process.stdout.write(${JSON.stringify(
+        JSON.stringify({
+          rate_limits: {
+            primary: { used_percent: 77, window_duration_mins: 300 },
+            secondary: { used_percent: 12, window_duration_mins: 10080 },
+          },
+        }),
+      )});`,
+    ],
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(snapshot?.primary.usedPercent, 77);
+  assert.equal(snapshot?.secondary.usedPercent, 12);
 });
 
 test("a numeric credit balance is lifted out of the opaque credits object", () => {

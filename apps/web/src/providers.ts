@@ -446,33 +446,65 @@ export function parseCodexRateLimits(
   contents: string,
 ): ProviderUsageReport | undefined {
   const marker = '"rate_limits":';
-  const at = contents.lastIndexOf(marker);
-  if (at === -1) {
+  if (!contents.includes(marker)) {
     return undefined;
   }
-  // The object runs to the end of its own JSON line.
-  const lineEnd = contents.indexOf("\n", at);
-  const line = contents.slice(
-    contents.lastIndexOf("\n", at) + 1,
-    lineEnd === -1 ? undefined : lineEnd,
-  );
-  let limits:
-    | {
-        primary?: CodexRateWindow | null;
-        secondary?: CodexRateWindow | null;
-        plan_type?: string | null;
-      }
-    | undefined;
-  try {
-    const event = JSON.parse(line) as Record<string, unknown>;
-    const found = findRateLimits(event);
-    limits = found as typeof limits;
-  } catch {
-    return undefined;
+  type CodexRateLimits = {
+    primary?: CodexRateWindow | null;
+    secondary?: CodexRateWindow | null;
+    plan_type?: string | null;
+  };
+  // Newest reading of each window, not the newest event.
+  //
+  // A session emits `rate_limits` repeatedly, and the payloads are not always
+  // complete: an event can carry the weekly window and not the five-hour one.
+  // Reading only the last occurrence meant one partial event at the end of a
+  // rollout discarded a figure that was sitting a few lines above it, and the
+  // card showed a week with no five hours beside it. Each window is now taken
+  // from the most recent event that actually reported it.
+  let limits: CodexRateLimits | undefined;
+  const freshest: CodexRateLimits = {};
+  const lines = contents.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === undefined || !line.includes(marker)) {
+      continue;
+    }
+    let found: CodexRateLimits | undefined;
+    try {
+      found = findRateLimits(
+        JSON.parse(line) as Record<string, unknown>,
+      ) as CodexRateLimits | undefined;
+    } catch {
+      continue;
+    }
+    if (found === undefined) {
+      continue;
+    }
+    limits ??= found;
+    if (
+      freshest.primary == null &&
+      typeof found.primary?.used_percent === "number"
+    ) {
+      freshest.primary = found.primary;
+    }
+    if (
+      freshest.secondary == null &&
+      typeof found.secondary?.used_percent === "number"
+    ) {
+      freshest.secondary = found.secondary;
+    }
+    if (freshest.plan_type == null && typeof found.plan_type === "string") {
+      freshest.plan_type = found.plan_type;
+    }
+    if (freshest.primary != null && freshest.secondary != null) {
+      break;
+    }
   }
   if (limits === undefined) {
     return undefined;
   }
+  limits = { ...limits, ...freshest };
   const windows: ProviderUsageWindow[] = [];
   for (const [name, window] of [
     ["primary", limits.primary],
@@ -1044,14 +1076,32 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
   ],
-  // Only the -codex ids. The bare ones are real models but not for this
-  // door: Codex on a ChatGPT account 400s them ("The 'gpt-5' model is not
-  // supported when using Codex with a ChatGPT account"), and a suggestion
-  // that stores a guaranteed failure is a trap with a label. API-key
-  // accounts get the CLI's own reported list and never see this fallback.
+  // What the Codex CLI documents, newest first. gpt-5.1-codex and
+  // gpt-5.2-codex, which this list used to hold, are deprecated. Shown
+  // only where the CLI has cached nothing, and never in place of a real list:
+  // an account that reports its own models never sees these.
+  //
+  // These are not the `-codex` suffixed names this list used to hold. That
+  // rule came from `gpt-5` 400ing on a ChatGPT-account Codex ("The 'gpt-5'
+  // model is not supported when using Codex with a ChatGPT account"), and it
+  // is not known here whether these three carry the same split. They are
+  // offered as suggestions rather than as a reported list — `optionsNote`
+  // says which the reader is looking at — and a wrong one fails at planning
+  // with the CLI's own words rather than silently. The cure is the cache: the
+  // moment it exists these are gone.
   openai: [
-    { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
-    { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini" },
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
+    // Still reachable "depending on your account/API configuration", and kept
+    // for exactly that reason: the three above carry no -codex suffix, and it
+    // was a bare id that a ChatGPT-account Codex refused last time. If that
+    // split still holds, an account the newest names fail for has something
+    // in the list that works rather than an empty answer — and the last of
+    // these is suffixed the old safe way.
+    { id: "gpt-5.5", label: "GPT-5.5" },
+    { id: "gpt-5.4", label: "GPT-5.4" },
+    { id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
   ],
   google: [
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
@@ -1071,7 +1121,7 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
  */
 const SUGGESTED_EFFORTS: Record<ProviderId, string[]> = {
   anthropic: [...CLAUDE_EFFORTS],
-  openai: ["minimal", "low", "medium", "high", "xhigh"],
+  openai: ["none", "low", "medium", "high", "xhigh", "max"],
   google: [],
   cursor: [],
   copilot: [],
@@ -1923,6 +1973,42 @@ interface BrowserCliSpec {
    * is what the CLIs with a known single banner do.
    */
   signInHosts?: string[];
+  /**
+   * Other names the same CLI is installed under, tried in order when the
+   * first one is not on the machine.
+   *
+   * Cursor's installer publishes `cursor-agent` — it is the name in its own
+   * issue tracker and in the help text this file's tests quote back — while
+   * this asked for `agent` and nothing else. Where only one of the two
+   * exists, everything Cursor did here failed at once and silently: no
+   * status, no usage, no model list, no sign-in. Codex has had a resolver
+   * with candidates for exactly this reason; this is the same idea for a
+   * name that cannot be found on disk because it is resolved through PATH.
+   */
+  commandAliases?: string[];
+}
+
+/**
+ * Whether a run failed because the command is not installed, rather than
+ * because the command ran and disliked something.
+ *
+ * Both shapes matter. A spawn that cannot find its target throws, and a shell
+ * that cannot find it answers 127 with its own words — "not recognized" on
+ * Windows, "not found" elsewhere. Treating only the throw as "missing" would
+ * leave the second case looking like a real answer from a CLI that never ran.
+ */
+function missingCommand(outcome: {
+  exitCode?: number;
+  stderr?: string;
+  error?: unknown;
+}): boolean {
+  const words = `${outcome.stderr ?? ""} ${
+    outcome.error instanceof Error ? outcome.error.message : String(outcome.error ?? "")
+  }`;
+  if (/ENOENT|not recognized|not found|No such file/iu.test(words)) {
+    return true;
+  }
+  return outcome.exitCode === 127;
 }
 
 /** Commands used by the browser-only agent connections. */
@@ -1930,6 +2016,10 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
   if (provider === "cursor") {
     return {
       command: "agent",
+      // Tried after `agent`, so a machine that has the short name keeps
+      // behaving exactly as it did and one that has only the published name
+      // starts working instead of failing at every call.
+      commandAliases: ["cursor-agent"],
       prefixArgs: [],
       loginArgs: ["login"],
       label: "Cursor",
@@ -2282,6 +2372,26 @@ function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
 }
 
 /** The Codex CLI may live off PATH; the actively-used install is a fallback. */
+/**
+ * Whether a CLI's own words say the account is signed in.
+ *
+ * Written down once because the obvious test is wrong: "logged in" is a
+ * substring of "Not logged in", so asking whether the words appear reads a
+ * refusal as a confirmation. Two readers here made that mistake — the usage
+ * card's diagnosis and the connection detector — and one of them would have
+ * reported a signed-out account as signed in.
+ */
+export function saysSignedIn(output: string): boolean {
+  if (
+    /\b(?:not logged in|not signed in|no active session|please (?:log|sign) in)\b/iu.test(
+      output,
+    )
+  ) {
+    return false;
+  }
+  return /\b(?:logged in|signed in)\b/iu.test(output);
+}
+
 export function resolveCodexCommand(homeDirectory = os.homedir()): string {
   const candidates = [
     "codex",
@@ -2303,6 +2413,8 @@ export class ProviderChatService {
   private readonly runner: ProcessRunner;
   private readonly detachedSpawner: DetachedSpawner;
   private readonly homeDirectory: string;
+  /** Which name each browser CLI was actually found under. */
+  private readonly browserCommands = new Map<string, string>();
   private readonly detectionCache = new Map<
     ProviderId,
     { at: number; state: ProviderCliState }
@@ -2646,7 +2758,45 @@ export class ProviderChatService {
      * the CLI rather than the question being addressed to the wrong account.
      */
     userId?: string;
+    /**
+     * Whose account to ask about, when that is not the caller.
+     *
+     * An agent whose connection is org-wide is one anybody may @mention into
+     * real work — see {@link listConnectionsFor}, which answers a teammate's
+     * `visibility` for exactly that reason. How much of its quota is left is
+     * the same kind of fact: it decides whether mentioning it will get any
+     * work done. A personal connection is not shared at all, and neither is
+     * its usage.
+     */
+    ownerId?: string;
   }): Promise<ProviderUsageReport> {
+    const owner = input.ownerId ?? input.userId;
+    if (owner !== undefined && owner !== input.userId) {
+      const shared = (await this.listConnectionsFor([owner]))[owner]?.some(
+        (connection) =>
+          connection.provider === input.provider &&
+          connection.visibility === "org",
+      );
+      if (shared !== true) {
+        return {
+          source: PROVIDER_NAMES[input.provider],
+          windows: [],
+          unavailableReason:
+            "This is a personal connection, so its usage is visible only to " +
+            "the person who owns it.",
+        };
+      }
+      // Read as the owner, then handed back with the one figure that is not
+      // an operational fact removed: a credit balance is money on somebody
+      // else's account, and knowing whether an agent can still do work does
+      // not require knowing what is left in their wallet.
+      const { creditBalance: withheld, ...report } = await this.usage({
+        provider: input.provider,
+        userId: owner,
+      });
+      void withheld;
+      return report;
+    }
     if (
       input.provider !== "anthropic" &&
       input.provider !== "openai" &&
@@ -2749,14 +2899,26 @@ export class ProviderChatService {
         userId === undefined
           ? undefined
           : await this.ownCredential(userId, "openai").catch(() => undefined);
+      // Captured rather than swallowed. Opening the caller's credential home
+      // can fail outright — most often as "not connected" — and that error is
+      // the whole answer to why the card is empty. It used to be discarded by
+      // the catch below, and the card then blamed the account's quota for a
+      // connection that was never there.
+      const trace: string[] = [];
+      let obstacle: string | undefined =
+        userId !== undefined && credential === undefined
+          ? "No Codex connection is stored for this account, so the quota " +
+            "was asked of whatever login this machine carries rather than " +
+            "of you. Connect Codex above to read your own."
+          : undefined;
       const inHome = await this.withCompletionEnv(
         userId,
         "openai",
         credential,
         async (env) => {
-          const live = await this.codexAccountRateLimits(env);
+          const live = await this.codexAccountRateLimits(env, trace);
           if (live !== undefined) {
-            return live;
+            return { report: live };
           }
           // Sessions write their rollouts under whatever CODEX_HOME the run
           // was given, so the search follows the same home the runs use; the
@@ -2770,34 +2932,79 @@ export class ProviderChatService {
               ? undefined
               : path.join(codexHome, "sessions"),
           );
-          if (newest === undefined) {
-            return undefined;
+          const parsed =
+            newest === undefined
+              ? undefined
+              : parseCodexRateLimits(await readFile(newest, "utf8"));
+          trace.push(
+            newest === undefined
+              ? "no session records under this home"
+              : parsed === undefined
+                ? "the newest session record carried no rate limits"
+                : "read from a session record",
+          );
+          if (parsed !== undefined) {
+            return { report: { ...parsed, source } };
           }
-          const parsed = parseCodexRateLimits(await readFile(newest, "utf8"));
-          return parsed === undefined ? undefined : { ...parsed, source };
+          // Nothing to show, so find out why while the caller's home still
+          // exists. Asked here and nowhere else: outside this callback the
+          // home is gone, and the question would be about the host's login.
+          return { obstacle: await this.codexQuotaObstacle(env) };
         },
-      ).catch(() => undefined);
-      if (inHome !== undefined) {
-        return inHome;
+      ).catch((error: unknown) => {
+        obstacle =
+          error instanceof ProviderChatError && error.code === "not_connected"
+            ? "This account is not connected to Codex here, so there is no " +
+              "account to ask for a quota. Connect it from the row above."
+            : `The Codex quota could not be read: ${
+                error instanceof Error ? error.message : String(error)
+              }`;
+        return undefined;
+      });
+      if (inHome?.report !== undefined) {
+        return inHome.report;
       }
       // The durable copy: credential homes are temporary, and the close hook
       // carries the newest rollout's tail out of one before it is removed.
       if (userId !== undefined) {
         const store = await this.credentialStore();
         const snapshot = await store.readUsageSnapshot(userId, "codex");
-        if (snapshot !== undefined) {
-          const persisted = parseCodexRateLimits(snapshot);
-          if (persisted !== undefined) {
-            return { ...persisted, source };
-          }
+        const persisted =
+          snapshot === undefined ? undefined : parseCodexRateLimits(snapshot);
+        trace.push(
+          snapshot === undefined
+            ? "no snapshot kept from an earlier run"
+            : persisted === undefined
+              ? "the kept snapshot carried no rate limits"
+              : "read from the kept snapshot",
+        );
+        if (persisted !== undefined) {
+          return { ...persisted, source };
         }
       }
       return {
         source,
         windows: [],
         unavailableReason:
-          "Codex reported no quota for this account, and no Codex session " +
-          "has recorded rate limits on this machine yet.",
+          inHome?.obstacle ??
+          obstacle ??
+          // Said as a fact where the connection settles it. The stored
+          // credential's kind is known here, so "which is what an API-key
+          // account returns" does not have to stay a hypothesis offered to
+          // somebody who cannot check it: an API key has no subscription
+          // quota to report, and that is the end of the question rather than
+          // a symptom of something still to fix.
+          (credential?.kind === "api_key"
+            ? "This Codex connection signs in with an API key, which carries " +
+              "no subscription quota — that usage is billed per token and " +
+              "reported in the OpenAI dashboard rather than here."
+            : "Codex reported no quota for this account, and no Codex " +
+              "session has recorded rate limits on this machine yet. An " +
+              "account billed by API key reports no subscription quota at " +
+              "all.") +
+            // What each source actually said, so the next reading of this
+            // card is a diagnosis rather than another guess.
+            (trace.length === 0 ? "" : ` Tried: ${trace.join("; ")}.`),
       };
     } catch (error) {
       return {
@@ -2822,6 +3029,47 @@ export class ProviderChatService {
    * the flag prints its own usage text instead of an account, which
    * {@link parseCursorUsage} reports as nothing rather than as a quota.
    */
+  /**
+   * Runs a browser CLI, trying the names it may be installed under.
+   *
+   * The winner is remembered, so the second name costs one extra spawn per
+   * process rather than one per call. A failure that is not "no such command"
+   * is returned as it stands: a CLI that ran and refused has answered, and
+   * retrying it under another name would turn one real refusal into two.
+   */
+  private async runBrowserCli(
+    spec: BrowserCliSpec,
+    args: readonly string[],
+    options: Parameters<ProcessRunner>[2],
+  ): Promise<Awaited<ReturnType<ProcessRunner>>> {
+    const remembered = this.browserCommands.get(spec.command);
+    const candidates =
+      remembered === undefined
+        ? [spec.command, ...(spec.commandAliases ?? [])]
+        : [remembered];
+    let last: Awaited<ReturnType<ProcessRunner>> | undefined;
+    let thrown: unknown;
+    for (const command of candidates) {
+      try {
+        const result = await this.runner(command, args, options);
+        if (!missingCommand({ exitCode: result.exitCode, stderr: result.stderr })) {
+          this.browserCommands.set(spec.command, command);
+          return result;
+        }
+        last = result;
+      } catch (error) {
+        if (!missingCommand({ error })) {
+          throw error;
+        }
+        thrown = error;
+      }
+    }
+    if (last !== undefined) {
+      return last;
+    }
+    throw thrown ?? new Error(`${spec.command} is not installed here`);
+  }
+
   private async cursorUsage(userId?: string): Promise<ProviderUsageReport> {
     const spec = browserCliSpec("cursor") as BrowserCliSpec;
     const source = "cursor status, as reported by the signed-in account";
@@ -2842,8 +3090,8 @@ export class ProviderChatService {
         args: readonly string[],
       ): Promise<ProviderUsageReport | undefined> => {
         try {
-          const output = await this.runner(
-            spec.command,
+          const output = await this.runBrowserCli(
+            spec,
             [...spec.prefixArgs, ...args],
             {
               timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
@@ -2893,9 +3141,84 @@ export class ProviderChatService {
   }
 
   /** Native status first, with the app-server retained for older CLIs. */
+  /**
+   * Why a quota read came back with nothing — asked of the caller's own home.
+   *
+   * Every reader above answers `undefined` for four different situations: the
+   * CLI is not installed where Kumi runs, it is installed but signed out, it
+   * is too old to have the method, or the account genuinely has no
+   * subscription quota. The card said the last of those in all four cases,
+   * which is untrue in three and unactionable in all: "Codex reported no
+   * quota" describes a Codex that was never successfully asked.
+   *
+   * So when there is nothing to show, the obstacle is looked for and named.
+   * Undefined means the CLI ran and is signed in, and the plain answer — this
+   * account has no quota to report — is the true one after all.
+   */
+  private async codexQuotaObstacle(
+    env: NodeJS.ProcessEnv | undefined,
+  ): Promise<string | undefined> {
+    const command = resolveCodexCommand(this.homeDirectory);
+    const ask = async (args: readonly string[]): Promise<ProcessOutput> =>
+      await this.runner(command, args, {
+        timeoutMs: CODEX_QUOTA_TIMEOUT_MS,
+        maxOutputBytes: 65_536,
+        ...(env === undefined ? {} : { env }),
+      });
+    try {
+      const version = await ask(["--version"]);
+      if (version.exitCode !== 0) {
+        return (
+          "The Codex CLI on this machine could not be asked for its version, " +
+          "so it cannot be asked for a quota either."
+        );
+      }
+    } catch (error) {
+      return (
+        "The Codex CLI could not be run where Kumi is installed: " +
+        `${error instanceof Error ? error.message : String(error)}. ` +
+        "Usage comes from that CLI, so it stays empty until it is there."
+      );
+    }
+    try {
+      const login = await ask(["login", "status"]);
+      if (!saysSignedIn(`${login.stdout}\n${login.stderr}`)) {
+        return (
+          "The Codex CLI is installed but this account is not signed in to " +
+          "it, so it has no quota to report. Signing in again from the " +
+          "connection above is what fills this."
+        );
+      }
+    } catch {
+      // Signed-in state could not be established either way. Say nothing
+      // rather than accuse a working login of being absent.
+    }
+    return undefined;
+  }
+
   private async codexAccountRateLimits(
     env: NodeJS.ProcessEnv | undefined,
+    /**
+     * What each source actually answered, appended as it goes.
+     *
+     * Three rounds of this card were spent guessing which step was failing,
+     * because every one of them reports the same nothing. A reader that says
+     * "the app-server replied with no rate limits" is a different problem
+     * from one that says "the app-server could not be started", and the card
+     * could not tell them apart — nor could anybody reading it.
+     */
+    trace?: string[],
   ): Promise<ProviderUsageReport | undefined> {
+    // `account/rateLimits/read` is the interface OpenAI documents for reading
+    // this, and it answers in the shape it promises. `--status` is a display
+    // that happens to emit JSON today. Asking the display first would let a
+    // rename inside it outrank the contract, and the wrong answer is the one
+    // that parses — so it is the fallback, for a CLI whose app-server does
+    // not answer.
+    const live = await this.codexAppServerRateLimits(env, trace);
+    if (live !== undefined) {
+      return live;
+    }
     try {
       const result = await this.runner(
         resolveCodexCommand(this.homeDirectory),
@@ -2906,18 +3229,26 @@ export class ProviderChatService {
           ...(env === undefined ? {} : { env }),
         },
       );
-      const status =
+      const parsed =
         result.exitCode === 0
           ? parseCodexStatusRateLimits(result.stdout)
           : undefined;
-      if (status !== undefined) {
-        return status;
-      }
-    } catch {
-      // The status flag is feature-detected: old or missing CLIs continue to
-      // the app-server compatibility path below.
+      trace?.push(
+        result.exitCode !== 0
+          ? `codex --status --json exited ${String(result.exitCode)}`
+          : parsed === undefined
+            ? "codex --status --json carried no rate limits"
+            : "codex --status --json answered",
+      );
+      return parsed;
+    } catch (error) {
+      trace?.push(
+        `codex --status --json could not run (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
+      return undefined;
     }
-    return await this.codexAppServerRateLimits(env);
   }
 
   /**
@@ -2933,6 +3264,7 @@ export class ProviderChatService {
    */
   private async codexAppServerRateLimits(
     env: NodeJS.ProcessEnv | undefined,
+    trace?: string[],
   ): Promise<ProviderUsageReport | undefined> {
     const conversation = [
       {
@@ -2966,8 +3298,36 @@ export class ProviderChatService {
       // Parsed whatever the exit code: the app-server is killed at the
       // deadline and exits non-zero on EOF, both after it has already
       // answered.
-      return parseCodexAppServerRateLimits(result.stdout);
-    } catch {
+      const parsed = parseCodexAppServerRateLimits(result.stdout);
+      // Silence from the app-server is the one outcome that says nothing at
+      // all about the account, so it carries the exit code and whatever the
+      // process complained about. "Unknown subcommand" is a CLI too old to
+      // have the interface; 124 is the deadline; anything else is the
+      // server's own words about why it would not answer.
+      // Long enough to carry a path. The first cut at this was 160
+      // characters and sliced a `codex_home:` value in half, which read as
+      // the home being the filesystem root and sent the diagnosis a whole
+      // round in the wrong direction.
+      const complaint = result.stderr.trim().split("\n")[0]?.slice(0, 400);
+      trace?.push(
+        parsed !== undefined
+          ? "account/rateLimits/read answered"
+          : result.stdout.trim() === ""
+            ? `codex app-server said nothing (exit ${String(result.exitCode)}${
+                complaint === undefined || complaint === ""
+                  ? ""
+                  : `: ${complaint}`
+              })`
+            : "account/rateLimits/read replied without rate limits, which is " +
+              "what an API-key account returns",
+      );
+      return parsed;
+    } catch (error) {
+      trace?.push(
+        `codex app-server could not run (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
       return undefined;
     }
   }
@@ -3064,7 +3424,7 @@ export class ProviderChatService {
       maxOutputBytes: 65_536,
     });
     const output = `${login.stdout}\n${login.stderr}`;
-    const loggedIn = login.exitCode === 0 && /logged in/iu.test(output);
+    const loggedIn = login.exitCode === 0 && saysSignedIn(output);
     return {
       detected: true,
       loggedIn,
@@ -3104,8 +3464,12 @@ export class ProviderChatService {
   private async detectBrowserCli(provider: "cursor" | "copilot" | "kiro"):
     Promise<ProviderCliState> {
     const spec = browserCliSpec(provider) as BrowserCliSpec;
-    const version = await this.runner(
-      spec.command,
+    // Through the alias-aware runner, because this is the check that decides
+    // whether the connection is usable at all: finding no `agent` on a
+    // machine that has `cursor-agent` reported the CLI as absent, and every
+    // later question was never asked.
+    const version = await this.runBrowserCli(
+      spec,
       [...spec.prefixArgs, "--version"],
       { timeoutMs: 30_000, maxOutputBytes: 65_536 },
     );
@@ -4286,7 +4650,7 @@ export class ProviderChatService {
               ...(model === undefined ? [] : ["--model", model]),
               prompt,
             ];
-    return await this.runner(spec.command, args, options);
+    return await this.runBrowserCli(spec, args, options);
   }
 
   /**
@@ -4660,22 +5024,34 @@ export class ProviderChatService {
         // at all. The value reaches `codex exec -m <model>` unaltered either
         // way, exactly as it does for Claude.
         allowCustomModel: models === undefined,
-        // No suggested model names. A suggestion here is a guess about
-        // somebody else's account, and picking one from a list reads as
-        // picking something available — which is how "gpt-5" came to be
-        // selected on a ChatGPT-account Codex that answers
-        // `The 'gpt-5' model is not supported when using Codex with a ChatGPT
-        // account` and fails the task at planning time. A name nobody can
-        // check is worse offered than withheld: typing one is at least an
-        // explicit guess, and the field still accepts one.
+        // Suggested names, where the CLI has cached none of its own. This
+        // used to send nothing at all, on the reasoning that a suggestion is
+        // a guess about somebody else's account — true, and it was the right
+        // answer to `gpt-5`, which 400s on a ChatGPT-account Codex. But the
+        // conclusion drawn from it was too wide. An empty control is not a
+        // careful answer to an uncertain one: it leaves somebody who does not
+        // already know an id with no way to name a model at all, which is the
+        // state this shipped in. A named guess that fails at planning with
+        // the CLI's own message is recoverable; a control with nothing in it
+        // is not even wrong.
         //
-        // Reasoning levels are kept. They are fixed vocabulary the CLI defines
-        // rather than entitlements that vary by account, so suggesting them
-        // cannot mislead the same way.
+        // What keeps it honest is that these never masquerade as reported.
+        // `suggestedModels` and `models` are mutually exclusive, and
+        // `providerOptionsNote` tells the reader which they have.
         ...(models === undefined
-          ? { suggestedEfforts: [...SUGGESTED_EFFORTS.openai] }
+          ? {
+              suggestedModels: [...SUGGESTED_MODELS.openai],
+              suggestedEfforts: [...SUGGESTED_EFFORTS.openai],
+            }
           : {}),
-        notes: [],
+        notes:
+          models === undefined
+            ? [
+                "Codex has not cached a model list on this machine, so these " +
+                  "are the CLI's documented ids rather than what this account " +
+                  "reports. Any other id can be typed instead.",
+              ]
+            : [],
       };
     }
     if (input.provider === "anthropic") {

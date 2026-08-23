@@ -1124,3 +1124,47 @@ test("a Gemini API key is offered again, and arrives ready to use", async (t) =>
     await home.close();
   }
 });
+
+test("a Codex run's rate limits survive the home they were written in", async (t) => {
+  // Codex records its rate limits only in the session rollouts it writes
+  // under CODEX_HOME, and that home is deleted when the run ends. The close
+  // hook exists to carry the newest one's tail out first — and it looked in
+  // `<home>/sessions` while Codex was pointed at `<home>/config`, so it read
+  // a directory nothing ever writes to. Nothing was ever captured, and every
+  // usage card on every deployment said "no snapshot kept from an earlier
+  // run" for as long as this has existed.
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-rollout",
+  });
+  const credential = await vault.get("user-1", "codex");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "codex", credential });
+  const codexHome = home.env["CODEX_HOME"];
+  assert.ok(codexHome !== undefined && codexHome.startsWith(home.path));
+
+  // Written where the CLI was actually pointed, which is the whole point.
+  const day = path.join(codexHome, "sessions", "2026", "08", "23");
+  await mkdir(day, { recursive: true });
+  await writeFile(
+    path.join(day, "rollout-1.jsonl"),
+    `${JSON.stringify({
+      type: "token_count",
+      rate_limits: {
+        primary: { used_percent: 41, window_minutes: 300 },
+        secondary: { used_percent: 7, window_minutes: 10_080 },
+      },
+    })}\n`,
+    "utf8",
+  );
+
+  const { usageSnapshot } = await home.close();
+  assert.ok(
+    usageSnapshot !== undefined,
+    "the rollout written under CODEX_HOME was not carried out of the home",
+  );
+  assert.match(usageSnapshot ?? "", /used_percent/u);
+});

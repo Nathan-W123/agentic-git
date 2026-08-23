@@ -19,7 +19,9 @@ import {
   parseClaudeStreamJson,
   parseCursorModelList,
   parseCursorUsage,
+  saysSignedIn,
   parseCodexAppServerRateLimits,
+  parseCodexRateLimits,
   parseCodexStatusRateLimits,
   parseCodexJsonl,
   streamProcess,
@@ -273,10 +275,9 @@ test("a sign-in's model list is kept, so the account's own models replace the su
   // Before: nothing reported, so the picker runs on suggestions.
   const before = await service.options({ provider: "openai" });
   assert.equal(before.models, null);
-  // Nothing offered before the account reports one — a suggested model name
-  // is a guess about someone else's entitlements, and the point of this test
-  // is what replaces it, not that a placeholder was there first.
-  assert.equal((before.suggestedModels ?? []).length, 0);
+  // The CLI's documented ids stand in until the account reports its own. The
+  // point of this test is what replaces them.
+  assert.ok((before.suggestedModels ?? []).length > 0);
 
   // A sign-in leaves a model list behind in its throwaway home.
   const flowHome = path.join(harness.home, "throwaway-device-home");
@@ -348,12 +349,28 @@ test("openai with no cached model list stays usable instead of refusing everythi
   const options = await service.options({ provider: "openai" });
   assert.equal(options.models, null);
   assert.equal(options.allowCustomModel, true);
-  assert.deepEqual(options.notes, []);
-  // No suggested model names at all. A suggestion here is a guess about
-  // somebody else's entitlements, and offering it in a picker reads as
-  // offering something available — which is how a ChatGPT-account Codex came
-  // to be set to a model it answers 400 for and fails at planning time.
-  assert.equal((options.suggestedModels ?? []).length, 0);
+  // The CLI's documented ids, offered rather than withheld. This used to send
+  // none of them, reasoning that a suggestion is a guess about somebody
+  // else's entitlements — true, and the right answer to `gpt-5`, which a
+  // ChatGPT-account Codex answers 400 for. But the conclusion was too wide:
+  // it left anybody who did not already know an id unable to name a model at
+  // all. A guess that fails at planning with the CLI's own words is
+  // recoverable; an empty control is not even wrong.
+  assert.deepEqual(options.suggestedModels?.map((model) => model.id), [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    // The older ids an account may still be on, so a deployment the newest
+    // names fail for is not left picking between six dead options and typing.
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+  ]);
+  // And never mistakable for the account's own answer.
+  assert.match(
+    (options.notes ?? []).join(" "),
+    /has not cached a model list/u,
+  );
   // Reasoning levels stay: fixed vocabulary the CLI defines, not entitlements
   // that vary by account, so suggesting them cannot mislead the same way.
   assert.ok((options.suggestedEfforts ?? []).length > 0);
@@ -410,14 +427,15 @@ test("every provider offers a model list to pick from, cached or not", async () 
   for (const provider of ["anthropic", "openai", "google"] as const) {
     const options = await service.options({ provider });
     const models = options.models ?? options.suggestedModels ?? [];
-    // Codex is the exception, and deliberately: with no cached list there is
-    // nothing to offer that is not a guess about this account's entitlements,
-    // and a guess presented as a choice is how an account was set to a model
-    // it answers 400 for. It gets a free-text field instead.
+    // Codex with no cached list is no longer the exception: it offers the
+    // CLI's documented ids, keeps free text beside them, and says in its note
+    // that they are suggestions rather than what the account reported.
     if (provider === "openai" && options.models === null) {
       assert.equal(options.allowCustomModel, true);
-      assert.deepEqual(options.notes, []);
-      continue;
+      assert.match(
+        (options.notes ?? []).join(" "),
+        /has not cached a model list/u,
+      );
     }
     assert.ok(
       models.length > 0,
@@ -627,10 +645,11 @@ test("claude usage percentages are read from the CLI's own /usage report", async
   // The "95% of your usage was at >150k context" line is prose, not a window.
   assert.ok(!report.windows.some((window) => window.percentUsed === 95));
 
-  // Codex records its limits per session, and this harness has none.
+  // Codex records its limits per session, and this harness has none — and
+  // says which of the several reasons for an empty card applies here.
   const codex = await service.usage({ provider: "openai" });
   assert.deepEqual(codex.windows, []);
-  assert.match(codex.unavailableReason ?? "", /no Codex session/iu);
+  assert.match(codex.unavailableReason ?? "", /could not be asked|not signed in|no Codex session/iu);
 });
 
 test("codex usage comes from the rate limits its own session records", async () => {
@@ -682,7 +701,7 @@ test("codex usage comes from the rate limits its own session records", async () 
   });
   const none = await bare.usage({ provider: "openai" });
   assert.deepEqual(none.windows, []);
-  assert.match(none.unavailableReason ?? "", /no Codex session/iu);
+  assert.match(none.unavailableReason ?? "", /could not be asked|not signed in|no Codex session/iu);
 });
 
 test("codex usage asks the account for its quota before reading session records", async () => {
@@ -728,7 +747,12 @@ test("codex usage asks the account for its quota before reading session records"
     provider: "openai",
     userId: "usage-user",
   });
-  assert.deepEqual(seen[0], ["--status", "--json"]);
+  // The documented interface is asked first and is not scripted here, so the
+  // status read answers. What this test is really holding down is below: the
+  // question is put to the account, inside its own home, every time it is
+  // asked.
+  assert.deepEqual(seen[0], ["app-server", "--stdio"]);
+  assert.deepEqual(seen[1], ["--status", "--json"]);
   const quotaCall = calls.find((call) => call.args[0] === "--status");
   assert.ok((quotaCall?.env?.["CODEX_HOME"] ?? "").length > 0);
   assert.notEqual(quotaCall?.env?.["CODEX_HOME"], harness.home);
@@ -751,7 +775,9 @@ test("codex usage asks the account for its quota before reading session records"
   });
   assert.equal(reopened.windows[0]?.percentUsed, 12.5);
   assert.deepEqual(seen, [
+    ["app-server", "--stdio"],
     ["--status", "--json"],
+    ["app-server", "--stdio"],
     ["--status", "--json"],
   ]);
 });
@@ -826,10 +852,8 @@ test("unsupported native status falls back without losing usage", async () => {
   });
 
   const report = await service.usage({ provider: "openai" });
-  assert.deepEqual(seen, [
-    ["--status", "--json"],
-    ["app-server", "--stdio"],
-  ]);
+  // The app-server answers, so the status read is never reached.
+  assert.deepEqual(seen, [["app-server", "--stdio"]]);
   assert.deepEqual(
     report.windows.map((window) => window.percentUsed),
     [9, 31],
@@ -2915,6 +2939,439 @@ test("cursor usage falls back to plain status, and stays unavailable when there 
   const report = await missing.usage({ provider: "cursor" });
   assert.deepEqual(report.windows, []);
   assert.match(report.unavailableReason ?? "", /cursor/iu);
+});
+
+test("a refusal is not read as a confirmation", () => {
+  // "logged in" is a substring of "Not logged in". Asking whether the words
+  // appear reports a signed-out account as signed in, which is how an empty
+  // usage card came to blame the account instead of the missing login.
+  assert.equal(saysSignedIn("Not logged in. Run `codex login`."), false);
+  assert.equal(saysSignedIn("not signed in"), false);
+  assert.equal(saysSignedIn("No active session"), false);
+  assert.equal(saysSignedIn("Please log in to continue"), false);
+  assert.equal(saysSignedIn(""), false);
+
+  assert.equal(saysSignedIn("Logged in using ChatGPT"), true);
+  assert.equal(saysSignedIn("Signed in as nathan@example.com"), true);
+});
+
+test("a five-hour window survives a later event that omits it", async () => {
+  // Codex emits rate_limits repeatedly through a session and the payloads are
+  // not always complete. Reading only the last occurrence let one partial
+  // event at the end of a rollout discard a figure sitting a few lines above
+  // it, and the card showed a week with no five hours beside it.
+  const rollout = [
+    JSON.stringify({ type: "message", text: "…" }),
+    JSON.stringify({
+      type: "token_count",
+      rate_limits: {
+        primary: { used_percent: 34, window_minutes: 300, resets_at: 1_785_902_966 },
+        secondary: { used_percent: 5, window_minutes: 10_080 },
+        plan_type: "pro",
+      },
+    }),
+    // Later, and weekly only.
+    JSON.stringify({
+      type: "token_count",
+      rate_limits: { secondary: { used_percent: 9, window_minutes: 10_080 } },
+    }),
+  ].join("\n");
+
+  const report = parseCodexRateLimits(rollout);
+  assert.ok(report !== undefined);
+  assert.deepEqual(
+    report.windows.map((window) => [window.label, window.percentUsed]),
+    [
+      // The five-hour figure is kept from where it was last reported...
+      ["5 hours", 34],
+      // ...and the weekly one is the newer of the two readings, not the older.
+      ["week", 9],
+    ],
+  );
+  assert.equal(report.planType, "pro");
+});
+
+test("a window nobody ever reported stays absent", async () => {
+  // The other half: this must not invent a window, only stop losing one.
+  const report = parseCodexRateLimits(
+    JSON.stringify({
+      type: "token_count",
+      rate_limits: { secondary: { used_percent: 9, window_minutes: 10_080 } },
+    }),
+  );
+
+  assert.deepEqual(
+    report?.windows.map((window) => window.label),
+    ["week"],
+  );
+});
+
+test("a teammate sees an org-wide agent's usage, and never a personal one's", async () => {
+  // Usage was refused for anybody but the owner, which was one answer to a
+  // real question — the route reported the *caller's* account, so showing it
+  // beside somebody else's agent would have put your consumption under their
+  // name. The route takes an owner now, so the rule can be the one the rest
+  // of the roster already uses: an org-wide connection is one anybody may put
+  // to work, and how much of its quota is left decides whether doing so
+  // accomplishes anything. A personal connection is shared with nobody.
+  const harness = await createHarness();
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("owner-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-owner",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    credentials: store,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args[0] === "--version"
+        ? output("codex-cli 0.146.0")
+        : args[0] === "login"
+          ? output("Logged in using ChatGPT")
+          : args[0] === "app-server"
+            ? output(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 1,
+                  result: {
+                    rateLimits: {
+                      primary: { usedPercent: 61, windowDurationMins: 300 },
+                      secondary: { usedPercent: 8, windowDurationMins: 10_080 },
+                      planType: "pro",
+                      // The key this parser reads: `credits.balance`.
+                      credits: { balance: 1234 },
+                    },
+                  },
+                }),
+              )
+            : output("", 2, "error")) as ProcessRunner,
+  });
+
+  // Personal by default: a teammate is told, in the service's own words.
+  const refused = await service.usage({
+    provider: "openai",
+    userId: "watcher-user",
+    ownerId: "owner-user",
+  });
+  assert.deepEqual(refused.windows, []);
+  assert.match(refused.unavailableReason ?? "", /visible only to/u);
+
+  // Set where `listConnectionsFor` reads it. Going through `setSettings`
+  // would need a connections record too, and the rule under test is about the
+  // credential's visibility, not about how it came to be set.
+  await store.put("owner-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-owner",
+    visibility: "org",
+  });
+
+  const shared = await service.usage({
+    provider: "openai",
+    userId: "watcher-user",
+    ownerId: "owner-user",
+  });
+  assert.equal(shared.unavailableReason, undefined);
+  assert.deepEqual(
+    shared.windows.map((window) => window.percentUsed),
+    [61, 8],
+  );
+  // Operational facts travel; a money balance on somebody else's account does
+  // not, because knowing whether an agent can still work does not require it.
+  assert.equal(shared.creditBalance, undefined);
+
+  // And the owner still sees their own in full.
+  const own = await service.usage({
+    provider: "openai",
+    userId: "owner-user",
+  });
+  assert.equal(own.creditBalance, 1234);
+});
+
+test("an API-key connection is told it has no quota, not left guessing", async () => {
+  // The card offered "which is what an API-key account returns" as a
+  // hypothesis to somebody with no way to check it, while the answer sat in
+  // the stored credential the whole time. An API key has no subscription
+  // quota; that closes the question rather than describing a symptom.
+  const harness = await createHarness();
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("key-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-key-user",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    credentials: store,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args[0] === "--version"
+        ? output("codex-cli 0.146.0")
+        : args[0] === "login"
+          ? output("Logged in")
+          : args[0] === "app-server"
+            ? output(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }))
+            : output("", 2, "error: unexpected argument")) as ProcessRunner,
+  });
+
+  const said =
+    (await service.usage({ provider: "openai", userId: "key-user" }))
+      .unavailableReason ?? "";
+  assert.match(said, /signs in with an API key/u);
+  assert.match(said, /OpenAI dashboard/u);
+  // And not the old hedge, which described the situation as a maybe.
+  assert.doesNotMatch(said, /no Codex session has recorded/u);
+});
+
+test("an empty card names what each source answered", async () => {
+  // Three rounds of this were spent guessing which step was failing, because
+  // every step reports the same nothing. "The app-server replied without rate
+  // limits" and "the app-server could not be started" are different problems
+  // with different fixes, and the card could not tell them apart.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) => {
+      if (args[0] === "--version") {
+        return output("codex-cli 0.146.0");
+      }
+      if (args[0] === "login") {
+        return output("Logged in using ChatGPT");
+      }
+      if (args[0] === "app-server") {
+        // Answers, but with no rateLimits — what an API-key account returns.
+        return output(
+          JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }),
+        );
+      }
+      return output("", 1, "error: unknown flag --status");
+    }) as ProcessRunner,
+  });
+
+  const report = await service.usage({ provider: "openai" });
+  const said = report.unavailableReason ?? "";
+  assert.match(said, /Tried:/u);
+  assert.match(said, /rateLimits\/read replied without rate limits/u);
+  assert.match(said, /--status --json exited 1/u);
+  assert.match(said, /no session records/u);
+});
+
+test("a silent app-server is quoted, not read as an account with no quota", async () => {
+  // "Returned nothing" was the one outcome that said nothing about the
+  // account and still sat beside a sentence blaming it. An app-server that
+  // does not answer is a CLI without the interface, a deadline, or a refusal
+  // it can name — and which of those it is decides the fix.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) => {
+      if (args[0] === "--version") {
+        return output("codex-cli 0.146.0");
+      }
+      if (args[0] === "login") {
+        return output("Logged in using ChatGPT");
+      }
+      if (args[0] === "app-server") {
+        return output("", 2, "error: unrecognized subcommand 'app-server'");
+      }
+      return output("", 2, "error: unexpected argument '--status'");
+    }) as ProcessRunner,
+  });
+
+  const said = (await service.usage({ provider: "openai" })).unavailableReason ?? "";
+  assert.match(said, /codex app-server said nothing \(exit 2/u);
+  assert.match(said, /unrecognized subcommand/u);
+  // And it is not reported as the account having answered with no limits.
+  assert.doesNotMatch(said, /replied without rate limits/u);
+});
+
+test("a connection failure is the answer, not a quota of zero", async () => {
+  // The remaining way to reach the blanket sentence: opening the caller's
+  // credential home fails, the whole in-home block is skipped, and the card
+  // reported an account quota for a connection that was never established.
+  const harness = await createHarness();
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("disconnected-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-disconnected",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    // Delegating rather than spread: a spread of a class instance keeps none
+    // of its prototype methods, and the reader needs the real ones.
+    credentials: new Proxy(store, {
+      get: (target, property) => {
+        if (property === "openCredentialHome") {
+          return async () => undefined;
+        }
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+    runner: scriptedRunner({}),
+  });
+
+  const report = await service.usage({
+    provider: "openai",
+    userId: "disconnected-user",
+  });
+  assert.deepEqual(report.windows, []);
+  assert.match(report.unavailableReason ?? "", /not connected to Codex/u);
+  assert.doesNotMatch(report.unavailableReason ?? "", /reported no quota/u);
+});
+
+test("a caller with no stored connection is told whose quota was read", async () => {
+  // A host-login deployment legitimately has no per-user credential, and the
+  // read still happens — but against the machine's login, not this person's.
+  // Saying so is the difference between "you have no quota" and "that was not
+  // your account".
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "--version"
+          ? output("codex-cli 0.146.0")
+          : args[0] === "login"
+            ? output("Logged in using ChatGPT")
+            : output(""),
+    }),
+  });
+
+  const report = await service.usage({
+    provider: "openai",
+    userId: "no-connection-user",
+  });
+  assert.match(report.unavailableReason ?? "", /rather than of you/u);
+});
+
+test("an empty usage card says what is actually in the way", async () => {
+  // One sentence used to cover four situations — the CLI missing, signed out,
+  // too old, or an account with genuinely no subscription quota — and it
+  // asserted the last of them every time. "Codex reported no quota" describes
+  // a Codex that was never successfully asked, and leaves nothing to do about
+  // it.
+  const harness = await createHarness();
+
+  const noBinary = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async () => {
+      throw new Error("spawn codex ENOENT");
+    }) as ProcessRunner,
+  });
+  const missing = await noBinary.usage({ provider: "openai" });
+  assert.deepEqual(missing.windows, []);
+  assert.match(missing.unavailableReason ?? "", /could not be run where Kumi/u);
+  assert.match(missing.unavailableReason ?? "", /ENOENT/u);
+
+  const signedOut = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) => {
+      if (args[0] === "--version") {
+        return output("codex-cli 0.146.0");
+      }
+      if (args[0] === "login") {
+        return output("Not logged in.");
+      }
+      // Neither quota source answers.
+      return output("");
+    }) as ProcessRunner,
+  });
+  const out = await signedOut.usage({ provider: "openai" });
+  assert.deepEqual(out.windows, []);
+  assert.match(out.unavailableReason ?? "", /not signed in/u);
+
+  // Installed, signed in, and simply nothing to report: the plain answer is
+  // the true one here, and it now says why that can legitimately happen.
+  const noQuota = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args[0] === "--version"
+        ? output("codex-cli 0.146.0")
+        : args[0] === "login"
+          ? output("Logged in using ChatGPT")
+          : output("")) as ProcessRunner,
+  });
+  const quiet = await noQuota.usage({ provider: "openai" });
+  assert.match(quiet.unavailableReason ?? "", /billed by API key/u);
+});
+
+test("Cursor is found under the name its installer actually uses", async () => {
+  // The spec asked for `agent` and nothing else, while Cursor publishes
+  // `cursor-agent` — the name in its own issue tracker and in the help text
+  // these tests quote back. On a machine with only the published name, every
+  // Cursor call failed at once and silently: no detection, no status, no
+  // usage, no model list.
+  const harness = await createHarness();
+  const tried: string[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (command: string, args: readonly string[]) => {
+      tried.push(command);
+      if (command === "agent") {
+        // What a shell says about a command it cannot find.
+        return output("", 127, "'agent' is not recognized as an internal or external command");
+      }
+      return args.includes("--format")
+        ? output(JSON.stringify({ loggedIn: true, plan: "pro", quota: { usedPercent: 42 } }))
+        : output("");
+    }) as ProcessRunner,
+  });
+
+  const report = await service.usage({ provider: "cursor" });
+  assert.deepEqual(tried.slice(0, 2), ["agent", "cursor-agent"]);
+  assert.equal(report.planType, "pro");
+  assert.equal(report.windows[0]?.percentUsed, 42);
+});
+
+test("a CLI that ran and refused is not retried under another name", async () => {
+  // The other half. Exit 127 with a shell's "not recognized" means nothing
+  // ran; any other refusal is an answer, and asking a second binary the same
+  // question would turn one real failure into two.
+  const harness = await createHarness();
+  const tried: string[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (command: string) => {
+      tried.push(command);
+      return output("", 1, "error: you are not authorized");
+    }) as ProcessRunner,
+  });
+
+  await service.usage({ provider: "cursor" });
+  assert.deepEqual([...new Set(tried)], ["agent"]);
+});
+
+test("cursor prefers its structured status over the printed one", async () => {
+  // The test above covers `--format json` failing. It does not cover both
+  // answering, which is the case that decides which source is the contract —
+  // the same gap the Codex reader had, where the order was only ever
+  // exercised by a failure and would have passed reversed.
+  //
+  // So both answer here, and they disagree on purpose. The printed status is
+  // a display: its wording is free to move between releases, and preferring
+  // it would let a relabelling there outrank the structured answer.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args.includes("--format")
+        ? output(
+            JSON.stringify({ loggedIn: true, plan: "pro", quota: { usedPercent: 42 } }),
+          )
+        : output(
+            ["Logged in: yes", "Plan: business", "Usage this month: 99% used"].join(
+              "\n",
+            ),
+          )) as ProcessRunner,
+  });
+
+  const report = await service.usage({ provider: "cursor" });
+  assert.equal(report.planType, "pro");
+  assert.equal(report.windows[0]?.percentUsed, 42);
 });
 
 test("an account with no models reads as no list rather than a bad one", () => {
