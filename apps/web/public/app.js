@@ -70,7 +70,6 @@ import {
   takeReadyPlan,
   addChannelAgent,
   removeChannelAgent,
-  removeChannelAgentForUser,
   renameAgent,
   renameChannelAgent,
   setChannelAgentSetting,
@@ -176,6 +175,7 @@ import {
   answerAgentQuestion,
   applyProviderSetting,
   channelFileEdited,
+  clearDirectMessageSelection,
   clearRightPanel,
   createInvitation,
   invitationLink,
@@ -1871,12 +1871,12 @@ async function showInviteLink(token, repositoryId) {
  * "Delete" in the compact row menu means delete it from this chat; the agent
  * account and its work elsewhere remain intact.
  */
-async function removeChannelAgentAction(agentId, removeAny = false) {
+async function removeChannelAgentAction(agentId) {
   const repositoryId = activeChannelId();
   const agent = channelAgentsFor(repositoryId).find(
     (candidate) => candidate.id === agentId,
   );
-  if (!repositoryId || agent === undefined) {
+  if (!repositoryId || agent?.mine !== true) {
     return;
   }
   const confirmed = await showModal({
@@ -1887,19 +1887,7 @@ async function removeChannelAgentAction(agentId, removeAny = false) {
   if (confirmed === undefined) {
     return;
   }
-  if (removeAny) {
-    // Teammate entries are keyed `${userId}:${provider}` by
-    // `channelAgentsFor`; the existing moderation operation takes the same
-    // two values separately.
-    const separatorIndex = agentId.indexOf(":");
-    removeChannelAgentForUser(
-      repositoryId,
-      agentId.slice(0, separatorIndex),
-      agentId.slice(separatorIndex + 1),
-    );
-  } else {
-    removeChannelAgent(repositoryId, agentId);
-  }
+  removeChannelAgent(repositoryId, agentId);
   state.chatSettingsOpenId = undefined;
   render();
   refreshChannelInfoPopover();
@@ -5707,6 +5695,28 @@ function selectMobileChannelMessage(event) {
 }
 
 /**
+ * Gives one private message its clock and its controls, and the rest none.
+ *
+ * A conversation is mostly short lines, and drawing a timestamp and a pair of
+ * buttons under every one of them is most of the panel's height spent saying
+ * the same two things over and over. A press on a message asks for them;
+ * pressing it again, or anywhere else that does nothing, puts them away.
+ *
+ * The choice lives in `state` rather than on the row: this panel is rebuilt
+ * on every poll, and a class left straight on the DOM would not survive it.
+ */
+function selectDirectMessage(event) {
+  const row = event.target.closest?.(".dm-msg") ?? null;
+  const chosen = row === null ? undefined : row.dataset.dmMessage;
+  const next = chosen === state.dmSelectedMessageId ? undefined : chosen;
+  if (next === state.dmSelectedMessageId) {
+    return;
+  }
+  state.dmSelectedMessageId = next;
+  render();
+}
+
+/**
  * Moves one shared desktop hover surface to the message under the pointer.
  *
  * Painting every row's own background makes the highlight disappear from one
@@ -5779,6 +5789,10 @@ document.addEventListener("click", (event) => {
   }
   const found = actionOf(event);
   if (found === undefined) {
+    // Nothing here does anything of its own, so a press on a private message
+    // is a complete interaction: it asks for that message's time and its
+    // controls, and a press anywhere else puts them away again.
+    selectDirectMessage(event);
     return;
   }
   const { node, act, value } = found;
@@ -6551,6 +6565,7 @@ document.addEventListener("click", (event) => {
     case "dm-open":
       state.activeDm = value;
       state.dmDraft = "";
+      clearDirectMessageSelection();
       openUserDirectMessage(value);
       render();
       loadOpenedDirectMessage(value);
@@ -6591,6 +6606,7 @@ document.addEventListener("click", (event) => {
       state.activeDm = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
+      clearDirectMessageSelection();
       render();
       return;
     // Your own agent, one to one, without leaving the room.
@@ -6794,8 +6810,15 @@ document.addEventListener("click", (event) => {
       showMenu(node, personMenuItems(value));
       return;
     /** Replaces the rendered name with its inline editor. */
-    case "channel-settings-toggle":
+    case "channel-settings-toggle": {
       closePopover();
+      const repositoryId = activeChannelId();
+      const agent = channelAgentsFor(repositoryId).find(
+        (candidate) => candidate.id === value,
+      );
+      if (agent?.mine !== true) {
+        return;
+      }
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
       if (state.chatSettingsOpenId === value) {
@@ -6804,6 +6827,7 @@ document.addEventListener("click", (event) => {
         input?.select();
       }
       return;
+    }
     case "agent-rename-toggle":
       state.settingsRenamingId =
         state.settingsRenamingId === value ? undefined : value;
@@ -6837,10 +6861,6 @@ document.addEventListener("click", (event) => {
     case "channel-agent-remove":
       closePopover();
       void removeChannelAgentAction(value);
-      return;
-    case "channel-agent-remove-any":
-      closePopover();
-      void removeChannelAgentAction(value, true);
       return;
     case "channel-leave":
       void leaveRepositoryAction(value);
@@ -7600,7 +7620,10 @@ document.addEventListener("submit", (event) => {
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
       const renamed = input !== null && input.value !== input.defaultValue;
-      if (renamed) {
+      const ownAgent = channelAgentsFor(activeChannelId()).some(
+        (agent) => agent.id === form.dataset.value && agent.mine === true,
+      );
+      if (renamed && ownAgent) {
         renameChannelAgent(activeChannelId(), form.dataset.value, input.value);
       }
       state.chatSettingsOpenId = undefined;
@@ -8132,7 +8155,15 @@ document.addEventListener("focusout", (event) => {
     return;
   }
   const agentId = node.dataset.value;
-  if (activeChannelId() && agentId && state.chatSettingsOpenId === agentId) {
+  const ownAgent = channelAgentsFor(activeChannelId()).some(
+    (agent) => agent.id === agentId && agent.mine === true,
+  );
+  if (
+    activeChannelId() &&
+    agentId &&
+    ownAgent &&
+    state.chatSettingsOpenId === agentId
+  ) {
     if (node.value !== node.defaultValue) {
       renameChannelAgent(activeChannelId(), agentId, node.value);
     }

@@ -4863,14 +4863,14 @@ test("a clearly-scoped task message auto-claims to the one obviously-best agent"
   });
   assert.equal(named.status, 200, JSON.stringify(named.data));
   assert.equal(
-    (await owner.request(`${base}/agents/${backend.id}:openai`, {
+    (await backend.client.request(`${base}/agents/${backend.id}:openai`, {
       method: "POST",
       body: { name: "Auth Billing Backend Bot" },
     })).status,
     200,
   );
   assert.equal(
-    (await owner.request(`${base}/agents/${database.id}:google`, {
+    (await database.client.request(`${base}/agents/${database.id}:google`, {
       method: "POST",
       body: { name: "Database Schema Migrations Bot" },
     })).status,
@@ -4916,14 +4916,14 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
   // Same three content words in both names, in different order — a real
   // near-tie between two equally-plausible agents, not a contrived one.
   assert.equal(
-    (await owner.request(`${base}/agents/${first.id}:openai`, {
+    (await first.client.request(`${base}/agents/${first.id}:openai`, {
       method: "POST",
       body: { name: "Error Handling API Bot" },
     })).status,
     200,
   );
   assert.equal(
-    (await owner.request(`${base}/agents/${second.id}:google`, {
+    (await second.client.request(`${base}/agents/${second.id}:google`, {
       method: "POST",
       body: { name: "Api Error Handling Service" },
     })).status,
@@ -5056,7 +5056,7 @@ test("an explicit @mention suppresses auto-claim even when an unmentioned agent 
     200,
   );
   assert.equal(
-    (await owner.request(`${base}/agents/${backend.id}:openai`, {
+    (await backend.client.request(`${base}/agents/${backend.id}:openai`, {
       method: "POST",
       body: { name: "Backend Bot (Bella)" },
     })).status,
@@ -8193,6 +8193,40 @@ test("renaming your own agent does not rename everybody else's on that vendor", 
   assert.notEqual(byUser.get(colleague.id)?.name, "Eos");
 });
 
+test("only the user who added an agent can rename it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "rename-owner-only");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const colleague = await addColleague(runtime, "agent-owner@example.com");
+  runtime.chatConnections.set(colleague.id, [
+    { provider: "anthropic", visibility: "org", callSign: "Athena" },
+  ]);
+  const added = await colleague.client.request(
+    `${base}/agents/anthropic/membership`,
+    { method: "POST" },
+  );
+  assert.equal(added.status, 200, JSON.stringify(added.data));
+
+  // Even the organization owner cannot rename a connection a colleague
+  // brought in. Repository authority is not ownership of their agent.
+  const refused = await owner.request(
+    `${base}/agents/${colleague.id}:anthropic`,
+    { method: "POST", body: { name: "Apollo" } },
+  );
+  assert.equal(refused.status, 403, JSON.stringify(refused.data));
+  assert.equal(refused.data.error.code, "forbidden");
+
+  const renamed = await colleague.client.request(
+    `${base}/agents/${colleague.id}:anthropic`,
+    { method: "POST", body: { name: "Artemis" } },
+  );
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  assert.equal(renamed.data.scope, "account");
+});
+
 test("a renamed agent answers to its new name, and the roster says that name", async (t) => {
   // The bug in full: the server resolved overrides one way and the browser
   // another, so a rename showed on screen while the server still matched the
@@ -8209,7 +8243,7 @@ test("a renamed agent answers to its new name, and the roster says that name", a
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
-  // An older per-agent override, the shape a teammate's rename writes.
+  // An older per-agent override, from before names became account-wide.
   assert.equal(
     (await owner.request(`${base}/agents/${ownerId}:anthropic`, {
       method: "POST",
@@ -9081,7 +9115,7 @@ test("a human can leave a repository held only through a grant, but not one reac
   );
 });
 
-test("loosening agent-membership removal to manage_project+ does not let an unrelated viewer remove someone's agent, and self-removal keeps working for everyone", async (t) => {
+test("only the user who added an agent can remove it", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -9116,7 +9150,8 @@ test("loosening agent-membership removal to manage_project+ does not let an unre
   );
   assert.equal(devAttempt.status, 403);
 
-  // An admin (manage_project) can remove somebody else's agent.
+  // An admin still cannot remove somebody else's agent. Repository authority
+  // does not transfer ownership of the connection that powers it.
   const admin = await runtime.store.createUser({
     email: "mod-admin@example.com",
     displayName: "Admin",
@@ -9132,9 +9167,10 @@ test("loosening agent-membership removal to manage_project+ does not let an unre
     `${base}/agents/anthropic/membership?userId=${bootstrapped.user.id}`,
     { method: "DELETE" },
   );
-  assert.equal(adminRemoval.status, 200, JSON.stringify(adminRemoval.data));
+  assert.equal(adminRemoval.status, 403, JSON.stringify(adminRemoval.data));
+  assert.equal(adminRemoval.data.error.code, "forbidden");
   const rosterAfterModeration = await owner.request(`${base}/agents`);
-  assert.deepEqual(rosterAfterModeration.data.agents, []);
+  assert.equal(rosterAfterModeration.data.agents.length, 1);
 
   // Self-service removal still needs only submit_task — the plain developer
   // above, with no manage_project, can remove their own membership.
@@ -12446,7 +12482,7 @@ test("'/stop @agent' spares another persona's same-vendor work", async (t) => {
   );
   assert.equal(
     (
-      await owner.request(`${base}/agents/${colleague.id}:anthropic`, {
+      await colleague.client.request(`${base}/agents/${colleague.id}:anthropic`, {
         method: "POST",
         body: { name: "Andromeda" },
       })
@@ -14735,27 +14771,15 @@ test("an unmatched request goes to the sender's own agent, then to whoever is fr
 
   // One agent each, both org-wide so either could take anything.
   runtime.chatConnections.set(ownerId, [
-    { provider: "anthropic", visibility: "org" },
+    { provider: "anthropic", visibility: "org", callSign: "Willow" },
   ]);
   runtime.chatConnections.set(teammate.id, [
-    { provider: "openai", visibility: "org" },
+    { provider: "openai", visibility: "org", callSign: "Cedar" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
   // Named so that nothing in the request can match either of them, and no
   // role set on either: this is the case where fit has no answer at all.
-  for (const [agent, name] of [
-    ["anthropic", "Willow"],
-    [`${teammate.id}:openai`, "Cedar"],
-  ] as const) {
-    assert.equal(
-      (await owner.request(`${base}/agents/${agent}`, {
-        method: "POST",
-        body: { name },
-      })).status,
-      200,
-    );
-  }
 
   runtime.setTaskClassification("ACT");
   assert.equal(
@@ -15282,26 +15306,14 @@ test("an unreachable pick hands the decision to the runner-up, not to silence", 
 
   const cofounder = await addColleague(runtime, "understudy-cofounder@example.com");
   runtime.chatConnections.set(ownerId, [
-    { provider: "anthropic", visibility: "org" },
+    { provider: "anthropic", visibility: "org", callSign: "Willow" },
   ]);
   runtime.chatConnections.set(cofounder.id, [
-    { provider: "openai", visibility: "org" },
+    { provider: "openai", visibility: "org", callSign: "Cedar" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
   // Names that share no token with the request, so no fit tier: this is the
   // pure fallback path.
-  for (const [agent, name] of [
-    ["anthropic", "Willow"],
-    [`${cofounder.id}:openai`, "Cedar"],
-  ] as const) {
-    assert.equal(
-      (await owner.request(`${base}/agents/${agent}`, {
-        method: "POST",
-        body: { name },
-      })).status,
-      200,
-    );
-  }
   // The owner's own agent is mid-task — an unfinished row under the same
   // (owner, agent) key the busy signal reads.
   await runtime.store.submitTask({
@@ -15365,25 +15377,13 @@ test("a parked conversation does not make the sender's own agent busy", async (t
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
   const cofounder = await addColleague(runtime, "parked-cofounder@example.com");
   runtime.chatConnections.set(ownerId, [
-    { provider: "anthropic", visibility: "org" },
+    { provider: "anthropic", visibility: "org", callSign: "Willow" },
   ]);
   runtime.chatConnections.set(cofounder.id, [
-    { provider: "openai", visibility: "org" },
+    { provider: "openai", visibility: "org", callSign: "Cedar" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
   // No shared tokens with the request, so the fit tier stays out of it.
-  for (const [agent, name] of [
-    ["anthropic", "Willow"],
-    [`${cofounder.id}:openai`, "Cedar"],
-  ] as const) {
-    assert.equal(
-      (await owner.request(`${base}/agents/${agent}`, {
-        method: "POST",
-        body: { name },
-      })).status,
-      200,
-    );
-  }
 
   // One earlier conversation with the owner's agent, landed and parked open.
   const turn = await runtime.store.submitTask({
@@ -15430,24 +15430,12 @@ test("a stranded task from a dead run ages out of the busy signal", async (t) =>
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
   const cofounder = await addColleague(runtime, "stale-cofounder@example.com");
   runtime.chatConnections.set(ownerId, [
-    { provider: "anthropic", visibility: "org" },
+    { provider: "anthropic", visibility: "org", callSign: "Willow" },
   ]);
   runtime.chatConnections.set(cofounder.id, [
-    { provider: "openai", visibility: "org" },
+    { provider: "openai", visibility: "org", callSign: "Cedar" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
-  for (const [agent, name] of [
-    ["anthropic", "Willow"],
-    [`${cofounder.id}:openai`, "Cedar"],
-  ] as const) {
-    assert.equal(
-      (await owner.request(`${base}/agents/${agent}`, {
-        method: "POST",
-        body: { name },
-      })).status,
-      200,
-    );
-  }
 
   // A run that died three hours ago: the row stranded `claimed`, and nothing
   // will ever finish it. Backdated through the store's own map — the public

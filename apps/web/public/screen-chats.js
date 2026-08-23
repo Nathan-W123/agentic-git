@@ -1189,7 +1189,8 @@ const AGENT_STATUS_TITLE = {
  * under the row or retain a duplicate input after the edit is done.
  */
 function rosterRow(agent) {
-  const settingsOpen = state.chatSettingsOpenId === agent.id;
+  const settingsOpen =
+    agent.mine === true && state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
   return `<div class="roster-row">
@@ -1275,12 +1276,17 @@ export function rosterMenuItems(agentId) {
       iconName: "chatBubble",
     });
   }
-  items.push({
-    act: "channel-settings-toggle",
-    value: agent.id,
-    label: "Rename",
-    iconName: "pencil",
-  });
+  // Its owner is the person who connected and added it. Administrators may
+  // still manage channel roles below, but the agent's identity and membership
+  // remain that person's to change.
+  if (agent.mine === true) {
+    items.push({
+      act: "channel-settings-toggle",
+      value: agent.id,
+      label: "Rename",
+      iconName: "pencil",
+    });
+  }
   // Only the auditor gets this, because it is the only role that spends
   // without being asked. Moderators only: turning it back on starts an audit,
   // which costs money, so it is the same decision the promotion route guards.
@@ -1297,13 +1303,9 @@ export function rosterMenuItems(agentId) {
       iconName: paused ? "play" : "pause",
     });
   }
-  if (agent.mine === true || canModerate) {
-    const removeAct =
-      agent.mine === true
-        ? "channel-agent-remove"
-        : "channel-agent-remove-any";
+  if (agent.mine === true) {
     items.push({
-      act: removeAct,
+      act: "channel-agent-remove",
       value: agent.id,
       label: "Delete",
       iconName: "trash",
@@ -4137,46 +4139,26 @@ function threadListPanel(repositoryId) {
           : "Pending";
     const said = threadSaidCount(count);
     const context = `${status} — ${title} — ${author.name}, ${said} — started ${clockTime(entry.at)}`;
-    if (finished) {
-      return `<div class="thread-item-row">
-        <button type="button" class="thread-item thread-item-ended${manageable ? " thread-item-managed" : ""}"
-          title="${esc(context)}"
-          aria-label="${esc(`Open completed thread: ${title}. ${author.name}, ${said}.`)}"
-          data-act="channel-thread-open" data-value="${esc(entry.id)}">
-          <span class="ti-done" aria-hidden="true">${icon("check")}</span>
-          <span class="ti-text">${esc(title)}</span>
-          <span class="ti-who">${esc(author.name)}</span>
-        </button>
-        ${
-          manageable
-            ? iconButton("trash", {
-                act: "channel-thread-delete",
-                value: entry.id,
-                title: "Delete this thread",
-                small: true,
-              })
-            : ""
-        }
-      </div>`;
-    }
     return `<div class="thread-item-row">
-      <button type="button" class="thread-item${working ? " thread-item-active" : ""}${waiting ? " thread-item-held" : ""}${!working && !waiting ? " thread-item-pending" : ""}"
+      <button type="button" class="thread-item${finished ? " thread-item-ended" : ""}${!finished && working ? " thread-item-active" : ""}${!finished && waiting ? " thread-item-held" : ""}${!finished && !working && !waiting ? " thread-item-pending" : ""}"
         title="${esc(context)}"
-        aria-label="${esc(`Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
+        aria-label="${esc(finished ? `Open completed thread: ${title}. ${author.name}, ${said}.` : `Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
         data-act="channel-thread-open" data-value="${esc(entry.id)}">
         <span class="ti-main">
           <span class="ti-text">${esc(title)}</span>
           <span class="ti-meta">
             ${
-              working
-                ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
-                : waiting
-                  ? `<span class="ti-held">Waiting for you</span>`
-                  : `<span class="ti-pending">Pending</span>`
+              finished
+                ? `<span class="ti-done" aria-hidden="true">${icon("check")}</span>`
+                : working
+                  ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
+                  : waiting
+                    ? `<span class="ti-held">Waiting for you</span>`
+                    : `<span class="ti-pending">Pending</span>`
             }
             <span class="ti-who">${esc(author.name)}</span>
             <span class="ti-count">${esc(said)}</span>
-            ${working ? threadRunMark(entry, repositoryId, author) : ""}
+            ${!finished && working ? threadRunMark(entry, repositoryId, author) : ""}
           </span>
         </span>
         <span class="ti-go">${icon("chevronRight")}</span>
@@ -4741,9 +4723,6 @@ function agentSpec(agent, repositoryId) {
                     )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}`
               }</span>
             </span>
-            <button type="button" class="aspec-nav" data-act="agent-panel-tab"
-              data-value="history" title="Task history">
-              <span>History</span>${icon("arrowRight")}</button>
           </div>
         </div>
       </section>
@@ -4920,6 +4899,27 @@ function directMessageReference(message, messages, otherName) {
     </button>`;
 }
 
+/**
+ * Whether one private message continues the same person's uninterrupted run.
+ *
+ * A message answering another keeps its own reference and its own full row,
+ * and a date boundary starts a fresh run even when one person was speaking on
+ * both sides of midnight. The same rule the room's transcript already uses
+ * (see `continuesUserMessageGroup`), read off a conversation that has only
+ * two speakers and no kinds to tell apart.
+ */
+function continuesDirectMessageGroup(previous, current, startsNewDay) {
+  if (
+    previous === undefined ||
+    startsNewDay ||
+    current?.referencedMessageId !== undefined
+  ) {
+    return false;
+  }
+  const authorId = String(current?.authorId ?? "");
+  return authorId !== "" && String(previous.authorId ?? "") === authorId;
+}
+
 /** The selected direct-message reply, kept outside the textarea. */
 function directReplyChip(target, otherName) {
   if (target === undefined) {
@@ -4991,20 +4991,32 @@ function dmPanel() {
           ? `<p class="dm-empty">No messages yet. This conversation is just
              between you and ${esc(name)} — it is not in the channel.</p>`
           : messages
-              .map((message) => {
+              .map((message, index) => {
                 const mine = message.authorId === currentUserId();
                 const day = new Date(
                   message.createdAt ?? Date.now(),
                 ).toDateString();
-                const separator =
-                  day === lastDay
-                    ? ""
-                    : `<div class="chan-day transcript-separator"><span>${
-                        day === new Date().toDateString() ? "Today" : esc(day)
-                      }</span></div>`;
+                const startsNewDay = day !== lastDay;
+                const separator = startsNewDay
+                  ? `<div class="chan-day transcript-separator"><span>${
+                      day === new Date().toDateString() ? "Today" : esc(day)
+                    }</span></div>`
+                  : "";
                 lastDay = day;
-                return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}"
-                    id="dm-msg-${esc(message.id)}">
+                // A run from one person stacks: the lines close up and only
+                // the message a reader has actually asked about spends a row
+                // on its clock and its controls.
+                const compact = continuesDirectMessageGroup(
+                  messages[index - 1],
+                  message,
+                  startsNewDay,
+                );
+                const selected = message.id === state.dmSelectedMessageId;
+                return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}${
+                  compact ? " dm-compact" : ""
+                }${selected ? " dm-selected" : ""}"
+                    id="dm-msg-${esc(message.id)}"
+                    data-dm-message="${esc(message.id)}">
                   ${directMessageReference(message, messages, name)}
                   <div class="dm-bubble cmsg-text"
                     data-reveal="dm:${esc(userId)}|msg-${esc(message.id)}">${messageBody(

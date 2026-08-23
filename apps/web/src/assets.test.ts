@@ -4421,14 +4421,17 @@ test("ended threads wrap as compact pills without live activity motion", async (
     listStart,
     chats.indexOf("\n/**\n * Your own agent", listStart),
   );
-  const finishedMarkup = list.slice(
-    list.indexOf("if (finished)"),
-    list.indexOf('class="thread-item${working', list.indexOf("if (finished)")),
-  );
 
-  assert.match(finishedMarkup, /class="thread-item thread-item-ended/u);
-  assert.match(finishedMarkup, /class="ti-done"/u);
-  assert.doesNotMatch(finishedMarkup, /ti-activity|text-sweep/u);
+  assert.match(list, /finished \? " thread-item-ended"/u);
+  assert.match(
+    list,
+    /finished\s*\n\s*\? `<span class="ti-done" aria-hidden="true">\$\{icon\("check"\)\}<\/span>`/u,
+  );
+  assert.match(list, /class="ti-main"/u);
+  assert.match(list, /class="ti-meta"/u);
+  assert.match(list, /class="ti-go"/u);
+  assert.match(list, /class="ti-count"/u);
+  assert.match(list, /!finished && working \? threadRunMark/u);
   const finished = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   const active = /\n\.thread-list-active \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(finished ?? "", /display: grid;/u);
@@ -4437,8 +4440,10 @@ test("ended threads wrap as compact pills without live activity motion", async (
   const card = /\n\.thread-item \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(card ?? "", /border-radius: var\(--radius\);/u);
   const ended = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(ended ?? "", /background: var\(--bg-inset\);/u);
   assert.doesNotMatch(ended ?? "", /border-radius:\s*999px/u);
   assert.doesNotMatch(ended ?? "", /max-width:\s*260px/u);
+  assert.doesNotMatch(css, /\.thread-item-ended \.ti-who::before/u);
 });
 
 test("long thread titles stay on one compact line", async () => {
@@ -4476,7 +4481,7 @@ test("thread list keeps unfinished work ahead of ended threads", async () => {
   assert.ok(
     list.indexOf('class="thread-list-active"') <
       list.indexOf('class="thread-list-finished"'),
-    "unfinished summaries should render before the completed pills",
+    "unfinished summaries should render before the completed threads",
   );
   assert.match(list, /: "Pending";/u);
 });
@@ -4496,8 +4501,8 @@ test("compact thread summaries keep accessible thread navigation", async () => {
 
   assert.equal(
     list.match(/data-act="channel-thread-open"/gu)?.length,
-    2,
-    "both active rows and ended pills should open their thread",
+    1,
+    "active and ended rows share one open control that opens their thread",
   );
   assert.match(list, /aria-label="\$\{esc\(`Open completed thread:/u);
   assert.match(list, /aria-label="\$\{esc\(`Open thread:/u);
@@ -5015,7 +5020,9 @@ test("agent details use the reference profile with supported controls", async ()
   assert.doesNotMatch(css, /^\.agent-panel-head\s*\{/mu);
 
   // Only a real assignment becomes the primary-colour bubble. Its own copy,
-  // state line, mark, and history control remain legible on that solid surface.
+  // state line, and mark remain legible on that solid surface. The inline
+  // history control next to "available for new work" is gone; Message and
+  // History stay as explicit profile actions above.
   const activeTask = /\n\.agent-spec \.aspec-current-task-active \{([\s\S]*?)\n\}/u.exec(
     css,
   )?.[1];
@@ -5026,7 +5033,6 @@ test("agent details use the reference profile with supported controls", async ()
     "aspec-capability-mark",
     "aspec-capability-title",
     "aspec-capability-meta",
-    "aspec-nav",
   ]) {
     assert.match(
       css,
@@ -5035,12 +5041,11 @@ test("agent details use the reference profile with supported controls", async ()
   }
   assert.match(
     css,
-    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-nav \{\s*color: #fff;/u,
+    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-capability-meta \{\s*color: #fff;/u,
   );
-  assert.match(
-    css,
-    /\.aspec-current-task-active \.aspec-nav \{[\s\S]*?background: rgba\(0, 0, 0, 0\.14\);/u,
-  );
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-nav/u);
+  assert.doesNotMatch(spec, /class="aspec-nav"/u);
+  assert.doesNotMatch(spec, /title="Task history"/u);
 
   // The remaining interactive and informative parts stay on the single
   // scrolling surface, including owner-only and read-only paths.
@@ -5054,7 +5059,6 @@ test("agent details use the reference profile with supported controls", async ()
     assert.match(spec, new RegExp(`data-act="${action}"|"${action}"`, "u"));
   }
   assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
-  assert.match(spec, /data-value="history" title="Task history"/u);
   // The live assignment opens its thread the same way a history row does.
   assert.match(spec, /const openCurrentTask =/u);
   assert.match(
@@ -5125,7 +5129,7 @@ test("a call sign outranks a legacy vendor-wide channel name", async () => {
   assert.doesNotMatch(rename, /\[providerId, `\$\{myId\}:\$\{providerId\}`\]/u);
 });
 
-test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
+test("a roster row offers rename and delete only for the viewer's agent", async () => {
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");
   const css = await publicFile("styles.css");
@@ -5139,19 +5143,26 @@ test("a roster row carries one ellipsis and a compact rename delete menu", async
   );
 
   assert.equal(row.match(/act: "roster-agent-menu"/gu)?.length, 1);
+  assert.match(
+    row,
+    /const settingsOpen =\s*agent\.mine === true && state\.chatSettingsOpenId === agent\.id;/u,
+  );
   assert.match(row, /settingsOpen\s*\? `<form class="roster-rename"/u);
   assert.match(row, /: `<div class="rr-name">\$\{esc\(agent\.name\)\}<\/div>`/u);
   assert.match(row, /class="rr-name-input" data-act="channel-rename-input"/u);
   assert.doesNotMatch(row, /rosterSettings|channel-role-input/u);
 
-  assert.match(menu, /label: "Rename"/u);
-  assert.match(menu, /iconName: "pencil"/u);
-  assert.match(menu, /label: "Delete"/u);
-  assert.match(menu, /danger: true/u);
   assert.match(
     menu,
-    /agent\.mine === true\s*\?\s*"channel-agent-remove"\s*:\s*"channel-agent-remove-any"/u,
+    /if \(agent\.mine === true\) \{\s*items\.push\(\{\s*act: "channel-settings-toggle",[\s\S]*?label: "Rename"/u,
   );
+  assert.match(menu, /iconName: "pencil"/u);
+  assert.match(
+    menu,
+    /if \(agent\.mine === true\) \{\s*items\.push\(\{\s*act: "channel-agent-remove",[\s\S]*?label: "Delete"/u,
+  );
+  assert.match(menu, /danger: true/u);
+  assert.doesNotMatch(menu, /channel-agent-remove-any/u);
   assert.doesNotMatch(menu, /label: "Settings"|iconName: "sliders"/u);
   assert.doesNotMatch(chats, /function rosterSettings|function settingRow/u);
 
@@ -5164,6 +5175,7 @@ test("a roster row carries one ellipsis and a compact rename delete menu", async
 
 test("inline rename and delete finish without retaining extra UI", async () => {
   const app = await browserSource();
+  const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
   const remove = app.slice(
     app.indexOf("async function removeChannelAgentAction"),
@@ -5184,16 +5196,17 @@ test("inline rename and delete finish without retaining extra UI", async () => {
 
   assert.match(remove, /await showModal\(/u);
   assert.match(remove, /if \(confirmed === undefined\) \{\s*return;/u);
+  assert.match(remove, /agent\?\.mine !== true/u);
   assert.match(remove, /removeChannelAgent\(repositoryId, agentId\)/u);
-  assert.match(remove, /removeChannelAgentForUser\(/u);
   assert.match(app, /case "channel-agent-remove":\s*\n\s*closePopover\(\);/u);
-  assert.match(app, /case "channel-agent-remove-any":\s*\n\s*closePopover\(\);/u);
+  assert.doesNotMatch(app, /channel-agent-remove-any|removeChannelAgentForUser/u);
   // The shared popover closes on its scrim or Escape, covering dismissal as
   // well as either menu selection above.
   assert.match(ui, /data-act="pop-close"/u);
   assert.match(ui, /event\.key === "Escape"[\s\S]{0,60}closePopover\(\)/u);
 
-  assert.match(submit, /renameChannelAgent\(/u);
+  assert.match(submit, /agent\.mine === true/u);
+  assert.match(submit, /if \(renamed && ownAgent\) \{\s*renameChannelAgent\(/u);
   assert.match(submit, /state\.chatSettingsOpenId = undefined;/u);
   assert.match(submit, /render\(\);/u);
   const escape = /if \(act === "channel-rename-input" && event\.key === "Escape"\) \{([\s\S]*?)\n  \}/u.exec(
@@ -5203,12 +5216,26 @@ test("inline rename and delete finish without retaining extra UI", async () => {
   assert.match(escape ?? "", /state\.chatSettingsOpenId = undefined;/u);
   assert.doesNotMatch(escape ?? "", /renameChannelAgent/u);
   assert.match(renameKeys, /event\.key === "Enter"[\s\S]{0,240}requestSubmit\(\)/u);
+  assert.match(renameBlur, /agent\.mine === true/u);
   assert.match(renameBlur, /renameChannelAgent\(activeChannelId\(\), agentId, node\.value\)/u);
   assert.match(renameBlur, /state\.chatSettingsOpenId = undefined;\s*\n\s*render\(\);/u);
   assert.match(
     app,
     /event\.target\.closest\?\.\("button, input, select, textarea, a\[href\]"\)[\s\S]{0,80}return;/u,
   );
+
+  const rename = data.slice(
+    data.indexOf("export function renameChannelAgent"),
+    data.indexOf("export function setChannelAgentSetting"),
+  );
+  const removal = data.slice(
+    data.indexOf("export function removeChannelAgent"),
+    data.indexOf("const repositoryPath"),
+  );
+  for (const operation of [rename, removal]) {
+    assert.match(operation, /const providerId = ownProviderId\(agentId\);/u);
+    assert.match(operation, /if \(providerId === undefined\) \{\s*return;/u);
+  }
 });
 
 test("a slash command is offered wherever it is typed, not only at the start", async () => {

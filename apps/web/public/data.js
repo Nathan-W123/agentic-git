@@ -383,6 +383,14 @@ export const state = {
   dmDraft: "",
   /** The message the next direct message answers, if any. */
   dmReplyMessageId: undefined,
+  /**
+   * The one private message showing its time and its controls, if any.
+   *
+   * Kept here rather than as a class on the row, because `render()` rebuilds
+   * the panel on every poll and a mark left straight on the DOM would be
+   * swept out from under a reader mid-conversation.
+   */
+  dmSelectedMessageId: undefined,
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
   /**
@@ -2900,8 +2908,8 @@ function overrideFor(overrides, agent) {
   // agent-specific keys existed and cannot be deleted on a rename without
   // renaming every other person's agent on that vendor in the room, so
   // without this an old room went on showing the old name after an
-  // account-wide rename. A row naming this one agent still wins — that is a
-  // deliberate per-room rename, and it is that room's to keep.
+  // account-wide rename. A historical row naming this one agent still wins
+  // until its owner renames the agent and clears it account-wide.
   const legacyName = agent.hasName === true ? undefined : legacy?.name;
   return {
     name: specific?.name ?? legacyName,
@@ -3306,6 +3314,11 @@ export async function sendDirectMessage(userId, content, referencedMessageId) {
   noteDirectMessage({ message: response.message });
 }
 
+/** Puts the open conversation back to nothing selected. */
+export function clearDirectMessageSelection() {
+  state.dmSelectedMessageId = undefined;
+}
+
 /**
  * Unsends one direct message.
  *
@@ -3330,6 +3343,9 @@ export async function deleteDirectMessageEntry(userId, messageId) {
   );
   if (state.activeDm === userId && state.dmReplyMessageId === messageId) {
     state.dmReplyMessageId = undefined;
+  }
+  if (state.dmSelectedMessageId === messageId) {
+    clearDirectMessageSelection();
   }
   await loadDirectMessages();
 }
@@ -3391,6 +3407,9 @@ export function noteDirectMessageDeleted(frame) {
   );
   if (state.activeDm === other && state.dmReplyMessageId === messageId) {
     state.dmReplyMessageId = undefined;
+  }
+  if (state.dmSelectedMessageId === messageId) {
+    clearDirectMessageSelection();
   }
   // The inbox row shows the last message and an unread count, and the deleted
   // one may have been either. Re-read rather than recompute: this is the same
@@ -4583,13 +4602,17 @@ export async function renameAgent(providerId, name) {
  * behaviour — Athena here, Vesta next door — is what people reported as the
  * rename not sticking.
  *
- * A teammate's agent is still renamed for this channel alone, keyed
- * (repository, agent) server-side: their agent's name is theirs, and nobody
- * with mere `view` here gets to change it in every repository they work in.
+ * Only the account that brought the agent into the channel may rename it.
+ * Besides keeping the optimistic update honest, this guard covers every
+ * browser caller; the server enforces the same ownership rule independently.
  */
 export function renameChannelAgent(repositoryId, agentId, name) {
   const trimmed = String(name ?? "").trim();
   if (!repositoryId || !agentId || trimmed === "") {
+    return;
+  }
+  const providerId = ownProviderId(agentId);
+  if (providerId === undefined) {
     return;
   }
   // Guarded here rather than at each caller because a rename commits from two
@@ -4603,26 +4626,7 @@ export function renameChannelAgent(repositoryId, agentId, name) {
     );
     return;
   }
-  const providerId = ownProviderId(agentId);
-  if (providerId === undefined) {
-    state.channelAgentOverrides[repositoryId] ??= {};
-    state.channelAgentOverrides[repositoryId][agentId] = {
-      ...state.channelAgentOverrides[repositoryId][agentId],
-      name: trimmed,
-    };
-    // The roster's resolved name wins over the local override in
-    // `channelAgentsFor`, so without this the rename would not show until the
-    // roster was fetched again.
-    state.channelRoster[repositoryId] = (
-      state.channelRoster[repositoryId] ?? []
-    ).map((entry) =>
-      `${entry.userId}:${entry.provider}` === agentId
-        ? { ...entry, name: trimmed }
-        : entry,
-    );
-  } else {
-    applyAgentRenameLocally(providerId, trimmed);
-  }
+  applyAgentRenameLocally(providerId, trimmed);
   if (state.projectId) {
     void api(channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}`), {
       method: "POST",
@@ -4801,37 +4805,19 @@ export function removeChannelAgent(repositoryId, agentId) {
   if (!repositoryId || !agentId) {
     return;
   }
-  const myId = currentUserId();
-  state.channelRoster[repositoryId] = (state.channelRoster[repositoryId] ?? []).filter(
-    (entry) => !(entry.userId === myId && entry.provider === agentId),
-  );
-  if (state.projectId) {
-    void api(
-      channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}/membership`),
-      { method: "DELETE" },
-    ).catch((error) => toast(`Could not remove agent from this chat: ${error.message}`, "error"));
-  }
-}
-
-/**
- * Removes another member's agent from a channel — moderation, gated
- * server-side on `manage_project` (loosened from `agent.mine`-only in
- * `screen-chats.js`'s `rosterRow`), unlike {@link removeChannelAgent}'s
- * self-service path which only ever needs `submit_task`.
- */
-export function removeChannelAgentForUser(repositoryId, userId, provider) {
-  if (!repositoryId || !userId || !provider) {
+  const providerId = ownProviderId(agentId);
+  if (providerId === undefined) {
     return;
   }
+  const myId = currentUserId();
   state.channelRoster[repositoryId] = (state.channelRoster[repositoryId] ?? []).filter(
-    (entry) => !(entry.userId === userId && entry.provider === provider),
+    (entry) => !(entry.userId === myId && entry.provider === providerId),
   );
   if (state.projectId) {
     void api(
-      `${channelPath(repositoryId, `/agents/${encodeURIComponent(provider)}/membership`)}` +
-        `?userId=${encodeURIComponent(userId)}`,
+      channelPath(repositoryId, `/agents/${encodeURIComponent(providerId)}/membership`),
       { method: "DELETE" },
-    ).catch((error) => toast(`Could not remove that agent: ${error.message}`, "error"));
+    ).catch((error) => toast(`Could not remove agent from this chat: ${error.message}`, "error"));
   }
 }
 
@@ -5607,6 +5593,7 @@ export function putAwayRightPanel(kind) {
       state.activeDm = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
+      clearDirectMessageSelection();
       return;
     case "file":
       closeChannelFile();
