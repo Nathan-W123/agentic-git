@@ -17,30 +17,17 @@ test("loads every control-room asset with an explicit content type", async () =>
   const assets = await loadStaticAssets();
   assert.equal(assets.get("/index.html")?.contentType, "text/html; charset=utf-8");
   assert.equal(assets.get("/styles.css")?.contentType, "text/css; charset=utf-8");
-  assert.equal(assets.get("/mark.svg")?.contentType, "image/svg+xml");
   assert.equal(
     assets.get("/manifest.webmanifest")?.contentType,
     "application/manifest+json",
   );
-  // The home-screen icons: iOS reads only the apple-touch link, Android's
-  // maskable shape comes from the manifest, and both need real PNGs.
-  for (const icon of ["/apple-touch-icon.png", "/icon-192.png", "/icon-512.png"]) {
-    assert.equal(
-      assets.get(icon)?.contentType,
-      "image/png",
-      `${icon} should be served`,
-    );
-    // A PNG that is not a PNG (a stray text file, a bad regeneration) would
-    // ship silently; the signature is cheap to pin.
-    const body = assets.get(icon)?.body;
-    assert.equal(Buffer.isBuffer(body), true, `${icon} should be bytes`);
-    assert.equal(
-      Buffer.isBuffer(body)
-        ? body.subarray(0, 8).toString("hex")
-        : undefined,
-      "89504e470d0a1a0a",
-      `${icon} should be a real PNG`,
-    );
+  for (const icon of [
+    "/mark.svg",
+    "/apple-touch-icon.png",
+    "/icon-192.png",
+    "/icon-512.png",
+  ]) {
+    assert.equal(assets.get(icon), undefined, `${icon} should not be served`);
   }
   for (const module of [
     "/app.js",
@@ -118,6 +105,7 @@ test("the initial document paints an accessible loading shell", async () => {
     /class="boot-shell" role="status" aria-live="polite"[\s\S]{0,100}aria-label="Loading Kumi"/u,
   );
   assert.match(html, /class="sr-only">Loading Kumi…<\/span>/u);
+  assert.doesNotMatch(html, /boot-skeleton-mark/u);
 
   // The script owns the same shape after the document paint, then clears the
   // busy state only when it has a real application or signed-out surface.
@@ -125,8 +113,10 @@ test("the initial document paints an accessible loading shell", async () => {
   assert.match(app, /root\.setAttribute\("aria-busy", "true"\);/u);
   assert.match(app, /root\.removeAttribute\("aria-busy"\);/u);
   assert.match(app, /appRoot\.removeAttribute\("aria-busy"\);/u);
+  assert.doesNotMatch(app, /boot-skeleton-mark/u);
 
   assert.match(css, /\.boot-shell \{/u);
+  assert.doesNotMatch(css, /boot-skeleton-mark/u);
   assert.match(
     css,
     /@media \(prefers-reduced-motion: reduce\) \{\s*\.skeleton \{\s*animation: none;/u,
@@ -138,6 +128,7 @@ test("the initial document paints an accessible loading shell", async () => {
   const served = assets.get("/index.html")?.body.toString("utf8") ?? "";
   assert.match(served, /id="app-root" aria-busy="true"/u);
   assert.match(served, /class="boot-shell" role="status"/u);
+  assert.doesNotMatch(served, /boot-skeleton-mark/u);
   assert.match(served, /src="\/app\.[0-9a-f]{12}\.js"/u);
 });
 
@@ -376,7 +367,16 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
   assert.match(chats, /const open = state\.pinsOpen === true/u);
   assert.match(chats, /chan-pins\$\{open \? " open" : ""\}/u);
+  assert.match(chats, /aria-hidden="\$\{!open\}"\$\{open \? "" : " inert"\}/u);
+  assert.match(chats, /class="chan-pins-surface"/u);
   assert.match(chats, /chan-pins-list-frame" aria-hidden="\$\{!open\}"/u);
+  assert.match(app, /banner\.setAttribute\("aria-hidden", String\(!next\)\)/u);
+  assert.match(app, /banner\.toggleAttribute\("inert", !next\)/u);
+  assert.match(styles, /\.chan-pins \{[\s\S]*grid-template-rows: 0fr/u);
+  assert.match(styles, /\.chan-pins \{[\s\S]*visibility: hidden/u);
+  assert.match(styles, /\.chan-pins \{[\s\S]*border-bottom: 0 solid/u);
+  assert.match(styles, /\.chan-pins\.open \{[\s\S]*grid-template-rows: 1fr/u);
+  assert.match(styles, /\.chan-pins-surface \{[\s\S]*min-height: 0/u);
   assert.match(styles, /\.chan-pins-list-frame \{[\s\S]*grid-template-rows: 0fr/u);
   assert.match(
     styles,
@@ -1121,7 +1121,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(channelStem ?? "", /top: -1px;/u);
   assert.match(channelStem ?? "", /bottom: -1px;/u);
-  assert.match(channelEnd ?? "", /bottom: 22px;/u);
+  assert.match(
+    channelEnd ?? "",
+    /bottom: calc\(var\(--cmsg-face\) \/ 2 \+ 2px \+ 11px\);/u,
+    "the stem's foot should be measured from the face it turns into",
+  );
   assert.match(
     css,
     /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
@@ -1168,9 +1172,16 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelEndCap ?? "", /right: calc\(100% \+ 10px\);/u);
   // The hook is only the quarter turn: a straight upright here would be
   // painted on top of the shared stem and make every branch visibly thicker.
-  // The 20px face and two pixels of vertical padding put the link's midpoint
-  // twelve pixels above the route's foot.
-  const stemEnd = Number(/bottom: (\d+)px;/u.exec(channelEnd ?? "")?.[1]) - 12;
+  // Every piece of the join is measured from the replier's face — the one
+  // part of the summary whose height never changes — rather than from a line
+  // box that gains a second line whenever an agent is working.
+  const faceSize = Number(/--cmsg-face: (\d+)px;/u.exec(css)?.[1]);
+  assert.equal(faceSize, 20, "the branch turns into the 20px replier face");
+  const stemEnd = Number(
+    /bottom: calc\(var\(--cmsg-face\) \/ 2 \+ 2px \+ (\d+)px\);/u.exec(
+      channelEnd ?? "",
+    )?.[1],
+  );
   const elbowTop = Number(
     /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
   );
@@ -1189,10 +1200,19 @@ test("a reply carries a quiet visual path back to its root", async () => {
     elbowTop,
     "the final stem should stop at the hook's tangent",
   );
+  // A two-pixel stroke whose lower pixel is the link's middle is a stroke
+  // centred on it, and the faces are the only thing that middle is measured
+  // from — so the line crosses the replier's face on its own centre rather
+  // than leaving the face hanging below it.
   assert.equal(
     elbowHeight - elbowTop,
-    2,
-    "the elbow's horizontal run should stay two pixels below the link's middle",
+    1,
+    "the elbow's horizontal run should be centred on the replier's face",
+  );
+  assert.match(
+    channelEndCap ?? "",
+    /top: calc\(50% - 1px\);/u,
+    "the round cap should close the run on that same centre line",
   );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
@@ -2313,20 +2333,21 @@ test("the product is named Kumi throughout the browser surface", async () => {
   }
 });
 
-test("the sign-in screens show the whole wordmark, not the K badge", async () => {
+test("the full wordmark remains without a standalone K badge", async () => {
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
 
-  // The badge slices a square out of the word, so anything on the auth shell
-  // asking for `brandMark` gets a lone giant K — the bug this guards.
-  assert.equal(/brandMark\(/u.test(app), false, "app.js still draws the badge");
+  assert.doesNotMatch(ui, /brandMark/u);
+  assert.doesNotMatch(app, /brandMark/u);
+  assert.doesNotMatch(chats, /brandMark|channel-rail-brand/u);
   assert.match(app, /brandWordmark\(\d+\)/u);
 
   const start = ui.indexOf("export function brandWordmark");
   assert.notEqual(start, -1, "the wordmark helper was not found in ui.js");
   const wordmark = ui.slice(start, ui.indexOf("\n}", start));
   assert.match(wordmark, /preserveAspectRatio="xMidYMid meet"/u);
-  // All four letters, drawn once and shared with the badge.
+  // All four letters remain available as one complete wordmark.
   assert.match(wordmark, /\$\{BRAND_LETTERS\}/u);
 
   const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);
@@ -4780,6 +4801,41 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.match(panel, /headerAction\("history", "history", "Task history"\)/u);
 });
 
+test("agent history is a dense active-then-finished task list", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const historyStart = chats.indexOf("const TASK_ICON = {");
+  const historyEnd = chats.indexOf(
+    "/** Every loaded room this exact agent belongs to",
+    historyStart,
+  );
+  assert.notEqual(historyStart, -1);
+  assert.notEqual(historyEnd, -1);
+  const history = chats.slice(historyStart, historyEnd);
+  assert.match(history, /function agentHistorySections\(rows\)/u);
+  assert.match(history, /function agentHistoryRow\(\{ task, message \}\)/u);
+  assert.match(history, /FINISHED_HISTORY_STATUS/u);
+  assert.match(history, /"integrated"/u);
+  assert.match(history, /"failed"/u);
+  assert.match(history, /"cancelled"/u);
+  // Still one line of summary, status, and a way into the thread.
+  assert.match(history, /taskSummaryLine\(task, message\)/u);
+  assert.match(history, /data-act="channel-thread-open"/u);
+  assert.match(history, /class="agent-history-row \$\{esc\(task\.status\)\}"/u);
+  assert.match(history, /class="ah-objective"/u);
+  assert.match(history, /class="ah-when"/u);
+  // Active work above finished work, same quiet split the thread list uses.
+  assert.match(history, /agentHistorySections\(rows\)/u);
+  assert.match(history, /class="agent-history-active"/u);
+  assert.match(history, /class="agent-history-finished"/u);
+  assert.match(history, /aria-label="Active"/u);
+  assert.match(history, /aria-label="Finished"/u);
+  assert.match(css, /\.agent-history-active \+ \.agent-history-finished/u);
+  assert.match(css, /\.agent-history-finished \.agent-history-row/u);
+  assert.match(css, /\.agent-history-row \{[^}]*padding:\s*4px 12px/su);
+  assert.match(css, /\.agent-history-row \{[^}]*font-size:\s*12px/su);
+});
+
 test("the spec tab is where an agent is made org-wide or kept personal", async () => {
   const app = await browserSource();
   const chats = await publicFile("screen-chats.js");
@@ -5702,6 +5758,7 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
 
 test("a phone's channel header is one banner across the screen with its actions on the right", async () => {
   const css = await publicFile("styles.css");
+  const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
   // Fixed, full width, and tall enough to clear the status bar — the header
@@ -5751,6 +5808,19 @@ test("a phone's channel header is one banner across the screen with its actions 
     header.indexOf('act: "channel-menu"') > header.indexOf('<span class="spacer">'),
     "the spacer pushes the channel actions button to the right",
   );
+
+  // The account button is the only global action sharing the channel banner.
+  // Notification history remains available without crowding the phone header
+  // with a bell and its unread badge.
+  const topbar = app.slice(
+    app.indexOf("function topbar"),
+    app.indexOf("The screens the account menu is the way into"),
+  );
+  assert.doesNotMatch(
+    topbar,
+    /notificationBell|data-act="go-notifications"|icon\("bell"\)/u,
+  );
+  assert.match(app, /case "go-notifications":/u);
 });
 
 test("a phone's channel rail and sidebar drawer start below the header banner", async () => {

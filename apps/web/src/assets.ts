@@ -25,13 +25,6 @@ const PUBLIC_FILES = [
   ["screen-chats.js", "text/javascript; charset=utf-8"],
   ["screen-agents.js", "text/javascript; charset=utf-8"],
   ["screen-notifications.js", "text/javascript; charset=utf-8"],
-  ["mark.svg", "image/svg+xml"],
-  // The same mark as PNG, for the surfaces that cannot read the SVG: iOS
-  // home screens and Android maskable icons. Rendered by
-  // scripts/render-brand-icons.mjs, never edited by hand.
-  ["apple-touch-icon.png", "image/png"],
-  ["icon-192.png", "image/png"],
-  ["icon-512.png", "image/png"],
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
 

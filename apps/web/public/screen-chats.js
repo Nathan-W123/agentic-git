@@ -85,7 +85,6 @@ import {
 import {
   agentFace,
   agentLabelOf,
-  brandMark,
   avatar,
   chime,
   clockTime,
@@ -136,8 +135,6 @@ function channelRail(activeRepositoryId) {
     left.id.localeCompare(right.id),
   );
   return `<nav class="channel-rail" aria-label="Channels">
-    <button type="button" class="channel-rail-brand" data-act="nav" data-value="chats"
-      title="Kumi" aria-label="Kumi">${brandMark(28)}</button>
     <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
       title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
       aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
@@ -4420,6 +4417,55 @@ const TASK_ICON = {
   open: "dotsHorizontal",
 };
 
+/** Statuses that no longer need attention in the history list. */
+const FINISHED_HISTORY_STATUS = new Set([
+  "integrated",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Split one agent's history into work that still needs attention and work
+ * that has already landed. Keeps each half in the newest-first order
+ * `agentHistoryRows` already established.
+ */
+function agentHistorySections(rows) {
+  const active = [];
+  const finished = [];
+  for (const row of rows) {
+    if (FINISHED_HISTORY_STATUS.has(row.task.status)) {
+      finished.push(row);
+    } else {
+      active.push(row);
+    }
+  }
+  return { active, finished };
+}
+
+/**
+ * One compact history line: status mark, one-line summary, when it ran.
+ * Opens the thread when the task was talked about in the channel.
+ */
+function agentHistoryRow({ task, message }) {
+  const iconName = TASK_ICON[task.status] ?? "info";
+  // A description of the work, not the words that asked for it. The
+  // request is still here — on the row's tooltip, with its role preamble
+  // taken off, for the reader who wants to know exactly what was said.
+  const line = taskSummaryLine(task, message);
+  const full = withoutRolePreamble(task.objective).trim();
+  const open =
+    message === undefined
+      ? ""
+      : ` role="button" tabindex="0" data-act="channel-thread-open"
+          data-value="${esc(message.id)}"`;
+  return `<div class="agent-history-row ${esc(task.status)}"${open}
+    title="${esc(full)}">
+    <span class="ah-glyph">${icon(iconName)}</span>
+    <span class="ah-objective">${esc(line)}</span>
+    <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
+  </div>`;
+}
+
 function agentHistory(agent, repositoryId) {
   const rows = agentHistoryRows(agent, repositoryId);
   if (rows.length === 0) {
@@ -4429,27 +4475,23 @@ function agentHistory(agent, repositoryId) {
       `${esc(agent.name.split(" ")[0])} has not been asked for anything in this repository.`,
     )}</div>`;
   }
-  return `<div class="agent-history scroll">${rows
-    .map(({ task, message }) => {
-      const iconName = TASK_ICON[task.status] ?? "info";
-      // A description of the work, not the words that asked for it. The
-      // request is still here — on the row's tooltip, with its role preamble
-      // taken off, for the reader who wants to know exactly what was said.
-      const line = taskSummaryLine(task, message);
-      const full = withoutRolePreamble(task.objective).trim();
-      const open =
-        message === undefined
-          ? ""
-          : ` role="button" tabindex="0" data-act="channel-thread-open"
-              data-value="${esc(message.id)}"`;
-      return `<div class="agent-history-row ${esc(task.status)}"${open}
-        title="${esc(full)}">
-        <span class="ah-glyph">${icon(iconName)}</span>
-        <span class="ah-objective">${esc(line)}</span>
-        <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
-      </div>`;
-    })
-    .join("")}</div>`;
+  const { active, finished } = agentHistorySections(rows);
+  return `<div class="agent-history scroll">
+    ${
+      active.length === 0
+        ? ""
+        : `<div class="agent-history-active" aria-label="Active">
+            ${active.map(agentHistoryRow).join("")}
+          </div>`
+    }
+    ${
+      finished.length === 0
+        ? ""
+        : `<div class="agent-history-finished" aria-label="Finished">
+            ${finished.map(agentHistoryRow).join("")}
+          </div>`
+    }
+  </div>`;
 }
 
 /** Every loaded room this exact agent belongs to, with that room's overrides. */
@@ -6419,8 +6461,8 @@ export function submitComposerMessage(rerender) {
  * The banner reads from the server-fed pinned list rather than the loaded
  * transcript, because a pin exists precisely so a message survives the room
  * moving on — a banner that only knew the current page would forget exactly
- * the pins it was for. Collapsible to one line, because pins are a shelf,
- * not a second conversation.
+ * the pins it was for. The header shortcut reveals the whole shelf; while it
+ * is off, the shelf leaves no partial row behind in the conversation.
  */
 function pinnedBanner(repositoryId) {
   const pins = state.channelPins[repositoryId] ?? [];
@@ -6430,16 +6472,18 @@ function pinnedBanner(repositoryId) {
     return `<div hidden></div>`;
   }
   const open = state.pinsOpen === true;
-  return `<div class="chan-pins${open ? " open" : ""}">
-    <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
-      aria-expanded="${open}">
-      ${icon("pin")}
-      <span>${pins.length} pinned</span>
-      <span class="spacer"></span>
-      ${icon("chevronDown")}
-    </button>
-    <div class="chan-pins-list-frame" aria-hidden="${!open}"${open ? "" : " inert"}>
-      <div class="chan-pins-list">${pins
+  return `<div class="chan-pins${open ? " open" : ""}"
+    aria-hidden="${!open}"${open ? "" : " inert"}>
+    <div class="chan-pins-surface">
+      <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
+        aria-expanded="${open}">
+        ${icon("pin")}
+        <span>${pins.length} pinned</span>
+        <span class="spacer"></span>
+        ${icon("chevronDown")}
+      </button>
+      <div class="chan-pins-list-frame" aria-hidden="${!open}"${open ? "" : " inert"}>
+        <div class="chan-pins-list">${pins
         .map((entry) => {
           const title = threadTitle(entry) || "(no text)";
           const pinner =
@@ -6462,6 +6506,7 @@ function pinnedBanner(repositoryId) {
               </div>`;
         })
         .join("")}</div>
+      </div>
     </div>
   </div>`;
 }
