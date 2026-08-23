@@ -11371,6 +11371,91 @@ test("renaming an agent in Settings renames it in every repository", async (t) =
   assert.equal(runtime.submittedTasks.length, 1);
 });
 
+test("a legacy vendor-wide channel name no longer shadows an account-wide rename", async (t) => {
+  // The half of the report that survived the account-wide rename. A row keyed
+  // by the bare provider names a *vendor*, not an agent, and clearing one on a
+  // rename would rename every other person's agent on that vendor in that
+  // room — so it is never cleared. Rooms carrying one from before agent-keyed
+  // rows existed therefore kept answering to the old name after a rename made
+  // anywhere. The call sign outranks it now.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const first = await invitableRepository(owner, "legacy-one");
+  const second = await invitableRepository(owner, "legacy-two");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await joinAllConnectedAgents(runtime, first);
+  await joinAllConnectedAgents(runtime, second);
+  // Written by a deployment that only had the vendor to key on.
+  await runtime.store.setChannelAgentOverride(second, "anthropic", {
+    name: "Hera",
+    role: "Backend Engineer",
+  });
+
+  const renamed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${first}/channel/agents/${ownerId}:anthropic`,
+    { method: "POST", body: { name: "Scout" } },
+  );
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  assert.equal(renamed.data.scope, "account");
+
+  for (const repositoryId of [first, second]) {
+    const roster = await owner.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/agents`,
+    );
+    assert.equal(roster.status, 200, JSON.stringify(roster.data));
+    assert.equal(roster.data.agents[0].name, "Scout");
+  }
+  // The room's own decision about the role is not a name and still stands.
+  const rosterSecond = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${second}/channel/agents`,
+  );
+  assert.equal(rosterSecond.data.agents[0].role, "Backend Engineer");
+
+  // And the new name is the one a mention resolves against there.
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${second}/channel/messages`,
+    { method: "POST", body: { content: "@Scout please look at this" } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1);
+});
+
+test("a room's rename of one agent still wins, and an unnamed agent keeps the vendor-wide name", async (t) => {
+  // The two things the rule above must not break: a deliberate per-agent
+  // rename in one room is that room's to keep, and a legacy vendor-wide row
+  // still names the agents that have no call sign of their own.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "legacy-kept");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+    // Never named — the pre-call-sign connection the legacy row is for.
+    { provider: "openai", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await runtime.store.setChannelAgentOverride(repo, "openai", { name: "Hera" });
+  await runtime.store.setChannelAgentOverride(repo, `${ownerId}:anthropic`, {
+    name: "Vesta",
+  });
+
+  const roster = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(roster.status, 200, JSON.stringify(roster.data));
+  const agents = roster.data.agents as Array<{ provider: string; name: string }>;
+  assert.equal(
+    agents.find((agent) => agent.provider === "anthropic")?.name,
+    "Vesta",
+  );
+  assert.equal(agents.find((agent) => agent.provider === "openai")?.name, "Hera");
+});
+
 test("a call sign longer than the account allows is refused, not half-written", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

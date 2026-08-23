@@ -5100,6 +5100,28 @@ test("repository role overrides survive roster refreshes", async () => {
   assert.match(body, /model: local\?\.model \?\? agent\.model/u);
 });
 
+test("a call sign outranks a legacy vendor-wide channel name", async () => {
+  // Same order the gateway resolves in: a bare-provider row names a vendor and
+  // must not shadow the name the account holds, or a room that carries one
+  // goes on showing the old name after an account-wide rename. A row naming
+  // one agent still wins, and the vendor-wide row is never dropped locally —
+  // it belongs to every agent on that vendor that has no name of its own.
+  const data = await publicFile("data.js");
+  const resolve = data.slice(
+    data.indexOf("function overrideFor(overrides, agent)"),
+    data.indexOf("function withOverride(agent, override)"),
+  );
+  assert.match(resolve, /agent\.hasName === true \? undefined : legacy\?\.name/u);
+  assert.match(resolve, /name: specific\?\.name \?\? legacyName/u);
+
+  const rename = data.slice(
+    data.indexOf("function applyAgentRenameLocally(providerId, name)"),
+    data.indexOf("export async function renameAgent"),
+  );
+  assert.match(rename, /const key = `\$\{myId\}:\$\{providerId\}`/u);
+  assert.doesNotMatch(rename, /\[providerId, `\$\{myId\}:\$\{providerId\}`\]/u);
+});
+
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");

@@ -1668,15 +1668,16 @@ export function normalizeChannelAgentId(agentId: string, viewerId: string): stri
  * that rather than resolving a second time — two implementations of one
  * order was exactly how the two came to disagree.
  *
- * Specific beats general: an override naming this one agent wins over a
- * legacy bare-provider row that names every agent on the vendor.
+ * Specific beats general: an override naming this one agent wins over the
+ * account's own call sign, which in turn wins over a legacy bare-provider row
+ * that names every agent on the vendor.
  */
 export function resolveChannelAgentPresentation(
   overrides: Record<
     string,
     { name?: string; role?: string; model?: string; effort?: string } | undefined
   >,
-  agent: { userId: string; provider: string },
+  agent: { userId: string; provider: string; callSign?: string },
   defaultName: string,
 ): { name: string; role: string; model?: string; effort?: string } {
   const specific = overrides[`${agent.userId}:${agent.provider}`];
@@ -1688,8 +1689,18 @@ export function resolveChannelAgentPresentation(
   // choosing a model changed a control and not one thing about the run.
   const model = specific?.model ?? legacy?.model;
   const effort = specific?.effort ?? legacy?.effort;
+  // A legacy row names a vendor, not an agent, so it must not outrank the name
+  // the account itself holds. `clearChannelAgentNameOverrides` only ever clears
+  // the `${userId}:${provider}` rows — it cannot delete a bare-provider row
+  // without renaming every other person's agent on that vendor in that channel
+  // — so a deployment that wrote one before agent-specific keys existed kept
+  // answering to the old name in that room after an account-wide rename. That
+  // is the "renamed it here and the other repositories kept the old name"
+  // report. A row naming *this one agent* still wins: that is a deliberate
+  // per-room rename of somebody's agent, and it is theirs to keep.
+  const legacyName = agent.callSign === undefined ? legacy?.name : undefined;
   return {
-    name: specific?.name ?? legacy?.name ?? defaultName,
+    name: specific?.name ?? legacyName ?? defaultName,
     // No vendor-guessed default: an agent is unlabeled until this channel
     // actually names its role.
     role: specific?.role ?? legacy?.role ?? "",

@@ -2876,8 +2876,17 @@ function overrideFor(overrides, agent) {
   if (specific === undefined && legacy === undefined) {
     return undefined;
   }
+  // The same order the server resolves in (`resolveChannelAgentPresentation`
+  // in api-gateway): a bare-provider row names a *vendor*, so it must not
+  // outrank the name the account itself holds. Those rows were written before
+  // agent-specific keys existed and cannot be deleted on a rename without
+  // renaming every other person's agent on that vendor in the room, so
+  // without this an old room went on showing the old name after an
+  // account-wide rename. A row naming this one agent still wins — that is a
+  // deliberate per-room rename, and it is that room's to keep.
+  const legacyName = agent.hasName === true ? undefined : legacy?.name;
   return {
-    name: specific?.name ?? legacy?.name,
+    name: specific?.name ?? legacyName,
     role: specific?.role ?? legacy?.role,
     model: specific?.model ?? legacy?.model,
     effort: specific?.effort ?? legacy?.effort,
@@ -4485,25 +4494,22 @@ function ownProviderId(agentId) {
  */
 function applyAgentRenameLocally(providerId, name) {
   const myId = currentUserId();
-  const keys = [providerId, `${myId}:${providerId}`];
+  // Only the row that names this one agent. The bare-provider row is the
+  // vendor's, shared with every other person's agent on it in that channel,
+  // and the server does not delete it either — a call sign simply outranks it
+  // now (`overrideFor`), so dropping it here would rename teammates' agents on
+  // this screen until the next roster fetch put them back.
+  const key = `${myId}:${providerId}`;
   state.providers = state.providers.map((provider) =>
     provider.id === providerId ? { ...provider, callSign: name } : provider,
   );
   for (const repositoryId of Object.keys(state.channelAgentOverrides)) {
     const overrides = state.channelAgentOverrides[repositoryId] ?? {};
-    let changed = false;
-    const next = { ...overrides };
-    for (const key of keys) {
-      if (next[key]?.name === undefined) {
-        continue;
-      }
-      const { name: _dropped, ...rest } = next[key];
-      next[key] = rest;
-      changed = true;
+    if (overrides[key]?.name === undefined) {
+      continue;
     }
-    if (changed) {
-      state.channelAgentOverrides[repositoryId] = next;
-    }
+    const { name: _dropped, ...rest } = overrides[key];
+    state.channelAgentOverrides[repositoryId] = { ...overrides, [key]: rest };
   }
   for (const repositoryId of Object.keys(state.channelRoster)) {
     state.channelRoster[repositoryId] = (
