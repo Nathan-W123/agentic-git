@@ -2263,6 +2263,69 @@ test("the local model writes the catch-up's prose, and only its prose", async (t
   );
 });
 
+test("a conversational turn that landed is described, not left to its prompt", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "catch-up-open-thread");
+  const catchUpPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/catch-up`;
+
+  const colleague = await runtime.store.createUser({
+    email: "catch-up-thread-reader@example.com",
+    displayName: "Reader",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  await runtime.store.markCatchUpSeen(
+    DEFAULT_PROJECT_ID,
+    colleague.id,
+    "2026-01-01T00:00:00.000Z",
+  );
+
+  // Work asked for inside a thread lands and then waits for the next message,
+  // so its row stays `open` and never gets a `completedAt`. Skipping those
+  // left the client with nothing but the request to caption them with.
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "can you fix the notification on the bottom left",
+    agentId: "claude",
+    validationCommands: [],
+    conversationId: "conversation-1",
+  });
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: task.id,
+    data: {
+      agentExplanation:
+        "The unread count now sits on the avatar instead of floating away from it.",
+      files: ["app.js"],
+    },
+  });
+  await runtime.store.openSubmittedTask(task.id);
+
+  const client = new TestClient(runtime.origin);
+  await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: colleague.email, password: PASSWORD },
+  });
+  const caught = await client.request(catchUpPath);
+  assert.equal(caught.status, 200);
+  assert.equal(caught.data.catchUp.tasks.length, 1);
+  assert.equal(caught.data.catchUp.tasks[0]?.id, task.id);
+  assert.equal(
+    caught.data.catchUp.tasks[0]?.summary,
+    "The unread count now sits on the avatar instead of floating away from it.",
+  );
+  assert.deepEqual(caught.data.catchUp.tasks[0]?.changedFiles, ["app.js"]);
+  assert.equal(caught.data.catchUp.counts.landed, 1);
+});
+
 test("a catch-up carries only what its reader may see", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

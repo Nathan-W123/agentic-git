@@ -195,7 +195,6 @@ import {
   signInForInvitation,
 } from "./data.js";
 import {
-  briefObjective,
   captureChannelScroll,
   channelMessageHasTaskThread,
   channelInfoPopoverHtml,
@@ -8488,6 +8487,11 @@ async function showSinceYouLeft() {
     .filter((task) => {
       const completedAt = Date.parse(task.completedAt ?? task.openedAt ?? "");
       return (
+        // Only work the server wrote an account of. A row it did not describe
+        // has nothing to say but the request somebody typed, and a panel of
+        // requests read back is not a summary of what happened — it is the
+        // thing the reader already knows.
+        serverOutcomes.has(task.id) &&
         ["integrated", "open"].includes(task.status) &&
         Number.isFinite(completedAt) &&
         completedAt > sinceAt
@@ -8503,12 +8507,11 @@ async function showSinceYouLeft() {
       return {
         ...task,
         completedAt: outcome?.completedAt ?? task.completedAt ?? task.openedAt,
-        // The server's outcome first, then the request this task was given:
-        // a row saying only that the work was completed cannot tell somebody
-        // which of last night's tasks it stands for.
+        // The server's account of what the work did. Never the request that
+        // asked for it: this panel exists to say what changed, and echoing
+        // back what the reader typed says nothing they did not already know.
         summary:
           String(outcome?.summary ?? "").trim() ||
-          briefObjective(task.objective) ||
           "Completed the requested work.",
         changedFiles: Array.isArray(outcome?.changedFiles)
           ? outcome.changedFiles

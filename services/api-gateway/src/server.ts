@@ -10202,14 +10202,24 @@ export class ApiGateway {
         }
       }
 
+      // When a task's work landed, which is not the same as when the task
+      // finished. A conversational task keeps its thread open for the next
+      // turn, so it is `open` with no `completedAt` even though a change of
+      // its own has already been promoted — and a digest that looked only at
+      // `completedAt` skipped exactly those, leaving the client to caption
+      // them with the request somebody typed instead of an account of what
+      // was done. `openedAt` is stamped when a turn lands and the thread is
+      // held open, so it is that turn's landing moment.
+      const landedAt = (task: SubmittedTask): string | undefined =>
+        task.completedAt ?? task.openedAt;
       const tasks = (
         await this.options.store.listSubmittedTasks({ projectId })
-      ).filter(
-        (task) =>
-          visibleIds.has(task.repositoryId) &&
-          task.completedAt !== undefined &&
-          task.completedAt > since,
-      );
+      ).filter((task) => {
+        const at = landedAt(task);
+        return (
+          visibleIds.has(task.repositoryId) && at !== undefined && at > since
+        );
+      });
       const completedChanges = await Promise.all(
         tasks.map(async (task) => {
           const filter: AuditEventFilter = {
@@ -10237,7 +10247,7 @@ export class ApiGateway {
               id: task.id,
               repositoryId: task.repositoryId,
               objective: withoutRoleContext(task.objective),
-              at: task.completedAt ?? since,
+              at: landedAt(task) ?? outcome?.occurredAt ?? since,
               ...(typeof agentResponse === "string" ? { agentResponse } : {}),
               changedFiles,
             } satisfies CatchUpChange,

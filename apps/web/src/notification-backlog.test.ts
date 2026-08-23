@@ -110,10 +110,11 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(data, /catchUps: \{\}/u);
   assert.match(app, /const serverOutcomes = new Map/u);
   assert.match(app, /outcome\?\.summary/u);
-  // A row that says only that the work was completed cannot be told apart
-  // from the other five, so an outcome the server could not phrase falls back
-  // to the request the task was given.
-  assert.match(app, /briefObjective\(task\.objective\)/u);
+  // A row the server wrote no account of is left out rather than captioned
+  // with the request somebody typed. Echoing the prompt back made the panel
+  // a list of what the reader had already asked for instead of what was done.
+  assert.match(app, /serverOutcomes\.has\(task\.id\)/u);
+  assert.doesNotMatch(app, /briefObjective\(task\.objective\)/u);
   assert.doesNotMatch(app, /function catchUpTaskOutcome\(task\)/u);
   assert.doesNotMatch(app, /Implemented: \$\{objective\}/u);
   // The digest is skimmed, so each row is one condensed claim with the who
@@ -187,7 +188,7 @@ test("returning users see completed work in the side panel", async () => {
 
   // Closing from the button, Escape, or a swipe advances the same personal
   // watermark only after the list has actually been shown.
-  assert.match(app, /if \(state\.catchUp !== undefined\) \{\s*dismissSinceYouLeft\(\);/u);
+  assert.match(app, /if \(showing === "catch-up"\) \{\s*dismissSinceYouLeft\(\);/u);
   assert.match(app, /case "catch-up-close":\s*dismissSinceYouLeft\(\);/u);
   assert.match(app, /catch-up\/seen/u);
 });
