@@ -60,7 +60,13 @@ export function blanketPlan(
  * the moment of the freeze and hands the result here. Directories are kept
  * alongside the files because a task frozen mid-sweep has touched three files
  * of a directory it is still working through, and a file-exact freeze would
- * refuse it the fourth. See {@link FrozenPlanClaim}.
+ * refuse it the fourth.
+ *
+ * They widen what this holder may write, and nothing more. Arbitration reads
+ * the files, so the rest of a directory stays available to everybody else and
+ * the fourth file is re-admitted when it is actually written rather than held
+ * on the chance that it will be. See `claimOccupiesPath`, which is where that
+ * distinction lives.
  */
 export function freezePlanFromWorkingChanges(
   plan: AgentPlan,
@@ -88,19 +94,4 @@ export function freezePlanFromWorkingChanges(
     expectedFiles: files,
     claim: { kind: "frozen", directories, frozenAt },
   };
-}
-
-/**
- * Whether a frozen claim still lets this task reach a path.
- *
- * The check the widening path would otherwise have to make against the plan's
- * declarations alone, which cannot see the directories a freeze added.
- */
-export function frozenClaimCovers(plan: AgentPlan, file: string): boolean {
-  if (plan.expectedFiles.includes(file)) {
-    return true;
-  }
-  return (plan.claim?.kind === "frozen" ? plan.claim.directories : []).some(
-    (directory) => file.startsWith(directory),
-  );
 }

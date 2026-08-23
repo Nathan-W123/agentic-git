@@ -1211,6 +1211,67 @@ test("a deployment that performs no actions says so, and the task carries on", a
   }
 });
 
+test("puts a frozen holder's reach into its own directory to the authority", async () => {
+  // The other half of narrowing arbitration to the files a freeze names. Once
+  // the rest of the directory can be granted to somebody else, writing it on
+  // the strength of the directory alone would make two tasks the writer of one
+  // file and nothing would say so. So the reach leaves the reservation, and a
+  // file this holder never named is asked for like any other mid-run reach.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      // Written without announcing it. A file the agent asks for goes through
+      // admission whatever the claim says, so asking would prove nothing here;
+      // the question is what happens to one that simply appears.
+      "src/b.txt",
+    );
+    const asked: string[][] = [];
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          asked.push([...request.plan.expectedFiles]);
+          return {
+            outcome: "admitted",
+            plan: {
+              ...request.plan,
+              claim: {
+                kind: "frozen",
+                directories: ["src/"],
+                frozenAt: new Date().toISOString(),
+              },
+            },
+          };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(
+      asked.some((files) => files.includes("src/b.txt")),
+      true,
+      "the file inside the frozen directory should have been asked for",
+    );
+    // And granted, because nobody else held it — the round trip is what makes
+    // the answer real, not an extra way to fail.
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/b.txt"), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("waits for live scope held by work running in another run", async () => {
   // The wave this task belongs to is the only thing the conflict check can
   // see, and a task in a different run is not in it. Before the authority was

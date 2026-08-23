@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   assertAgentPlan,
+  claimCoversPath,
+  claimOccupiesPath,
   isBlanketClaim,
   type AgentPlan,
   type ChangeSet,
@@ -12,7 +14,6 @@ import {
 import {
   blanketPlan,
   freezePlanFromWorkingChanges,
-  frozenClaimCovers,
 } from "./blanket-claim.js";
 import { PlanAdmissionController } from "./plan-admission.js";
 import {
@@ -116,14 +117,37 @@ test("a frozen claim covers the rest of its directories and nothing else", () =>
   ]);
 
   // The next file of the sweep, written a second after the freeze.
-  assert.ok(frozenClaimCovers(frozen, "src/render/mesh.ts"));
+  assert.ok(claimCoversPath(frozen, "src/render/mesh.ts"));
   assertChangeSetWithinPlan(frozen, changeSet(["src/render/mesh.ts"]));
   // Somewhere else entirely is outside it, and stays outside it.
-  assert.ok(!frozenClaimCovers(frozen, "src/audio/mixer.ts"));
+  assert.ok(!claimCoversPath(frozen, "src/audio/mixer.ts"));
   assert.throws(
     () => assertChangeSetWithinPlan(frozen, changeSet(["src/audio/mixer.ts"])),
     ScopeExpansionError,
   );
+});
+
+test("the two readings of a claim disagree, and are meant to", () => {
+  const frozen = freezePlanFromWorkingChanges(blanketPlan(TASK), [
+    { path: "src/render/canvas.ts", status: "modified" },
+  ]);
+
+  // The file it was seen working in is held under both readings.
+  assert.ok(claimOccupiesPath(frozen, "src/render/canvas.ts"));
+  assert.ok(claimCoversPath(frozen, "src/render/canvas.ts"));
+
+  // Its neighbour is the case the two readings are for. The holder may write
+  // it — that is what the directory is for — but it does not hold it, so a
+  // second task asking for it is answered by conflict scoring rather than by
+  // a directory prefix. Anything reading the wide one to decide who waits
+  // reintroduces the lockout; anything reading the narrow one to decide what
+  // the holder may write breaks the sweep it was frozen in the middle of.
+  assert.ok(!claimOccupiesPath(frozen, "src/render/mesh.ts"));
+  assert.ok(claimCoversPath(frozen, "src/render/mesh.ts"));
+
+  // A claim nobody has narrowed yet is the one case with nothing finer to go
+  // on, so both readings still give it the repository.
+  assert.ok(claimOccupiesPath(blanketPlan(TASK), "src/render/mesh.ts"));
 });
 
 test("nothing is admitted while a repository-wide claim is held", () => {
@@ -163,7 +187,8 @@ test("a frozen claim admits the arriving task to everything outside it", () => {
   });
   assert.equal(outside.status, "approved");
 
-  // And to nothing the holder actually named.
+  // And to nothing the holder actually named. The neighbouring file it may
+  // write but has not been given has its own test below.
   const inside = controller.admit({
     plan: plan("task_third", ["src/render/canvas.ts"]),
     agentId: "agent-c",
@@ -233,4 +258,15 @@ test("a frozen claim partially admits a plan with work outside its directories",
       .map((grant) => grant.resourceId),
     ["src/audio/mixer.ts"],
   );
+
+  // The file beside it is not deferred at all — there is nothing to reduce,
+  // so the whole plan is granted.
+  const beside = controller.admit({
+    plan: plan("task_third", ["src/render/mesh.ts", "src/audio/mixer.ts"]),
+    agentId: "agent-c",
+    baseRevision: "a".repeat(40),
+    baseVersion: 1,
+    active: [{ taskId: TASK.id, agentId: "agent-a", plan: frozen }],
+  });
+  assert.equal(beside.status, "approved");
 });

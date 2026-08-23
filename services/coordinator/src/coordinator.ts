@@ -100,7 +100,6 @@ import {
   ScopeExpansionError,
   assertChangeSetWithinPlan,
 } from "./scope-validator.js";
-import { frozenClaimCovers } from "./blanket-claim.js";
 import { estimateScope } from "./scope-estimation.js";
 
 export interface CoordinatedTask {
@@ -4733,11 +4732,17 @@ export class Coordinator {
     if (entry.plan.claim?.kind !== "frozen") {
       return;
     }
+    // Measured against what the claim occupies, not against what it permits.
+    // The directories a freeze carries are what let this holder write here
+    // without asking, and arbitration stopped treating them as a hold — so a
+    // path under one may since have been granted to somebody else. Reading
+    // them here too would let this holder write it anyway, with nothing
+    // anywhere saying two tasks had authored the same file.
     const escaped = [
       ...new Set(
         changeSet.patches
           .map((patch) => patch.path)
-          .filter((file) => !frozenClaimCovers(entry.plan, file)),
+          .filter((file) => !claimOccupiesPath(entry.plan, file)),
       ),
     ].sort();
     if (escaped.length === 0) {
