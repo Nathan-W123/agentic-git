@@ -4723,9 +4723,6 @@ function agentSpec(agent, repositoryId) {
                     )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}`
               }</span>
             </span>
-            <button type="button" class="aspec-nav" data-act="agent-panel-tab"
-              data-value="history" title="Task history">
-              <span>History</span>${icon("arrowRight")}</button>
           </div>
         </div>
       </section>
