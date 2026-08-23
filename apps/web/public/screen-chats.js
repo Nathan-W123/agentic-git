@@ -252,6 +252,20 @@ function usageAccountLine(report) {
 }
 
 /**
+ * The provider an agent's usage is filed under.
+ *
+ * The vendor id alone — never the agent id. Only this account's own agents
+ * are keyed by a bare provider; everywhere else an agent arrives as the
+ * server's `<userId>:<provider>` composite, and asking the usage route for
+ * that composite is a path it does not have, which came back as "Route was
+ * not found" printed where a percentage belongs. One helper because the card
+ * and the specification both need the answer and must not drift apart on it.
+ */
+function usageProviderId(agent) {
+  return agent?.provider ?? String(agent?.id ?? "").split(":").at(-1) ?? "";
+}
+
+/**
  * The usage figures for one of this account's own agents, as one section of
  * its profile card.
  *
@@ -264,7 +278,7 @@ function usageBlock(agent) {
   if (agent.mine !== true) {
     return "";
   }
-  const report = state.providerUsage[agent.id];
+  const report = state.providerUsage[usageProviderId(agent)];
   let body;
   if (report === undefined || report.loading === true) {
     body = `<span class="rr-usage-empty">Checking usage…</span>`;
@@ -364,7 +378,7 @@ function personRecord(repositoryId, userId) {
 function agentProfile(agent, repositoryId) {
   const status = agentStatus(agent, repositoryId);
   const progress = agentWorkingProgress(agent, repositoryId);
-  const providerId = agent.provider ?? agent.id;
+  const providerId = usageProviderId(agent);
   // A hover card is identification, not the full settings page. Keep the two
   // execution choices people compare at a glance and leave role, task/path,
   // ownership and access policy to the profile opened from the button below.
@@ -388,7 +402,12 @@ function agentProfile(agent, repositoryId) {
         ? `${AGENT_STATUS_TITLE[status]} · ${Math.round(progress)}%`
         : (AGENT_STATUS_TITLE[status] ?? ""),
     facts,
-    usage: "",
+    usage: usageBlock(agent),
+    // What the card's usage section is keyed by, so whatever draws the face
+    // can start the fetch that fills it. Only for one's own agent: the route
+    // answers for the caller's account, and asking it for a teammate's agent
+    // spends a request whose answer this card would never show.
+    ...(agent.mine === true ? { usageProviderId: providerId } : {}),
     action: {
       act: "agent-panel-open",
       value: String(agent.id ?? ""),
@@ -1189,11 +1208,21 @@ function rosterRow(agent) {
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
       ${
+        // `data-hover` is what starts the usage fetch the card's own section
+        // reads — see `requestUsageForHoverTarget` in app.js. Keyed by the
+        // vendor, not the agent, and only for one's own agent: the route
+        // reports the caller's account and refuses anything else.
         profileAnchor(
           agentProfile(agent, activeChannelId()),
           "rr-avatar",
           "down",
           statusAgentFace(agent, 22, activeChannelId()),
+          agent.mine === true
+            ? {
+                "data-hover": "agent-usage",
+                "data-hover-value": usageProviderId(agent),
+              }
+            : {},
         )
       }
       <span class="rr-body">
@@ -2282,6 +2311,16 @@ function identityWrap(identity, content, withCard = false) {
     ...(action === undefined
       ? {}
       : { role: "button", "data-act": action.act, "data-value": action.value }),
+    // A face in the transcript opens the same card the roster's does, so it
+    // has to start the same fetch: without this the usage section sat on
+    // "Checking usage…" for as long as the card was open, because nothing
+    // had asked.
+    ...(withCard !== true || identity.usageProviderId === undefined
+      ? {}
+      : {
+          "data-hover": "agent-usage",
+          "data-hover-value": identity.usageProviderId,
+        }),
   };
   // The card hangs off the face and not off the name as well. Both are the
   // same anchor and either would carry it, but a transcript draws this markup
@@ -4507,7 +4546,7 @@ function agentUsage(agent) {
   if (agent.mine !== true) {
     return `<div class="aspec-note">Usage is private to the agent's owner.</div>`;
   }
-  const report = state.providerUsage[agent.provider ?? agent.id];
+  const report = state.providerUsage[usageProviderId(agent)];
   if (report === undefined || report.loading === true) {
     return `<div class="aspec-note">Checking usage…</div>`;
   }
