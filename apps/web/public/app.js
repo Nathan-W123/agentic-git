@@ -2323,18 +2323,22 @@ async function toggleAuditingAction(repositoryId, paused) {
  * Irreversible: cascades the repository's own channel and grants, and takes
  * the execution history with it. A single confirm button is too easy to hit
  * by reflex for something nobody can undo, so this asks for the repository's
- * name to be typed out — `yesiwanttodelete<id>` — and refuses anything else.
- * Matched case-insensitively and trimmed: the phrase is there to make the
- * person read what they are deleting, not to catch a stray capital.
+ * name to be typed out — `yesiwanttodelete<name>` — and refuses anything
+ * else. The name is whatever the repository is called on screen right now, so
+ * a renamed repository asks for its new name rather than its id; spaces are
+ * dropped so the phrase stays one word. Matched case-insensitively and
+ * trimmed: the phrase is there to make the person read what they are
+ * deleting, not to catch a stray capital.
  *
  * Only owners and co-owners are offered the control at all (see
  * `canDeleteRepository`), and the server refuses anyone else regardless.
  */
 async function deleteRepositoryAction(repositoryId) {
-  const phrase = `yesiwanttodelete${repositoryId}`;
+  const label = repositoryLabel(repositoryId);
+  const phrase = `yesiwanttodelete${label.replace(/\s+/gu, "")}`;
   const values = await showModal({
     title: "Delete this repository?",
-    subtitle: `This permanently deletes ${repositoryId}, its chat history, and its repository-scoped grants. This cannot be undone.`,
+    subtitle: `This permanently deletes ${label}, its chat history, and its repository-scoped grants. This cannot be undone.`,
     confirm: "Delete repository",
     body: `<label class="field">
         <span>Type <code>${esc(phrase)}</code> to confirm</span>
@@ -2353,7 +2357,7 @@ async function deleteRepositoryAction(repositoryId) {
   try {
     await deleteRepository(repositoryId);
     closePopover();
-    toast(`Deleted ${repositoryId}`, "ok");
+    toast(`Deleted ${label}`, "ok");
     render();
   } catch (error) {
     toast(error.message, "error");
