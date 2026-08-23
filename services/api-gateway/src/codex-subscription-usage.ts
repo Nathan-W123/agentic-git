@@ -38,6 +38,18 @@ export interface CodexRateLimitSnapshot {
   rateLimitReachedType?: string;
 }
 
+/**
+ * Where a reader runs, and as whom.
+ *
+ * `env` is what lets one of these be asked about a particular person's
+ * account rather than about whatever login the container carries: it is the
+ * caller's credential home, and Codex reads its auth from inside it. Without
+ * it these readers could only ever answer for the host.
+ */
+export interface CodexProcessEnvOptions {
+  env?: NodeJS.ProcessEnv;
+}
+
 /** Injectable seam used by the gateway and its tests. */
 export type CodexUsageReader = () => Promise<
   CodexRateLimitSnapshot | undefined
@@ -324,7 +336,7 @@ function jsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-interface CodexProcessOptions {
+interface CodexProcessOptions extends CodexProcessEnvOptions {
   command?: string;
   args?: readonly string[];
   timeoutMs?: number;
@@ -346,6 +358,7 @@ export async function readCodexStatusSubscriptionUsage(
     child = spawn(command, [...args], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      ...(options.env === undefined ? {} : { env: options.env }),
     });
   } catch {
     return undefined;
@@ -422,6 +435,7 @@ export async function readCodexAppServerSubscriptionUsage(
     child = spawn(command, [...args], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      ...(options.env === undefined ? {} : { env: options.env }),
     });
   } catch {
     return undefined;
@@ -577,7 +591,7 @@ export async function readCodexAppServerSubscriptionUsage(
  * and the wrong answer is the one that parses.
  */
 export async function readCodexSubscriptionUsage(
-  options: {
+  options: CodexProcessEnvOptions & {
     command?: string;
     /** Backward-compatible spelling for appServerArgs. */
     args?: readonly string[];
@@ -591,6 +605,7 @@ export async function readCodexSubscriptionUsage(
     ...(options.command === undefined ? {} : { command: options.command }),
     ...(appServerArgs === undefined ? {} : { args: appServerArgs }),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.env === undefined ? {} : { env: options.env }),
   });
   if (appServer !== undefined) {
     return appServer;
@@ -602,5 +617,6 @@ export async function readCodexSubscriptionUsage(
     ...(options.command === undefined ? {} : { command: options.command }),
     ...(options.statusArgs === undefined ? {} : { args: options.statusArgs }),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.env === undefined ? {} : { env: options.env }),
   });
 }
