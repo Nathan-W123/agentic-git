@@ -1973,6 +1973,42 @@ interface BrowserCliSpec {
    * is what the CLIs with a known single banner do.
    */
   signInHosts?: string[];
+  /**
+   * Other names the same CLI is installed under, tried in order when the
+   * first one is not on the machine.
+   *
+   * Cursor's installer publishes `cursor-agent` — it is the name in its own
+   * issue tracker and in the help text this file's tests quote back — while
+   * this asked for `agent` and nothing else. Where only one of the two
+   * exists, everything Cursor did here failed at once and silently: no
+   * status, no usage, no model list, no sign-in. Codex has had a resolver
+   * with candidates for exactly this reason; this is the same idea for a
+   * name that cannot be found on disk because it is resolved through PATH.
+   */
+  commandAliases?: string[];
+}
+
+/**
+ * Whether a run failed because the command is not installed, rather than
+ * because the command ran and disliked something.
+ *
+ * Both shapes matter. A spawn that cannot find its target throws, and a shell
+ * that cannot find it answers 127 with its own words — "not recognized" on
+ * Windows, "not found" elsewhere. Treating only the throw as "missing" would
+ * leave the second case looking like a real answer from a CLI that never ran.
+ */
+function missingCommand(outcome: {
+  exitCode?: number;
+  stderr?: string;
+  error?: unknown;
+}): boolean {
+  const words = `${outcome.stderr ?? ""} ${
+    outcome.error instanceof Error ? outcome.error.message : String(outcome.error ?? "")
+  }`;
+  if (/ENOENT|not recognized|not found|No such file/iu.test(words)) {
+    return true;
+  }
+  return outcome.exitCode === 127;
 }
 
 /** Commands used by the browser-only agent connections. */
@@ -1980,6 +2016,10 @@ function browserCliSpec(provider: ProviderId): BrowserCliSpec | undefined {
   if (provider === "cursor") {
     return {
       command: "agent",
+      // Tried after `agent`, so a machine that has the short name keeps
+      // behaving exactly as it did and one that has only the published name
+      // starts working instead of failing at every call.
+      commandAliases: ["cursor-agent"],
       prefixArgs: [],
       loginArgs: ["login"],
       label: "Cursor",
@@ -2373,6 +2413,8 @@ export class ProviderChatService {
   private readonly runner: ProcessRunner;
   private readonly detachedSpawner: DetachedSpawner;
   private readonly homeDirectory: string;
+  /** Which name each browser CLI was actually found under. */
+  private readonly browserCommands = new Map<string, string>();
   private readonly detectionCache = new Map<
     ProviderId,
     { at: number; state: ProviderCliState }
@@ -2987,6 +3029,47 @@ export class ProviderChatService {
    * the flag prints its own usage text instead of an account, which
    * {@link parseCursorUsage} reports as nothing rather than as a quota.
    */
+  /**
+   * Runs a browser CLI, trying the names it may be installed under.
+   *
+   * The winner is remembered, so the second name costs one extra spawn per
+   * process rather than one per call. A failure that is not "no such command"
+   * is returned as it stands: a CLI that ran and refused has answered, and
+   * retrying it under another name would turn one real refusal into two.
+   */
+  private async runBrowserCli(
+    spec: BrowserCliSpec,
+    args: readonly string[],
+    options: Parameters<ProcessRunner>[2],
+  ): Promise<Awaited<ReturnType<ProcessRunner>>> {
+    const remembered = this.browserCommands.get(spec.command);
+    const candidates =
+      remembered === undefined
+        ? [spec.command, ...(spec.commandAliases ?? [])]
+        : [remembered];
+    let last: Awaited<ReturnType<ProcessRunner>> | undefined;
+    let thrown: unknown;
+    for (const command of candidates) {
+      try {
+        const result = await this.runner(command, args, options);
+        if (!missingCommand({ exitCode: result.exitCode, stderr: result.stderr })) {
+          this.browserCommands.set(spec.command, command);
+          return result;
+        }
+        last = result;
+      } catch (error) {
+        if (!missingCommand({ error })) {
+          throw error;
+        }
+        thrown = error;
+      }
+    }
+    if (last !== undefined) {
+      return last;
+    }
+    throw thrown ?? new Error(`${spec.command} is not installed here`);
+  }
+
   private async cursorUsage(userId?: string): Promise<ProviderUsageReport> {
     const spec = browserCliSpec("cursor") as BrowserCliSpec;
     const source = "cursor status, as reported by the signed-in account";
@@ -3007,8 +3090,8 @@ export class ProviderChatService {
         args: readonly string[],
       ): Promise<ProviderUsageReport | undefined> => {
         try {
-          const output = await this.runner(
-            spec.command,
+          const output = await this.runBrowserCli(
+            spec,
             [...spec.prefixArgs, ...args],
             {
               timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
@@ -3381,8 +3464,12 @@ export class ProviderChatService {
   private async detectBrowserCli(provider: "cursor" | "copilot" | "kiro"):
     Promise<ProviderCliState> {
     const spec = browserCliSpec(provider) as BrowserCliSpec;
-    const version = await this.runner(
-      spec.command,
+    // Through the alias-aware runner, because this is the check that decides
+    // whether the connection is usable at all: finding no `agent` on a
+    // machine that has `cursor-agent` reported the CLI as absent, and every
+    // later question was never asked.
+    const version = await this.runBrowserCli(
+      spec,
       [...spec.prefixArgs, "--version"],
       { timeoutMs: 30_000, maxOutputBytes: 65_536 },
     );
@@ -4563,7 +4650,7 @@ export class ProviderChatService {
               ...(model === undefined ? [] : ["--model", model]),
               prompt,
             ];
-    return await this.runner(spec.command, args, options);
+    return await this.runBrowserCli(spec, args, options);
   }
 
   /**

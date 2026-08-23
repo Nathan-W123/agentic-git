@@ -3299,6 +3299,52 @@ test("an empty usage card says what is actually in the way", async () => {
   assert.match(quiet.unavailableReason ?? "", /billed by API key/u);
 });
 
+test("Cursor is found under the name its installer actually uses", async () => {
+  // The spec asked for `agent` and nothing else, while Cursor publishes
+  // `cursor-agent` — the name in its own issue tracker and in the help text
+  // these tests quote back. On a machine with only the published name, every
+  // Cursor call failed at once and silently: no detection, no status, no
+  // usage, no model list.
+  const harness = await createHarness();
+  const tried: string[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (command: string, args: readonly string[]) => {
+      tried.push(command);
+      if (command === "agent") {
+        // What a shell says about a command it cannot find.
+        return output("", 127, "'agent' is not recognized as an internal or external command");
+      }
+      return args.includes("--format")
+        ? output(JSON.stringify({ loggedIn: true, plan: "pro", quota: { usedPercent: 42 } }))
+        : output("");
+    }) as ProcessRunner,
+  });
+
+  const report = await service.usage({ provider: "cursor" });
+  assert.deepEqual(tried.slice(0, 2), ["agent", "cursor-agent"]);
+  assert.equal(report.planType, "pro");
+  assert.equal(report.windows[0]?.percentUsed, 42);
+});
+
+test("a CLI that ran and refused is not retried under another name", async () => {
+  // The other half. Exit 127 with a shell's "not recognized" means nothing
+  // ran; any other refusal is an answer, and asking a second binary the same
+  // question would turn one real failure into two.
+  const harness = await createHarness();
+  const tried: string[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (command: string) => {
+      tried.push(command);
+      return output("", 1, "error: you are not authorized");
+    }) as ProcessRunner,
+  });
+
+  await service.usage({ provider: "cursor" });
+  assert.deepEqual([...new Set(tried)], ["agent"]);
+});
+
 test("cursor prefers its structured status over the printed one", async () => {
   // The test above covers `--format json` failing. It does not cover both
   // answering, which is the case that decides which source is the contract —
