@@ -1499,9 +1499,15 @@ function chanSidebar(activeRepositoryId) {
       }
       <button type="button" class="chan-account" data-act="user-menu"
         title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
-        ${avatar(user, 32, user, myAvatar())}
+        <!-- Keep the unread count anchored to the avatar. The account button
+             fills the sidebar row, so positioning the badge against the
+             button put it at the far edge, detached from the person it
+             belongs to. -->
+        <span class="chan-account-avatar" style="position:relative">
+          ${avatar(user, 32, user, myAvatar())}
+          ${countBadge(dmUnreadTotal())}
+        </span>
         <span class="chan-account-copy"><b>${esc(user)}</b></span>
-        ${countBadge(dmUnreadTotal())}
       </button>
       <button type="button" class="icon-btn chan-settings" data-act="nav"
         data-value="settings" title="Settings" aria-label="Settings">
