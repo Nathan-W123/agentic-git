@@ -763,3 +763,46 @@ test("a blocked plan is told what it collided with", () => {
   assert.equal(assessment.disposition, "block");
   assert.match(assessment.explanation, /file_overlap: src\/a\.ts/u);
 });
+
+test("a plan does not depend on symbols its files merely mention", () => {
+  // Taken from a real refusal. One task adds a delete confirmation, another
+  // removes description text from a settings page; they share one file. The
+  // block came from dependency impact at twenty-five a hit, on three symbols
+  // neither agent named — enrichment had put every symbol the shared file
+  // *references* into one plan's dependencies, and every symbol the other's
+  // files *declare* into its resources, so the two inflated sets met.
+  const zeus: AgentPlan = {
+    ...plan("zeus", ["apps/web/public/app.js", "apps/web/public/screen-repos.js"]),
+    expectedSymbols: [
+      "deleteRepositoryAction",
+      "ensureRepositoryGrants",
+      "channelInfoPopoverHtml",
+    ],
+    declared: { symbols: ["deleteRepositoryAction"], dependencies: [] },
+  };
+  const hades: AgentPlan = {
+    ...plan("hades", ["apps/web/public/app.js"]),
+    dependencies: [
+      "symbol:channelInfoPopoverHtml",
+      "symbol:deleteRepositoryAction",
+      "symbol:ensureRepositoryGrants",
+    ],
+    declared: { symbols: [], dependencies: [] },
+  };
+  const detector = new ConflictDetector();
+
+  const assessment = detector.assess(zeus, hades);
+  // The one file they both named, and nothing else. Twenty is the top of the
+  // concurrent band, so they run together.
+  assert.equal(assessment?.score, 20);
+  assert.equal(assessment?.disposition, "concurrent");
+  assert.doesNotMatch(assessment?.explanation ?? "", /dependency_impact/u);
+
+  // Without the agents' own words the same pair blocks, on symbols neither
+  // of them asked for.
+  const strip = (candidate: AgentPlan): AgentPlan => {
+    const { declared: _declared, ...rest } = candidate;
+    return rest;
+  };
+  assert.equal(detector.assess(strip(zeus), strip(hades))?.disposition, "block");
+});

@@ -120,7 +120,14 @@ function dispositionFor(
  */
 function asDeclared(
   plan: AgentPlan,
-  key: "apis" | "schemas" | "configKeys" | "tests" | "services",
+  key:
+    | "symbols"
+    | "dependencies"
+    | "apis"
+    | "schemas"
+    | "configKeys"
+    | "tests"
+    | "services",
   enriched: readonly string[] | undefined,
 ): readonly string[] {
   return plan.declared === undefined
@@ -187,14 +194,39 @@ export function overlappingFiles(
   });
 }
 
+/**
+ * What a plan offers, for deciding whether another plan depends on it.
+ *
+ * Declared throughout, for the reason {@link asDeclared} gives — and it
+ * matters more here than anywhere else it applies. Dependency impact scores
+ * twenty-five a hit, so an inflated set does not merely add a point or two:
+ * one plan's enriched symbol list crossing another's dependencies produced a
+ * hundred and twenty-five points between a task removing text from a settings
+ * page and a task adding a delete confirmation, on the strength of symbols
+ * neither agent had asked for.
+ *
+ * Files stay as they are: `enrichPlan` never adds any, so `expectedFiles` is
+ * already the agent's own.
+ */
 function resourceNames(plan: CompleteAgentPlan): Set<string> {
   return new Set(
     [
       ...plan.expectedFiles.flatMap((value) => [value, `file:${value}`]),
-      ...plan.expectedSymbols.flatMap((value) => [value, `symbol:${value}`]),
-      ...plan.expectedApis.flatMap((value) => [value, `api:${value}`]),
-      ...plan.expectedSchemas.flatMap((value) => [value, `schema:${value}`]),
-      ...plan.expectedServices.flatMap((value) => [value, `service:${value}`]),
+      ...asDeclared(plan, "symbols", plan.expectedSymbols).flatMap((value) => [
+        value,
+        `symbol:${value}`,
+      ]),
+      ...asDeclared(plan, "apis", plan.expectedApis).flatMap((value) => [
+        value,
+        `api:${value}`,
+      ]),
+      ...asDeclared(plan, "schemas", plan.expectedSchemas).flatMap((value) => [
+        value,
+        `schema:${value}`,
+      ]),
+      ...asDeclared(plan, "services", plan.expectedServices).flatMap(
+        (value) => [value, `service:${value}`],
+      ),
     ].map((value) => value.toLowerCase()),
   );
 }
@@ -205,10 +237,10 @@ function dependencyImpact(first: AgentPlan, second: AgentPlan): string[] {
   const leftResources = resourceNames(left);
   const rightResources = resourceNames(right);
   const impacts = [
-    ...left.dependencies.filter((value) =>
+    ...asDeclared(left, "dependencies", left.dependencies).filter((value) =>
       rightResources.has(value.toLowerCase()),
     ),
-    ...right.dependencies.filter((value) =>
+    ...asDeclared(right, "dependencies", right.dependencies).filter((value) =>
       leftResources.has(value.toLowerCase()),
     ),
     ...overlap(asDeclared(left, "services", left.expectedServices), asDeclared(right, "services", right.expectedServices)).map(

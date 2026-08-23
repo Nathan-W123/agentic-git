@@ -102,6 +102,7 @@ export interface PlanGrounding {
 /** One plan's own declarations, kept apart from what enrichment added. */
 export interface PlanDeclarations {
   symbols?: string[];
+  dependencies?: string[];
   apis?: string[];
   schemas?: string[];
   configKeys?: string[];
@@ -1630,6 +1631,7 @@ export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
   if (plan.declared !== undefined) {
     for (const key of [
       "symbols",
+      "dependencies",
       "apis",
       "schemas",
       "configKeys",
