@@ -103,12 +103,14 @@ test("an unread direct message has a number somewhere on screen", async () => {
   const total = slice(data, "export function dmUnreadTotal()", "\n/** Unread messages waiting from one person. */");
   assert.match(total, /state\.dmConversations\.reduce/u);
   assert.match(total, /conversation\.unread/u);
+  // Agent private-chat threads do not count toward the account badge.
+  assert.match(total, /isDirectMessagePerson\(conversation\.userId\)/u);
 
   assert.match(app, /function dmBadge\(\)/u);
   assert.match(chats, /countBadge\(dmUnreadTotal\(\)\)/u);
 
   // The menu row opens the conversations themselves, each with its own count.
-  const list = slice(app, 'case "dm-list": {', 'case "repo-menu":');
+  const list = slice(app, "function showDirectMessageMenu(node) {", "\n/**\n * Opens the already-cached");
   assert.match(list, /act: "dm-open"/u);
   assert.match(list, /hint: `\$\{conversation\.unread\} unread`/u);
 });
@@ -190,17 +192,39 @@ test("settings is visible beside the account menu", async () => {
 
 test("direct messages are offered with people and with nobody else", async () => {
   const app = await publicFile("app.js");
-
-  const list = slice(app, 'case "dm-list": {', 'case "repo-menu":');
+  const data = await publicFile("data.js");
 
   // An agent is not somebody you send private mail to: your own is reached by
   // `agent-chat-open` beside the channel, and an org agent works in the room.
-  // Filtered by id rather than simply not added, because the conversation
-  // list arrives from the server and is not this menu's to assume about.
-  assert.match(list, /const agentIds = new Set\(state\.agents\.map/u);
-  assert.match(list, /!agentIds\.has\(userId\)/u);
-  // Nor yourself. Writing to yourself is not a conversation.
-  assert.match(list, /userId !== me/u);
+  // Filtered by the full set of agent correspondent ids rather than only
+  // `state.agents` (project adapter configs), because personal and roster
+  // agents carry provider ids and `${userId}:${provider}` composites.
+  assert.match(data, /export function agentCorrespondentIds\(\)/u);
+  assert.match(data, /export function isDirectMessagePerson\(userId\)/u);
+  const person = slice(
+    data,
+    "export function isDirectMessagePerson(userId) {",
+    "\n/**\n * Everything waiting from people",
+  );
+  assert.match(person, /agentCorrespondentIds\(\)\.has\(id\)/u);
+  assert.match(person, /currentUserId\(\)/u);
+
+  const list = slice(
+    app,
+    "function showDirectMessageMenu(node) {",
+    "\n/**\n * Opens the already-cached",
+  );
+  assert.match(list, /isDirectMessagePerson\(conversation\.userId\)/u);
+  assert.match(list, /isDirectMessagePerson\(person\.id\)/u);
+
+  // Opening a person closes any agent private-chat panel that was beside it.
+  const open = slice(
+    app,
+    "function openUserDirectMessage(userId) {",
+    "\n/**\n * Who this account can write to privately",
+  );
+  assert.match(open, /state\.activeAgentPanel = undefined/u);
+  assert.match(open, /clearRightPanel\("agent"\)/u);
 
   // The half that makes it a way to start one: everybody reachable who is not
   // already in a thread with this account. "No conversations yet" used to be
@@ -208,6 +232,15 @@ test("direct messages are offered with people and with nobody else", async () =>
   assert.match(list, /state\.dmPeople\.filter/u);
   assert.match(list, /!talking\.has\(person\.id\)/u);
   assert.match(list, /label: "Nobody else on this project yet"/u);
+
+  // The account menu still reaches the same door.
+  const destinations = slice(app, "function accountDestinations() {", "\n/**");
+  assert.match(destinations, /act: "dm-list"/u);
+  assert.match(app, /case "dm-list": \{\s*\n\s*showDirectMessageMenu\(node\);/u);
+  assert.match(
+    app,
+    /case "dm-open":\s*\n\s*state\.activeDm = value;\s*\n\s*state\.dmDraft = "";\s*\n\s*openUserDirectMessage\(value\);/u,
+  );
 });
 
 test("Advanced is the foot of Settings, and holds what left it", async () => {

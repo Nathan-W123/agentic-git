@@ -3340,18 +3340,82 @@ export function personOnline(userId) {
 }
 
 /**
- * Everything waiting from everybody, as one number.
+ * Ids that name an agent as a private-chat correspondent.
  *
- * `dmUnreadFrom` answers for a person the reader can already see in the
- * roster beside them. A message from somebody outside this channel had no
- * number anywhere on screen, which is the whole of finding 17: the count was
- * loaded and never rendered.
+ * Broader than `state.agents` alone: that list is the project's registered
+ * adapter configs, and the ids a personal or roster agent actually carries
+ * are provider ids and `${userId}:${provider}` composites. Filtering only the
+ * adapter list left agent threads in the Direct messages menu and unread
+ * total.
+ */
+export function agentCorrespondentIds() {
+  const ids = new Set();
+  for (const agent of state.agents ?? []) {
+    const id = String(agent?.id ?? "");
+    if (id !== "") {
+      ids.add(id);
+    }
+  }
+  for (const agent of myAgents()) {
+    ids.add(String(agent.id));
+    if (agent.provider) {
+      ids.add(String(agent.provider));
+    }
+  }
+  for (const repository of state.repositories ?? []) {
+    for (const agent of channelAgentsFor(repository.id)) {
+      ids.add(String(agent.id));
+      if (agent.provider) {
+        ids.add(String(agent.provider));
+      }
+    }
+  }
+  for (const roster of Object.values(state.channelRoster ?? {})) {
+    for (const entry of roster ?? []) {
+      const provider = entry.provider;
+      if (entry.userId && provider) {
+        ids.add(`${entry.userId}:${provider}`);
+      }
+      if (provider) {
+        ids.add(String(provider));
+      }
+      if (entry.id) {
+        ids.add(String(entry.id));
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * Whether an id is somebody this account can open as a person-to-person DM.
+ *
+ * Agents are reached through `agent-chat-open`, not the Direct messages menu.
+ */
+export function isDirectMessagePerson(userId) {
+  const id = String(userId ?? "");
+  if (id === "" || id === currentUserId()) {
+    return false;
+  }
+  return !agentCorrespondentIds().has(id);
+}
+
+/**
+ * Everything waiting from people, as one number.
+ *
+ * Agent private-chat threads are not counted: the Direct messages entry is
+ * person-to-person only. `dmUnreadFrom` answers for a person the reader can
+ * already see in the roster beside them. A message from somebody outside this
+ * channel had no number anywhere on screen, which is the whole of finding 17:
+ * the count was loaded and never rendered.
  */
 export function dmUnreadTotal() {
-  return state.dmConversations.reduce(
-    (total, conversation) => total + Number(conversation.unread ?? 0),
-    0,
-  );
+  return state.dmConversations.reduce((total, conversation) => {
+    if (!isDirectMessagePerson(conversation.userId)) {
+      return total;
+    }
+    return total + Number(conversation.unread ?? 0);
+  }, 0);
 }
 
 /** Unread messages waiting from one person. */
