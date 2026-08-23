@@ -3890,7 +3890,7 @@ function catchUpPanel() {
   );
   const repositoryName = repository?.name ?? catchUp.repositoryId;
   const roster = channelAgentsFor(catchUp.repositoryId);
-  const workers = new Set();
+  const workers = new Map();
   let touched = 0;
   const rows = catchUp.tasks
     .map((task) => {
@@ -3901,7 +3901,7 @@ function catchUpPanel() {
       touched += changedFiles.length;
       const worker = roster.find((agent) => taskBelongsToAgent(task, agent));
       if (worker !== undefined) {
-        workers.add(worker.name);
+        workers.set(worker.id, worker);
       }
       const summary =
         String(task.summary ?? "").trim() ||
@@ -3920,6 +3920,7 @@ function catchUpPanel() {
             ? undefined
             : {
                 icon: "agent",
+                agent: worker,
                 label: worker.name,
                 title: `${worker.name} did this work`,
               },
@@ -3971,16 +3972,12 @@ function catchUpPanel() {
         } done</h2>
         ${pillBar(
           [
-            workers.size === 0
-              ? undefined
-              : {
-                  icon: "agent",
-                  label:
-                    workers.size === 1
-                      ? [...workers][0]
-                      : `${String(workers.size)} agents`,
-                  title: [...workers].join(", "),
-                },
+            ...[...workers.values()].map((worker) => ({
+              icon: "agent",
+              agent: worker,
+              label: worker.name,
+              title: `${worker.name} completed work while you were away`,
+            })),
             touched === 0
               ? undefined
               : {

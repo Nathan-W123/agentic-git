@@ -2214,6 +2214,26 @@ test("a doodle is tinted by its owner, never by its vendor", async () => {
   assert.equal(/tint/u.test(body), false);
 });
 
+test("catch-up pills use each named agent's actual mark", async () => {
+  const ui = await publicFile("ui.js");
+  const chats = await publicFile("screen-chats.js");
+  const pillStart = ui.indexOf("export function pillBar");
+  const pillBody = ui.slice(pillStart, ui.indexOf("\n}\n", pillStart));
+  const catchUpStart = chats.indexOf("function catchUpPanel()");
+  const catchUpBody = chats.slice(
+    catchUpStart,
+    chats.indexOf("\n/**", catchUpStart),
+  );
+
+  assert.match(
+    pillBody,
+    /agentFace\(pill\.agent, 18, \{ showPresence: false \}\)/u,
+  );
+  assert.match(catchUpBody, /agent: worker/u);
+  assert.match(catchUpBody, /\.\.\.\[\.\.\.workers\.values\(\)\]\.map/u);
+  assert.doesNotMatch(catchUpBody, /label: `\$\{String\(workers\.size\)\} agents`/u);
+});
+
 test("an agent colour is stored on the account, not in the browser", async () => {
   const data = await publicFile("data.js");
   const start = data.indexOf("export async function saveAppearance");
