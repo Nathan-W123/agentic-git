@@ -26,7 +26,7 @@ import {
 } from "@coord/repository-service";
 import {
   assertAgentPlan,
-  claimCoversPath,
+  claimReservesPath,
   createId,
   describeError,
   mergePlanScope,
@@ -100,7 +100,6 @@ import {
   ScopeExpansionError,
   assertChangeSetWithinPlan,
 } from "./scope-validator.js";
-import { frozenClaimCovers } from "./blanket-claim.js";
 import { estimateScope } from "./scope-estimation.js";
 
 export interface CoordinatedTask {
@@ -447,9 +446,11 @@ function planClaimedResources(plan: AgentPlan): Map<string, PlanResourceRef> {
  * every other axis are compared the same way files are — a task queued behind
  * a symbol is waiting just as long as one queued behind a file.
  *
- * A frozen or blanket claim is read through {@link claimCoversPath} as well as
- * through its file list: a claim covers directories the holder has not named
- * file by file, and those are exactly the paths a waiter is refused for.
+ * A blanket claim is read through {@link claimReservesPath} as well as through
+ * its file list, because a claim nobody has narrowed yet reserves everything.
+ * A frozen one contests only the paths its holder actually names — the
+ * directories a freeze widens to say what that holder may write, not what
+ * every arrival is refused.
  */
 export function contestedPlanResources(
   holder: AgentPlan,
@@ -488,7 +489,7 @@ export function contestedPlanResources(
     for (const resourceId of wanted ?? []) {
       const covered =
         held.has(planResourceKey(resourceType, resourceId)) ||
-        (resourceType === "file" && claimCoversPath(holder, resourceId));
+        (resourceType === "file" && claimReservesPath(holder, resourceId));
       if (covered) {
         contested[bucket].push(resourceId);
       }
@@ -4732,11 +4733,17 @@ export class Coordinator {
     if (entry.plan.claim?.kind !== "frozen") {
       return;
     }
+    // Measured against what the claim reserves, not against what it permits.
+    // The directories a freeze widens to are what let this holder write here
+    // without asking; they are not a reservation, so somebody else may have
+    // been granted this path in the meantime. Sending it back through
+    // admission is what turns that into an answer instead of a silent second
+    // writer.
     const escaped = [
       ...new Set(
         changeSet.patches
           .map((patch) => patch.path)
-          .filter((file) => !frozenClaimCovers(entry.plan, file)),
+          .filter((file) => !claimReservesPath(entry.plan, file)),
       ),
     ].sort();
     if (escaped.length === 0) {

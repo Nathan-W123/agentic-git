@@ -1,6 +1,6 @@
 import {
   arbitrationFiles,
-  claimCoversPath,
+  claimReservesPath,
   completeAgentPlan,
   isBlanketClaim,
   planAdmissionApproved,
@@ -912,10 +912,10 @@ export class PlanAdmissionController {
       for (const holder of entry.heldBy) {
         const active = input.active.find((plan) => plan.taskId === holder);
         // A claim is a statement about what a task is allowed to reach rather
-        // than about what it declared, so a frozen claim over this path has no
-        // lines to withhold and takes the file whole.
+        // than about what it declared, so a claim that reserves this path has
+        // no lines to withhold and takes the file whole.
         const held =
-          active === undefined || claimCoversPath(active.plan, file)
+          active === undefined || claimReservesPath(active.plan, file)
             ? undefined
             : declaredSpans(active.plan, file, locate);
         if (held === undefined || held.length === 0) {
@@ -996,7 +996,7 @@ export class PlanAdmissionController {
     const blocking = others.filter(
       (entry) =>
         isBlanketClaim(entry.plan) ||
-        wanted.some((file) => claimCoversPath(entry.plan, file)),
+        wanted.some((file) => claimReservesPath(entry.plan, file)),
     );
     if (blocking.length === 0) {
       return undefined;
@@ -1012,7 +1012,7 @@ export class PlanAdmissionController {
       constraints: [
         blanket
           ? "Resubmit once the repository-wide claim is narrowed or released"
-          : "Plan around the directories the executing task is working in, " +
+          : "Plan around the files the executing task is working in, " +
             "or resubmit once it integrates",
       ],
       blockedBy: blocking.map((entry) => entry.taskId).sort(),
@@ -1020,15 +1020,14 @@ export class PlanAdmissionController {
       explanation: blanket
         ? "A task already executing holds a repository-wide claim, so nothing " +
           "else can be admitted until it is narrowed to what it has touched"
-        : "Executing work holds " +
+        : // Named file by file, because that is now the only thing that can
+          // have produced this refusal. Reporting the directory instead read
+          // as a whole folder being spoken for, which is both alarming and,
+          // since the claim stopped reserving directories, untrue.
+          "Executing work holds " +
           blocking
             .flatMap((entry) =>
-              (entry.plan.claim?.kind === "frozen"
-                ? entry.plan.claim.directories
-                : []
-              ).filter((directory) =>
-                wanted.some((file) => file.startsWith(directory)),
-              ),
+              wanted.filter((file) => claimReservesPath(entry.plan, file)),
             )
             .filter((value, index, all) => all.indexOf(value) === index)
             .sort()
@@ -1318,17 +1317,18 @@ export class PlanAdmissionController {
       contested.map((entry) => [entry.resourceId, entry]),
     );
 
-    // Frozen claims deliberately widen touched files to their directories.
-    // Those paths do not appear as ordinary plan declarations, so conflict
-    // scoring and ownership cannot discover them. Add them explicitly to the
-    // same contested-resource set partial admission already knows how to
-    // reduce and enforce.
+    // What a frozen claim reserves is the files its holder was observed
+    // touching, which the freeze wrote into a plan nobody re-planned. Conflict
+    // scoring reaches those through grounding as well as through the raw list,
+    // so add them explicitly to the same contested-resource set partial
+    // admission already knows how to reduce and enforce, rather than trusting
+    // two spellings of a path to agree.
     for (const file of uniqueRepositoryPaths(input.plan.expectedFiles)) {
       for (const holder of input.active) {
         if (
           holder.taskId === input.plan.taskId ||
           holder.plan.claim?.kind !== "frozen" ||
-          !claimCoversPath(holder.plan, file)
+          !claimReservesPath(holder.plan, file)
         ) {
           continue;
         }
