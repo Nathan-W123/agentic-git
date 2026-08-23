@@ -2954,6 +2954,89 @@ test("a refusal is not read as a confirmation", () => {
   assert.equal(saysSignedIn("Signed in as nathan@example.com"), true);
 });
 
+test("a teammate sees an org-wide agent's usage, and never a personal one's", async () => {
+  // Usage was refused for anybody but the owner, which was one answer to a
+  // real question — the route reported the *caller's* account, so showing it
+  // beside somebody else's agent would have put your consumption under their
+  // name. The route takes an owner now, so the rule can be the one the rest
+  // of the roster already uses: an org-wide connection is one anybody may put
+  // to work, and how much of its quota is left decides whether doing so
+  // accomplishes anything. A personal connection is shared with nobody.
+  const harness = await createHarness();
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("owner-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-owner",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    credentials: store,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args[0] === "--version"
+        ? output("codex-cli 0.146.0")
+        : args[0] === "login"
+          ? output("Logged in using ChatGPT")
+          : args[0] === "app-server"
+            ? output(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 1,
+                  result: {
+                    rateLimits: {
+                      primary: { usedPercent: 61, windowDurationMins: 300 },
+                      secondary: { usedPercent: 8, windowDurationMins: 10_080 },
+                      planType: "pro",
+                      // The key this parser reads: `credits.balance`.
+                      credits: { balance: 1234 },
+                    },
+                  },
+                }),
+              )
+            : output("", 2, "error")) as ProcessRunner,
+  });
+
+  // Personal by default: a teammate is told, in the service's own words.
+  const refused = await service.usage({
+    provider: "openai",
+    userId: "watcher-user",
+    ownerId: "owner-user",
+  });
+  assert.deepEqual(refused.windows, []);
+  assert.match(refused.unavailableReason ?? "", /visible only to/u);
+
+  // Set where `listConnectionsFor` reads it. Going through `setSettings`
+  // would need a connections record too, and the rule under test is about the
+  // credential's visibility, not about how it came to be set.
+  await store.put("owner-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-owner",
+    visibility: "org",
+  });
+
+  const shared = await service.usage({
+    provider: "openai",
+    userId: "watcher-user",
+    ownerId: "owner-user",
+  });
+  assert.equal(shared.unavailableReason, undefined);
+  assert.deepEqual(
+    shared.windows.map((window) => window.percentUsed),
+    [61, 8],
+  );
+  // Operational facts travel; a money balance on somebody else's account does
+  // not, because knowing whether an agent can still work does not require it.
+  assert.equal(shared.creditBalance, undefined);
+
+  // And the owner still sees their own in full.
+  const own = await service.usage({
+    provider: "openai",
+    userId: "owner-user",
+  });
+  assert.equal(own.creditBalance, 1234);
+});
+
 test("an API-key connection is told it has no quota, not left guessing", async () => {
   // The card offered "which is what an API-key account returns" as a
   // hypothesis to somebody with no way to check it, while the answer sat in

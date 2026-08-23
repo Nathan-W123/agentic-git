@@ -1388,12 +1388,23 @@ export function tabs(act, items, current) {
  */
 export function iconButton(
   name,
-  { act = "", title = "", value = "", small = false, cls = "" } = {},
+  { act = "", title = "", value = "", small = false, cls = "", data = {} } = {},
 ) {
   return `<button type="button" class="icon-btn${small ? " sm" : ""}${
     cls ? ` ${cls}` : ""
   }"${act ? ` data-act="${act}"` : ""}${
     value ? ` data-value="${esc(value)}"` : ""
+  }${
+    // Extra data attributes, for a button whose action needs more than one
+    // value. The usage refresh needs to say whose account it is asking about
+    // as well as which vendor, and anything passed here used to be dropped
+    // on the floor by this destructure.
+    Object.entries(data)
+      .filter(([, attribute]) => attribute !== undefined && attribute !== "")
+      .map(([attribute, attributeValue]) =>
+        ` data-${attribute}="${esc(String(attributeValue))}"`,
+      )
+      .join("")
   } title="${esc(title)}" aria-label="${esc(title)}">${icon(name)}</button>`;
 }
 

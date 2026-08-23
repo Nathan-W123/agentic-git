@@ -2922,7 +2922,13 @@ export interface ChatProviderOperations {
   /** Model/effort choices the connected account actually reports. */
   options(input: { provider: string; userId?: string }): Promise<unknown>;
   /** Consumption the provider's own CLI publishes, when it publishes any. */
-  usage(input: { provider: string; userId?: string }): Promise<unknown>;
+  usage(input: {
+    provider: string;
+    /** The caller. */
+    userId?: string;
+    /** Whose agent, when it is not the caller's own. */
+    ownerId?: string;
+  }): Promise<unknown>;
   setSettings(input: {
     userId: string;
     provider: string;
@@ -9053,11 +9059,23 @@ export class ApiGateway {
           return;
         }
         if (action === "usage" && method === "GET") {
+          // Whose agent this is about, when it is not the caller's. The
+          // service decides whether to answer: an org-wide connection is one
+          // anybody may put to work, and a personal one stays private.
+          const owner = url.searchParams.get("owner") ?? undefined;
           const recordedUsage = await performChat(() =>
-            chatOperations.usage({ provider, userId: identity.userId }),
+            chatOperations.usage({
+              provider,
+              userId: identity.userId,
+              ...(owner === undefined || owner === "" ? {} : { ownerId: owner }),
+            }),
           );
           let usage = recordedUsage;
-          if (provider === "openai" && !hasUsageWindows(recordedUsage)) {
+          if (
+            provider === "openai" &&
+            (owner === undefined || owner === "" || owner === identity.userId) &&
+            !hasUsageWindows(recordedUsage)
+          ) {
             const liveSnapshot = await (
               this.options.codexUsageReader ?? readCodexSubscriptionUsage
             )().catch(() => undefined);

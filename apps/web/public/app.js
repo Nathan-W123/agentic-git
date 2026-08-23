@@ -3545,7 +3545,11 @@ function requestUsageForHoverTarget(event) {
   if (target === null) {
     return;
   }
-  void ensureProviderUsage(target.dataset.hoverValue, render);
+  void ensureProviderUsage(
+    target.dataset.hoverValue,
+    render,
+    target.dataset.hoverOwner,
+  );
 }
 document.addEventListener("mouseover", requestUsageForHoverTarget);
 // `:hover` never matches on a touch screen, so the card above has nothing to
@@ -7150,7 +7154,10 @@ document.addEventListener("click", (event) => {
     // on saying it for the rest of the session, including after the run that
     // produced some.
     case "agent-usage-refresh":
-      void refreshProviderUsage(value, render);
+      // The owner rides on the button, because the roster shows other
+      // people's agents too and a refresh must ask about the same account the
+      // card is displaying rather than about whoever pressed it.
+      void refreshProviderUsage(value, render, node.dataset.owner);
       return;
     /**
      * Stopping a run, asked about first.
