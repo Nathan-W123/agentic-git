@@ -19,6 +19,7 @@ import {
   parseClaudeStreamJson,
   parseCursorModelList,
   parseCursorUsage,
+  saysSignedIn,
   parseCodexAppServerRateLimits,
   parseCodexStatusRateLimits,
   parseCodexJsonl,
@@ -643,10 +644,11 @@ test("claude usage percentages are read from the CLI's own /usage report", async
   // The "95% of your usage was at >150k context" line is prose, not a window.
   assert.ok(!report.windows.some((window) => window.percentUsed === 95));
 
-  // Codex records its limits per session, and this harness has none.
+  // Codex records its limits per session, and this harness has none — and
+  // says which of the several reasons for an empty card applies here.
   const codex = await service.usage({ provider: "openai" });
   assert.deepEqual(codex.windows, []);
-  assert.match(codex.unavailableReason ?? "", /no Codex session/iu);
+  assert.match(codex.unavailableReason ?? "", /could not be asked|not signed in|no Codex session/iu);
 });
 
 test("codex usage comes from the rate limits its own session records", async () => {
@@ -698,7 +700,7 @@ test("codex usage comes from the rate limits its own session records", async () 
   });
   const none = await bare.usage({ provider: "openai" });
   assert.deepEqual(none.windows, []);
-  assert.match(none.unavailableReason ?? "", /no Codex session/iu);
+  assert.match(none.unavailableReason ?? "", /could not be asked|not signed in|no Codex session/iu);
 });
 
 test("codex usage asks the account for its quota before reading session records", async () => {
@@ -744,7 +746,12 @@ test("codex usage asks the account for its quota before reading session records"
     provider: "openai",
     userId: "usage-user",
   });
-  assert.deepEqual(seen[0], ["--status", "--json"]);
+  // The documented interface is asked first and is not scripted here, so the
+  // status read answers. What this test is really holding down is below: the
+  // question is put to the account, inside its own home, every time it is
+  // asked.
+  assert.deepEqual(seen[0], ["app-server", "--stdio"]);
+  assert.deepEqual(seen[1], ["--status", "--json"]);
   const quotaCall = calls.find((call) => call.args[0] === "--status");
   assert.ok((quotaCall?.env?.["CODEX_HOME"] ?? "").length > 0);
   assert.notEqual(quotaCall?.env?.["CODEX_HOME"], harness.home);
@@ -767,7 +774,9 @@ test("codex usage asks the account for its quota before reading session records"
   });
   assert.equal(reopened.windows[0]?.percentUsed, 12.5);
   assert.deepEqual(seen, [
+    ["app-server", "--stdio"],
     ["--status", "--json"],
+    ["app-server", "--stdio"],
     ["--status", "--json"],
   ]);
 });
@@ -842,10 +851,8 @@ test("unsupported native status falls back without losing usage", async () => {
   });
 
   const report = await service.usage({ provider: "openai" });
-  assert.deepEqual(seen, [
-    ["--status", "--json"],
-    ["app-server", "--stdio"],
-  ]);
+  // The app-server answers, so the status read is never reached.
+  assert.deepEqual(seen, [["app-server", "--stdio"]]);
   assert.deepEqual(
     report.windows.map((window) => window.percentUsed),
     [9, 31],
@@ -2931,6 +2938,71 @@ test("cursor usage falls back to plain status, and stays unavailable when there 
   const report = await missing.usage({ provider: "cursor" });
   assert.deepEqual(report.windows, []);
   assert.match(report.unavailableReason ?? "", /cursor/iu);
+});
+
+test("a refusal is not read as a confirmation", () => {
+  // "logged in" is a substring of "Not logged in". Asking whether the words
+  // appear reports a signed-out account as signed in, which is how an empty
+  // usage card came to blame the account instead of the missing login.
+  assert.equal(saysSignedIn("Not logged in. Run `codex login`."), false);
+  assert.equal(saysSignedIn("not signed in"), false);
+  assert.equal(saysSignedIn("No active session"), false);
+  assert.equal(saysSignedIn("Please log in to continue"), false);
+  assert.equal(saysSignedIn(""), false);
+
+  assert.equal(saysSignedIn("Logged in using ChatGPT"), true);
+  assert.equal(saysSignedIn("Signed in as nathan@example.com"), true);
+});
+
+test("an empty usage card says what is actually in the way", async () => {
+  // One sentence used to cover four situations — the CLI missing, signed out,
+  // too old, or an account with genuinely no subscription quota — and it
+  // asserted the last of them every time. "Codex reported no quota" describes
+  // a Codex that was never successfully asked, and leaves nothing to do about
+  // it.
+  const harness = await createHarness();
+
+  const noBinary = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async () => {
+      throw new Error("spawn codex ENOENT");
+    }) as ProcessRunner,
+  });
+  const missing = await noBinary.usage({ provider: "openai" });
+  assert.deepEqual(missing.windows, []);
+  assert.match(missing.unavailableReason ?? "", /could not be run where Kumi/u);
+  assert.match(missing.unavailableReason ?? "", /ENOENT/u);
+
+  const signedOut = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) => {
+      if (args[0] === "--version") {
+        return output("codex-cli 0.146.0");
+      }
+      if (args[0] === "login") {
+        return output("Not logged in.");
+      }
+      // Neither quota source answers.
+      return output("");
+    }) as ProcessRunner,
+  });
+  const out = await signedOut.usage({ provider: "openai" });
+  assert.deepEqual(out.windows, []);
+  assert.match(out.unavailableReason ?? "", /not signed in/u);
+
+  // Installed, signed in, and simply nothing to report: the plain answer is
+  // the true one here, and it now says why that can legitimately happen.
+  const noQuota = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args[0] === "--version"
+        ? output("codex-cli 0.146.0")
+        : args[0] === "login"
+          ? output("Logged in using ChatGPT")
+          : output("")) as ProcessRunner,
+  });
+  const quiet = await noQuota.usage({ provider: "openai" });
+  assert.match(quiet.unavailableReason ?? "", /billed by API key/u);
 });
 
 test("cursor prefers its structured status over the printed one", async () => {

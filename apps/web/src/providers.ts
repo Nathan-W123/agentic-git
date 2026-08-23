@@ -2300,6 +2300,26 @@ function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
 }
 
 /** The Codex CLI may live off PATH; the actively-used install is a fallback. */
+/**
+ * Whether a CLI's own words say the account is signed in.
+ *
+ * Written down once because the obvious test is wrong: "logged in" is a
+ * substring of "Not logged in", so asking whether the words appear reads a
+ * refusal as a confirmation. Two readers here made that mistake — the usage
+ * card's diagnosis and the connection detector — and one of them would have
+ * reported a signed-out account as signed in.
+ */
+export function saysSignedIn(output: string): boolean {
+  if (
+    /\b(?:not logged in|not signed in|no active session|please (?:log|sign) in)\b/iu.test(
+      output,
+    )
+  ) {
+    return false;
+  }
+  return /\b(?:logged in|signed in)\b/iu.test(output);
+}
+
 export function resolveCodexCommand(homeDirectory = os.homedir()): string {
   const candidates = [
     "codex",
@@ -2774,7 +2794,7 @@ export class ProviderChatService {
         async (env) => {
           const live = await this.codexAccountRateLimits(env);
           if (live !== undefined) {
-            return live;
+            return { report: live };
           }
           // Sessions write their rollouts under whatever CODEX_HOME the run
           // was given, so the search follows the same home the runs use; the
@@ -2788,15 +2808,21 @@ export class ProviderChatService {
               ? undefined
               : path.join(codexHome, "sessions"),
           );
-          if (newest === undefined) {
-            return undefined;
+          const parsed =
+            newest === undefined
+              ? undefined
+              : parseCodexRateLimits(await readFile(newest, "utf8"));
+          if (parsed !== undefined) {
+            return { report: { ...parsed, source } };
           }
-          const parsed = parseCodexRateLimits(await readFile(newest, "utf8"));
-          return parsed === undefined ? undefined : { ...parsed, source };
+          // Nothing to show, so find out why while the caller's home still
+          // exists. Asked here and nowhere else: outside this callback the
+          // home is gone, and the question would be about the host's login.
+          return { obstacle: await this.codexQuotaObstacle(env) };
         },
       ).catch(() => undefined);
-      if (inHome !== undefined) {
-        return inHome;
+      if (inHome?.report !== undefined) {
+        return inHome.report;
       }
       // The durable copy: credential homes are temporary, and the close hook
       // carries the newest rollout's tail out of one before it is removed.
@@ -2814,8 +2840,10 @@ export class ProviderChatService {
         source,
         windows: [],
         unavailableReason:
+          inHome?.obstacle ??
           "Codex reported no quota for this account, and no Codex session " +
-          "has recorded rate limits on this machine yet.",
+            "has recorded rate limits on this machine yet. An account billed " +
+            "by API key reports no subscription quota at all.",
       };
     } catch (error) {
       return {
@@ -2911,9 +2939,74 @@ export class ProviderChatService {
   }
 
   /** Native status first, with the app-server retained for older CLIs. */
+  /**
+   * Why a quota read came back with nothing — asked of the caller's own home.
+   *
+   * Every reader above answers `undefined` for four different situations: the
+   * CLI is not installed where Kumi runs, it is installed but signed out, it
+   * is too old to have the method, or the account genuinely has no
+   * subscription quota. The card said the last of those in all four cases,
+   * which is untrue in three and unactionable in all: "Codex reported no
+   * quota" describes a Codex that was never successfully asked.
+   *
+   * So when there is nothing to show, the obstacle is looked for and named.
+   * Undefined means the CLI ran and is signed in, and the plain answer — this
+   * account has no quota to report — is the true one after all.
+   */
+  private async codexQuotaObstacle(
+    env: NodeJS.ProcessEnv | undefined,
+  ): Promise<string | undefined> {
+    const command = resolveCodexCommand(this.homeDirectory);
+    const ask = async (args: readonly string[]): Promise<ProcessOutput> =>
+      await this.runner(command, args, {
+        timeoutMs: CODEX_QUOTA_TIMEOUT_MS,
+        maxOutputBytes: 65_536,
+        ...(env === undefined ? {} : { env }),
+      });
+    try {
+      const version = await ask(["--version"]);
+      if (version.exitCode !== 0) {
+        return (
+          "The Codex CLI on this machine could not be asked for its version, " +
+          "so it cannot be asked for a quota either."
+        );
+      }
+    } catch (error) {
+      return (
+        "The Codex CLI could not be run where Kumi is installed: " +
+        `${error instanceof Error ? error.message : String(error)}. ` +
+        "Usage comes from that CLI, so it stays empty until it is there."
+      );
+    }
+    try {
+      const login = await ask(["login", "status"]);
+      if (!saysSignedIn(`${login.stdout}\n${login.stderr}`)) {
+        return (
+          "The Codex CLI is installed but this account is not signed in to " +
+          "it, so it has no quota to report. Signing in again from the " +
+          "connection above is what fills this."
+        );
+      }
+    } catch {
+      // Signed-in state could not be established either way. Say nothing
+      // rather than accuse a working login of being absent.
+    }
+    return undefined;
+  }
+
   private async codexAccountRateLimits(
     env: NodeJS.ProcessEnv | undefined,
   ): Promise<ProviderUsageReport | undefined> {
+    // `account/rateLimits/read` is the interface OpenAI documents for reading
+    // this, and it answers in the shape it promises. `--status` is a display
+    // that happens to emit JSON today. Asking the display first would let a
+    // rename inside it outrank the contract, and the wrong answer is the one
+    // that parses — so it is the fallback, for a CLI whose app-server does
+    // not answer.
+    const live = await this.codexAppServerRateLimits(env);
+    if (live !== undefined) {
+      return live;
+    }
     try {
       const result = await this.runner(
         resolveCodexCommand(this.homeDirectory),
@@ -2924,18 +3017,13 @@ export class ProviderChatService {
           ...(env === undefined ? {} : { env }),
         },
       );
-      const status =
-        result.exitCode === 0
-          ? parseCodexStatusRateLimits(result.stdout)
-          : undefined;
-      if (status !== undefined) {
-        return status;
-      }
+      return result.exitCode === 0
+        ? parseCodexStatusRateLimits(result.stdout)
+        : undefined;
     } catch {
-      // The status flag is feature-detected: old or missing CLIs continue to
-      // the app-server compatibility path below.
+      // Old or missing CLIs have already had their chance above.
+      return undefined;
     }
-    return await this.codexAppServerRateLimits(env);
   }
 
   /**
@@ -3082,7 +3170,7 @@ export class ProviderChatService {
       maxOutputBytes: 65_536,
     });
     const output = `${login.stdout}\n${login.stderr}`;
-    const loggedIn = login.exitCode === 0 && /logged in/iu.test(output);
+    const loggedIn = login.exitCode === 0 && saysSignedIn(output);
     return {
       detected: true,
       loggedIn,
