@@ -1696,8 +1696,8 @@ export function resolveChannelAgentPresentation(
   // — so a deployment that wrote one before agent-specific keys existed kept
   // answering to the old name in that room after an account-wide rename. That
   // is the "renamed it here and the other repositories kept the old name"
-  // report. A row naming *this one agent* still wins: that is a deliberate
-  // per-room rename of somebody's agent, and it is theirs to keep.
+  // report. A historical row naming *this one agent* still wins until that
+  // agent's owner renames it and clears those old room-specific names.
   const legacyName = agent.callSign === undefined ? legacy?.name : undefined;
   return {
     name: specific?.name ?? legacyName ?? defaultName,
@@ -8522,9 +8522,9 @@ export class ApiGateway {
       return;
     }
 
-    // Per-(repository, agent) presentation: a display name and/or a
-    // model/effort choice that is free to disagree with the agent's
-    // account-wide connection. See `renameChannelAgent` in data.js.
+    // Per-(repository, agent) presentation: channel role/model/effort choices,
+    // plus the owning account's route to its agent-wide display name. See
+    // `renameChannelAgent` in data.js.
     const channelAgentMatch = matchPath(
       path,
       new RegExp(
@@ -8561,6 +8561,17 @@ export class ApiGateway {
       }
       const body = objectBody(await this.readJson(request));
       const name = stringField(body["name"], "name", { max: 120, optional: true });
+      const ownPrefix = `${principal.user.id}:`;
+      const ownProvider = agentId.startsWith(ownPrefix)
+        ? agentId.slice(ownPrefix.length)
+        : undefined;
+      if (name !== undefined && ownProvider === undefined) {
+        throw new HttpError(
+          403,
+          "forbidden",
+          "Only the user who added an agent can rename it",
+        );
+      }
       // `min: 0`, matching model/effort below: an empty string clears the
       // role back to the vendor-wide default rather than being rejected as
       // too short, the same way clearing the model dropdown does.
@@ -8671,14 +8682,9 @@ export class ApiGateway {
       // the other channels. Renaming in one room and finding the old name
       // still up in the next is what this replaces.
       //
-      // Only your own. A teammate's agent is still renamed for this channel
-      // alone: their name is theirs, and renaming it in every repository they
-      // work in is not a decision anyone with `view` here gets to make.
+      // Only your own. An agent's name belongs to the account that connected
+      // and added it, regardless of somebody else's repository permissions.
       const chatProviders = this.options.operations.chatProviders;
-      const ownPrefix = `${principal.user.id}:`;
-      const ownProvider = agentId.startsWith(ownPrefix)
-        ? agentId.slice(ownPrefix.length)
-        : undefined;
       let namedAccountWide = false;
       if (name !== undefined && ownProvider !== undefined && chatProviders !== undefined) {
         try {
@@ -8756,12 +8762,10 @@ export class ApiGateway {
     // of `manage_project`, because adding your own agent is closer to "I can
     // make it do work" than to "I can administer this repository".
     //
-    // `DELETE` additionally accepts a `?userId=` query parameter naming
-    // *whose* membership to remove — moderation, not self-service, so it
-    // requires `manage_project` on top of the `submit_task` every caller
-    // already needs to reach this route at all. The self-service path (no
-    // `userId`, or one's own) is unaffected and still needs only
-    // `submit_task`, matching `agent.mine` in `rosterRow` (screen-chats.js).
+    // `DELETE` accepts a `?userId=` only for compatibility with older clients,
+    // but it may identify only the caller. The account that brought an agent
+    // in is the only account that may take it back out; repository moderation
+    // permissions do not transfer ownership of somebody else's connection.
     // `POST` never accepts it: adding an agent to the channel is something
     // only its own owner can do for it, moderator or not.
     const channelAgentMembershipMatch = matchPath(
@@ -8790,7 +8794,7 @@ export class ApiGateway {
         throw new HttpError(404, "not_found", "Repository was not found");
       }
       const isMember = method === "POST";
-      let targetUserId = principal.user.id;
+      const targetUserId = principal.user.id;
       if (!isMember) {
         const requestedUserId = url.searchParams.get("userId")?.trim();
         if (
@@ -8798,14 +8802,11 @@ export class ApiGateway {
           requestedUserId.length > 0 &&
           requestedUserId !== principal.user.id
         ) {
-          await authorizeRepository(
-            this.options.store,
-            principal,
-            projectId,
-            repositoryId,
-            "manage_project",
+          throw new HttpError(
+            403,
+            "forbidden",
+            "Only the user who added an agent can remove it",
           );
-          targetUserId = requestedUserId;
         }
       }
       await this.options.store.setChannelAgentMember(

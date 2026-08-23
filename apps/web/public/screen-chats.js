@@ -1187,7 +1187,8 @@ const AGENT_STATUS_TITLE = {
  * under the row or retain a duplicate input after the edit is done.
  */
 function rosterRow(agent) {
-  const settingsOpen = state.chatSettingsOpenId === agent.id;
+  const settingsOpen =
+    agent.mine === true && state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
   return `<div class="roster-row">
@@ -1273,12 +1274,17 @@ export function rosterMenuItems(agentId) {
       iconName: "chatBubble",
     });
   }
-  items.push({
-    act: "channel-settings-toggle",
-    value: agent.id,
-    label: "Rename",
-    iconName: "pencil",
-  });
+  // Its owner is the person who connected and added it. Administrators may
+  // still manage channel roles below, but the agent's identity and membership
+  // remain that person's to change.
+  if (agent.mine === true) {
+    items.push({
+      act: "channel-settings-toggle",
+      value: agent.id,
+      label: "Rename",
+      iconName: "pencil",
+    });
+  }
   // Only the auditor gets this, because it is the only role that spends
   // without being asked. Moderators only: turning it back on starts an audit,
   // which costs money, so it is the same decision the promotion route guards.
@@ -1295,13 +1301,9 @@ export function rosterMenuItems(agentId) {
       iconName: paused ? "play" : "pause",
     });
   }
-  if (agent.mine === true || canModerate) {
-    const removeAct =
-      agent.mine === true
-        ? "channel-agent-remove"
-        : "channel-agent-remove-any";
+  if (agent.mine === true) {
     items.push({
-      act: removeAct,
+      act: "channel-agent-remove",
       value: agent.id,
       label: "Delete",
       iconName: "trash",

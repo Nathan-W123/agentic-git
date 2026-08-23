@@ -70,7 +70,6 @@ import {
   takeReadyPlan,
   addChannelAgent,
   removeChannelAgent,
-  removeChannelAgentForUser,
   renameAgent,
   renameChannelAgent,
   setChannelAgentSetting,
@@ -1871,12 +1870,12 @@ async function showInviteLink(token, repositoryId) {
  * "Delete" in the compact row menu means delete it from this chat; the agent
  * account and its work elsewhere remain intact.
  */
-async function removeChannelAgentAction(agentId, removeAny = false) {
+async function removeChannelAgentAction(agentId) {
   const repositoryId = activeChannelId();
   const agent = channelAgentsFor(repositoryId).find(
     (candidate) => candidate.id === agentId,
   );
-  if (!repositoryId || agent === undefined) {
+  if (!repositoryId || agent?.mine !== true) {
     return;
   }
   const confirmed = await showModal({
@@ -1887,19 +1886,7 @@ async function removeChannelAgentAction(agentId, removeAny = false) {
   if (confirmed === undefined) {
     return;
   }
-  if (removeAny) {
-    // Teammate entries are keyed `${userId}:${provider}` by
-    // `channelAgentsFor`; the existing moderation operation takes the same
-    // two values separately.
-    const separatorIndex = agentId.indexOf(":");
-    removeChannelAgentForUser(
-      repositoryId,
-      agentId.slice(0, separatorIndex),
-      agentId.slice(separatorIndex + 1),
-    );
-  } else {
-    removeChannelAgent(repositoryId, agentId);
-  }
+  removeChannelAgent(repositoryId, agentId);
   state.chatSettingsOpenId = undefined;
   render();
   refreshChannelInfoPopover();
@@ -6794,8 +6781,15 @@ document.addEventListener("click", (event) => {
       showMenu(node, personMenuItems(value));
       return;
     /** Replaces the rendered name with its inline editor. */
-    case "channel-settings-toggle":
+    case "channel-settings-toggle": {
       closePopover();
+      const repositoryId = activeChannelId();
+      const agent = channelAgentsFor(repositoryId).find(
+        (candidate) => candidate.id === value,
+      );
+      if (agent?.mine !== true) {
+        return;
+      }
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
       if (state.chatSettingsOpenId === value) {
@@ -6804,6 +6798,7 @@ document.addEventListener("click", (event) => {
         input?.select();
       }
       return;
+    }
     case "agent-rename-toggle":
       state.settingsRenamingId =
         state.settingsRenamingId === value ? undefined : value;
@@ -6837,10 +6832,6 @@ document.addEventListener("click", (event) => {
     case "channel-agent-remove":
       closePopover();
       void removeChannelAgentAction(value);
-      return;
-    case "channel-agent-remove-any":
-      closePopover();
-      void removeChannelAgentAction(value, true);
       return;
     case "channel-leave":
       void leaveRepositoryAction(value);
@@ -7600,7 +7591,10 @@ document.addEventListener("submit", (event) => {
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
       const renamed = input !== null && input.value !== input.defaultValue;
-      if (renamed) {
+      const ownAgent = channelAgentsFor(activeChannelId()).some(
+        (agent) => agent.id === form.dataset.value && agent.mine === true,
+      );
+      if (renamed && ownAgent) {
         renameChannelAgent(activeChannelId(), form.dataset.value, input.value);
       }
       state.chatSettingsOpenId = undefined;
@@ -8132,7 +8126,15 @@ document.addEventListener("focusout", (event) => {
     return;
   }
   const agentId = node.dataset.value;
-  if (activeChannelId() && agentId && state.chatSettingsOpenId === agentId) {
+  const ownAgent = channelAgentsFor(activeChannelId()).some(
+    (agent) => agent.id === agentId && agent.mine === true,
+  );
+  if (
+    activeChannelId() &&
+    agentId &&
+    ownAgent &&
+    state.chatSettingsOpenId === agentId
+  ) {
     if (node.value !== node.defaultValue) {
       renameChannelAgent(activeChannelId(), agentId, node.value);
     }
