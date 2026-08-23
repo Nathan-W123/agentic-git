@@ -92,6 +92,23 @@ export const GENERIC_IDENTIFIER_TOKENS = new Set([
 /** How many real counterparts one unresolved declaration may be mapped to. */
 const MAX_REFERENTS = 3;
 
+/**
+ * How many files a real symbol may live in and still locate anything.
+ *
+ * A referent's whole purpose is to say where a misnamed declaration was
+ * pointing, and every file the referent lives in is added to what the plan is
+ * arbitrated over. A name that exists in one place answers that question. A
+ * name that exists everywhere does not answer it — it drags in every file it
+ * appears in, and the plan is then decided against code nobody named.
+ *
+ * Measured on this repository: of 6,439 distinct symbol names, 78% live in a
+ * single file and 91% in three or fewer. The tail is what it sounds like —
+ * `root` in 72 files, `result` in 72, `index` in 64, `error` in 57. Cutting
+ * at the same three keeps nine names in ten groundable and takes the tail out
+ * entirely.
+ */
+const MAX_REFERENT_FILES = 3;
+
 /** Lowercased word fragments of one identifier: camelCase, snake_case, digits. */
 export function identifierTokens(name: string): string[] {
   return (
@@ -120,9 +137,19 @@ interface ScoredSymbol extends SymbolCandidate {
  * Real symbols an unresolved declared name plausibly refers to.
  *
  * A candidate matches when the declaration's content tokens are all present in
- * it, or when the two share at least half their combined content tokens. Both
+ * it, or when the two share more than half their combined content tokens. Both
  * rules require a shared token that is not generic, so `calculateTotal`
  * reaches `orderTotal` through "total" while `getData` reaches nothing.
+ *
+ * "More than half" and not "half" is the difference between a resolution and a
+ * dragnet. A two-token declaration against a one-token symbol sharing one
+ * token scores exactly one half — the weakest match the rule can express — and
+ * that is how `threadRow` reached the bare symbol `row`, `selectedMessage`
+ * reached `message`, and a one-file plan to restyle a list came to be
+ * arbitrated over twenty-six files across every package in the repository.
+ * Stronger matches are unaffected: `renderThreadList` still reaches
+ * `renderThread` at two thirds, and a declaration whose content tokens are all
+ * present passes on the first rule regardless of score.
  */
 function symbolReferentsFor(
   declared: string,
@@ -134,6 +161,10 @@ function symbolReferentsFor(
   }
   const scored: ScoredSymbol[] = [];
   for (const candidate of candidates) {
+    // A name that is everywhere points nowhere. See MAX_REFERENT_FILES.
+    if (candidate.files.length > MAX_REFERENT_FILES) {
+      continue;
+    }
     const candidateTokens = contentTokens(candidate.name);
     const shared = [...declaredTokens].filter((token) =>
       candidateTokens.has(token),
@@ -143,7 +174,7 @@ function symbolReferentsFor(
     }
     const union = new Set([...declaredTokens, ...candidateTokens]);
     const score = shared.length / union.size;
-    if (shared.length === declaredTokens.size || score >= 0.5) {
+    if (shared.length === declaredTokens.size || score > 0.5) {
       scored.push({ ...candidate, score });
     }
   }
