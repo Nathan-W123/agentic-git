@@ -153,6 +153,47 @@ test("a repository imported from a remote pushes to a dedicated branch", async (
   }
 });
 
+test("a branch namer reaches the push, and the CLI passes none of its own", async () => {
+  const harness = await createHarness();
+  try {
+    const canonical = await harness.repositories.importRemoteRepository(
+      LOOPBACK_HOST,
+      path.join(harness.project.repositoriesPath, "origin.git"),
+      "origin",
+      { branch: "main" },
+    );
+    await harness.store.saveRepository({
+      id: canonical.id,
+      path: canonical.path,
+      branch: canonical.branch,
+      provider: "github",
+      remoteUrl: LOOPBACK_HOST,
+    });
+    harness.project.config.defaultRepository = canonical.id;
+    await harness.project.save();
+
+    const named = await repoPush(
+      harness.project,
+      harness.store,
+      { branchNamer: async () => "Tidy Export Path" },
+      harness.repositories,
+    );
+    assert.equal(named.targetBranch, "coord/tidy-export-path");
+
+    // The shell keeps the deterministic name: no option, no model, no wait.
+    const plain = await repoPush(
+      harness.project,
+      harness.store,
+      { allowExistingTarget: true },
+      harness.repositories,
+    );
+    assert.notEqual(plain.targetBranch, "coord/tidy-export-path");
+    assert.ok(plain.targetBranch.startsWith("coord/"));
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("pushing a repository with no recorded remote explains what to do", async () => {
   const harness = await createHarness();
   try {

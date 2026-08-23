@@ -60,6 +60,8 @@ async function harness(t: { after: (fn: () => Promise<void>) => void }) {
 interface RecordedRemoteCall {
   operation: "sync" | "push";
   credentials?: { token: string };
+  /** Present when the push was handed a model to name its branch with. */
+  branchNamer?: unknown;
 }
 
 function recordingRepositories(
@@ -93,7 +95,7 @@ function recordingRepositories(
     },
     pushToRemote: async (
       _repository: unknown,
-      options: { credentials?: { token: string } },
+      options: { credentials?: { token: string }; branchNamer?: unknown },
     ) => {
       captured.push({ operation: "push", ...options });
       const outcome = pushOutcomes.shift() ?? "push";
@@ -197,6 +199,64 @@ test("a direct push runs as the authenticated actor without creating a task", as
       (entry) => entry.event.type === "repository_synced",
     ).length,
     1,
+  );
+});
+
+test("the push is handed the local model that names its branch", async (t) => {
+  const { project, store, github, submitter } = await harness(t);
+  await github.connect({ userId: submitter, token: "ghp_named" });
+  const previous = process.env["COORD_LOCAL_TRIAGE"];
+  delete process.env["COORD_LOCAL_TRIAGE"];
+  t.after(async () => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_TRIAGE"];
+    } else {
+      process.env["COORD_LOCAL_TRIAGE"] = previous;
+    }
+  });
+
+  const captured: RecordedRemoteCall[] = [];
+  const result = await pushCanonicalForActor(
+    project,
+    store,
+    github,
+    { repositoryId: "origin", actorId: submitter },
+    recordingRepositories(captured),
+  );
+
+  assert.equal(result.outcome, "done");
+  // The model is offered, never required: building it loads nothing, and the
+  // push names its own branch when the model declines to.
+  const push = captured.find((call) => call.operation === "push");
+  assert.equal(typeof push?.branchNamer, "function");
+});
+
+test("a deployment with local models switched off pushes without one", async (t) => {
+  const { project, store, github, submitter } = await harness(t);
+  await github.connect({ userId: submitter, token: "ghp_unnamed" });
+  const previous = process.env["COORD_LOCAL_TRIAGE"];
+  process.env["COORD_LOCAL_TRIAGE"] = "0";
+  t.after(async () => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_TRIAGE"];
+    } else {
+      process.env["COORD_LOCAL_TRIAGE"] = previous;
+    }
+  });
+
+  const captured: RecordedRemoteCall[] = [];
+  const result = await pushCanonicalForActor(
+    project,
+    store,
+    github,
+    { repositoryId: "origin", actorId: submitter },
+    recordingRepositories(captured),
+  );
+
+  assert.equal(result.outcome, "done");
+  assert.equal(
+    captured.find((call) => call.operation === "push")?.branchNamer,
+    undefined,
   );
 });
 
