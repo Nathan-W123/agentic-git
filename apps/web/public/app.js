@@ -1655,26 +1655,18 @@ function appearanceCard() {
     ${colourRow(
       "set-accent",
       "Primary colour",
-      `Accents, highlights, and the active state across the interface. Only
-       you see this.`,
       accent,
     )}
 
     ${colourRow(
       "set-accent-secondary",
       "Secondary colour",
-      `The other half of a pair: the second way into a repository, the far end
-       of a progress bar, the thread beside a channel. Somewhere the interface
-       shows two things and only one of them was coloured.`,
       myAccentSecondary(),
     )}
 
     ${colourRow(
       "set-agent-color",
       "Your agents' colour",
-      `Every agent you connect is drawn in this colour, on shared views too —
-       so your teammates can tell your agents from theirs. The mark says which
-       vendor; the colour says whose.`,
       agentColor,
       `<div class="doodle-preview" style="color:${esc(agentColor)}">
         ${[
@@ -1700,8 +1692,6 @@ function appearanceCard() {
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">Default colours</div>
-        <div class="sr-sub">Restore the original primary, secondary, and agent
-          colours.</div>
       </span>
       <span class="sr-ctl">
         <button type="button" class="btn btn-quiet" data-act="colours-reset">
@@ -1724,12 +1714,11 @@ function appearanceCard() {
  * `state.openWheel` holds one act at a time, so opening a second wheel closes
  * the first rather than stacking them.
  */
-function colourRow(act, title, sub, current, extra = "") {
+function colourRow(act, title, current, extra = "") {
   const open = state.openWheel === act;
   return `<div class="set-row">
       <span class="sr-body">
         <div class="sr-title">${title}</div>
-        <div class="sr-sub">${sub}</div>
       </span>
       <span class="sr-ctl colour-pick">
         <span class="colour-dot" style="background:${esc(current)}"></span>
