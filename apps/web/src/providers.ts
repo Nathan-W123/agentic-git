@@ -3135,11 +3135,21 @@ export class ProviderChatService {
       // deadline and exits non-zero on EOF, both after it has already
       // answered.
       const parsed = parseCodexAppServerRateLimits(result.stdout);
+      // Silence from the app-server is the one outcome that says nothing at
+      // all about the account, so it carries the exit code and whatever the
+      // process complained about. "Unknown subcommand" is a CLI too old to
+      // have the interface; 124 is the deadline; anything else is the
+      // server's own words about why it would not answer.
+      const complaint = result.stderr.trim().split("\n")[0]?.slice(0, 160);
       trace?.push(
         parsed !== undefined
           ? "account/rateLimits/read answered"
           : result.stdout.trim() === ""
-            ? "account/rateLimits/read returned nothing"
+            ? `codex app-server said nothing (exit ${String(result.exitCode)}${
+                complaint === undefined || complaint === ""
+                  ? ""
+                  : `: ${complaint}`
+              })`
             : "account/rateLimits/read replied without rate limits, which is " +
               "what an API-key account returns",
       );
