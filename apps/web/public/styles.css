@@ -4934,13 +4934,6 @@ button.chip.lg:hover {
     margin-left: 6px;
   }
 
-  /* The private-message reply is the same hover-only reveal as the channel's
-     message actions, and needs the same treatment for fingers. */
-  .dm-msg .dm-msg-actions {
-    opacity: 1 !important;
-    pointer-events: auto !important;
-  }
-
   /* The platform's tap flash is a grey-blue rectangle in somebody else's
      palette, drawn over rows that already have hover treatments in ours.
      Zeroed only here, where the :active states below take over the job —
@@ -5239,6 +5232,18 @@ button.chip.lg:hover {
   align-items: flex-end;
 }
 
+/* A run from one person is one stack rather than a column of separate
+   bubbles: the lines close up on the `.dm-body` gap, and the corner where
+   they meet squares off so the run reads as one block of speech. */
+.dm-msg.dm-compact {
+  margin-top: -6px;
+}
+
+.dm-msg.dm-compact .dm-bubble {
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+}
+
 .dm-bubble {
   padding: 8px 11px;
   border-radius: var(--radius-sm);
@@ -5273,19 +5278,32 @@ button.chip.lg:hover {
   opacity: 0.62;
 }
 
-/* The reply affordance on a private message: revealed on hover the way the
-   channel's message actions are, and sitting where the bubble points — after
-   theirs, before mine — so it never overlaps the words it acts on. */
+/* The clock and the reply-and-delete bar belong to the message a reader has
+   actually asked about, and to no other. Both are taken out of the layout
+   rather than faded: they are a row each under a message that is usually one
+   short line itself, so leaving them laid out and invisible would spend the
+   height anyway — and revealing them on a pointer crossing the panel would
+   shove the whole conversation under the reader's eye.
+
+   Focus landing anywhere inside a message — a link in the words, an image
+   it carries — counts as asking about that message too, so a reader moving
+   through the conversation by keyboard is not left without its controls. */
+.dm-msg .dm-time,
 .dm-msg .dm-msg-actions {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
+  display: none;
 }
 
-.dm-msg:hover .dm-msg-actions,
+.dm-msg.dm-selected .dm-time,
+.dm-msg:focus-within .dm-time {
+  display: block;
+}
+
+/* Sitting where the bubble points — after theirs, before mine — so it never
+   overlaps the words it acts on. */
+.dm-msg.dm-selected .dm-msg-actions,
 .dm-msg:focus-within .dm-msg-actions {
-  opacity: 1;
-  pointer-events: auto;
+  display: flex;
+  align-items: center;
 }
 
 /* The usage figures are a section of the profile card now (see `.pcard`), so

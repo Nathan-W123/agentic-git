@@ -668,3 +668,60 @@ test("a sent private message is painted in the chosen accent", async () => {
   // has been applied.
   assert.match(css, /--accent-ink: #141312;/u);
 });
+
+test("a private conversation stacks, and shows one message's time and delete at a time", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const css = await publicFile("styles.css");
+
+  // A run from one person was a column of separate bubbles, each paying for
+  // its own clock underneath. Consecutive messages from the same author now
+  // close up, on the rule the room's transcript already follows.
+  const grouping = slice(
+    chats,
+    "function continuesDirectMessageGroup(",
+    "\n}",
+  );
+  assert.match(grouping, /startsNewDay \|\|/u);
+  assert.match(grouping, /current\?\.referencedMessageId !== undefined/u);
+  assert.match(grouping, /String\(previous\.authorId \?\? ""\) === authorId/u);
+
+  const dmPanel = slice(chats, "function dmPanel()", "\nfunction threadPanel(");
+  assert.match(dmPanel, /continuesDirectMessageGroup\(\s*messages\[index - 1\]/u);
+  assert.match(dmPanel, /compact \? " dm-compact" : ""/u);
+  assert.match(dmPanel, /message\.id === state\.dmSelectedMessageId/u);
+  assert.match(dmPanel, /selected \? " dm-selected" : ""/u);
+
+  // The choice is held in state, because the panel is rebuilt on every poll
+  // and a class left on the row would not survive the next one.
+  assert.match(data, /dmSelectedMessageId: undefined,/u);
+  const select = slice(app, "function selectDirectMessage(", "\n}");
+  assert.match(select, /row\.dataset\.dmMessage/u);
+  assert.match(select, /chosen === state\.dmSelectedMessageId \? undefined : chosen/u);
+  assert.match(select, /state\.dmSelectedMessageId = next;/u);
+  // Only for a press that does nothing else, so a reply or a delete is not
+  // re-rendered out from under its own click.
+  assert.match(
+    app,
+    /if \(found === undefined\) \{[\s\S]*?selectDirectMessage\(event\);\s*\n\s*return;/u,
+  );
+  // And nothing stays selected once that conversation is gone.
+  assert.match(data, /export function clearDirectMessageSelection\(\) \{/u);
+
+  // Neither the clock nor the controls are laid out until they are asked
+  // for — fading them would spend the height they cost anyway.
+  assert.match(
+    css,
+    /\.dm-msg \.dm-time,\s*\n\.dm-msg \.dm-msg-actions \{\s*\n\s*display: none;/u,
+  );
+  assert.match(css, /\.dm-msg\.dm-selected \.dm-time,/u);
+  assert.match(css, /\.dm-msg\.dm-selected \.dm-msg-actions,/u);
+  assert.match(css, /\.dm-msg\.dm-compact \{\s*\n\s*margin-top: -6px;/u);
+  // A finger gets the same selection as a pointer, rather than every message
+  // in the conversation carrying its bar at once.
+  assert.doesNotMatch(
+    css,
+    /@media \(hover: none\) \{[\s\S]*?\.dm-msg \.dm-msg-actions \{\s*opacity: 1 !important;/u,
+  );
+});

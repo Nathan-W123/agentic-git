@@ -175,6 +175,7 @@ import {
   answerAgentQuestion,
   applyProviderSetting,
   channelFileEdited,
+  clearDirectMessageSelection,
   clearRightPanel,
   createInvitation,
   invitationLink,
@@ -5694,6 +5695,28 @@ function selectMobileChannelMessage(event) {
 }
 
 /**
+ * Gives one private message its clock and its controls, and the rest none.
+ *
+ * A conversation is mostly short lines, and drawing a timestamp and a pair of
+ * buttons under every one of them is most of the panel's height spent saying
+ * the same two things over and over. A press on a message asks for them;
+ * pressing it again, or anywhere else that does nothing, puts them away.
+ *
+ * The choice lives in `state` rather than on the row: this panel is rebuilt
+ * on every poll, and a class left straight on the DOM would not survive it.
+ */
+function selectDirectMessage(event) {
+  const row = event.target.closest?.(".dm-msg") ?? null;
+  const chosen = row === null ? undefined : row.dataset.dmMessage;
+  const next = chosen === state.dmSelectedMessageId ? undefined : chosen;
+  if (next === state.dmSelectedMessageId) {
+    return;
+  }
+  state.dmSelectedMessageId = next;
+  render();
+}
+
+/**
  * Moves one shared desktop hover surface to the message under the pointer.
  *
  * Painting every row's own background makes the highlight disappear from one
@@ -5766,6 +5789,10 @@ document.addEventListener("click", (event) => {
   }
   const found = actionOf(event);
   if (found === undefined) {
+    // Nothing here does anything of its own, so a press on a private message
+    // is a complete interaction: it asks for that message's time and its
+    // controls, and a press anywhere else puts them away again.
+    selectDirectMessage(event);
     return;
   }
   const { node, act, value } = found;
@@ -6538,6 +6565,7 @@ document.addEventListener("click", (event) => {
     case "dm-open":
       state.activeDm = value;
       state.dmDraft = "";
+      clearDirectMessageSelection();
       openUserDirectMessage(value);
       render();
       loadOpenedDirectMessage(value);
@@ -6578,6 +6606,7 @@ document.addEventListener("click", (event) => {
       state.activeDm = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
+      clearDirectMessageSelection();
       render();
       return;
     // Your own agent, one to one, without leaving the room.

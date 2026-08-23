@@ -383,6 +383,14 @@ export const state = {
   dmDraft: "",
   /** The message the next direct message answers, if any. */
   dmReplyMessageId: undefined,
+  /**
+   * The one private message showing its time and its controls, if any.
+   *
+   * Kept here rather than as a class on the row, because `render()` rebuilds
+   * the panel on every poll and a mark left straight on the DOM would be
+   * swept out from under a reader mid-conversation.
+   */
+  dmSelectedMessageId: undefined,
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
   /**
@@ -3288,6 +3296,11 @@ export async function sendDirectMessage(userId, content, referencedMessageId) {
   noteDirectMessage({ message: response.message });
 }
 
+/** Puts the open conversation back to nothing selected. */
+export function clearDirectMessageSelection() {
+  state.dmSelectedMessageId = undefined;
+}
+
 /**
  * Unsends one direct message.
  *
@@ -3312,6 +3325,9 @@ export async function deleteDirectMessageEntry(userId, messageId) {
   );
   if (state.activeDm === userId && state.dmReplyMessageId === messageId) {
     state.dmReplyMessageId = undefined;
+  }
+  if (state.dmSelectedMessageId === messageId) {
+    clearDirectMessageSelection();
   }
   await loadDirectMessages();
 }
@@ -3373,6 +3389,9 @@ export function noteDirectMessageDeleted(frame) {
   );
   if (state.activeDm === other && state.dmReplyMessageId === messageId) {
     state.dmReplyMessageId = undefined;
+  }
+  if (state.dmSelectedMessageId === messageId) {
+    clearDirectMessageSelection();
   }
   // The inbox row shows the last message and an unread count, and the deleted
   // one may have been either. Re-read rather than recompute: this is the same
@@ -5556,6 +5575,7 @@ export function putAwayRightPanel(kind) {
       state.activeDm = undefined;
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
+      clearDirectMessageSelection();
       return;
     case "file":
       closeChannelFile();

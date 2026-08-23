@@ -4901,6 +4901,27 @@ function directMessageReference(message, messages, otherName) {
     </button>`;
 }
 
+/**
+ * Whether one private message continues the same person's uninterrupted run.
+ *
+ * A message answering another keeps its own reference and its own full row,
+ * and a date boundary starts a fresh run even when one person was speaking on
+ * both sides of midnight. The same rule the room's transcript already uses
+ * (see `continuesUserMessageGroup`), read off a conversation that has only
+ * two speakers and no kinds to tell apart.
+ */
+function continuesDirectMessageGroup(previous, current, startsNewDay) {
+  if (
+    previous === undefined ||
+    startsNewDay ||
+    current?.referencedMessageId !== undefined
+  ) {
+    return false;
+  }
+  const authorId = String(current?.authorId ?? "");
+  return authorId !== "" && String(previous.authorId ?? "") === authorId;
+}
+
 /** The selected direct-message reply, kept outside the textarea. */
 function directReplyChip(target, otherName) {
   if (target === undefined) {
@@ -4972,20 +4993,32 @@ function dmPanel() {
           ? `<p class="dm-empty">No messages yet. This conversation is just
              between you and ${esc(name)} — it is not in the channel.</p>`
           : messages
-              .map((message) => {
+              .map((message, index) => {
                 const mine = message.authorId === currentUserId();
                 const day = new Date(
                   message.createdAt ?? Date.now(),
                 ).toDateString();
-                const separator =
-                  day === lastDay
-                    ? ""
-                    : `<div class="chan-day transcript-separator"><span>${
-                        day === new Date().toDateString() ? "Today" : esc(day)
-                      }</span></div>`;
+                const startsNewDay = day !== lastDay;
+                const separator = startsNewDay
+                  ? `<div class="chan-day transcript-separator"><span>${
+                      day === new Date().toDateString() ? "Today" : esc(day)
+                    }</span></div>`
+                  : "";
                 lastDay = day;
-                return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}"
-                    id="dm-msg-${esc(message.id)}">
+                // A run from one person stacks: the lines close up and only
+                // the message a reader has actually asked about spends a row
+                // on its clock and its controls.
+                const compact = continuesDirectMessageGroup(
+                  messages[index - 1],
+                  message,
+                  startsNewDay,
+                );
+                const selected = message.id === state.dmSelectedMessageId;
+                return `${separator}<div class="dm-msg${mine ? " dm-mine" : ""}${
+                  compact ? " dm-compact" : ""
+                }${selected ? " dm-selected" : ""}"
+                    id="dm-msg-${esc(message.id)}"
+                    data-dm-message="${esc(message.id)}">
                   ${directMessageReference(message, messages, name)}
                   <div class="dm-bubble cmsg-text"
                     data-reveal="dm:${esc(userId)}|msg-${esc(message.id)}">${messageBody(
