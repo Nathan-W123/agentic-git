@@ -2954,6 +2954,39 @@ test("a refusal is not read as a confirmation", () => {
   assert.equal(saysSignedIn("Signed in as nathan@example.com"), true);
 });
 
+test("an empty card names what each source answered", async () => {
+  // Three rounds of this were spent guessing which step was failing, because
+  // every step reports the same nothing. "The app-server replied without rate
+  // limits" and "the app-server could not be started" are different problems
+  // with different fixes, and the card could not tell them apart.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) => {
+      if (args[0] === "--version") {
+        return output("codex-cli 0.146.0");
+      }
+      if (args[0] === "login") {
+        return output("Logged in using ChatGPT");
+      }
+      if (args[0] === "app-server") {
+        // Answers, but with no rateLimits — what an API-key account returns.
+        return output(
+          JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }),
+        );
+      }
+      return output("", 1, "error: unknown flag --status");
+    }) as ProcessRunner,
+  });
+
+  const report = await service.usage({ provider: "openai" });
+  const said = report.unavailableReason ?? "";
+  assert.match(said, /Tried:/u);
+  assert.match(said, /rateLimits\/read replied without rate limits/u);
+  assert.match(said, /--status --json exited 1/u);
+  assert.match(said, /no session records/u);
+});
+
 test("a connection failure is the answer, not a quota of zero", async () => {
   // The remaining way to reach the blanket sentence: opening the caller's
   // credential home fails, the whole in-home block is skipped, and the card

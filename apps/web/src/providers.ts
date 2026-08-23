@@ -2792,6 +2792,7 @@ export class ProviderChatService {
       // the whole answer to why the card is empty. It used to be discarded by
       // the catch below, and the card then blamed the account's quota for a
       // connection that was never there.
+      const trace: string[] = [];
       let obstacle: string | undefined =
         userId !== undefined && credential === undefined
           ? "No Codex connection is stored for this account, so the quota " +
@@ -2803,7 +2804,7 @@ export class ProviderChatService {
         "openai",
         credential,
         async (env) => {
-          const live = await this.codexAccountRateLimits(env);
+          const live = await this.codexAccountRateLimits(env, trace);
           if (live !== undefined) {
             return { report: live };
           }
@@ -2823,6 +2824,13 @@ export class ProviderChatService {
             newest === undefined
               ? undefined
               : parseCodexRateLimits(await readFile(newest, "utf8"));
+          trace.push(
+            newest === undefined
+              ? "no session records under this home"
+              : parsed === undefined
+                ? "the newest session record carried no rate limits"
+                : "read from a session record",
+          );
           if (parsed !== undefined) {
             return { report: { ...parsed, source } };
           }
@@ -2849,11 +2857,17 @@ export class ProviderChatService {
       if (userId !== undefined) {
         const store = await this.credentialStore();
         const snapshot = await store.readUsageSnapshot(userId, "codex");
-        if (snapshot !== undefined) {
-          const persisted = parseCodexRateLimits(snapshot);
-          if (persisted !== undefined) {
-            return { ...persisted, source };
-          }
+        const persisted =
+          snapshot === undefined ? undefined : parseCodexRateLimits(snapshot);
+        trace.push(
+          snapshot === undefined
+            ? "no snapshot kept from an earlier run"
+            : persisted === undefined
+              ? "the kept snapshot carried no rate limits"
+              : "read from the kept snapshot",
+        );
+        if (persisted !== undefined) {
+          return { ...persisted, source };
         }
       }
       return {
@@ -2864,7 +2878,10 @@ export class ProviderChatService {
           obstacle ??
           "Codex reported no quota for this account, and no Codex session " +
             "has recorded rate limits on this machine yet. An account billed " +
-            "by API key reports no subscription quota at all.",
+            "by API key reports no subscription quota at all." +
+            // What each source actually said, so the next reading of this
+            // card is a diagnosis rather than another guess.
+            (trace.length === 0 ? "" : ` Tried: ${trace.join("; ")}.`),
       };
     } catch (error) {
       return {
@@ -3017,6 +3034,16 @@ export class ProviderChatService {
 
   private async codexAccountRateLimits(
     env: NodeJS.ProcessEnv | undefined,
+    /**
+     * What each source actually answered, appended as it goes.
+     *
+     * Three rounds of this card were spent guessing which step was failing,
+     * because every one of them reports the same nothing. A reader that says
+     * "the app-server replied with no rate limits" is a different problem
+     * from one that says "the app-server could not be started", and the card
+     * could not tell them apart — nor could anybody reading it.
+     */
+    trace?: string[],
   ): Promise<ProviderUsageReport | undefined> {
     // `account/rateLimits/read` is the interface OpenAI documents for reading
     // this, and it answers in the shape it promises. `--status` is a display
@@ -3024,7 +3051,7 @@ export class ProviderChatService {
     // rename inside it outrank the contract, and the wrong answer is the one
     // that parses — so it is the fallback, for a CLI whose app-server does
     // not answer.
-    const live = await this.codexAppServerRateLimits(env);
+    const live = await this.codexAppServerRateLimits(env, trace);
     if (live !== undefined) {
       return live;
     }
@@ -3038,11 +3065,24 @@ export class ProviderChatService {
           ...(env === undefined ? {} : { env }),
         },
       );
-      return result.exitCode === 0
-        ? parseCodexStatusRateLimits(result.stdout)
-        : undefined;
-    } catch {
-      // Old or missing CLIs have already had their chance above.
+      const parsed =
+        result.exitCode === 0
+          ? parseCodexStatusRateLimits(result.stdout)
+          : undefined;
+      trace?.push(
+        result.exitCode !== 0
+          ? `codex --status --json exited ${String(result.exitCode)}`
+          : parsed === undefined
+            ? "codex --status --json carried no rate limits"
+            : "codex --status --json answered",
+      );
+      return parsed;
+    } catch (error) {
+      trace?.push(
+        `codex --status --json could not run (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
       return undefined;
     }
   }
@@ -3060,6 +3100,7 @@ export class ProviderChatService {
    */
   private async codexAppServerRateLimits(
     env: NodeJS.ProcessEnv | undefined,
+    trace?: string[],
   ): Promise<ProviderUsageReport | undefined> {
     const conversation = [
       {
@@ -3093,8 +3134,22 @@ export class ProviderChatService {
       // Parsed whatever the exit code: the app-server is killed at the
       // deadline and exits non-zero on EOF, both after it has already
       // answered.
-      return parseCodexAppServerRateLimits(result.stdout);
-    } catch {
+      const parsed = parseCodexAppServerRateLimits(result.stdout);
+      trace?.push(
+        parsed !== undefined
+          ? "account/rateLimits/read answered"
+          : result.stdout.trim() === ""
+            ? "account/rateLimits/read returned nothing"
+            : "account/rateLimits/read replied without rate limits, which is " +
+              "what an API-key account returns",
+      );
+      return parsed;
+    } catch (error) {
+      trace?.push(
+        `codex app-server could not run (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
       return undefined;
     }
   }
