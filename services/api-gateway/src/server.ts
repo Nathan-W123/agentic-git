@@ -82,6 +82,10 @@ import {
 } from "./auth.js";
 import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
+  arbitrationLine,
+  type DeferredRef,
+} from "./arbitration-line.js";
+import {
   createChatterFilter,
   createLocalSummariser,
   type ChatterFilter,
@@ -15732,9 +15736,50 @@ export class ApiGateway {
       (Array.isArray(value) ? value : []).filter(
         (entry): entry is string => typeof entry === "string",
       );
-    const clause = (files: string[]): string =>
-      files.slice(0, 4).join(", ") +
-      (files.length > 4 ? ` and ${String(files.length - 4)} more` : "");
+    const deferred: DeferredRef[] = (
+      Array.isArray(data["deferredResources"]) ? data["deferredResources"] : []
+    ).flatMap((entry) => {
+      if (typeof entry !== "object" || entry === null) {
+        return [];
+      }
+      const resource = entry as {
+        resourceType?: unknown;
+        resourceId?: unknown;
+        heldBy?: unknown;
+        implied?: unknown;
+      };
+      return typeof resource.resourceId === "string"
+        ? [
+            {
+              resourceType:
+                typeof resource.resourceType === "string"
+                  ? resource.resourceType
+                  : "file",
+              resourceId: resource.resourceId,
+              implied: resource.implied === true,
+            },
+          ]
+        : [];
+    });
+    // Who holds the withheld half, for the case `blockedBy` is empty by
+    // design. Taken from the resources the room is about to be told about, so
+    // the name in the sentence is the name behind the loss it describes.
+    const holders = [
+      ...new Set(
+        (Array.isArray(data["deferredResources"])
+          ? data["deferredResources"]
+          : []
+        )
+          .flatMap((entry) =>
+            typeof entry === "object" && entry !== null
+              ? ((entry as { heldBy?: unknown }).heldBy ?? [])
+              : [],
+          )
+          .filter((entry): entry is string => typeof entry === "string")
+          .slice(0, 2)
+          .map((entry) => describe.name(entry)),
+      ),
+    ];
     const status = String(data["status"] ?? "");
     const approved =
       status === "approved" || status === "approved_with_constraints";
@@ -15745,50 +15790,17 @@ export class ApiGateway {
       await this.replaceArbitrationNotice(watched);
       return;
     }
-    let line: string;
-    if (data["partial"] === true) {
-      const granted = fileList(data["grantedFiles"]);
-      const deferredFiles = fileList(
-        (Array.isArray(data["deferredResources"])
-          ? data["deferredResources"]
-          : []
-        ).map((entry) =>
-          typeof entry === "object" && entry !== null
-            ? (entry as { resourceId?: unknown }).resourceId
-            : entry,
-        ),
-      );
-      // The one case where the files earn their place in the line: a split is
-      // only legible if the room can see which half started. Still one
-      // sentence, and still the agents first.
-      line = oneAgent
-        ? `⚖️ ${held} is working on multiple tasks that conflict — it starts ` +
-          `on ${granted.length > 0 ? clause(granted) : "the free part"} now ` +
-          `and takes ${
-            deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"
-          } once ${blockerWork} is done.`
-        : `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts on ` +
-          `${granted.length > 0 ? clause(granted) : "the free part"} now, ` +
-          `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
-          `${blocker} is done.`;
-    } else if (status === "blocked") {
-      // The same order the sequenced line reports, said the same way. It used
-      // to read "${held} is narrowing its plan", which describes an internal
-      // retry the room cannot see and which the person who submitted the work
-      // read as their own request being trimmed. Who goes first is the part
-      // that is true and the part they wanted.
-      line = oneAgent
-        ? `⚖️ ${held} is working on multiple tasks that conflict — it will do ` +
-          `${blockerWork} first, then ${heldWork}.`
-        : `⚖️ ${held} and ${blocker} have conflicting files — ${held} will ` +
-          `wait for ${blocker} to go first.`;
-    } else {
-      line = oneAgent
-        ? `⚖️ ${held} is working on multiple tasks that conflict — ` +
-          `${heldWork} starts once ${blockerWork} is done.`
-        : `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
-          `once ${blocker} is done.`;
-    }
+    const line = arbitrationLine({
+      held,
+      blockedByNames: blockers,
+      holderNames: holders,
+      heldWork,
+      blockerWork,
+      status,
+      partial: data["partial"] === true,
+      grantedFiles: fileList(data["grantedFiles"]),
+      deferred,
+    });
     await this.replaceArbitrationNotice(watched, line, blockedBy);
   }
 
