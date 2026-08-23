@@ -7640,7 +7640,16 @@ export class ApiGateway {
       ]);
       const present = new Set(this.webSockets.connectedUserIds(projectId));
       this.sendJson(response, 200, {
-        conversations,
+        // A conversation can outlive the other person's access. It remains
+        // private data in the store, but it is no longer an open destination:
+        // the thread route below refuses that correspondent too. Keeping the
+        // stale row in the inbox left the client with no profile from which to
+        // resolve a name, so it printed the internal `user_…` id as though it
+        // were another person (historical agent-backed rows had the same
+        // shape). The reachability roster is the authority for both halves.
+        conversations: conversations.filter((conversation) =>
+          reachable.has(conversation.userId),
+        ),
         // Everyone who could be written to, with whether they are here now —
         // and "everyone" is the project's whole room, grants included. A
         // repository-scoped invite made somebody a colleague in every channel

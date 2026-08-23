@@ -3434,7 +3434,15 @@ export function isDirectMessagePerson(userId) {
   if (id === "" || id === currentUserId()) {
     return false;
   }
-  return !agentCorrespondentIds().has(id);
+  // The inbox and this roster arrive in one response. Requiring the profile
+  // here is both the proof that the id still names somebody reachable on this
+  // project and the source of the name the menu will draw. Old conversations
+  // with removed collaborators (including rows left by the former private
+  // agent path) therefore cannot fall through to a raw internal user id.
+  return (
+    state.dmPeople.some((person) => String(person?.id ?? "") === id) &&
+    !agentCorrespondentIds().has(id)
+  );
 }
 
 /**

@@ -9622,6 +9622,28 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
     ).status,
     400,
   );
+
+  // A conversation may remain in storage after its other participant leaves
+  // the project, but it is no longer a destination the viewer can open. The
+  // inbox must drop it along with the departed profile; otherwise the browser
+  // can only label the row with its internal `user_…` id.
+  await runtime.store.removeMembership(organizationId, friendId);
+  const afterFriendLeft = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`,
+  );
+  assert.equal(afterFriendLeft.status, 200);
+  assert.equal(
+    (afterFriendLeft.data.conversations as { userId: string }[]).some(
+      (conversation) => conversation.userId === friendId,
+    ),
+    false,
+  );
+  assert.equal(
+    (afterFriendLeft.data.people as { id: string }[]).some(
+      (person) => person.id === friendId,
+    ),
+    false,
+  );
 });
 
 test("channel stats count every root and reply, past the read page", async (t) => {
