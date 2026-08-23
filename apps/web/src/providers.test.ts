@@ -20,6 +20,7 @@ import {
   parseCursorModelList,
   parseCursorUsage,
   parseCodexAppServerRateLimits,
+  parseCodexStatusRateLimits,
   parseCodexJsonl,
   streamProcess,
   type ProcessRunner,
@@ -702,32 +703,21 @@ test("codex usage asks the account for its quota before reading session records"
       {
         codex: (args) => {
           seen.push([...args]);
-          if (args[0] !== "app-server") {
+          if (args[0] !== "--status") {
             return output("", 127, "not scripted");
           }
-          // The app-server answers the handshake and then the quota read, on
-          // its own JSON-RPC lines. Exit code is deliberately non-zero: it is
-          // killed once the answer is in, and the figures still count.
           return output(
-            `${[
-              JSON.stringify({ jsonrpc: "2.0", id: 0, result: {} }),
-              JSON.stringify({
-                jsonrpc: "2.0",
-                id: 1,
-                result: {
-                  rate_limits: {
-                    primary: {
-                      used_percent: 12.5,
-                      window_minutes: 300,
-                      resets_at: 1_785_902_966,
-                    },
-                    secondary: { used_percent: 40, window_minutes: 10_080 },
-                    plan_type: "plus",
-                  },
+            JSON.stringify({
+              rate_limits: {
+                five_hour: {
+                  remaining_percent: 87.5,
+                  window_minutes: 300,
+                  resets_at: 1_785_902_966,
                 },
-              }),
-            ].join("\n")}\n`,
-            143,
+                weekly: { remaining_percent: 60, window_minutes: 10_080 },
+                plan_type: "plus",
+              },
+            }),
           );
         },
       },
@@ -738,15 +728,15 @@ test("codex usage asks the account for its quota before reading session records"
     provider: "openai",
     userId: "usage-user",
   });
-  assert.deepEqual(seen[0], ["app-server", "--stdio"]);
-  const quotaCall = calls.find((call) => call.args[0] === "app-server");
+  assert.deepEqual(seen[0], ["--status", "--json"]);
+  const quotaCall = calls.find((call) => call.args[0] === "--status");
   assert.ok((quotaCall?.env?.["CODEX_HOME"] ?? "").length > 0);
   assert.notEqual(quotaCall?.env?.["CODEX_HOME"], harness.home);
   // Codex reads its API key from auth.json inside that isolated home, never
   // from an inherited environment variable that could identify another user.
   assert.equal(quotaCall?.env?.["OPENAI_API_KEY"], undefined);
   assert.equal(report.unavailableReason, undefined);
-  assert.equal(report.source, "Codex account rate limits (plus)");
+  assert.equal(report.source, "Codex native status (plus)");
   assert.equal(report.windows.length, 2);
   assert.equal(report.windows[0]?.percentUsed, 12.5);
   assert.equal(report.windows[0]?.label, "5 hours");
@@ -761,9 +751,89 @@ test("codex usage asks the account for its quota before reading session records"
   });
   assert.equal(reopened.windows[0]?.percentUsed, 12.5);
   assert.deepEqual(seen, [
-    ["app-server", "--stdio"],
+    ["--status", "--json"],
+    ["--status", "--json"],
+  ]);
+});
+
+test("native Codex status JSON maps five-hour and weekly balances", () => {
+  const report = parseCodexStatusRateLimits(
+    JSON.stringify({
+      status: {
+        usage: {
+          fiveHour: {
+            remainingPercentage: 72.5,
+            resetsAt: 1_785_902_966,
+          },
+          weekly: {
+            percentRemaining: -4,
+            windowDurationMins: 10_080,
+            resetAt: 1_786_402_966,
+          },
+        },
+        planType: "team",
+        credits: { balance: 7.5 },
+      },
+    }),
+  );
+
+  assert.equal(report?.source, "Codex native status (team)");
+  assert.equal(report?.planType, "team");
+  assert.equal(report?.creditBalance, 7.5);
+  assert.deepEqual(
+    report?.windows.map((window) => [
+      window.label,
+      window.percentUsed,
+      window.windowDurationMins,
+      window.resetsAtEpoch,
+    ]),
+    [
+      ["5 hours", 27.5, 300, 1_785_902_966],
+      ["week", 100, 10_080, 1_786_402_966],
+    ],
+  );
+  assert.equal(parseCodexStatusRateLimits("not json"), undefined);
+  assert.equal(
+    parseCodexStatusRateLimits(JSON.stringify({ status: {} })),
+    undefined,
+  );
+});
+
+test("unsupported native status falls back without losing usage", async () => {
+  const harness = await createHarness();
+  const seen: string[][] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) => {
+        seen.push([...args]);
+        if (args[0] === "--status") {
+          return output("", 2, "unexpected argument '--status'");
+        }
+        return output(
+          `${JSON.stringify({
+            id: 1,
+            result: {
+              rateLimits: {
+                primary: { usedPercent: 9, windowDurationMins: 300 },
+                secondary: { usedPercent: 31, windowDurationMins: 10_080 },
+              },
+            },
+          })}\n`,
+        );
+      },
+    }),
+  });
+
+  const report = await service.usage({ provider: "openai" });
+  assert.deepEqual(seen, [
+    ["--status", "--json"],
     ["app-server", "--stdio"],
   ]);
+  assert.deepEqual(
+    report.windows.map((window) => window.percentUsed),
+    [9, 31],
+  );
 });
 
 test("the codex quota answer is read in either spelling, and nothing is invented", () => {

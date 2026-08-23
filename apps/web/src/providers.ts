@@ -530,6 +530,71 @@ function codexNumber(
     : undefined;
 }
 
+function codexStatusNumber(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim().replace(/%$/u, "");
+  if (trimmed === "") {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function codexStatusWindow(
+  value: unknown,
+  fallbackMinutes: number,
+): ProviderUsageWindow | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const window = value as Record<string, unknown>;
+  const used = codexStatusNumber(
+    window["usedPercent"] ??
+      window["used_percent"] ??
+      window["percentUsed"] ??
+      window["percent_used"],
+  );
+  const remaining = codexStatusNumber(
+    window["remainingPercent"] ??
+      window["remaining_percent"] ??
+      window["remainingPercentage"] ??
+      window["remaining_percentage"] ??
+      window["percentRemaining"] ??
+      window["percent_remaining"],
+  );
+  if (used === undefined && remaining === undefined) {
+    return undefined;
+  }
+  const minutes =
+    codexStatusNumber(
+      window["windowDurationMins"] ??
+        window["window_duration_mins"] ??
+        window["windowMinutes"] ??
+        window["window_minutes"] ??
+        window["durationMins"] ??
+        window["duration_mins"],
+    ) ?? fallbackMinutes;
+  const resetsAt = codexStatusNumber(
+    window["resetsAt"] ??
+      window["resets_at"] ??
+      window["resetAt"] ??
+      window["reset_at"],
+  );
+  return codexAppServerWindow(
+    {
+      usedPercent: used !== undefined ? used : 100 - (remaining ?? 100),
+      windowDurationMins: minutes,
+      ...(resetsAt === undefined ? {} : { resetsAt }),
+    },
+    codexWindowLabel(fallbackMinutes),
+  );
+}
+
 function codexAppServerWindow(
   value: unknown,
   fallbackLabel: string,
@@ -749,6 +814,114 @@ export function parseCodexAppServerRateLimits(
     };
   }
   return undefined;
+}
+
+/**
+ * Reads the machine-readable counterpart of Codex's native `/status` view.
+ *
+ * Status releases have used both camel- and snake-case names and have called
+ * the two subscription windows either primary/secondary or five-hour/weekly.
+ * The status view reports remaining percentages on some builds, while the
+ * dashboard's existing contract stores used percentages, so that one value
+ * is converted here and nowhere else.
+ */
+export function parseCodexStatusRateLimits(
+  stdout: string,
+): ProviderUsageReport | undefined {
+  let root: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(stdout.trim()) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return undefined;
+    }
+    root = parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  const statusValue = root["status"];
+  const envelope =
+    typeof statusValue === "object" &&
+    statusValue !== null &&
+    !Array.isArray(statusValue)
+      ? (statusValue as Record<string, unknown>)
+      : root;
+  const limitsValue =
+    envelope["rateLimits"] ??
+    envelope["rate_limits"] ??
+    envelope["limits"] ??
+    envelope["usage"] ??
+    envelope;
+  if (
+    typeof limitsValue !== "object" ||
+    limitsValue === null ||
+    Array.isArray(limitsValue)
+  ) {
+    return undefined;
+  }
+  const limits = limitsValue as Record<string, unknown>;
+  const primary = codexStatusWindow(
+    limits["primary"] ??
+      limits["fiveHour"] ??
+      limits["five_hour"] ??
+      limits["fiveHourUsage"] ??
+      limits["five_hour_usage"] ??
+      limits["5h"] ??
+      limits["5-hour"],
+    300,
+  );
+  const secondary = codexStatusWindow(
+    limits["secondary"] ??
+      limits["weekly"] ??
+      limits["week"] ??
+      limits["weeklyUsage"] ??
+      limits["weekly_usage"],
+    10_080,
+  );
+  if (primary === undefined || secondary === undefined) {
+    return undefined;
+  }
+  const windows = [primary, secondary];
+  const accountValue = envelope["account"] ?? root["account"];
+  const account =
+    typeof accountValue === "object" &&
+    accountValue !== null &&
+    !Array.isArray(accountValue)
+      ? (accountValue as Record<string, unknown>)
+      : undefined;
+  const planValue =
+    limits["planType"] ??
+    limits["plan_type"] ??
+    envelope["planType"] ??
+    envelope["plan_type"] ??
+    root["planType"] ??
+    root["plan_type"] ??
+    account?.["planType"] ??
+    account?.["plan_type"];
+  const plan =
+    typeof planValue === "string" && planValue.trim() !== ""
+      ? planValue.trim()
+      : undefined;
+  const credits =
+    limits["credits"] ?? envelope["credits"] ?? root["credits"];
+  const creditBalance =
+    codexCreditBalance(credits) ??
+    codexStatusNumber(
+      limits["creditBalance"] ??
+        limits["credit_balance"] ??
+        envelope["creditBalance"] ??
+        envelope["credit_balance"] ??
+        root["creditBalance"] ??
+        root["credit_balance"],
+    );
+  return {
+    source:
+      plan === undefined
+        ? "Codex native status"
+        : `Codex native status (${plan})`,
+    windows,
+    ...(plan === undefined ? {} : { planType: plan }),
+    ...(creditBalance === undefined ? {} : { creditBalance }),
+  };
 }
 
 /** Finds the `rate_limits` object wherever the CLI nested it. */
@@ -2562,12 +2735,12 @@ export class ProviderChatService {
    * Codex session has recorded rate limits on this machine yet", which is a
    * fact about where we looked rather than about the account.
    *
-   * So the account is asked directly, through the app-server's
-   * `account/rateLimits/read`, *inside* the credential home rather than after
-   * it: that is the only moment the caller's own `CODEX_HOME` exists, and
-   * asking outside it would ask on behalf of whatever login the host happens
-   * to carry. The old readers remain, in order, for a CLI too old to answer
-   * and for a host-login deployment.
+   * So the account is asked directly through `codex --status --json`,
+   * *inside* the credential home rather than after it: that is the only
+   * moment the caller's own `CODEX_HOME` exists, and asking outside it would
+   * ask on behalf of whatever login the host happens to carry. The app-server
+   * and session readers remain, in order, for a CLI too old to answer and for
+   * a host-login deployment.
    */
   private async codexUsage(userId?: string): Promise<ProviderUsageReport> {
     const source = "Codex CLI session records (~/.codex/sessions)";
@@ -2719,6 +2892,34 @@ export class ProviderChatService {
     }
   }
 
+  /** Native status first, with the app-server retained for older CLIs. */
+  private async codexAccountRateLimits(
+    env: NodeJS.ProcessEnv | undefined,
+  ): Promise<ProviderUsageReport | undefined> {
+    try {
+      const result = await this.runner(
+        resolveCodexCommand(this.homeDirectory),
+        ["--status", "--json"],
+        {
+          timeoutMs: CODEX_QUOTA_TIMEOUT_MS,
+          maxOutputBytes: 262_144,
+          ...(env === undefined ? {} : { env }),
+        },
+      );
+      const status =
+        result.exitCode === 0
+          ? parseCodexStatusRateLimits(result.stdout)
+          : undefined;
+      if (status !== undefined) {
+        return status;
+      }
+    } catch {
+      // The status flag is feature-detected: old or missing CLIs continue to
+      // the app-server compatibility path below.
+    }
+    return await this.codexAppServerRateLimits(env);
+  }
+
   /**
    * One `account/rateLimits/read` against the app-server, batched.
    *
@@ -2730,7 +2931,7 @@ export class ProviderChatService {
    * the method, or missing entirely, must not turn the usage card into an
    * error.
    */
-  private async codexAccountRateLimits(
+  private async codexAppServerRateLimits(
     env: NodeJS.ProcessEnv | undefined,
   ): Promise<ProviderUsageReport | undefined> {
     const conversation = [
