@@ -3778,6 +3778,12 @@ let drawerDrag;
 const CHAN_FOLD_MS = 380;
 let chanFoldTimer;
 
+/* How long the pinned shelf takes to fold away, in milliseconds: the longest
+   leg of the `.chan-pins` transition in styles.css. The redraw that removes
+   the shelf from the document waits this out so the fold is seen. */
+const PINS_FOLD_MS = 240;
+let pinsFoldTimer;
+
 /**
  * Say that the sidebar is mid-fold, for as long as it is.
  *
@@ -3800,36 +3806,72 @@ function markChanFolding(shell) {
 }
 
 /**
- * Opens or closes the pinned-message shelf without replacing the chat screen.
- * Keeping the existing nodes in place gives the list and chevron a before and
- * after state for their CSS transitions.
+ * Opens or closes the pinned-message shelf.
+ *
+ * Closed, the shelf is not in the document at all: a folded-away banner that
+ * still existed left a line of itself above the conversation, and the point of
+ * the header shortcut is that pins are out of the way until they are asked
+ * for. Opening therefore draws the screen and then replays the unfold from the
+ * collapsed state, and closing folds the nodes that are already there before a
+ * redraw takes them out — so both directions still animate.
  */
 function setPinnedMessagesOpen(open) {
   const next = open === true;
   state.pinsOpen = next;
+  paintPinnedMessagesShortcut(next);
+
+  if (next) {
+    render();
+    requestAnimationFrame(() => {
+      const shelf = document.querySelector(".chan-pins");
+      if (shelf === null || state.pinsOpen !== true) {
+        return;
+      }
+      shelf.classList.remove("open");
+      // Reading the height commits the folded state, so adding the class back
+      // is a change the transition can run over rather than a no-op.
+      void shelf.offsetHeight;
+      shelf.classList.add("open");
+    });
+    return;
+  }
 
   const banner = document.querySelector(".chan-pins");
   if (banner === null) {
     return;
   }
-  banner.classList.toggle("open", next);
-  banner.setAttribute("aria-hidden", String(!next));
-  banner.toggleAttribute("inert", !next);
+  banner.classList.remove("open");
+  banner.setAttribute("aria-hidden", "true");
+  banner.toggleAttribute("inert", true);
   banner
     .querySelector(".chan-pins-head")
-    ?.setAttribute("aria-expanded", String(next));
+    ?.setAttribute("aria-expanded", "false");
   const list = banner.querySelector(".chan-pins-list-frame");
-  list?.setAttribute("aria-hidden", String(!next));
-  list?.toggleAttribute("inert", !next);
+  list?.setAttribute("aria-hidden", "true");
+  list?.toggleAttribute("inert", true);
+  clearTimeout(pinsFoldTimer);
+  pinsFoldTimer = setTimeout(() => {
+    if (state.pinsOpen !== true) {
+      render();
+    }
+  }, PINS_FOLD_MS);
+}
 
+/**
+ * Keeps the header's pin shortcut telling the truth about the shelf. It lives
+ * outside the toggle above because the shortcut is there whether or not the
+ * channel has any pins to show yet.
+ */
+function paintPinnedMessagesShortcut(open) {
   const shortcut = document.querySelector(".ch-pins-toggle");
-  if (shortcut !== null) {
-    const title = next ? "Hide pinned messages" : "Show pinned messages";
-    shortcut.classList.toggle("on", next);
-    shortcut.title = title;
-    shortcut.setAttribute("aria-label", title);
-    shortcut.setAttribute("aria-pressed", String(next));
+  if (shortcut === null) {
+    return;
   }
+  const title = open ? "Hide pinned messages" : "Show pinned messages";
+  shortcut.classList.toggle("on", open);
+  shortcut.title = title;
+  shortcut.setAttribute("aria-label", title);
+  shortcut.setAttribute("aria-pressed", String(open));
 }
 
 function setChanDrawer(open) {

@@ -365,13 +365,21 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   );
   assert.doesNotMatch(toggle, /render\(\)/u);
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
-  assert.match(chats, /const open = state\.pinsOpen === true/u);
-  assert.match(chats, /chan-pins\$\{open \? " open" : ""\}/u);
-  assert.match(chats, /aria-hidden="\$\{!open\}"\$\{open \? "" : " inert"\}/u);
+  // Closed, the shelf is absent from the markup entirely, so nothing of it can
+  // sit above the conversation; the header shortcut is the only way back in.
+  assert.match(
+    chats,
+    /pins\.length === 0 \|\| state\.pinsOpen !== true/u,
+  );
+  assert.match(chats, /class="chan-pins open" aria-hidden="false"/u);
   assert.match(chats, /class="chan-pins-surface"/u);
-  assert.match(chats, /chan-pins-list-frame" aria-hidden="\$\{!open\}"/u);
-  assert.match(app, /banner\.setAttribute\("aria-hidden", String\(!next\)\)/u);
-  assert.match(app, /banner\.toggleAttribute\("inert", !next\)/u);
+  assert.match(chats, /chan-pins-list-frame" aria-hidden="false"/u);
+  // Both directions still animate: the open gesture redraws and replays the
+  // unfold, the close gesture folds the live nodes before dropping them.
+  assert.match(app, /banner\.classList\.remove\("open"\)/u);
+  assert.match(app, /banner\.toggleAttribute\("inert", true\)/u);
+  assert.match(app, /shelf\.classList\.add\("open"\)/u);
+  assert.match(app, /pinsFoldTimer = setTimeout/u);
   assert.match(styles, /\.chan-pins \{[\s\S]*grid-template-rows: 0fr/u);
   assert.match(styles, /\.chan-pins \{[\s\S]*visibility: hidden/u);
   assert.match(styles, /\.chan-pins \{[\s\S]*border-bottom: 0 solid/u);
