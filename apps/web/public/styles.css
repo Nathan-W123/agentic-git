@@ -1073,11 +1073,10 @@ svg.ui-icon {
   }
 }
 
-/* Working, so it breathes — see `.status-working`, which this is the smaller
+/* Working — solid green; see `.status-working`, which this is the smaller
    sibling of. `online` here means running a task, not merely connected. */
 .presence-online {
   background: var(--green);
-  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 .presence-idle {
@@ -5166,20 +5165,9 @@ button.chip.lg:hover {
   box-sizing: content-box;
 }
 
-/* Green: a person is here, or an agent is mid-task. */
+/* Green: a person is here, or an agent is mid-task. Solid — no fade. */
 .status-working {
   background: var(--ok, #22c55e);
-  /*
-   * Breathing rather than lit. A dot that is simply on says "this agent
-   * exists"; one that fades says "this agent is doing something right now",
-   * which is the thing somebody watching a channel actually wants to know —
-   * and it is the only state here that changes on its own, so it is the only
-   * one that earns motion.
-   *
-   * Opacity alone, and never to nothing: the dot has to stay findable at the
-   * bottom of the fade, or a glance at the wrong moment reads as offline.
-   */
-  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 @keyframes status-breathe {
@@ -8983,9 +8971,7 @@ body.resizing-panel {
 
 @media (prefers-reduced-motion: reduce) {
   .agent-face svg,
-  .agent-face svg *,
-  .status-working,
-  .presence-online {
+  .agent-face svg * {
     animation: none;
   }
 }
@@ -11189,8 +11175,7 @@ dialog.modal[open]::backdrop {
    edged, so the word was the third thing on the row saying the same thing,
    and it pushed the reply count around as threads started and stopped. The
    word survives for screen readers, where there is no wash and no edge to
-   read. Same fade as `.status-working`, so every live signal in the app
-   breathes on one clock. */
+   read. Same fade clock as other live signals in the app. */
 .thread-item-active .ti-live {
   flex: none;
   align-self: center;

@@ -8421,7 +8421,7 @@ test("a repository can be renamed without its id moving, and only by somebody wh
   );
 });
 
-test("a repository's creator can delete it without manage_project, but a colleague who did not create it cannot", async (t) => {
+test("a repository's creator can rename it without manage_project, but deleting it is the owner's alone", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
@@ -8479,9 +8479,29 @@ test("a repository's creator can delete it without manage_project, but a colleag
   );
   assert.equal(strangerAttempt.status, 403);
 
-  // The developer who created it can delete it, despite lacking
+  // The developer who created it can still rename it, despite lacking
   // manage_project — the creator's own additional path in.
-  const deleted = await devClient.request(
+  const renamed = await devClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/dev-created-repo`,
+    { method: "PATCH", body: { name: "Their own repository" } },
+  );
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+
+  // Deleting it is another matter: it is irreversible and cascades the
+  // channel, the grants and the history, so creating a repository does not
+  // by itself entitle anyone to destroy it. Ownership does.
+  const creatorAttempt = await devClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/dev-created-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(creatorAttempt.status, 403, JSON.stringify(creatorAttempt.data));
+  assert.notEqual(
+    await runtime.store.getRepository("dev-created-repo"),
+    undefined,
+  );
+
+  // The organization's owner can, and the deletion is audited.
+  const deleted = await owner.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/dev-created-repo`,
     { method: "DELETE" },
   );
@@ -8498,7 +8518,7 @@ test("a repository's creator can delete it without manage_project, but a colleag
   assert.equal(events[0]?.event.data["repositoryId"], "dev-created-repo");
 });
 
-test("an organization admin can delete a repository they did not create", async (t) => {
+test("an organization admin cannot delete a repository they did not create", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
@@ -8516,13 +8536,74 @@ test("an organization admin can delete a repository they did not create", async 
   });
   const adminClient = await loginAs(runtime.origin, admin.email);
 
-  const deleted = await adminClient.request(
+  // manage_project is enough to administer a repository — renaming it,
+  // moderating it, deciding who is on it — and deliberately not enough to
+  // delete it out from under everyone working there.
+  const refused = await adminClient.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/owner-created-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(refused.status, 403, JSON.stringify(refused.data));
+  assert.notEqual(
+    await runtime.store.getRepository("owner-created-repo"),
+    undefined,
+  );
+
+  const renamed = await adminClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/owner-created-repo`,
+    { method: "PATCH", body: { name: "Still theirs to rename" } },
+  );
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+});
+
+test("only an organization owner or a repository co-owner can delete a repository", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "co-owned-repo");
+
+  // Somebody whose whole access is one repository-scoped grant: no
+  // organization membership at all. At `developer` the grant reaches the
+  // repository but not its deletion.
+  const guest = await runtime.store.createUser({
+    email: "co-owner-guest@example.com",
+    displayName: "Guest",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: "co-owned-repo",
+    userId: guest.id,
+    role: "developer",
+    grantedBy: undefined,
+    createdAt: new Date().toISOString(),
+  });
+  const guestClient = await loginAs(runtime.origin, guest.email);
+  const refused = await guestClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/co-owned-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(refused.status, 403, JSON.stringify(refused.data));
+  assert.notEqual(
+    await runtime.store.getRepository("co-owned-repo"),
+    undefined,
+  );
+
+  // Promoted to co-owner — an `owner` grant on this repository, which is what
+  // the People row's "Promote to co-owner" writes — the same person can.
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: "co-owned-repo",
+    userId: guest.id,
+    role: "owner",
+    grantedBy: undefined,
+    createdAt: new Date().toISOString(),
+  });
+  const deleted = await guestClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/co-owned-repo`,
     { method: "DELETE" },
   );
   assert.equal(deleted.status, 200, JSON.stringify(deleted.data));
   assert.equal(
-    await runtime.store.getRepository("owner-created-repo"),
+    await runtime.store.getRepository("co-owned-repo"),
     undefined,
   );
 });

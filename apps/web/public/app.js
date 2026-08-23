@@ -55,6 +55,7 @@ import {
   activeChannelId,
   canLeaveRepository,
   canManageRepository,
+  canDeleteRepository,
   closeChannelFile,
   loadChannelFile,
   moveChannelFile,
@@ -1654,26 +1655,18 @@ function appearanceCard() {
     ${colourRow(
       "set-accent",
       "Primary colour",
-      `Accents, highlights, and the active state across the interface. Only
-       you see this.`,
       accent,
     )}
 
     ${colourRow(
       "set-accent-secondary",
       "Secondary colour",
-      `The other half of a pair: the second way into a repository, the far end
-       of a progress bar, the thread beside a channel. Somewhere the interface
-       shows two things and only one of them was coloured.`,
       myAccentSecondary(),
     )}
 
     ${colourRow(
       "set-agent-color",
       "Your agents' colour",
-      `Every agent you connect is drawn in this colour, on shared views too —
-       so your teammates can tell your agents from theirs. The mark says which
-       vendor; the colour says whose.`,
       agentColor,
       `<div class="doodle-preview" style="color:${esc(agentColor)}">
         ${[
@@ -1699,8 +1692,6 @@ function appearanceCard() {
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">Default colours</div>
-        <div class="sr-sub">Restore the original primary, secondary, and agent
-          colours.</div>
       </span>
       <span class="sr-ctl">
         <button type="button" class="btn btn-quiet" data-act="colours-reset">
@@ -1723,12 +1714,11 @@ function appearanceCard() {
  * `state.openWheel` holds one act at a time, so opening a second wheel closes
  * the first rather than stacking them.
  */
-function colourRow(act, title, sub, current, extra = "") {
+function colourRow(act, title, current, extra = "") {
   const open = state.openWheel === act;
   return `<div class="set-row">
       <span class="sr-body">
         <div class="sr-title">${title}</div>
-        <div class="sr-sub">${sub}</div>
       </span>
       <span class="sr-ctl colour-pick">
         <span class="colour-dot" style="background:${esc(current)}"></span>
@@ -2333,17 +2323,34 @@ async function toggleAuditingAction(repositoryId, paused) {
 /**
  * Deleting a repository outright.
  *
- * Irreversible: cascades the repository's own channel and grants, and is
- * refused server-side while a task or run still references it. The
- * confirmation says so, rather than reading like an ordinary remove.
+ * Irreversible: cascades the repository's own channel and grants, and takes
+ * the execution history with it. A single confirm button is too easy to hit
+ * by reflex for something nobody can undo, so this asks for the repository's
+ * name to be typed out — `yesiwanttodelete<id>` — and refuses anything else.
+ * Matched case-insensitively and trimmed: the phrase is there to make the
+ * person read what they are deleting, not to catch a stray capital.
+ *
+ * Only owners and co-owners are offered the control at all (see
+ * `canDeleteRepository`), and the server refuses anyone else regardless.
  */
 async function deleteRepositoryAction(repositoryId) {
-  const confirmed = await showModal({
+  const phrase = `yesiwanttodelete${repositoryId}`;
+  const values = await showModal({
     title: "Delete this repository?",
     subtitle: `This permanently deletes ${repositoryId}, its chat history, and its repository-scoped grants. This cannot be undone.`,
     confirm: "Delete repository",
+    body: `<label class="field">
+        <span>Type <code>${esc(phrase)}</code> to confirm</span>
+        <input class="input" name="confirmation" autocomplete="off"
+          autocapitalize="off" spellcheck="false" required autofocus
+          placeholder="${esc(phrase)}">
+      </label>`,
   });
-  if (confirmed === undefined) {
+  if (values === undefined) {
+    return;
+  }
+  if (String(values.confirmation ?? "").trim().toLowerCase() !== phrase.toLowerCase()) {
+    toast(`Type ${phrase} exactly to delete this repository`, "error");
     return;
   }
   try {
@@ -3778,6 +3785,12 @@ let drawerDrag;
 const CHAN_FOLD_MS = 380;
 let chanFoldTimer;
 
+/* How long the pinned shelf takes to fold away, in milliseconds: the longest
+   leg of the `.chan-pins` transition in styles.css. The redraw that removes
+   the shelf from the document waits this out so the fold is seen. */
+const PINS_FOLD_MS = 240;
+let pinsFoldTimer;
+
 /**
  * Say that the sidebar is mid-fold, for as long as it is.
  *
@@ -3800,36 +3813,72 @@ function markChanFolding(shell) {
 }
 
 /**
- * Opens or closes the pinned-message shelf without replacing the chat screen.
- * Keeping the existing nodes in place gives the list and chevron a before and
- * after state for their CSS transitions.
+ * Opens or closes the pinned-message shelf.
+ *
+ * Closed, the shelf is not in the document at all: a folded-away banner that
+ * still existed left a line of itself above the conversation, and the point of
+ * the header shortcut is that pins are out of the way until they are asked
+ * for. Opening therefore draws the screen and then replays the unfold from the
+ * collapsed state, and closing folds the nodes that are already there before a
+ * redraw takes them out — so both directions still animate.
  */
 function setPinnedMessagesOpen(open) {
   const next = open === true;
   state.pinsOpen = next;
+  paintPinnedMessagesShortcut(next);
+
+  if (next) {
+    render();
+    requestAnimationFrame(() => {
+      const shelf = document.querySelector(".chan-pins");
+      if (shelf === null || state.pinsOpen !== true) {
+        return;
+      }
+      shelf.classList.remove("open");
+      // Reading the height commits the folded state, so adding the class back
+      // is a change the transition can run over rather than a no-op.
+      void shelf.offsetHeight;
+      shelf.classList.add("open");
+    });
+    return;
+  }
 
   const banner = document.querySelector(".chan-pins");
   if (banner === null) {
     return;
   }
-  banner.classList.toggle("open", next);
-  banner.setAttribute("aria-hidden", String(!next));
-  banner.toggleAttribute("inert", !next);
+  banner.classList.remove("open");
+  banner.setAttribute("aria-hidden", "true");
+  banner.toggleAttribute("inert", true);
   banner
     .querySelector(".chan-pins-head")
-    ?.setAttribute("aria-expanded", String(next));
+    ?.setAttribute("aria-expanded", "false");
   const list = banner.querySelector(".chan-pins-list-frame");
-  list?.setAttribute("aria-hidden", String(!next));
-  list?.toggleAttribute("inert", !next);
+  list?.setAttribute("aria-hidden", "true");
+  list?.toggleAttribute("inert", true);
+  clearTimeout(pinsFoldTimer);
+  pinsFoldTimer = setTimeout(() => {
+    if (state.pinsOpen !== true) {
+      render();
+    }
+  }, PINS_FOLD_MS);
+}
 
+/**
+ * Keeps the header's pin shortcut telling the truth about the shelf. It lives
+ * outside the toggle above because the shortcut is there whether or not the
+ * channel has any pins to show yet.
+ */
+function paintPinnedMessagesShortcut(open) {
   const shortcut = document.querySelector(".ch-pins-toggle");
-  if (shortcut !== null) {
-    const title = next ? "Hide pinned messages" : "Show pinned messages";
-    shortcut.classList.toggle("on", next);
-    shortcut.title = title;
-    shortcut.setAttribute("aria-label", title);
-    shortcut.setAttribute("aria-pressed", String(next));
+  if (shortcut === null) {
+    return;
   }
+  const title = open ? "Hide pinned messages" : "Show pinned messages";
+  shortcut.classList.toggle("on", open);
+  shortcut.title = title;
+  shortcut.setAttribute("aria-label", title);
+  shortcut.setAttribute("aria-pressed", String(open));
 }
 
 function setChanDrawer(open) {
@@ -5809,6 +5858,12 @@ document.addEventListener("click", (event) => {
         ...(canManageRepository(value)
           ? [
               { act: "channel-rename-repo", value, label: "Rename repository…", iconName: "pencil" },
+            ]
+          : []),
+        // Deleting asks for more than managing does: an owner, or a co-owner
+        // of this repository. An admin who may rename it is not offered it.
+        ...(canDeleteRepository(value)
+          ? [
               {
                 act: "channel-delete-repo",
                 value,
@@ -7158,11 +7213,11 @@ document.addEventListener("click", (event) => {
               },
             ]
           : []),
-        // Renaming and deleting are the admin's counterparts: somebody whose
-        // access is organization-wide cannot leave a repository, but can
-        // rename or remove it. Without these the menu had nothing to offer
-        // them at all. A rename changes only what the repository is called —
-        // the id keeps addressing the channel, its tasks and its files.
+        // Renaming is the admin's counterpart: somebody whose access is
+        // organization-wide cannot leave a repository, but can rename it.
+        // Without this the menu had nothing to offer them at all. A rename
+        // changes only what the repository is called — the id keeps
+        // addressing the channel, its tasks and its files.
         ...(canManageRepository(value)
           ? [
               {
@@ -7171,6 +7226,13 @@ document.addEventListener("click", (event) => {
                 label: `Rename #${repositoryLabel(value)}`,
                 iconName: "pencil",
               },
+            ]
+          : []),
+        // Deleting is not: it is irreversible and takes everyone else's
+        // history with it, so only an owner or a co-owner of this repository
+        // is offered it.
+        ...(canDeleteRepository(value)
+          ? [
               {
                 act: "channel-delete-repo",
                 value,

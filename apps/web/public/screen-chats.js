@@ -24,6 +24,7 @@ import {
   agentsThinkingIn,
 api,
   canDeleteChannelEntry,
+  canDeleteRepository,
   canLeaveRepository,
   canManageOrganization,
   canManageRepository,
@@ -5890,7 +5891,10 @@ export function channelInfoPopoverHtml(repositoryId) {
   const repository = state.repositories.find((repo) => repo.id === repositoryId);
   const roster = channelAgentsFor(repositoryId);
   const addable = addableAgents(repositoryId);
-  const canManage = canManageRepository(repositoryId);
+  // Deleting asks for ownership rather than for management: an organization
+  // owner, or a co-owner of this repository. Somebody who may rename it and
+  // moderate it is not offered the one control nobody can undo.
+  const canDelete = canDeleteRepository(repositoryId);
   const canLeave = canLeaveRepository();
   // Stats moved to Settings (`channelStatsCard`); co-owner promote / demote /
   // remove moved to People-row menus (`personMenuItems`). Channel info keeps
@@ -5948,7 +5952,7 @@ export function channelInfoPopoverHtml(repositoryId) {
     }
     <div class="pop-block pop-block-danger">
       ${
-        canManage
+        canDelete
           ? `<button type="button" class="btn btn-sm btn-danger" data-act="channel-delete-repo" data-value="${esc(repositoryId)}">
                ${icon("close")} Delete repository
              </button>`
@@ -6476,28 +6480,27 @@ export function submitComposerMessage(rerender) {
  * The banner reads from the server-fed pinned list rather than the loaded
  * transcript, because a pin exists precisely so a message survives the room
  * moving on — a banner that only knew the current page would forget exactly
- * the pins it was for. The header shortcut reveals the whole shelf; while it
- * is off, the shelf leaves no partial row behind in the conversation.
+ * the pins it was for. Closed, the shelf is not drawn at all — no collapsed
+ * row, no rule, no reserved height — so the header's pin shortcut, beside the
+ * people and agent counts, is the only thing that brings it back.
  */
 function pinnedBanner(repositoryId) {
   const pins = state.channelPins[repositoryId] ?? [];
-  if (pins.length === 0) {
+  if (pins.length === 0 || state.pinsOpen !== true) {
     // The same no-op the search row uses, so the column's child list keeps
-    // its shape whether or not anything is pinned.
+    // its shape whether or not the shelf is showing.
     return `<div hidden></div>`;
   }
-  const open = state.pinsOpen === true;
-  return `<div class="chan-pins${open ? " open" : ""}"
-    aria-hidden="${!open}"${open ? "" : " inert"}>
+  return `<div class="chan-pins open" aria-hidden="false">
     <div class="chan-pins-surface">
       <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
-        aria-expanded="${open}">
+        aria-expanded="true">
         ${icon("pin")}
         <span>${pins.length} pinned</span>
         <span class="spacer"></span>
         ${icon("chevronDown")}
       </button>
-      <div class="chan-pins-list-frame" aria-hidden="${!open}"${open ? "" : " inert"}>
+      <div class="chan-pins-list-frame" aria-hidden="false">
         <div class="chan-pins-list">${pins
         .map((entry) => {
           const title = threadTitle(entry) || "(no text)";
