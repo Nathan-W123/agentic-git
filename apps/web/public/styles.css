@@ -53,6 +53,11 @@
   --accent-wash: color-mix(in srgb, var(--salmon) 12%, transparent);
   --accent-wash-strong: color-mix(in srgb, var(--salmon) 20%, transparent);
   --accent-line: color-mix(in srgb, var(--salmon) 38%, transparent);
+  /* The words written on a surface filled with the accent, rather than tinted
+     by it. `applyTheme` replaces this with whichever of near-white and
+     near-black actually reads against the chosen colour; the default here is
+     the answer for the salmon above. */
+  --accent-ink: #141312;
 
   /* The second colour, for the other half of a pair. Overwritten by
      `applyTheme` from the account, like the primary above it; these are the
@@ -5263,9 +5268,21 @@ button.chip.lg:hover {
   overflow-wrap: anywhere;
 }
 
+/* Yours in the colour you chose, not in the greys around it. A neutral bubble
+   on a neutral ground was the one thing in the conversation that never said
+   which side of it you were on, and the accent is already what this interface
+   means by "you". `--accent-ink` rather than white: the wheel allows yellows
+   and limes that white simply disappears into. */
 .dm-mine .dm-bubble {
-  background: var(--surface-3);
-  color: var(--text);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* A link inside your own bubble sits on the accent, so it cannot also be the
+   accent. It carries the ink and keeps the underline to stay a link. */
+.dm-mine .dm-bubble a {
+  color: var(--accent-ink);
+  text-decoration: underline;
 }
 
 .dm-time {

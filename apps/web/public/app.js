@@ -2760,6 +2760,12 @@ function applyTheme() {
     withAlpha(accent, light ? 0.28 : 0.2),
   );
   root.setProperty("--accent-line", withAlpha(accent, light ? 0.5 : 0.38));
+  // The words written *on* the accent, for the surfaces that are filled with
+  // it rather than tinted by it — a sent private message being the one people
+  // read most. White is right for a deep blue and unreadable on a chosen
+  // yellow, so this asks which of the theme's own two extremes actually reads
+  // against the colour somebody picked instead of assuming either.
+  root.setProperty("--accent-ink", accentInk(accent));
   // The second colour, derived exactly as the first is so the two behave
   // identically under both themes. Fewer variants, deliberately: a secondary
   // that grew its own dim, bright and strong-wash would be a second theme
@@ -2848,6 +2854,22 @@ function readableOn(accent, ground, target) {
     }
   }
   return mix(accent, "#000000", 0.8);
+}
+
+/**
+ * The readable ink for text sitting on a filled accent.
+ *
+ * Not a search, because there are only two answers worth having: near-white
+ * and near-black are the two colours a filled bubble can carry without
+ * inventing a third tone the palette does not have. Whichever stands further
+ * off the accent wins, which lands white on a deep blue and black on the
+ * yellows and limes the wheel also allows — the case a hardcoded `#fff` got
+ * wrong every time.
+ */
+function accentInk(accent) {
+  return contrastRatio("#ffffff", accent) >= contrastRatio("#141312", accent)
+    ? "#ffffff"
+    : "#141312";
 }
 
 /* ------------------------------------------------------------- router ---- */
