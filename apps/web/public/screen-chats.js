@@ -3601,7 +3601,7 @@ function composer(repositoryId) {
           enterkeyhint="send"
           placeholder="${
             state.composerThreadId === undefined
-              ? `Message #${esc(repositoryId ?? "")}`
+              ? `Message #${esc(repositoryLabel(repositoryId ?? ""))}`
               : replyTarget?.kind === "user" &&
                   replyTarget.taskId === undefined
                 ? "Write a reply..."

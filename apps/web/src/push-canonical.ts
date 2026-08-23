@@ -1,8 +1,11 @@
 import { repoPush, repoSync } from "@coord/cli/repo-export";
 import type { CoordinatorProject } from "@coord/cli/project";
+import { createLocalSummariser } from "@coord/local-triage";
 import type { CoordinationStore } from "@coord/persistence";
 import {
+  PUSH_BRANCH_NAME_TIMEOUT_MS,
   UpstreamChangedError,
+  type PushBranchNamer,
   type RepositoryService,
 } from "@coord/repository-service";
 import { describeError } from "@coord/shared-types";
@@ -13,6 +16,38 @@ export interface PushCanonicalResult {
   outcome: "done" | "refused";
   detail?: { url?: string; output?: string[] };
   explanation: string;
+}
+
+/** Held across pushes so the second one does not load the model again. */
+let branchNamer: PushBranchNamer | undefined;
+
+/**
+ * The local model that names the pushed branch, or nothing.
+ *
+ * The same model, the same switch and the same bargain as the catch-up
+ * popup's sentences: a small model on this machine, no network, no vendor
+ * bill, and `COORD_LOCAL_TRIAGE=0` turns it off — a deployment that has said
+ * no to local models should not quietly acquire one here either. Switched
+ * off, or failing for any of the reasons it can, the branch keeps the
+ * deterministic name built from the commit subjects.
+ *
+ * Built once and kept: the model loads on first use, and a push that had to
+ * load it again every time would spend the wait for nothing.
+ */
+export function defaultPushBranchNamer(): PushBranchNamer | undefined {
+  const raw = process.env["COORD_LOCAL_TRIAGE"]?.trim().toLowerCase() ?? "";
+  if (["0", "false", "off", "no"].includes(raw)) {
+    return undefined;
+  }
+  if (branchNamer === undefined) {
+    const local = createLocalSummariser({
+      budgetMs: PUSH_BRANCH_NAME_TIMEOUT_MS,
+    });
+    // A branch name is a handful of words; letting it run to the summariser's
+    // default length only gives a small model room to explain itself.
+    branchNamer = async (prompt) => await local.write(prompt, 16);
+  }
+  return branchNamer;
 }
 
 async function pushCanonicalAs(
@@ -33,6 +68,9 @@ async function pushCanonicalAs(
     };
   }
   const credentials = { token: connection.token };
+  // Presentation only, and optional: the branch is named by the local model
+  // when this deployment runs one, and by the commit subjects when it does not.
+  const namer = defaultPushBranchNamer();
   let operation: "sync" | "push" = "sync";
   try {
     const sync = async () =>
@@ -53,7 +91,11 @@ async function pushCanonicalAs(
       await repoPush(
         project,
         store,
-        { repositoryId: input.repositoryId, credentials },
+        {
+          repositoryId: input.repositoryId,
+          credentials,
+          ...(namer === undefined ? {} : { branchNamer: namer }),
+        },
         repositories,
       );
 

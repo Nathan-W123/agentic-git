@@ -192,9 +192,11 @@ test("deleting a repository requires typing the confirmation phrase", async () =
     "async function deleteRepositoryAction(repositoryId)",
     "async function renameRepositoryAction(repositoryId)",
   );
-  // The phrase is the repository's own name, so it cannot be typed out of
-  // habit for the wrong repository.
-  assert.match(action, /const phrase = `yesiwanttodelete\$\{repositoryId\}`/u);
+  // The phrase is whatever the repository is called on screen — a renamed
+  // repository asks for its new name — so it cannot be typed out of habit for
+  // the wrong repository.
+  assert.match(action, /const label = repositoryLabel\(repositoryId\);/u);
+  assert.match(action, /const phrase = `yesiwanttodelete\$\{label\.replace\(/u);
   assert.match(action, /name="confirmation"/u);
   // Mismatched input says so and stops — the request is never sent.
   assert.match(

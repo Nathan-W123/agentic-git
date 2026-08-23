@@ -1318,6 +1318,22 @@ test("an agent roster is personal, not a project-wide list", async () => {
   assert.equal(/state\.agents/u.test(body), false);
 });
 
+test("Settings Agents rows show the provider, then Connected as the call sign", async () => {
+  const app = await publicFile("app.js");
+  const start = app.indexOf("function agentsCard()");
+  assert.notEqual(start, -1);
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+  // Title is the vendor label (Claude), not the kumi name that used to sit
+  // there and hide which provider the row was for.
+  assert.match(body, /sr-title.*\$\{esc\(agentLabelOf\(agent\.id\)\)\}/u);
+  // A named connection says who it is connected as — the call sign — rather
+  // than the opaque "you".
+  assert.match(
+    body,
+    /agent\.hasName === true\s*\?\s*`Connected as \$\{agent\.name\}`\s*:\s*"Connected as you"/u,
+  );
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may
@@ -1520,6 +1536,22 @@ test("the composer stays open over a decision the textarea cannot see", async ()
   ]) {
     assert.match(body, pending);
   }
+});
+
+test("the channel composer placeholder uses the repository display name", async () => {
+  const source = await publicFile("screen-chats.js");
+  const start = source.indexOf("function composer(repositoryId)");
+  const body = source.slice(start, source.indexOf("\n}", start));
+  // A rename changes displayName (e.g. KUMI) while the id can stay the old
+  // slug; the empty-bar hint must follow the name people see elsewhere.
+  assert.match(
+    body,
+    /Message #\$\{esc\(repositoryLabel\(repositoryId \?\? ""\)\)\}/u,
+  );
+  assert.doesNotMatch(
+    body,
+    /Message #\$\{esc\(repositoryId \?\? ""\)\}/u,
+  );
 });
 
 test("the chat panel shows a bare progress bar and no token statistics", async () => {
@@ -3400,6 +3432,56 @@ test("channel messages compact only an uninterrupted run from one person", async
   assert.match(
     css,
     /\.cmsg-row\.cmsg-compact \.cmsg-body \{[\s\S]{0,80}margin-left: calc\(var\(--cmsg-body-x\) - 8px\);/u,
+  );
+});
+
+test("desktop channel message hover uses one smoothly moving highlight", async () => {
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  assert.match(
+    app,
+    /function positionChannelMessageHoverHighlight\(event\)[\s\S]*?\(hover: hover\) and \(pointer: fine\)[\s\S]*?#chan-messages > \.cmsg-row:not\(\.cmsg-system\)[\s\S]*?--cmsg-hover-y[\s\S]*?row\.offsetTop/u,
+    "desktop hover should position a shared surface from the active row",
+  );
+  assert.match(
+    app,
+    /function clearChannelMessageHoverHighlight\(event\)[\s\S]*?event\.relatedTarget[\s\S]*?nextRow\?\.parentElement === list[\s\S]*?return;[\s\S]*?classList\.remove\("is-visible"\)/u,
+    "moving between rows should preserve the surface while leaving clears it",
+  );
+  assert.match(
+    app,
+    /document\.addEventListener\("mouseover", positionChannelMessageHoverHighlight\);/u,
+  );
+  assert.match(
+    app,
+    /document\.addEventListener\("mouseout", clearChannelMessageHoverHighlight\);/u,
+  );
+
+  const highlight = /\.cmsg-hover-highlight \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(highlight, undefined, "the shared hover surface should exist");
+  assert.match(highlight ?? "", /background: var\(--bg-hover\);/u);
+  assert.match(
+    highlight ?? "",
+    /transform: translate3d\([\s\S]*?var\(--cmsg-hover-y, 0\)/u,
+  );
+  assert.match(
+    highlight ?? "",
+    /transform 0\.18s cubic-bezier\(0\.2, 0\.8, 0\.2, 1\)/u,
+    "the same surface should travel rather than teleport between rows",
+  );
+  assert.doesNotMatch(
+    css,
+    /\.cmsg-row:hover \{\s*background:/u,
+    "individual rows should no longer repaint their own desktop hover",
+  );
+  assert.match(
+    css,
+    /@media \(hover: none\) \{[\s\S]*?\.cmsg-hover-highlight \{\s*display: none;/u,
+  );
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.cmsg-hover-highlight \{\s*transition: none;/u,
   );
 });
 

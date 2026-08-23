@@ -245,7 +245,31 @@ export interface PushToRemoteOptions {
   /** Permit updating a target branch that already exists. Never forces. */
   allowExistingTarget?: boolean;
   credentials?: RemoteRepositoryCredentials;
+  /**
+   * Writes the branch label, when the caller has a model that can.
+   *
+   * Ignored when {@link PushToRemoteOptions.targetBranch} is given — an
+   * explicit name is a decision already made — and never required: every
+   * answer it fails to produce falls back to the deterministic slug.
+   */
+  branchNamer?: PushBranchNamer;
 }
+
+/**
+ * The branch-naming model's seam.
+ *
+ * A prompt in, a few words out, or nothing — the same shape and the same
+ * bargain as the catch-up summariser this reuses. `undefined` and `null` both
+ * mean "no model wrote anything", which is what a deployment without a local
+ * model, a timeout, a wedged session and a blank reply all produce, and every
+ * one of them leaves the branch named the way it was named before.
+ *
+ * Narrow on purpose: a push is built, tested and correct without it, so a
+ * test stubs one function rather than a model.
+ */
+export type PushBranchNamer = (
+  prompt: string,
+) => Promise<string | null | undefined>;
 
 export interface PushToRemoteResult {
   remoteUrl: string;
@@ -266,6 +290,8 @@ const DEFAULT_IDENTITY: CommitIdentity = {
 const PUSH_BRANCH_PREFIX = "coord/";
 const PUSH_BRANCH_WORDS = 4;
 const PUSH_BRANCH_SLUG_LENGTH = 26;
+/** What the slug says when the description left nothing to say. */
+const PUSH_BRANCH_FALLBACK_SLUG = "canonical-update";
 const PUSH_SUMMARY_LENGTH = 500;
 const PUSH_SUBJECT_LIMIT = 12;
 const PUSH_BRANCH_STOP_WORDS = new Set([
@@ -339,7 +365,100 @@ function pushBranchSlug(summary: string): string {
     .join("-")
     .slice(0, PUSH_BRANCH_SLUG_LENGTH)
     .replace(/-+$/u, "");
-  return slug.length === 0 ? "canonical-update" : slug;
+  return slug.length === 0 ? PUSH_BRANCH_FALLBACK_SLUG : slug;
+}
+
+/**
+ * What the naming model is asked for.
+ *
+ * Written for the same small instruction model the catch-up popup uses, so it
+ * is blunt: say the shape of the answer in the instruction, forbid the things
+ * such a model reliably adds — a prefix, an explanation, quotes — and hand it
+ * the description as plain prose rather than as anything it will echo back.
+ */
+export const PUSH_BRANCH_PROMPT = [
+  "Name a git branch for these changes, in two to four lowercase words joined",
+  "by hyphens. Answer with the name only: no prefix, no slashes, no quotes, no",
+  "explanation. Use only the facts given, and do not invent details.",
+].join(" ");
+
+/**
+ * How long the branch name may take before the deterministic one is used.
+ *
+ * A push is somebody waiting at a prompt for work to reach GitHub, and a
+ * branch label is the least important thing about it — so the model gets one
+ * short window and the push carries on regardless. This bounds a namer that
+ * does not bound itself; one that does simply answers first.
+ */
+export const PUSH_BRANCH_NAME_TIMEOUT_MS = 6_000;
+
+/**
+ * The branch label out of whatever the model replied, or nothing.
+ *
+ * Small models fence their answers, prefix them with "Branch name:", wrap
+ * them in quotes and then explain themselves on the next line. The first
+ * non-empty line is taken, the decoration comes off, and the result goes
+ * through the same slug the deterministic name is built with — so a model can
+ * only ever choose the *words* of a branch name, never its shape, and no
+ * reply can produce something `git check-ref-format` would refuse. A reply
+ * with no usable words in it comes back `undefined`, which the caller reads
+ * as "no name was written" and falls back.
+ */
+export function sanitisePushBranchName(
+  raw: string | null | undefined,
+): string | undefined {
+  if (raw === null || raw === undefined) {
+    return undefined;
+  }
+  const line = raw
+    .replaceAll(/```[a-z]*\n?/giu, "\n")
+    .split(/\r?\n/u)
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0);
+  if (line === undefined) {
+    return undefined;
+  }
+  const stripped = line
+    .replace(/^[\s>*\-•"'`]+/u, "")
+    .replace(/^(?:branch(?:\s*name)?|name)\s*[:=-]\s*/iu, "")
+    .replace(/^coord\//iu, "");
+  const slug = pushBranchSlug(stripped);
+  return slug === PUSH_BRANCH_FALLBACK_SLUG ? undefined : slug;
+}
+
+/**
+ * The model's branch name for this description, or nothing.
+ *
+ * Everything that can go wrong here is the same answer: a namer that throws,
+ * one that takes too long, and one that replies with nothing usable all leave
+ * the caller with the deterministic name it would have used anyway. Nothing a
+ * model does is allowed to fail or delay a push.
+ */
+async function namePushBranch(
+  namer: PushBranchNamer,
+  summary: string,
+): Promise<string | undefined> {
+  const prompt = [PUSH_BRANCH_PROMPT, "", `Changes: ${summary}`].join("\n");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const written = await Promise.race([
+      namer(prompt),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          resolve(undefined);
+        }, PUSH_BRANCH_NAME_TIMEOUT_MS);
+        // Never a reason to hold a process open for a branch label.
+        timer.unref?.();
+      }),
+    ]);
+    return sanitisePushBranchName(written);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function isErrorCode(error: unknown, code: string): boolean {
@@ -651,11 +770,19 @@ export class RepositoryService {
    * before push does not turn "Sync ... <sha>" into the public name of the
    * work. The longer text is kept for the result while only a few useful words
    * become the branch name.
+   *
+   * Those words are the local model's when the caller supplied one — the same
+   * model that names finished work in the catch-up popup, asked here to name
+   * the branch — because the first four non-stop words of a commit subject
+   * make a branch nobody can read at a glance. It is presentation only: the
+   * summary, the revision and everything the push actually does are unchanged
+   * by it, and a deployment with no model gets exactly the old name.
    */
   private async describePush(
     repository: CanonicalRepository,
     commit: string,
     baseline: string | undefined,
+    branchNamer?: PushBranchNamer,
   ): Promise<{ summary: string; defaultBranch: string }> {
     const revision = baseline === undefined ? commit : `${baseline}..${commit}`;
     const log = await this.git.run(
@@ -726,9 +853,13 @@ export class RepositoryService {
     if (summary.length > PUSH_SUMMARY_LENGTH) {
       summary = `${summary.slice(0, PUSH_SUMMARY_LENGTH - 1).trimEnd()}…`;
     }
+    const written =
+      branchNamer === undefined
+        ? undefined
+        : await namePushBranch(branchNamer, summary);
     return {
       summary,
-      defaultBranch: `${PUSH_BRANCH_PREFIX}${pushBranchSlug(summary)}`,
+      defaultBranch: `${PUSH_BRANCH_PREFIX}${written ?? pushBranchSlug(summary)}`,
     };
   }
 
@@ -782,7 +913,14 @@ export class RepositoryService {
       throw new UpstreamChangedError(upstreamBranch, baseline, currentUpstream);
     }
 
-    const description = await this.describePush(repository, commit, baseline);
+    // A caller that already knows the branch it wants never wakes the model:
+    // the name is decided, and the only thing left to describe is the summary.
+    const description = await this.describePush(
+      repository,
+      commit,
+      baseline,
+      options.targetBranch === undefined ? options.branchNamer : undefined,
+    );
     const targetBranch = options.targetBranch ?? description.defaultBranch;
     await this.assertBranchName(targetBranch);
 

@@ -1450,12 +1450,10 @@ function githubCard() {
     // for a thing that cannot be done here would only invite a dead click.
     return "";
   }
-  const credential = github?.credential;
-  const broken = credential?.unusableReason;
+  const broken = github?.credential?.unusableReason;
   const connected = github?.connected === true;
   return `<section class="card">
-    <div class="panel-head"><div><h3>GitHub</h3>
-      <p>The account a push of your tasks runs as</p></div></div>
+    <div class="panel-head"><div><h3>GitHub</h3></div></div>
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">${
@@ -1463,17 +1461,6 @@ function githubCard() {
             ? `Connected as ${esc(github.login ?? "you")}`
             : "Not connected"
         }</div>
-        <div class="sr-sub${broken ? " sr-warn" : ""}">${esc(
-          broken
-            ? broken
-            : connected
-              ? `Personal access token ending …${credential?.hint ?? ""}. ` +
-                "Pushes an agent runs for you authenticate as this token."
-              : github === undefined
-                ? "Checking…"
-                : "When an agent pushes for you, it pushes as you. Connect " +
-                  "your GitHub account to make that possible.",
-        )}</div>
       </span>
       <span class="sr-ctl">
         <button class="btn btn-sm" data-act="${
@@ -1509,9 +1496,7 @@ function githubCard() {
 function agentsCard() {
   const agents = myAgents();
   return `<section class="card">
-    <div class="panel-head"><div><h3>Agents</h3>
-      <p>What this deployment offers, and which of them you have connected —
-        one row per provider, usable in every channel you join it to</p></div></div>
+    <div class="panel-head"><div><h3>Agents</h3></div></div>
     ${
       agents.length === 0
         ? `<div class="set-row"><span class="sr-body">
@@ -1519,11 +1504,15 @@ function agentsCard() {
                deployment.</div></span></div>`
         : agents
             .map((agent) => {
-              // The owner suffix is dropped from a vendor-label fallback
-              // ("Claude (Nathan)" reads as "Claude" in your own settings),
+              // The row title is the vendor people say ("Claude"), not the
+              // call sign. The call sign belongs on the status line below —
+              // "Connected as Hera" — so both facts stay visible at once
+              // instead of the name swallowing the provider.
+              // Rename still edits the call sign: the owner suffix is dropped
+              // from a vendor-label fallback ("Claude (Nathan)" → "Claude")
               // but never from a name somebody chose — an agent called
               // "Athena (night shift)" keeps every word of it.
-              const label =
+              const callSign =
                 agent.hasName === true
                   ? agent.name
                   : agent.name.replace(/\s*\(.*\)$/u, "");
@@ -1541,7 +1530,13 @@ function agentsCard() {
               const state_ = agent.needsReconnect
                 ? { text: "Sign-in expired", cls: " sr-warn" }
                 : agent.mine
-                  ? { text: "Connected as you", cls: "" }
+                  ? {
+                      text:
+                        agent.hasName === true
+                          ? `Connected as ${agent.name}`
+                          : "Connected as you",
+                      cls: "",
+                    }
                   : agent.hostAccount
                     ? {
                         text: "Available on this deployment — using this machine's account",
@@ -1556,17 +1551,13 @@ function agentsCard() {
                           data-value="${esc(agent.id)}">
                           <input class="input" data-act="settings-rename-input"
                             data-value="${esc(agent.id)}" maxlength="40"
-                            aria-label="Agent name" value="${esc(label)}">
+                            aria-label="Agent name" value="${esc(callSign)}">
                           <button class="btn btn-sm btn-primary" type="submit">Save</button>
                         </form>`
-                      : `<div class="sr-title">${esc(label)}</div>`
+                      : `<div class="sr-title">${esc(agentLabelOf(agent.id))}</div>`
                   }
                   <div class="sr-sub${state_.cls}">${esc(state_.text)}${
                     agent.detail ? ` — ${esc(agent.detail)}` : ""
-                  }${
-                    renaming
-                      ? " — this name is what it answers to in every repository"
-                      : ""
                   }</div>
                 </span>
                 <span class="sr-ctl">
@@ -1634,9 +1625,6 @@ function appearanceCard() {
     <div class="set-row">
       <span class="sr-body">
         <div class="sr-title">Profile picture</div>
-        <div class="sr-sub">Shown wherever your initials appear. Stored in this
-          browser only — the account has no field for a picture yet, so it will
-          not follow you to another machine.</div>
       </span>
       <span class="sr-action avatar-pick">
         ${avatar(currentUserName(), 40, currentUserName(), myAvatar())}
@@ -2326,18 +2314,22 @@ async function toggleAuditingAction(repositoryId, paused) {
  * Irreversible: cascades the repository's own channel and grants, and takes
  * the execution history with it. A single confirm button is too easy to hit
  * by reflex for something nobody can undo, so this asks for the repository's
- * name to be typed out — `yesiwanttodelete<id>` — and refuses anything else.
- * Matched case-insensitively and trimmed: the phrase is there to make the
- * person read what they are deleting, not to catch a stray capital.
+ * name to be typed out — `yesiwanttodelete<name>` — and refuses anything
+ * else. The name is whatever the repository is called on screen right now, so
+ * a renamed repository asks for its new name rather than its id; spaces are
+ * dropped so the phrase stays one word. Matched case-insensitively and
+ * trimmed: the phrase is there to make the person read what they are
+ * deleting, not to catch a stray capital.
  *
  * Only owners and co-owners are offered the control at all (see
  * `canDeleteRepository`), and the server refuses anyone else regardless.
  */
 async function deleteRepositoryAction(repositoryId) {
-  const phrase = `yesiwanttodelete${repositoryId}`;
+  const label = repositoryLabel(repositoryId);
+  const phrase = `yesiwanttodelete${label.replace(/\s+/gu, "")}`;
   const values = await showModal({
     title: "Delete this repository?",
-    subtitle: `This permanently deletes ${repositoryId}, its chat history, and its repository-scoped grants. This cannot be undone.`,
+    subtitle: `This permanently deletes ${label}, its chat history, and its repository-scoped grants. This cannot be undone.`,
     confirm: "Delete repository",
     body: `<label class="field">
         <span>Type <code>${esc(phrase)}</code> to confirm</span>
@@ -2356,7 +2348,7 @@ async function deleteRepositoryAction(repositoryId) {
   try {
     await deleteRepository(repositoryId);
     closePopover();
-    toast(`Deleted ${repositoryId}`, "ok");
+    toast(`Deleted ${label}`, "ok");
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -5713,6 +5705,69 @@ function selectMobileChannelMessage(event) {
     row.classList.add("cmsg-selected");
   }
 }
+
+/**
+ * Moves one shared desktop hover surface to the message under the pointer.
+ *
+ * Painting every row's own background makes the highlight disappear from one
+ * message and appear on the next. Keeping one surface in the transcript lets
+ * CSS interpolate its position and height instead, including between compact
+ * and full message rows. Touch keeps the selected-row interaction above and
+ * reduced-motion readers keep the surface without its travel animation.
+ */
+function positionChannelMessageHoverHighlight(event) {
+  if (!window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+    return;
+  }
+  const row =
+    event.target.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  const list = row?.parentElement ?? null;
+  if (row === null || list?.id !== "chan-messages") {
+    return;
+  }
+
+  let highlight = list.querySelector(":scope > .cmsg-hover-highlight");
+  if (highlight === null) {
+    highlight = document.createElement("div");
+    highlight.className = "cmsg-hover-highlight";
+    highlight.setAttribute("aria-hidden", "true");
+    list.append(highlight);
+  }
+  highlight.style.setProperty("--cmsg-hover-x", `${row.offsetLeft}px`);
+  highlight.style.setProperty("--cmsg-hover-y", `${row.offsetTop}px`);
+  highlight.style.setProperty("--cmsg-hover-width", `${row.offsetWidth}px`);
+  highlight.style.setProperty("--cmsg-hover-height", `${row.offsetHeight}px`);
+  highlight.classList.add("is-visible");
+}
+
+/** Hides the shared surface only after the pointer leaves message rows. */
+function clearChannelMessageHoverHighlight(event) {
+  const row =
+    event.target.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  const list = row?.parentElement ?? null;
+  if (row === null || list?.id !== "chan-messages") {
+    return;
+  }
+  const nextRow =
+    event.relatedTarget?.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  // Moving directly to another message leaves the surface alive so the next
+  // mouseover changes its geometry and CSS can animate from the old row.
+  if (nextRow?.parentElement === list) {
+    return;
+  }
+  list
+    .querySelector(":scope > .cmsg-hover-highlight")
+    ?.classList.remove("is-visible");
+}
+
+document.addEventListener("mouseover", positionChannelMessageHoverHighlight);
+document.addEventListener("mouseout", clearChannelMessageHoverHighlight);
 
 document.addEventListener("click", (event) => {
   // This runs before action lookup because an ordinary message body has no

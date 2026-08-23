@@ -6,7 +6,12 @@ import test from "node:test";
 
 import { GitClient, type GitRunOptions } from "./git-client.js";
 import type { ProcessOutput } from "./process-runner.js";
-import { RepositoryService, SyncDivergedError } from "./repository-service.js";
+import {
+  RepositoryService,
+  SyncDivergedError,
+  sanitisePushBranchName,
+  type PushBranchNamer,
+} from "./repository-service.js";
 
 /* -------------------------------------------------------------------------
  * Greenfield initialization
@@ -321,6 +326,109 @@ test("push naming is sanitized, bounded, and falls back to changed files", async
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("the local model names the pushed branch when there is one", async () => {
+  const fixture = await pushFixture();
+  try {
+    await advanceCanonical(fixture);
+    const prompts: string[] = [];
+    const namer: PushBranchNamer = async (prompt) => {
+      prompts.push(prompt);
+      // What a small model actually replies with: a label, quotes, and a
+      // sentence of its own afterwards.
+      return 'Branch name: "Readable Branch Names"\nThis names the branch.';
+    };
+
+    const result = await fixture.repositories.pushToRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      branchNamer: namer,
+    });
+
+    assert.equal(result.targetBranch, "coord/readable-branch-names");
+    // The facts are untouched: only the label the branch carries changed.
+    assert.equal(
+      result.summary,
+      "Improve push branch naming with readable summaries",
+    );
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0]?.includes("Improve push branch naming"));
+    const refs = await new GitClient().run([
+      "ls-remote",
+      "--heads",
+      fixture.remotePath,
+    ]);
+    assert.ok(refs.stdout.includes("coord/readable-branch-names"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a model that fails or says nothing leaves the deterministic name", async () => {
+  const fixture = await pushFixture();
+  try {
+    await advanceCanonical(fixture);
+
+    const thrown = await fixture.repositories.pushToRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      branchNamer: async () => {
+        throw new Error("no model here");
+      },
+    });
+    assert.equal(thrown.targetBranch, "coord/improve-push-branch-naming");
+
+    // A blank reply and a reply with no words in it are the same answer as no
+    // model at all, and neither may leave the branch called "coord/".
+    for (const reply of ["", "   ", "```\n\n```", undefined]) {
+      const fallback = await fixture.repositories.pushToRemote(
+        fixture.canonical,
+        {
+          remoteUrl: LOOPBACK_HOST,
+          allowExistingTarget: true,
+          branchNamer: async () => reply,
+        },
+      );
+      assert.equal(fallback.targetBranch, "coord/improve-push-branch-naming");
+    }
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an explicitly named branch is never sent to the model", async () => {
+  const fixture = await pushFixture();
+  try {
+    await advanceCanonical(fixture);
+    let asked = 0;
+    const result = await fixture.repositories.pushToRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      targetBranch: "coord/chosen-by-hand",
+      branchNamer: async () => {
+        asked += 1;
+        return "something-else";
+      },
+    });
+
+    assert.equal(result.targetBranch, "coord/chosen-by-hand");
+    assert.equal(asked, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a model can choose a branch name's words but never its shape", () => {
+  assert.equal(
+    sanitisePushBranchName("  refs/heads/../Bad Name  "),
+    "refs-heads-bad-name",
+  );
+  assert.equal(sanitisePushBranchName("coord/already-prefixed"), "already-prefixed");
+  assert.equal(
+    sanitisePushBranchName("a-very-long-branch-name-that-keeps-going-and-going"),
+    "very-long-branch-name",
+  );
+  assert.equal(sanitisePushBranchName("!!! ???"), undefined);
+  assert.equal(sanitisePushBranchName(null), undefined);
+  assert.equal(sanitisePushBranchName(undefined), undefined);
 });
 
 test("a push is refused when the remote moved since import", async () => {
