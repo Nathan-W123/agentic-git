@@ -194,3 +194,80 @@ test("identifier tokens split camelCase, snake_case and acronyms", () => {
   assert.deepEqual(identifierTokens("TAX_RATE"), ["tax", "rate"]);
   assert.deepEqual(identifierTokens("HTTPServer2"), ["http", "server", "2"]);
 });
+
+test("half a name in common is not a resolution", () => {
+  // The rule used to accept an exact half, which is the weakest match it can
+  // express: a two-token declaration against a one-token symbol sharing one
+  // token. That is how `threadRow` reached the bare symbol `row`, and a plan
+  // naming one file came to be arbitrated over twenty-six.
+  const index = pricingIndex({
+    files: [
+      indexedFile("src/pricing/total.js", ["subtotal", "orderTotal"]),
+      indexedFile("src/ui/row.js", ["row"]),
+    ],
+    paths: ["src/pricing/total.js", "src/ui/row.js"],
+  });
+
+  const grounded = groundPlan(
+    plan({ expectedSymbols: ["priceRow"] }),
+    index,
+  );
+
+  assert.deepEqual(grounded.grounding?.symbolReferents, []);
+});
+
+test("more than half still resolves, which is the point of keeping the rule", () => {
+  const index = pricingIndex({
+    files: [indexedFile("src/pricing/total.js", ["renderTotal"])],
+    paths: ["src/pricing/total.js"],
+  });
+
+  const grounded = groundPlan(
+    // {render, total, list} against {render, total}: two shared of three.
+    plan({ expectedSymbols: ["renderTotalList"] }),
+    index,
+  );
+
+  assert.deepEqual(
+    grounded.grounding?.symbolReferents.map((entry) => entry.resolved),
+    ["renderTotal"],
+  );
+});
+
+test("a misname whose content tokens are all present still resolves", () => {
+  // The case grounding was built for, asserted here so tightening the score
+  // cannot take it: `calculate` is generic, so the declaration's content is
+  // just "total", and `orderTotal` carries all of it.
+  const grounded = groundPlan(
+    plan({ expectedSymbols: ["calculateTotal"] }),
+    pricingIndex(),
+  );
+
+  assert.deepEqual(
+    grounded.grounding?.symbolReferents.map((entry) => entry.resolved),
+    ["orderTotal"],
+  );
+});
+
+test("a name that lives everywhere locates nothing", () => {
+  // Every file a referent lives in is added to what the plan is arbitrated
+  // over, so a common name does not answer "where was this pointing" — it
+  // drags in everywhere it appears. `root` and `result` live in seventy-odd
+  // files of this repository; a resolution to one of those is not a location.
+  const spread = ["a", "b", "c", "d"].map((name) =>
+    indexedFile(`src/wide/${name}.js`, ["entry"]),
+  );
+  const index = pricingIndex({
+    files: [...spread, indexedFile("src/narrow/one.js", ["entryPoint"])],
+    paths: [...spread.map((file) => file.path), "src/narrow/one.js"],
+  });
+
+  const grounded = groundPlan(
+    plan({ expectedSymbols: ["entryList"] }),
+    index,
+  );
+
+  // `entry` shares its only content token with the declaration and would have
+  // matched on the first rule, but it is in four files and says nothing.
+  assert.deepEqual(grounded.grounding?.symbolReferents, []);
+});
