@@ -6669,7 +6669,11 @@ document.addEventListener("click", (event) => {
           (agent) => agent.id === value,
         );
         if (opened?.mine === true) {
-          void ensureProviderUsage(opened.provider ?? opened.id, render);
+          // Opening the specification is an explicit request for the current
+          // account figures. Discard the browser's last snapshot so Codex's
+          // native quota read runs for every visit instead of leaving an old
+          // percentage in a panel somebody has just reopened.
+          void refreshProviderUsage(opened.provider ?? opened.id, render);
           // The model and reasoning pickers on the details tab are drawn from
           // the account's own reported lists, so they have to be asked for the
           // same way the composer's pickers are — otherwise the tab shows two
@@ -6687,6 +6691,16 @@ document.addEventListener("click", (event) => {
     case "agent-panel-tab":
       state.agentPanelTab = value;
       render();
+      // Returning from chat or history opens the specification just as surely
+      // as clicking the roster row does, so it gets the same fresh reading.
+      if (value === "spec") {
+        const opened = channelAgentsFor(activeChannelId()).find(
+          (agent) => agent.id === state.activeAgentPanel,
+        );
+        if (opened?.mine === true) {
+          void refreshProviderUsage(opened.provider ?? opened.id, render);
+        }
+      }
       return;
     case "agent-panel-close":
       clearRightPanel("agent");

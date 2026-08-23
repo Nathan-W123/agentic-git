@@ -156,6 +156,15 @@ export interface ProviderUsageReport {
    * carries is deliberately not promised here.
    */
   creditBalance?: number;
+  /**
+   * Readable facts the CLI reported that are not percentages.
+   *
+   * Cursor's `status` answers with the account, its plan and its version
+   * rather than a quota, and dropping that on the floor left the card saying
+   * "no usage reported" about a CLI that had just answered. Kept as the CLI's
+   * own lines so nothing here is a number it never gave.
+   */
+  notes?: string[];
 }
 
 export interface ChatReply {
@@ -521,6 +530,71 @@ function codexNumber(
     : undefined;
 }
 
+function codexStatusNumber(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim().replace(/%$/u, "");
+  if (trimmed === "") {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function codexStatusWindow(
+  value: unknown,
+  fallbackMinutes: number,
+): ProviderUsageWindow | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const window = value as Record<string, unknown>;
+  const used = codexStatusNumber(
+    window["usedPercent"] ??
+      window["used_percent"] ??
+      window["percentUsed"] ??
+      window["percent_used"],
+  );
+  const remaining = codexStatusNumber(
+    window["remainingPercent"] ??
+      window["remaining_percent"] ??
+      window["remainingPercentage"] ??
+      window["remaining_percentage"] ??
+      window["percentRemaining"] ??
+      window["percent_remaining"],
+  );
+  if (used === undefined && remaining === undefined) {
+    return undefined;
+  }
+  const minutes =
+    codexStatusNumber(
+      window["windowDurationMins"] ??
+        window["window_duration_mins"] ??
+        window["windowMinutes"] ??
+        window["window_minutes"] ??
+        window["durationMins"] ??
+        window["duration_mins"],
+    ) ?? fallbackMinutes;
+  const resetsAt = codexStatusNumber(
+    window["resetsAt"] ??
+      window["resets_at"] ??
+      window["resetAt"] ??
+      window["reset_at"],
+  );
+  return codexAppServerWindow(
+    {
+      usedPercent: used !== undefined ? used : 100 - (remaining ?? 100),
+      windowDurationMins: minutes,
+      ...(resetsAt === undefined ? {} : { resetsAt }),
+    },
+    codexWindowLabel(fallbackMinutes),
+  );
+}
+
 function codexAppServerWindow(
   value: unknown,
   fallbackLabel: string,
@@ -740,6 +814,114 @@ export function parseCodexAppServerRateLimits(
     };
   }
   return undefined;
+}
+
+/**
+ * Reads the machine-readable counterpart of Codex's native `/status` view.
+ *
+ * Status releases have used both camel- and snake-case names and have called
+ * the two subscription windows either primary/secondary or five-hour/weekly.
+ * The status view reports remaining percentages on some builds, while the
+ * dashboard's existing contract stores used percentages, so that one value
+ * is converted here and nowhere else.
+ */
+export function parseCodexStatusRateLimits(
+  stdout: string,
+): ProviderUsageReport | undefined {
+  let root: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(stdout.trim()) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return undefined;
+    }
+    root = parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  const statusValue = root["status"];
+  const envelope =
+    typeof statusValue === "object" &&
+    statusValue !== null &&
+    !Array.isArray(statusValue)
+      ? (statusValue as Record<string, unknown>)
+      : root;
+  const limitsValue =
+    envelope["rateLimits"] ??
+    envelope["rate_limits"] ??
+    envelope["limits"] ??
+    envelope["usage"] ??
+    envelope;
+  if (
+    typeof limitsValue !== "object" ||
+    limitsValue === null ||
+    Array.isArray(limitsValue)
+  ) {
+    return undefined;
+  }
+  const limits = limitsValue as Record<string, unknown>;
+  const primary = codexStatusWindow(
+    limits["primary"] ??
+      limits["fiveHour"] ??
+      limits["five_hour"] ??
+      limits["fiveHourUsage"] ??
+      limits["five_hour_usage"] ??
+      limits["5h"] ??
+      limits["5-hour"],
+    300,
+  );
+  const secondary = codexStatusWindow(
+    limits["secondary"] ??
+      limits["weekly"] ??
+      limits["week"] ??
+      limits["weeklyUsage"] ??
+      limits["weekly_usage"],
+    10_080,
+  );
+  if (primary === undefined || secondary === undefined) {
+    return undefined;
+  }
+  const windows = [primary, secondary];
+  const accountValue = envelope["account"] ?? root["account"];
+  const account =
+    typeof accountValue === "object" &&
+    accountValue !== null &&
+    !Array.isArray(accountValue)
+      ? (accountValue as Record<string, unknown>)
+      : undefined;
+  const planValue =
+    limits["planType"] ??
+    limits["plan_type"] ??
+    envelope["planType"] ??
+    envelope["plan_type"] ??
+    root["planType"] ??
+    root["plan_type"] ??
+    account?.["planType"] ??
+    account?.["plan_type"];
+  const plan =
+    typeof planValue === "string" && planValue.trim() !== ""
+      ? planValue.trim()
+      : undefined;
+  const credits =
+    limits["credits"] ?? envelope["credits"] ?? root["credits"];
+  const creditBalance =
+    codexCreditBalance(credits) ??
+    codexStatusNumber(
+      limits["creditBalance"] ??
+        limits["credit_balance"] ??
+        envelope["creditBalance"] ??
+        envelope["credit_balance"] ??
+        root["creditBalance"] ??
+        root["credit_balance"],
+    );
+  return {
+    source:
+      plan === undefined
+        ? "Codex native status"
+        : `Codex native status (${plan})`,
+    windows,
+    ...(plan === undefined ? {} : { planType: plan }),
+    ...(creditBalance === undefined ? {} : { creditBalance }),
+  };
 }
 
 /** Finds the `rate_limits` object wherever the CLI nested it. */
@@ -986,7 +1168,7 @@ const CLI_TIMEOUT_MS = 240_000;
  * trivial prompt, so it gets a far shorter deadline than a real completion.
  */
 const CREDENTIAL_PROBE_TIMEOUT_MS = 90_000;
-/** Usage moves slowly; re-probing on every render would be wasteful. */
+/** Claude usage moves slowly; re-probing it on every render would be wasteful. */
 const USAGE_CACHE_MS = 120_000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // Square brackets appear in real Claude Code model values (e.g. the
@@ -1889,6 +2071,200 @@ export function parseCursorModelList(stdout: string): ProviderModelOption[] {
   return models;
 }
 
+/** How long `status` may take before the usage card stops waiting for it. */
+export const CURSOR_STATUS_TIMEOUT_MS = 8_000;
+
+/** Keys whose value is a secret, an internal handle, or otherwise unreadable. */
+const CURSOR_STATUS_SKIP =
+  /token|secret|password|credential|cookie|apikey|api_key|(^|_)id$|uuid|path|dir$|home$/iu;
+
+/** `usedPercent` -> `Used percent`, `logged_in` -> `Logged in`. */
+function cursorNoteLabel(key: string): string {
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .replace(/[_-]+/gu, " ")
+    .trim()
+    .toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** A scalar as a person reads it; anything else is not a note. */
+function cursorNoteValue(value: unknown): string | undefined {
+  if (typeof value === "boolean") {
+    return value ? "yes" : "no";
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length === 0 || trimmed.length > 120 ? undefined : trimmed;
+}
+
+function cursorPercent(value: unknown): number | undefined {
+  const percent = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(percent) && percent >= 0 && percent <= 100
+    ? percent
+    : undefined;
+}
+
+/**
+ * Reads `status --format json`, and the plain text the CLI prints without that
+ * flag, into a usage report.
+ *
+ * Cursor is not Codex: its status command answers with the account the CLI is
+ * signed in as, its plan and its version, and it publishes no subscription
+ * percentage unless the account has one. So a percentage becomes a window
+ * where there is one, and everything else the CLI said is kept as its own
+ * lines — which is the honest form of "this is what Cursor reports", rather
+ * than a quota bar derived from figures Cursor never gave.
+ */
+export function parseCursorUsage(stdout: string): ProviderUsageReport {
+  const source = "cursor status, as reported by the signed-in account";
+  const text = stripAnsi(stdout);
+  const windows: ProviderUsageWindow[] = [];
+  const notes: string[] = [];
+  let planType: string | undefined;
+
+  const takePlan = (key: string, value: unknown): boolean => {
+    if (
+      planType !== undefined ||
+      !/^(plan|plan_?type|subscription|tier)$/iu.test(key) ||
+      typeof value !== "string" ||
+      value.trim().length === 0
+    ) {
+      return false;
+    }
+    planType = value.trim();
+    return true;
+  };
+  const takeWindow = (key: string, label: string, value: unknown): boolean => {
+    if (!/percent|percentage/iu.test(key)) {
+      return false;
+    }
+    const percent = cursorPercent(value);
+    if (percent === undefined) {
+      return false;
+    }
+    windows.push({ label, percentUsed: percent });
+    return true;
+  };
+  const takeNote = (key: string, value: unknown): void => {
+    const readable = cursorNoteValue(value);
+    if (readable === undefined || notes.length >= 8) {
+      return;
+    }
+    notes.push(`${cursorNoteLabel(key)}: ${readable}`);
+  };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.trim());
+  } catch {
+    const opened = text.indexOf("{");
+    const closed = text.lastIndexOf("}");
+    if (opened !== -1 && closed > opened) {
+      try {
+        parsed = JSON.parse(text.slice(opened, closed + 1));
+      } catch {
+        parsed = undefined;
+      }
+    }
+  }
+
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    // Two levels: the flags Cursor reports about the account sit at the top,
+    // and anything it groups (a plan, a quota) sits one object below. Deeper
+    // than that is structure this cannot claim to understand.
+    const visit = (value: Record<string, unknown>, group: string): void => {
+      for (const [key, entry] of Object.entries(value)) {
+        const label = group === "" ? key : `${group} ${key}`;
+        if (
+          typeof entry === "object" &&
+          entry !== null &&
+          !Array.isArray(entry) &&
+          group === ""
+        ) {
+          visit(entry as Record<string, unknown>, key);
+          continue;
+        }
+        if (CURSOR_STATUS_SKIP.test(key)) {
+          continue;
+        }
+        if (
+          takeWindow(key, cursorNoteLabel(group === "" ? key : group), entry) ||
+          takePlan(key, entry)
+        ) {
+          continue;
+        }
+        takeNote(label, entry);
+      }
+    };
+    visit(parsed as Record<string, unknown>, "");
+  } else if (
+    // A CLI too old for `--format json` answers with its own usage text, and
+    // that text is not an account: read as fields it would become a card full
+    // of "Error: unknown option", which reads as a report rather than as the
+    // nothing it is.
+    !/unknown (?:option|argument|flag)|unrecognized (?:option|argument)|invalid option/iu.test(
+      text,
+    )
+  ) {
+    for (const raw of text.split(/\r?\n/u)) {
+      const line = raw.trim();
+      if (line.length === 0) {
+        continue;
+      }
+      const percentLine = /^(.+?):\s*(\d{1,3})%(?:\s*used)?\b/u.exec(line);
+      if (percentLine !== null) {
+        const percent = cursorPercent(Number(percentLine[2]));
+        if (percent !== undefined) {
+          windows.push({
+            label: (percentLine[1] as string).trim(),
+            percentUsed: percent,
+          });
+          continue;
+        }
+      }
+      const field = /^([A-Za-z][A-Za-z0-9 _-]{0,40}):\s*(.+)$/u.exec(line);
+      if (
+        field === null ||
+        CURSOR_STATUS_SKIP.test(field[1] as string) ||
+        // Diagnostics and help are about the command, not about the account.
+        /^(error|warning|warn|usage|help|tip|note|hint)$/iu.test(
+          (field[1] as string).trim(),
+        )
+      ) {
+        continue;
+      }
+      if (takePlan((field[1] as string).trim(), field[2])) {
+        continue;
+      }
+      takeNote((field[1] as string).trim(), field[2]);
+    }
+  }
+
+  if (windows.length === 0 && notes.length === 0 && planType === undefined) {
+    return {
+      source,
+      windows: [],
+      unavailableReason: /not (?:logged|signed) ?in|please (?:log|sign) ?in/iu.test(
+        text,
+      )
+        ? "The Cursor CLI is signed out, so it had no account to report on."
+        : "The cursor CLI reported nothing about this account. Its status command publishes no subscription percentage.",
+    };
+  }
+  return {
+    source,
+    windows,
+    ...(notes.length === 0 ? {} : { notes }),
+    ...(planType === undefined ? {} : { planType }),
+  };
+}
+
 /** Whether a URL is on one of the hosts this vendor signs in through. */
 function isSignInUrl(value: string, hosts: string[] | undefined): boolean {
   if (hosts === undefined || hosts.length === 0) {
@@ -2271,7 +2647,11 @@ export class ProviderChatService {
      */
     userId?: string;
   }): Promise<ProviderUsageReport> {
-    if (input.provider !== "anthropic" && input.provider !== "openai") {
+    if (
+      input.provider !== "anthropic" &&
+      input.provider !== "openai" &&
+      input.provider !== "cursor"
+    ) {
       return {
         source: PROVIDER_NAMES[input.provider],
         windows: [],
@@ -2284,16 +2664,18 @@ export class ProviderChatService {
     // of their own, which is the shared login the container itself carries.
     const usageKey = `${input.userId ?? "host"}:${input.provider}`;
     if (input.provider === "openai") {
-      const cachedCodex = this.usageCache.get(usageKey);
-      if (
-        cachedCodex !== undefined &&
-        Date.now() - cachedCodex.at < USAGE_CACHE_MS
-      ) {
-        return cachedCodex.report;
-      }
-      const report = await this.codexUsage(input.userId);
-      this.usageCache.set(usageKey, { at: Date.now(), report });
-      return report;
+      // The browser deliberately asks again whenever the agent specification
+      // opens. Honour that request all the way through to Codex: caching here
+      // made a fresh HTTP request return the previous app-server answer for
+      // two minutes, so reopening the page did not actually run the quota
+      // command the page exists to surface.
+      return await this.codexUsage(input.userId);
+    }
+    if (input.provider === "cursor") {
+      // Uncached for the same reason: the specification page asks again every
+      // time it opens, and answering that request from a stored figure would
+      // not run the command the page opened to run.
+      return await this.cursorUsage(input.userId);
     }
     const cached = this.usageCache.get(usageKey);
     if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) {
@@ -2353,12 +2735,12 @@ export class ProviderChatService {
    * Codex session has recorded rate limits on this machine yet", which is a
    * fact about where we looked rather than about the account.
    *
-   * So the account is asked directly, through the app-server's
-   * `account/rateLimits/read`, *inside* the credential home rather than after
-   * it: that is the only moment the caller's own `CODEX_HOME` exists, and
-   * asking outside it would ask on behalf of whatever login the host happens
-   * to carry. The old readers remain, in order, for a CLI too old to answer
-   * and for a host-login deployment.
+   * So the account is asked directly through `codex --status --json`,
+   * *inside* the credential home rather than after it: that is the only
+   * moment the caller's own `CODEX_HOME` exists, and asking outside it would
+   * ask on behalf of whatever login the host happens to carry. The app-server
+   * and session readers remain, in order, for a CLI too old to answer and for
+   * a host-login deployment.
    */
   private async codexUsage(userId?: string): Promise<ProviderUsageReport> {
     const source = "Codex CLI session records (~/.codex/sessions)";
@@ -2428,6 +2810,117 @@ export class ProviderChatService {
   }
 
   /**
+   * What Cursor's own CLI says about the account it is signed in as.
+   *
+   * `status` is what the Cursor CLI publishes about an account, it runs no
+   * model turn, and it is asked inside the caller's own credential home --
+   * the same home their runs use, so the answer is about the account those
+   * runs spend rather than whatever login the host happens to carry.
+   *
+   * `--format json` is asked for first because that is the answer worth
+   * parsing, and the bare `status` is the fallback: a CLI that does not know
+   * the flag prints its own usage text instead of an account, which
+   * {@link parseCursorUsage} reports as nothing rather than as a quota.
+   */
+  private async cursorUsage(userId?: string): Promise<ProviderUsageReport> {
+    const spec = browserCliSpec("cursor") as BrowserCliSpec;
+    const source = "cursor status, as reported by the signed-in account";
+    let home: CredentialHome | undefined;
+    try {
+      if (userId !== undefined) {
+        const store = await this.credentialStore();
+        home = await store.openCredentialHome({
+          userId,
+          vendor: "cursor",
+          baseEnv: sanitizeChildEnv(process.env),
+          // Shared, as the model list read is: two of these may overlap and
+          // neither writes anything into the home.
+          mode: "shared",
+        });
+      }
+      const ask = async (
+        args: readonly string[],
+      ): Promise<ProviderUsageReport | undefined> => {
+        try {
+          const output = await this.runner(
+            spec.command,
+            [...spec.prefixArgs, ...args],
+            {
+              timeoutMs: CURSOR_STATUS_TIMEOUT_MS,
+              maxOutputBytes: 262_144,
+              ...(home === undefined ? {} : { env: home.env }),
+            },
+          );
+          // Read whatever the exit code: the CLI exits non-zero merely for
+          // being signed out, while still printing the status it was asked
+          // for. Some builds print that status on stderr.
+          return parseCursorUsage(
+            output.stdout.trim() === "" ? output.stderr : output.stdout,
+          );
+        } catch {
+          // A missing binary, or a deadline. Neither is an answer, and the
+          // fallback below is still worth trying.
+          return undefined;
+        }
+      };
+      try {
+        const asJson = await ask(["status", "--format", "json"]);
+        if (asJson !== undefined && asJson.unavailableReason === undefined) {
+          return asJson;
+        }
+        const asText = await ask(["status"]);
+        return (
+          (asText?.unavailableReason === undefined ? asText : undefined) ??
+          asJson ??
+          asText ?? {
+            source,
+            windows: [],
+            unavailableReason:
+              "The cursor CLI could not be asked for its status on this machine.",
+          }
+        );
+      } finally {
+        await home?.close();
+      }
+    } catch (error) {
+      return {
+        source,
+        windows: [],
+        unavailableReason:
+          error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Native status first, with the app-server retained for older CLIs. */
+  private async codexAccountRateLimits(
+    env: NodeJS.ProcessEnv | undefined,
+  ): Promise<ProviderUsageReport | undefined> {
+    try {
+      const result = await this.runner(
+        resolveCodexCommand(this.homeDirectory),
+        ["--status", "--json"],
+        {
+          timeoutMs: CODEX_QUOTA_TIMEOUT_MS,
+          maxOutputBytes: 262_144,
+          ...(env === undefined ? {} : { env }),
+        },
+      );
+      const status =
+        result.exitCode === 0
+          ? parseCodexStatusRateLimits(result.stdout)
+          : undefined;
+      if (status !== undefined) {
+        return status;
+      }
+    } catch {
+      // The status flag is feature-detected: old or missing CLIs continue to
+      // the app-server compatibility path below.
+    }
+    return await this.codexAppServerRateLimits(env);
+  }
+
+  /**
    * One `account/rateLimits/read` against the app-server, batched.
    *
    * The whole conversation — initialize, initialized, the read — is written
@@ -2438,7 +2931,7 @@ export class ProviderChatService {
    * the method, or missing entirely, must not turn the usage card into an
    * error.
    */
-  private async codexAccountRateLimits(
+  private async codexAppServerRateLimits(
     env: NodeJS.ProcessEnv | undefined,
   ): Promise<ProviderUsageReport | undefined> {
     const conversation = [
