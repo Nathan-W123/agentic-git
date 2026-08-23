@@ -31,11 +31,14 @@ import {
   parseAutoClaimVerdict,
   readsAsEchoOfRequest,
   reportedFreshTokens,
+  selectChannelMemo,
   selectThreadContext,
   summariseAuditData,
+  summariseChannelThread,
   summariseObjective,
   truncateToTokens,
   type ApiOperations,
+  type ChannelMemoThread,
 } from "./server.js";
 import { hashPassword } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
@@ -15967,6 +15970,160 @@ test("selectThreadContext reports elided history instead of silently dropping it
   assert.ok(notice.includes(String(selected.elided)), notice);
   assert.ok(elidedHistoryNotice(1).includes("1 earlier message "), "singular");
   assert.ok(elidedHistoryNotice(3).includes("3 earlier messages"), "plural");
+});
+
+test("summariseChannelThread speaks for a conversation only when it settled something", () => {
+  const settled = summariseChannelThread({
+    id: "one",
+    kind: "user",
+    content: "how should the retry loop back off?",
+    replies: [
+      { kind: "progress", content: "reading services/worker/src" },
+      {
+        kind: "outcome",
+        content: "Switched retries to exponential backoff capped at a minute.",
+      },
+      { kind: "user", content: "nice" },
+    ],
+  });
+  assert.ok(settled !== undefined);
+  assert.ok(settled.startsWith("how should the retry loop back off?"), settled);
+  assert.ok(settled.includes("exponential backoff"), settled);
+  // A conversation that only chatted leaves nothing behind: carrying its
+  // opening line alone is the dilution this layer exists to avoid.
+  assert.equal(
+    summariseChannelThread({
+      id: "two",
+      kind: "user",
+      content: "morning all",
+      replies: [{ kind: "agent", content: "looking now" }],
+    }),
+    undefined,
+  );
+  // People settling it between themselves counts, with no agent ending.
+  const spoken = summariseChannelThread({
+    id: "three",
+    kind: "user",
+    content: "which store backs the channel?",
+    replies: [
+      {
+        kind: "user",
+        content: "we decided the memory store stays the contract",
+      },
+    ],
+  });
+  assert.ok(spoken?.includes("we decided the memory store"), String(spoken));
+  // An opening that decides on its own, with nobody needing to reply.
+  assert.ok(
+    summariseChannelThread({
+      id: "four",
+      kind: "user",
+      content: "we are going with the queue instead of a cron",
+    }) !== undefined,
+  );
+  // Deleted threads and the room's own machinery never speak for it.
+  assert.equal(
+    summariseChannelThread({
+      id: "five",
+      kind: "user",
+      content: "we decided to drop the cache",
+      deletedAt: new Date().toISOString(),
+    }),
+    undefined,
+  );
+  assert.equal(
+    summariseChannelThread({
+      id: "six",
+      kind: "progress",
+      content: "we decided to drop the cache",
+    }),
+    undefined,
+  );
+});
+
+test("summariseChannelThread prefers the thread's ending over later chatter", () => {
+  const line = summariseChannelThread({
+    id: "one",
+    kind: "user",
+    content: "the export format",
+    replies: [
+      {
+        kind: "outcome",
+        content: "Shipped CSV export behind the same button.",
+      },
+      { kind: "user", content: "we will look at parquet another time" },
+    ],
+  });
+  assert.ok(line?.includes("Shipped CSV export"), String(line));
+  assert.ok(!line?.includes("parquet"), String(line));
+});
+
+test("selectChannelMemo carries the newest threads and older ones the request is about", () => {
+  const thread = (
+    id: string,
+    content: string,
+    decision: string,
+  ): ChannelMemoThread => ({
+    id,
+    kind: "user",
+    content,
+    replies: [{ kind: "outcome", content: decision }],
+  });
+  const threads = [
+    thread(
+      "migration",
+      "the deployment pipeline rewrite",
+      "We decided the migration runner must stay idempotent.",
+    ),
+    thread("icons", "the icon set", "We chose the outline icons."),
+    thread("copy", "the onboarding copy", "We went with the shorter blurb."),
+    thread("colours", "the banner colour", "We settled on the muted teal."),
+    thread("spacing", "the card spacing", "We chose eight point spacing."),
+    thread("newest", "the sidebar width", "We decided on a fixed sidebar."),
+  ];
+  const lines = selectChannelMemo({
+    threads,
+    focus: "make the migration runner idempotent for the new backfill",
+  });
+  const joined = lines.join("\n");
+  // Recency: the last thing the room settled is standing context.
+  assert.ok(joined.includes("fixed sidebar"), joined);
+  assert.ok(joined.includes("eight point spacing"), joined);
+  // Relevance: the decision the request is actually about, from further back.
+  assert.ok(joined.includes("migration runner must stay idempotent"), joined);
+  // Everything unrelated in between stays out.
+  assert.ok(!joined.includes("outline icons"), joined);
+  assert.ok(!joined.includes("shorter blurb"), joined);
+  // Read in the order the room happened.
+  assert.ok(
+    joined.indexOf("migration runner") < joined.indexOf("fixed sidebar"),
+    joined,
+  );
+  // With nothing to score against, recency alone decides.
+  const blind = selectChannelMemo({ threads });
+  assert.ok(!blind.join("\n").includes("migration runner"), blind.join("\n"));
+});
+
+test("selectChannelMemo stays inside its budget and thread cap", () => {
+  const filler = "padding ".repeat(30).trim();
+  const threads = Array.from({ length: 10 }, (_, index) => ({
+    id: `thread-${String(index)}`,
+    kind: "user",
+    content: `topic number ${String(index)} ${filler}`,
+    replies: [
+      {
+        kind: "outcome",
+        content: `We decided on option ${String(index)} ${filler}`,
+      },
+    ],
+  }));
+  const capped = selectChannelMemo({ threads, maxThreads: 1 });
+  assert.equal(capped.length, 1);
+  assert.ok(capped[0]?.includes("option 9"), String(capped[0]));
+  const budgeted = selectChannelMemo({ threads, budgetTokens: 40 });
+  const spent = budgeted.reduce((sum, line) => sum + estimateTokens(line), 0);
+  assert.ok(spent <= 40, `spent ${String(spent)}`);
+  assert.deepEqual(selectChannelMemo({ threads, budgetTokens: 0 }), []);
 });
 
 test("summariseAuditData keeps priority keys first and falls back to other scalar fields", () => {
