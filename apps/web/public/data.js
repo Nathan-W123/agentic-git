@@ -3714,6 +3714,40 @@ export function taskBelongsToAgent(task, agent) {
 }
 
 /**
+ * The agent a task's work belongs to, as a record something can be drawn from.
+ *
+ * The channel's own roster is the good answer, because it carries the name
+ * this room knows the agent by and the colour of whoever owns it. It is also
+ * not always there: `channelAgentsFor` reads whatever `ensureChannelRoster`
+ * has already fetched, and the catch-up digest is drawn the moment somebody
+ * comes back — before that request has resolved on a cold load. A miss used
+ * to mean an unattributed row, or worse, a stand-in bot that named an agent
+ * while showing nothing of it.
+ *
+ * So the fallback is the task's own `agentId`, which names the vendor CLI
+ * that ran the work. It cannot say whose agent it was — that is exactly what
+ * {@link taskBelongsToAgent} exists to decide — so the record it returns
+ * carries no name and no colour, only the vendor, which is enough to draw the
+ * right mark and leaves the caller to label it.
+ */
+export function agentForTask(task, repositoryId = task?.repositoryId) {
+  if (task === undefined) {
+    return undefined;
+  }
+  const known = channelAgentsFor(repositoryId).find((agent) =>
+    taskBelongsToAgent(task, agent),
+  );
+  if (known !== undefined) {
+    return known;
+  }
+  const ran = String(task.agentId ?? "").toLowerCase();
+  const provider = Object.keys(VENDOR_FOR_PROVIDER).find((candidate) =>
+    ran.includes(VENDOR_FOR_PROVIDER[candidate]),
+  );
+  return provider === undefined ? undefined : { id: task.agentId, provider };
+}
+
+/**
  * A stored message in the shape the screens read.
  *
  * The store timestamps records as `createdAt`; everything on this side —

@@ -19,6 +19,7 @@
 import {
   activeChannelId,
   activeTasks,
+  agentForTask,
   agentStatus,
   agentWorkingProgress,
   agentsThinkingIn,
@@ -3872,6 +3873,21 @@ function catchUpLead(summary) {
 }
 
 /**
+ * What to call the agent on a digest pill.
+ *
+ * The name this channel knows it by, where the roster answered — that is the
+ * name the reader has met. Where it did not, the record is the vendor the
+ * task ran on and nothing else, so the vendor's own name is the honest label:
+ * "Claude" says less than "Zeus" but is never somebody else's agent.
+ */
+function agentPillName(agent) {
+  return (
+    String(agent?.name ?? "").trim() ||
+    agentLabelOf(agent?.provider ?? agent?.id)
+  );
+}
+
+/**
  * Work that finished while this person was away, in the same side surface a
  * plan uses rather than in a blocking modal over the whole room.
  *
@@ -3896,7 +3912,6 @@ function catchUpPanel() {
     (entry) => entry.id === catchUp.repositoryId,
   );
   const repositoryName = repository?.name ?? catchUp.repositoryId;
-  const roster = channelAgentsFor(catchUp.repositoryId);
   const workers = new Map();
   let touched = 0;
   const rows = catchUp.tasks
@@ -3906,7 +3921,10 @@ function catchUpPanel() {
         : [];
       const taskRepositoryId = task.repositoryId ?? catchUp.repositoryId;
       touched += changedFiles.length;
-      const worker = roster.find((agent) => taskBelongsToAgent(task, agent));
+      // Resolved from the task itself rather than by scanning the roster
+      // here, so a digest drawn before the roster lands still attributes its
+      // rows to the vendor that ran them instead of to nobody.
+      const worker = agentForTask(task, taskRepositoryId);
       if (worker !== undefined) {
         workers.set(worker.id, worker);
       }
@@ -3928,8 +3946,8 @@ function catchUpPanel() {
             : {
                 icon: "agent",
                 agent: worker,
-                label: worker.name,
-                title: `${worker.name} did this work`,
+                label: agentPillName(worker),
+                title: `${agentPillName(worker)} did this work`,
               },
           changedFiles.length === 0
             ? undefined
@@ -3982,8 +4000,8 @@ function catchUpPanel() {
             ...[...workers.values()].map((worker) => ({
               icon: "agent",
               agent: worker,
-              label: worker.name,
-              title: `${worker.name} completed work while you were away`,
+              label: agentPillName(worker),
+              title: `${agentPillName(worker)} completed work while you were away`,
             })),
             touched === 0
               ? undefined

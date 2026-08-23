@@ -2232,6 +2232,43 @@ test("catch-up pills use each named agent's actual mark", async () => {
   assert.match(catchUpBody, /agent: worker/u);
   assert.match(catchUpBody, /\.\.\.\[\.\.\.workers\.values\(\)\]\.map/u);
   assert.doesNotMatch(catchUpBody, /label: `\$\{String\(workers\.size\)\} agents`/u);
+
+  // Naming an agent is enough: a pill that says it is an agent's takes the
+  // agent's mark even where the record behind it is missing, so there is no
+  // path left that draws a stand-in bot under somebody's name.
+  assert.match(pillBody, /pill\.icon !== "agent"/u);
+
+  // And the bot is gone from the set of rendered objects entirely, so nothing
+  // can reach it again by asking for it by name.
+  const artStart = ui.indexOf("const PILL_ART = {");
+  const art = ui.slice(artStart, ui.indexOf("\n};", artStart));
+  assert.doesNotMatch(art, /^ {2}agent: \{/mu);
+
+  // The row's agent comes from the task, not from a roster scan that answers
+  // "nobody" until the roster has been fetched.
+  assert.match(catchUpBody, /agentForTask\(task, taskRepositoryId\)/u);
+  const data = await publicFile("data.js");
+  assert.match(data, /export function agentForTask\(/u);
+});
+
+test("every provider this deployment connects to has its own mark", async () => {
+  const ui = await publicFile("ui.js");
+  const marksStart = ui.indexOf("const VENDOR_MARKS = {");
+  const marks = ui.slice(marksStart, ui.indexOf("\n};", marksStart));
+  // `generic` is for a vendor this build has never heard of. A provider it
+  // ships a connection for landing there is the anonymous robot showing up
+  // under a name somebody chose, which is the whole complaint these marks
+  // answer.
+  for (const provider of [
+    "anthropic",
+    "openai",
+    "google",
+    "cursor",
+    "copilot",
+    "kiro",
+  ]) {
+    assert.match(marks, new RegExp(`^ {2}${provider}: \``, "mu"));
+  }
 });
 
 test("an agent colour is stored on the account, not in the browser", async () => {
