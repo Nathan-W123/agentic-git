@@ -216,6 +216,21 @@ function usageResetText(window) {
 }
 
 /**
+ * The readable lines a CLI reported that are not percentages.
+ *
+ * Cursor answers its status command with the account, its plan and its
+ * version rather than a quota, so a card that only knows how to draw meters
+ * had nothing to show for a CLI that had just answered. These are the CLI's
+ * own words, capped so one talkative release cannot fill the panel.
+ */
+function usageNoteLines(report) {
+  return (Array.isArray(report?.notes) ? report.notes : [])
+    .filter((note) => typeof note === "string" && note.trim() !== "")
+    .slice(0, 8)
+    .map((note) => note.trim());
+}
+
+/**
  * The plan and any credit balance, which are facts about the account rather
  * than about one window. Codex reports both; the other CLIs report neither,
  * and this renders nothing at all for them rather than an empty row.
@@ -257,10 +272,14 @@ function usageBlock(agent) {
     body = `<span class="rr-usage-empty">Checking usage…</span>`;
   } else if (report.unavailableReason !== undefined) {
     body = `<span class="rr-usage-empty">${esc(report.unavailableReason)}</span>`;
-  } else if ((report.windows ?? []).length === 0) {
+  } else if (
+    (report.windows ?? []).length === 0 &&
+    usageNoteLines(report).length === 0 &&
+    usageAccountLine(report) === ""
+  ) {
     body = `<span class="rr-usage-empty">No usage reported.</span>`;
   } else {
-    body = `${report.windows
+    body = `${(report.windows ?? [])
       .map((window) => {
         const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
         return `<span class="rr-usage-row">
@@ -274,6 +293,9 @@ function usageBlock(agent) {
         }`;
       })
       .join("")}
+      ${usageNoteLines(report)
+        .map((note) => `<span class="rr-usage-plan">${esc(note)}</span>`)
+        .join("")}
       ${
         usageAccountLine(report) === ""
           ? ""
@@ -4509,11 +4531,15 @@ function agentUsage(agent) {
   if (report.unavailableReason !== undefined) {
     return `<div class="aspec-note">${esc(report.unavailableReason)}</div>`;
   }
-  if ((report.windows ?? []).length === 0) {
+  if (
+    (report.windows ?? []).length === 0 &&
+    usageNoteLines(report).length === 0 &&
+    usageAccountLine(report) === ""
+  ) {
     return `<div class="aspec-note">No usage reported.</div>`;
   }
   return `<div class="aspec-usage">
-    ${report.windows
+    ${(report.windows ?? [])
       .map((window) => {
         const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
         return `<div>
@@ -4529,6 +4555,9 @@ function agentUsage(agent) {
           }
         </div>`;
       })
+      .join("")}
+    ${usageNoteLines(report)
+      .map((note) => `<div class="aspec-usage-plan">${esc(note)}</div>`)
       .join("")}
     ${
       usageAccountLine(report) === ""

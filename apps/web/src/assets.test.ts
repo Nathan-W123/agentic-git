@@ -5071,6 +5071,28 @@ test("agent details use the reference profile with supported controls", async ()
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
   assert.match(spec, /const readOnly =/u);
+
+  // Every way of opening the specification asks for a current native usage
+  // snapshot: both the roster entry and returning from chat/history.
+  const app = await browserSource();
+  const openSpec = app.slice(
+    app.indexOf('case "agent-panel-open"'),
+    app.indexOf('case "agent-panel-tab"'),
+  );
+  const returnToSpec = app.slice(
+    app.indexOf('case "agent-panel-tab"'),
+    app.indexOf('case "agent-panel-close"'),
+  );
+  assert.match(
+    openSpec,
+    /refreshProviderUsage\(opened\.provider \?\? opened\.id, render\)/u,
+  );
+  assert.doesNotMatch(openSpec, /ensureProviderUsage/u);
+  assert.match(returnToSpec, /if \(value === "spec"\)/u);
+  assert.match(
+    returnToSpec,
+    /refreshProviderUsage\(opened\.provider \?\? opened\.id, render\)/u,
+  );
 });
 
 test("agent details omit roles while keeping channel membership", async () => {

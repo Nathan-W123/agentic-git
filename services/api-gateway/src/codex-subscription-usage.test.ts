@@ -3,6 +3,9 @@ import test from "node:test";
 
 import {
   normalizeCodexRateLimits,
+  parseCodexStatusOutput,
+  readCodexAppServerSubscriptionUsage,
+  readCodexStatusSubscriptionUsage,
   readCodexSubscriptionUsage,
 } from "./codex-subscription-usage.js";
 
@@ -66,6 +69,51 @@ test("partial and API-key account responses have no subscription snapshot", () =
   );
 });
 
+test("native status output returns a normalized live snapshot", () => {
+  const snapshot = parseCodexStatusOutput(
+    JSON.stringify({
+      status: {
+        usage: {
+          five_hour: {
+            remaining_percent: 91,
+            resets_at: 1_787_000_000,
+          },
+          weekly: {
+            remaining_percentage: "69%",
+            window_minutes: 10_080,
+            reset_at: 1_787_400_000,
+          },
+        },
+        plan_type: "team",
+        credits: { balance: 12.5 },
+      },
+    }),
+  );
+
+  assert.deepEqual(snapshot, {
+    primary: {
+      usedPercent: 9,
+      windowDurationMins: 300,
+      resetsAt: 1_787_000_000,
+    },
+    secondary: {
+      usedPercent: 31,
+      windowDurationMins: 10_080,
+      resetsAt: 1_787_400_000,
+    },
+    planType: "team",
+    credits: { balance: 12.5 },
+    creditBalance: 12.5,
+  });
+  assert.equal(parseCodexStatusOutput("not json"), undefined);
+  assert.equal(
+    parseCodexStatusOutput(
+      JSON.stringify({ five_hour: { remaining_percent: 90 } }),
+    ),
+    undefined,
+  );
+});
+
 const successfulAppServer = String.raw`
 let buffer = "";
 let initialized = false;
@@ -102,7 +150,7 @@ setInterval(() => {}, 1000);
 `;
 
 test("the stdio app-server handshake returns a normalized live snapshot", async () => {
-  const snapshot = await readCodexSubscriptionUsage({
+  const snapshot = await readCodexAppServerSubscriptionUsage({
     command: process.execPath,
     args: ["-e", successfulAppServer],
     timeoutMs: 1_000,
@@ -125,13 +173,13 @@ test("the stdio app-server handshake returns a normalized live snapshot", async 
 });
 
 test("startup failures, malformed output, and timeouts stay unavailable", async () => {
-  const missing = await readCodexSubscriptionUsage({
+  const missing = await readCodexStatusSubscriptionUsage({
     command: `missing-codex-${process.pid}`,
     timeoutMs: 100,
   });
   assert.equal(missing, undefined);
 
-  const malformed = await readCodexSubscriptionUsage({
+  const malformed = await readCodexStatusSubscriptionUsage({
     command: process.execPath,
     args: [
       "-e",
@@ -141,14 +189,51 @@ test("startup failures, malformed output, and timeouts stay unavailable", async 
   });
   assert.equal(malformed, undefined);
 
+  const rejected = await readCodexStatusSubscriptionUsage({
+    command: process.execPath,
+    args: [
+      "-e",
+      `process.stdout.write(${JSON.stringify(
+        JSON.stringify({
+          rate_limits: {
+            primary: { used_percent: 1 },
+            secondary: { used_percent: 2 },
+          },
+        }),
+      )}); process.exit(2);`,
+    ],
+    timeoutMs: 1_000,
+  });
+  assert.equal(rejected, undefined);
+
+  const oversized = await readCodexStatusSubscriptionUsage({
+    command: process.execPath,
+    args: ["-e", 'process.stdout.write("x".repeat(1048577));'],
+    timeoutMs: 1_000,
+  });
+  assert.equal(oversized, undefined);
+
   const startedAt = Date.now();
-  const timedOut = await readCodexSubscriptionUsage({
+  const timedOut = await readCodexStatusSubscriptionUsage({
     command: process.execPath,
     args: ["-e", "setInterval(() => {}, 1000);"],
     timeoutMs: 30,
   });
   assert.equal(timedOut, undefined);
   assert.ok(Date.now() - startedAt < 1_000);
+});
+
+test("status failures retain the app-server fallback", async () => {
+  const snapshot = await readCodexSubscriptionUsage({
+    command: process.execPath,
+    statusArgs: ["-e", "process.exit(2);"],
+    appServerArgs: ["-e", successfulAppServer],
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(snapshot?.primary.usedPercent, 9);
+  assert.equal(snapshot?.secondary.usedPercent, 31);
+  assert.equal(snapshot?.planType, "team");
 });
 
 test("a numeric credit balance is lifted out of the opaque credits object", () => {
