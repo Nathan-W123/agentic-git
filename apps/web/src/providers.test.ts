@@ -2954,6 +2954,41 @@ test("a refusal is not read as a confirmation", () => {
   assert.equal(saysSignedIn("Signed in as nathan@example.com"), true);
 });
 
+test("an API-key connection is told it has no quota, not left guessing", async () => {
+  // The card offered "which is what an API-key account returns" as a
+  // hypothesis to somebody with no way to check it, while the answer sat in
+  // the stored credential the whole time. An API key has no subscription
+  // quota; that closes the question rather than describing a symptom.
+  const harness = await createHarness();
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("key-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-key-user",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    credentials: store,
+    runner: (async (_command: string, args: readonly string[]) =>
+      args[0] === "--version"
+        ? output("codex-cli 0.146.0")
+        : args[0] === "login"
+          ? output("Logged in")
+          : args[0] === "app-server"
+            ? output(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }))
+            : output("", 2, "error: unexpected argument")) as ProcessRunner,
+  });
+
+  const said =
+    (await service.usage({ provider: "openai", userId: "key-user" }))
+      .unavailableReason ?? "";
+  assert.match(said, /signs in with an API key/u);
+  assert.match(said, /OpenAI dashboard/u);
+  // And not the old hedge, which described the situation as a maybe.
+  assert.doesNotMatch(said, /no Codex session has recorded/u);
+});
+
 test("an empty card names what each source answered", async () => {
   // Three rounds of this were spent guessing which step was failing, because
   // every step reports the same nothing. "The app-server replied without rate
