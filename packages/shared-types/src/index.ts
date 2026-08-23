@@ -1140,8 +1140,12 @@ export type AuditEventType =
   | "workspace_collaboration_saved"
   /** A message was posted to a repository's shared group channel. */
   | "channel_message_posted"
+  /** A person's still-unanswered channel message was corrected in place. */
+  | "channel_message_edited"
   /** A threaded reply was posted under a channel message. */
   | "channel_message_replied"
+  /** A person's still-unanswered threaded reply was corrected in place. */
+  | "channel_reply_edited"
   /** A reaction on a channel message was added or removed. */
   | "channel_reaction_toggled"
   /**

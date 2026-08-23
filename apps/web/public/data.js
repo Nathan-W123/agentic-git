@@ -3044,7 +3044,16 @@ export function channelAgentsFor(repositoryId) {
       .filter((entry) => typeof entry.name === "string" && entry.name.length > 0)
       .map((entry) => [
         `${entry.userId}:${entry.provider}`,
-        { name: entry.name, role: entry.role ?? "" },
+        {
+          name: entry.name,
+          role: entry.role ?? "",
+          // These are already resolved by the gateway with the same
+          // specific-over-legacy precedence as the name. Dropping them here
+          // made the profile say "Default" even after a channel had selected
+          // a concrete model and reasoning level.
+          model: entry.model,
+          effort: entry.effort,
+        },
       ]),
   );
   return [...mine, ...others].map((raw) => {
@@ -3068,8 +3077,8 @@ export function channelAgentsFor(repositoryId) {
         ...agent,
         name: server.name,
         role: local?.role ?? server.role,
-        model: local?.model ?? agent.model,
-        effort: local?.effort ?? agent.effort,
+        model: local?.model ?? server.model ?? agent.model,
+        effort: local?.effort ?? server.effort ?? agent.effort,
       };
     }
     // Before the roster resolves — the "paint immediately" floor — and for an
@@ -3324,6 +3333,23 @@ export async function sendDirectMessage(userId, content, referencedMessageId) {
   noteDirectMessage({ message: response.message });
 }
 
+/** Corrects one of the reader's direct messages for both participants. */
+export async function editDirectMessageEntry(userId, messageId, content) {
+  const body = String(content ?? "").trim();
+  if (body === "" || !userId || !messageId) {
+    return undefined;
+  }
+  const response = await api(
+    directPath(
+      `/${encodeURIComponent(userId)}/messages/${encodeURIComponent(messageId)}`,
+    ),
+    { method: "PATCH", body: { content: body } },
+  );
+  noteDirectMessageEdited({ message: response.message });
+  await loadDirectMessages();
+  return response.message;
+}
+
 /** Puts the open conversation back to nothing selected. */
 export function clearDirectMessageSelection() {
   state.dmSelectedMessageId = undefined;
@@ -3395,6 +3421,25 @@ export function noteDirectMessage(frame) {
       (conversation) => conversation.userId !== other,
     ),
   ];
+}
+
+/** Applies a private-message correction echoed to either participant. */
+export function noteDirectMessageEdited(frame) {
+  const message = frame?.message;
+  if (message === undefined) {
+    return;
+  }
+  const me = currentUserId();
+  const other = message.authorId === me ? message.recipientId : message.authorId;
+  state.dmThreads[other] = (state.dmThreads[other] ?? []).map((entry) =>
+    entry.id === message.id ? { ...entry, ...message } : entry,
+  );
+  const conversation = state.dmConversations.find(
+    (entry) => entry.userId === other,
+  );
+  if (conversation?.lastMessage?.id === message.id) {
+    conversation.lastMessage = { ...conversation.lastMessage, ...message };
+  }
 }
 
 /**
@@ -5053,6 +5098,28 @@ export async function deleteChannelMessageEntry(
   return { cancelledTask: response?.cancelledTask === true };
 }
 
+/** Corrects an unanswered channel root without creating a second message. */
+export async function editChannelMessageEntry(repositoryId, messageId, content) {
+  const response = await api(
+    channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}`),
+    { method: "PATCH", body: { content: String(content ?? "").trim() } },
+  );
+  state.channelMessages[repositoryId] = (
+    state.channelMessages[repositoryId] ?? []
+  ).map((entry) =>
+    entry.id === messageId
+      ? { ...entry, content: response.message.content }
+      : entry,
+  );
+  state.channelPins[repositoryId] = (state.channelPins[repositoryId] ?? []).map(
+    (entry) =>
+      entry.id === messageId
+        ? { ...entry, content: response.message.content }
+        : entry,
+  );
+  return response.message;
+}
+
 /**
  * Removes one whole thread from the thread panel.
  *
@@ -5098,6 +5165,37 @@ export async function deleteChannelReplyEntry(repositoryId, messageId, replyId) 
   if (state.threadReplyMessageId === replyId) {
     state.threadReplyMessageId = undefined;
   }
+}
+
+/** Corrects an unanswered reply in place. */
+export async function editChannelReplyEntry(
+  repositoryId,
+  messageId,
+  replyId,
+  content,
+) {
+  const response = await api(
+    channelPath(
+      repositoryId,
+      `/messages/${encodeURIComponent(messageId)}/replies/${encodeURIComponent(replyId)}`,
+    ),
+    { method: "PATCH", body: { content: String(content ?? "").trim() } },
+  );
+  state.channelMessages[repositoryId] = (
+    state.channelMessages[repositoryId] ?? []
+  ).map((entry) =>
+    entry.id === messageId
+      ? {
+          ...entry,
+          replies: (entry.replies ?? []).map((reply) =>
+            reply.id === replyId
+              ? { ...reply, content: response.reply.content }
+              : reply,
+          ),
+        }
+      : entry,
+  );
+  return response.reply;
 }
 
 export async function deleteAllChannelThreads(repositoryId) {
@@ -5333,6 +5431,47 @@ export function canDeleteChannelEntry(repositoryId, entry) {
   return (
     (me !== "" && (authorId === me || authorId.startsWith(`${me}:`))) ||
     canManageRepository(repositoryId)
+  );
+}
+
+/**
+ * Whether editing would still be an honest correction rather than rewriting
+ * a prompt somebody (or an agent) has already acted on.
+ *
+ * The server repeats this check against durable history. This client copy is
+ * only for keeping an inevitably-refused pencil out of the action row.
+ */
+export function canEditChannelEntry(repositoryId, entry) {
+  const me = currentUserId();
+  if (
+    entry === undefined ||
+    entry.kind !== "user" ||
+    entry.authorId !== me ||
+    entry.deletedAt !== undefined ||
+    !isServerChannelId(repositoryId, entry.id)
+  ) {
+    return false;
+  }
+  const roots = channelMessagesFor(repositoryId);
+  const root =
+    entry.messageId === undefined
+      ? entry
+      : roots.find((message) => message.id === entry.messageId);
+  if (
+    root === undefined ||
+    root.taskId !== undefined ||
+    (entry.messageId === undefined && (root.replies ?? []).length > 0) ||
+    (entry.messageId !== undefined &&
+      (root.replies ?? []).at(-1)?.id !== entry.id)
+  ) {
+    return false;
+  }
+  return !roots.some(
+    (message) =>
+      message.referencedMessageId === entry.id ||
+      (message.replies ?? []).some(
+        (reply) => reply.referencedMessageId === entry.id,
+      ),
   );
 }
 

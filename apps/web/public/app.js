@@ -17,6 +17,7 @@ import {
   TYPING_SWEEP_MS,
   noteAgentBusy,
   noteDirectMessage,
+  noteDirectMessageEdited,
   noteDirectMessageDeleted,
   ensureDirectMessages,
   loadChannelStats,
@@ -83,6 +84,9 @@ import {
   deleteChannelReplyEntry,
   deleteChannelThread,
   deleteDirectMessageEntry,
+  editChannelMessageEntry,
+  editChannelReplyEntry,
+  editDirectMessageEntry,
   loadPreview,
   rollbackTask,
   setAuditorPaused,
@@ -2048,6 +2052,88 @@ async function deleteDirectMessageAction(userId, messageId) {
   }
   try {
     await deleteDirectMessageEntry(userId, messageId);
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/** One compact editor shared by channel roots, replies, and direct messages. */
+async function messageEditValue(
+  content,
+  { agentAware = false, maxLength = 10_000 } = {},
+) {
+  const values = await showModal({
+    title: "Edit message",
+    subtitle: agentAware
+      ? "You can correct it until somebody replies or an agent starts acting on it."
+      : "The correction appears for everyone in this conversation.",
+    confirm: "Save",
+    body: `<label class="field">
+        <span>Message</span>
+        <textarea class="input" name="content" rows="6" maxlength="${String(maxLength)}"
+          required autofocus>${esc(String(content ?? ""))}</textarea>
+      </label>`,
+  });
+  const next = String(values?.content ?? "").trim();
+  return values === undefined || next === "" ? undefined : next;
+}
+
+async function editChannelMessageAction(repositoryId, messageId) {
+  const message = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === messageId,
+  );
+  if (message === undefined) {
+    return;
+  }
+  const content = await messageEditValue(message.content, { agentAware: true });
+  if (content === undefined || content === String(message.content ?? "").trim()) {
+    return;
+  }
+  try {
+    await editChannelMessageEntry(repositoryId, messageId, content);
+    toast("Message updated", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function editChannelReplyAction(repositoryId, messageId, replyId) {
+  const root = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === messageId,
+  );
+  const reply = (root?.replies ?? []).find((entry) => entry.id === replyId);
+  if (reply === undefined) {
+    return;
+  }
+  const content = await messageEditValue(reply.content, { agentAware: true });
+  if (content === undefined || content === String(reply.content ?? "").trim()) {
+    return;
+  }
+  try {
+    await editChannelReplyEntry(repositoryId, messageId, replyId, content);
+    toast("Message updated", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function editDirectMessageAction(userId, messageId) {
+  const message = (state.dmThreads[userId] ?? []).find(
+    (entry) => entry.id === messageId,
+  );
+  if (message === undefined) {
+    return;
+  }
+  const content = await messageEditValue(message.content, { maxLength: 8_000 });
+  if (content === undefined || content === String(message.content ?? "").trim()) {
+    return;
+  }
+  try {
+    await editDirectMessageEntry(userId, messageId, content);
+    toast("Message updated", "ok");
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -5717,71 +5803,18 @@ function selectDirectMessage(event) {
     return;
   }
   state.dmSelectedMessageId = next;
-  render();
+  // Selecting a message only changes two classes. Rebuilding the whole app
+  // here also replaces the conversation's scroller; when another side panel
+  // precedes this one, that scroller has no captured anchor and starts again
+  // at the first message. Keep the durable choice in state for later polls,
+  // and paint this interaction on the existing rows.
+  for (const selected of document.querySelectorAll(".dm-msg.dm-selected")) {
+    selected.classList.remove("dm-selected");
+  }
+  if (next !== undefined) {
+    row.classList.add("dm-selected");
+  }
 }
-
-/**
- * Moves one shared desktop hover surface to the message under the pointer.
- *
- * Painting every row's own background makes the highlight disappear from one
- * message and appear on the next. Keeping one surface in the transcript lets
- * CSS interpolate its position and height instead, including between compact
- * and full message rows. Touch keeps the selected-row interaction above and
- * reduced-motion readers keep the surface without its travel animation.
- */
-function positionChannelMessageHoverHighlight(event) {
-  if (!window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
-    return;
-  }
-  const row =
-    event.target.closest?.(
-      "#chan-messages > .cmsg-row:not(.cmsg-system)",
-    ) ?? null;
-  const list = row?.parentElement ?? null;
-  if (row === null || list?.id !== "chan-messages") {
-    return;
-  }
-
-  let highlight = list.querySelector(":scope > .cmsg-hover-highlight");
-  if (highlight === null) {
-    highlight = document.createElement("div");
-    highlight.className = "cmsg-hover-highlight";
-    highlight.setAttribute("aria-hidden", "true");
-    list.append(highlight);
-  }
-  highlight.style.setProperty("--cmsg-hover-x", `${row.offsetLeft}px`);
-  highlight.style.setProperty("--cmsg-hover-y", `${row.offsetTop}px`);
-  highlight.style.setProperty("--cmsg-hover-width", `${row.offsetWidth}px`);
-  highlight.style.setProperty("--cmsg-hover-height", `${row.offsetHeight}px`);
-  highlight.classList.add("is-visible");
-}
-
-/** Hides the shared surface only after the pointer leaves message rows. */
-function clearChannelMessageHoverHighlight(event) {
-  const row =
-    event.target.closest?.(
-      "#chan-messages > .cmsg-row:not(.cmsg-system)",
-    ) ?? null;
-  const list = row?.parentElement ?? null;
-  if (row === null || list?.id !== "chan-messages") {
-    return;
-  }
-  const nextRow =
-    event.relatedTarget?.closest?.(
-      "#chan-messages > .cmsg-row:not(.cmsg-system)",
-    ) ?? null;
-  // Moving directly to another message leaves the surface alive so the next
-  // mouseover changes its geometry and CSS can animate from the old row.
-  if (nextRow?.parentElement === list) {
-    return;
-  }
-  list
-    .querySelector(":scope > .cmsg-hover-highlight")
-    ?.classList.remove("is-visible");
-}
-
-document.addEventListener("mouseover", positionChannelMessageHoverHighlight);
-document.addEventListener("mouseout", clearChannelMessageHoverHighlight);
 
 document.addEventListener("click", (event) => {
   // This runs before action lookup because an ordinary message body has no
@@ -6375,6 +6408,14 @@ document.addEventListener("click", (event) => {
     case "channel-message-delete":
       void deleteChannelMessageAction(activeChannelId(), value);
       return;
+    case "channel-message-edit":
+      void editChannelMessageAction(activeChannelId(), value);
+      return;
+    case "thread-reply-edit": {
+      const [rootId = "", replyId = ""] = value.split("|");
+      void editChannelReplyAction(activeChannelId(), rootId, replyId);
+      return;
+    }
     case "thread-reply-delete": {
       // `rootId|replyId`: deleting a reply is a write against the thread it
       // lives in, and the row only ever carries one value.
@@ -6385,6 +6426,11 @@ document.addEventListener("click", (event) => {
     case "dm-delete":
       if (state.activeDm !== undefined) {
         void deleteDirectMessageAction(state.activeDm, value);
+      }
+      return;
+    case "dm-edit":
+      if (state.activeDm !== undefined) {
+        void editDirectMessageAction(state.activeDm, value);
       }
       return;
     case "channel-threads-clear":
@@ -8639,6 +8685,16 @@ async function boot() {
           { method: "POST" },
         ).catch(() => undefined);
       }
+      if (!renameFieldFocused()) {
+        render();
+      }
+      return;
+    }
+    // A correction replaces the existing bubble for both participants. It is
+    // not a new message and must not increment unread counts or replay the
+    // arrival animation.
+    if (frame?.type === "direct-message-edited") {
+      noteDirectMessageEdited(frame);
       if (!renameFieldFocused()) {
         render();
       }

@@ -23,6 +23,7 @@ import {
   agentWorkingProgress,
   agentsThinkingIn,
 api,
+  canEditChannelEntry,
   canDeleteChannelEntry,
   canDeleteRepository,
   canLeaveRepository,
@@ -96,8 +97,6 @@ import {
   iconButton,
   imeComposing,
   emptyState,
-  miniEditable,
-  miniSelect,
   pillBar,
   relativeTime,
   showPopover,
@@ -255,7 +254,22 @@ function usageAccountLine(report) {
 }
 
 /**
- * Whose account a usage question is about, or nothing for your own.
+ * The provider an agent's usage is filed under.
+ *
+ * The vendor id alone — never the agent id. Only this account's own agents
+ * are keyed by a bare provider; everywhere else an agent arrives as the
+ * server's `<userId>:<provider>` composite, and asking the usage route for
+ * that composite is a path it does not have, which came back as "Route was
+ * not found" printed where a percentage belongs. One helper because the card
+ * and the specification both need the answer and must not drift apart on it.
+ */
+function usageProviderId(agent) {
+  return agent?.provider ?? String(agent?.id ?? "").split(":").at(-1) ?? "";
+}
+
+/**
+ * The usage figures for one of this account's own agents, as one section of
+ * its profile card.
  *
  * A teammate's agent used to be skipped entirely, because the route reported
  * the *caller's* account and showing that beside somebody else's agent would
@@ -275,8 +289,10 @@ function usageOwner(agent) {
  * "Checking…" and every later one is instant.
  */
 function usageBlock(agent) {
-  const report =
-    state.providerUsage[usageKey(agent.id, usageOwner(agent))];
+  if (agent.mine !== true) {
+    return "";
+  }
+  const report = state.providerUsage[usageProviderId(agent)];
   let body;
   if (report === undefined || report.loading === true) {
     body = `<span class="rr-usage-empty">Checking usage…</span>`;
@@ -376,52 +392,24 @@ function personRecord(repositoryId, userId) {
 function agentProfile(agent, repositoryId) {
   const status = agentStatus(agent, repositoryId);
   const progress = agentWorkingProgress(agent, repositoryId);
-  const providerId = agent.provider ?? agent.id;
-  const owner =
-    agent.mine === true
-      ? "Your agent"
-      : `${memberName(agent.userId ?? "")}'s agent`;
-  // The work it has in hand, preferring this room's but never calling an agent
-  // idle while it is visibly busy in another channel — the same order
-  // `agentSpec` resolves in.
-  const agentTasks = [...activeTasks(), ...waitingTasks()].filter((candidate) =>
-    taskBelongsToAgent(candidate, agent),
-  );
-  const task =
-    agentTasks.find((candidate) => candidate.repositoryId === repositoryId) ??
-    agentTasks[0];
-  const facts = [];
-  if (task !== undefined) {
-    const taskRepositoryId = task.repositoryId ?? repositoryId;
-    facts.push({
-      // Only what is true of it right now. A queued task described as work in
-      // hand is the one line on this card somebody would act on and be wrong.
-      label: status === "working" ? "Working on" : "Waiting to start",
-      value: taskSummaryLine(
-        task,
-        channelMessagesFor(taskRepositoryId).find(
-          (entry) => entry.taskId === task.id,
-        ),
-      ),
-    });
-  }
-  facts.push({
-    label: "Role here",
-    value: String(agent.role ?? "").trim() || "No role set",
-  });
-  facts.push({ label: "Model", value: String(agent.model ?? "").trim() || "Default" });
-  facts.push({
-    label: "Who may task it",
-    value: agent.visibility === "org" ? "Anyone in the org" : "Only its owner",
-  });
+  const providerId = usageProviderId(agent);
+  // A hover card is identification, not the full settings page. Keep the two
+  // execution choices people compare at a glance and leave role, task/path,
+  // ownership and access policy to the profile opened from the button below.
+  // The exact stored id is shown rather than replacing it with a provider
+  // name or the ambiguous word "Default".
+  const model = String(agent.model ?? "").trim();
+  const effort = String(agent.effort ?? "").trim();
+  const facts = [
+    { label: "Model", value: model || "Not reported" },
+    { label: "Reasoning", value: effort || "Provider default" },
+  ];
   return {
     kind: "agent",
     name: agent.name,
     face: statusAgentFace(agent, 52, repositoryId),
     accent: safeAccent(agent.color),
-    // The vendor behind it and whose account pays for it: the two facts that
-    // decide what an agent can be asked for, said before anything else.
-    subtitle: `${agentLabelOf(providerId)} · ${owner}`,
+    subtitle: agentLabelOf(providerId),
     status,
     statusText:
       status === "working" && Number.isFinite(progress)
@@ -429,6 +417,11 @@ function agentProfile(agent, repositoryId) {
         : (AGENT_STATUS_TITLE[status] ?? ""),
     facts,
     usage: usageBlock(agent),
+    // What the card's usage section is keyed by, so whatever draws the face
+    // can start the fetch that fills it. Only for one's own agent: the route
+    // answers for the caller's account, and asking it for a teammate's agent
+    // spends a request whose answer this card would never show.
+    ...(agent.mine === true ? { usageProviderId: providerId } : {}),
     action: {
       act: "agent-panel-open",
       value: String(agent.id ?? ""),
@@ -1230,19 +1223,20 @@ function rosterRow(agent) {
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
       ${
         // `data-hover` is what starts the usage fetch the card's own section
-        // reads — see `requestUsageForHoverTarget` in app.js.
+        // reads — see `requestUsageForHoverTarget` in app.js. Keyed by the
+        // vendor, not the agent, and only for one's own agent: the route
+        // reports the caller's account and refuses anything else.
         profileAnchor(
           agentProfile(agent, activeChannelId()),
           "rr-avatar",
           "down",
           statusAgentFace(agent, 22, activeChannelId()),
-          {
-            "data-hover": "agent-usage",
-            "data-hover-value": agent.id,
-            ...(usageOwner(agent) === undefined
-              ? {}
-              : { "data-hover-owner": usageOwner(agent) }),
-          },
+          agent.mine === true
+            ? {
+                "data-hover": "agent-usage",
+                "data-hover-value": usageProviderId(agent),
+              }
+            : {},
         )
       }
       <span class="rr-body">
@@ -2331,6 +2325,16 @@ function identityWrap(identity, content, withCard = false) {
     ...(action === undefined
       ? {}
       : { role: "button", "data-act": action.act, "data-value": action.value }),
+    // A face in the transcript opens the same card the roster's does, so it
+    // has to start the same fetch: without this the usage section sat on
+    // "Checking usage…" for as long as the card was open, because nothing
+    // had asked.
+    ...(withCard !== true || identity.usageProviderId === undefined
+      ? {}
+      : {
+          "data-hover": "agent-usage",
+          "data-hover-value": identity.usageProviderId,
+        }),
   };
   // The card hangs off the face and not off the name as well. Both are the
   // same anchor and either would carry it, but a transcript draws this markup
@@ -2645,6 +2649,22 @@ function messageRow(
               title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
               small: true,
             })
+      }
+      ${
+        canEditChannelEntry(repositoryId, entry)
+          ? iconButton("pencil", {
+              act:
+                entry.messageId === undefined
+                  ? "channel-message-edit"
+                  : "thread-reply-edit",
+              value:
+                entry.messageId === undefined
+                  ? entry.id
+                  : `${entry.messageId}|${entry.id}`,
+              title: "Edit message",
+              small: true,
+            })
+          : ""
       }
       ${
         // Delete, in the same quiet set as the rest. Its own words or a
@@ -4537,14 +4557,10 @@ function agentChannelAssignments(agent, repositoryId) {
 }
 
 function agentUsage(agent) {
-  // No longer refused here. An agent whose connection is org-wide is one
-  // anybody in the room may put to work, and how much of its quota is left
-  // decides whether doing so accomplishes anything. The service still
-  // withholds a personal connection's figures, and says so in its own words.
-  const report =
-    state.providerUsage[
-      usageKey(agent.provider ?? agent.id, usageOwner(agent))
-    ];
+  if (agent.mine !== true) {
+    return `<div class="aspec-note">Usage is private to the agent's owner.</div>`;
+  }
+  const report = state.providerUsage[usageProviderId(agent)];
   if (report === undefined || report.loading === true) {
     return `<div class="aspec-note">Checking usage…</div>`;
   }
@@ -4614,24 +4630,6 @@ function agentSpec(agent, repositoryId) {
   const allChannelsLoaded = state.repositories.every((repository) =>
     state.channelRosterLoaded.has(repository.id),
   );
-  // The reference treats configuration as a short set of integrations rather
-  // than a settings table. The controls stay in place, but each value now reads
-  // as one compact connection chip beneath the profile introduction.
-  const configurationChip = (label, control, title = "") =>
-    `<div class="aspec-chip"${title === "" ? "" : ` title="${esc(title)}"`}>
-      <span class="aspec-chip-label">${esc(label)}</span>
-      <span class="aspec-chip-value">${control}</span>
-    </div>`;
-  const readOnly = (value) =>
-    `<span class="aspec-chip-text">${esc(value)}</span>`;
-  const channelAssignment = (repository) => `<div
-    class="aspec-capability aspec-channel">
-    <span class="aspec-capability-mark">${icon("check")}</span>
-    <span class="aspec-capability-copy">
-      <span class="aspec-capability-title">#${esc(repository.id)}</span>
-      <span class="aspec-capability-meta">Channel membership</span>
-    </span>
-  </div>`;
   // Model and reasoning are the agent's own credential spending its owner's
   // account, so only that owner picks them; a teammate reads what was chosen.
   const providerId = agent.provider ?? agent.id;
@@ -4642,76 +4640,81 @@ function agentSpec(agent, repositoryId) {
       ? providerEffortOptions(providerId, currentAssignment.model ?? "")
       : [];
   const optionsNote = agent.mine === true ? providerOptionsNote(providerId) : "";
-  // No list is not the same as no choice. Codex reports models from a cache
-  // its CLI writes locally, and where that file is absent the server sends an
-  // empty list beside `allowCustomModel` — which this row used to answer with
-  // a read-only "Default", leaving the model unchangeable on exactly the
-  // provider that needed naming most.
-  const customModel =
-    agent.mine === true && providerAllowsCustomModel(providerId);
-  // Personal or org-wide. Unlike the two rows under it this is not a channel
-  // override at all — it is the stored credential's own field, so the answer
-  // is the same in every room and only its owner may change it. It sits with
-  // Connection above the per-channel settings for that reason, and says so in
-  // the chip's tooltip rather than in another line of prose.
   const visibility = agent.visibility === "org" ? "org" : "personal";
-  const configuration = `<div class="aspec-chip-grid" data-agent="${esc(agent.id)}">
-      ${configurationChip("Connection", readOnly(agentLabelOf(providerId)), providerId)}
-      ${configurationChip(
-        "Visibility",
-        agent.mine === true
-          ? miniSelect(
-              "channel-agent-visibility",
-              [
-                { value: "personal", label: "Only me" },
-                { value: "org", label: "Anyone in the org" },
-              ],
-              visibility,
-              "Who may @mention this agent to submit work",
-            )
-          : readOnly(
-              visibility === "org" ? "Anyone in the org" : "Only its owner",
-            ),
-        `Set on the connection, so it applies wherever this agent works — not just #${repositoryId}`,
-      )}
-      ${configurationChip(
-        "Model",
-        models.length > 0
-          ? miniSelect(
-              "channel-agent-model",
-              models,
-              currentAssignment.model ?? "",
-              "Model in this channel",
-            )
-          : customModel
-            ? miniEditable(
-                "channel-agent-model",
-                currentAssignment.model ?? "",
-                "Default",
-                "Model in this channel. Nothing lists what this account may " +
-                  "use, so a model id typed here is passed through as given; " +
-                  "empty runs the CLI's own default.",
-              )
-            : readOnly(currentAssignment.model || "Default"),
-      )}
-      ${configurationChip(
-        "Reasoning",
-        efforts.length === 0
-          ? readOnly(currentAssignment.effort || "Default")
-          : miniSelect(
-              "channel-agent-effort",
-              efforts,
-              currentAssignment.effort ?? "",
-              "Reasoning effort in this channel",
-            ),
-      )}
-    </div>`;
-  // The room the panel was opened from is already the whole first section, so
-  // it is not repeated in the list underneath it; that list is only "and here
-  // is everywhere else this agent works".
-  const elsewhere = assignments.filter(
-    ({ repository }) => repository.id !== repositoryId,
-  );
+  // These are intentionally ordinary selects. Their option menu, keyboard
+  // behaviour and focus treatment stay native; the field around each one
+  // provides the profile's visual hierarchy.
+  const nativeSelect = (act, options, current, label) => {
+    const value = String(current ?? "");
+    const known = options.some((option) => option.value === value);
+    const shown =
+      value !== "" && !known
+        ? [{ value, label: `${value} (set)` }, ...options]
+        : options;
+    const placeholder =
+      value === ""
+        ? `<option value="" selected>Provider default</option>`
+        : "";
+    return `<select class="aspec-native-select" data-act="${esc(act)}"
+      aria-label="${esc(label)}">${placeholder}${shown
+        .map(
+          (option) => `<option value="${esc(option.value)}"${
+            option.value === value ? " selected" : ""
+          }>${esc(option.label)}</option>`,
+        )
+        .join("")}</select>`;
+  };
+  const readOnly = (value) =>
+    `<span class="aspec-field-value">${esc(value || "Not reported")}</span>`;
+  const field = (label, control, hint = "") => `<label class="aspec-field">
+    <span class="aspec-field-label">${esc(label)}</span>
+    ${control}
+    ${hint === "" ? "" : `<span class="aspec-field-hint">${esc(hint)}</span>`}
+  </label>`;
+  const modelValue = String(currentAssignment.model ?? "").trim();
+  const effortValue = String(currentAssignment.effort ?? "").trim();
+  const settings = `<div class="aspec-settings" data-agent="${esc(agent.id)}">
+    ${field(
+      "Model",
+      agent.mine === true && models.length > 0
+        ? nativeSelect(
+            "channel-agent-model",
+            models,
+            modelValue,
+            "Model in this channel",
+          )
+        : readOnly(modelValue),
+      "Used for work in this channel",
+    )}
+    ${field(
+      "Reasoning",
+      agent.mine === true && efforts.length > 0
+        ? nativeSelect(
+            "channel-agent-effort",
+            efforts,
+            effortValue,
+            "Reasoning effort in this channel",
+          )
+        : readOnly(effortValue || "Provider default"),
+      "Thinking depth for new work",
+    )}
+    ${field(
+      "Visibility",
+      agent.mine === true
+        ? nativeSelect(
+            "channel-agent-visibility",
+            [
+              { value: "personal", label: "Only me" },
+              { value: "org", label: "Anyone in the org" },
+            ],
+            visibility,
+            "Who may use this agent",
+          )
+        : readOnly(visibility === "org" ? "Organization" : "Owner only"),
+      "Applies in every channel",
+    )}
+    ${field("Connection", readOnly(agentLabelOf(providerId)), providerId)}
+  </div>`;
   // Same doorway as a history row: the live assignment opens its thread.
   // Idle ("Available for new work") stays inert — there is nowhere to go.
   const openCurrentTask =
@@ -4719,101 +4722,122 @@ function agentSpec(agent, repositoryId) {
       ? ""
       : ` role="button" tabindex="0" data-act="channel-thread-open"
           data-value="${esc(taskMessage.id)}" title="Open this task's thread"`;
-  return `<div class="agent-spec">
+  const accent = safeAccent(agent.color);
+  const channels =
+    assignments.length > 0
+      ? assignments.map(({ repository }) => repository)
+      : [{ id: repositoryId }];
+  const progress = agentWorkingProgress(agent, repositoryId);
+  const statusText =
+    status === "working" && Number.isFinite(progress)
+      ? `${AGENT_STATUS_TITLE[status]} · ${Math.round(progress)}%`
+      : (AGENT_STATUS_TITLE[status] ?? "");
+  return `<div class="agent-spec"${
+    accent === undefined ? "" : ` style="--aspec-accent:${accent}"`
+  }>
     <div class="aspec-content">
-      <section class="aspec-head">
-        <span class="aspec-face">
-          ${statusAgentFace(agent, 68, repositoryId)}
-        </span>
-        <h2>${esc(agent.name)}</h2>
-        <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
-          repositoryId,
-        )}${agent.mine ? " · Your agent" : ""}</div>
-        <p class="aspec-description">${esc(agentLabelOf(providerId))} agent ${
-          agent.mine ? "connected to your account" : "shared with this channel"
-        }.</p>
-        <div class="aspec-actions">
-          ${
-            canChatPrivately
-              ? `<button type="button" class="aspec-action aspec-action-primary"
-                  data-act="agent-panel-tab" data-value="chat">
-                  ${icon("chatBubble")}<span>Message</span></button>`
-              : ""
-          }
-          <button type="button" class="aspec-action" data-act="agent-panel-tab"
-            data-value="history">${icon("history")}<span>History</span></button>
-        </div>
-      </section>
-
-      <section class="aspec-section">
-        <h3 class="aspec-label">Works with</h3>
-        ${configuration}
-        ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
-      </section>
-
-      <section class="aspec-section">
-        <h3 class="aspec-label">Capabilities</h3>
-        <div class="aspec-capabilities">
-          <div class="aspec-capability aspec-current-task${
-            task === undefined ? "" : " aspec-current-task-active"
-          }"${openCurrentTask}>
-            <span class="aspec-capability-mark">${icon("check")}</span>
-            <span class="aspec-capability-copy">
-              <span class="aspec-capability-title">${
-                task === undefined
-                  ? "Available for new work"
-                  : esc(taskSummaryLine(task, taskMessage))
-              }</span>
-              <span class="aspec-capability-meta">${
-                task === undefined
-                  ? `No task is running in #${esc(repositoryId)}`
-                  : `${esc(
-                      String(task.status ?? "working").replaceAll("_", " "),
-                    )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}`
-              }</span>
-            </span>
+      <section class="aspec-identity-card">
+        <div class="aspec-banner"></div>
+        <div class="aspec-identity-body">
+          <span class="aspec-face">${statusAgentFace(agent, 76, repositoryId)}</span>
+          <h2>${esc(agent.name)}</h2>
+          <div class="aspec-handle">${esc(agentLabelOf(providerId))}</div>
+          <div class="aspec-status">
+            <span class="status-dot status-${esc(status)}"></span>${esc(statusText)}
+          </div>
+          <div class="aspec-actions">
+            ${
+              canChatPrivately
+                ? `<button type="button" class="aspec-action aspec-action-primary"
+                    data-act="agent-panel-tab" data-value="chat">
+                    ${icon("chatBubble")}<span>Message</span></button>`
+                : ""
+            }
+            <button type="button" class="aspec-action" data-act="agent-panel-tab"
+              data-value="history">${icon("history")}<span>History</span></button>
+          </div>
+          <div class="aspec-profile-facts">
+            <div><span>Channel</span><strong>#${esc(repositoryId)}</strong></div>
+            <div><span>Profile</span><strong>${
+              agent.mine
+                ? "Your connected agent"
+                : `${esc(memberName(agent.userId ?? ""))}'s agent`
+            }</strong></div>
           </div>
         </div>
       </section>
 
-      ${
-        elsewhere.length === 0 && allChannelsLoaded
-          ? ""
-          : `<section class="aspec-section">
-              <div class="aspec-label-row">
-                <h3 class="aspec-label">Also in</h3>
-                <span class="aspec-count">${elsewhere.length}</span>
-              </div>
-              ${
-                elsewhere.length === 0
-                  ? ""
-                  : `<div class="aspec-capabilities aspec-channels">
-                      ${elsewhere
-                        .map(({ repository }) => channelAssignment(repository))
-                        .join("")}
-                    </div>`
-              }
-              ${
-                allChannelsLoaded
-                  ? ""
-                  : `<div class="aspec-note">Checking remaining channels…</div>`
-              }
-            </section>`
-      }
+      <div class="aspec-main">
+        <section class="aspec-pane aspec-activity-pane">
+          <h3 class="aspec-pane-title">Activity</h3>
+          <div class="aspec-activity${task === undefined ? "" : " is-active"}"${openCurrentTask}>
+            <span class="aspec-activity-mark">${icon(
+              task === undefined ? "check" : "robot",
+            )}</span>
+            <span class="aspec-activity-copy">
+              <strong>${
+                task === undefined
+                  ? "Available for new work"
+                  : esc(taskSummaryLine(task, taskMessage))
+              }</strong>
+              <span>${
+                task === undefined
+                  ? `Nothing running in #${esc(repositoryId)}`
+                  : `${esc(String(task.status ?? "working").replaceAll("_", " "))} · #${esc(
+                      taskRepositoryId,
+                    )} · ${esc(relativeTime(task.submittedAt))}`
+              }</span>
+            </span>
+          </div>
+        </section>
 
-      <section class="aspec-section aspec-usage-section">
-        <div class="aspec-label-row">
-          <h3 class="aspec-label">Usage</h3>
-          ${iconButton("refresh", {
-            act: "agent-usage-refresh",
-            value: providerId,
-            title: "Check usage again",
-            small: true,
-            data: { owner: usageOwner(agent) ?? "" },
-          })}
+        <section class="aspec-pane aspec-settings-pane">
+          <div class="aspec-pane-head">
+            <h3 class="aspec-pane-title">Agent settings</h3>
+            ${agent.mine === true ? `<span class="aspec-editing">Editable</span>` : ""}
+          </div>
+          ${settings}
+          ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
+        </section>
+
+        <div class="aspec-bottom-grid">
+          <section class="aspec-pane aspec-channels-pane">
+            <div class="aspec-pane-head">
+              <h3 class="aspec-pane-title">Channels</h3>
+              <span class="aspec-count">${channels.length}</span>
+            </div>
+            <div class="aspec-channel-list">${channels
+              .map(
+                (repository) => `<span class="aspec-channel-chip">#${esc(
+                  repository.id,
+                )}</span>`,
+              )
+              .join("")}</div>
+            ${
+              allChannelsLoaded
+                ? ""
+                : `<div class="aspec-note">Checking remaining channels…</div>`
+            }
+          </section>
+
+          <section class="aspec-pane aspec-usage-section">
+            <div class="aspec-pane-head">
+              <h3 class="aspec-pane-title">Usage</h3>
+              ${
+                agent.mine === true
+                  ? iconButton("refresh", {
+                      act: "agent-usage-refresh",
+                      value: providerId,
+                      title: "Check usage again",
+                      small: true,
+                    })
+                  : ""
+              }
+            </div>
+            <div class="aspec-usage-card">${agentUsage(agent)}</div>
+          </section>
         </div>
-        <div class="aspec-usage-card">${agentUsage(agent)}</div>
-      </section>
+      </div>
     </div>
   </div>`;
 }
@@ -5080,12 +5104,17 @@ function dmPanel() {
                     // here are the whole audience, so unsending takes it off
                     // both screens and leaves nothing to explain.
                     mine
-                      ? iconButton("trash", {
-                          act: "dm-delete",
+                      ? `${iconButton("pencil", {
+                          act: "dm-edit",
                           value: message.id,
-                          title: "Delete this message",
+                          title: "Edit message",
                           small: true,
-                        })
+                        })}${iconButton("trash", {
+                            act: "dm-delete",
+                            value: message.id,
+                            title: "Delete this message",
+                            small: true,
+                          })}`
                       : ""
                   }</span>
                   <time class="dm-time">${esc(clockTime(message.createdAt))}</time>

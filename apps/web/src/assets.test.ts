@@ -3435,53 +3435,23 @@ test("channel messages compact only an uninterrupted run from one person", async
   );
 });
 
-test("desktop channel message hover uses one smoothly moving highlight", async () => {
+test("desktop channel messages use the sidebar's ordinary row hover", async () => {
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
 
-  assert.match(
-    app,
-    /function positionChannelMessageHoverHighlight\(event\)[\s\S]*?\(hover: hover\) and \(pointer: fine\)[\s\S]*?#chan-messages > \.cmsg-row:not\(\.cmsg-system\)[\s\S]*?--cmsg-hover-y[\s\S]*?row\.offsetTop/u,
-    "desktop hover should position a shared surface from the active row",
-  );
-  assert.match(
-    app,
-    /function clearChannelMessageHoverHighlight\(event\)[\s\S]*?event\.relatedTarget[\s\S]*?nextRow\?\.parentElement === list[\s\S]*?return;[\s\S]*?classList\.remove\("is-visible"\)/u,
-    "moving between rows should preserve the surface while leaving clears it",
-  );
-  assert.match(
-    app,
-    /document\.addEventListener\("mouseover", positionChannelMessageHoverHighlight\);/u,
-  );
-  assert.match(
-    app,
-    /document\.addEventListener\("mouseout", clearChannelMessageHoverHighlight\);/u,
-  );
+  assert.doesNotMatch(app, /ChannelMessageHoverHighlight/u);
+  assert.doesNotMatch(css, /\.cmsg-hover-highlight/u);
 
-  const highlight = /\.cmsg-hover-highlight \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.notEqual(highlight, undefined, "the shared hover surface should exist");
-  assert.match(highlight ?? "", /background: var\(--bg-hover\);/u);
+  const row = /\.cmsg-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(row ?? "", /transition: background 0\.13s ease;/u);
   assert.match(
-    highlight ?? "",
-    /transform: translate3d\([\s\S]*?var\(--cmsg-hover-y, 0\)/u,
-  );
-  assert.match(
-    highlight ?? "",
-    /transform 0\.18s cubic-bezier\(0\.2, 0\.8, 0\.2, 1\)/u,
-    "the same surface should travel rather than teleport between rows",
-  );
-  assert.doesNotMatch(
     css,
-    /\.cmsg-row:hover \{\s*background:/u,
-    "individual rows should no longer repaint their own desktop hover",
+    /@media \(hover: hover\) \{\s*\.cmsg-row:not\(\.cmsg-system\):hover \{[\s\S]*?background: var\(--bg-hover\);/u,
+    "each message should paint the same simple hover ground as a sidebar row",
   );
   assert.match(
     css,
-    /@media \(hover: none\) \{[\s\S]*?\.cmsg-hover-highlight \{\s*display: none;/u,
-  );
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.cmsg-hover-highlight \{\s*transition: none;/u,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.cmsg-row \{\s*transition: none;/u,
   );
 });
 
@@ -4951,18 +4921,18 @@ test("the spec tab is where an agent is made org-wide or kept personal", async (
   // was only offered while pasting a credential, which left an agent
   // connected as personal personal forever.
   assert.notEqual(handlerStart, -1);
-  assert.match(spec, /miniSelect\(\s*"channel-agent-visibility"/u);
+  assert.match(spec, /nativeSelect\(\s*"channel-agent-visibility"/u);
   assert.match(spec, /\{ value: "personal", label: "Only me" \}/u);
   assert.match(spec, /\{ value: "org", label: "Anyone in the org" \}/u);
 
   // Only the owner of the credential picks who may spend it; a teammate
   // reads the answer, the same way model and reasoning already degrade.
-  assert.match(spec, /agent\.mine === true\s*\?\s*miniSelect\(\s*"channel-agent-visibility"/u);
-  assert.match(spec, /: readOnly\(\s*visibility === "org" \? "Anyone in the org" : "Only its owner",/u);
+  assert.match(spec, /agent\.mine === true\s*\?\s*nativeSelect\(\s*"channel-agent-visibility"/u);
+  assert.match(spec, /: readOnly\(visibility === "org" \? "Organization" : "Owner only"\)/u);
 
   // The select lives inside the chip group the handler resolves the agent
   // from, so the control and its handler cannot drift apart again.
-  assert.match(spec, /<div class="aspec-chip-grid" data-agent="\$\{esc\(agent\.id\)\}">/u);
+  assert.match(spec, /<div class="aspec-settings" data-agent="\$\{esc\(agent\.id\)\}">/u);
   assert.match(handler, /node\.closest\("\[data-agent\]"\)\?\.dataset\.agent/u);
   assert.match(
     handler,
@@ -4982,21 +4952,24 @@ test("agent details use the reference profile with supported controls", async ()
     chats.indexOf("function dmPanel()"),
   );
 
-  // The visual hierarchy follows the supplied agent profile: a large identity,
-  // introductory copy, connected-setting pills, and checked capability rows.
-  assert.match(spec, /statusAgentFace\(agent, 68, repositoryId\)/u);
-  assert.match(spec, /class="aspec-description"/u);
-  assert.match(spec, /<h3 class="aspec-label">Works with<\/h3>/u);
-  assert.match(spec, /<h3 class="aspec-label">Capabilities<\/h3>/u);
-  assert.match(spec, /class="aspec-chip"/u);
-  assert.match(
-    spec,
-    /class="aspec-capability aspec-current-task\$\{\s*task === undefined \? "" : " aspec-current-task-active"\s*\}"/u,
-  );
+  // The supplied profile's split composition is explicit: banner-backed
+  // identity on the left and compact activity, settings, channels and usage
+  // on the right. This keeps the normal desktop profile to one viewport.
+  assert.match(spec, /class="aspec-identity-card"/u);
+  assert.match(spec, /class="aspec-banner"/u);
+  assert.match(spec, /statusAgentFace\(agent, 76, repositoryId\)/u);
+  assert.match(spec, /class="aspec-main"/u);
+  assert.match(spec, /class="aspec-pane aspec-activity-pane"/u);
+  assert.match(spec, /class="aspec-pane aspec-settings-pane"/u);
+  assert.match(spec, /class="aspec-pane aspec-channels-pane"/u);
+  assert.match(spec, /class="aspec-pane aspec-usage-section"/u);
   assert.match(panel, /<aside class="thread-panel agent-detail-panel">/u);
-  assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(680px, 64vw\)/su);
-  assert.match(css, /\.agent-spec \.aspec-chip\s*\{/u);
-  assert.match(css, /\.agent-spec \.aspec-capability\s*\{/u);
+  assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(820px, 76vw\)/su);
+  assert.match(
+    css,
+    /\.agent-spec \.aspec-content\s*\{[^}]*grid-template-columns:\s*minmax\(220px, 0\.72fr\) minmax\(390px, 1\.28fr\)/su,
+  );
+  assert.match(css, /@container \(max-width: 650px\)/u);
 
   // Conversation destinations are visible controls on the landing page, not
   // icon-only knowledge hidden in the panel header. Private chat keeps the
@@ -5019,30 +4992,17 @@ test("agent details use the reference profile with supported controls", async ()
   assert.doesNotMatch(panel, /class="agent-panel-head"/u);
   assert.doesNotMatch(css, /^\.agent-panel-head\s*\{/mu);
 
-  // Only a real assignment becomes the primary-colour bubble. Its own copy,
-  // state line, and mark remain legible on that solid surface. The inline
-  // history control next to "available for new work" is gone; Message and
-  // History stay as explicit profile actions above.
-  const activeTask = /\n\.agent-spec \.aspec-current-task-active \{([\s\S]*?)\n\}/u.exec(
-    css,
-  )?.[1];
-  assert.notEqual(activeTask, undefined, "an active task has a shape rule");
-  assert.match(activeTask ?? "", /background: var\(--accent\);/u);
-  assert.match(activeTask ?? "", /border-radius: 14px;/u);
-  for (const child of [
-    "aspec-capability-mark",
-    "aspec-capability-title",
-    "aspec-capability-meta",
-  ]) {
-    assert.match(
-      css,
-      new RegExp(`\\.aspec-current-task-active \\.${child}`, "u"),
-    );
-  }
+  // Editing uses ordinary selects with native option menus inside clearly
+  // labelled fields, rather than tiny composer pills transplanted into the
+  // profile. Unknown current values are still shown before reported options.
+  assert.match(spec, /const nativeSelect = \(act, options, current, label\)/u);
+  assert.match(spec, /class="aspec-native-select" data-act="\$\{esc\(act\)\}"/u);
   assert.match(
     css,
-    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-capability-meta \{\s*color: #fff;/u,
+    /\.agent-spec \.aspec-native-select\s*\{[^}]*appearance: auto;/su,
   );
+  assert.match(css, /\.agent-spec \.aspec-field-label\s*\{/u);
+  assert.doesNotMatch(spec, /class="aspec-chip"/u);
   assert.doesNotMatch(css, /\.agent-spec \.aspec-nav/u);
   assert.doesNotMatch(spec, /class="aspec-nav"/u);
   assert.doesNotMatch(spec, /title="Task history"/u);
@@ -5066,8 +5026,8 @@ test("agent details use the reference profile with supported controls", async ()
     /taskMessage === undefined\s*\?\s*""\s*:\s*` role="button" tabindex="0" data-act="channel-thread-open"/u,
   );
   assert.match(spec, /data-value="\$\{esc\(taskMessage\.id\)\}"/u);
-  assert.match(css, /\.aspec-current-task-active\[role="button"\]/u);
-  assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository \}\)/u);
+  assert.match(css, /\.agent-spec \.aspec-activity\[role="button"\]/u);
+  assert.match(spec, /assignments\.map\(\(\{ repository \}\) => repository\)/u);
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
   assert.match(spec, /const readOnly =/u);
@@ -5109,11 +5069,11 @@ test("agent details omit roles while keeping channel membership", async () => {
   assert.doesNotMatch(chats, /roleMenuItems|RESERVED_ROLES|INVESTIGATOR_ROLE/u);
   assert.doesNotMatch(css, /\.agent-spec \.aspec-role/u);
 
-  assert.match(spec, /const channelAssignment = \(repository\)/u);
-  assert.match(spec, /Channel membership/u);
+  assert.match(spec, /const channels =/u);
+  assert.match(spec, /class="aspec-channel-list"/u);
   assert.match(
     spec,
-    /\.map\(\(\{ repository \}\) => channelAssignment\(repository\)\)/u,
+    /assignments\.map\(\(\{ repository \}\) => repository\)/u,
   );
 });
 
@@ -5126,7 +5086,8 @@ test("repository role overrides survive roster refreshes", async () => {
     data.indexOf("/** Agents and people who can be @mentioned"),
   );
   assert.match(body, /role: local\?\.role \?\? server\.role/u);
-  assert.match(body, /model: local\?\.model \?\? agent\.model/u);
+  assert.match(body, /model: local\?\.model \?\? server\.model \?\? agent\.model/u);
+  assert.match(body, /effort: local\?\.effort \?\? server\.effort \?\? agent\.effort/u);
 });
 
 test("a call sign outranks a legacy vendor-wide channel name", async () => {
@@ -5445,12 +5406,19 @@ test("one profile card describes people and agents wherever a face is drawn", as
   );
   assert.match(person, /profileAnchor\(\s*personProfile\(userId, name, repositoryId\),\s*"rr-avatar",\s*"down",/u);
   assert.match(agentRow, /profileAnchor\(\s*agentProfile\(agent, activeChannelId\(\)\),\s*"rr-avatar",\s*"down",/u);
-  // The usage figures still arrive on the first hover, as one section of the
-  // card rather than a card of their own.
-  assert.match(agentRow, /"data-hover": "agent-usage"/u);
-  assert.match(chats, /function usageBlock\(agent\)/u);
-  assert.match(chats, /<span class="pcard-usage">\$\{body\}<\/span>/u);
-  assert.match(browser, /function requestUsageForHoverTarget\(event\)/u);
+  // The agent popout is intentionally only identity, live status and the two
+  // execution choices. Role, task/path, access policy and usage belong to the
+  // profile page and do not turn a hover into a scrolling settings card.
+  const agentCard = chats.slice(
+    chats.indexOf("function agentProfile(agent, repositoryId)"),
+    chats.indexOf("function personProfile(userId, name, repositoryId)"),
+  );
+  assert.match(agentCard, /label: "Model", value: model \|\| "Not reported"/u);
+  assert.match(agentCard, /label: "Reasoning", value: effort \|\| "Provider default"/u);
+  assert.match(agentCard, /subtitle: agentLabelOf\(providerId\)/u);
+  assert.match(agentCard, /usage: ""/u);
+  assert.doesNotMatch(agentCard, /Role here|Who may task it|Working on|Waiting to start/u);
+  assert.doesNotMatch(agentRow, /data-hover/u);
 
   // A conversation opened from a search or a notification is the one place
   // somebody is read without the sidebar row that would otherwise explain them.
@@ -5496,22 +5464,36 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(pop ?? "", /top: -10000px/u);
   assert.match(pop ?? "", /left: -10000px/u);
   assert.match(pop ?? "", /padding: 7px 0/u);
-  assert.match(pop ?? "", /opacity: 0/u);
+  assert.doesNotMatch(pop ?? "", /opacity:/u);
   assert.match(pop ?? "", /visibility: hidden/u);
   assert.match(pop ?? "", /pointer-events: none/u);
   // The delay may keep accidental passes quiet, but a visible profile is
   // always fully opaque rather than fading through the transcript beneath it.
-  assert.match(pop ?? "", /opacity 0s linear 0\.1s/u);
+  assert.match(pop ?? "", /visibility 0s linear 0\.1s/u);
   assert.match(
     css,
-    /\.pcard-anchor:hover > \.pcard-pop,\n\.pcard-anchor:focus-within > \.pcard-pop \{[\s\S]*?opacity: 1;\s*visibility: visible;\s*pointer-events: auto;[\s\S]*?transition-delay/u,
+    /\.pcard-anchor:hover > \.pcard-pop,\n\.pcard-anchor:focus-within > \.pcard-pop \{[\s\S]*?visibility: visible;\s*pointer-events: auto;[\s\S]*?transition-delay/u,
   );
   // Fixed cards outlive their hover for a beat; exclusivity snaps every other
   // one shut the instant a new face is held open, so two identities cannot
   // stack as a single garbled card.
   assert.match(
     css,
-    /body:has\(\.pcard-anchor:is\(:hover, :focus-within\)\)\s*\.pcard-anchor:not\(:hover\):not\(:focus-within\)\s*>\s*\.pcard-pop \{[\s\S]*?opacity: 0;[\s\S]*?transition-duration: 0s;/u,
+    /body:has\(\.pcard-anchor:is\(:hover, :focus-within\)\)\s*\.pcard-anchor:not\(:hover\):not\(:focus-within\)\s*>\s*\.pcard-pop \{[\s\S]*?visibility: hidden;[\s\S]*?transition-duration: 0s;/u,
+  );
+  assert.match(/\n\.pcard \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "", /isolation: isolate/u);
+  const card = /\n\.pcard \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(card, /background(-color)?: var\(--surface-1\)/u);
+  assert.match(card, /opacity: 1/u);
+  const body = /\n\.pcard-body \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(body, /background: var\(--surface-1\)/u);
+  assert.match(
+    css,
+    /\.cmsg-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
+  );
+  assert.match(
+    css,
+    /\.roster-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
   );
   // No ring drawn round the face at the same time: the card opening is the
   // answer to the hover, and the outline was the same news twice.

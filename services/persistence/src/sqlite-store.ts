@@ -3353,6 +3353,26 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return message;
   }
 
+  public async updateDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+    content: string,
+  ): Promise<DirectMessage | undefined> {
+    const updated = content.trim();
+    if (updated.length === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare(
+        `UPDATE direct_messages SET content = ?
+         WHERE id = ? AND project_id = ? AND author_id = ?
+         RETURNING *`,
+      )
+      .get(updated, messageId, projectId, authorId) as Row | undefined;
+    return row === undefined ? undefined : this.toDirectMessage(row);
+  }
+
   public async deleteDirectMessage(
     projectId: ProjectId,
     messageId: string,
@@ -3527,6 +3547,27 @@ export class SqliteCoordinationStore implements CoordinationStore {
            )`,
       )
       .run(content, replyId, messageId, messageId, repositoryId);
+  }
+
+  public async channelEntryHasDependents(
+    repositoryId: string,
+    entryId: string,
+  ): Promise<boolean> {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1
+             FROM channel_messages
+            WHERE repository_id = ? AND referenced_message_id = ?
+            UNION ALL
+           SELECT 1
+             FROM channel_message_replies AS reply
+             JOIN channel_messages AS root ON root.id = reply.message_id
+            WHERE root.repository_id = ? AND reply.referenced_message_id = ?
+            LIMIT 1`,
+        )
+        .get(repositoryId, entryId, repositoryId, entryId) !== undefined
+    );
   }
 
   public async addChannelReply(

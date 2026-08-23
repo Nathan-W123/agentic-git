@@ -1714,6 +1714,18 @@ export interface CoordinationStore {
     replyId: string,
     content: string,
   ): Promise<void>;
+  /**
+   * Whether another channel entry points at this message or reply.
+   *
+   * Editing is intentionally limited to words nobody (including an agent)
+   * has answered yet. Keeping this lookup in the store grounds that rule in
+   * durable conversation history rather than whichever page a browser has
+   * loaded.
+   */
+  channelEntryHasDependents(
+    repositoryId: string,
+    entryId: string,
+  ): Promise<boolean>;
   addChannelReply(input: AddChannelReplyInput): Promise<ChannelReply>;
   getChannelMessage(
     repositoryId: string,
@@ -1796,6 +1808,13 @@ export interface CoordinationStore {
   ): Promise<ChannelReply | undefined>;
 
   appendDirectMessage(input: AppendDirectMessageInput): Promise<DirectMessage>;
+  /** Replaces the sender's own direct message, returning the updated row. */
+  updateDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+    content: string,
+  ): Promise<DirectMessage | undefined>;
   /**
    * Removes one direct message, and only if `authorId` is the one who sent
    * it.

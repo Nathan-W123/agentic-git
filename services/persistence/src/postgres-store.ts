@@ -3419,6 +3419,28 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return message;
   }
 
+  public async updateDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+    content: string,
+  ): Promise<DirectMessage | undefined> {
+    const updated = content.trim();
+    if (updated.length === 0) {
+      return undefined;
+    }
+    const rows = (
+      await this.query(
+        `UPDATE direct_messages SET content = $1
+         WHERE id = $2 AND project_id = $3 AND author_id = $4
+         RETURNING *`,
+        [updated, messageId, projectId, authorId],
+      )
+    ).rows as Row[];
+    const row = rows[0];
+    return row === undefined ? undefined : this.toDirectMessage(row);
+  }
+
   public async deleteDirectMessage(
     projectId: ProjectId,
     messageId: string,
@@ -4056,6 +4078,25 @@ export class PostgresCoordinationStore implements CoordinationStore {
          )`,
       [content, replyId, messageId, repositoryId],
     );
+  }
+
+  public async channelEntryHasDependents(
+    repositoryId: string,
+    entryId: string,
+  ): Promise<boolean> {
+    const row = await this.row(
+      `SELECT 1
+         FROM channel_messages
+        WHERE repository_id = $1 AND referenced_message_id = $2
+        UNION ALL
+       SELECT 1
+         FROM channel_message_replies AS reply
+         JOIN channel_messages AS root ON root.id = reply.message_id
+        WHERE root.repository_id = $1 AND reply.referenced_message_id = $2
+        LIMIT 1`,
+      [repositoryId, entryId],
+    );
+    return row !== undefined;
   }
 
   private toChannelReply(row: Row): ChannelReply {

@@ -7582,26 +7582,56 @@ export class ApiGateway {
         "u",
       ),
     );
-    // Unsending one piece of private mail.
+    // Correcting or unsending one piece of private mail.
     //
-    // Sender only, and gone for both sides — the two people in a conversation
-    // are the whole of its audience, so there is no third party a tombstone
-    // would be preserving the record for, and "deleted for me" would be a
-    // filter rather than a deletion. The store enforces the sender rule in the
-    // same statement that removes the row.
-    const directMessageDeleteMatch = matchPath(
+    // Both are sender-only and shared by both sides. A correction replaces the
+    // same row so it cannot create a second unread message; an unsend removes
+    // it because the two people are its whole audience and there is no third
+    // party a tombstone would preserve history for. The store enforces the
+    // sender rule in the same statement that performs either write.
+    const directMessageActionMatch = matchPath(
       path,
       new RegExp(
         `^${API_PREFIX}/projects/([^/]+)/direct-messages/([^/]+)/messages/([^/]+)$`,
         "u",
       ),
     );
-    if (directMessageDeleteMatch !== undefined) {
-      const [projectId = "", , messageId = ""] = directMessageDeleteMatch;
+    if (directMessageActionMatch !== undefined) {
+      const [projectId = "", , messageId = ""] = directMessageActionMatch;
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      if (method === "PATCH") {
+        const body = objectBody(await this.readJson(request));
+        const content = stringField(body["content"], "content", {
+          min: 1,
+          max: 8_000,
+        }) ?? "";
+        const message = await this.options.store.updateDirectMessage(
+          projectId,
+          messageId,
+          principal.user.id,
+          content,
+        );
+        if (message === undefined) {
+          // Sender ownership is deliberately indistinguishable from absence,
+          // matching unsend below: a private-message id is not an oracle for
+          // who wrote to whom.
+          throw new HttpError(404, "not_found", "Message was not found");
+        }
+        this.webSockets.sendToUsers(
+          projectId,
+          [principal.user.id, message.recipientId],
+          {
+            type: "direct-message-edited",
+            projectId,
+            message,
+          },
+        );
+        this.sendJson(response, 200, { message });
+        return;
+      }
       if (method !== "DELETE") {
         throw new HttpError(405, "method_not_allowed", "Unsupported method");
       }
-      await authorizeProject(this.options.store, principal, projectId, "view");
       const removed = await this.options.store.deleteDirectMessage(
         projectId,
         messageId,
@@ -8289,21 +8319,24 @@ export class ApiGateway {
       return;
     }
 
-    // Removing one reply.
+    // Correcting or removing one reply.
     //
     // A reply is a leaf — nothing hangs off it — so it goes outright, and the
     // rule about who may is the same one the root gets below: your own words,
     // or anybody who runs the project.
-    const channelReplyDeleteMatch = matchPath(
+    const channelReplyActionMatch = matchPath(
       path,
       new RegExp(
         `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/messages/([^/]+)/replies/([^/]+)$`,
         "u",
       ),
     );
-    if (channelReplyDeleteMatch !== undefined && method === "DELETE") {
+    if (
+      channelReplyActionMatch !== undefined &&
+      (method === "DELETE" || method === "PATCH")
+    ) {
       const [projectId = "", repositoryId = "", messageId = "", replyId = ""] =
-        channelReplyDeleteMatch;
+        channelReplyActionMatch;
       await authorizeRepository(
         this.options.store,
         principal,
@@ -8324,6 +8357,60 @@ export class ApiGateway {
       const reply = message?.replies.find((entry) => entry.id === replyId);
       if (message === undefined || reply === undefined) {
         throw new HttpError(404, "not_found", "Reply was not found");
+      }
+      if (method === "PATCH") {
+        // Editing is narrower than moderation. A manager may remove somebody
+        // else's words, but may never rewrite them under that person's name.
+        if (reply.kind !== "user" || reply.authorId !== principal.user.id) {
+          throw new HttpError(
+            403,
+            "forbidden",
+            "Only the author can edit this reply",
+          );
+        }
+        // Once an agent owns the thread, the transcript is also the prompt it
+        // acted on. Rewriting that prompt would make the visible history say
+        // something different from what the agent received. The same applies
+        // after any later line has quoted this reply.
+        if (
+          message.taskId !== undefined ||
+          message.replies.at(-1)?.id !== replyId ||
+          (await this.options.store.channelEntryHasDependents(
+            repositoryId,
+            replyId,
+          ))
+        ) {
+          throw new HttpError(
+            409,
+            "message_already_answered",
+            "This reply cannot be edited after an agent starts or somebody replies to it",
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        const content = stringField(body["content"], "content", {
+          min: 1,
+          max: 10_000,
+        }) ?? "";
+        await this.options.store.setChannelReplyContent(
+          repositoryId,
+          messageId,
+          replyId,
+          content,
+        );
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_reply_edited",
+          data: {
+            projectId,
+            repositoryId,
+            messageId,
+            replyId,
+            authorId: reply.authorId,
+          },
+        });
+        this.sendJson(response, 200, {
+          reply: { ...reply, content },
+        });
+        return;
       }
       if (!isOwnChannelEntry(reply.authorId, principal.user.id)) {
         await authorizeRepository(
@@ -8354,7 +8441,7 @@ export class ApiGateway {
       return;
     }
 
-    // Removing a thread, or clearing the channel.
+    // Correcting or removing a root, or clearing the channel.
     //
     // Clearing the whole channel stays `manage_project`: every thread in it is
     // a record of work other people read, and throwing the lot away is an
@@ -8381,7 +8468,10 @@ export class ApiGateway {
         "u",
       ),
     );
-    if (channelMessageMatch !== undefined && method === "DELETE") {
+    if (
+      channelMessageMatch !== undefined &&
+      (method === "DELETE" || method === "PATCH")
+    ) {
       const [projectId = "", repositoryId = "", messageId] =
         channelMessageMatch;
       await authorizeRepository(
@@ -8415,6 +8505,59 @@ export class ApiGateway {
       );
       if (message === undefined) {
         throw new HttpError(404, "not_found", "Message was not found");
+      }
+      if (method === "PATCH") {
+        if (message.kind !== "user" || message.authorId !== principal.user.id) {
+          throw new HttpError(
+            403,
+            "forbidden",
+            "Only the author can edit this message",
+          );
+        }
+        if (message.deletedAt !== undefined) {
+          throw new HttpError(409, "message_deleted", "Message was deleted");
+        }
+        // A correction is safe only while the line is still just a line. If
+        // it has become a task prompt, acquired a thread, or been referenced
+        // by a later answer, preserving the exact prompt the agent and other
+        // people saw is less surprising than silently changing history.
+        if (
+          message.taskId !== undefined ||
+          message.replies.length > 0 ||
+          (await this.options.store.channelEntryHasDependents(
+            repositoryId,
+            messageId,
+          ))
+        ) {
+          throw new HttpError(
+            409,
+            "message_already_answered",
+            "This message cannot be edited after an agent starts or somebody replies to it",
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        const content = stringField(body["content"], "content", {
+          min: 1,
+          max: 10_000,
+        }) ?? "";
+        await this.options.store.setChannelMessageContent(
+          repositoryId,
+          messageId,
+          content,
+        );
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_message_edited",
+          data: {
+            projectId,
+            repositoryId,
+            messageId,
+            authorId: message.authorId,
+          },
+        });
+        this.sendJson(response, 200, {
+          message: { ...message, content },
+        });
+        return;
       }
       if (!isOwnChannelEntry(message.authorId, principal.user.id)) {
         await authorizeRepository(
