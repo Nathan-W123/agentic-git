@@ -2987,6 +2987,35 @@ test("an empty card names what each source answered", async () => {
   assert.match(said, /no session records/u);
 });
 
+test("a silent app-server is quoted, not read as an account with no quota", async () => {
+  // "Returned nothing" was the one outcome that said nothing about the
+  // account and still sat beside a sentence blaming it. An app-server that
+  // does not answer is a CLI without the interface, a deadline, or a refusal
+  // it can name — and which of those it is decides the fix.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: (async (_command: string, args: readonly string[]) => {
+      if (args[0] === "--version") {
+        return output("codex-cli 0.146.0");
+      }
+      if (args[0] === "login") {
+        return output("Logged in using ChatGPT");
+      }
+      if (args[0] === "app-server") {
+        return output("", 2, "error: unrecognized subcommand 'app-server'");
+      }
+      return output("", 2, "error: unexpected argument '--status'");
+    }) as ProcessRunner,
+  });
+
+  const said = (await service.usage({ provider: "openai" })).unavailableReason ?? "";
+  assert.match(said, /codex app-server said nothing \(exit 2/u);
+  assert.match(said, /unrecognized subcommand/u);
+  // And it is not reported as the account having answered with no limits.
+  assert.doesNotMatch(said, /replied without rate limits/u);
+});
+
 test("a connection failure is the answer, not a quota of zero", async () => {
   // The remaining way to reach the blanket sentence: opening the caller's
   // credential home fails, the whole in-home block is skipped, and the card
