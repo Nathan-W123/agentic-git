@@ -2876,9 +2876,20 @@ export class ProviderChatService {
         unavailableReason:
           inHome?.obstacle ??
           obstacle ??
-          "Codex reported no quota for this account, and no Codex session " +
-            "has recorded rate limits on this machine yet. An account billed " +
-            "by API key reports no subscription quota at all." +
+          // Said as a fact where the connection settles it. The stored
+          // credential's kind is known here, so "which is what an API-key
+          // account returns" does not have to stay a hypothesis offered to
+          // somebody who cannot check it: an API key has no subscription
+          // quota to report, and that is the end of the question rather than
+          // a symptom of something still to fix.
+          (credential?.kind === "api_key"
+            ? "This Codex connection signs in with an API key, which carries " +
+              "no subscription quota — that usage is billed per token and " +
+              "reported in the OpenAI dashboard rather than here."
+            : "Codex reported no quota for this account, and no Codex " +
+              "session has recorded rate limits on this machine yet. An " +
+              "account billed by API key reports no subscription quota at " +
+              "all.") +
             // What each source actually said, so the next reading of this
             // card is a diagnosis rather than another guess.
             (trace.length === 0 ? "" : ` Tried: ${trace.join("; ")}.`),
