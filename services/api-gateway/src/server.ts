@@ -12256,7 +12256,9 @@ export class ApiGateway {
           objective: taskObjective,
           senderId,
           candidate,
-          referencedMessageId: input.referencedMessageId,
+          ...(input.referencedMessageId !== undefined
+            ? { referencedMessageId: input.referencedMessageId }
+            : {}),
           trigger: "answer_followup",
           ...(input.brief === true ? { brief: true } : {}),
         });
