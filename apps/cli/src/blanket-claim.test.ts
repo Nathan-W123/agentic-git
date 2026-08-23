@@ -4,9 +4,8 @@ import test from "node:test";
 import { InMemoryCoordinationStore } from "@coord/persistence";
 import type { CanonicalRepository } from "@coord/repository-service";
 import type { CanonicalVersion, TaskDefinition } from "@coord/shared-types";
-import { isBlanketClaim } from "@coord/shared-types";
+import { claimCoversPath, isBlanketClaim } from "@coord/shared-types";
 
-import { frozenClaimCovers } from "@coord/coordinator";
 import { LeasePlanAuthority } from "./lease-admission.js";
 
 /**
@@ -479,12 +478,12 @@ test("a holder that has written nothing is narrowed to its estimate", async () =
   // matters here is that the holder stopped standing in the way of it while
   // it had not started typing.
   assert.equal(
-    frozenClaimCovers(frozen!, "src/audio/mixer.ts"),
+    claimCoversPath(frozen!, "src/audio/mixer.ts"),
     false,
     "the narrowed claim should no longer reach the arriving task's file",
   );
   assert.equal(
-    frozenClaimCovers(frozen!, "src/renderer/draw.ts"),
+    claimCoversPath(frozen!, "src/renderer/draw.ts"),
     true,
     "and should still reach its own",
   );

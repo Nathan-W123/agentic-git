@@ -1012,7 +1012,7 @@ export class PlanAdmissionController {
       constraints: [
         blanket
           ? "Resubmit once the repository-wide claim is narrowed or released"
-          : "Plan around the directories the executing task is working in, " +
+          : "Plan around the files the executing task is working in, " +
             "or resubmit once it integrates",
       ],
       blockedBy: blocking.map((entry) => entry.taskId).sort(),
@@ -1020,15 +1020,14 @@ export class PlanAdmissionController {
       explanation: blanket
         ? "A task already executing holds a repository-wide claim, so nothing " +
           "else can be admitted until it is narrowed to what it has touched"
-        : "Executing work holds " +
+        : // Named file by file, because that is now the only thing that can
+          // have produced this refusal. Reporting the directory instead read
+          // as a whole folder being spoken for, which is both alarming and,
+          // since the claim stopped reserving directories, untrue.
+          "Executing work holds " +
           blocking
             .flatMap((entry) =>
-              (entry.plan.claim?.kind === "frozen"
-                ? entry.plan.claim.directories
-                : []
-              ).filter((directory) =>
-                wanted.some((file) => file.startsWith(directory)),
-              ),
+              wanted.filter((file) => claimOccupiesPath(entry.plan, file)),
             )
             .filter((value, index, all) => all.indexOf(value) === index)
             .sort()
