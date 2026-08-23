@@ -3140,7 +3140,11 @@ export class ProviderChatService {
       // process complained about. "Unknown subcommand" is a CLI too old to
       // have the interface; 124 is the deadline; anything else is the
       // server's own words about why it would not answer.
-      const complaint = result.stderr.trim().split("\n")[0]?.slice(0, 160);
+      // Long enough to carry a path. The first cut at this was 160
+      // characters and sliced a `codex_home:` value in half, which read as
+      // the home being the filesystem root and sent the diagnosis a whole
+      // round in the wrong direction.
+      const complaint = result.stderr.trim().split("\n")[0]?.slice(0, 400);
       trace?.push(
         parsed !== undefined
           ? "account/rateLimits/read answered"
