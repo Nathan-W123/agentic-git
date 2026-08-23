@@ -5758,6 +5758,7 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
 
 test("a phone's channel header is one banner across the screen with its actions on the right", async () => {
   const css = await publicFile("styles.css");
+  const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
   // Fixed, full width, and tall enough to clear the status bar — the header
@@ -5807,6 +5808,19 @@ test("a phone's channel header is one banner across the screen with its actions 
     header.indexOf('act: "channel-menu"') > header.indexOf('<span class="spacer">'),
     "the spacer pushes the channel actions button to the right",
   );
+
+  // The account button is the only global action sharing the channel banner.
+  // Notification history remains available without crowding the phone header
+  // with a bell and its unread badge.
+  const topbar = app.slice(
+    app.indexOf("function topbar"),
+    app.indexOf("The screens the account menu is the way into"),
+  );
+  assert.doesNotMatch(
+    topbar,
+    /notificationBell|data-act="go-notifications"|icon\("bell"\)/u,
+  );
+  assert.match(app, /case "go-notifications":/u);
 });
 
 test("a phone's channel rail and sidebar drawer start below the header banner", async () => {

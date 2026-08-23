@@ -96,7 +96,6 @@ import {
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
-  unreadCount,
   dmUnreadTotal,
   memberName,
   memberRole,
@@ -1141,32 +1140,9 @@ function topbar() {
         ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
         : ""
     }
-    ${notificationBell()}
     <button class="account-btn" data-act="user-menu" title="${esc(user)}"
       >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
   </header>`;
-}
-
-/**
- * The way into Notifications, and the count that makes it worth pressing.
- *
- * The route, the screen, its filters, `unreadCount()` and even a
- * `go-notifications` case in the action handler all existed already; nothing
- * anywhere emitted the action, so the screen could only be reached by typing
- * its hash. This is the button — which is also what makes the comment on
- * `agentNameForTask` ("which the bell badge asks for on every render") a
- * description of the product again rather than archaeology.
- */
-function notificationBell() {
-  const unread = unreadCount();
-  return `<button type="button" class="icon-btn bell" data-act="go-notifications"
-    title="Notifications" aria-label="${
-      unread === 0 ? "Notifications" : `Notifications, ${unread} unread`
-    }">${icon("bell")}${
-      unread === 0
-        ? ""
-        : `<span class="dot-badge">${esc(String(unread > 99 ? "99+" : unread))}</span>`
-    }</button>`;
 }
 
 /**
@@ -1177,8 +1153,8 @@ function notificationBell() {
  *
  * Notifications is deliberately not one of them any more. Pressing your own
  * name is how you reach your own things, and a backlog of everything every
- * agent has done is not that; it is still the bell in the topbar and still
- * reachable by name in the quick switcher.
+ * agent has done is not that; it remains reachable by name in the quick
+ * switcher.
  *
  * My Agents is absent for the same reason it always was: a roster of agent
  * connections is not the account's own things either, and it keeps the quick
