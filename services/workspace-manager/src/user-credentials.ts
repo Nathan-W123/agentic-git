@@ -1479,8 +1479,16 @@ export async function openCredentialHome(input: {
   }
 
   const configVariable = CONFIG_DIRECTORY_VARIABLES[vendor];
+  // Hoisted out of the block below so the close hook can read the very
+  // directory the CLI was handed. It used to guess, and guessed one level
+  // too high: Codex was given `<home>/config` and writes its rollouts to
+  // `<home>/config/sessions`, while the capture looked in `<home>/sessions`
+  // — a directory nothing ever writes to. So the snapshot was never taken,
+  // and every usage question on every deployment answered "no snapshot kept
+  // from an earlier run", for as long as this has existed.
+  let configDirectory: string | undefined;
   if (configVariable !== undefined) {
-    const configDirectory = path.join(directory, "config");
+    configDirectory = path.join(directory, "config");
     await mkdir(configDirectory, { recursive: true });
     env[configVariable] = configDirectory;
     if (vendor === "claude" && credential.kind === "session_file") {
@@ -1597,7 +1605,7 @@ export async function openCredentialHome(input: {
       let usageSnapshot: string | undefined;
       if (vendor === "codex") {
         usageSnapshot = await newestRolloutTail(
-          path.join(directory, "sessions"),
+          path.join(configDirectory ?? directory, "sessions"),
         ).catch(() => undefined);
       }
       await rm(directory, { recursive: true, force: true });
