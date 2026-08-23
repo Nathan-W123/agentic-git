@@ -2142,6 +2142,28 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     message.content = content;
   }
 
+  public async channelEntryHasDependents(
+    repositoryId: string,
+    entryId: string,
+  ): Promise<boolean> {
+    for (const message of this.channelMessages.values()) {
+      if (message.repositoryId !== repositoryId) {
+        continue;
+      }
+      if (message.referencedMessageId === entryId) {
+        return true;
+      }
+      if (
+        message.replies.some(
+          (reply) => reply.referencedMessageId === entryId,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private channelAgentKey(repositoryId: string, agentId: string): string {
     return `${repositoryId}\0${agentId}`;
   }
@@ -2346,6 +2368,26 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         : { referencedMessageId: input.referencedMessageId }),
     };
     this.directMessages.set(message.id, message);
+    return { ...message };
+  }
+
+  public async updateDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+    content: string,
+  ): Promise<DirectMessage | undefined> {
+    const message = this.directMessages.get(messageId);
+    const updated = content.trim();
+    if (
+      message === undefined ||
+      message.projectId !== projectId ||
+      message.authorId !== authorId ||
+      updated.length === 0
+    ) {
+      return undefined;
+    }
+    message.content = updated;
     return { ...message };
   }
 

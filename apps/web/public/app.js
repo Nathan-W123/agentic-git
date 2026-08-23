@@ -17,6 +17,7 @@ import {
   TYPING_SWEEP_MS,
   noteAgentBusy,
   noteDirectMessage,
+  noteDirectMessageEdited,
   noteDirectMessageDeleted,
   ensureDirectMessages,
   loadChannelStats,
@@ -83,6 +84,9 @@ import {
   deleteChannelReplyEntry,
   deleteChannelThread,
   deleteDirectMessageEntry,
+  editChannelMessageEntry,
+  editChannelReplyEntry,
+  editDirectMessageEntry,
   loadPreview,
   rollbackTask,
   setAuditorPaused,
@@ -2048,6 +2052,88 @@ async function deleteDirectMessageAction(userId, messageId) {
   }
   try {
     await deleteDirectMessageEntry(userId, messageId);
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/** One compact editor shared by channel roots, replies, and direct messages. */
+async function messageEditValue(
+  content,
+  { agentAware = false, maxLength = 10_000 } = {},
+) {
+  const values = await showModal({
+    title: "Edit message",
+    subtitle: agentAware
+      ? "You can correct it until somebody replies or an agent starts acting on it."
+      : "The correction appears for everyone in this conversation.",
+    confirm: "Save",
+    body: `<label class="field">
+        <span>Message</span>
+        <textarea class="input" name="content" rows="6" maxlength="${String(maxLength)}"
+          required autofocus>${esc(String(content ?? ""))}</textarea>
+      </label>`,
+  });
+  const next = String(values?.content ?? "").trim();
+  return values === undefined || next === "" ? undefined : next;
+}
+
+async function editChannelMessageAction(repositoryId, messageId) {
+  const message = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === messageId,
+  );
+  if (message === undefined) {
+    return;
+  }
+  const content = await messageEditValue(message.content, { agentAware: true });
+  if (content === undefined || content === String(message.content ?? "").trim()) {
+    return;
+  }
+  try {
+    await editChannelMessageEntry(repositoryId, messageId, content);
+    toast("Message updated", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function editChannelReplyAction(repositoryId, messageId, replyId) {
+  const root = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === messageId,
+  );
+  const reply = (root?.replies ?? []).find((entry) => entry.id === replyId);
+  if (reply === undefined) {
+    return;
+  }
+  const content = await messageEditValue(reply.content, { agentAware: true });
+  if (content === undefined || content === String(reply.content ?? "").trim()) {
+    return;
+  }
+  try {
+    await editChannelReplyEntry(repositoryId, messageId, replyId, content);
+    toast("Message updated", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function editDirectMessageAction(userId, messageId) {
+  const message = (state.dmThreads[userId] ?? []).find(
+    (entry) => entry.id === messageId,
+  );
+  if (message === undefined) {
+    return;
+  }
+  const content = await messageEditValue(message.content, { maxLength: 8_000 });
+  if (content === undefined || content === String(message.content ?? "").trim()) {
+    return;
+  }
+  try {
+    await editDirectMessageEntry(userId, messageId, content);
+    toast("Message updated", "ok");
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -6371,6 +6457,14 @@ document.addEventListener("click", (event) => {
     case "channel-message-delete":
       void deleteChannelMessageAction(activeChannelId(), value);
       return;
+    case "channel-message-edit":
+      void editChannelMessageAction(activeChannelId(), value);
+      return;
+    case "thread-reply-edit": {
+      const [rootId = "", replyId = ""] = value.split("|");
+      void editChannelReplyAction(activeChannelId(), rootId, replyId);
+      return;
+    }
     case "thread-reply-delete": {
       // `rootId|replyId`: deleting a reply is a write against the thread it
       // lives in, and the row only ever carries one value.
@@ -6381,6 +6475,11 @@ document.addEventListener("click", (event) => {
     case "dm-delete":
       if (state.activeDm !== undefined) {
         void deleteDirectMessageAction(state.activeDm, value);
+      }
+      return;
+    case "dm-edit":
+      if (state.activeDm !== undefined) {
+        void editDirectMessageAction(state.activeDm, value);
       }
       return;
     case "channel-threads-clear":
@@ -8632,6 +8731,16 @@ async function boot() {
           { method: "POST" },
         ).catch(() => undefined);
       }
+      if (!renameFieldFocused()) {
+        render();
+      }
+      return;
+    }
+    // A correction replaces the existing bubble for both participants. It is
+    // not a new message and must not increment unread counts or replay the
+    // arrival animation.
+    if (frame?.type === "direct-message-edited") {
+      noteDirectMessageEdited(frame);
       if (!renameFieldFocused()) {
         render();
       }

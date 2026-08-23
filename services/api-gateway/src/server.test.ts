@@ -13557,6 +13557,115 @@ test("work merged into an existing thread says what asked for it", async (t) => 
   );
 });
 
+test("channel messages and replies can be corrected only before anyone acts on them", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "message-edit");
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "edit-guest@example.com",
+    repositoryId,
+  );
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`;
+
+  const posted = await owner.request(base, {
+    method: "POST",
+    body: { content: "Meet at tree o'clock." },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const messageId = posted.data.message.id;
+
+  const notAuthors = await guest.request(`${base}/${messageId}`, {
+    method: "PATCH",
+    body: { content: "I should not be able to rewrite this." },
+  });
+  assert.equal(notAuthors.status, 403, JSON.stringify(notAuthors.data));
+
+  const corrected = await owner.request(`${base}/${messageId}`, {
+    method: "PATCH",
+    body: { content: "Meet at three o'clock." },
+  });
+  assert.equal(corrected.status, 200, JSON.stringify(corrected.data));
+  assert.equal(corrected.data.message.content, "Meet at three o'clock.");
+  assert.equal(
+    (
+      await runtime.store.getChannelMessage(
+        repositoryId,
+        messageId,
+        session.user.id,
+      )
+    )?.content,
+    "Meet at three o'clock.",
+  );
+
+  await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: "agent:test",
+    content: "That time works.",
+    referencedMessageId: messageId,
+  });
+  const alreadyAnswered = await owner.request(`${base}/${messageId}`, {
+    method: "PATCH",
+    body: { content: "Meet at four o'clock." },
+  });
+  assert.equal(alreadyAnswered.status, 409, JSON.stringify(alreadyAnswered.data));
+
+  const reply = await runtime.store.addChannelReply({
+    repositoryId,
+    messageId,
+    kind: "user",
+    authorId: session.user.id,
+    content: "A first reply.",
+  });
+  const replyCorrected = await owner.request(
+    `${base}/${messageId}/replies/${reply.id}`,
+    { method: "PATCH", body: { content: "A corrected reply." } },
+  );
+  assert.equal(replyCorrected.status, 200, JSON.stringify(replyCorrected.data));
+  assert.equal(replyCorrected.data.reply.content, "A corrected reply.");
+
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId,
+    kind: "user",
+    authorId: session.user.id,
+    content: "This answers the corrected reply.",
+    referencedMessageId: reply.id,
+  });
+  const replyAnswered = await owner.request(
+    `${base}/${messageId}/replies/${reply.id}`,
+    { method: "PATCH", body: { content: "Too late to rewrite this reply." } },
+  );
+  assert.equal(replyAnswered.status, 409, JSON.stringify(replyAnswered.data));
+
+  // Once the root has a reply, changing the visible request would rewrite
+  // history underneath somebody who has already acted on it.
+  const answered = await owner.request(`${base}/${messageId}`, {
+    method: "PATCH",
+    body: { content: "A different request entirely." },
+  });
+  assert.equal(answered.status, 409, JSON.stringify(answered.data));
+
+  const task = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId,
+    objective: "act on the reply",
+    agentId: "test-agent",
+    validationCommands: [],
+    submittedBy: session.user.id,
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, messageId, task.id);
+  const agentStarted = await owner.request(
+    `${base}/${messageId}/replies/${reply.id}`,
+    { method: "PATCH", body: { content: "Too late to change the prompt." } },
+  );
+  assert.equal(agentStarted.status, 409, JSON.stringify(agentStarted.data));
+});
+
 test("deleting your own channel message removes it, and somebody else's does not", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -13735,6 +13844,48 @@ test("deleting a message that carries a thread blanks it and stops its task", as
   assert.equal(
     await runtime.store.getChannelMessage(repositoryId, secondId, ownerId),
     undefined,
+  );
+});
+
+test("a direct message can be edited by its sender and nobody else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dm-edit");
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "dm-edit-guest@example.com",
+    repositoryId,
+  );
+  const guestId = (await guest.request("/api/v1/auth/me")).data.user.id;
+
+  const sent = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${guestId}`,
+    { method: "POST", body: { content: "Meet at tree." } },
+  );
+  const messageId = sent.data.message.id;
+  const refused = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}/messages/${messageId}`,
+    { method: "PATCH", body: { content: "Not my words." } },
+  );
+  assert.equal(refused.status, 404, JSON.stringify(refused.data));
+
+  const corrected = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${guestId}/messages/${messageId}`,
+    { method: "PATCH", body: { content: "Meet at three." } },
+  );
+  assert.equal(corrected.status, 200, JSON.stringify(corrected.data));
+  assert.equal(corrected.data.message.content, "Meet at three.");
+  assert.equal(
+    (
+      await runtime.store.listDirectMessages(
+        DEFAULT_PROJECT_ID,
+        guestId,
+        session.user.id,
+      )
+    )[0]?.content,
+    "Meet at three.",
   );
 });
 

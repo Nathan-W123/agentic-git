@@ -23,6 +23,7 @@ import {
   agentWorkingProgress,
   agentsThinkingIn,
 api,
+  canEditChannelEntry,
   canDeleteChannelEntry,
   canDeleteRepository,
   canLeaveRepository,
@@ -2629,6 +2630,22 @@ function messageRow(
             })
       }
       ${
+        canEditChannelEntry(repositoryId, entry)
+          ? iconButton("pencil", {
+              act:
+                entry.messageId === undefined
+                  ? "channel-message-edit"
+                  : "thread-reply-edit",
+              value:
+                entry.messageId === undefined
+                  ? entry.id
+                  : `${entry.messageId}|${entry.id}`,
+              title: "Edit message",
+              small: true,
+            })
+          : ""
+      }
+      ${
         // Delete, in the same quiet set as the rest. Its own words or a
         // manager's reach — `canDeleteChannelEntry` is the client's copy of
         // the rule the gateway holds, so the button is absent rather than
@@ -5045,12 +5062,17 @@ function dmPanel() {
                     // here are the whole audience, so unsending takes it off
                     // both screens and leaves nothing to explain.
                     mine
-                      ? iconButton("trash", {
-                          act: "dm-delete",
+                      ? `${iconButton("pencil", {
+                          act: "dm-edit",
                           value: message.id,
-                          title: "Delete this message",
+                          title: "Edit message",
                           small: true,
-                        })
+                        })}${iconButton("trash", {
+                            act: "dm-delete",
+                            value: message.id,
+                            title: "Delete this message",
+                            small: true,
+                          })}`
                       : ""
                   }</span>
                   <time class="dm-time">${esc(clockTime(message.createdAt))}</time>
