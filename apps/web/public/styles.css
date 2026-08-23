@@ -5479,7 +5479,7 @@ button.chip.lg:hover {
   overflow: hidden;
   opacity: 0;
   border-bottom: 0 solid var(--border-soft);
-  background: var(--bg-card-2);
+  background: var(--bg);
   transition:
     grid-template-rows 220ms ease,
     opacity 150ms ease,
