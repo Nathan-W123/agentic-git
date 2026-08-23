@@ -5974,3 +5974,39 @@ test("a phone's channel rail and sidebar drawer start below the header banner", 
     /\.chan-sidebar-scrim \{[\s\S]{0,400}inset: var\(--chan-head-h\) 0 0;/u,
   );
 });
+
+test("a provider with no model list still lets a model be named", async () => {
+  // Codex reports its models from a cache its own CLI writes on this machine.
+  // Where that file is absent the server sends no list and sets
+  // `allowCustomModel` — "nothing to choose from, but a name typed here is
+  // passed through". The browser read the list, ignored the flag, and drew a
+  // read-only "Default", so on the one provider that most needed a model
+  // named, the model could not be changed anywhere in the UI.
+  const ui = await publicFile("ui.js");
+  const data = await publicFile("data.js");
+  const chat = await publicFile("chat.js");
+  const chats = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
+
+  // The control exists, commits on change like the select beside it, and
+  // carries the same action so it reaches the same handler.
+  assert.match(ui, /export function miniEditable\(/u);
+  assert.match(ui, /<input data-act="\$\{esc\(act\)\}" type="text"/u);
+  // The flag the server has always sent and nothing read.
+  assert.match(data, /export function providerAllowsCustomModel\(/u);
+  assert.match(data, /loaded\.allowCustomModel === true/u);
+
+  // Both places a model is picked fall back to typing it, rather than to a
+  // dead control: the channel roster's chip and the agent composer.
+  const chip = chats.slice(
+    chats.indexOf('configurationChip(\n        "Model"'),
+    chats.indexOf('configurationChip(\n        "Reasoning"'),
+  );
+  assert.match(chip, /customModel/u);
+  assert.match(chip, /miniEditable\(\s*"channel-agent-model"/u);
+  assert.match(chat, /providerAllowsCustomModel\(agent\?\.id\)/u);
+  assert.match(chat, /miniEditable\(\s*"chat-model"/u);
+
+  // And it is styled as the control beside it rather than as a raw input.
+  assert.match(styles, /\.mini-select\.mini-editable input/u);
+});

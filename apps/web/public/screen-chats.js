@@ -59,6 +59,7 @@ api,
   postChannelReply,
   providerEffortOptions,
   providerModelOptions,
+  providerAllowsCustomModel,
   providerOptionsNote,
   repositoryLabel,
   saveChannelDraft,
@@ -94,6 +95,7 @@ import {
   iconButton,
   imeComposing,
   emptyState,
+  miniEditable,
   miniSelect,
   pillBar,
   relativeTime,
@@ -4609,6 +4611,13 @@ function agentSpec(agent, repositoryId) {
       ? providerEffortOptions(providerId, currentAssignment.model ?? "")
       : [];
   const optionsNote = agent.mine === true ? providerOptionsNote(providerId) : "";
+  // No list is not the same as no choice. Codex reports models from a cache
+  // its CLI writes locally, and where that file is absent the server sends an
+  // empty list beside `allowCustomModel` — which this row used to answer with
+  // a read-only "Default", leaving the model unchangeable on exactly the
+  // provider that needed naming most.
+  const customModel =
+    agent.mine === true && providerAllowsCustomModel(providerId);
   // Personal or org-wide. Unlike the two rows under it this is not a channel
   // override at all — it is the stored credential's own field, so the answer
   // is the same in every room and only its owner may change it. It sits with
@@ -4636,14 +4645,23 @@ function agentSpec(agent, repositoryId) {
       )}
       ${configurationChip(
         "Model",
-        models.length === 0
-          ? readOnly(currentAssignment.model || "Default")
-          : miniSelect(
+        models.length > 0
+          ? miniSelect(
               "channel-agent-model",
               models,
               currentAssignment.model ?? "",
               "Model in this channel",
-            ),
+            )
+          : customModel
+            ? miniEditable(
+                "channel-agent-model",
+                currentAssignment.model ?? "",
+                "Default",
+                "Model in this channel. Nothing lists what this account may " +
+                  "use, so a model id typed here is passed through as given; " +
+                  "empty runs the CLI's own default.",
+              )
+            : readOnly(currentAssignment.model || "Default"),
       )}
       ${configurationChip(
         "Reasoning",

@@ -3000,6 +3000,30 @@ svg.ui-icon {
   text-overflow: ellipsis;
 }
 
+.mini-select.mini-editable {
+  /* A typed model is usually longer than a picked one, and the chevron the
+     select reserves room for is not drawn here. */
+  max-width: 168px;
+}
+
+.mini-select.mini-editable input {
+  appearance: none;
+  background: none;
+  border: none;
+  outline: none;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  min-width: 0;
+  width: 100%;
+  text-overflow: ellipsis;
+}
+
+.mini-select.mini-editable input::placeholder {
+  color: var(--text-3, var(--text-2));
+  opacity: 1;
+}
+
 .mini-select select option {
   background: var(--bg-card-2);
 }

@@ -882,6 +882,24 @@ export function providerModelOptions(providerId) {
 }
 
 /**
+ * Whether a name typed by hand reaches this provider.
+ *
+ * The server has always sent `allowCustomModel`, and nothing here read it. It
+ * is how a provider says "I cannot list what is available, but I will pass
+ * through whatever you name" — true for Codex wherever its CLI has not cached
+ * a list, and for Cursor always. Absent or false means the list is the whole
+ * of what may be chosen.
+ */
+export function providerAllowsCustomModel(providerId) {
+  const loaded = state.providerOptions[providerId];
+  return (
+    loaded !== undefined &&
+    loaded !== null &&
+    loaded.allowCustomModel === true
+  );
+}
+
+/**
  * The reasoning levels available, for one model.
  *
  * Two shapes, because the vendors answer differently. Claude's levels are the
