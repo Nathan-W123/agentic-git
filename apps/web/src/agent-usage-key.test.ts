@@ -62,8 +62,8 @@ test("the profile card and the specification read one usage key", async () => {
   ] as const) {
     assert.match(
       source,
-      /state\.providerUsage\[usageProviderId\(agent\)\]/u,
-      `${name} should read usage under the resolved vendor`,
+      /state\.providerUsage\[usageStateKey\(agent\)\]/u,
+      `${name} should read usage under the resolved vendor and owner`,
     );
   }
 });
@@ -76,20 +76,43 @@ test("a face that opens the card is the face that asks for the usage", async () 
   assert.match(chats, /usage: usageBlock\(agent\)/u);
   assert.match(chats, /usageProviderId: providerId/u);
   // Both the roster row and the transcript's author face hand the vendor to
-  // that listener; a teammate's row asks for nothing, because the route only
-  // answers for the caller's own account.
+  // that listener, for every agent in the room — a teammate's row names the
+  // owner beside it so the answer is that agent's account and not the
+  // reader's.
   const roster = chats.slice(
     chats.indexOf("function rosterRow("),
     chats.indexOf("function section("),
   );
   assert.match(roster, /"data-hover": "agent-usage"/u);
   assert.match(roster, /"data-hover-value": usageProviderId\(agent\)/u);
-  assert.match(roster, /agent\.mine === true\n\s*\? \{/u);
+  assert.match(roster, /"data-hover-owner": usageOwner\(agent\)/u);
+  assert.doesNotMatch(roster, /agent\.mine === true\n\s*\? \{/u);
   const wrap = chats.slice(
     chats.indexOf("function identityWrap("),
     chats.indexOf("function plainAnchor("),
   );
   assert.match(wrap, /identity\.usageProviderId/u);
+  assert.match(wrap, /identity\.usageOwnerId/u);
   assert.match(app, /closest\('\[data-hover="agent-usage"\]'\)/u);
-  assert.match(app, /ensureProviderUsage\(target\.dataset\.hoverValue, render\)/u);
+  assert.match(app, /target\.dataset\.hoverValue/u);
+  assert.match(app, /target\.dataset\.hoverOwner/u);
+});
+
+test("nothing on the card is withheld because the agent is somebody else's", async () => {
+  // The whole point of this change: usage is an operational fact about an
+  // agent anybody in the room may put to work, so neither the hover card nor
+  // the specification refuses to draw it for a teammate's agent.
+  const chats = await publicFile("screen-chats.js");
+  const card = chats.slice(
+    chats.indexOf("function usageBlock("),
+    chats.indexOf("\n}\n", chats.indexOf("function usageBlock(")),
+  );
+  const spec = chats.slice(
+    chats.indexOf("function agentUsage("),
+    chats.indexOf("\n}\n", chats.indexOf("function agentUsage(")),
+  );
+  for (const source of [card, spec]) {
+    assert.doesNotMatch(source, /agent\.mine !== true/u);
+  }
+  assert.doesNotMatch(chats, /Usage is private to the agent's owner/u);
 });

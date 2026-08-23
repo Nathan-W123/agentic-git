@@ -2761,31 +2761,17 @@ export class ProviderChatService {
     /**
      * Whose account to ask about, when that is not the caller.
      *
-     * An agent whose connection is org-wide is one anybody may @mention into
-     * real work — see {@link listConnectionsFor}, which answers a teammate's
-     * `visibility` for exactly that reason. How much of its quota is left is
-     * the same kind of fact: it decides whether mentioning it will get any
-     * work done. A personal connection is not shared at all, and neither is
-     * its usage.
+     * Any agent in the room is one somebody may @mention into real work, and
+     * how much of its quota is left decides whether doing so accomplishes
+     * anything — so that figure is readable by everyone here, whether the
+     * connection behind it is org-wide or personal. The connection's
+     * `visibility` still decides whose credential a prompt spends; it no
+     * longer decides who may see how much of it is gone.
      */
     ownerId?: string;
   }): Promise<ProviderUsageReport> {
     const owner = input.ownerId ?? input.userId;
     if (owner !== undefined && owner !== input.userId) {
-      const shared = (await this.listConnectionsFor([owner]))[owner]?.some(
-        (connection) =>
-          connection.provider === input.provider &&
-          connection.visibility === "org",
-      );
-      if (shared !== true) {
-        return {
-          source: PROVIDER_NAMES[input.provider],
-          windows: [],
-          unavailableReason:
-            "This is a personal connection, so its usage is visible only to " +
-            "the person who owns it.",
-        };
-      }
       // Read as the owner, then handed back with the one figure that is not
       // an operational fact removed: a credit balance is money on somebody
       // else's account, and knowing whether an agent can still do work does

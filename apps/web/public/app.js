@@ -222,6 +222,8 @@ import {
   updateComposerInput,
   updateComposerPresentation,
   updateThreadComposerInput,
+  usageOwner,
+  usageProviderId,
 } from "./screen-chats.js";
 
 /* ---------------------------------------------------------- formatting ---- */
@@ -6710,20 +6712,27 @@ document.addEventListener("click", (event) => {
       moveRightPanel("agent", "right");
       setChanDrawer(false);
       render();
-      // Usage belongs to the signed-in account, so it is only requested for
-      // one of this person's own agents. Channel membership is repository
-      // scoped; load every roster once so the specification can honestly
-      // list every channel rather than only rooms visited this session.
+      // Usage is asked for whichever agent was opened, teammates' included —
+      // the route takes an owner, so the figures are that agent's own.
+      // Channel membership is repository scoped; load every roster once so
+      // the specification can honestly list every channel rather than only
+      // rooms visited this session.
       {
         const opened = channelAgentsFor(activeChannelId()).find(
           (agent) => agent.id === value,
         );
-        if (opened?.mine === true) {
+        if (opened !== undefined) {
           // Opening the specification is an explicit request for the current
           // account figures. Discard the browser's last snapshot so Codex's
           // native quota read runs for every visit instead of leaving an old
           // percentage in a panel somebody has just reopened.
-          void refreshProviderUsage(opened.provider ?? opened.id, render);
+          void refreshProviderUsage(
+            usageProviderId(opened),
+            render,
+            usageOwner(opened),
+          );
+        }
+        if (opened?.mine === true) {
           // The model and reasoning pickers on the details tab are drawn from
           // the account's own reported lists, so they have to be asked for the
           // same way the composer's pickers are — otherwise the tab shows two
@@ -6747,8 +6756,12 @@ document.addEventListener("click", (event) => {
         const opened = channelAgentsFor(activeChannelId()).find(
           (agent) => agent.id === state.activeAgentPanel,
         );
-        if (opened?.mine === true) {
-          void refreshProviderUsage(opened.provider ?? opened.id, render);
+        if (opened !== undefined) {
+          void refreshProviderUsage(
+            usageProviderId(opened),
+            render,
+            usageOwner(opened),
+          );
         }
       }
       return;
