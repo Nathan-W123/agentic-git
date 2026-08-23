@@ -5706,6 +5706,69 @@ function selectMobileChannelMessage(event) {
   }
 }
 
+/**
+ * Moves one shared desktop hover surface to the message under the pointer.
+ *
+ * Painting every row's own background makes the highlight disappear from one
+ * message and appear on the next. Keeping one surface in the transcript lets
+ * CSS interpolate its position and height instead, including between compact
+ * and full message rows. Touch keeps the selected-row interaction above and
+ * reduced-motion readers keep the surface without its travel animation.
+ */
+function positionChannelMessageHoverHighlight(event) {
+  if (!window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+    return;
+  }
+  const row =
+    event.target.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  const list = row?.parentElement ?? null;
+  if (row === null || list?.id !== "chan-messages") {
+    return;
+  }
+
+  let highlight = list.querySelector(":scope > .cmsg-hover-highlight");
+  if (highlight === null) {
+    highlight = document.createElement("div");
+    highlight.className = "cmsg-hover-highlight";
+    highlight.setAttribute("aria-hidden", "true");
+    list.append(highlight);
+  }
+  highlight.style.setProperty("--cmsg-hover-x", `${row.offsetLeft}px`);
+  highlight.style.setProperty("--cmsg-hover-y", `${row.offsetTop}px`);
+  highlight.style.setProperty("--cmsg-hover-width", `${row.offsetWidth}px`);
+  highlight.style.setProperty("--cmsg-hover-height", `${row.offsetHeight}px`);
+  highlight.classList.add("is-visible");
+}
+
+/** Hides the shared surface only after the pointer leaves message rows. */
+function clearChannelMessageHoverHighlight(event) {
+  const row =
+    event.target.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  const list = row?.parentElement ?? null;
+  if (row === null || list?.id !== "chan-messages") {
+    return;
+  }
+  const nextRow =
+    event.relatedTarget?.closest?.(
+      "#chan-messages > .cmsg-row:not(.cmsg-system)",
+    ) ?? null;
+  // Moving directly to another message leaves the surface alive so the next
+  // mouseover changes its geometry and CSS can animate from the old row.
+  if (nextRow?.parentElement === list) {
+    return;
+  }
+  list
+    .querySelector(":scope > .cmsg-hover-highlight")
+    ?.classList.remove("is-visible");
+}
+
+document.addEventListener("mouseover", positionChannelMessageHoverHighlight);
+document.addEventListener("mouseout", clearChannelMessageHoverHighlight);
+
 document.addEventListener("click", (event) => {
   // This runs before action lookup because an ordinary message body has no
   // `data-act`: selecting it is still a complete interaction on touch.

@@ -5643,6 +5643,8 @@ button.chip.lg:hover {
   overflow-y: auto;
   min-height: 0;
   padding: 12px 24px 20px;
+  position: relative;
+  isolation: isolate;
 }
 
 .chan-messages-loading {
@@ -5851,10 +5853,53 @@ button.chip.lg:hover {
 }
 
 .cmsg-row:hover {
-  background: var(--bg-hover);
   /* An opaque stroke has to follow the surface under it, or the line would
      stay at the room's shade while the row it crosses lightens. */
   --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--bg-hover));
+}
+
+/* One surface travels behind the desktop transcript instead of each row
+   painting a separate hover background. Its geometry is written by the two
+   delegated hover handlers in app.js, so compact and full rows can share the
+   same movement without changing their own layout or action targets. */
+.cmsg-hover-highlight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: -1;
+  width: var(--cmsg-hover-width, 0);
+  height: var(--cmsg-hover-height, 0);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(
+    var(--cmsg-hover-x, 0),
+    var(--cmsg-hover-y, 0),
+    0
+  );
+  transition:
+    transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    height 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.1s ease;
+  will-change: transform, width, height;
+}
+
+.cmsg-hover-highlight.is-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .cmsg-hover-highlight {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmsg-hover-highlight {
+    transition: none;
+  }
 }
 
 /* Consecutive lines from one person read as a single message group. Keep the
