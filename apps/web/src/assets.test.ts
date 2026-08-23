@@ -2470,6 +2470,24 @@ test("a first repository can be created or imported from GitHub", async () => {
   );
 });
 
+test("a push sync collision asks which side wins and resumes the push", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const repos = await publicFile("screen-repos.js");
+
+  assert.match(data, /\.then\(\(result\) => onResponse\?\.\(result\)\)/u);
+  assert.match(chats, /handleChannelCommandResult/u);
+  assert.match(repos, /push\?\.detail\?\.syncConflict !== true/u);
+  assert.match(repos, /confirm: "Take GitHub's version"/u);
+  assert.match(repos, /cancel: "Keep Kumi's version"/u);
+  assert.match(repos, /"prefer-remote"[\s\S]*afterSync/u);
+  assert.match(repos, /"prefer-local"[\s\S]*afterSync/u);
+  assert.match(
+    repos,
+    /repositories\/\$\{encodeURIComponent\(repositoryId\)\}\/push`/u,
+  );
+});
+
 test("anything the interface can hide, it can also bring back", async () => {
   const code = await publicFile("screen-code.js");
   const app = await browserSource();

@@ -4246,7 +4246,13 @@ export async function refreshChannelMessages(repositoryId) {
  * through the store directly — the HTTP route never lets a signed-in person
  * author a message as somebody else's agent.
  */
-export function sendChannelMessage(repositoryId, text, kind = "user", authorId) {
+export function sendChannelMessage(
+  repositoryId,
+  text,
+  kind = "user",
+  authorId,
+  onResponse,
+) {
   const trimmed = String(text ?? "").trim();
   if (!repositoryId || trimmed === "") {
     return undefined;
@@ -4286,10 +4292,12 @@ export function sendChannelMessage(repositoryId, text, kind = "user", authorId) 
     void api(channelPath(repositoryId, "/messages"), {
       method: "POST",
       body: { content: trimmed },
-    }).catch((error) => {
-      message.failed = true;
-      toast(`Message did not send: ${error.message}`, "error");
-    });
+    })
+      .then((result) => onResponse?.(result))
+      .catch((error) => {
+        message.failed = true;
+        toast(`Message did not send: ${error.message}`, "error");
+      });
   }
   return message;
 }
@@ -4417,6 +4425,7 @@ export function postChannelReply(
   messageId,
   text,
   referencedMessageId = undefined,
+  onResponse = undefined,
 ) {
   const trimmed = String(text ?? "").trim();
   const message = findChannelMessage(repositoryId, messageId);
@@ -4441,10 +4450,12 @@ export function postChannelReply(
         content: trimmed,
         ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
       },
-    }).catch((error) => {
-      reply.failed = true;
-      toast(`Reply did not send: ${error.message}`, "error");
-    });
+    })
+      .then((result) => onResponse?.(result))
+      .catch((error) => {
+        reply.failed = true;
+        toast(`Reply did not send: ${error.message}`, "error");
+      });
   }
   return reply;
 }

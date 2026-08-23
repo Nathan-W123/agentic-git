@@ -353,7 +353,12 @@ export async function connectRepository(rerender) {
   }
 }
 
-export async function syncRepositoryFromGitHub(repositoryId, rerender, resolve) {
+export async function syncRepositoryFromGitHub(
+  repositoryId,
+  rerender,
+  resolve,
+  afterSync,
+) {
   toast("Syncing from GitHub…");
   try {
     const result = await api(
@@ -378,42 +383,126 @@ export async function syncRepositoryFromGitHub(repositoryId, rerender, resolve) 
     );
     await loadContext();
     rerender();
+    await afterSync?.();
   } catch (error) {
     // A collision is a question, not a failure: the same files changed on
     // both sides, and only a person can say which version survives. Asked
     // here rather than reported, because the alternative — the remedies the
     // refusal used to list — is not reachable from a phone at all.
     if (error.code === "sync_conflict") {
-      const choice = await showModal({
-        title: "Both sides changed the same files",
-        subtitle:
-          "Pick which version wins for those files. Everything else merges " +
-          "normally, and the version you don't pick stays in the history.",
-        confirm: "Take GitHub's version",
-        cancel: "Keep this project's",
-        body: `<p class="modal-hint">${esc(error.message)}</p>`,
-      });
-      if (choice === undefined) {
-        // Cancel is the second answer here, not a way out — the dialog's
-        // two buttons are the two sides. Nothing has changed yet either way.
-        const keep = await showModal({
-          title: "Keep this project's version?",
-          subtitle: "For the clashing files only.",
-          confirm: "Keep this project's version",
-          body: `<p class="modal-hint">GitHub's version of those files stays
-            in the history and in the merge, but this project's content is
-            what the files hold afterwards.</p>`,
-        });
-        if (keep !== undefined) {
-          await syncRepositoryFromGitHub(repositoryId, rerender, "prefer-local");
-        }
-        return;
-      }
-      await syncRepositoryFromGitHub(repositoryId, rerender, "prefer-remote");
+      await chooseSyncSide(
+        repositoryId,
+        rerender,
+        error.message,
+        afterSync,
+      );
       return;
     }
     toast(error.message, "error");
   }
+}
+
+/**
+ * Asks the one question a conflicting merge cannot answer for itself.
+ *
+ * Kept shared by the repository Sync control and `/push`: the command first
+ * discovers the collision while trying to synchronize, then resumes its push
+ * through `afterSync` once this choice has made the merge possible.
+ */
+async function chooseSyncSide(repositoryId, rerender, message, afterSync) {
+  const choice = await showModal({
+    title: "Both sides changed the same files",
+    subtitle:
+      "Pick which version wins for those files. Everything else merges " +
+      "normally, and the version you don't pick stays in the history.",
+    confirm: "Take GitHub's version",
+    cancel: "Keep Kumi's version",
+    body: `<p class="modal-hint">${esc(message)}</p>`,
+  });
+  if (choice === undefined) {
+    // Cancel is the second answer here, not a way out — the dialog's two
+    // buttons are the two sides. Confirm once more because Escape and the
+    // Kumi button share the native dialog's cancel result.
+    const keep = await showModal({
+      title: "Keep Kumi's version?",
+      subtitle: "For the clashing files only.",
+      confirm: "Keep Kumi's version",
+      body: `<p class="modal-hint">GitHub's version of those files stays
+        in the history and in the merge, but Kumi's content is what the files
+        hold afterwards.</p>`,
+    });
+    if (keep !== undefined) {
+      await syncRepositoryFromGitHub(
+        repositoryId,
+        rerender,
+        "prefer-local",
+        afterSync,
+      );
+    }
+    return;
+  }
+  await syncRepositoryFromGitHub(
+    repositoryId,
+    rerender,
+    "prefer-remote",
+    afterSync,
+  );
+}
+
+/** Completes the push whose first synchronization opened the choice above. */
+async function pushAfterSync(repositoryId, rerender, messageId) {
+  toast("Pushing to GitHub…");
+  try {
+    const response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/push`,
+      {
+        method: "POST",
+        body: messageId === undefined ? {} : { messageId },
+      },
+    );
+    const push = response.push ?? {};
+    if (push.detail?.syncConflict === true) {
+      await chooseSyncSide(
+        repositoryId,
+        rerender,
+        push.explanation ?? "GitHub changed again before the push could finish.",
+        async () => await pushAfterSync(repositoryId, rerender, messageId),
+      );
+      return;
+    }
+    toast(
+      push.explanation ??
+        (push.outcome === "done" ? "Pushed to GitHub" : "Nothing was pushed"),
+      push.outcome === "done" ? "ok" : "error",
+    );
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Opens the sync choice encoded in a channel command response, if there is
+ * one. Ordinary messages and successful pushes take no browser-side action.
+ */
+export function handleChannelCommandResult(
+  repositoryId,
+  response,
+  rerender,
+  messageId,
+) {
+  const push = response?.command?.name === "push"
+    ? response.command.result
+    : undefined;
+  if (push?.detail?.syncConflict !== true) {
+    return false;
+  }
+  void chooseSyncSide(
+    repositoryId,
+    rerender,
+    push.explanation,
+    async () => await pushAfterSync(repositoryId, rerender, messageId),
+  );
+  return true;
 }
 
 export function openRepository(repositoryId, navigate) {

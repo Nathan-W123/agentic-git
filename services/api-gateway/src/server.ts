@@ -2976,6 +2976,28 @@ export interface WorkspaceOperations {
   submit(input: WorkspaceScopeInput & { objective: string }): Promise<unknown>;
 }
 
+export interface RepositoryPushResult {
+  outcome: "done" | "refused";
+  detail?: {
+    url?: string;
+    output?: string[];
+    /** Both GitHub and canonical changed the same files. */
+    syncConflict?: true;
+    conflicts?: string[];
+  };
+  explanation: string;
+}
+
+interface ChannelCommandResponse {
+  name: "push";
+  result: RepositoryPushResult;
+}
+
+interface SlashCommandDispatch {
+  handled: boolean;
+  response?: ChannelCommandResponse;
+}
+
 export interface ApiOperations {
   listAgents?(): Promise<
     Array<{
@@ -3045,11 +3067,7 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
     actorId: string;
-  }): Promise<{
-    outcome: "done" | "refused";
-    detail?: { url?: string; output?: string[] };
-    explanation: string;
-  }>;
+  }): Promise<RepositoryPushResult>;
   submitTask(input: {
     projectId: string;
     repositoryId: string;
@@ -6647,6 +6665,72 @@ export class ApiGateway {
       return;
     }
 
+    // Resumes a `/push` after its conflict dialog has synchronized the two
+    // histories. The original command message is already in the channel, so
+    // this route performs only the operation and its answer; making the
+    // browser post `/push` a second time would leave a duplicate command in
+    // the conversation. A thread id preserves where that answer belongs when
+    // the command was typed inside a task thread.
+    const pushMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/push$`,
+        "u",
+      ),
+    );
+    if (pushMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = ""] = pushMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const operation = this.options.operations.pushRepository;
+      if (operation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot push repositories from the channel",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const messageId = stringField(body["messageId"], "messageId", {
+        max: 200,
+        optional: true,
+      });
+      const pushed = await operation({
+        projectId,
+        repositoryId,
+        actorId: principal.user.id,
+      });
+      // A second upstream race can ask the question again. Do not turn that
+      // into the error line this route exists to replace; the browser will
+      // reopen the choice from the structured result.
+      if (pushed.detail?.syncConflict !== true) {
+        if (messageId === undefined) {
+          await this.postChannelSystemMessage(
+            projectId,
+            repositoryId,
+            pushed.explanation,
+          );
+        } else {
+          await this.sayThreadIsUnanswered(
+            { projectId, repositoryId, messageId },
+            pushed.explanation,
+          );
+        }
+      }
+      this.sendJson(response, 200, { push: pushed });
+      return;
+    }
+
     // Deleting a repository. Ownership, and nothing weaker: an organization
     // owner, or somebody holding an `owner` grant on this repository — the
     // co-owner the People row promotes. Administrators and the repository's
@@ -8463,8 +8547,9 @@ export class ApiGateway {
         // message inside `dispatchChannelMentions`; nothing should escape it,
         // but a broad catch here keeps a bug in that path from 500ing what is
         // otherwise a successful post.
+        let command: ChannelCommandResponse | undefined;
         try {
-          await this.dispatchChannelMentions({
+          command = await this.dispatchChannelMentions({
             projectId,
             repositoryId,
             content,
@@ -8494,6 +8579,7 @@ export class ApiGateway {
             mentionAgents,
             mentionPeople,
           ),
+          ...(command === undefined ? {} : { command }),
         });
         return;
       }
@@ -8553,21 +8639,37 @@ export class ApiGateway {
       });
       // Answered after the reply is stored, never before it is acknowledged:
       // the person typing should see their own message land at once, and the
-      // agent's answer arrives on the event stream like any other reply.
-      void this.answerThreadReply({
+      // agent's answer arrives on the event stream like any other reply. A
+      // push is the one synchronous answer: its structured sync collision has
+      // to travel in this response for the browser to open the choice dialog.
+      const answering = this.answerThreadReply({
         projectId,
         repositoryId,
         messageId,
         viewerId: principal.user.id,
         question: content,
-      }).catch((error: unknown) => {
+      });
+      const reportAnswerFailure = (error: unknown): void => {
         process.stderr.write(
           `[channel] thread reply answer failed for ${messageId}: ${
             error instanceof Error ? error.message : String(error)
           }\n`,
         );
+      };
+      let command: ChannelCommandResponse | undefined;
+      if (parseSlashCommand(content)?.command.name === "push") {
+        try {
+          command = await answering;
+        } catch (error) {
+          reportAnswerFailure(error);
+        }
+      } else {
+        void answering.catch(reportAnswerFailure);
+      }
+      this.sendJson(response, 201, {
+        reply,
+        ...(command === undefined ? {} : { command }),
       });
-      this.sendJson(response, 201, { reply });
       return;
     }
 
@@ -11204,11 +11306,12 @@ export class ApiGateway {
   /**
    * Acts on a command that the channel itself answers.
    *
-   * Returns true when the message is finished with — `/help`, `/push` and the
-   * thread-scoped ones are answered here and go no further. Returns false for
-   * commands that only change how the rest of the message is treated
-   * (`/plan`, `/queue`, `/ask`, `/dnc`, `/simple`), which still need the
-   * mention resolution below.
+   * `handled` says the message is finished with — `/help`, `/push` and the
+   * thread-scoped ones are answered here and go no further. A push also
+   * returns its structured result so the browser can turn a sync collision
+   * into a choice instead of an error line. Commands that only change how the
+   * rest of the message is treated (`/plan`, `/queue`, `/ask`, `/dnc`,
+   * `/simple`) continue into mention resolution below.
    */
   private async runSlashCommand(input: {
     projectId: string;
@@ -11216,7 +11319,7 @@ export class ApiGateway {
     senderId: string;
     command: SlashCommand;
     rest: string;
-  }): Promise<boolean> {
+  }): Promise<SlashCommandDispatch> {
     const { projectId, repositoryId } = input;
     if (input.command.name === "help") {
       await this.postChannelSystemMessage(
@@ -11224,14 +11327,14 @@ export class ApiGateway {
         repositoryId,
         formatSlashHelp(),
       );
-      return true;
+      return { handled: true };
     }
     if (input.command.name === "stop") {
       // `/cancel` with the code put back. Stopping is entirely its job — the
       // same operation, the same targeting, the same summary — and the only
       // thing this adds is undoing what the stopped tasks had already landed.
       await this.cancelFromChannel({ ...input, undo: true });
-      return true;
+      return { handled: true };
     }
     // `/retry` acts on the task a thread is following, and a message in the
     // channel is not in a thread. Said plainly rather than ignored, because
@@ -11243,11 +11346,11 @@ export class ApiGateway {
         "`/retry` works inside a task's thread — open the thread for the " +
           "run you mean and say it there.",
       );
-      return true;
+      return { handled: true };
     }
     if (input.command.name === "cancel") {
       await this.cancelFromChannel(input);
-      return true;
+      return { handled: true };
     }
     if (input.command.name === "push") {
       const operation = this.options.operations.pushRepository;
@@ -11257,19 +11360,24 @@ export class ApiGateway {
           repositoryId,
           "This deployment cannot push repositories from the channel.",
         );
-        return true;
+        return { handled: true };
       }
       const result = await operation({
         projectId,
         repositoryId,
         actorId: input.senderId,
       });
-      await this.postChannelSystemMessage(
-        projectId,
-        repositoryId,
-        result.explanation,
-      );
-      return true;
+      if (result.detail?.syncConflict !== true) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          result.explanation,
+        );
+      }
+      return {
+        handled: true,
+        response: { name: "push", result },
+      };
     }
     if (input.command.name === "queue") {
       if (/@agents\b/iu.test(input.rest) || EVERYONE_RE.test(input.rest)) {
@@ -11278,7 +11386,7 @@ export class ApiGateway {
           repositoryId,
           "`/queue` works with one agent at a time — mention the agent whose work should run next.",
         );
-        return true;
+        return { handled: true };
       }
       if (!ADDRESSED_RE.test(input.rest)) {
         await this.postChannelSystemMessage(
@@ -11286,10 +11394,10 @@ export class ApiGateway {
           repositoryId,
           "`/queue` needs one agent and a task — use `/queue @agent what should run next`.",
         );
-        return true;
+        return { handled: true };
       }
     }
-    return false;
+    return { handled: false };
   }
 
   /**
@@ -11429,7 +11537,7 @@ export class ApiGateway {
     senderId: string;
     /** The stored channel root that caused this dispatch. */
     referencedMessageId: string;
-  }): Promise<void> {
+  }): Promise<ChannelCommandResponse | undefined> {
     const { projectId, repositoryId, senderId, referencedMessageId } = input;
     // A command says *how* to treat the request; an "@" says who it is for.
     // Different questions, so they compose: the command word is taken out
@@ -11439,15 +11547,15 @@ export class ApiGateway {
     const parsed = parseSlashCommand(input.content);
     const content = parsed === undefined ? input.content : parsed.rest;
     if (parsed !== undefined) {
-      const handled = await this.runSlashCommand({
+      const dispatched = await this.runSlashCommand({
         projectId,
         repositoryId,
         senderId,
         command: parsed.command,
         rest: parsed.rest,
       });
-      if (handled) {
-        return;
+      if (dispatched.handled) {
+        return dispatched.response;
       }
     }
     const [candidates, people] = await Promise.all([
@@ -13091,7 +13199,7 @@ export class ApiGateway {
     messageId: string;
     viewerId: string;
     question: string;
-  }): Promise<void> {
+  }): Promise<ChannelCommandResponse | undefined> {
     let question = input.question.trim();
     if (question.length === 0) {
       return;
@@ -13125,18 +13233,22 @@ export class ApiGateway {
     }
     if (command?.command.name === "push") {
       const operation = this.options.operations.pushRepository;
-      const explanation =
-        operation === undefined
-          ? "This deployment cannot push repositories from the channel."
-          : (
-              await operation({
-                projectId: input.projectId,
-                repositoryId: input.repositoryId,
-                actorId: input.viewerId,
-              })
-            ).explanation;
-      await this.sayThreadIsUnanswered(input, explanation);
-      return;
+      if (operation === undefined) {
+        await this.sayThreadIsUnanswered(
+          input,
+          "This deployment cannot push repositories from the channel.",
+        );
+        return;
+      }
+      const result = await operation({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        actorId: input.viewerId,
+      });
+      if (result.detail?.syncConflict !== true) {
+        await this.sayThreadIsUnanswered(input, result.explanation);
+      }
+      return { name: "push", result };
     }
     // `/ask`, `/dnc` and `/simple` mean here what they mean in the channel.
     // The command word is lifted out before the work-versus-question split:

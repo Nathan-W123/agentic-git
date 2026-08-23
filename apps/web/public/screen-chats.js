@@ -79,6 +79,7 @@ api,
   waitingTasks,
 } from "./data.js";
 import { chatComposer, chatProgress, chatThread } from "./chat.js";
+import { handleChannelCommandResult } from "./screen-repos.js";
 import {
   FLAG_FOR_STATUS,
   buildTree,
@@ -6561,7 +6562,19 @@ export function submitComposerMessage(rerender) {
     const target = channelMessagesFor(repositoryId).find(
       (entry) => entry.id === continuing,
     );
-    const posted = postChannelReply(repositoryId, continuing, state.chatDraft);
+    const posted = postChannelReply(
+      repositoryId,
+      continuing,
+      state.chatDraft,
+      undefined,
+      (response) =>
+        handleChannelCommandResult(
+          repositoryId,
+          response,
+          rerender,
+          continuing,
+        ),
+    );
     if (posted === undefined) {
       return;
     }
@@ -6587,7 +6600,14 @@ export function submitComposerMessage(rerender) {
     }
     return;
   }
-  const sent = sendChannelMessage(repositoryId, state.chatDraft, "user");
+  const sent = sendChannelMessage(
+    repositoryId,
+    state.chatDraft,
+    "user",
+    undefined,
+    (response) =>
+      handleChannelCommandResult(repositoryId, response, rerender),
+  );
   if (sent === undefined) {
     return;
   }
@@ -6708,8 +6728,10 @@ export function submitThreadReply(rerender) {
   if (state.activeChannelThread === undefined) {
     return;
   }
-  const root = channelMessagesFor(activeChannelId()).find(
-    (entry) => entry.id === state.activeChannelThread,
+  const repositoryId = activeChannelId();
+  const threadId = state.activeChannelThread;
+  const root = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === threadId,
   );
   const referencedMessageId =
     root?.id === state.threadReplyMessageId ||
@@ -6721,10 +6743,17 @@ export function submitThreadReply(rerender) {
   // The whole draft carries its images the same way a channel message does;
   // the reply address is separate so it never becomes editable quote text.
   postChannelReply(
-    activeChannelId(),
-    state.activeChannelThread,
+    repositoryId,
+    threadId,
     state.threadDraft,
     referencedMessageId,
+    (response) =>
+      handleChannelCommandResult(
+        repositoryId,
+        response,
+        rerender,
+        threadId,
+      ),
   );
   state.threadDraft = "";
   state.threadReplyMessageId = undefined;
