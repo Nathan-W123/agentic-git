@@ -1,3 +1,4 @@
+import { frozenTouchedRanges } from "./blanket-claim.js";
 import {
   arbitrationFiles,
   claimOccupiesPath,
@@ -289,6 +290,50 @@ function occupiedSpans(
  * nobody can predict, and a footprint with an unplaced symbol in it is not
  * known to be smaller than the file.
  */
+/**
+ * The named spans a frozen holder occupies in one file, read from where it has
+ * been observed writing rather than from anything it declared.
+ *
+ * A plan frozen from a worktree declares no symbols and never will — nobody
+ * wrote it. Before this, that meant every such holder took each of its files
+ * whole and no waiter could ever be split around one, which for a repository
+ * whose largest file is most of its backend is the difference between two
+ * agents working and one waiting.
+ *
+ * Reluctant in the two places it has to be. A file the index cannot parse, or
+ * an edit that lands where no symbol does — between functions, in imports, at
+ * the top level — gives `undefined` and the whole file back: an edit outside
+ * every name is an edit this cannot bound, and a claim narrower than the truth
+ * hands another task lines this holder will overwrite.
+ */
+function observedSpans(
+  plan: AgentPlan,
+  file: string,
+  locate: (file: string) => readonly NamedRange[] | undefined,
+): readonly NamedRange[] | undefined {
+  const touched = frozenTouchedRanges(plan, file);
+  if (touched === undefined) {
+    return undefined;
+  }
+  const placed = locate(file);
+  if (placed === undefined || placed.length === 0) {
+    return undefined;
+  }
+  const spans = new Map<string, NamedRange>();
+  for (const range of touched) {
+    const covering = placed.filter(
+      (span) => span.startLine <= range.endLine && span.endLine >= range.startLine,
+    );
+    if (covering.length === 0) {
+      return undefined;
+    }
+    for (const span of covering) {
+      spans.set(`${span.name}\0${String(span.startLine)}`, span);
+    }
+  }
+  return spans.size === 0 ? undefined : [...spans.values()];
+}
+
 function declaredSpans(
   plan: AgentPlan,
   file: string,
@@ -913,11 +958,20 @@ export class PlanAdmissionController {
         const active = input.active.find((plan) => plan.taskId === holder);
         // A claim that occupies this path is a statement about what a task is
         // allowed to reach rather than about what it declared, so it has no
-        // lines to withhold and takes the file whole.
-        const held =
-          active === undefined || claimOccupiesPath(active.plan, file)
+        // lines to withhold and takes the file whole — unless the freeze was
+        // able to watch where it was writing, which is the one thing a plan
+        // nobody wrote can offer in place of declarations.
+        const observed =
+          active === undefined
             ? undefined
-            : declaredSpans(active.plan, file, locate);
+            : observedSpans(active.plan, file, locate);
+        const held =
+          active === undefined
+            ? undefined
+            : (observed ??
+              (claimOccupiesPath(active.plan, file)
+                ? undefined
+                : declaredSpans(active.plan, file, locate)));
         if (held === undefined || held.length === 0) {
           return undefined;
         }

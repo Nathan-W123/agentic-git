@@ -15,6 +15,7 @@ import {
   type CommandResult,
   type FilePatch,
   type FilePatchStatus,
+  type LineRange,
   type RiskAssessment,
   type TaskId,
   type TestResult,
@@ -146,6 +147,24 @@ export interface WorkspaceManager {
   listWorkingChanges?(
     workspace: TaskWorkspace,
   ): Promise<Array<{ path: string; status: FilePatchStatus }>>;
+  /**
+   * Which lines of each changed file have been written, while the agent works.
+   *
+   * Separate from {@link listWorkingChanges} on purpose. That one runs on a
+   * timer to draw progress and wants names only; this reads a real diff and is
+   * asked for once, when a repository-wide claim is being narrowed and the
+   * question is how much of a file its holder is actually in.
+   *
+   * Only tracked edits are located. A file the agent created is new in its
+   * entirety and has no base to diff against, so it is left out and stays
+   * whole — the absence of a range has to read as "anywhere in this file".
+   *
+   * Optional, like its neighbour: a manager that cannot answer says nothing,
+   * and a claim frozen without it holds its files whole, as it always did.
+   */
+  listWorkingRanges?(
+    workspace: TaskWorkspace,
+  ): Promise<Array<{ path: string; ranges: LineRange[] }>>;
 }
 
 export type WorkspaceCommandOptions = Pick<
@@ -159,6 +178,60 @@ export interface NameStatusEntry {
 }
 
 /** Parses `git diff --name-status -z` without corrupting tabs or newlines. */
+/**
+ * The lines each file gained, read off a `-U0` unified diff.
+ *
+ * Only the new side is kept. A holder's claim is about the file as it stands
+ * now — where its code sits today, for another task to be placed around — and
+ * the old side describes a file that no longer exists.
+ *
+ * A pure deletion has no new lines: `@@ -40,3 +39,0 @@` says three lines left
+ * and nothing arrived. It is recorded as the single line the deletion closed
+ * over, because a hole in a file is still a place its author has been, and
+ * dropping it would leave the file looking untouched at that point.
+ */
+export function parseUnifiedHunkRanges(
+  output: string,
+): Array<{ path: string; ranges: LineRange[] }> {
+  const byPath = new Map<string, LineRange[]>();
+  let current: LineRange[] | undefined;
+  for (const line of output.split("\n")) {
+    if (line.startsWith("+++ ")) {
+      const target = line.slice(4).trim();
+      // "+++ /dev/null" is a file the diff deleted outright; there is no new
+      // side to place anything in.
+      if (target === "/dev/null") {
+        current = undefined;
+        continue;
+      }
+      const path = normalizeRepositoryPath(
+        target.startsWith("b/") ? target.slice(2) : target,
+      );
+      current = byPath.get(path) ?? [];
+      byPath.set(path, current);
+      continue;
+    }
+    if (current === undefined || !line.startsWith("@@")) {
+      continue;
+    }
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/u.exec(line);
+    if (header === null) {
+      continue;
+    }
+    const start = Number(header[1]);
+    const count = header[2] === undefined ? 1 : Number(header[2]);
+    current.push(
+      count === 0
+        ? { startLine: Math.max(1, start), endLine: Math.max(1, start) }
+        : { startLine: start, endLine: start + count - 1 },
+    );
+  }
+  return [...byPath.entries()]
+    .filter(([, ranges]) => ranges.length > 0)
+    .map(([path, ranges]) => ({ path, ranges }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
 export function parseNameStatusZ(output: string): NameStatusEntry[] {
   const fields = output.split("\0");
   if (fields.at(-1) === "") {
@@ -619,6 +692,29 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       ...(spec.env === undefined ? {} : { env: spec.env }),
       ...options,
     });
+  }
+
+  /**
+   * Where inside each tracked file the agent has been writing.
+   *
+   * `-U0` is the whole trick: with no context lines, every hunk header names
+   * exactly the lines that changed, and the output is proportional to the edit
+   * rather than to the file. Reading a diff of an 18,000-line file to find out
+   * that four functions moved costs about what those four functions cost.
+   */
+  public async listWorkingRanges(
+    workspace: TaskWorkspace,
+  ): Promise<Array<{ path: string; ranges: LineRange[] }>> {
+    const diff = await this.git.run([
+      "-C",
+      workspace.path,
+      "diff",
+      "-U0",
+      "--no-renames",
+      "--no-color",
+      workspace.baseVersion.revision,
+    ]);
+    return parseUnifiedHunkRanges(diff.stdout);
   }
 
   /**

@@ -2,7 +2,9 @@ import {
   normalizeRepositoryPath,
   type AgentPlan,
   type FilePatchStatus,
+  type LineRange,
   type TaskDefinition,
+  type TouchedFileRanges,
 } from "@coord/shared-types";
 
 /**
@@ -70,7 +72,15 @@ export function blanketPlan(
  */
 export function freezePlanFromWorkingChanges(
   plan: AgentPlan,
-  changes: ReadonlyArray<{ path: string; status: FilePatchStatus }>,
+  changes: ReadonlyArray<{
+    path: string;
+    status: FilePatchStatus;
+    /**
+     * Which lines of this file have been written, where the caller could read
+     * them. Absent means "somewhere in this file", and the file stands whole.
+     */
+    ranges?: readonly LineRange[];
+  }>,
   frozenAt: string = new Date().toISOString(),
 ): AgentPlan {
   const files = [
@@ -89,9 +99,52 @@ export function freezePlanFromWorkingChanges(
         .filter((directory) => directory.length > 0),
     ),
   ].sort();
+  // Only files with something read off them. A file observed as changed but
+  // never located is left out, and the whole of it stays this holder's — the
+  // absence has to read as "everywhere", never as "nowhere".
+  const touched: TouchedFileRanges[] = [];
+  for (const change of changes) {
+    if (change.ranges === undefined || change.ranges.length === 0) {
+      continue;
+    }
+    const file = normalizeRepositoryPath(change.path);
+    const existing = touched.find((entry) => entry.file === file);
+    if (existing === undefined) {
+      touched.push({ file, ranges: [...change.ranges] });
+    } else {
+      existing.ranges.push(...change.ranges);
+    }
+  }
+  touched.sort((left, right) => left.file.localeCompare(right.file));
   return {
     ...plan,
     expectedFiles: files,
-    claim: { kind: "frozen", directories, frozenAt },
+    claim: {
+      kind: "frozen",
+      directories,
+      frozenAt,
+      ...(touched.length === 0 ? {} : { touched }),
+    },
   };
+}
+
+/**
+ * The lines a frozen claim says its holder has been writing in one file, or
+ * nothing when it has not been able to say.
+ *
+ * Nothing is the conservative answer everywhere it appears: no observation
+ * means the holder could be anywhere in the file, which is how this behaved
+ * before there was anything to observe.
+ */
+export function frozenTouchedRanges(
+  plan: Pick<AgentPlan, "claim">,
+  file: string,
+): readonly LineRange[] | undefined {
+  if (plan.claim?.kind !== "frozen") {
+    return undefined;
+  }
+  const entry = plan.claim.touched?.find((touched) => touched.file === file);
+  return entry === undefined || entry.ranges.length === 0
+    ? undefined
+    : entry.ranges;
 }
