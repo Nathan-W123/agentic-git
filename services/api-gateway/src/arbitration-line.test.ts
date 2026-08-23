@@ -72,8 +72,9 @@ test("a file's contents are not counted as further things lost", () => {
   const line = arbitrationLine(REPORTED);
 
   assert.doesNotMatch(line, /965 more/u, line);
-  assert.match(line, /apps\/web\/public\/screen-chats\.js/u, line);
-  assert.match(line, /apps\/web\/src\/assets\.test\.ts/u, line);
+  assert.match(line, /screen-chats\.js/u, line);
+  assert.match(line, /assets\.test\.ts/u, line);
+  assert.doesNotMatch(line, /apps\/web\//u, line);
   assert.equal(namedDeferrals(REPORTED.deferred).length, 2);
 });
 
@@ -129,7 +130,7 @@ test("a symbol withheld beside a file survives, because type is not the test", (
     ],
   });
 
-  assert.match(line, /apps\/web\/public\/data\.js/u, line);
+  assert.match(line, /takes data\.js, renameAgent/u, line);
   assert.match(line, /renameAgent/u, line);
   assert.doesNotMatch(line, /somethingInsideDataJs/u, line);
   // Mixed granularity is not "files", and saying so was how a route came to
@@ -190,4 +191,20 @@ test("more names than fit are counted, and the count is of what was named", () =
   const line = arbitrationLine({ ...BASE, holderNames: ["@Zeus"], deferred });
 
   assert.match(line, /and 5 more once/u, line);
+});
+
+test("granted and deferred collisions keep enough path to tell them apart", () => {
+  const line = arbitrationLine({
+    ...BASE,
+    holderNames: ["@Zeus"],
+    grantedFiles: ["packages/shared-types/src/index.ts"],
+    deferred: [
+      ...files("apps/cli/src/index.ts"),
+      { resourceType: "symbol", resourceId: "renderThreadList" },
+    ],
+  });
+
+  assert.match(line, /starts on shared-types\/src\/index\.ts now/u, line);
+  assert.match(line, /takes cli\/src\/index\.ts, renderThreadList once/u, line);
+  assert.doesNotMatch(line, /packages\/|apps\//u, line);
 });
