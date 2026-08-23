@@ -6552,7 +6552,10 @@ test("a channel's role override reaches the roster and the objective a dispatche
   assert.equal(postedAgain.status, 201);
   const [, second] = runtime.submittedTasks;
   assert.ok(second !== undefined);
-  assert.equal(second.objective, "one more thing please");
+  // The request opens the objective with nothing prefixed to it; the
+  // directives every task carries follow it.
+  assert.match(second.objective, /^one more thing please\n\n/u);
+  assert.doesNotMatch(second.objective, /^Your role in this repository/u);
 });
 
 test("a thread carries what its task changed, and keeps it", async (t) => {
@@ -7558,6 +7561,53 @@ test("/simple keeps it brief in both places a reply is written from", async (t) 
     .find((entry) => entry.includes("summary of the codebase"));
   assert.ok(summaryPrompt, JSON.stringify(runtime.chatPrompts));
   assert.match(summaryPrompt ?? "", /short and simple/u);
+});
+
+test("every task and every answer is told to end on the answer, not a status", async (t) => {
+  // What was reaching the room: "I'll wait for the search agent to finish and
+  // report back", posted verbatim as the reply, read as the answer by
+  // everybody in the channel. No command asks for this and none can turn it
+  // off — it rides with plain work and plain questions alike.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+
+  const taskRepo = await invitableRepository(owner, "answer-not-status-task");
+  await joinAllConnectedAgents(runtime, taskRepo);
+  const taskBase = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${taskRepo}/channel`;
+  const work = await owner.request(`${taskBase}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) rework the retry loop" },
+  });
+  assert.equal(work.status, 201, JSON.stringify(work.data));
+  const objective = runtime.submittedTasks[0]?.objective ?? "";
+  assert.match(objective, /final message is the answer, not a status report/u);
+  assert.match(objective, /never end a turn saying a search is running/u);
+
+  const askRepo = await invitableRepository(owner, "answer-not-status-question");
+  await joinAllConnectedAgents(runtime, askRepo);
+  const askBase = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${askRepo}/channel`;
+  const asked = await owner.request(`${askBase}/messages`, {
+    method: "POST",
+    body: { content: "/simple @Claude (Owner) what are you working on?" },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+  const prompt = runtime.chatPrompts
+    .map((entry) => entry.prompt)
+    .find((entry) => entry.includes("what are you working on?"));
+  assert.ok(prompt, JSON.stringify(runtime.chatPrompts));
+  assert.match(prompt ?? "", /final message is the answer, not a status report/u);
+  // `/simple` still applies, and reads after it: brevity is the outer
+  // instruction, and the shortest true answer satisfies both.
+  assert.match(prompt ?? "", /short and simple/u);
+  assert.ok(
+    (prompt ?? "").indexOf("final message is the answer") <
+      (prompt ?? "").indexOf("short and simple"),
+    prompt ?? "",
+  );
 });
 
 test("/push publishes directly as the sender without planning or running a task", async (t) => {
