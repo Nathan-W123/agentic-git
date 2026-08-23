@@ -1235,6 +1235,35 @@ const DO_NOT_CODE_DIRECTIVE =
   "there.";
 
 /**
+ * What every reply owes the room: an answer, not a progress note.
+ *
+ * Replies were ending on the work rather than on its result — "I'll wait for
+ * the search agent to finish and report back" is posted verbatim as the chat
+ * message, so the room reads a status line as the answer and then waits for a
+ * follow-up that never comes. This travels with every task and every answer,
+ * unconditionally: unlike `/simple` or `/dnc` there is no request it does not
+ * apply to. Nothing filters the reply afterwards — the fix is that the turn
+ * does not end until it has something to say.
+ */
+const ANSWER_NOT_STATUS_DIRECTIVE =
+  "Your final message is the answer, not a status report. If you delegated " +
+  "to a subagent, wait for its result before finishing — never end a turn " +
+  "saying a search is running or that you will report back. Do not state a " +
+  "conclusion while work you started is still outstanding. If you cannot " +
+  "answer, say what you checked and what would settle it.";
+
+/**
+ * The command word's directive, behind the one every reply carries.
+ *
+ * `/simple` reads last on purpose: brevity is the outer instruction, and the
+ * shortest true answer still satisfies everything above it.
+ */
+const withAnswerDirective = (directive?: string): string =>
+  directive === undefined
+    ? ANSWER_NOT_STATUS_DIRECTIVE
+    : `${ANSWER_NOT_STATUS_DIRECTIVE}\n\n${directive}`;
+
+/**
  * Internal objective marker for an explicit `/ask` task.
  *
  * Task submission has no command metadata of its own. Carrying this exact
@@ -10173,14 +10202,24 @@ export class ApiGateway {
         }
       }
 
+      // When a task's work landed, which is not the same as when the task
+      // finished. A conversational task keeps its thread open for the next
+      // turn, so it is `open` with no `completedAt` even though a change of
+      // its own has already been promoted — and a digest that looked only at
+      // `completedAt` skipped exactly those, leaving the client to caption
+      // them with the request somebody typed instead of an account of what
+      // was done. `openedAt` is stamped when a turn lands and the thread is
+      // held open, so it is that turn's landing moment.
+      const landedAt = (task: SubmittedTask): string | undefined =>
+        task.completedAt ?? task.openedAt;
       const tasks = (
         await this.options.store.listSubmittedTasks({ projectId })
-      ).filter(
-        (task) =>
-          visibleIds.has(task.repositoryId) &&
-          task.completedAt !== undefined &&
-          task.completedAt > since,
-      );
+      ).filter((task) => {
+        const at = landedAt(task);
+        return (
+          visibleIds.has(task.repositoryId) && at !== undefined && at > since
+        );
+      });
       const completedChanges = await Promise.all(
         tasks.map(async (task) => {
           const filter: AuditEventFilter = {
@@ -10208,7 +10247,7 @@ export class ApiGateway {
               id: task.id,
               repositoryId: task.repositoryId,
               objective: withoutRoleContext(task.objective),
-              at: task.completedAt ?? since,
+              at: landedAt(task) ?? outcome?.occurredAt ?? since,
               ...(typeof agentResponse === "string" ? { agentResponse } : {}),
               changedFiles,
             } satisfies CatchUpChange,
@@ -11488,12 +11527,16 @@ export class ApiGateway {
               referencedMessageId,
               // The same directive slot the single-mention path fills: a
               // broadcast `/dnc` is still a do-not-code request in every
-              // answer of the fan-out, and `/simple` still means brief.
-              parsed?.command.name === "dnc"
-                ? DO_NOT_CODE_DIRECTIVE
-                : parsed?.command.name === "simple"
-                  ? KEEP_IT_SIMPLE_DIRECTIVE
-                  : undefined,
+              // answer of the fan-out, and `/simple` still means brief. Every
+              // answer of the fan-out also owes the room an answer rather
+              // than a status line, whether or not a command was typed.
+              withAnswerDirective(
+                parsed?.command.name === "dnc"
+                  ? DO_NOT_CODE_DIRECTIVE
+                  : parsed?.command.name === "simple"
+                    ? KEEP_IT_SIMPLE_DIRECTIVE
+                    : undefined,
+              ),
             ).catch(() => undefined),
           ),
         );
@@ -12093,7 +12136,9 @@ export class ApiGateway {
         projectId,
         repositoryId,
         input.referencedMessageId,
-        input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
+        withAnswerDirective(
+          input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
+        ),
       );
       if (taskObjective !== undefined) {
         await this.dispatchOneMention({
@@ -12286,12 +12331,16 @@ export class ApiGateway {
         // submitted outside a channel has no such pair to resolve.
         // `/simple` rides inside the objective string itself — no new field,
         // no schema, just words the worker reads with the rest of the ask.
+        // The answer-not-a-status-report directive rides the same way and is
+        // not opt-in: it goes ahead of `/simple` so brevity reads last and
+        // still wins.
         objective: withRoleContext(
           candidate.role,
           [
             await this.describeAttachments(
               (input.objective ?? withoutMentions(content)) || content,
             ),
+            ANSWER_NOT_STATUS_DIRECTIVE,
             ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
             ...(input.forceQuestion === true ? [FORCE_QUESTION_MARKER] : []),
           ].join("\n\n"),
@@ -13095,12 +13144,13 @@ export class ApiGateway {
     const forceQuestion = command?.command.name === "ask";
     const answerOnly = command?.command.name === "dnc";
     const brief = command?.command.name === "simple";
-    const directive =
+    const directive = withAnswerDirective(
       command?.command.name === "dnc"
         ? DO_NOT_CODE_DIRECTIVE
         : brief
           ? KEEP_IT_SIMPLE_DIRECTIVE
-          : undefined;
+          : undefined,
+    );
     if ((forceQuestion || answerOnly || brief) && command !== undefined) {
       // A bare command with nothing after it still needs something to hand
       // the agent; the raw text beats an empty question slot.
@@ -13240,7 +13290,7 @@ export class ApiGateway {
           root,
           candidate,
           question,
-          ...(directive === undefined ? {} : { directive }),
+          directive,
         });
       }
       return;
@@ -13454,7 +13504,7 @@ export class ApiGateway {
         root,
         candidate,
         question,
-        ...(directive === undefined ? {} : { directive }),
+        directive,
       });
     }
     if (answering.length === 0 && owner === undefined) {

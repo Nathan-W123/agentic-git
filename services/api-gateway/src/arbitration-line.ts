@@ -2,10 +2,12 @@
  * The one sentence the room is told when arbitration decides an order.
  *
  * Lifted out of the server so it can be read and tested as what it is — a
- * rendering of a decision, with no I/O in it. Every name that reaches here is
- * already resolved for display; the choices left are which of them to say and
- * what to call the thing they are contending over.
+ * rendering of a decision, with no I/O in it. Agent and task names that reach
+ * here are already resolved for display; resource ids stay repo-relative so
+ * this renderer can compact every name in the sentence together.
  */
+
+import { shortenResourceNamesForMessage } from "./resource-display-name.js";
 
 /** One resource an admission withheld, as much of it as a sentence needs. */
 export interface DeferredRef {
@@ -101,11 +103,17 @@ export function arbitrationLine(input: ArbitrationAnnouncement): string {
 
   if (input.partial) {
     const named = namedDeferrals(input.deferred);
-    const deferredNames = named.map((entry) => entry.resourceId);
+    const displayNames = shortenResourceNamesForMessage([
+      ...input.grantedFiles.map((resourceId) => ({
+        resourceType: "file",
+        resourceId,
+      })),
+      ...named,
+    ]);
+    const grantedNames = displayNames.slice(0, input.grantedFiles.length);
+    const deferredNames = displayNames.slice(input.grantedFiles.length);
     const granted =
-      input.grantedFiles.length > 0
-        ? clause([...input.grantedFiles])
-        : "the free part";
+      grantedNames.length > 0 ? clause(grantedNames) : "the free part";
     const rest = deferredNames.length > 0 ? clause(deferredNames) : "the rest";
     // Both halves get a verb. Without one the two lists ran together — "starts
     // on styles.css now, screen-chats.js, assets.test.ts and 965 more once

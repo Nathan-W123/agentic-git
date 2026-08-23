@@ -416,7 +416,11 @@ export function pillBar(pills, note = "") {
       (pill) =>
         `<span class="pill"${
           pill.title ? ` title="${esc(pill.title)}"` : ""
-        }>${pillIcon(pill.icon)}<span class="pill-label">${esc(
+        }>${
+          pill.agent === undefined
+            ? pillIcon(pill.icon)
+            : agentFace(pill.agent, 18, { showPresence: false })
+        }<span class="pill-label">${esc(
           pill.label,
         )}</span></span>`,
     )
@@ -1177,7 +1181,11 @@ export function agentFace(agent, size = 34, indicator = {}) {
     }"
     title="${esc(
       agent?.name ?? AGENTS[kind].label,
-    )}">${vendorMark(kind)}<i class="presence presence-${presence}"></i>${
+    )}">${vendorMark(kind)}${
+      indicator.showPresence === false
+        ? ""
+        : `<i class="presence presence-${presence}"></i>`
+    }${
       working
         ? `<i class="agent-run" aria-label="Working">${vendorMark(kind)}</i>`
         : ""
