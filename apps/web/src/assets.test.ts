@@ -1538,6 +1538,22 @@ test("the composer stays open over a decision the textarea cannot see", async ()
   }
 });
 
+test("the channel composer placeholder uses the repository display name", async () => {
+  const source = await publicFile("screen-chats.js");
+  const start = source.indexOf("function composer(repositoryId)");
+  const body = source.slice(start, source.indexOf("\n}", start));
+  // A rename changes displayName (e.g. KUMI) while the id can stay the old
+  // slug; the empty-bar hint must follow the name people see elsewhere.
+  assert.match(
+    body,
+    /Message #\$\{esc\(repositoryLabel\(repositoryId \?\? ""\)\)\}/u,
+  );
+  assert.doesNotMatch(
+    body,
+    /Message #\$\{esc\(repositoryId \?\? ""\)\}/u,
+  );
+});
+
 test("the chat panel shows a bare progress bar and no token statistics", async () => {
   const source = await publicFile("chat.js");
   const start = source.indexOf("export function chatProgress");
