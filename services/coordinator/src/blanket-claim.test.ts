@@ -163,10 +163,9 @@ test("a frozen claim admits the arriving task to everything outside it", () => {
   });
   assert.equal(outside.status, "approved");
 
-  // And to nothing inside it, including a file the holder has not touched yet
-  // but is plainly working through.
+  // And to nothing the holder actually named.
   const inside = controller.admit({
-    plan: plan("task_third", ["src/render/mesh.ts"]),
+    plan: plan("task_third", ["src/render/canvas.ts"]),
     agentId: "agent-c",
     baseRevision: "a".repeat(40),
     baseVersion: 1,
@@ -176,6 +175,36 @@ test("a frozen claim admits the arriving task to everything outside it", () => {
   assert.deepEqual(inside.blockedBy, [TASK.id]);
 });
 
+test("a frozen claim does not hold the files beside the one it named", () => {
+  // The directories a freeze carries are room for files the holder may still
+  // create, not a hold over every file that already lives there. One task
+  // touching one file of a directory must not queue everybody else behind the
+  // rest of it.
+  const frozen = freezePlanFromWorkingChanges(blanketPlan(TASK), [
+    { path: "src/render/canvas.ts", status: "modified" },
+  ]);
+  const controller = new PlanAdmissionController();
+  const decided = controller.admit({
+    plan: plan("task_second", ["src/render/mesh.ts"]),
+    agentId: "agent-b",
+    baseRevision: "a".repeat(40),
+    baseVersion: 1,
+    active: [{ taskId: TASK.id, agentId: "agent-a", plan: frozen }],
+  });
+
+  assert.equal(decided.status, "approved");
+  assert.deepEqual(decided.blockedBy, []);
+  assert.deepEqual(
+    decided.ownershipGrants
+      .filter((grant) => grant.resourceType === "file")
+      .map((grant) => grant.resourceId),
+    ["src/render/mesh.ts"],
+  );
+  // The holder may still write there itself: what it is allowed to reach is
+  // unchanged, and only arbitration reads the directories more narrowly.
+  assertChangeSetWithinPlan(frozen, changeSet(["src/render/mesh.ts"]));
+});
+
 test("a frozen claim partially admits a plan with work outside its directories", () => {
   const frozen = freezePlanFromWorkingChanges(blanketPlan(TASK), [
     { path: "src/render/canvas.ts", status: "modified" },
@@ -183,7 +212,7 @@ test("a frozen claim partially admits a plan with work outside its directories",
   const controller = new PlanAdmissionController();
   const decided = controller.admit({
     plan: plan("task_second", [
-      "src/render/mesh.ts",
+      "src/render/canvas.ts",
       "src/audio/mixer.ts",
     ]),
     agentId: "agent-b",
@@ -196,7 +225,7 @@ test("a frozen claim partially admits a plan with work outside its directories",
   assert.deepEqual(decided.blockedBy, []);
   assert.deepEqual(
     decided.deferredResources?.map((resource) => resource.resourceId),
-    ["src/render/mesh.ts"],
+    ["src/render/canvas.ts"],
   );
   assert.deepEqual(
     decided.ownershipGrants
