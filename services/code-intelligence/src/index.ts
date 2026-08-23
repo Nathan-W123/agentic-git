@@ -920,7 +920,17 @@ export class CodeIntelligenceService {
       //
       // The first enrichment wins: running twice must not record the widened
       // set as though the agent had asked for it.
-      declaredSymbols: [...(plan.declaredSymbols ?? plan.expectedSymbols)],
+      // Every list, not just the symbols. All of them are widened below from
+      // the contents of the declared files, and all of them are read
+      // somewhere as a claim — so all of them need the agent's own words kept.
+      declared: plan.declared ?? {
+        symbols: [...plan.expectedSymbols],
+        apis: [...(plan.expectedApis ?? [])],
+        schemas: [...(plan.expectedSchemas ?? [])],
+        configKeys: [...(plan.expectedConfigKeys ?? [])],
+        tests: [...(plan.expectedTests ?? [])],
+        services: [...(plan.expectedServices ?? [])],
+      },
       expectedSymbols: uniqueStrings([
         ...plan.expectedSymbols,
         ...files.flatMap((file) => file.symbols),

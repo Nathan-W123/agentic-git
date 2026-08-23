@@ -513,7 +513,7 @@ test("two agents editing different functions of one file both keep theirs", () =
   // symbol in the file was added to what it expects.
   const holder: AgentPlan = {
     ...plan("task_holder", ["alpha", "beta", "gamma"]),
-    declaredSymbols: ["alpha"],
+    declared: { symbols: ["alpha"] },
   };
 
   const admission = new PlanAdmissionController().admit({
@@ -584,7 +584,7 @@ function releaseHolder(declared: string[]): {
     agentId: "agent_holder",
     plan: {
       ...releasePlan("task_holder", ["alpha", "beta", "gamma"]),
-      declaredSymbols: declared,
+      declared: { symbols: declared },
     },
   };
 }
@@ -691,7 +691,7 @@ test("a function that does not exist yet cannot land in granted ground", () => {
         agentId: "agent_holder",
         plan: {
           ...shape("task_holder", ["alpha", "beta", "gamma"]),
-          declaredSymbols: ["alpha", "newHelper"],
+          declared: { symbols: ["alpha", "newHelper"] },
         },
       },
     ],

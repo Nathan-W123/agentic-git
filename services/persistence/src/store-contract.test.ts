@@ -2127,7 +2127,7 @@ for (const backend of backends) {
           // As enrichment leaves it: every symbol in the file it named,
           // with the one the agent actually asked for kept apart.
           expectedSymbols: ["alpha", "beta", "gamma"],
-          declaredSymbols: ["alpha"],
+          declared: { symbols: ["alpha"] },
         },
         admission: {
           status: "approved",
@@ -2149,7 +2149,7 @@ for (const backend of backends) {
     const readBack = (await store.getWorkLease(leased.lease.id))?.plan?.plan;
     assert.deepEqual(readBack?.expectedSymbols, ["alpha", "beta", "gamma"]);
     assert.deepEqual(
-      readBack?.declaredSymbols,
+      readBack?.declared?.symbols,
       ["alpha"],
       "the agent's own declarations must survive the round trip, or a " +
         "holder claims every symbol in every file it named",

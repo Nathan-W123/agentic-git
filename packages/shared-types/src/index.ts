@@ -99,31 +99,44 @@ export interface PlanGrounding {
   notes: string[];
 }
 
+/** One plan's own declarations, kept apart from what enrichment added. */
+export interface PlanDeclarations {
+  symbols?: string[];
+  apis?: string[];
+  schemas?: string[];
+  configKeys?: string[];
+  tests?: string[];
+  services?: string[];
+}
+
 export interface AgentPlan {
   taskId: TaskId;
   objective: string;
   expectedFiles: string[];
   expectedSymbols: string[];
   /**
-   * The symbols the agent itself named, before enrichment widened the set.
+   * What the agent itself named, before enrichment widened each list.
    *
-   * `enrichPlan` adds every symbol of every declared file to
-   * {@link expectedSymbols}, which is right for the things it exists for —
-   * comparing plans, spotting semantic overlap — and wrong for deciding what
-   * one task withholds from another inside a file they share. Withheld
-   * against the enriched set, a holder claims every function in the file, so
-   * a second agent that wants one of them is admitted to the file with every
-   * function in it withheld: it can edit the imports and the gaps between
-   * declarations, produce a changeset whose every hunk is then deferred, and
-   * land nothing after paying for a full run.
+   * `enrichPlan` fills every `expected*` list from the contents of the files
+   * a plan declares, which is right for what it exists for — making two plans
+   * comparable — and wrong wherever those lists are read as claims.
    *
-   * So the agent's own declaration is kept alongside the widened one, and the
-   * symbol-level withholding reads this. Absent means the plan was never
-   * enriched and {@link expectedSymbols} is already the agent's own words;
-   * empty means the agent named no symbols at all, which withholds the whole
-   * file exactly as it did before.
+   * Wrong in two ways, both measured. A holder ends up claiming every symbol
+   * in every file it named, so a second agent wanting one function is
+   * admitted to the file with all of them withheld. And scoring reads the
+   * same widened lists, so unrelated plans collide on their files' contents:
+   * a "schema" here is any declaration ending in Schema, Entity, Model,
+   * Record, Payload, Input or Migration, and a "service" any ending in
+   * Service, Client, Repository, Gateway or Worker. Those are naming
+   * conventions, not shared resources — two files that have never met collide
+   * on one `Input` suffix, at forty points, before a single file overlaps.
+   *
+   * So the agent's own words are kept beside the widened ones, and everything
+   * that treats a list as a claim reads these. Absent means the plan was
+   * never enriched and the `expected*` lists are already the agent's own; an
+   * empty list inside means it named none of that kind.
    */
-  declaredSymbols?: string[];
+  declared?: PlanDeclarations;
   /** Public routes, commands, events, or other externally consumed APIs. */
   expectedApis?: string[];
   /** Database, validation, serialization, or infrastructure schemas. */
@@ -1512,7 +1525,7 @@ export function substituteGroundedNames(plan: AgentPlan): GroundedPlanView {
  * declared are claimed on its behalf.
  */
 export function arbitrationSymbols(plan: AgentPlan): string[] {
-  const declared = plan.declaredSymbols ?? plan.expectedSymbols;
+  const declared = plan.declared?.symbols ?? plan.expectedSymbols;
   const grounding = plan.grounding;
   if (grounding === undefined) {
     return declared;
@@ -1594,7 +1607,6 @@ export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
     plan.objective.trim().length === 0 ||
     !isStringArray(plan.expectedFiles) ||
     !isStringArray(plan.expectedSymbols) ||
-    !isOptionalStringArray(plan.declaredSymbols) ||
     !isOptionalStringArray(plan.expectedApis) ||
     !isOptionalStringArray(plan.expectedSchemas) ||
     !isOptionalStringArray(plan.expectedConfigKeys) ||
@@ -1615,8 +1627,20 @@ export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
 
   plan.expectedFiles = uniqueRepositoryPaths(plan.expectedFiles);
   plan.expectedSymbols = uniqueStrings(plan.expectedSymbols);
-  if (plan.declaredSymbols !== undefined) {
-    plan.declaredSymbols = uniqueStrings(plan.declaredSymbols);
+  if (plan.declared !== undefined) {
+    for (const key of [
+      "symbols",
+      "apis",
+      "schemas",
+      "configKeys",
+      "tests",
+      "services",
+    ] as const) {
+      const value = plan.declared[key];
+      if (value !== undefined) {
+        plan.declared[key] = uniqueStrings(value);
+      }
+    }
   }
   plan.dependencies = uniqueStrings(plan.dependencies);
   plan.externalAccess = uniqueStrings(plan.externalAccess);
@@ -1743,13 +1767,13 @@ export function assertChangeSet(value: unknown): asserts value is ChangeSet {
  * than an agent describing it, which is untrue of every plan an agent wrote.
  */
 export type CompleteAgentPlan = Required<
-  Omit<AgentPlan, "grounding" | "claim" | "declaredSymbols">
+  Omit<AgentPlan, "grounding" | "claim" | "declared">
 > &
-  // `declaredSymbols` keeps its optionality on purpose: absent is not the
-  // same as empty. Absent says this plan was never enriched, so
-  // `expectedSymbols` is still the agent's own words; empty says the agent
-  // named no symbols. Filling it in here would erase that distinction.
-  Pick<AgentPlan, "grounding" | "claim" | "declaredSymbols">;
+  // `declared` keeps its optionality on purpose: absent is not the same as
+  // empty. Absent says this plan was never enriched, so the `expected*` lists
+  // are still the agent's own words; a list present but empty says the agent
+  // named none of that kind. Filling it in here would erase that.
+  Pick<AgentPlan, "grounding" | "claim" | "declared">;
 
 /** Returns a detached plan with every optional resource collection populated. */
 export function completeAgentPlan(plan: AgentPlan): CompleteAgentPlan {

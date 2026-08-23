@@ -103,6 +103,31 @@ function dispositionFor(
   return "block";
 }
 
+/**
+ * One of a plan's resource lists as the agent declared it.
+ *
+ * Scoring has to read these rather than the `expected*` lists, because
+ * enrichment fills those from the *contents* of every declared file and the
+ * contents are mostly naming conventions. A "schema" is any declaration
+ * ending in Schema, Entity, Model, Record, Payload, Input or Migration; a
+ * "service" any ending in Service, Client, Repository, Gateway or Worker. In
+ * a TypeScript repository two files that have nothing to do with each other
+ * collide on one `Input` suffix — forty points, before a single file
+ * overlaps, and enough on its own to push a pair past the block threshold.
+ *
+ * Undefined `declared` means the plan was never enriched, so its own lists
+ * are already the agent's words.
+ */
+function asDeclared(
+  plan: AgentPlan,
+  key: "apis" | "schemas" | "configKeys" | "tests" | "services",
+  enriched: readonly string[] | undefined,
+): readonly string[] {
+  return plan.declared === undefined
+    ? (enriched ?? [])
+    : (plan.declared[key] ?? []);
+}
+
 function overlap(first: readonly string[], second: readonly string[]): string[] {
   const right = new Set(second.map((value) => value.toLowerCase()));
   return uniqueStrings(
@@ -186,7 +211,7 @@ function dependencyImpact(first: AgentPlan, second: AgentPlan): string[] {
     ...right.dependencies.filter((value) =>
       leftResources.has(value.toLowerCase()),
     ),
-    ...overlap(left.expectedServices, right.expectedServices).map(
+    ...overlap(asDeclared(left, "services", left.expectedServices), asDeclared(right, "services", right.expectedServices)).map(
       (value) => `service:${value}`,
     ),
   ];
@@ -481,30 +506,30 @@ export class ConflictDetector {
       ),
       evidence(
         "api_overlap",
-        overlap(left.expectedApis, right.expectedApis),
+        overlap(asDeclared(left, "apis", left.expectedApis), asDeclared(right, "apis", right.expectedApis)),
         taskIds,
-        overlap(left.expectedApis, right.expectedApis).length *
+        overlap(asDeclared(left, "apis", left.expectedApis), asDeclared(right, "apis", right.expectedApis)).length *
           this.options.apiOverlapWeight,
       ),
       evidence(
         "schema_overlap",
-        overlap(left.expectedSchemas, right.expectedSchemas),
+        overlap(asDeclared(left, "schemas", left.expectedSchemas), asDeclared(right, "schemas", right.expectedSchemas)),
         taskIds,
-        overlap(left.expectedSchemas, right.expectedSchemas).length *
+        overlap(asDeclared(left, "schemas", left.expectedSchemas), asDeclared(right, "schemas", right.expectedSchemas)).length *
           this.options.schemaOverlapWeight,
       ),
       evidence(
         "configuration_overlap",
-        overlap(left.expectedConfigKeys, right.expectedConfigKeys),
+        overlap(asDeclared(left, "configKeys", left.expectedConfigKeys), asDeclared(right, "configKeys", right.expectedConfigKeys)),
         taskIds,
-        overlap(left.expectedConfigKeys, right.expectedConfigKeys).length *
+        overlap(asDeclared(left, "configKeys", left.expectedConfigKeys), asDeclared(right, "configKeys", right.expectedConfigKeys)).length *
           this.options.configurationOverlapWeight,
       ),
       evidence(
         "test_overlap",
-        overlap(left.expectedTests, right.expectedTests),
+        overlap(asDeclared(left, "tests", left.expectedTests), asDeclared(right, "tests", right.expectedTests)),
         taskIds,
-        overlap(left.expectedTests, right.expectedTests).length *
+        overlap(asDeclared(left, "tests", left.expectedTests), asDeclared(right, "tests", right.expectedTests)).length *
           this.options.testOverlapWeight,
       ),
       intent?.independent === true
