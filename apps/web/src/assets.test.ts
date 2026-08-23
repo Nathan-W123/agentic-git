@@ -5015,7 +5015,9 @@ test("agent details use the reference profile with supported controls", async ()
   assert.doesNotMatch(css, /^\.agent-panel-head\s*\{/mu);
 
   // Only a real assignment becomes the primary-colour bubble. Its own copy,
-  // state line, mark, and history control remain legible on that solid surface.
+  // state line, and mark remain legible on that solid surface. The inline
+  // history control next to "available for new work" is gone; Message and
+  // History stay as explicit profile actions above.
   const activeTask = /\n\.agent-spec \.aspec-current-task-active \{([\s\S]*?)\n\}/u.exec(
     css,
   )?.[1];
@@ -5026,7 +5028,6 @@ test("agent details use the reference profile with supported controls", async ()
     "aspec-capability-mark",
     "aspec-capability-title",
     "aspec-capability-meta",
-    "aspec-nav",
   ]) {
     assert.match(
       css,
@@ -5035,12 +5036,11 @@ test("agent details use the reference profile with supported controls", async ()
   }
   assert.match(
     css,
-    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-nav \{\s*color: #fff;/u,
+    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-capability-meta \{\s*color: #fff;/u,
   );
-  assert.match(
-    css,
-    /\.aspec-current-task-active \.aspec-nav \{[\s\S]*?background: rgba\(0, 0, 0, 0\.14\);/u,
-  );
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-nav/u);
+  assert.doesNotMatch(spec, /class="aspec-nav"/u);
+  assert.doesNotMatch(spec, /title="Task history"/u);
 
   // The remaining interactive and informative parts stay on the single
   // scrolling surface, including owner-only and read-only paths.
@@ -5054,7 +5054,6 @@ test("agent details use the reference profile with supported controls", async ()
     assert.match(spec, new RegExp(`data-act="${action}"|"${action}"`, "u"));
   }
   assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
-  assert.match(spec, /data-value="history" title="Task history"/u);
   // The live assignment opens its thread the same way a history row does.
   assert.match(spec, /const openCurrentTask =/u);
   assert.match(

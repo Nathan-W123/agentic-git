@@ -7909,36 +7909,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   text-transform: capitalize;
 }
 
-/* The way through to everything this agent has been asked for here. A text
-   control on the heading's own line rather than a full-width bordered button
-   under the task: the panel header carries the same move as an icon, and two
-   boxes saying "History" on one screen is one too many. */
-.agent-spec .aspec-nav {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  padding: 3px 4px;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-3);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-  transition: color 0.13s ease, background 0.13s ease;
-}
-
-.agent-spec .aspec-nav:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.agent-spec .aspec-nav svg {
-  width: 13px;
-  height: 13px;
-  flex: none;
-}
-
 .agent-spec .aspec-note {
   margin-top: 8px;
   color: var(--text-3);
@@ -8265,17 +8235,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   text-transform: capitalize;
 }
 
-.agent-spec .aspec-nav {
-  padding: 6px 8px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  font-size: 11.5px;
-}
-
-.agent-spec .aspec-nav:hover {
-  border-color: var(--border-soft);
-}
-
 /* A task that exists is the live assignment this profile is about, so it
    becomes one accent surface instead of another grey capability row. The
    available-for-work fallback keeps the unmodified row above. */
@@ -8305,23 +8264,12 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 
 .agent-spec .aspec-current-task-active .aspec-capability-mark,
 .agent-spec .aspec-current-task-active .aspec-capability-title,
-.agent-spec .aspec-current-task-active .aspec-capability-meta,
-.agent-spec .aspec-current-task-active .aspec-nav {
+.agent-spec .aspec-current-task-active .aspec-capability-meta {
   color: #fff;
 }
 
 .agent-spec .aspec-current-task-active .aspec-capability-meta {
   opacity: 0.78;
-}
-
-.agent-spec .aspec-current-task-active .aspec-nav {
-  border-color: rgba(255, 255, 255, 0.18);
-  background: rgba(0, 0, 0, 0.14);
-}
-
-.agent-spec .aspec-current-task-active .aspec-nav:hover {
-  border-color: rgba(255, 255, 255, 0.34);
-  background: rgba(0, 0, 0, 0.22);
 }
 
 .agent-spec .aspec-note {
@@ -8363,10 +8311,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   .agent-spec .aspec-capability {
     align-items: flex-start;
     flex-wrap: wrap;
-  }
-
-  .agent-spec .aspec-current-task .aspec-nav {
-    margin-left: 36px;
   }
 }
 
