@@ -1031,9 +1031,23 @@ const PLAN_SHAPE_INSTRUCTIONS = [
   // rest of the file to whoever asks next. An empty list is read as a claim on
   // every file listed, whole, so it is the difference between a colleague
   // working alongside this task and one waiting for it.
-  "expectedSymbols matters more than it looks: name every function, class or",
-  "method you expect to add, change or remove, including ones you will create.",
-  "Leave it empty only for a change that belongs to no declaration at all.",
+  //
+  // Stated as a consequence rather than a request, because the field is
+  // easily read as bookkeeping. It is not: it is the difference between
+  // holding two lines of a file and holding all of it. The instruction below
+  // also says to go and look, since planning happens with the repository
+  // open and a name guessed from the objective is worth less than one read
+  // off the code.
+  "expectedSymbols decides whether anyone can work in the same file as you",
+  "while you work. Name every function, class or method you will add, change",
+  "or remove — including ones that do not exist yet. You have the repository",
+  "in front of you: open the files you named and read the declarations out,",
+  "rather than guessing them from the objective.",
+  "An empty list claims every file you listed, whole, and makes everybody",
+  "else wait for you to finish. Leave it empty only for a change that belongs",
+  "to no declaration at all — a config value, a bare data file.",
+  'Asked to remove a notification bell from a header, this is ["notificationBell"],',
+  "not [].",
 ].join("\n");
 
 /**

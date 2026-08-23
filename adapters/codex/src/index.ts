@@ -2065,9 +2065,15 @@ export class CodexAdapter implements AgentAdapter {
       // the rest of the file to whoever asks next. An empty list is read as a
       // claim on every file listed, whole — the difference between a colleague
       // working alongside this task and one waiting for it to finish.
-      "In expectedSymbols, name every function, class or method you expect to",
-      "add, change or remove, including ones that do not exist yet. Leave it",
-      "empty only for a change that belongs to no declaration at all.",
+      "expectedSymbols decides whether anyone can work in the same file as you",
+      "while you work. Name every function, class or method you will add,",
+      "change or remove — including ones that do not exist yet. You have the",
+      "repository in front of you: open the files you named and read the",
+      "declarations out, rather than guessing them from the objective.",
+      "An empty list claims every file you listed, whole, and makes everybody",
+      "else wait for you to finish. Leave it empty only for a change that",
+      "belongs to no declaration at all — a config value, a bare data file.",
+      'Asked to remove a notification bell from a header, that is ["notificationBell"], not [].',
       "List affected APIs, schemas, configuration keys, tests, and services.",
       "State a concise intent that distinguishes adding, removing, enabling, or disabling behavior.",
       "List external access honestly; the execution sandbox may deny it.",

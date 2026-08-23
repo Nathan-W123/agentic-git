@@ -730,27 +730,47 @@ export function likelySymbolsIn(
   // not make every fragment decisive.
   const ceiling = Math.max(3, Math.round(placed.length * 0.05));
 
-  const claimed: string[] = [];
+  // Scored rather than filtered, because how *much* of a name an objective
+  // accounts for is the difference between a claim and a coincidence.
+  // `notificationBell` against "remove the notification bell" is the whole
+  // name; `chanHeader` against the same words is one fragment of two, and the
+  // first is a far better answer than the second wherever both exist.
+  const scored: { name: string; matched: number; whole: boolean }[] = [];
   for (const entry of placed) {
     // The whole name written out is unambiguous however common its parts are.
     if (lowered.includes(entry.name.toLowerCase())) {
-      claimed.push(entry.name);
+      scored.push({ name: entry.name, matched: Number.MAX_SAFE_INTEGER, whole: true });
       continue;
     }
     const tokens = [...new Set(indexTokens(entry.name, minTokenLength))];
-    if (
-      tokens.some((token) => {
-        const shared = frequency.get(token) ?? 0;
-        // A fragment every declaration in the file carries has not chosen
-        // between them — "total" in a file of `orderTotal` and `formatTotal`
-        // is the file's subject, not a claim on half of it. The proportional
-        // ceiling alone cannot see this, because its floor is larger than a
-        // small file.
-        return words.has(token) && shared > 0 && shared < placed.length && shared <= ceiling;
-      })
-    ) {
-      claimed.push(entry.name);
+    const matched = tokens.filter((token) => {
+      const shared = frequency.get(token) ?? 0;
+      // A fragment every declaration in the file carries has not chosen
+      // between them — "total" in a file of `orderTotal` and `formatTotal` is
+      // the file's subject, not a claim on half of it. The proportional
+      // ceiling alone cannot see this, because its floor is larger than a
+      // small file.
+      return (
+        words.has(token) &&
+        shared > 0 &&
+        shared < placed.length &&
+        shared <= ceiling
+      );
+    }).length;
+    if (matched > 0) {
+      scored.push({ name: entry.name, matched, whole: false });
     }
   }
-  return claimed.sort();
+  if (scored.length === 0) {
+    return [];
+  }
+  // Only the best answers the file has. A declaration the objective accounts
+  // for twice over is not in the same class as one it brushes against, and
+  // keeping both claims the second for nothing — which costs whoever wanted
+  // it a turn.
+  const best = scored.reduce((top, entry) => Math.max(top, entry.matched), 0);
+  return scored
+    .filter((entry) => entry.matched === best)
+    .map((entry) => entry.name)
+    .sort();
 }

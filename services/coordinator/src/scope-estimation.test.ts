@@ -317,3 +317,32 @@ test("a name written out in full is claimed however common its words are", () =>
     ["renderChats"],
   );
 });
+
+test("the name an objective accounts for wins over one it brushes", () => {
+  // Taken from a real collision. "the header's notification bell" mentions
+  // both words, and both `notificationBell` and a header function are
+  // plausible from names alone — but one of them is the whole request and the
+  // other is a fragment of it. Keeping both claims a function nobody was
+  // going to touch, which costs whoever wanted it a turn.
+  assert.deepEqual(
+    likelySymbolsIn("remove the header's notification bell", [
+      { name: "notificationBell" },
+      { name: "renderHeader" },
+      { name: "headerTitle" },
+      { name: "unreadCount" },
+    ]),
+    ["notificationBell"],
+  );
+});
+
+test("a terse objective still finds the declaration it named", () => {
+  // What a person actually types. Two words, both of them in one name.
+  assert.deepEqual(
+    likelySymbolsIn("get rid of this notif bell", [
+      { name: "notificationBell" },
+      { name: "chanHeader" },
+      { name: "threadPanel" },
+    ]),
+    ["notificationBell"],
+  );
+});
