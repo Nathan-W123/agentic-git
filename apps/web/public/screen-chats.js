@@ -4137,46 +4137,26 @@ function threadListPanel(repositoryId) {
           : "Pending";
     const said = threadSaidCount(count);
     const context = `${status} — ${title} — ${author.name}, ${said} — started ${clockTime(entry.at)}`;
-    if (finished) {
-      return `<div class="thread-item-row">
-        <button type="button" class="thread-item thread-item-ended${manageable ? " thread-item-managed" : ""}"
-          title="${esc(context)}"
-          aria-label="${esc(`Open completed thread: ${title}. ${author.name}, ${said}.`)}"
-          data-act="channel-thread-open" data-value="${esc(entry.id)}">
-          <span class="ti-done" aria-hidden="true">${icon("check")}</span>
-          <span class="ti-text">${esc(title)}</span>
-          <span class="ti-who">${esc(author.name)}</span>
-        </button>
-        ${
-          manageable
-            ? iconButton("trash", {
-                act: "channel-thread-delete",
-                value: entry.id,
-                title: "Delete this thread",
-                small: true,
-              })
-            : ""
-        }
-      </div>`;
-    }
     return `<div class="thread-item-row">
-      <button type="button" class="thread-item${working ? " thread-item-active" : ""}${waiting ? " thread-item-held" : ""}${!working && !waiting ? " thread-item-pending" : ""}"
+      <button type="button" class="thread-item${finished ? " thread-item-ended" : ""}${!finished && working ? " thread-item-active" : ""}${!finished && waiting ? " thread-item-held" : ""}${!finished && !working && !waiting ? " thread-item-pending" : ""}"
         title="${esc(context)}"
-        aria-label="${esc(`Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
+        aria-label="${esc(finished ? `Open completed thread: ${title}. ${author.name}, ${said}.` : `Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
         data-act="channel-thread-open" data-value="${esc(entry.id)}">
         <span class="ti-main">
           <span class="ti-text">${esc(title)}</span>
           <span class="ti-meta">
             ${
-              working
-                ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
-                : waiting
-                  ? `<span class="ti-held">Waiting for you</span>`
-                  : `<span class="ti-pending">Pending</span>`
+              finished
+                ? `<span class="ti-done" aria-hidden="true">${icon("check")}</span>`
+                : working
+                  ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
+                  : waiting
+                    ? `<span class="ti-held">Waiting for you</span>`
+                    : `<span class="ti-pending">Pending</span>`
             }
             <span class="ti-who">${esc(author.name)}</span>
             <span class="ti-count">${esc(said)}</span>
-            ${working ? threadRunMark(entry, repositoryId, author) : ""}
+            ${!finished && working ? threadRunMark(entry, repositoryId, author) : ""}
           </span>
         </span>
         <span class="ti-go">${icon("chevronRight")}</span>

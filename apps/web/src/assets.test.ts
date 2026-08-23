@@ -4421,14 +4421,17 @@ test("ended threads wrap as compact pills without live activity motion", async (
     listStart,
     chats.indexOf("\n/**\n * Your own agent", listStart),
   );
-  const finishedMarkup = list.slice(
-    list.indexOf("if (finished)"),
-    list.indexOf('class="thread-item${working', list.indexOf("if (finished)")),
-  );
 
-  assert.match(finishedMarkup, /class="thread-item thread-item-ended/u);
-  assert.match(finishedMarkup, /class="ti-done"/u);
-  assert.doesNotMatch(finishedMarkup, /ti-activity|text-sweep/u);
+  assert.match(list, /finished \? " thread-item-ended"/u);
+  assert.match(
+    list,
+    /finished\s*\n\s*\? `<span class="ti-done" aria-hidden="true">\$\{icon\("check"\)\}<\/span>`/u,
+  );
+  assert.match(list, /class="ti-main"/u);
+  assert.match(list, /class="ti-meta"/u);
+  assert.match(list, /class="ti-go"/u);
+  assert.match(list, /class="ti-count"/u);
+  assert.match(list, /!finished && working \? threadRunMark/u);
   const finished = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   const active = /\n\.thread-list-active \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(finished ?? "", /display: grid;/u);
@@ -4437,8 +4440,10 @@ test("ended threads wrap as compact pills without live activity motion", async (
   const card = /\n\.thread-item \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(card ?? "", /border-radius: var\(--radius\);/u);
   const ended = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(ended ?? "", /background: var\(--bg-inset\);/u);
   assert.doesNotMatch(ended ?? "", /border-radius:\s*999px/u);
   assert.doesNotMatch(ended ?? "", /max-width:\s*260px/u);
+  assert.doesNotMatch(css, /\.thread-item-ended \.ti-who::before/u);
 });
 
 test("long thread titles stay on one compact line", async () => {
@@ -4476,7 +4481,7 @@ test("thread list keeps unfinished work ahead of ended threads", async () => {
   assert.ok(
     list.indexOf('class="thread-list-active"') <
       list.indexOf('class="thread-list-finished"'),
-    "unfinished summaries should render before the completed pills",
+    "unfinished summaries should render before the completed threads",
   );
   assert.match(list, /: "Pending";/u);
 });
@@ -4496,8 +4501,8 @@ test("compact thread summaries keep accessible thread navigation", async () => {
 
   assert.equal(
     list.match(/data-act="channel-thread-open"/gu)?.length,
-    2,
-    "both active rows and ended pills should open their thread",
+    1,
+    "active and ended rows share one open control that opens their thread",
   );
   assert.match(list, /aria-label="\$\{esc\(`Open completed thread:/u);
   assert.match(list, /aria-label="\$\{esc\(`Open thread:/u);

@@ -11083,7 +11083,7 @@ dialog.modal[open]::backdrop {
   outline-offset: 1px;
 }
 
-/* Completed work uses the same card geometry as active, pending, and held.
+/* Completed work uses the same multi-line card as active, pending, and held.
    Quieter fill and a green check carry the finished state; the full title,
    author, reply count, and time remain in the accessible label and tooltip. */
 .thread-item-ended {
@@ -11103,19 +11103,6 @@ dialog.modal[open]::backdrop {
 .thread-item-ended .ti-done svg {
   width: 13px;
   height: 13px;
-}
-
-.thread-list-finished .thread-item-ended .ti-who {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-size: 11.5px;
-  color: var(--text-3);
-}
-
-.thread-item-ended .ti-who::before {
-  content: "·";
-  margin-right: 5px;
-  color: var(--text-4);
 }
 
 .thread-item-pending {
@@ -11630,8 +11617,6 @@ dialog.modal[open]::backdrop {
 }
 
 .thread-item-ended .ti-text {
-  flex: 1 1 auto;
-  min-width: 0;
   font-weight: 500;
   color: var(--text-2);
 }
