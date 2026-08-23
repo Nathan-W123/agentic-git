@@ -333,10 +333,16 @@ test("a partially overlapping plan is admitted for its free files, across runs",
       "No blanket claim was frozen, so the second task was admitted into a " +
         "repository the first still claimed in full.",
     );
+    // Narrowed by declaration, not by observation. The arrival is what
+    // triggers this, and it happens before the holder has necessarily
+    // finished writing — so the honest answer is everything the objective
+    // said it would touch, not only what it has touched so far. Narrowing to
+    // observation here would free a file the holder is still about to write.
+    // The holder's own poll narrows further, to what it actually took.
     assert.deepEqual(
       frozen.event.data["files"] ?? frozen.event.data["expectedFiles"],
-      [SHARED_FILE],
-      "The narrowed claim should keep exactly what the holder had written",
+      ["a.py", SHARED_FILE],
+      "The narrowed claim should keep what the holder said it would touch",
     );
   } finally {
     if (first !== undefined) {

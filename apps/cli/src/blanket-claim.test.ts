@@ -98,6 +98,9 @@ test("a task alone in its repository is granted all of it, with no plan", async 
   const claim = await authority.claimRepository({
     task: first.task,
     repository: REPOSITORY,
+    // No estimate: the claim covers the repository and an arrival behind
+    // it is refused, which is the shape these tests were written for.
+    estimatedFiles: [],
     baseVersion: BASE,
   });
 
@@ -125,6 +128,9 @@ test("a second lease in the repository refuses the blanket claim", async () => {
     await authority.claimRepository({
       task: first.task,
       repository: REPOSITORY,
+      // No estimate: the claim covers the repository and an arrival behind
+      // it is refused, which is the shape these tests were written for.
+      estimatedFiles: [],
       baseVersion: BASE,
     }),
     undefined,
@@ -141,6 +147,9 @@ test("a second task freezes the first to what it has touched", async () => {
   const claim = await holder.claimRepository({
     task: first.task,
     repository: REPOSITORY,
+    // No estimate: the claim covers the repository and an arrival behind
+    // it is refused, which is the shape these tests were written for.
+    estimatedFiles: [],
     baseVersion: BASE,
   });
   assert.notEqual(claim, undefined);
@@ -201,6 +210,9 @@ test("a blanket holder defers arrivals immediately rather than queueing them", a
   await holder.claimRepository({
     task: first.task,
     repository: REPOSITORY,
+    // No estimate: the claim covers the repository and an arrival behind
+    // it is refused, which is the shape these tests were written for.
+    estimatedFiles: [],
     baseVersion: BASE,
   });
   const second = await leaseFor(store, worker, "fix the audio mixer");
@@ -275,6 +287,9 @@ test("a claim already carrying a contract is never widened into a blanket one", 
     await authority.claimRepository({
       task: first.task,
       repository: REPOSITORY,
+      // No estimate: the claim covers the repository and an arrival behind
+      // it is refused, which is the shape these tests were written for.
+      estimatedFiles: [],
       baseVersion: BASE,
     }),
     undefined,
@@ -291,6 +306,9 @@ test("a holder with nothing to narrow to at all keeps the whole repository", asy
   const claim = await holder.claimRepository({
     task: first.task,
     repository: REPOSITORY,
+    // No estimate: the claim covers the repository and an arrival behind
+    // it is refused, which is the shape these tests were written for.
+    estimatedFiles: [],
     baseVersion: BASE,
   });
   assert.notEqual(claim, undefined);
@@ -358,6 +376,9 @@ test("a repository-wide hold is announced, and announced once", async () => {
   await holder.claimRepository({
     task: first.task,
     repository: REPOSITORY,
+    // No estimate: the claim covers the repository and an arrival behind
+    // it is refused, which is the shape these tests were written for.
+    estimatedFiles: [],
     baseVersion: BASE,
   });
   const second = await leaseFor(store, worker, "fix the audio mixer");
@@ -414,6 +435,9 @@ test("a holder that has written nothing is narrowed to its estimate", async () =
   const claim = await holder.claimRepository({
     task: first.task,
     repository: REPOSITORY,
+    // No estimate: the claim covers the repository and an arrival behind
+    // it is refused, which is the shape these tests were written for.
+    estimatedFiles: [],
     baseVersion: BASE,
   });
   assert.notEqual(claim, undefined);
