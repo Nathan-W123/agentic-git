@@ -4429,12 +4429,16 @@ test("ended threads wrap as compact pills without live activity motion", async (
   assert.match(finishedMarkup, /class="thread-item thread-item-ended/u);
   assert.match(finishedMarkup, /class="ti-done"/u);
   assert.doesNotMatch(finishedMarkup, /ti-activity|text-sweep/u);
-  const wrap = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(wrap ?? "", /display: flex;/u);
-  assert.match(wrap ?? "", /flex-wrap: wrap;/u);
-  const pill = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(pill ?? "", /border-radius: 999px;/u);
-  assert.match(pill ?? "", /max-width: 260px;/u);
+  const finished = /\n\.thread-list-finished \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  const active = /\n\.thread-list-active \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(finished ?? "", /display: grid;/u);
+  assert.match(active ?? "", /display: grid;/u);
+  assert.doesNotMatch(finished ?? "", /flex-wrap:/u);
+  const card = /\n\.thread-item \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(card ?? "", /border-radius: var\(--radius\);/u);
+  const ended = /\n\.thread-item-ended \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.doesNotMatch(ended ?? "", /border-radius:\s*999px/u);
+  assert.doesNotMatch(ended ?? "", /max-width:\s*260px/u);
 });
 
 test("long thread titles stay on one compact line", async () => {
@@ -4445,8 +4449,7 @@ test("long thread titles stay on one compact line", async () => {
   assert.match(title ?? "", /text-overflow: ellipsis;/u);
   assert.match(title ?? "", /white-space: nowrap;/u);
   assert.doesNotMatch(title ?? "", /line-clamp/u);
-  const row =
-    /\n\.thread-list-finished \.thread-item-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  const row = /\n\.thread-item-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(row ?? "", /max-width: 100%;/u);
 });
 
@@ -5098,6 +5101,28 @@ test("repository role overrides survive roster refreshes", async () => {
   );
   assert.match(body, /role: local\?\.role \?\? server\.role/u);
   assert.match(body, /model: local\?\.model \?\? agent\.model/u);
+});
+
+test("a call sign outranks a legacy vendor-wide channel name", async () => {
+  // Same order the gateway resolves in: a bare-provider row names a vendor and
+  // must not shadow the name the account holds, or a room that carries one
+  // goes on showing the old name after an account-wide rename. A row naming
+  // one agent still wins, and the vendor-wide row is never dropped locally —
+  // it belongs to every agent on that vendor that has no name of its own.
+  const data = await publicFile("data.js");
+  const resolve = data.slice(
+    data.indexOf("function overrideFor(overrides, agent)"),
+    data.indexOf("function withOverride(agent, override)"),
+  );
+  assert.match(resolve, /agent\.hasName === true \? undefined : legacy\?\.name/u);
+  assert.match(resolve, /name: specific\?\.name \?\? legacyName/u);
+
+  const rename = data.slice(
+    data.indexOf("function applyAgentRenameLocally(providerId, name)"),
+    data.indexOf("export async function renameAgent"),
+  );
+  assert.match(rename, /const key = `\$\{myId\}:\$\{providerId\}`/u);
+  assert.doesNotMatch(rename, /\[providerId, `\$\{myId\}:\$\{providerId\}`\]/u);
 });
 
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
