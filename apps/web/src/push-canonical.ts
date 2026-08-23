@@ -4,6 +4,7 @@ import { createLocalSummariser } from "@coord/local-triage";
 import type { CoordinationStore } from "@coord/persistence";
 import {
   PUSH_BRANCH_NAME_TIMEOUT_MS,
+  SyncDivergedError,
   UpstreamChangedError,
   type PushBranchNamer,
   type RepositoryService,
@@ -14,7 +15,13 @@ import type { GitHubConnectionService } from "./github-connection.js";
 
 export interface PushCanonicalResult {
   outcome: "done" | "refused";
-  detail?: { url?: string; output?: string[] };
+  detail?: {
+    url?: string;
+    output?: string[];
+    /** The sync needs a person to choose which side wins overlapping files. */
+    syncConflict?: true;
+    conflicts?: string[];
+  };
   explanation: string;
 }
 
@@ -132,6 +139,20 @@ async function pushCanonicalAs(
     };
   } catch (error) {
     const explanation = describeError(error);
+    if (error instanceof SyncDivergedError) {
+      // This refusal is actionable in the dashboard. Keep it distinct from
+      // authentication, connectivity and live-work failures so `/push` can
+      // ask the same two-sided question as the repository Sync control, then
+      // resume publishing after the person answers it.
+      return {
+        outcome: "refused",
+        detail: {
+          syncConflict: true,
+          conflicts: [...error.conflicts],
+        },
+        explanation,
+      };
+    }
     if (/authentication failed|error: 40[13]\b|returned error: 40[13]\b/iu.test(explanation)) {
       // Stored and usable are different things: a token GitHub has just
       // refused should stop looking connected in Settings, and the refusal

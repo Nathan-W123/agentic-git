@@ -391,8 +391,25 @@ async function startRuntime(
     /** The direct push result returned to the channel. */
     pushOutcome?: {
       outcome: "done" | "refused";
+      detail?: {
+        url?: string;
+        output?: string[];
+        syncConflict?: true;
+        conflicts?: string[];
+      };
       explanation: string;
     };
+    /** Consecutive direct push results, for a conflict followed by its retry. */
+    pushOutcomes?: Array<{
+      outcome: "done" | "refused";
+      detail?: {
+        url?: string;
+        output?: string[];
+        syncConflict?: true;
+        conflicts?: string[];
+      };
+      explanation: string;
+    }>;
   } = {},
 ): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
@@ -405,6 +422,7 @@ async function startRuntime(
   const chatConnections: TestRuntime["chatConnections"] = new Map();
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const pushCalls: TestRuntime["pushCalls"] = [];
+  const pushOutcomes = [...(options.pushOutcomes ?? [])];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const providerUsage: TestRuntime["providerUsage"] = new Map();
@@ -656,6 +674,7 @@ async function startRuntime(
     async pushRepository(input) {
       pushCalls.push(input);
       return (
+        pushOutcomes.shift() ??
         options.pushOutcome ?? {
           outcome: "done",
           explanation: "Pushed canonical to coord/export-test on GitHub.",
@@ -7698,6 +7717,80 @@ test("/push publishes directly as the sender without planning or running a task"
   assert.match(
     (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
     /Pushed canonical to coord\/export-test on GitHub/u,
+  );
+});
+
+test("/push returns a sync choice and its retry publishes after that choice", async (t) => {
+  const runtime = await startRuntime(t, {
+    pushOutcomes: [
+      {
+        outcome: "refused",
+        detail: {
+          syncConflict: true,
+          conflicts: ["src/shared.ts"],
+        },
+        explanation: "Both sides changed src/shared.ts.",
+      },
+      {
+        outcome: "done",
+        explanation: "Pushed to coord/resolved-sync on GitHub.",
+      },
+    ],
+  });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "push-sync-choice");
+  const messages =
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`;
+
+  const posted = await owner.request(messages, {
+    method: "POST",
+    body: { content: "/push" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.deepEqual(posted.data.command, {
+    name: "push",
+    result: {
+      outcome: "refused",
+      detail: {
+        syncConflict: true,
+        conflicts: ["src/shared.ts"],
+      },
+      explanation: "Both sides changed src/shared.ts.",
+    },
+  });
+  const beforeRetry = await owner.request(messages);
+  assert.doesNotMatch(
+    (beforeRetry.data.messages as any[])
+      .map((message) => String(message.content))
+      .join("\n"),
+    /Both sides changed/u,
+  );
+
+  const retried = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/push`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(retried.status, 200, JSON.stringify(retried.data));
+  assert.equal(retried.data.push.outcome, "done");
+  assert.deepEqual(runtime.pushCalls, [
+    {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      actorId: bootstrapped.user.id,
+    },
+    {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      actorId: bootstrapped.user.id,
+    },
+  ]);
+  const afterRetry = await owner.request(messages);
+  assert.match(
+    (afterRetry.data.messages as any[])
+      .map((message) => String(message.content))
+      .join("\n"),
+    /Pushed to coord\/resolved-sync on GitHub/u,
   );
 });
 
