@@ -208,6 +208,11 @@ test("direct messages are offered with people and with nobody else", async () =>
   );
   assert.match(person, /agentCorrespondentIds\(\)\.has\(id\)/u);
   assert.match(person, /currentUserId\(\)/u);
+  // A historical conversation is not a contact. Requiring the current DM
+  // roster also guarantees there is a real name to render instead of a raw
+  // internal user id.
+  assert.match(person, /state\.dmPeople\.some/u);
+  assert.match(person, /String\(person\?\.id/u);
 
   const list = slice(
     app,
