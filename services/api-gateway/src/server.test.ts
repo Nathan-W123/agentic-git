@@ -3084,6 +3084,104 @@ test("an invitation brings in somebody who has no account yet", async (t) => {
   assert.equal(preview.data.invitation.accountExists, false);
 });
 
+test("a recipient name makes a readable invitation link", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "readable-invite");
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: {
+        ...inviteBody("", "developer", repo),
+        recipientName: "Nathan",
+      },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  assert.equal(invited.data.token, "NATHAN");
+
+  // The readable token remains a bearer credential, and only its hash is
+  // kept. The deterministic internal id is what makes the code resolvable
+  // without adding a second persisted field.
+  const stored = await runtime.store.getInvitation(
+    invited.data.invitation.id as string,
+  );
+  assert.ok(stored);
+  assert.notEqual(stored.secretHash, "NATHAN");
+  assert.notEqual(stored.id, "NATHAN");
+
+  const joiner = new TestClient(runtime.origin);
+  const preview = await joiner.request("/api/v1/invitations/NATHAN");
+  assert.equal(preview.status, 200, JSON.stringify(preview.data));
+  assert.equal(preview.data.invitation.repositoryId, repo);
+  assert.equal(preview.data.invitation.open, true);
+
+  const accepted = await joiner.request("/api/v1/invitations/NATHAN/accept", {
+    method: "POST",
+    body: {
+      email: "nathan@example.com",
+      displayName: "Nathan",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  assert.equal(accepted.data.user.email, "nathan@example.com");
+  assert.equal(
+    (await runtime.store.listRepositoryGrants(repo)).some(
+      (grant) => grant.userId === accepted.data.user.id,
+    ),
+    true,
+  );
+});
+
+test("invalid and reserved readable invitation names are refused", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "readable-invite-collisions");
+  const endpoint =
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`;
+
+  const invalid = await owner.request(endpoint, {
+    method: "POST",
+    body: {
+      ...inviteBody("", "viewer", repo),
+      recipientName: "Amy!",
+    },
+  });
+  assert.equal(invalid.status, 400, JSON.stringify(invalid.data));
+  assert.equal(
+    invalid.data.error?.code ?? invalid.data.code,
+    "invalid_invitation_code",
+  );
+
+  const first = await owner.request(endpoint, {
+    method: "POST",
+    body: {
+      ...inviteBody("", "viewer", repo),
+      recipientName: "Nathan",
+    },
+  });
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  assert.equal(first.data.token, "NATHAN");
+
+  const reserved = await owner.request(endpoint, {
+    method: "POST",
+    body: {
+      ...inviteBody("", "viewer", repo),
+      recipientName: "  nathan  ",
+    },
+  });
+  assert.equal(reserved.status, 409, JSON.stringify(reserved.data));
+  assert.equal(
+    reserved.data.error?.code ?? reserved.data.code,
+    "invitation_code_unavailable",
+  );
+});
+
 /**
  * Somebody already on Lattice, invited to a second repository.
  *

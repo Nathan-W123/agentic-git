@@ -276,6 +276,14 @@ test("settings dialog enter animation only plays when the dialog opens", async (
     /\.settings-layer\.settings-entering \.settings-dialog\{[^}]*animation:settings-in/u,
   );
 
+  // Closing motion temporarily reattaches only the overlay node after the
+  // render has removed Settings. Its scoped styles therefore have to travel
+  // inside that node or the unstyled brand gear flashes at its natural size.
+  assert.match(
+    dialog,
+    /<div class="settings-layer" data-act="settings-backdrop">\s*<style id="settings-dialog-styles">/u,
+  );
+
   const motion = slice(app, "const MOTION_SURFACES = [", "const surfaceNodes");
   assert.match(motion, /selector:\s*"\.settings-layer"/u);
   assert.match(motion, /enter:\s*"settings-entering"/u);
@@ -295,4 +303,50 @@ test("Advanced is a category in the settings dialog", async () => {
     app,
     /if \(route === "settings" \|\| route === "advanced"\)[\s\S]{0,220}openSettings/u,
   );
+});
+
+test("a NATHAN-style invite link enters the invitation flow in a running session", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+
+  // A readable token has the same special entry point as the old opaque one,
+  // both at startup and when a signed-in browser follows the link later.
+  assert.equal(/^#invite\/(.+)$/u.exec("#invite/NATHAN")?.[1], "NATHAN");
+  const hashRoute = slice(app, "function applyHash() {", "/* -------------------------------------------------------------- events");
+  assert.match(hashRoute, /\^#invite\\\/\.\+\$[\s\S]{0,100}handleInviteLink\(\)/u);
+  const handler = slice(
+    app,
+    "async function handleInviteLink() {",
+    "\nfunction showInvite() {",
+  );
+  assert.match(handler, /\^#invite\\\/\(\.\+\)\$/u);
+  assert.match(handler, /state\.inviteToken = match\[1\]/u);
+  assert.match(handler, /readInvitation\(state\.inviteToken\)/u);
+
+  const invite = slice(
+    app,
+    "async function inviteSomebody(rerender, repositoryId) {",
+    "\n/**\n * The link, shown once.",
+  );
+  assert.match(invite, /name="recipientName"/u);
+  assert.match(invite, /placeholder="Nathan"/u);
+  assert.match(
+    invite,
+    /createInvitation\(\s*values\.recipientName,\s*values\.role,\s*values\.repositoryId,/u,
+  );
+
+  const request = slice(
+    data,
+    "export async function createInvitation(",
+    "\nexport async function revokeInvitation(",
+  );
+  assert.match(request, /createInvitation\(recipientName, role, repositoryId\)/u);
+  assert.match(request, /body: \{[\s\S]*recipientName,\s*role,/u);
+
+  const linkDialog = slice(
+    app,
+    "async function showInviteLink(token, repositoryId) {",
+    "\n/**\n * Removes one agent membership",
+  );
+  assert.match(linkDialog, /anyone\s+who guesses it can use this invitation/u);
 });

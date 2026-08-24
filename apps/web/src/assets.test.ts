@@ -5222,6 +5222,29 @@ test("agent details use the reference profile with supported controls", async ()
   );
   assert.match(css, /@container \(max-width: 650px\)/u);
 
+  // The head is a row — face beside the name — with the short facts under it
+  // as a strip of pills, not as stacked label-over-value pairs. Each of those
+  // pairs cost two lines and a column to state one word.
+  assert.match(spec, /class="aspec-identity-head"/u);
+  assert.match(spec, /class="aspec-pills"/u);
+  assert.match(spec, /specPill\(`#\$\{repositoryId\}`/u);
+  assert.match(spec, /specPill\(statusText, \{ dot: status \}\)/u);
+  assert.doesNotMatch(spec, /class="aspec-(?:status|profile-facts)"/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-profile-facts/u);
+  assert.match(css, /\.agent-spec \.aspec-pill\s*\{[^}]*border-radius: 999px;/su);
+  // A band of colour, not a hero image: the banner used to push the profile a
+  // screen down from the panel header for a gradient nobody reads.
+  assert.match(
+    css,
+    /\.agent-spec \.aspec-banner\s*\{[^}]*height: clamp\(58px, 9vh, 74px\);/su,
+  );
+
+  // One caption per control, doubling the settings block's height to repeat
+  // its own labels, is a title attribute now.
+  assert.doesNotMatch(spec, /class="aspec-field-hint"/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-field-hint/u);
+  assert.match(spec, /const field = \(label, control, hint = ""\)[\s\S]*?title="\$\{esc\(hint\)\}"/u);
+
   // Conversation destinations are visible controls on the landing page, not
   // icon-only knowledge hidden in the panel header. Private chat keeps the
   // existing owner/personal rule; history is available for every agent.
@@ -5745,6 +5768,13 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(
     css,
     /\.roster-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
+  );
+  // The list is itself a transformed stacking context (fold animation), so a
+  // person card that opens over the Agents heading would otherwise be painted
+  // through by that later sibling. Lift the open roster the same way.
+  assert.match(
+    css,
+    /\.chan-roster:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
   );
   // No ring drawn round the face at the same time: the card opening is the
   // answer to the hover, and the outline was the same news twice.

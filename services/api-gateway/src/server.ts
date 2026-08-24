@@ -2861,6 +2861,31 @@ const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
 /** A week: long enough to be useful, short enough to be a poor thing to leak. */
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Turns the recipient label into the credential used in a readable link.
+ *
+ * Six characters keeps the shortest codes out of the especially easy-to-
+ * guess range. Spaces become dashes, while everything else must already be a
+ * URL-safe letter, digit or separator so the link says exactly what its
+ * creator intended.
+ */
+function normalizeInvitationCode(value: string): string | undefined {
+  const code = value.trim().toUpperCase().replace(/\s+/gu, "-");
+  if (
+    code.length < 6 ||
+    code.length > 48 ||
+    !/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/u.test(code)
+  ) {
+    return undefined;
+  }
+  return code;
+}
+
+/** A stable lookup key that does not put the readable bearer code in storage. */
+function invitationIdForCode(code: string): string {
+  return `inv_code_${hashSecret(code)}`;
+}
+
 const ROLES: readonly OrganizationRole[] = [
   "owner",
   "admin",
@@ -5001,11 +5026,20 @@ export class ApiGateway {
       const token = inviteTokenMatch[0] ?? "";
       const action = inviteAcceptMatch === undefined ? undefined : "accept";
       const separator = token.indexOf(".");
+      const invitationCode =
+        separator === -1 ? normalizeInvitationCode(token) : undefined;
+      const invitationId =
+        invitationCode !== undefined
+          ? invitationIdForCode(invitationCode)
+          : separator > 0
+            ? token.slice(0, separator)
+            : undefined;
       const invitation =
-        separator < 1
+        invitationId === undefined
           ? undefined
-          : await this.options.store.getInvitation(token.slice(0, separator));
-      const secret = separator < 1 ? "" : token.slice(separator + 1);
+          : await this.options.store.getInvitation(invitationId);
+      const secret =
+        invitationCode ?? (separator > 0 ? token.slice(separator + 1) : "");
       // One answer for every way a link can be wrong, so a probe cannot tell
       // "no such invitation" from "wrong secret".
       if (
@@ -6003,6 +6037,22 @@ export class ApiGateway {
             ? undefined
             : emailField(body["email"]);
         const email = offered ?? "";
+        const recipientName = stringField(
+          body["recipientName"],
+          "recipientName",
+          { max: 80, optional: true },
+        );
+        const invitationCode =
+          recipientName === undefined
+            ? undefined
+            : normalizeInvitationCode(recipientName);
+        if (recipientName !== undefined && invitationCode === undefined) {
+          throw new HttpError(
+            400,
+            "invalid_invitation_code",
+            "Invite names must become 6–48 characters using letters, numbers, spaces, or dashes",
+          );
+        }
         const role = stringField(body["role"], "role", { max: 20 }) as
           | OrganizationRole
           | undefined;
@@ -6042,8 +6092,22 @@ export class ApiGateway {
         // the organization-wide invitation, where a second one would have
         // added nothing; a repository grant is worth offering to someone who
         // is already in the organization but cannot reach this repository.
-        const id = `inv_${randomBytes(9).toString("base64url")}`;
-        const secret = randomBytes(32).toString("base64url");
+        const id =
+          invitationCode === undefined
+            ? `inv_${randomBytes(9).toString("base64url")}`
+            : invitationIdForCode(invitationCode);
+        if (
+          invitationCode !== undefined &&
+          (await this.options.store.getInvitation(id)) !== undefined
+        ) {
+          throw new HttpError(
+            409,
+            "invitation_code_unavailable",
+            "That invite name is already in use",
+          );
+        }
+        const secret =
+          invitationCode ?? randomBytes(32).toString("base64url");
         const now = new Date();
         const invitation = {
           id,
@@ -6079,7 +6143,7 @@ export class ApiGateway {
         // recoverable form, so a lost link is reissued rather than looked up.
         this.sendJson(response, 201, {
           invitation: publicInvitation(invitation),
-          token: `${id}.${secret}`,
+          token: invitationCode ?? `${id}.${secret}`,
         });
         return;
       }

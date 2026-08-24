@@ -1671,7 +1671,7 @@ export async function loadInvitations() {
  * the invitation admits the person to every repository the organization has,
  * which is a different and much larger thing to hand out.
  */
-export async function createInvitation(role, repositoryId) {
+export async function createInvitation(recipientName, role, repositoryId) {
   const response = await api(
     `/organizations/${encodeURIComponent(state.organizationId)}/invitations`,
     {
@@ -1679,6 +1679,7 @@ export async function createInvitation(role, repositoryId) {
       body: {
         // No address: the link is the invitation, and it is shared wherever
         // the team already talks rather than mailed to one person.
+        recipientName,
         role,
         ...(repositoryId === undefined || repositoryId === ""
           ? {}

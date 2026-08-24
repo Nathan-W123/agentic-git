@@ -4640,6 +4640,21 @@ function agentUsage(agent) {
   </div>`;
 }
 
+/**
+ * One short fact about an agent, as a pill.
+ *
+ * The panel used to state these as a stack of label-over-value pairs — a
+ * capitalised micro-label on its own line above a single word — which spent
+ * two lines and a column each on facts that are one word long. A pill says
+ * the word and nothing else, and they sit together on one line, so the head
+ * of the panel reads as a strip of tags rather than as a form.
+ */
+function specPill(text, { dot = "", title = "" } = {}) {
+  return `<span class="aspec-pill"${title === "" ? "" : ` title="${esc(title)}"`}>${
+    dot === "" ? "" : `<span class="status-dot status-${esc(dot)}"></span>`
+  }${esc(text)}</span>`;
+}
+
 /** The profile-like landing surface for an agent panel. */
 function agentSpec(agent, repositoryId) {
   const assignments = agentChannelAssignments(agent, repositoryId);
@@ -4698,10 +4713,15 @@ function agentSpec(agent, repositoryId) {
   };
   const readOnly = (value) =>
     `<span class="aspec-field-value">${esc(value || "Not reported")}</span>`;
-  const field = (label, control, hint = "") => `<label class="aspec-field">
+  // The caption that used to sit under every control is a title now. Four
+  // fields each carrying a label, a control and a whispered line of prose
+  // made the settings block twice as tall to repeat what the labels said, and
+  // the captions were the first thing to be ellipsised anyway.
+  const field = (label, control, hint = "") => `<label class="aspec-field"${
+    hint === "" ? "" : ` title="${esc(hint)}"`
+  }>
     <span class="aspec-field-label">${esc(label)}</span>
     ${control}
-    ${hint === "" ? "" : `<span class="aspec-field-hint">${esc(hint)}</span>`}
   </label>`;
   const modelValue = String(currentAssignment.model ?? "").trim();
   const effortValue = String(currentAssignment.effort ?? "").trim();
@@ -4771,11 +4791,23 @@ function agentSpec(agent, repositoryId) {
       <section class="aspec-identity-card">
         <div class="aspec-banner"></div>
         <div class="aspec-identity-body">
-          <span class="aspec-face">${statusAgentFace(agent, 76, repositoryId)}</span>
-          <h2>${esc(agent.name)}</h2>
-          <div class="aspec-handle">${esc(agentLabelOf(providerId))}</div>
-          <div class="aspec-status">
-            <span class="status-dot status-${esc(status)}"></span>${esc(statusText)}
+          <div class="aspec-identity-head">
+            <span class="aspec-face">${statusAgentFace(agent, 76, repositoryId)}</span>
+            <div class="aspec-identity-id">
+              <h2>${esc(agent.name)}</h2>
+              <div class="aspec-handle">${esc(agentLabelOf(providerId))}</div>
+            </div>
+          </div>
+          <div class="aspec-pills">
+            ${statusText === "" ? "" : specPill(statusText, { dot: status })}
+            ${specPill(`#${repositoryId}`, {
+              title: "The channel this panel was opened from",
+            })}
+            ${specPill(
+              agent.mine
+                ? "Your agent"
+                : `${memberName(agent.userId ?? "")}'s agent`,
+            )}
           </div>
           <div class="aspec-actions">
             ${
@@ -4787,14 +4819,6 @@ function agentSpec(agent, repositoryId) {
             }
             <button type="button" class="aspec-action" data-act="agent-panel-tab"
               data-value="history">${icon("history")}<span>History</span></button>
-          </div>
-          <div class="aspec-profile-facts">
-            <div><span>Channel</span><strong>#${esc(repositoryId)}</strong></div>
-            <div><span>Profile</span><strong>${
-              agent.mine
-                ? "Your connected agent"
-                : `${esc(memberName(agent.userId ?? ""))}'s agent`
-            }</strong></div>
           </div>
         </div>
       </section>
@@ -4839,11 +4863,7 @@ function agentSpec(agent, repositoryId) {
               <span class="aspec-count">${channels.length}</span>
             </div>
             <div class="aspec-channel-list">${channels
-              .map(
-                (repository) => `<span class="aspec-channel-chip">#${esc(
-                  repository.id,
-                )}</span>`,
-              )
+              .map((repository) => specPill(`#${repository.id}`))
               .join("")}</div>
             ${
               allChannelsLoaded
