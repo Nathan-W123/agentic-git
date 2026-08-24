@@ -7470,7 +7470,6 @@ document.addEventListener("click", (event) => {
     }
     case "agent-info":
     case "agent-usage":
-    case "agent-all":
       navigate("agents");
       return;
     // Asks the vendor again rather than reading the kept answer. A usage card

@@ -1455,24 +1455,6 @@ export function iconButton(
   } title="${esc(title)}" aria-label="${esc(title)}">${icon(name)}</button>`;
 }
 
-export function statTile({ value, label, foot, iconName, tone = "purple" }) {
-  const colors = {
-    purple: "var(--accent-bright)",
-    green: "var(--green)",
-    blue: "var(--blue)",
-    orange: "var(--orange)",
-    red: "var(--red)",
-  };
-  return `<div class="card stat-tile">
-    <span class="st-icon" style="color:${colors[tone]}">${icon(iconName)}</span>
-    <span>
-      <span class="st-value">${esc(value)}</span>
-      <div class="st-label">${esc(label)}</div>
-      ${foot === undefined ? "" : `<div class="st-foot">${foot}</div>`}
-    </span>
-  </div>`;
-}
-
 /* ------------------------------------------------------- panel shapes ---- */
 
 /**
