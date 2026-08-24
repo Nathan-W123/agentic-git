@@ -62,6 +62,10 @@ export const state = {
   /* Navigation */
   route: "chats",
   repositoryId: stored("ag.repo"),
+  /** The account settings surface floats over the current conversation. */
+  settingsOpen: false,
+  /** The category selected in the settings dialog's left navigation. */
+  settingsSection: "general",
 
   /* Per-user agent connections (chat providers) */
   providers: [],
@@ -5995,11 +5999,26 @@ export function setChannelPicture(repositoryId, dataUrl) {
   localStorage.setItem(key, dataUrl);
 }
 
-/** "dark" or "light". Dark is what every colour here was chosen against. */
+/** The saved theme choice, kept separate from the theme it resolves to. */
+export function myThemePreference() {
+  const saved = localStorage.getItem("ag.theme");
+  return saved === "light" || saved === "dark" ? saved : "system";
+}
+
+/** "dark" or "light", after resolving the browser's system preference. */
 export function myTheme() {
-  return localStorage.getItem("ag.theme") === "light" ? "light" : "dark";
+  const preference = myThemePreference();
+  if (preference !== "system") {
+    return preference;
+  }
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches === true
+    ? "light"
+    : "dark";
 }
 
 export function setMyTheme(theme) {
-  localStorage.setItem("ag.theme", theme === "light" ? "light" : "dark");
+  localStorage.setItem(
+    "ag.theme",
+    theme === "light" || theme === "dark" ? theme : "system",
+  );
 }

@@ -661,25 +661,19 @@ test("first-run setup is exposed only while the control plane needs an owner", a
   assert.match(source, /data-act="auth-mode" data-value="bootstrap"/u);
 });
 
-test("navigation is the four product routes and nothing invented", async () => {
+test("settings floats above the three product routes", async () => {
   const source = await browserSource();
   const routes = /const ROUTES = new Set\(\[([\s\S]*?)\]\)/u.exec(source)?.[1];
   assert.notEqual(routes, undefined);
   const parsed = [...(routes ?? "").matchAll(/"([a-z]+)"/gu)].map(
     (match) => match[1],
   );
-  // Four product destinations, plus Settings' own second page. Advanced is
-  // not navigation: nothing in the rail, the topbar or the account menu goes
-  // there, and the only door is the last card on Settings. It is a route so
-  // that it can be linked and so Back is the way out, not because it is a
-  // fifth place to be.
-  assert.deepEqual(parsed, [
-    "chats",
-    "agents",
-    "notifications",
-    "settings",
-    "advanced",
-  ]);
+  // Settings and Advanced are categories in one modal, so neither can replace
+  // the conversation as a router screen.
+  assert.deepEqual(parsed, ["chats", "agents", "notifications"]);
+  assert.match(source, /state\.settingsOpen === true \? settingsDialog\(\) : ""/u);
+  assert.match(source, /role="dialog"[\s\S]{0,80}aria-modal="true"/u);
+  assert.match(source, /data-act="settings-section"/u);
   // Code is read where it is discussed — files and diffs render inline in the
   // channel transcript — so neither it nor the coordinator is a page of its
   // own, and tasks still belong to the agent that owns them.
@@ -689,6 +683,21 @@ test("navigation is the four product routes and nothing invented", async () => {
     ),
     false,
   );
+});
+
+test("settings exposes theme and message sound preferences", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const ui = await publicFile("ui.js");
+
+  assert.match(app, /data-act="settings-theme"/u);
+  assert.match(app, /\["system", "System"\]/u);
+  assert.match(data, /export function myThemePreference\(\)/u);
+  assert.match(data, /prefers-color-scheme: light/u);
+
+  assert.match(app, /data-act="settings-sounds"/u);
+  assert.match(app, /localStorage\.setItem\("ag\.messageSounds"/u);
+  assert.match(ui, /localStorage\.getItem\("ag\.messageSounds"\) === "false"/u);
 });
 
 test("the channel rail stays visible when the tool sidebar collapses", async () => {

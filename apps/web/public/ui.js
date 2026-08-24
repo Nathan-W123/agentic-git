@@ -1894,6 +1894,9 @@ let toneContext;
 
 export function chime(kind = "sent") {
   try {
+    if (window.localStorage.getItem("ag.messageSounds") === "false") {
+      return;
+    }
     const Context = window.AudioContext ?? window.webkitAudioContext;
     if (Context === undefined) {
       return;
