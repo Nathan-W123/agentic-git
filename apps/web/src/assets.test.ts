@@ -685,7 +685,7 @@ test("settings floats above the three product routes", async () => {
   );
 });
 
-test("settings exposes theme and message sound preferences", async () => {
+test("settings exposes theme and sound effect preferences", async () => {
   const app = await publicFile("app.js");
   const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
@@ -696,8 +696,66 @@ test("settings exposes theme and message sound preferences", async () => {
   assert.match(data, /prefers-color-scheme: light/u);
 
   assert.match(app, /data-act="settings-sounds"/u);
+  assert.match(app, /Quiet cues for sent and incoming messages/u);
   assert.match(app, /localStorage\.setItem\("ag\.messageSounds"/u);
   assert.match(ui, /localStorage\.getItem\("ag\.messageSounds"\) === "false"/u);
+});
+
+test("sound effects confirm real sends and reserve interruptions for live arrivals", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const ui = await publicFile("ui.js");
+
+  // Incoming cues can play after the initial gesture, are coalesced when a
+  // socket burst contains several messages, and still honour the one browser
+  // preference that controls every sound.
+  assert.match(ui, /export function armChime\(\)/u);
+  assert.match(ui, /const CHIME_COOLDOWN_MS = 300/u);
+  assert.match(ui, /received: \[660, 495\]/u);
+  assert.match(ui, /success: \[523\.25, 659\.25, 783\.99\]/u);
+  assert.match(app, /"pointerdown", armChime/u);
+
+  // A duplicate direct-message socket echo is silent, as is this account's
+  // outgoing copy. A newly added incoming copy is the only one that sounds.
+  assert.match(data, /thread\.some\([\s\S]{0,100}return false;/u);
+  assert.match(data, /return true;\s*\n\}/u);
+  assert.match(app, /const added = noteDirectMessage\(frame\);/u);
+  assert.match(
+    app,
+    /added && frame\.message\?\.recipientId === currentUserId\(\)/u,
+  );
+
+  // Channel history, edits, progress narration, and replayed frames stay
+  // visual. Only a new conversational id found by a live reconcile cues once.
+  assert.match(app, /const AUDIBLE_CHANNEL_KINDS = new Set/u);
+  assert.doesNotMatch(
+    app.slice(
+      app.indexOf("const AUDIBLE_CHANNEL_KINDS"),
+      app.indexOf("function audibleChannelEntryKeys"),
+    ),
+    /"progress"/u,
+  );
+  assert.match(app, /const canSound = !catchingUp;/u);
+  assert.match(app, /\(key\) => !audibleBefore\.has\(key\)/u);
+  assert.match(app, /canonical_promoted: "success"/u);
+  assert.match(app, /approval_requested: "attention"/u);
+
+  // The send cue follows validation/optimistic creation rather than firing on
+  // an empty composer or a missing thread.
+  const channelSubmit = chats.slice(
+    chats.indexOf("export function submitComposerMessage"),
+    chats.indexOf("function pinnedBanner"),
+  );
+  assert.doesNotMatch(channelSubmit, /submitComposerMessage\(rerender\) \{\s*chime/u);
+  assert.match(channelSubmit, /if \(sent === undefined\) \{[\s\S]{0,80}chime\("sent"\)/u);
+  const threadSubmit = chats.slice(
+    chats.indexOf("export function submitThreadReply"),
+    chats.indexOf("export function closeComposerAutocomplete"),
+  );
+  assert.match(threadSubmit, /if \(posted === undefined\) \{[\s\S]{0,80}chime\("sent"\)/u);
+  assert.match(app, /text\.trim\(\) === "" \|\| state\.sending\[agent\.id\] === true/u);
+  assert.match(app, /entry\.role === "assistant" && entry\.pending !== true/u);
 });
 
 test("the channel rail stays visible when the tool sidebar collapses", async () => {
@@ -2389,19 +2447,33 @@ test("a user's agent colour is one they chose, not one they were dealt", async (
   const data = await publicFile("data.js");
   const start = data.indexOf("export function agentColorFor");
   const body = data.slice(start, data.indexOf("\n}", start));
-  // Their explicit choice first, then their accent — both are "a colour for
-  // this person", and falling to the accent second is what stopped somebody
-  // whose interface was purple from having an orange agent beside it.
+  // Their stored agent colour, when it is not the shared default. A hash of
+  // the id or a fall-through to the interface accent would be a colour they
+  // never picked; distinct colours stay one click away in Appearance.
   assert.match(body, /agentColor/u);
-  assert.match(body, /accent/u);
-  // Then one shared default, deliberately, rather than a hash of the user id.
-  // The hash gave everybody a different colour for free, which sounds useful
-  // and reads as decoration: nothing in the interface means "orange", so an
-  // orange agent next to a purple highlight is two colours disagreeing.
-  // Distinct colours are still one click away in Appearance — the difference
-  // is that somebody chose them.
-  assert.match(body, /DEFAULT_ACCENT/u);
+  assert.match(body, /chosen/u);
   assert.equal(/charCodeAt/u.test(body), false);
+  assert.equal(/DEFAULT_ACCENT/u.test(body), false);
+});
+
+test("the default agent colour is black on the light theme", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("export function agentColorFor");
+  const body = data.slice(start, data.indexOf("\n}", start));
+  assert.match(body, /myTheme\(\) === "light"/u);
+  assert.match(body, /#000000/u);
+  assert.match(body, /DEFAULT_AGENT_COLOR/u);
+
+  const css = await publicFile("styles.css");
+  const face =
+    /:root\[data-theme="light"\] \.agent-face \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(face ?? "", /background: #f3efe8;/u);
+  assert.equal(/#33322f/u.test(face ?? ""), false);
+  const chip =
+    /:root\[data-theme="light"\] \.doodle-chip \.doodle \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  assert.match(chip ?? "", /background: #f3efe8;/u);
 });
 
 test("the theme is driven by custom properties rather than per-component colour", async () => {

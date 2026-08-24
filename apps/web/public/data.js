@@ -1804,24 +1804,22 @@ function validColor(value) {
 /**
  * The colour a user's agents are drawn in.
  *
- * One shared default for everybody who has not chosen, and a chosen value
- * always wins.
+ * A chosen value always wins, except the shared off-white default: on the
+ * light theme that doodle is painted black so it still reads on cream, and
+ * the stored off white is treated the same as unset so a palette click on
+ * the default does not leave a near-invisible mark. A hash of the id or the
+ * interface accent would be a colour they never asked for.
  */
 export function agentColorFor(userId) {
   const appearance = appearanceFor(userId);
   const chosen = validColor(appearance?.agentColor);
-  if (chosen !== undefined) {
-    return chosen;
-  }
-  // The shared off white, rather than their interface accent (`DEFAULT_ACCENT`
-  // and whatever they have set over it) or a hash of their id. Both of those
-  // gave people an agent colour they never asked for: the hash was decoration
-  // nothing in the interface agreed with, and the accent made every agent the
-  // same salmon as the mentions and the buttons, so the one thing the colour
-  // is for — telling whose agent this is — was exactly what it could not say.
-  // Off white says nothing until somebody chooses, which is one click away in
-  // Appearance.
-  return DEFAULT_AGENT_COLOR;
+  const stored =
+    chosen !== undefined && chosen !== DEFAULT_AGENT_COLOR
+      ? chosen
+      : DEFAULT_AGENT_COLOR;
+  return myTheme() === "light" && stored === DEFAULT_AGENT_COLOR
+    ? "#000000"
+    : stored;
 }
 
 function appearanceFor(userId) {
@@ -3399,13 +3397,13 @@ export async function deleteDirectMessageEntry(userId, messageId) {
 export function noteDirectMessage(frame) {
   const message = frame?.message;
   if (message === undefined) {
-    return;
+    return false;
   }
   const me = currentUserId();
   const other = message.authorId === me ? message.recipientId : message.authorId;
   const thread = state.dmThreads[other] ?? [];
   if (thread.some((existing) => existing.id === message.id)) {
-    return;
+    return false;
   }
   state.dmThreads[other] = [...thread, message];
   // The badge would otherwise wait for the next inbox refresh. Not counted
@@ -3438,6 +3436,7 @@ export function noteDirectMessage(frame) {
       method: "POST",
     }).catch(() => undefined);
   }
+  return true;
 }
 
 /** Applies a private-message correction echoed to either participant. */

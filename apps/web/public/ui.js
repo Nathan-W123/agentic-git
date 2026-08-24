@@ -1455,24 +1455,6 @@ export function iconButton(
   } title="${esc(title)}" aria-label="${esc(title)}">${icon(name)}</button>`;
 }
 
-export function statTile({ value, label, foot, iconName, tone = "purple" }) {
-  const colors = {
-    purple: "var(--accent-bright)",
-    green: "var(--green)",
-    blue: "var(--blue)",
-    orange: "var(--orange)",
-    red: "var(--red)",
-  };
-  return `<div class="card stat-tile">
-    <span class="st-icon" style="color:${colors[tone]}">${icon(iconName)}</span>
-    <span>
-      <span class="st-value">${esc(value)}</span>
-      <div class="st-label">${esc(label)}</div>
-      ${foot === undefined ? "" : `<div class="st-foot">${foot}</div>`}
-    </span>
-  </div>`;
-}
-
 /* ------------------------------------------------------- panel shapes ---- */
 
 /**
@@ -1879,36 +1861,78 @@ export function closePopover() {
 /* ----------------------------------------------------------------- sound ---- */
 
 /**
- * A short tone when a message goes out.
+ * The small set of sounds the control room uses for meaningful feedback.
  *
  * Synthesised rather than played from a file: the page's CSP allows no
- * external asset, and two oscillator notes cost nothing to ship and nothing
- * to load. The context is created on first use, which is always inside a
- * click or a keypress — a browser refuses to start audio any earlier, and
- * building it at import time would leave it permanently suspended.
+ * external asset, and a few oscillator notes cost nothing to ship or load.
+ * `armChime` creates the context on the first real interaction so a later
+ * message can sound too; browsers usually refuse to start audio from an
+ * unsolicited socket callback.
  *
  * Failure is silent on purpose. A blocked or unavailable audio device is not
- * a reason to interrupt somebody who was only sending a message.
+ * a reason to interrupt somebody with an error about sound.
  */
 let toneContext;
+let lastChimeAt = 0;
+
+const CHIME_NOTES = {
+  // Up confirms an action; down says something came back.
+  sent: [523.25, 784],
+  received: [660, 495],
+  // A resolved run gets a complete chord, while attention is a restrained
+  // repeated note rather than an alarm.
+  success: [523.25, 659.25, 783.99],
+  attention: [440, 440],
+};
+
+/** Several messages arriving in one socket burst are one interruption. */
+const CHIME_COOLDOWN_MS = 300;
+
+function soundEffectsEnabled() {
+  return window.localStorage.getItem("ag.messageSounds") !== "false";
+}
+
+function contextForChime() {
+  if (!soundEffectsEnabled()) {
+    return undefined;
+  }
+  const Context = window.AudioContext ?? window.webkitAudioContext;
+  if (Context === undefined) {
+    return undefined;
+  }
+  toneContext ??= new Context();
+  return toneContext;
+}
+
+/**
+ * Gives later incoming sounds a browser-approved audio context, without
+ * making a sound merely because somebody clicked or pressed a key.
+ */
+export function armChime() {
+  try {
+    void contextForChime()?.resume?.();
+  } catch {
+    /* Audio is an enhancement; an unavailable device changes nothing. */
+  }
+}
 
 export function chime(kind = "sent") {
   try {
-    if (window.localStorage.getItem("ag.messageSounds") === "false") {
+    const context = contextForChime();
+    if (context === undefined) {
       return;
     }
-    const Context = window.AudioContext ?? window.webkitAudioContext;
-    if (Context === undefined) {
+    const now = Date.now();
+    if (now - lastChimeAt < CHIME_COOLDOWN_MS) {
       return;
     }
-    toneContext ??= new Context();
-    void toneContext.resume?.();
-    const at = toneContext.currentTime;
-    // Sent rises, received falls, so the two are told apart without looking.
-    const notes = kind === "received" ? [660, 495] : [523.25, 784];
+    lastChimeAt = now;
+    void context.resume?.();
+    const at = context.currentTime;
+    const notes = CHIME_NOTES[kind] ?? CHIME_NOTES.sent;
     for (const [index, frequency] of notes.entries()) {
-      const oscillator = toneContext.createOscillator();
-      const gain = toneContext.createGain();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
       oscillator.type = "sine";
       oscillator.frequency.value = frequency;
       // Quiet, and shaped: a square-edged tone at full volume is a beep
@@ -1917,7 +1941,7 @@ export function chime(kind = "sent") {
       gain.gain.setValueAtTime(0.0001, start);
       gain.gain.exponentialRampToValueAtTime(0.055, start + 0.012);
       gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.13);
-      oscillator.connect(gain).connect(toneContext.destination);
+      oscillator.connect(gain).connect(context.destination);
       oscillator.start(start);
       oscillator.stop(start + 0.14);
     }

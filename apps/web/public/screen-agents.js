@@ -39,16 +39,13 @@ import {
   agentLabelOf,
   badge,
   bar,
-  chipRow,
   esc,
   icon,
   iconButton,
   emptyState,
   searchBox,
-  sectionRail,
   segmented,
   showModal,
-  statTile,
   tabs,
   tileCard,
   toast,
@@ -85,41 +82,65 @@ function filtered(agents) {
   });
 }
 
-function agentRow(agent, active) {
+/**
+ * Everything about a connection that is not its name, on one line.
+ *
+ * The row used to spend three lines of type and two columns on this — the
+ * provider under the name, the objective in a column of its own, and the
+ * repository (or a "Ready for new assignment" filler invented to fill the
+ * slot) under that — so a reader had to sweep sideways to assemble one
+ * sentence about one agent. It is that sentence: provider, what it is doing,
+ * and where. Missing parts simply do not appear, which is why this joins a
+ * filtered list rather than interpolating a fixed template.
+ */
+function rowSubtitle(agent) {
   const task = agent.task;
+  return [
+    agent.role,
+    taskLine(agent),
+    task?.repositoryId === undefined || task.repositoryId === ""
+      ? undefined
+      : task.repositoryId,
+  ]
+    .filter((part) => part !== undefined && part !== "")
+    .join(" · ");
+}
+
+/**
+ * The progress a row shows, or nothing at all.
+ *
+ * An idle connection has no run to report, and a 0% bar beside every idle
+ * agent is four bars of furniture saying the same nothing. The column is left
+ * genuinely empty instead — the subtitle already said "No task assigned".
+ */
+function rowProgress(agent, key) {
+  const task = agent.task;
+  if (task === undefined) {
+    return "";
+  }
+  if (!taskStarted(task)) {
+    return `<span class="mt-stage">Queued</span>`;
+  }
+  return `${bar(
+    agent.progress,
+    agent.status === "working" ? "" : "grey",
+    true,
+    `${key}:${agent.id}:${task.id}`,
+  )}<span class="ar-pct">${Math.round(agent.progress)}%</span>`;
+}
+
+function agentRow(agent, active) {
   // A div, not a button: the row carries its own menu button, and a nested
   // <button> makes the parser close the outer one and hoist the inner out of
   // the row entirely.
   return `<div class="agent-row${active ? " active" : ""}" role="button" tabindex="0"
     data-act="agent-pick" data-value="${esc(agent.id)}">
-    <span class="ar-face">${agentFace(agent, 34)}</span>
+    <span class="ar-face">${agentFace(agent, 32)}</span>
     <span class="ar-id">
-      <div class="ar-name">${esc(agent.name)}</div>
-      <div class="ar-role">${esc(agent.role)}</div>
+      <div class="ar-name"><span>${esc(agent.name)}</span>${badge(agent.status)}</div>
+      <div class="ar-sub">${esc(rowSubtitle(agent))}</div>
     </span>
-    <span class="ar-badge">${badge(agent.status)}</span>
-    <span class="ar-task">
-      <div class="ar-task-name">${icon(task === undefined ? "pause" : "file")}
-        ${esc(task?.objective ?? (agent.connected ? "No task assigned" : "Connection unavailable"))}</div>
-      <div class="ar-task-path">${esc(
-        task === undefined
-          ? agent.connected
-            ? "Ready for new assignment"
-            : (agent.detail ?? "Not connected")
-          : `${task.repositoryId ?? ""}`,
-      )}</div>
-    </span>
-    <span class="ar-prog">${
-      task !== undefined && !taskStarted(task)
-        ? `<span class="mt-stage">Queued</span>`
-        : `${bar(
-            agent.progress,
-            agent.status === "working" ? "" : "grey",
-            false,
-            `agent-row:${agent.id}:${task?.id ?? "idle"}`,
-          )}
-           <span class="ar-pct">${Math.round(agent.progress)}%</span>`
-    }</span>
+    <span class="ar-prog">${rowProgress(agent, "agent-row")}</span>
     <span class="ar-more">${iconButton("dots", {
       act: "agent-menu",
       value: agent.id,
@@ -150,8 +171,6 @@ function taskLine(agent) {
  * same height, so a deck of them compares at a glance.
  */
 function agentCard(agent, active) {
-  const task = agent.task;
-  const queued = task !== undefined && !taskStarted(task);
   return tileCard({
     glyph: `<span class="tile-face">${agentFace(agent, 36)}</span>`,
     trailing: iconButton("dots", {
@@ -161,20 +180,14 @@ function agentCard(agent, active) {
       small: true,
     }),
     title: agent.name,
-    subtitle: `${icon(task === undefined ? "pause" : "file")}<span>${esc(taskLine(agent))}</span>`,
-    foot: `${badge(agent.status)}${
-      task === undefined
-        ? ""
-        : queued
-          ? `<span class="tile-pct">Queued</span>`
-          : `${bar(
-              agent.progress,
-              agent.status === "working" ? "" : "grey",
-              false,
-              `agent-card:${agent.id}:${task.id}`,
-            )}
-             <span class="tile-pct">${Math.round(agent.progress)}%</span>`
-    }`,
+    // The provider leads the line, the way the reference names a maker before
+    // describing what the thing does. No icon in front of it: a card in a deck
+    // of six carried six glyphs that all meant "there is a task here", which
+    // the sentence says better and quieter.
+    subtitle: `<span class="tile-by">${esc(agent.role)}</span>
+      <span class="tile-say">${esc(taskLine(agent))}</span>`,
+    foot: `${badge(agent.status)}<span class="tile-spacer"></span>
+      <span class="ar-prog">${rowProgress(agent, "agent-card")}</span>`,
     act: "agent-pick",
     value: agent.id,
     active,
@@ -210,13 +223,16 @@ function agentHero(agent) {
       : agent.presence === "idle"
         ? "orange"
         : "green";
+  // One statement of state, not two. The name carried a status badge while
+  // the line under it carried a coloured dot and a status word, so a panel
+  // about one connection opened by saying "idle" twice in two shapes.
   return `<header class="agent-hero">
-    <span class="ah-face">${agentFace(agent, 52)}</span>
+    <span class="ah-face">${agentFace(agent, 46)}</span>
     <div class="ah-id">
-      <div class="ah-name">${esc(agent.name)}${badge(agent.status)}</div>
-      <div class="ah-meta">${
+      <div class="ah-name">${esc(agent.name)}</div>
+      <div class="ah-meta"><span>${esc(agent.role)}</span><span class="sep">·</span>${
         tone === "" ? "" : `<span class="dot ${tone}"></span>`
-      }<span>${esc(presence)}</span><span>·</span><span>${esc(
+      }<span>${esc(presence)}</span><span class="sep">·</span><span>${esc(
         agent.visibility === "org" ? "Shared with the project" : "Yours only",
       )}</span></div>
     </div>
@@ -249,11 +265,32 @@ function agentChangeSet(agent) {
 }
 
 /**
- * The connection's properties, as labelled rails rather than as a paragraph
- * of dot-separated fragments. Three lines that each answer one question:
- * what it thinks with, what it is on, and what it has touched.
+ * One labelled fact about the connection.
+ *
+ * A micro-label above a plain value, the way the reference states a channel
+ * or a profile — no border, no icon, no pill. The chips these replace each
+ * cost an outline, a glyph and a background to say a word, and nine of them
+ * stacked into three rails made the top of the panel busier than the
+ * conversation underneath it.
  */
-function agentRails(agent) {
+function spec(label, value, { tone = "", wide = false, title = "" } = {}) {
+  return `<div class="spec${wide ? " wide" : ""}">
+    <span class="spec-k">${esc(label)}</span>
+    <span class="spec-v${tone === "" ? "" : ` ${tone}`}"${
+      title === "" ? "" : ` title="${esc(title)}"`
+    }>${esc(value)}</span>
+  </div>`;
+}
+
+/**
+ * The connection's properties, as a grid of labelled values.
+ *
+ * The same three questions the rails answered — what it thinks with, what it
+ * is on, what it has touched — split into single facts so they line up in
+ * columns and can be read down rather than swept across. What it is working
+ * on spans the width, because it is the one that is a sentence.
+ */
+function agentSpecs(agent) {
   const task = agent.task;
   const patches = agentChangeSet(agent)?.patches ?? [];
   const held =
@@ -261,81 +298,52 @@ function agentRails(agent) {
       ? []
       : heldFiles().filter((file) => file.taskId === task.id);
   const progress = task === undefined ? agent.progress : taskProgress(task);
-  return `<div class="agent-rails">
-    ${sectionRail(
-      "Model",
-      chipRow([
-        {
-          label: agent.model === "" ? "Model unset" : agent.model,
-          iconName: "cpu",
-          title: "The model this agent answers with",
-        },
-        agent.effort === "" ? undefined : { label: `${agent.effort} effort`, iconName: "bolt" },
-        agent.contextPercent > 0
-          ? {
-              label: `${agent.contextPercent}% context`,
-              iconName: "layers",
-              tone: agent.contextPercent > 80 ? "orange" : undefined,
-              title: "How full the last exchange left the context window",
-            }
-          : undefined,
-      ]),
+  const files =
+    patches.length === 0
+      ? held.length === 0
+        ? "None yet"
+        : `0 of ${held.length} planned`
+      : held.length > 0
+        ? `${patches.length} of ${held.length} planned`
+        : `${patches.length} file${patches.length === 1 ? "" : "s"}`;
+  return `<div class="agent-specs">
+    ${spec(
+      "Working on",
+      task === undefined
+        ? agent.connected
+          ? "Nothing — ready for a new assignment"
+          : "Not connected"
+        : task.objective,
+      { wide: true, title: task?.objective ?? "", tone: task === undefined ? "quiet" : "" },
     )}
-    ${sectionRail(
-      "Task",
-      chipRow(
-        task === undefined
-          ? [
-              {
-                label: agent.connected ? "No task assigned" : "Not connected",
-                iconName: "pause",
-              },
-            ]
-          : [
-              {
-                label: task.objective,
-                iconName: "file",
-                tone: "purple",
-                title: task.objective,
-              },
-              taskStarted(task)
-                ? {
-                    label: `${progress}% done`,
-                    iconName: "clock",
-                    tone: "blue",
-                    title:
-                      held.length > 0
-                        ? `${patches.length} of ${held.length} planned files in the changeset`
-                        : undefined,
-                  }
-                : { label: "Queued", iconName: "clock", tone: "orange" },
-              task.repositoryId === undefined || task.repositoryId === ""
-                ? undefined
-                : { label: task.repositoryId, iconName: "folder" },
-            ],
-      ),
+    ${spec("Model", agent.model === "" ? "Not set" : agent.model, {
+      title: "The model this agent answers with",
+    })}
+    ${spec("Reasoning", agent.effort === "" ? "Default" : agent.effort)}
+    ${spec(
+      "Context",
+      agent.contextPercent > 0 ? `${agent.contextPercent}%` : "—",
+      {
+        tone: agent.contextPercent > 80 ? "orange" : "",
+        title: "How full the last exchange left the context window",
+      },
     )}
-    ${sectionRail(
-      "Files",
-      chipRow([
-        patches.length === 0
-          ? {
-              label:
-                held.length === 0
-                  ? "Nothing touched yet"
-                  : `0 of ${held.length} planned files touched`,
-              iconName: "file",
-            }
-          : {
-              label:
-                held.length > 0
-                  ? `${patches.length} of ${held.length} planned files in the changeset`
-                  : `${patches.length} file${patches.length === 1 ? "" : "s"} in the changeset`,
-              iconName: "file",
-              tone: "green",
-            },
-      ]),
+    ${spec(
+      "Progress",
+      task === undefined
+        ? "—"
+        : taskStarted(task)
+          ? `${progress}%`
+          : "Queued",
+      { tone: task === undefined ? "" : taskStarted(task) ? "blue" : "orange" },
     )}
+    ${spec(
+      "Repository",
+      task?.repositoryId === undefined || task.repositoryId === ""
+        ? "—"
+        : task.repositoryId,
+    )}
+    ${spec("Files", files, { tone: patches.length > 0 ? "green" : "" })}
   </div>`;
 }
 
@@ -350,7 +358,7 @@ function detailPane(agent) {
   const tab = state.agentTab ?? "chat";
   return `<section class="card agent-panel">
     ${agentHero(agent)}
-    ${agentRails(agent)}
+    ${agentSpecs(agent)}
 
     ${tabs(
       "agent-tab",
@@ -378,22 +386,36 @@ function tabBody(tab, agent) {
         "This agent is connected and waiting for work.",
       )}</div>`;
     }
-    return `<div style="padding:16px 18px;display:grid;gap:14px">
-      <div>
-        <div class="ar-name">${esc(task.objective)}</div>
-        <div class="ar-role">${esc(task.repositoryId ?? "")} · ${esc(task.status)}</div>
+    // The same labelled values the panel head uses, so a fact does not change
+    // shape between the summary above and the tab below it. The objective
+    // leads at reading size; the meter is its own full-width row rather than
+    // a stub beside a percentage.
+    return `<div class="task-body">
+      <div class="task-objective">${esc(task.objective)}</div>
+      <div class="agent-specs bare">
+        ${spec(
+          "Repository",
+          task.repositoryId === undefined || task.repositoryId === ""
+            ? "—"
+            : task.repositoryId,
+        )}
+        ${spec("Status", String(task.status).replace(/_/gu, " "))}
+        ${spec(
+          "Progress",
+          taskStarted(task) ? `${taskProgress(task)}%` : "Queued",
+          { tone: taskStarted(task) ? "blue" : "orange" },
+        )}
       </div>
-      <div class="ar-prog">${
+      ${
         taskStarted(task)
-          ? `${bar(
+          ? bar(
               taskProgress(task),
               "",
               false,
               `agent-task:${agent.id}:${task.id}`,
-            )}
-             <span class="ar-pct">${taskProgress(task)}%</span>`
+            )
           : `<span class="mt-stage">Queued — waiting for a free slot</span>`
-      }</div>
+      }
       <div class="sum-actions">
         ${
           // Cancel only while there is something to stop, and Retry only once
@@ -471,6 +493,23 @@ function tabBody(tab, agent) {
   </div>`;
 }
 
+/**
+ * One number about the whole roster, stated on the line that introduces it.
+ *
+ * These were four `statTile` cards: four bordered boxes, four icons and four
+ * lines of encouragement ("All systems go", "Ready for tasks") above a list
+ * whose own filter tabs already carry the same counts. The numbers are worth
+ * keeping and the furniture is not, so they are set as plain figures on the
+ * section's own heading row — five facts in the height one heading was
+ * already spending.
+ */
+function summaryCount({ value, label, tone }) {
+  return `<span class="asum">
+    <span class="asum-value">${esc(String(value))}</span>
+    <span class="asum-label"><span class="dot ${tone}"></span>${esc(label)}</span>
+  </span>`;
+}
+
 export function renderAgents() {
   const agents = myAgents();
   const shown = filtered(agents);
@@ -495,51 +534,25 @@ export function renderAgents() {
       <button class="btn btn-primary" data-act="agent-add">${icon("plus")} Add Agent</button>
     </div>
 
-    <div class="stat-row">
+    <div class="agent-summary">
+      <h2>Your connections</h2>
+      <span class="spacer"></span>
       ${
         // Counted on `connected`, so this is how many agents this account has
         // a working sign-in for — not how many are doing anything, which is
-        // the Working tile beside it. It was labelled "Active agents", and a
+        // the Working count beside it. It was labelled "Active agents", and a
         // row that opens by calling four idle connections active is the first
         // thing a reader believes about the screen.
-        statTile({
+        summaryCount({
           value: agents.filter((agent) => agent.connected).length,
           label: "Connected agents",
-          foot: `<span class="dot green"></span> ${
-            offline === 0 ? "All systems go" : `${offline} offline`
-          }`,
-          iconName: "robot",
           tone: "green",
         })
       }
-      ${statTile({
-        value: working,
-        label: "Working",
-        foot: `<span class="dot blue"></span> On current tasks`,
-        iconName: "clock",
-        tone: "blue",
-      })}
-      ${statTile({
-        value: idle,
-        label: "Idle",
-        foot: `<span class="dot orange"></span> Ready for tasks`,
-        iconName: "users",
-        tone: "orange",
-      })}
-      ${statTile({
-        value: done,
-        label: "Completed",
-        foot: `<span class="dot grey"></span> Across all agents`,
-        iconName: "checkCircle",
-        tone: "purple",
-      })}
-    </div>
-
-    <div class="agent-section-head">
-      <h2>Your connections</h2>
-      <span class="ash-count">${esc(
-        `${agents.filter((agent) => agent.connected).length} of ${agents.length} connected`,
-      )}</span>
+      ${summaryCount({ value: working, label: "Working", tone: "blue" })}
+      ${summaryCount({ value: idle, label: "Idle", tone: "orange" })}
+      ${summaryCount({ value: offline, label: "Offline", tone: "grey" })}
+      ${summaryCount({ value: done, label: "Completed", tone: "purple" })}
     </div>
 
     <div class="agents-split">
@@ -590,9 +603,6 @@ export function renderAgents() {
                   ${shown
                     .map((agent) => agentRow(agent, agent.id === selected?.id))
                     .join("")}
-                </div>
-                <div class="agent-list-foot">
-                  <button data-act="agent-all">View all agents ${icon("arrowRight")}</button>
                 </div>`
         }
       </section>
