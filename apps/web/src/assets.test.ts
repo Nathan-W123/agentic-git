@@ -1341,6 +1341,29 @@ test("user-rooted tasks promote when their first reply arrives", async () => {
   );
 });
 
+test("the thread library shows its creator, participants, and latest activity", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const panel = chats.slice(
+    chats.indexOf("function threadListPanel("),
+    chats.indexOf("function threadPanel("),
+  );
+
+  assert.match(panel, /const creator = channelAuthor\(repositoryId, entry\);/u);
+  assert.match(
+    panel,
+    /threadParticipants\(\[entry, \.\.\.replies\], repositoryId\)/u,
+    "the participant stack should include every unique author in the thread",
+  );
+  assert.match(panel, /class="ti-creator"/u);
+  assert.match(panel, /class="avatar-stack ti-participants"/u);
+  assert.match(panel, /const updated = relativeTime\(lastActivity\(entry\)\);/u);
+  assert.match(panel, /class="ti-count"[\s\S]*class="ti-time"/u);
+  assert.doesNotMatch(panel, /ti-done|icon\("check"\)/u);
+  assert.match(css, /\.thread-item \.ti-participants \{[\s\S]*?margin-left: auto;/u);
+  assert.doesNotMatch(css, /\.thread-item-ended \.ti-done/u);
+});
+
 test("a long thread name cannot push the panel's close out of reach", async () => {
   const css = await publicFile("styles.css");
   const chats = await publicFile("screen-chats.js");
@@ -4634,7 +4657,7 @@ test("working thread summaries carry a concise sweeping activity", async () => {
   );
 });
 
-test("ended threads wrap as compact pills without live activity motion", async () => {
+test("ended threads stay compact without live activity motion", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const listStart = chats.indexOf("function threadListPanel(repositoryId)");
@@ -4644,10 +4667,7 @@ test("ended threads wrap as compact pills without live activity motion", async (
   );
 
   assert.match(list, /finished \? " thread-item-ended"/u);
-  assert.match(
-    list,
-    /finished\s*\n\s*\? `<span class="ti-done" aria-hidden="true">\$\{icon\("check"\)\}<\/span>`/u,
-  );
+  assert.doesNotMatch(list, /ti-done|icon\("check"\)/u);
   assert.match(list, /class="ti-main"/u);
   assert.match(list, /class="ti-meta"/u);
   assert.match(list, /class="ti-go"/u);

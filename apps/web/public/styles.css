@@ -11246,7 +11246,7 @@ dialog.modal[open]::backdrop {
 }
 
 /* Live and finished work share one card stack. State is colour and content
-   (wash, edge, check) — not a second silhouette for completed rows. */
+   (wash and edge) — not a second silhouette for completed rows. */
 .thread-list-active {
   display: grid;
   gap: 6px;
@@ -11316,25 +11316,13 @@ dialog.modal[open]::backdrop {
 }
 
 /* Completed work uses the same multi-line card as active, pending, and held.
-   Quieter fill and a green check carry the finished state; the full title,
-   author, reply count, and time remain in the accessible label and tooltip. */
+   Its quieter fill and placement in the completed group carry the state. */
 .thread-item-ended {
   background: var(--bg-inset);
 }
 
 .thread-item-ended:hover {
   background: var(--bg-card-2);
-}
-
-.thread-item-ended .ti-done {
-  display: inline-flex;
-  flex: none;
-  color: var(--green);
-}
-
-.thread-item-ended .ti-done svg {
-  width: 13px;
-  height: 13px;
 }
 
 .thread-item-pending {
@@ -11776,16 +11764,26 @@ dialog.modal[open]::backdrop {
 }
 
 /* ------------------------------------------------- thread summary ---- */
-/* One thread in the pullout: what the work is called, and a quiet second line
-   saying who is in it and how much was actually said. This shape belongs to
-   the pullout alone. The channel used to share these rules, so the two
+/* One thread in the pullout: who started it, what the work is called, and a
+   quiet second line saying who is in it and how much was actually said. This
+   shape belongs to the pullout alone. The channel used to share these rules, so the two
    surfaces were one design seen twice — but a card in the channel repeats the
    message directly above it, which is why the channel now gets a plain tinted
    count (`.cmsg-thread-link`) and these selectors name only `.thread-item`.
 
-   The row used to open with a glyph, and there is deliberately no rule for one
-   now: it was the same terminal mark on every thread, which described none of
-   them and misdescribed all of them. The name starts the row instead. */
+   The creator's face opens the row, identifying its origin without using a
+   generic state glyph. */
+
+.thread-item .ti-creator {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+}
+
+.thread-item .ti-creator .presence,
+.thread-item .ti-participants .presence {
+  display: none;
+}
 
 /* The chevron only promises there is somewhere to go, so it is the dimmest
    thing in the row and never competes with the name. */
@@ -11820,9 +11818,11 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
-/* Current phase, then who and how much — one quiet metadata line. */
+/* Current phase, reply count and latest activity, with everyone who took part
+   gathered at the bottom-right — one quiet metadata line. */
 .thread-item .ti-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   font-size: 11.5px;
@@ -11840,18 +11840,38 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
-.thread-item .ti-who {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
+.thread-item .ti-count,
+.thread-item .ti-time {
+  color: var(--text-4);
+  flex: none;
   white-space: nowrap;
 }
 
-.thread-item .ti-count {
-  color: var(--text-4);
+.thread-item .ti-time::before {
+  content: "\00b7";
+  margin-right: 6px;
+}
+
+.thread-item .ti-participants {
   flex: none;
+  margin-left: auto;
+  padding-right: 2px;
+}
+
+.thread-item .ti-participants > * {
+  position: relative;
+  border-radius: 50%;
+  background: var(--bg-card);
+  box-shadow: 0 0 0 2px var(--bg-card);
+  margin-right: -6px;
+}
+
+.thread-item .ti-participants > *:last-child {
+  margin-right: 0;
+}
+
+.thread-item .ti-participants .avatar {
+  border: 0;
 }
 
 .thread-item-ended .ti-text {

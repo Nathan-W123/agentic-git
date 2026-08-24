@@ -4219,9 +4219,36 @@ function threadListPanel(repositoryId) {
     const count = replies.filter(
       (reply) => reply.kind !== "progress" && reply !== titled,
     ).length;
+    const creator = channelAuthor(repositoryId, entry);
     const author =
       threadLastAgentAuthor(entry, repositoryId) ??
-      channelAuthor(repositoryId, entry);
+      creator;
+    const participants = threadParticipants([entry, ...replies], repositoryId);
+    const participantNames = participants.map((participant) => participant.name);
+    const participantFaces = participants
+      .map(
+        (participant) =>
+          `<span class="ti-participant">${
+            participant.agent !== undefined
+              ? agentFace(participant.agent, 18, { showPresence: false })
+              : avatar(
+                  participant.name,
+                  18,
+                  participant.name,
+                  participant.name === currentUserName() ? myAvatar() : undefined,
+                )
+          }</span>`,
+      )
+      .join("");
+    const creatorFace =
+      creator.agent !== undefined
+        ? agentFace(creator.agent, 24, { showPresence: false })
+        : avatar(
+            creator.name,
+            24,
+            creator.name,
+            creator.name === currentUserName() ? myAvatar() : undefined,
+          );
     const title = threadTitle(entry);
     const status = working
       ? threadActivityLabel(entry)
@@ -4231,27 +4258,30 @@ function threadListPanel(repositoryId) {
           ? "Completed"
           : "Pending";
     const said = threadSaidCount(count);
-    const context = `${status} — ${title} — ${author.name}, ${said} — started ${clockTime(entry.at)}`;
+    const updated = relativeTime(lastActivity(entry));
+    const context = `${status} — ${title} — started by ${creator.name}, ${said}, updated ${updated}`;
     return `<div class="thread-item-row">
       <button type="button" class="thread-item${finished ? " thread-item-ended" : ""}${!finished && working ? " thread-item-active" : ""}${!finished && waiting ? " thread-item-held" : ""}${!finished && !working && !waiting ? " thread-item-pending" : ""}"
         title="${esc(context)}"
-        aria-label="${esc(finished ? `Open completed thread: ${title}. ${author.name}, ${said}.` : `Open thread: ${title}. ${status}. ${author.name}, ${said}.`)}"
+        aria-label="${esc(finished ? `Open completed thread: ${title}. Started by ${creator.name}, ${said}, updated ${updated}.` : `Open thread: ${title}. ${status}. Started by ${creator.name}, ${said}, updated ${updated}.`)}"
         data-act="channel-thread-open" data-value="${esc(entry.id)}">
+        <span class="ti-creator" title="Started by ${esc(creator.name)}">${creatorFace}</span>
         <span class="ti-main">
           <span class="ti-text">${esc(title)}</span>
           <span class="ti-meta">
             ${
               finished
-                ? `<span class="ti-done" aria-hidden="true">${icon("check")}</span>`
+                ? ""
                 : working
                   ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
                   : waiting
                     ? `<span class="ti-held">Waiting for you</span>`
                     : `<span class="ti-pending">Pending</span>`
             }
-            <span class="ti-who">${esc(author.name)}</span>
             <span class="ti-count">${esc(said)}</span>
+            <span class="ti-time">${esc(updated)}</span>
             ${!finished && working ? threadRunMark(entry, repositoryId, author) : ""}
+            <span class="avatar-stack ti-participants" aria-label="${esc(`Participants: ${participantNames.join(", ")}`)}">${participantFaces}</span>
           </span>
         </span>
         <span class="ti-go">${icon("chevronRight")}</span>
