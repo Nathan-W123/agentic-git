@@ -3399,13 +3399,13 @@ export async function deleteDirectMessageEntry(userId, messageId) {
 export function noteDirectMessage(frame) {
   const message = frame?.message;
   if (message === undefined) {
-    return;
+    return false;
   }
   const me = currentUserId();
   const other = message.authorId === me ? message.recipientId : message.authorId;
   const thread = state.dmThreads[other] ?? [];
   if (thread.some((existing) => existing.id === message.id)) {
-    return;
+    return false;
   }
   state.dmThreads[other] = [...thread, message];
   // The badge would otherwise wait for the next inbox refresh. Not counted
@@ -3438,6 +3438,7 @@ export function noteDirectMessage(frame) {
       method: "POST",
     }).catch(() => undefined);
   }
+  return true;
 }
 
 /** Applies a private-message correction echoed to either participant. */

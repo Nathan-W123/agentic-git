@@ -6566,7 +6566,6 @@ export function openChannel(repositoryId, rerender) {
 }
 
 export function submitComposerMessage(rerender) {
-  chime("sent");
   const repositoryId = activeChannelId();
   if (!repositoryId) {
     return;
@@ -6597,6 +6596,7 @@ export function submitComposerMessage(rerender) {
     if (posted === undefined) {
       return;
     }
+    chime("sent");
     state.chatDraft = "";
     saveChannelDraft(repositoryId, "");
     closeComposerAutocomplete("channel");
@@ -6630,6 +6630,7 @@ export function submitComposerMessage(rerender) {
   if (sent === undefined) {
     return;
   }
+  chime("sent");
   state.chatDraft = "";
   saveChannelDraft(repositoryId, "");
   closeComposerAutocomplete("channel");
@@ -6738,12 +6739,12 @@ function composerThreadChip(repositoryId) {
  * than a second, invisible way to spend an agent.
  */
 export function startPlannedWork(repositoryId, messageId) {
-  chime("sent");
-  postChannelReply(repositoryId, messageId, "go ahead");
+  if (postChannelReply(repositoryId, messageId, "go ahead") !== undefined) {
+    chime("sent");
+  }
 }
 
 export function submitThreadReply(rerender) {
-  chime("sent");
   if (state.activeChannelThread === undefined) {
     return;
   }
@@ -6761,7 +6762,7 @@ export function submitThreadReply(rerender) {
       : undefined;
   // The whole draft carries its images the same way a channel message does;
   // the reply address is separate so it never becomes editable quote text.
-  postChannelReply(
+  const posted = postChannelReply(
     repositoryId,
     threadId,
     state.threadDraft,
@@ -6774,6 +6775,10 @@ export function submitThreadReply(rerender) {
         threadId,
       ),
   );
+  if (posted === undefined) {
+    return;
+  }
+  chime("sent");
   state.threadDraft = "";
   state.threadReplyMessageId = undefined;
   closeComposerAutocomplete("thread");

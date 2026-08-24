@@ -135,6 +135,8 @@ import {
   relativeTime,
   showModal,
   toast,
+  armChime,
+  chime,
 } from "./ui.js";
 import {
   ensureAgentOptions,
@@ -227,6 +229,12 @@ import {
   usageOwner,
   usageProviderId,
 } from "./screen-chats.js";
+
+// A socket callback cannot unlock browser audio by itself. The first genuine
+// interaction quietly prepares it so a later incoming cue can play; no sound
+// is made just for touching the interface.
+document.addEventListener("pointerdown", armChime, { once: true, passive: true });
+document.addEventListener("keydown", armChime, { once: true });
 
 /* ---------------------------------------------------------- formatting ---- */
 
@@ -1421,13 +1429,13 @@ function preferencesCard() {
       <p>Small behaviours that apply only in this browser</p></div></div>
     <div class="set-row">
       <span class="sr-body">
-        <div class="sr-title">Message sounds</div>
-        <div class="sr-sub">Play a short, quiet tone when you send a message.</div>
+        <div class="sr-title">Sound effects</div>
+        <div class="sr-sub">Quiet cues for sent and incoming messages, completed work, and items that need attention.</div>
       </span>
       <span class="sr-ctl">
         <button type="button" class="switch${sounds ? " on" : ""}"
           data-act="settings-sounds" aria-pressed="${sounds}"
-          aria-label="Message sounds"></button>
+          aria-label="Sound effects"></button>
       </span>
     </div>
   </section>`;
@@ -6088,7 +6096,13 @@ document.addEventListener("click", (event) => {
       return;
     case "settings-sounds": {
       const enabled = window.localStorage.getItem("ag.messageSounds") !== "false";
-      window.localStorage.setItem("ag.messageSounds", enabled ? "false" : "true");
+      const next = !enabled;
+      window.localStorage.setItem("ag.messageSounds", String(next));
+      // Enabling is its own preview, so the switch never asks somebody to
+      // trust a sound setting they have not heard.
+      if (next) {
+        chime("sent");
+      }
       render();
       return;
     }
@@ -7888,11 +7902,26 @@ document.addEventListener("submit", (event) => {
         return;
       }
       const text = input.value;
+      if (text.trim() === "" || state.sending[agent.id] === true) {
+        return;
+      }
+      const conversationLength = (state.conversations[agent.id] ?? []).length;
       input.value = "";
       delete state.agentChatDrafts[agent.id];
       // Whatever list was open belonged to the message that just went.
       closeComposerAutocomplete("chat");
-      void sendChat(agent.id, text, render);
+      chime("sent");
+      void sendChat(agent.id, text, render).then(() => {
+        // `sendChat` turns failures into a system row. Only a completed
+        // assistant turn is an incoming-message cue.
+        if (
+          (state.conversations[agent.id] ?? [])
+            .slice(conversationLength)
+            .some((entry) => entry.role === "assistant" && entry.pending !== true)
+        ) {
+          chime("received");
+        }
+      });
       return;
     }
     // Here rather than in the click handler it used to live in: the send
@@ -7911,7 +7940,10 @@ document.addEventListener("submit", (event) => {
       closeComposerAutocomplete("dm");
       render();
       void sendDirectMessage(other, draft, referencedMessageId)
-        .then(() => render())
+        .then(() => {
+          chime("sent");
+          render();
+        })
         .catch((error) => toast(`Could not send: ${error.message}`, "error"));
       return;
     }
@@ -8643,6 +8675,49 @@ let channelFrameTimer;
 let catchUpTimer;
 
 /**
+ * Channel entries that are conversation, not the high-frequency narration of
+ * a run. Progress remains visual; sounding every milestone would turn one
+ * task into a string of interruptions.
+ */
+const AUDIBLE_CHANNEL_KINDS = new Set([
+  "user",
+  "agent",
+  "system",
+  "outcome",
+  "plan",
+]);
+
+function audibleChannelEntryKeys(repositoryId) {
+  const keys = new Set();
+  const me = currentUserId();
+  const add = (entry, prefix) => {
+    if (
+      entry?.id !== undefined &&
+      entry.deletedAt === undefined &&
+      entry.authorId !== me &&
+      AUDIBLE_CHANNEL_KINDS.has(entry.kind)
+    ) {
+      keys.add(`${prefix}:${entry.id}`);
+    }
+  };
+  for (const message of channelMessagesFor(repositoryId)) {
+    add(message, "message");
+    for (const reply of message.replies ?? []) {
+      add(reply, "reply");
+    }
+  }
+  return keys;
+}
+
+/** Only live, user-relevant audit outcomes warrant a sound of their own. */
+const AUDIT_CHIMES = {
+  canonical_promoted: "success",
+  approval_requested: "attention",
+  question_asked: "attention",
+  task_failed: "attention",
+};
+
+/**
  * Whether the stream is still catching this browser up.
  *
  * Set by the hub's `connected` frame and cleared once the stream goes quiet,
@@ -8931,7 +9006,10 @@ async function boot() {
       // Reading it as it arrives — when it arrives in the conversation that is
       // open — happens inside `noteDirectMessage`, which is the only place
       // that knows whose conversation the message belongs to.
-      noteDirectMessage(frame);
+      const added = noteDirectMessage(frame);
+      if (added && frame.message?.recipientId === currentUserId()) {
+        chime("received");
+      }
       if (!renameFieldFocused()) {
         render();
       }
@@ -9010,6 +9088,13 @@ async function boot() {
       channelRepositoryId === activeChannelId() &&
       state.route === "chats"
     ) {
+      // Taken before the reconcile replaces local state. Comparing ids after
+      // the read distinguishes a genuinely new reply from an edit, delete,
+      // reaction, old reconnect history, or this browser's own server echo.
+      const canSound = !catchingUp;
+      const audibleBefore = canSound
+        ? audibleChannelEntryKeys(channelRepositoryId)
+        : undefined;
       // Coalesced because a reconnect delivers every channel event this
       // browser missed, and each one used
       // to re-read the channel and rebuild the whole app — a backlog of forty
@@ -9023,7 +9108,15 @@ async function boot() {
           openPromptedThread(channelRepositoryId);
           openReadyPlan(channelRepositoryId);
           markChannelReadIfWatching(channelRepositoryId);
+          const received =
+            audibleBefore !== undefined &&
+            [...audibleChannelEntryKeys(channelRepositoryId)].some(
+              (key) => !audibleBefore.has(key),
+            );
           render();
+          if (received) {
+            chime("received");
+          }
         });
       }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS));
     }
@@ -9050,6 +9143,12 @@ async function boot() {
       // the foreground. Notifications remain available in their dedicated
       // history without interrupting the current screen.
       noteEventSequence(frame.sequence);
+      const auditChime = catchingUp
+        ? undefined
+        : AUDIT_CHIMES[frame.event?.type];
+      if (auditChime !== undefined) {
+        chime(auditChime);
+      }
       extendCatchUp();
       // A terminal event delivered live was already seen during this visit.
       // Record that immediately instead of relying only on the later tab-close
