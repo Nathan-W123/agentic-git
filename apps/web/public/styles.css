@@ -8120,14 +8120,24 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   box-shadow: var(--shadow-card);
 }
 
+/*
+ * The card is as tall as what it says. It used to stretch to the height of
+ * the column of panes beside it, which was fine while it held a stack of
+ * labelled facts and is a pane of empty ground now that those are pills.
+ */
 .agent-spec .aspec-identity-card {
-  align-self: stretch;
+  align-self: start;
   min-width: 0;
   overflow: hidden;
 }
 
+/*
+ * A band of the agent's colour, not a hero image. It was a sixth of the
+ * viewport tall and carried nothing — the profile below it had to start a
+ * screen down from the panel's own header for a gradient nobody reads.
+ */
 .agent-spec .aspec-banner {
-  height: clamp(84px, 16vh, 116px);
+  height: clamp(58px, 9vh, 74px);
   background:
     radial-gradient(circle at 86% 18%, rgb(255 255 255 / 12%) 0 3px, transparent 4px),
     linear-gradient(
@@ -8141,11 +8151,31 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   padding: 0 18px 18px;
 }
 
+/*
+ * Face and name on one line, the way the reference names a thing beside its
+ * mark. Stacked, they cost the top of the panel three full-width lines — an
+ * avatar, a display name at heading size, and a provider under it — before
+ * anything about the connection had been said.
+ */
+.agent-spec .aspec-identity-head {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: -34px;
+}
+
+.agent-spec .aspec-identity-id {
+  min-width: 0;
+  flex: 1;
+  padding-bottom: 3px;
+}
+
 .agent-spec .aspec-face {
   position: relative;
   display: flex;
   width: fit-content;
-  margin: -40px 0 10px;
+  flex: none;
   padding: 4px;
   border-radius: 50%;
   background: var(--bg-panel);
@@ -8162,32 +8192,58 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .agent-spec .aspec-identity-body h2 {
   margin: 0;
   color: var(--text);
-  font-size: clamp(24px, 4.5cqi, 32px);
+  font-size: clamp(19px, 3.4cqi, 25px);
   font-weight: 680;
-  line-height: 1.12;
-  letter-spacing: -0.035em;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
   overflow-wrap: anywhere;
 }
 
 .agent-spec .aspec-handle {
-  margin-top: 3px;
+  margin-top: 2px;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.agent-spec .aspec-status {
+/*
+ * The strip of tags under the name: what it is doing, which room this is,
+ * whose connection it is. They wrap as a row rather than stacking as
+ * labelled pairs, which is the whole saving — three facts on one line
+ * instead of six.
+ */
+.agent-spec .aspec-pills {
   display: flex;
-  align-items: center;
-  gap: 7px;
+  flex-wrap: wrap;
+  gap: 6px;
   margin-top: 13px;
-  color: var(--text-2);
-  font-size: 11.5px;
 }
 
-.agent-spec .aspec-status .status-dot {
+.agent-spec .aspec-pill {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  height: 23px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-pill .status-dot {
   position: static;
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   flex: none;
   border: 0;
 }
@@ -8242,37 +8298,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .agent-spec .aspec-action-primary:hover {
   border-color: color-mix(in srgb, var(--accent) 88%, #000);
   background: color-mix(in srgb, var(--accent) 88%, #000);
-}
-
-.agent-spec .aspec-profile-facts {
-  display: grid;
-  gap: 11px;
-  margin-top: 18px;
-  padding-top: 15px;
-  border-top: 1px solid var(--border-soft);
-}
-
-.agent-spec .aspec-profile-facts div {
-  display: grid;
-  gap: 2px;
-}
-
-.agent-spec .aspec-profile-facts span {
-  color: var(--text-3);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.agent-spec .aspec-profile-facts strong {
-  min-width: 0;
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .agent-spec .aspec-main {
@@ -8448,15 +8473,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   white-space: nowrap;
 }
 
-.agent-spec .aspec-field-hint {
-  color: var(--text-4);
-  font-size: 9.5px;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .agent-spec .aspec-settings-pane > .aspec-note {
   margin: 8px 0 0;
   padding-top: 8px;
@@ -8478,21 +8494,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   flex-wrap: wrap;
   gap: 6px;
   overflow: hidden;
-}
-
-.agent-spec .aspec-channel-chip {
-  display: inline-flex;
-  min-width: 0;
-  height: 24px;
-  align-items: center;
-  padding: 0 8px;
-  border-radius: 7px;
-  background: var(--bg-card);
-  color: var(--text-2);
-  font-size: 10.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .agent-spec .aspec-note {
@@ -8538,11 +8539,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   }
 
   .agent-spec .aspec-banner {
-    height: 92px;
-  }
-
-  .agent-spec .aspec-profile-facts {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    height: 62px;
   }
 }
 
@@ -8550,10 +8547,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   .agent-spec .aspec-settings,
   .agent-spec .aspec-bottom-grid {
     grid-template-columns: 1fr;
-  }
-
-  .agent-spec .aspec-field-hint {
-    white-space: normal;
   }
 }
 
