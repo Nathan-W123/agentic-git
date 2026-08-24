@@ -6987,6 +6987,10 @@ document.addEventListener("click", (event) => {
       // "talk to my agent" and lands on the chat tab.
       state.activeAgentPanel = value;
       state.agentPanelTab = "spec";
+      // A search typed against one agent's work says nothing about the next
+      // one's, so the box and the filter strip start empty for each agent.
+      state.agentHistoryFilter = "all";
+      state.agentHistoryQuery = "";
       moveRightPanel("agent", "right");
       setChanDrawer(false);
       render();
@@ -7024,6 +7028,12 @@ document.addEventListener("click", (event) => {
           render();
         })();
       }
+      return;
+    // Which slice of the history is listed. Kept in state so a background
+    // poll redrawing the panel cannot quietly widen it back to everything.
+    case "agent-history-filter":
+      state.agentHistoryFilter = value;
+      render();
       return;
     case "agent-panel-tab":
       state.agentPanelTab = value;
@@ -8271,6 +8281,17 @@ document.addEventListener("input", (event) => {
     render();
     if (focused) {
       const next = $("[data-act='agent-search']");
+      next?.focus();
+      next?.setSelectionRange(next.value.length, next.value.length);
+    }
+    return;
+  }
+  if (act === "agent-history-search") {
+    state.agentHistoryQuery = node.value;
+    const focused = document.activeElement === node;
+    render();
+    if (focused) {
+      const next = $("[data-act='agent-history-search']");
       next?.focus();
       next?.setSelectionRange(next.value.length, next.value.length);
     }

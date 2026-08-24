@@ -7764,33 +7764,83 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 
 /* One agent's work in this repository. Sits in the middle row of
    `.thread-panel`'s grid, which is the row that stretches, so the list
-   scrolls rather than pushing anything off the bottom. Active work stays
-   in a tight stack; finished work sits quieter underneath. */
+   scrolls under a search box and filter strip that stay put. Each task is a
+   card: outcome, request, who ran it, what came back, what to do next. */
 .agent-history {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  /* Measured against the panel, not the window: this panel is dragged wider
+     and narrower, and a viewport query would keep five columns in a column
+     the reader has just squeezed to a third of the screen. */
+  container-type: inline-size;
+}
+
+.agent-history.empty {
+  display: block;
+  overflow-y: auto;
+}
+
+.agent-history-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.agent-history-head .search {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
+
+.agent-history .ah-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-history .ah-filter-label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.agent-history-list {
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 8px 12px 12px;
 }
 
 .agent-history-active,
 .agent-history-finished {
   display: grid;
+  gap: 8px;
 }
 
 .agent-history-active + .agent-history-finished {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-soft);
+  margin-top: 12px;
+}
+
+/* The one word above each half. The list used to separate them with a rule,
+   which said there were two groups without saying which was which. */
+.agent-history .ah-section-label {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
 }
 
 .agent-history-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 4px 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1.4fr) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
   font-size: 12px;
   line-height: 1.35;
-  border-left: 2px solid transparent;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
 }
 
 /* Only the rows that go somewhere look like they do. A task with no channel
@@ -7801,63 +7851,118 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 .agent-history-row[role="button"]:hover {
-  background: var(--bg-inset);
-  border-left-color: var(--accent-line);
+  border-color: var(--accent-line);
 }
 
-.agent-history-row .ah-glyph {
-  display: grid;
-  place-items: center;
-  align-self: center;
-  width: 11px;
-  flex: none;
-  color: var(--text-3);
+/* The outcome, said in a word rather than left to a ring's colour. */
+.agent-history-row .ah-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+  color: var(--text-2);
 }
 
-.agent-history-row .ah-glyph .ui-icon {
-  width: 11px;
-  height: 11px;
+.agent-history-row .ah-status .ui-icon {
+  width: 12px;
+  height: 12px;
 }
 
-.agent-history-row.integrated .ah-glyph {
+.agent-history-row .ah-status-ok {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
   color: var(--green);
 }
 
-.agent-history-row.failed .ah-glyph {
+.agent-history-row .ah-status-bad {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
   color: var(--red);
 }
 
-.agent-history-row.awaiting_approval .ah-glyph {
+.agent-history-row .ah-status-warn {
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
   color: var(--orange);
 }
 
-.agent-history-row.open .ah-glyph {
+.agent-history-row .ah-status-live {
+  background: color-mix(in srgb, var(--salmon) 16%, transparent);
   color: var(--accent-bright);
 }
 
+.agent-history-row .ah-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
 .agent-history-row .ah-objective {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
 }
 
+/* An absolute time, not an age: this list is scanned for "the one from
+   yesterday afternoon", which "2 days ago" cannot answer. */
 .agent-history-row .ah-when {
-  flex: none;
   color: var(--text-3);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
-/* Finished work keeps the same row shape but reads as archive: softer type
-   and quieter marks. */
+.agent-history-row .ah-face {
+  display: grid;
+  place-items: center;
+}
+
+.agent-history-row .ah-preview {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.agent-history-row .ah-preview-label {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.agent-history-row .ah-preview-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.agent-history-row .ah-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Finished work keeps the same card but reads as archive: softer type. */
 .agent-history-finished .agent-history-row {
   color: var(--text-2);
 }
 
-.agent-history-finished .agent-history-row .ah-glyph {
-  opacity: 0.72;
+/* A narrow panel drops the preview column rather than squeezing five things
+   into a width that fits three. The outcome, the request and the controls are
+   what the row is for; the summary is one hover away on the conversation. */
+@container (max-width: 620px) {
+  .agent-history-row {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+  }
+
+  .agent-history-row .ah-preview {
+    display: none;
+  }
 }
 
 /* ---------------------------------------------------- agent spec (details) --

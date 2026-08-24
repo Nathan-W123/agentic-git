@@ -5146,6 +5146,7 @@ test("clicking an agent opens its details while chat and history stay explicit",
 test("agent history is a dense active-then-finished task list", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
+  const app = await browserSource();
   const historyStart = chats.indexOf("const TASK_ICON = {");
   const historyEnd = chats.indexOf(
     "/** Every loaded room this exact agent belongs to",
@@ -5155,7 +5156,10 @@ test("agent history is a dense active-then-finished task list", async () => {
   assert.notEqual(historyEnd, -1);
   const history = chats.slice(historyStart, historyEnd);
   assert.match(history, /function agentHistorySections\(rows\)/u);
-  assert.match(history, /function agentHistoryRow\(\{ task, message \}\)/u);
+  assert.match(
+    history,
+    /function agentHistoryRow\(\{ task, message \}, agent, repositoryId\)/u,
+  );
   assert.match(history, /FINISHED_HISTORY_STATUS/u);
   assert.match(history, /"integrated"/u);
   assert.match(history, /"failed"/u);
@@ -5166,16 +5170,74 @@ test("agent history is a dense active-then-finished task list", async () => {
   assert.match(history, /class="agent-history-row \$\{esc\(task\.status\)\}"/u);
   assert.match(history, /class="ah-objective"/u);
   assert.match(history, /class="ah-when"/u);
-  // Active work above finished work, same quiet split the thread list uses.
-  assert.match(history, /agentHistorySections\(rows\)/u);
+  // Active work above finished work, each half named rather than merely ruled
+  // off from the other.
+  assert.match(history, /agentHistorySections\(shown\)/u);
   assert.match(history, /class="agent-history-active"/u);
   assert.match(history, /class="agent-history-finished"/u);
   assert.match(history, /aria-label="Active"/u);
   assert.match(history, /aria-label="Finished"/u);
+  assert.match(history, /class="ah-section-label"/u);
   assert.match(css, /\.agent-history-active \+ \.agent-history-finished/u);
   assert.match(css, /\.agent-history-finished \.agent-history-row/u);
-  assert.match(css, /\.agent-history-row \{[^}]*padding:\s*4px 12px/su);
-  assert.match(css, /\.agent-history-row \{[^}]*font-size:\s*12px/su);
+
+  // The outcome is a word in a tinted pill, not a coloured ring a reader has
+  // to already know the palette to decode.
+  assert.match(history, /function historyStatusPill\(status\)/u);
+  assert.match(history, /function historyStatusLabel\(status\)/u);
+  assert.match(history, /function historyStatusTone\(status\)/u);
+  assert.match(history, /return "Completed";/u);
+  assert.match(
+    history,
+    /class="ah-status ah-status-\$\{esc\(historyStatusTone\(status\)\)\}"/u,
+  );
+  assert.match(css, /\.agent-history-row \.ah-status-ok/u);
+  assert.match(css, /\.agent-history-row \.ah-status-bad/u);
+
+  // A clock reading, because this list is scanned for the run from yesterday
+  // afternoon and "2 days ago" cannot answer that.
+  assert.match(history, /function historyWhen\(value\)/u);
+  assert.match(history, /Today at \$\{time\}/u);
+  assert.match(history, /Yesterday at \$\{time\}/u);
+  assert.match(history, /historyWhen\(task\.submittedAt\)/u);
+
+  // Who ran it, and what came back from it.
+  assert.match(history, /statusAgentFace\(agent, 26, repositoryId\)/u);
+  assert.match(history, /function taskOutputPreview\(task\)/u);
+  assert.match(history, /task\?\.summary/u);
+  assert.match(history, /class="ah-preview-text"/u);
+
+  // The two things a reader does next, as controls a touch reader can find
+  // rather than a row-wide click alone. Retry only where the server takes it.
+  assert.match(history, /iconButton\("eye", \{[\s\S]*?act: "channel-thread-open"/u);
+  assert.match(
+    history,
+    /FINISHED_HISTORY_STATUS\.has\(task\.status\)\s*\?\s*iconButton\("refresh", \{[\s\S]*?act: "task-retry"/u,
+  );
+
+  // Search and filter above the list, held in state so a background poll
+  // rebuilding the panel cannot widen it back to everything.
+  assert.match(history, /function agentHistoryHead\(\)/u);
+  assert.match(history, /searchBox\(\s*"Search recent tasks\.\.\.",/u);
+  assert.match(history, /segmented\(\s*"agent-history-filter",/u);
+  assert.match(history, /const HISTORY_FILTERS = \[/u);
+  assert.match(history, /\{ value: "all", label: "All tasks" \}/u);
+  assert.match(history, /\{ value: "completed", label: "Completed" \}/u);
+  assert.match(history, /\{ value: "processing", label: "Processing" \}/u);
+  assert.match(history, /\{ value: "errors", label: "Errors" \}/u);
+  assert.match(history, /const HISTORY_FILTER_STATUS = \{/u);
+  assert.match(history, /function agentHistoryFiltered\(rows\)/u);
+  assert.match(history, /function historyMatchesQuery\(\{ task, message \}, query\)/u);
+  assert.match(
+    app,
+    /case "agent-history-filter":\s*\n\s*state\.agentHistoryFilter = value;/u,
+  );
+  assert.match(
+    app,
+    /if \(act === "agent-history-search"\) \{\s*\n\s*state\.agentHistoryQuery = node\.value;/u,
+  );
+  assert.match(css, /\.agent-history-head/u);
+  assert.match(css, /\.agent-history-list/u);
 });
 
 test("the spec tab is where an agent is made org-wide or kept personal", async () => {

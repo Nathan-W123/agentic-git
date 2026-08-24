@@ -101,6 +101,8 @@ import {
   emptyState,
   pillBar,
   relativeTime,
+  searchBox,
+  segmented,
   showPopover,
   toast,
 } from "./ui.js";
@@ -4533,6 +4535,193 @@ const FINISHED_HISTORY_STATUS = new Set([
 ]);
 
 /**
+ * The four questions anybody actually asks this list.
+ *
+ * Deliberately not one entry per task status: a reader looking for what went
+ * wrong does not care whether it was cancelled or refused, and a strip of ten
+ * buttons naming coordinator states would be a worse list than no filter.
+ */
+const HISTORY_FILTERS = [
+  { value: "all", label: "All tasks" },
+  { value: "completed", label: "Completed" },
+  { value: "processing", label: "Processing" },
+  { value: "errors", label: "Errors" },
+];
+
+/**
+ * Which statuses each filter admits. "Processing" is the complement of
+ * {@link FINISHED_HISTORY_STATUS} rather than its own list, so a status the
+ * coordinator adds later is in-flight here without this file being edited.
+ */
+const HISTORY_FILTER_STATUS = {
+  completed: new Set(["integrated"]),
+  errors: new Set(["failed", "cancelled"]),
+};
+
+/** The word a reader recognises for a coordinator status. */
+function historyStatusLabel(status) {
+  switch (status) {
+    case "integrated":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    case "awaiting_approval":
+      return "Waiting";
+    case "open":
+      return "Open";
+    default:
+      return "Processing";
+  }
+}
+
+/** Which of the palette's four meanings that status carries. */
+function historyStatusTone(status) {
+  switch (status) {
+    case "integrated":
+      return "ok";
+    case "failed":
+      return "bad";
+    case "cancelled":
+      return "muted";
+    case "awaiting_approval":
+      return "warn";
+    default:
+      return "live";
+  }
+}
+
+/**
+ * The row's leading mark: a tinted pill that says the outcome in a word.
+ *
+ * The glyph alone was ambiguous — a green ring and a grey ring are the same
+ * shape at eleven pixels — and the row had nowhere else that named the state.
+ */
+function historyStatusPill(status) {
+  return `<span class="ah-status ah-status-${esc(historyStatusTone(status))}">
+    ${icon(TASK_ICON[status] ?? "info")}
+    <span class="ah-status-label">${esc(historyStatusLabel(status))}</span>
+  </span>`;
+}
+
+/**
+ * When the work was asked for, as a clock reading rather than an age.
+ *
+ * "2 days ago" is fine while a row is fresh and useless in a list somebody is
+ * scanning for the thing they ran yesterday afternoon. Today and yesterday
+ * keep their names because those are the two days a reader thinks in.
+ */
+function historyWhen(value) {
+  const date = new Date(value ?? "");
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const time = date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((today.getTime() - day.getTime()) / 86_400_000);
+  if (days === 0) {
+    return `Today at ${time}`;
+  }
+  if (days === 1) {
+    return `Yesterday at ${time}`;
+  }
+  return `${date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  })} at ${time}`;
+}
+
+/**
+ * What the run left behind, in enough words to recognise it.
+ *
+ * The agent's own summary when it wrote one, and the size of the change when
+ * it did not. Never invented: a row with neither says nothing rather than
+ * claiming an outcome the record does not have.
+ */
+function taskOutputPreview(task) {
+  const summary = String(task?.summary ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (summary !== "") {
+    return summary.length > 64 ? `${summary.slice(0, 63)}…` : summary;
+  }
+  const changed = Array.isArray(task?.changedFiles) ? task.changedFiles : [];
+  if (changed.length > 0) {
+    return `${String(changed.length)} file${
+      changed.length === 1 ? "" : "s"
+    } changed`;
+  }
+  return "";
+}
+
+/**
+ * Whether a row answers what was typed into the search box.
+ *
+ * Matched against everything the row shows and the untrimmed request behind
+ * it, so searching for a word that only survives in the tooltip still finds
+ * the task it belongs to.
+ */
+function historyMatchesQuery({ task, message }, query) {
+  if (query === "") {
+    return true;
+  }
+  return [
+    taskSummaryLine(task, message),
+    withoutRolePreamble(task.objective),
+    taskOutputPreview(task),
+    historyStatusLabel(task.status),
+  ].some((text) => String(text).toLowerCase().includes(query));
+}
+
+/** The rows left after the filter strip and the search box have had their say. */
+function agentHistoryFiltered(rows) {
+  const filter = state.agentHistoryFilter ?? "all";
+  const query = String(state.agentHistoryQuery ?? "")
+    .trim()
+    .toLowerCase();
+  // `Object.hasOwn` rather than a plain lookup: the filter is read back off a
+  // button's `data-value`, and "constructor" would otherwise resolve to a
+  // function and throw on `.has`.
+  const allowed = Object.hasOwn(HISTORY_FILTER_STATUS, filter)
+    ? HISTORY_FILTER_STATUS[filter]
+    : undefined;
+  return rows.filter((row) => {
+    const status = row.task.status;
+    const admitted =
+      filter === "processing"
+        ? !FINISHED_HISTORY_STATUS.has(status)
+        : allowed === undefined || allowed.has(status);
+    return admitted && historyMatchesQuery(row, query);
+  });
+}
+
+/** The search box and filter strip that sit above the list. */
+function agentHistoryHead() {
+  return `<div class="agent-history-head">
+    ${searchBox(
+      "Search recent tasks...",
+      state.agentHistoryQuery ?? "",
+      "agent-history-search",
+    )}
+    <span class="ah-filter">
+      <span class="ah-filter-label">Filter</span>
+      ${segmented(
+        "agent-history-filter",
+        HISTORY_FILTERS,
+        state.agentHistoryFilter ?? "all",
+      )}
+    </span>
+  </div>`;
+}
+
+/**
  * Split one agent's history into work that still needs attention and work
  * that has already landed. Keeps each half in the newest-first order
  * `agentHistoryRows` already established.
@@ -4551,16 +4740,20 @@ function agentHistorySections(rows) {
 }
 
 /**
- * One compact history line: status mark, one-line summary, when it ran.
- * Opens the thread when the task was talked about in the channel.
+ * One history card: outcome pill, what was asked for and when, whose agent
+ * ran it, what it left behind, and the two things a reader does next.
+ *
+ * The row itself still opens the conversation the work was discussed in — the
+ * eye repeats that as a control a touch reader can find, and retry is offered
+ * only where the server would accept it.
  */
-function agentHistoryRow({ task, message }) {
-  const iconName = TASK_ICON[task.status] ?? "info";
+function agentHistoryRow({ task, message }, agent, repositoryId) {
   // A description of the work, not the words that asked for it. The
   // request is still here — on the row's tooltip, with its role preamble
   // taken off, for the reader who wants to know exactly what was said.
   const line = taskSummaryLine(task, message);
   const full = withoutRolePreamble(task.objective).trim();
+  const preview = taskOutputPreview(task);
   const open =
     message === undefined
       ? ""
@@ -4568,9 +4761,42 @@ function agentHistoryRow({ task, message }) {
           data-value="${esc(message.id)}"`;
   return `<div class="agent-history-row ${esc(task.status)}"${open}
     title="${esc(full)}">
-    <span class="ah-glyph">${icon(iconName)}</span>
-    <span class="ah-objective">${esc(line)}</span>
-    <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
+    ${historyStatusPill(task.status)}
+    <span class="ah-main">
+      <span class="ah-objective">${esc(line)}</span>
+      <span class="ah-when">${esc(historyWhen(task.submittedAt))}</span>
+    </span>
+    <span class="ah-face">${statusAgentFace(agent, 26, repositoryId)}</span>
+    <span class="ah-preview">
+      <span class="ah-preview-label">Output preview</span>
+      <span class="ah-preview-text">${esc(
+        preview === "" ? historyStatusLabel(task.status) : preview,
+      )}</span>
+    </span>
+    <span class="ah-actions">
+      ${
+        message === undefined
+          ? ""
+          : iconButton("eye", {
+              act: "channel-thread-open",
+              value: message.id,
+              title: "Open this task's conversation",
+              small: true,
+            })
+      }
+      ${
+        // Only work that has actually stopped: the handler refuses a running
+        // task, and a control that exists to be refused is worse than none.
+        FINISHED_HISTORY_STATUS.has(task.status)
+          ? iconButton("refresh", {
+              act: "task-retry",
+              value: task.id,
+              title: "Run this task again",
+              small: true,
+            })
+          : ""
+      }
+    </span>
   </div>`;
 }
 
@@ -4583,22 +4809,34 @@ function agentHistory(agent, repositoryId) {
       `${esc(agent.name.split(" ")[0])} has not been asked for anything in this repository.`,
     )}</div>`;
   }
-  const { active, finished } = agentHistorySections(rows);
-  return `<div class="agent-history scroll">
-    ${
-      active.length === 0
-        ? ""
-        : `<div class="agent-history-active" aria-label="Active">
-            ${active.map(agentHistoryRow).join("")}
-          </div>`
-    }
-    ${
-      finished.length === 0
-        ? ""
-        : `<div class="agent-history-finished" aria-label="Finished">
-            ${finished.map(agentHistoryRow).join("")}
-          </div>`
-    }
+  const shown = agentHistoryFiltered(rows);
+  const { active, finished } = agentHistorySections(shown);
+  const draw = (row) => agentHistoryRow(row, agent, repositoryId);
+  return `<div class="agent-history">
+    ${agentHistoryHead()}
+    <div class="agent-history-list scroll">
+      ${
+        shown.length === 0
+          ? `<div class="util-empty">No task here matches that search.</div>`
+          : ""
+      }
+      ${
+        active.length === 0
+          ? ""
+          : `<div class="agent-history-active" aria-label="Active">
+              <div class="ah-section-label">Active</div>
+              ${active.map(draw).join("")}
+            </div>`
+      }
+      ${
+        finished.length === 0
+          ? ""
+          : `<div class="agent-history-finished" aria-label="Finished">
+              <div class="ah-section-label">Recently</div>
+              ${finished.map(draw).join("")}
+            </div>`
+      }
+    </div>
   </div>`;
 }
 
