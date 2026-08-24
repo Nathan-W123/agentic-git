@@ -5249,6 +5249,18 @@ button.chip.lg:hover {
   z-index: 2;
 }
 
+/* The roster itself also carries a transform (fold animation), so the card's
+   stacking context stops at the list. Without lifting that list, the sticky
+   heading and roster below — Agents under People, or the other way about —
+   paint straight through a person card that opened downward, which is the
+   mash of names and status dots a hover over a user used to be. Above the
+   sticky `.chan-sec` (z-index 1) is enough; the closed state never hosts a
+   card, so it never needs the lift. */
+.chan-roster:has(.pcard-anchor:is(:hover, :focus-within)) {
+  position: relative;
+  z-index: 2;
+}
+
 /* A profile card opens *below* the row and inside the roster's own width.
    `.chan-scroll` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways

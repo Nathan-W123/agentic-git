@@ -5769,6 +5769,13 @@ test("one profile card describes people and agents wherever a face is drawn", as
     css,
     /\.roster-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
   );
+  // The list is itself a transformed stacking context (fold animation), so a
+  // person card that opens over the Agents heading would otherwise be painted
+  // through by that later sibling. Lift the open roster the same way.
+  assert.match(
+    css,
+    /\.chan-roster:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
+  );
   // No ring drawn round the face at the same time: the card opening is the
   // answer to the hover, and the outline was the same news twice.
   assert.match(
