@@ -11498,7 +11498,13 @@ dialog.modal[open]::backdrop {
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
 }
 :root[data-theme="light"] .agent-face {
-  background: #33322f;
+  background: #f3efe8;
+  border-radius: 50%;
+  padding: 2px;
+}
+
+:root[data-theme="light"] .doodle-chip .doodle {
+  background: #f3efe8;
   border-radius: 50%;
   padding: 2px;
 }

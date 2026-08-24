@@ -2447,19 +2447,33 @@ test("a user's agent colour is one they chose, not one they were dealt", async (
   const data = await publicFile("data.js");
   const start = data.indexOf("export function agentColorFor");
   const body = data.slice(start, data.indexOf("\n}", start));
-  // Their explicit choice first, then their accent — both are "a colour for
-  // this person", and falling to the accent second is what stopped somebody
-  // whose interface was purple from having an orange agent beside it.
+  // Their stored agent colour, when it is not the shared default. A hash of
+  // the id or a fall-through to the interface accent would be a colour they
+  // never picked; distinct colours stay one click away in Appearance.
   assert.match(body, /agentColor/u);
-  assert.match(body, /accent/u);
-  // Then one shared default, deliberately, rather than a hash of the user id.
-  // The hash gave everybody a different colour for free, which sounds useful
-  // and reads as decoration: nothing in the interface means "orange", so an
-  // orange agent next to a purple highlight is two colours disagreeing.
-  // Distinct colours are still one click away in Appearance — the difference
-  // is that somebody chose them.
-  assert.match(body, /DEFAULT_ACCENT/u);
+  assert.match(body, /chosen/u);
   assert.equal(/charCodeAt/u.test(body), false);
+  assert.equal(/DEFAULT_ACCENT/u.test(body), false);
+});
+
+test("the default agent colour is black on the light theme", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("export function agentColorFor");
+  const body = data.slice(start, data.indexOf("\n}", start));
+  assert.match(body, /myTheme\(\) === "light"/u);
+  assert.match(body, /#000000/u);
+  assert.match(body, /DEFAULT_AGENT_COLOR/u);
+
+  const css = await publicFile("styles.css");
+  const face =
+    /:root\[data-theme="light"\] \.agent-face \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(face ?? "", /background: #f3efe8;/u);
+  assert.equal(/#33322f/u.test(face ?? ""), false);
+  const chip =
+    /:root\[data-theme="light"\] \.doodle-chip \.doodle \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  assert.match(chip ?? "", /background: #f3efe8;/u);
 });
 
 test("the theme is driven by custom properties rather than per-component colour", async () => {
