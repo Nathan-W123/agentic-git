@@ -65,6 +65,7 @@ import {
   ensureChannelRoster,
   ensureProviderUsage,
   ensureRepositoryGrants,
+  markChannelRead,
   refreshChannelMessages,
   refreshProviderUsage,
   takePromptedThread,
@@ -3537,6 +3538,27 @@ window.matchMedia("(max-width: 600px)").addEventListener("change", () => {
 });
 
 /**
+ * Marks a channel read because it is the one on screen, being looked at.
+ *
+ * Opening a room is the only thing that used to clear it, so anything that
+ * arrived while the reader sat in it raised a badge on the room they were
+ * reading — and that badge stayed until they left and came back. A message
+ * landing in front of somebody is a message read; anywhere else, or with the
+ * tab in the background, it is genuinely still waiting.
+ */
+function markChannelReadIfWatching(repositoryId) {
+  if (
+    !repositoryId ||
+    state.route !== "chats" ||
+    activeChannelId() !== repositoryId ||
+    document.visibilityState !== "visible"
+  ) {
+    return;
+  }
+  markChannelRead(repositoryId);
+}
+
+/**
  * Catching back up, at the moments a phone actually returns: the tab coming
  * to the foreground, the page coming back out of the back-forward cache,
  * the network reappearing. A backgrounded phone tab loses its socket and
@@ -3557,6 +3579,9 @@ function resumeLiveUpdates() {
     void refreshChannelMessages(channel).then(() => {
       openPromptedThread(channel);
       openReadyPlan(channel);
+      // Coming back to the tab is the other half of reading it: whatever
+      // arrived while this browser was away is now on screen.
+      markChannelReadIfWatching(channel);
       if (!renameFieldFocused()) {
         render();
       }
@@ -8692,15 +8717,10 @@ async function boot() {
     // Private mail, delivered to the two people in it rather than to the
     // project (`sendToUsers`), and so never arriving here for anyone else.
     if (frame?.type === "direct-message") {
+      // Reading it as it arrives — when it arrives in the conversation that is
+      // open — happens inside `noteDirectMessage`, which is the only place
+      // that knows whose conversation the message belongs to.
       noteDirectMessage(frame);
-      if (state.activeDm !== undefined && !renameFieldFocused()) {
-        // Reading it as it arrives, so the badge does not appear and clear.
-        void api(
-          `/projects/${encodeURIComponent(state.projectId)}/direct-messages/` +
-            `${encodeURIComponent(state.activeDm)}/read`,
-          { method: "POST" },
-        ).catch(() => undefined);
-      }
       if (!renameFieldFocused()) {
         render();
       }
@@ -8791,6 +8811,7 @@ async function boot() {
         void refreshChannelMessages(channelRepositoryId).then(() => {
           openPromptedThread(channelRepositoryId);
           openReadyPlan(channelRepositoryId);
+          markChannelReadIfWatching(channelRepositoryId);
           render();
         });
       }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS));

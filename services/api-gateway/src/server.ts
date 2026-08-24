@@ -8795,7 +8795,15 @@ export class ApiGateway {
       }
       const at = new Date().toISOString();
       await this.options.store.markChannelRead(repositoryId, principal.user.id, at);
-      this.sendJson(response, 200, { readAt: at });
+      // Read back rather than echoed: the cursor only moves forward, so a
+      // request that arrived after a later one leaves the stored mark where it
+      // was, and the answer has to say where that is.
+      const readAt =
+        (await this.options.store.getChannelReadCursor(
+          repositoryId,
+          principal.user.id,
+        )) ?? at;
+      this.sendJson(response, 200, { readAt });
       return;
     }
 

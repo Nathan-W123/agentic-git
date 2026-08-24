@@ -3891,9 +3891,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
     at: string,
   ): Promise<void> {
     await this.query(
+      // Forward only, exactly as the SQLite store keeps it: a late write must
+      // not move a cursor backwards and un-read messages somebody has seen.
       `INSERT INTO channel_read_cursors (repository_id, user_id, read_at)
        VALUES ($1, $2, $3)
-       ON CONFLICT (repository_id, user_id) DO UPDATE SET read_at = excluded.read_at`,
+       ON CONFLICT (repository_id, user_id) DO UPDATE SET
+         read_at = GREATEST(channel_read_cursors.read_at, excluded.read_at)`,
       [repositoryId, userId, at],
     );
   }

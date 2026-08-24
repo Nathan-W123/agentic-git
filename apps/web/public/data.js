@@ -3406,14 +3406,18 @@ export function noteDirectMessage(frame) {
   state.dmThreads[other] = [...thread, message];
   // The badge would otherwise wait for the next inbox refresh. Not counted
   // when the conversation is already open, because it is being read.
-  const unreadHere = message.recipientId === me && state.activeDm !== other;
+  const open = state.activeDm === other;
+  const unreadHere = message.recipientId === me && !open;
   const existing = state.dmConversations.find(
     (conversation) => conversation.userId === other,
   );
   const updated = {
     userId: other,
     lastMessage: message,
-    unread: (existing?.unread ?? 0) + (unreadHere ? 1 : 0),
+    // An open conversation has nothing waiting in it. Adding to whatever the
+    // last inbox read reported left a count from before it was opened sitting
+    // on the row being read, growing with every reply.
+    unread: open ? 0 : (existing?.unread ?? 0) + (unreadHere ? 1 : 0),
   };
   state.dmConversations = [
     updated,
@@ -3421,6 +3425,15 @@ export function noteDirectMessage(frame) {
       (conversation) => conversation.userId !== other,
     ),
   ];
+  // Read where it landed, rather than wherever the reader happens to be. The
+  // caller used to mark whichever conversation was open, so a message arriving
+  // in one that was open in a second tab — or one opened after the frame — was
+  // never told to the server, and came back unread on the next inbox refresh.
+  if (open && message.recipientId === me) {
+    void api(directPath(`/${encodeURIComponent(other)}/read`), {
+      method: "POST",
+    }).catch(() => undefined);
+  }
 }
 
 /** Applies a private-message correction echoed to either participant. */
@@ -3957,9 +3970,13 @@ async function loadChannel(repositoryId) {
   if (Array.isArray(response.pinned)) {
     state.channelPins[repositoryId] = response.pinned.map(withSentTime);
   }
+  // The server's cursor is a floor, not a replacement. This read runs again
+  // every time the room changes, and the mark it carries is only as fresh as
+  // the last `POST /read` that actually landed — one that failed, or that is
+  // still in flight, used to hand back an older moment and un-read everything
+  // since it.
   if (response.readAt !== undefined) {
-    state.channelRead[repositoryId] = Date.parse(response.readAt);
-    window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+    noteChannelRead(repositoryId, Date.parse(response.readAt));
   }
   return true;
 }
@@ -5341,12 +5358,58 @@ export async function removeMember(userId) {
   await reloadMembers();
 }
 
+/**
+ * Moves a channel's read stamp, forward only.
+ *
+ * Everything that writes the stamp goes through here, because the two writers
+ * disagree: opening the room stamps it from this browser's clock, and a page
+ * of history carries the server's cursor. Letting the later write win outright
+ * meant a channel read a moment ago could be told it was last read before that
+ * — and every message in between became new again, on a screen the reader was
+ * looking at.
+ */
+function noteChannelRead(repositoryId, at) {
+  const next = Number.isFinite(at) ? at : 0;
+  if (next <= (state.channelRead[repositoryId] ?? 0)) {
+    return;
+  }
+  state.channelRead[repositoryId] = next;
+  window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+}
+
+/**
+ * The newest moment anything in the room is stamped with, by the same clock
+ * the unread count compares against.
+ *
+ * Read from `channelMessagesFor` deliberately: that is the exact list
+ * `countChannelSince` counts, so a stamp taken past all of it is a stamp that
+ * really does empty the badge.
+ */
+function newestChannelActivity(repositoryId) {
+  let newest = 0;
+  for (const message of channelMessagesFor(repositoryId)) {
+    const at = new Date(message.at).getTime();
+    if (Number.isFinite(at) && at > newest) {
+      newest = at;
+    }
+  }
+  return newest;
+}
+
 export function markChannelRead(repositoryId) {
   if (!repositoryId) {
     return;
   }
-  state.channelRead[repositoryId] = Date.now();
-  window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+  // Past the newest message here as well as past now. The timestamps being
+  // compared are the server's; the stamp was this browser's clock, so a
+  // browser running even slightly behind marked the room read at a moment the
+  // messages in it were already "after" — and the badge came straight back on
+  // the next render, with no way to clear it. Reading a room covers what is in
+  // it by definition, whichever clock said so.
+  noteChannelRead(
+    repositoryId,
+    Math.max(Date.now(), newestChannelActivity(repositoryId)),
+  );
   if (state.projectId) {
     // Best-effort: the badge is already correct from the local write above,
     // and the server's copy of "read" catches up next time this succeeds.
