@@ -2753,7 +2753,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     userId: string,
     at: string,
   ): Promise<void> {
-    this.channelReadCursors.set(this.channelReadKey(repositoryId, userId), at);
+    // Forward only, matching the persistent stores: a request that arrives
+    // out of order must not hand back messages the reader has already seen.
+    const key = this.channelReadKey(repositoryId, userId);
+    const current = this.channelReadCursors.get(key);
+    if (current === undefined || current < at) {
+      this.channelReadCursors.set(key, at);
+    }
   }
 
   public async getChannelReadCursor(

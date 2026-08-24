@@ -4397,6 +4397,27 @@ for (const backend of backends) {
         await store.getChannelReadCursor("repo_channel", bob.id),
         undefined,
       );
+      // And only forward. Two tabs, or a request overtaken by one sent after
+      // it, must not move the mark back: everything between the two moments
+      // would come back unread for somebody who has already read it.
+      await store.markChannelRead(
+        "repo_channel",
+        alice.id,
+        "2026-01-04T00:00:00.000Z",
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_channel", alice.id),
+        "2026-01-05T00:00:00.000Z",
+      );
+      await store.markChannelRead(
+        "repo_channel",
+        alice.id,
+        "2026-01-06T00:00:00.000Z",
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_channel", alice.id),
+        "2026-01-06T00:00:00.000Z",
+      );
     } finally {
       await store.close();
       await cleanup();

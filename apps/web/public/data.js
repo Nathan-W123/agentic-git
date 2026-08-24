@@ -62,6 +62,10 @@ export const state = {
   /* Navigation */
   route: "chats",
   repositoryId: stored("ag.repo"),
+  /** The account settings surface floats over the current conversation. */
+  settingsOpen: false,
+  /** The category selected in the settings dialog's left navigation. */
+  settingsSection: "general",
 
   /* Per-user agent connections (chat providers) */
   providers: [],
@@ -3406,14 +3410,18 @@ export function noteDirectMessage(frame) {
   state.dmThreads[other] = [...thread, message];
   // The badge would otherwise wait for the next inbox refresh. Not counted
   // when the conversation is already open, because it is being read.
-  const unreadHere = message.recipientId === me && state.activeDm !== other;
+  const open = state.activeDm === other;
+  const unreadHere = message.recipientId === me && !open;
   const existing = state.dmConversations.find(
     (conversation) => conversation.userId === other,
   );
   const updated = {
     userId: other,
     lastMessage: message,
-    unread: (existing?.unread ?? 0) + (unreadHere ? 1 : 0),
+    // An open conversation has nothing waiting in it. Adding to whatever the
+    // last inbox read reported left a count from before it was opened sitting
+    // on the row being read, growing with every reply.
+    unread: open ? 0 : (existing?.unread ?? 0) + (unreadHere ? 1 : 0),
   };
   state.dmConversations = [
     updated,
@@ -3421,6 +3429,15 @@ export function noteDirectMessage(frame) {
       (conversation) => conversation.userId !== other,
     ),
   ];
+  // Read where it landed, rather than wherever the reader happens to be. The
+  // caller used to mark whichever conversation was open, so a message arriving
+  // in one that was open in a second tab — or one opened after the frame — was
+  // never told to the server, and came back unread on the next inbox refresh.
+  if (open && message.recipientId === me) {
+    void api(directPath(`/${encodeURIComponent(other)}/read`), {
+      method: "POST",
+    }).catch(() => undefined);
+  }
 }
 
 /** Applies a private-message correction echoed to either participant. */
@@ -3574,17 +3591,61 @@ export function dmUnreadFrom(userId) {
 }
 
 /**
- * What an agent's dot should say: working, idle, or personal.
+ * Where this agent's usage report is filed, for a caller that only has the
+ * agent record.
  *
- * Working wins over personal. Both are true of a personal agent that is
- * mid-task, and which one to show is a question of what the reader is looking
- * for — "is anything happening" is the more urgent of the two, and the one
- * they cannot find out any other way. Personal is visible in the role line
- * regardless.
+ * The vendor and the owner are resolved exactly as `usageProviderId` and
+ * `usageOwner` in screen-chats.js resolve them for the fetch — the two must
+ * agree or the dot would read a key nothing was ever stored under.
+ */
+function agentUsageKey(agent) {
+  const provider =
+    agent?.provider ?? String(agent?.id ?? "").split(":").at(-1) ?? "";
+  return usageKey(
+    provider,
+    agent?.mine === true ? undefined : (agent?.userId ?? undefined),
+  );
+}
+
+/**
+ * Whether this agent's account has nothing left to spend.
+ *
+ * Read from the usage report the profile card already fetches rather than
+ * from a request of its own: the figure costs a CLI invocation server-side
+ * (see `ensureProviderUsage`), so the dot answers once the report is in hand
+ * and says nothing before that. Any single window at its ceiling is enough —
+ * a spent five-hour limit stops the work as surely as a spent weekly one.
+ */
+export function agentOutOfUsage(agent) {
+  const report = state.providerUsage[agentUsageKey(agent)];
+  if (
+    report === undefined ||
+    report.loading === true ||
+    report.unavailableReason !== undefined
+  ) {
+    return false;
+  }
+  return (report.windows ?? []).some(
+    (window) => (Number(window?.percentUsed) || 0) >= 100,
+  );
+}
+
+/**
+ * What an agent's dot should say: working, out of usage, personal, or idle.
+ *
+ * Working wins over the rest. Several are true at once of a personal agent
+ * that is mid-task, and which one to show is a question of what the reader is
+ * looking for — "is anything happening" is the most urgent of them, and the
+ * one they cannot find out any other way. Out of usage comes next, because it
+ * is the answer to "will @mentioning this accomplish anything" and nothing
+ * else on the row says it. Personal is visible in the role line regardless.
  */
 export function agentStatus(agent, repositoryId) {
   if (agentIsWorking(agent, repositoryId)) {
     return "working";
+  }
+  if (agentOutOfUsage(agent)) {
+    return "exhausted";
   }
   return agent.visibility === "personal" ? "personal" : "idle";
 }
@@ -3711,6 +3772,40 @@ export function taskBelongsToAgent(task, agent) {
   // hiding an agent's whole history is a worse answer than the ambiguity this
   // was written to fix, and it only ever applies to records that predate it.
   return task.submittedBy === undefined || task.submittedBy === agentOwnerId(agent);
+}
+
+/**
+ * The agent a task's work belongs to, as a record something can be drawn from.
+ *
+ * The channel's own roster is the good answer, because it carries the name
+ * this room knows the agent by and the colour of whoever owns it. It is also
+ * not always there: `channelAgentsFor` reads whatever `ensureChannelRoster`
+ * has already fetched, and the catch-up digest is drawn the moment somebody
+ * comes back — before that request has resolved on a cold load. A miss used
+ * to mean an unattributed row, or worse, a stand-in bot that named an agent
+ * while showing nothing of it.
+ *
+ * So the fallback is the task's own `agentId`, which names the vendor CLI
+ * that ran the work. It cannot say whose agent it was — that is exactly what
+ * {@link taskBelongsToAgent} exists to decide — so the record it returns
+ * carries no name and no colour, only the vendor, which is enough to draw the
+ * right mark and leaves the caller to label it.
+ */
+export function agentForTask(task, repositoryId = task?.repositoryId) {
+  if (task === undefined) {
+    return undefined;
+  }
+  const known = channelAgentsFor(repositoryId).find((agent) =>
+    taskBelongsToAgent(task, agent),
+  );
+  if (known !== undefined) {
+    return known;
+  }
+  const ran = String(task.agentId ?? "").toLowerCase();
+  const provider = Object.keys(VENDOR_FOR_PROVIDER).find((candidate) =>
+    ran.includes(VENDOR_FOR_PROVIDER[candidate]),
+  );
+  return provider === undefined ? undefined : { id: task.agentId, provider };
 }
 
 /**
@@ -3923,9 +4018,13 @@ async function loadChannel(repositoryId) {
   if (Array.isArray(response.pinned)) {
     state.channelPins[repositoryId] = response.pinned.map(withSentTime);
   }
+  // The server's cursor is a floor, not a replacement. This read runs again
+  // every time the room changes, and the mark it carries is only as fresh as
+  // the last `POST /read` that actually landed — one that failed, or that is
+  // still in flight, used to hand back an older moment and un-read everything
+  // since it.
   if (response.readAt !== undefined) {
-    state.channelRead[repositoryId] = Date.parse(response.readAt);
-    window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+    noteChannelRead(repositoryId, Date.parse(response.readAt));
   }
   return true;
 }
@@ -5307,12 +5406,58 @@ export async function removeMember(userId) {
   await reloadMembers();
 }
 
+/**
+ * Moves a channel's read stamp, forward only.
+ *
+ * Everything that writes the stamp goes through here, because the two writers
+ * disagree: opening the room stamps it from this browser's clock, and a page
+ * of history carries the server's cursor. Letting the later write win outright
+ * meant a channel read a moment ago could be told it was last read before that
+ * — and every message in between became new again, on a screen the reader was
+ * looking at.
+ */
+function noteChannelRead(repositoryId, at) {
+  const next = Number.isFinite(at) ? at : 0;
+  if (next <= (state.channelRead[repositoryId] ?? 0)) {
+    return;
+  }
+  state.channelRead[repositoryId] = next;
+  window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+}
+
+/**
+ * The newest moment anything in the room is stamped with, by the same clock
+ * the unread count compares against.
+ *
+ * Read from `channelMessagesFor` deliberately: that is the exact list
+ * `countChannelSince` counts, so a stamp taken past all of it is a stamp that
+ * really does empty the badge.
+ */
+function newestChannelActivity(repositoryId) {
+  let newest = 0;
+  for (const message of channelMessagesFor(repositoryId)) {
+    const at = new Date(message.at).getTime();
+    if (Number.isFinite(at) && at > newest) {
+      newest = at;
+    }
+  }
+  return newest;
+}
+
 export function markChannelRead(repositoryId) {
   if (!repositoryId) {
     return;
   }
-  state.channelRead[repositoryId] = Date.now();
-  window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+  // Past the newest message here as well as past now. The timestamps being
+  // compared are the server's; the stamp was this browser's clock, so a
+  // browser running even slightly behind marked the room read at a moment the
+  // messages in it were already "after" — and the badge came straight back on
+  // the next render, with no way to clear it. Reading a room covers what is in
+  // it by definition, whichever clock said so.
+  noteChannelRead(
+    repositoryId,
+    Math.max(Date.now(), newestChannelActivity(repositoryId)),
+  );
   if (state.projectId) {
     // Best-effort: the badge is already correct from the local write above,
     // and the server's copy of "read" catches up next time this succeeds.
@@ -5854,11 +5999,26 @@ export function setChannelPicture(repositoryId, dataUrl) {
   localStorage.setItem(key, dataUrl);
 }
 
-/** "dark" or "light". Dark is what every colour here was chosen against. */
+/** The saved theme choice, kept separate from the theme it resolves to. */
+export function myThemePreference() {
+  const saved = localStorage.getItem("ag.theme");
+  return saved === "light" || saved === "dark" ? saved : "system";
+}
+
+/** "dark" or "light", after resolving the browser's system preference. */
 export function myTheme() {
-  return localStorage.getItem("ag.theme") === "light" ? "light" : "dark";
+  const preference = myThemePreference();
+  if (preference !== "system") {
+    return preference;
+  }
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches === true
+    ? "light"
+    : "dark";
 }
 
 export function setMyTheme(theme) {
-  localStorage.setItem("ag.theme", theme === "light" ? "light" : "dark");
+  localStorage.setItem(
+    "ag.theme",
+    theme === "light" || theme === "dark" ? theme : "system",
+  );
 }

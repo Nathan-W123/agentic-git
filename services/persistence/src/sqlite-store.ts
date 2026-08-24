@@ -4082,9 +4082,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
   ): Promise<void> {
     this.db
       .prepare(
+        // Forward only. Two tabs, or a request that overtook one sent before
+        // it, could otherwise write an older moment over a newer one — and
+        // everything in between came back unread for a reader who had already
+        // seen it.
         `INSERT INTO channel_read_cursors (repository_id, user_id, read_at)
          VALUES (?, ?, ?)
-         ON CONFLICT(repository_id, user_id) DO UPDATE SET read_at = excluded.read_at`,
+         ON CONFLICT(repository_id, user_id) DO UPDATE SET
+           read_at = MAX(channel_read_cursors.read_at, excluded.read_at)`,
       )
       .run(repositoryId, userId, at);
   }

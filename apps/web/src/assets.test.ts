@@ -661,25 +661,19 @@ test("first-run setup is exposed only while the control plane needs an owner", a
   assert.match(source, /data-act="auth-mode" data-value="bootstrap"/u);
 });
 
-test("navigation is the four product routes and nothing invented", async () => {
+test("settings floats above the three product routes", async () => {
   const source = await browserSource();
   const routes = /const ROUTES = new Set\(\[([\s\S]*?)\]\)/u.exec(source)?.[1];
   assert.notEqual(routes, undefined);
   const parsed = [...(routes ?? "").matchAll(/"([a-z]+)"/gu)].map(
     (match) => match[1],
   );
-  // Four product destinations, plus Settings' own second page. Advanced is
-  // not navigation: nothing in the rail, the topbar or the account menu goes
-  // there, and the only door is the last card on Settings. It is a route so
-  // that it can be linked and so Back is the way out, not because it is a
-  // fifth place to be.
-  assert.deepEqual(parsed, [
-    "chats",
-    "agents",
-    "notifications",
-    "settings",
-    "advanced",
-  ]);
+  // Settings and Advanced are categories in one modal, so neither can replace
+  // the conversation as a router screen.
+  assert.deepEqual(parsed, ["chats", "agents", "notifications"]);
+  assert.match(source, /state\.settingsOpen === true \? settingsDialog\(\) : ""/u);
+  assert.match(source, /role="dialog"[\s\S]{0,80}aria-modal="true"/u);
+  assert.match(source, /data-act="settings-section"/u);
   // Code is read where it is discussed — files and diffs render inline in the
   // channel transcript — so neither it nor the coordinator is a page of its
   // own, and tasks still belong to the agent that owns them.
@@ -689,6 +683,21 @@ test("navigation is the four product routes and nothing invented", async () => {
     ),
     false,
   );
+});
+
+test("settings exposes theme and message sound preferences", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const ui = await publicFile("ui.js");
+
+  assert.match(app, /data-act="settings-theme"/u);
+  assert.match(app, /\["system", "System"\]/u);
+  assert.match(data, /export function myThemePreference\(\)/u);
+  assert.match(data, /prefers-color-scheme: light/u);
+
+  assert.match(app, /data-act="settings-sounds"/u);
+  assert.match(app, /localStorage\.setItem\("ag\.messageSounds"/u);
+  assert.match(ui, /localStorage\.getItem\("ag\.messageSounds"\) === "false"/u);
 });
 
 test("the channel rail stays visible when the tool sidebar collapses", async () => {
@@ -1835,6 +1844,14 @@ type LivenessModule = {
   state: {
     tasks: LivenessTask[];
     agentBusy: Record<string, { expiresAt: number; at: number }>;
+    providerUsage: Record<
+      string,
+      {
+        loading?: boolean;
+        unavailableReason?: string;
+        windows?: { label?: string; percentUsed?: number }[];
+      }
+    >;
   };
   agentStatus: (
     agent: {
@@ -1988,6 +2005,93 @@ test("a teammate's busy frame leaves this account's same-provider agent idle", a
       "repo",
     ),
     "working",
+  );
+});
+
+test("red is a private agent and grey is an account with nothing left", async () => {
+  const data = await liveness();
+  data.state.tasks = [];
+  data.state.agentBusy = {};
+  data.state.providerUsage = {};
+
+  const mine = { ...LIVENESS_AGENT, mine: true, visibility: "personal" };
+  assert.equal(data.agentStatus(mine, "repo"), "personal");
+
+  // Grey is a spent limit, read from the report the profile card fetches and
+  // filed under the same key: the bare vendor for one's own agent.
+  data.state.providerUsage = {
+    openai: { windows: [{ label: "Weekly", percentUsed: 100 }] },
+  };
+  assert.equal(data.agentStatus(mine, "repo"), "exhausted");
+
+  // A teammate's agent of the same vendor reads its owner's figures, not
+  // this account's — the key carries the owner for exactly that reason.
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+  data.state.providerUsage["u1:openai"] = {
+    windows: [
+      { label: "5-hour", percentUsed: 42 },
+      { label: "Weekly", percentUsed: 100 },
+    ],
+  };
+  assert.equal(
+    data.agentStatus(LIVENESS_AGENT, "repo"),
+    "exhausted",
+    "any one window at its ceiling stops the work",
+  );
+
+  // A question that has not been answered is not an answer: a report still
+  // in flight, or one that could not be read, must not grey the dot.
+  data.state.providerUsage = { openai: { loading: true } };
+  assert.equal(data.agentStatus(mine, "repo"), "personal");
+  data.state.providerUsage = {
+    openai: { unavailableReason: "No usage reported." },
+  };
+  assert.equal(data.agentStatus(mine, "repo"), "personal");
+
+  // Working still wins over both. What is happening now is the thing the
+  // reader cannot find out any other way.
+  data.state.providerUsage = {
+    "u1:openai": { windows: [{ percentUsed: 100 }] },
+  };
+  data.state.tasks = [livenessTask()];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+});
+
+test("a face and a roster row agree on what each dot colour means", async () => {
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+
+  // The face's badge is looked up from the status rather than folded into
+  // "offline", which is what used to paint a private agent grey.
+  assert.match(
+    ui,
+    /const presence = Object\.hasOwn\(FACE_PRESENCE, status\)\s*\n\s*\? FACE_PRESENCE\[status\]\s*\n\s*: "offline";/u,
+  );
+  assert.match(ui, /personal: "personal",/u);
+  assert.match(ui, /exhausted: "exhausted",/u);
+
+  // Red for private, grey for out of usage — in both dot vocabularies.
+  assert.match(
+    css,
+    /\.status-personal,\s*\n\.status-away \{\s*\n\s*background: var\(--danger/u,
+  );
+  assert.match(
+    css,
+    /\.status-exhausted \{\s*\n\s*background: var\(--text-4/u,
+  );
+  assert.match(
+    css,
+    /\.presence-personal \{\s*\n\s*background: var\(--danger/u,
+  );
+  assert.match(
+    css,
+    /\.presence-exhausted \{\s*\n\s*background: var\(--text-4\);/u,
+  );
+
+  // Neither new state moves, the way both did while they were drawn offline.
+  assert.match(
+    css,
+    /\.agent-face\[data-presence="personal"\] svg,[\s\S]{0,200}\.agent-face\[data-presence="exhausted"\] svg \* \{\s*\n\s*animation: none;/u,
   );
 });
 
@@ -2232,6 +2336,43 @@ test("catch-up pills use each named agent's actual mark", async () => {
   assert.match(catchUpBody, /agent: worker/u);
   assert.match(catchUpBody, /\.\.\.\[\.\.\.workers\.values\(\)\]\.map/u);
   assert.doesNotMatch(catchUpBody, /label: `\$\{String\(workers\.size\)\} agents`/u);
+
+  // Naming an agent is enough: a pill that says it is an agent's takes the
+  // agent's mark even where the record behind it is missing, so there is no
+  // path left that draws a stand-in bot under somebody's name.
+  assert.match(pillBody, /pill\.icon !== "agent"/u);
+
+  // And the bot is gone from the set of rendered objects entirely, so nothing
+  // can reach it again by asking for it by name.
+  const artStart = ui.indexOf("const PILL_ART = {");
+  const art = ui.slice(artStart, ui.indexOf("\n};", artStart));
+  assert.doesNotMatch(art, /^ {2}agent: \{/mu);
+
+  // The row's agent comes from the task, not from a roster scan that answers
+  // "nobody" until the roster has been fetched.
+  assert.match(catchUpBody, /agentForTask\(task, taskRepositoryId\)/u);
+  const data = await publicFile("data.js");
+  assert.match(data, /export function agentForTask\(/u);
+});
+
+test("every provider this deployment connects to has its own mark", async () => {
+  const ui = await publicFile("ui.js");
+  const marksStart = ui.indexOf("const VENDOR_MARKS = {");
+  const marks = ui.slice(marksStart, ui.indexOf("\n};", marksStart));
+  // `generic` is for a vendor this build has never heard of. A provider it
+  // ships a connection for landing there is the anonymous robot showing up
+  // under a name somebody chose, which is the whole complaint these marks
+  // answer.
+  for (const provider of [
+    "anthropic",
+    "openai",
+    "google",
+    "cursor",
+    "copilot",
+    "kiro",
+  ]) {
+    assert.match(marks, new RegExp(`^ {2}${provider}: \``, "mu"));
+  }
 });
 
 test("an agent colour is stored on the account, not in the browser", async () => {

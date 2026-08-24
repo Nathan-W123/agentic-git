@@ -248,33 +248,17 @@ test("direct messages are offered with people and with nobody else", async () =>
   );
 });
 
-test("Advanced is the foot of Settings, and holds what left it", async () => {
+test("Advanced is a category in the settings dialog", async () => {
   const app = await publicFile("app.js");
 
-  // The way in. Last card on the page, after the account — a settings screen
-  // whose first two cards were project-wide policy asked everybody to read
-  // past the team's rules to reach their own name.
-  const settings = slice(app, "function settingsScreen() {", "\n/**");
-  assert.match(settings, /data-act="nav" data-value="advanced"/u);
-  assert.equal(
-    settings.indexOf('data-value="advanced"') > settings.indexOf("<h3>Account</h3>"),
-    true,
-    "Advanced belongs below the account card, at the bottom of Settings",
+  const dialog = slice(app, "const SETTINGS_SECTIONS = [", "\n/**\n * The user's own GitHub");
+  assert.match(dialog, /id: "advanced"/u);
+  assert.match(dialog, /case "advanced":\s*\n\s*return `\$\{repositoryCard\(\)\}\$\{admissionsCard\(\)\}`/u);
+  assert.match(dialog, /data-act="settings-close"/u);
+  assert.match(dialog, /data-act="settings-section"/u);
+  assert.doesNotMatch(app, /function advancedScreen|function settingsScreen/u);
+  assert.match(
+    app,
+    /if \(route === "settings" \|\| route === "advanced"\)[\s\S]{0,220}openSettings/u,
   );
-  // And what left: neither card is still drawn on the page it moved off.
-  assert.doesNotMatch(settings, /repositoryCard\(\)|admissionsCard\(\)/u);
-
-  // The page itself, and the way back out of it by hand for anybody whose
-  // browser Back is not where they look.
-  const advanced = slice(app, "function advancedScreen() {", "\nfunction settingsScreen");
-  assert.match(advanced, /repositoryCard\(\)/u);
-  assert.match(advanced, /admissionsCard\(\)/u);
-  assert.match(advanced, /data-act="nav" data-value="settings"/u);
-  // Its own scroll identity: the toggles on it redraw the whole app, and a
-  // page that jumps to the top on every switch is unusable.
-  assert.match(advanced, /data-scroll-key="advanced"/u);
-
-  // Reachable by name as well, because a page with exactly one door is a page
-  // people lose.
-  assert.match(app, /\{ route: "advanced", label: "Advanced settings" \}/u);
 });

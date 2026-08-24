@@ -125,6 +125,11 @@ test("returning users see completed work in the side panel", async () => {
   assert.match(chats, /class="catch-up-task-lead"/u);
   assert.match(chats, /pillBar\(/u);
   assert.match(chats, /icon: "agent"/u);
+  // The who is that agent's own mark, drawn in its owner's colour. A shared
+  // bot glyph on every row said only "an agent did this", which is the one
+  // thing a reader of this panel already knows.
+  assert.match(chats, /agent: worker/u);
+  assert.match(chats, /label: agentPillName\(worker\)/u);
   assert.match(chats, /changedFiles\.join\(", "\)/u);
   assert.doesNotMatch(chats, /catch-up-file-names/u);
   assert.match(chats, /state\.catchUp = state\.catchUps\?\.\[repositoryId\]/u);

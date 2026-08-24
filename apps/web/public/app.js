@@ -47,6 +47,8 @@ import {
   setMyAvatar,
   setChannelPicture,
   myTheme,
+  myThemePreference,
+  setMyTheme,
   myAgents,
   notifications,
   persist,
@@ -65,6 +67,7 @@ import {
   ensureChannelRoster,
   ensureProviderUsage,
   ensureRepositoryGrants,
+  markChannelRead,
   refreshChannelMessages,
   refreshProviderUsage,
   takePromptedThread,
@@ -1359,85 +1362,167 @@ function repositoryCard() {
   </section>`;
 }
 
-/**
- * Advanced — the settings that are about the project rather than about you.
- *
- * Repository and admissions used to sit in the middle of Settings, between
- * the agents somebody signs in and the account they sign out of, and they are
- * a different kind of thing: nobody changes them on the way past, and
- * changing one changes it for the whole team. A page of their own at the
- * bottom of Settings keeps the everyday screen to the everyday choices. It is
- * a route rather than a panel so that it can be linked to, and so the
- * browser's back button is a way out of it.
- */
-function advancedScreen() {
-  return `<div class="scroll" data-scroll-key="advanced"><div class="page">
-    <div class="page-head">
-      <button class="icon-btn ph-back" data-act="nav" data-value="settings"
-        title="Back to settings" aria-label="Back to settings"
-        >${icon("arrowLeft")}</button>
-      <span class="ph-icon">${icon("sliders")}</span>
-      <div><h1>Advanced</h1>
-        <p>Repository and admissions. Both are project-wide — what you change
-          here, everybody's agents work under.</p></div>
-    </div>
+const SETTINGS_SECTIONS = [
+  {
+    id: "general",
+    label: "General",
+    iconName: "gear",
+    description: "Your account, theme, colours, and everyday preferences.",
+  },
+  {
+    id: "agents",
+    label: "Agents",
+    iconName: "robot",
+    description: "Connect and name the coding agents that belong to you.",
+  },
+  {
+    id: "connections",
+    label: "Connections",
+    iconName: "link",
+    description: "External accounts Kumi can use on your behalf.",
+  },
+  {
+    id: "workspace",
+    label: "Workspace",
+    iconName: "users",
+    description: "People and activity in the channel you have open.",
+  },
+  {
+    id: "advanced",
+    label: "Advanced",
+    iconName: "sliders",
+    description: "Project-wide repository and admission controls.",
+  },
+];
 
-    <div class="settings-grid">
-      ${repositoryCard()}
-
-      ${admissionsCard()}
+function accountCard() {
+  return `<section class="card settings-account-card">
+    <div class="panel-head"><div><h3>Account</h3>
+      <p>The identity you use across this Kumi workspace</p></div></div>
+    <div class="set-row">
+      <span class="settings-account-avatar">
+        ${avatar(currentUserName(), 42, currentUserName(), myAvatar())}
+      </span>
+      <span class="sr-body">
+        <div class="sr-title">${esc(currentUserName())}</div>
+        <div class="sr-sub">${esc(state.principal?.user?.email ?? "")}</div>
+      </span>
+      <span class="sr-ctl">
+        <button class="btn btn-sm" data-act="logout">${icon("logout")} Sign out</button>
+      </span>
     </div>
-  </div></div>`;
+  </section>`;
 }
 
-function settingsScreen() {
-  return `<div class="scroll" data-scroll-key="settings"><div class="page">
-    <div class="page-head">
-      <span class="ph-icon">${icon("gear")}</span>
-      <div><h1>Settings</h1><p>Your agents, your account, and this channel.
-        Repository and admissions are under Advanced, at the foot of the
-        page.</p></div>
+function preferencesCard() {
+  const sounds = window.localStorage.getItem("ag.messageSounds") !== "false";
+  return `<section class="card">
+    <div class="panel-head"><div><h3>Preferences</h3>
+      <p>Small behaviours that apply only in this browser</p></div></div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Message sounds</div>
+        <div class="sr-sub">Play a short, quiet tone when you send a message.</div>
+      </span>
+      <span class="sr-ctl">
+        <button type="button" class="switch${sounds ? " on" : ""}"
+          data-act="settings-sounds" aria-pressed="${sounds}"
+          aria-label="Message sounds"></button>
+      </span>
     </div>
+  </section>`;
+}
 
-    <div class="settings-grid">
-      ${agentsCard()}
+function settingsSectionMarkup(section) {
+  switch (section) {
+    case "agents":
+      return agentsCard();
+    case "connections":
+      return (
+        githubCard() ||
+        `<section class="card"><div class="set-row"><span class="sr-body">
+          <div class="sr-title">No connections available</div>
+          <div class="sr-sub">This deployment does not offer any external
+            account connections.</div></span></div></section>`
+      );
+    case "workspace":
+      return `${invitationsCard()}${channelStatsCard()}`;
+    case "advanced":
+      return `${repositoryCard()}${admissionsCard()}`;
+    default:
+      return `${accountCard()}${appearanceCard()}${preferencesCard()}`;
+  }
+}
 
-      ${githubCard()}
-
-      ${invitationsCard()}
-
-      ${appearanceCard()}
-
-      ${channelStatsCard()}
-
-      <section class="card">
-        <div class="panel-head"><div><h3>Account</h3></div></div>
-        <div class="set-row">
-          <span class="sr-body">
-            <div class="sr-title">${esc(currentUserName())}</div>
-            <div class="sr-sub">${esc(state.principal?.user?.email ?? "")}</div>
-          </span>
-          <span class="sr-ctl">
-            <button class="btn btn-sm" data-act="logout">${icon("logout")} Sign out</button>
+/**
+ * Settings is a large dialog over the conversation, with one stable category
+ * rail and a single, focused content pane. It deliberately does not become a
+ * router screen: closing it returns to the exact channel and scroll position
+ * that were visible underneath.
+ */
+function settingsDialog() {
+  const selected = SETTINGS_SECTIONS.some(
+    (section) => section.id === state.settingsSection,
+  )
+    ? state.settingsSection
+    : "general";
+  const section =
+    SETTINGS_SECTIONS.find((candidate) => candidate.id === selected) ??
+    SETTINGS_SECTIONS[0];
+  return `<style id="settings-dialog-styles">
+    .settings-layer{position:fixed;inset:0;z-index:84;display:grid;place-items:center;padding:24px;background:rgba(4,5,9,.58);backdrop-filter:blur(3px);animation:scrim-in var(--motion-scrim) ease}
+    .settings-dialog{width:min(980px,calc(100vw - 48px));height:min(720px,calc(100dvh - 48px));min-height:min(520px,calc(100dvh - 48px));display:grid;grid-template-columns:220px minmax(0,1fr);overflow:hidden;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:16px;box-shadow:var(--shadow-pop);animation:settings-in var(--motion-pop) ease;color:var(--text)}
+    @keyframes settings-in{from{opacity:0;transform:translateY(6px) scale(.99)}}
+    .settings-sidebar{min-width:0;display:flex;flex-direction:column;padding:18px 12px 14px;background:var(--bg-panel);border-right:1px solid var(--border-soft)}
+    .settings-brand{display:flex;align-items:center;gap:9px;padding:2px 9px 16px;font-size:15px;font-weight:650;letter-spacing:-.01em}.settings-brand .ui-icon{width:17px;height:17px;color:var(--text-2)}
+    .settings-nav{display:grid;gap:3px}.settings-nav-item{width:100%;min-height:38px;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;color:var(--text-2);font-size:13px;text-align:left}.settings-nav-item:hover{background:var(--bg-hover);color:var(--text)}.settings-nav-item.active{background:var(--bg-active);color:var(--text);font-weight:550}.settings-nav-item .ui-icon{width:15px;height:15px;color:var(--text-3)}.settings-nav-item.active .ui-icon{color:var(--text)}
+    .settings-sidebar-account{display:flex;align-items:center;gap:9px;margin-top:auto;padding:12px 9px 2px;border-top:1px solid var(--border-soft);min-width:0}.settings-sidebar-account-copy{min-width:0}.settings-sidebar-account-name,.settings-sidebar-account-email{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.settings-sidebar-account-name{font-size:12.5px;font-weight:550}.settings-sidebar-account-email{font-size:11px;color:var(--text-4);margin-top:1px}
+    .settings-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg-card)}
+    .settings-main-head{min-height:86px;display:flex;align-items:flex-start;gap:18px;padding:23px 26px 18px;border-bottom:1px solid var(--border-soft)}.settings-main-title{min-width:0}.settings-main-title h2{font-size:20px;line-height:1.25;letter-spacing:-.025em}.settings-main-title p{margin-top:5px;color:var(--text-3);font-size:12.5px}.settings-close{margin-left:auto;flex:none}
+    .settings-content.scroll{min-height:0;padding:22px 26px 30px}.settings-content-inner{display:grid;gap:14px;max-width:680px;margin:0 auto}.settings-content .card{box-shadow:none;border-color:var(--border-soft);background:var(--bg-card-2)}.settings-content .panel-head{padding:16px 17px 10px}.settings-content .panel-head h3{font-size:14px}.settings-content .panel-head p{margin-top:3px}.settings-account-avatar{flex:none}.settings-choice{display:inline-flex;gap:3px;padding:3px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:9px}.settings-choice button{padding:5px 10px;border-radius:6px;color:var(--text-3);font-size:12px}.settings-choice button:hover{color:var(--text)}.settings-choice button.active{background:var(--bg-active);color:var(--text);box-shadow:0 1px 2px rgb(0 0 0 / 18%)}
+    @media(max-width:700px){.settings-layer{padding:0}.settings-dialog{width:100vw;height:100dvh;min-height:0;border:0;border-radius:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.settings-sidebar{padding:calc(10px + var(--safe-top)) 12px 10px;border-right:0;border-bottom:1px solid var(--border-soft)}.settings-brand{padding:0 4px 10px}.settings-nav{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}.settings-nav::-webkit-scrollbar{display:none}.settings-nav-item{width:auto;min-height:34px;flex:none;padding:7px 10px}.settings-sidebar-account{display:none}.settings-main-head{min-height:78px;padding:16px 18px 14px}.settings-main-title p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.settings-content.scroll{padding:16px 14px calc(24px + var(--safe-bottom))}.settings-content .set-row{align-items:flex-start;flex-wrap:wrap}.settings-content .set-row .sr-ctl{margin-left:auto}.settings-choice button{padding:6px 9px}}
+  </style>
+  <div class="settings-layer" data-act="settings-backdrop">
+    <section class="settings-dialog" data-act="settings-dialog" role="dialog"
+      aria-modal="true" aria-labelledby="settings-title">
+      <aside class="settings-sidebar">
+        <div class="settings-brand">${icon("gear")}<span>Settings</span></div>
+        <nav class="settings-nav" aria-label="Settings categories">
+          ${SETTINGS_SECTIONS.map(
+            (item) => `<button type="button" class="settings-nav-item${
+              item.id === selected ? " active" : ""
+            }" data-act="settings-section" data-value="${esc(item.id)}"
+              aria-current="${item.id === selected ? "page" : "false"}">
+              ${icon(item.iconName)}<span>${esc(item.label)}</span></button>`,
+          ).join("")}
+        </nav>
+        <div class="settings-sidebar-account">
+          ${avatar(currentUserName(), 30, currentUserName(), myAvatar())}
+          <span class="settings-sidebar-account-copy">
+            <div class="settings-sidebar-account-name">${esc(currentUserName())}</div>
+            <div class="settings-sidebar-account-email">${esc(
+              state.principal?.user?.email ?? "",
+            )}</div>
           </span>
         </div>
-      </section>
-
-      <section class="card">
-        <div class="set-row">
-          <span class="sr-body">
-            <div class="sr-title">Advanced</div>
-            <div class="sr-sub">Repository and admissions — the project-wide
-              settings, off the page everybody opens.</div>
-          </span>
-          <span class="sr-ctl">
-            <button class="btn btn-sm" data-act="nav" data-value="advanced">
-              Open ${icon("chevronRight")}</button>
-          </span>
+      </aside>
+      <div class="settings-main">
+        <header class="settings-main-head">
+          <div class="settings-main-title"><h2 id="settings-title">${esc(
+            section.label,
+          )}</h2><p>${esc(section.description)}</p></div>
+          <button type="button" class="icon-btn settings-close"
+            data-act="settings-close" aria-label="Close settings"
+            title="Close settings">${icon("close")}</button>
+        </header>
+        <div class="settings-content scroll" data-scroll-key="settings">
+          <div class="settings-content-inner">
+            ${settingsSectionMarkup(selected)}
+          </div>
         </div>
-      </section>
-    </div>
-  </div></div>`;
+      </div>
+    </section>
+  </div>`;
 }
 
 /**
@@ -1623,9 +1708,31 @@ function commitAgentRename(providerId, name) {
 function appearanceCard() {
   const accent = myAccent();
   const agentColor = myAgentColor();
+  const theme = myThemePreference();
   return `<section class="card">
     <div class="panel-head"><div><h3>Appearance</h3>
       <p>How Kumi looks to you, and how your agents look to everyone</p></div></div>
+
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Theme</div>
+        <div class="sr-sub">Follow your device, or keep Kumi light or dark.</div>
+      </span>
+      <span class="sr-ctl settings-choice" role="group" aria-label="Theme">
+        ${[
+          ["system", "System"],
+          ["light", "Light"],
+          ["dark", "Dark"],
+        ]
+          .map(
+            ([value, label]) => `<button type="button" class="${
+              theme === value ? "active" : ""
+            }" data-act="settings-theme" data-value="${value}"
+              aria-pressed="${theme === value}">${label}</button>`,
+          )
+          .join("")}
+      </span>
+    </div>
 
     <div class="set-row">
       <span class="sr-body">
@@ -2953,11 +3060,6 @@ const ROUTES = new Set([
   "chats",
   "agents",
   "notifications",
-  "settings",
-  // Settings' own second page rather than a fifth product destination: it is
-  // reached from the foot of Settings and from nowhere in the navigation.
-  // A route all the same, so it can be linked and so Back leaves it.
-  "advanced",
 ]);
 
 function currentAgent() {
@@ -2971,10 +3073,6 @@ function screen() {
       return renderAgents();
     case "notifications":
       return renderNotifications();
-    case "settings":
-      return settingsScreen();
-    case "advanced":
-      return advancedScreen();
     default:
       return renderChats();
   }
@@ -3303,8 +3401,6 @@ function switcherEntries(query) {
       { route: "chats", label: "Chats" },
       { route: "agents", label: "My agents" },
       { route: "notifications", label: "Notifications" },
-      { route: "settings", label: "Settings" },
-      { route: "advanced", label: "Advanced settings" },
     ].map((screen) => ({
       kind: "Screen",
       label: screen.label,
@@ -3312,6 +3408,13 @@ function switcherEntries(query) {
       value: screen.route,
       iconName: "arrowRight",
     })),
+    {
+      kind: "Dialog",
+      label: "Settings",
+      act: "switch-screen",
+      value: "settings",
+      iconName: "gear",
+    },
   ];
   return rows
     .filter((row) => term === "" || row.label.toLowerCase().includes(term))
@@ -3536,6 +3639,38 @@ window.matchMedia("(max-width: 600px)").addEventListener("change", () => {
   render();
 });
 
+// A System theme remains live after the settings dialog closes. A laptop
+// changing with sunset should repaint Kumi at the same moment as the rest of
+// the desktop rather than waiting for the next message to trigger a render.
+window
+  .matchMedia("(prefers-color-scheme: light)")
+  .addEventListener("change", () => {
+    if (myThemePreference() === "system") {
+      render();
+    }
+  });
+
+/**
+ * Marks a channel read because it is the one on screen, being looked at.
+ *
+ * Opening a room is the only thing that used to clear it, so anything that
+ * arrived while the reader sat in it raised a badge on the room they were
+ * reading — and that badge stayed until they left and came back. A message
+ * landing in front of somebody is a message read; anywhere else, or with the
+ * tab in the background, it is genuinely still waiting.
+ */
+function markChannelReadIfWatching(repositoryId) {
+  if (
+    !repositoryId ||
+    state.route !== "chats" ||
+    activeChannelId() !== repositoryId ||
+    document.visibilityState !== "visible"
+  ) {
+    return;
+  }
+  markChannelRead(repositoryId);
+}
+
 /**
  * Catching back up, at the moments a phone actually returns: the tab coming
  * to the foreground, the page coming back out of the back-forward cache,
@@ -3557,6 +3692,9 @@ function resumeLiveUpdates() {
     void refreshChannelMessages(channel).then(() => {
       openPromptedThread(channel);
       openReadyPlan(channel);
+      // Coming back to the tab is the other half of reading it: whatever
+      // arrived while this browser was away is now on screen.
+      markChannelReadIfWatching(channel);
       if (!renameFieldFocused()) {
         render();
       }
@@ -4081,6 +4219,31 @@ function openReadyPlan(repositoryId) {
   state.autoOpenedThread = undefined;
 }
 
+/** Keep keyboard focus inside the settings surface while it is modal. */
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab" || state.settingsOpen !== true) {
+    return;
+  }
+  const dialog = document.querySelector(".settings-dialog");
+  const focusable = [
+    ...(dialog?.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? []),
+  ];
+  if (focusable.length === 0) {
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+
 /**
  * Escape closes whatever is stacked over the conversation, one layer a press.
  *
@@ -4097,11 +4260,15 @@ function openReadyPlan(repositoryId) {
  * once to leave it and again to close the panel.
  */
 document.addEventListener("keydown", (event) => {
-  if (
-    event.key !== "Escape" ||
-    event.defaultPrevented ||
-    state.route !== "chats"
-  ) {
+  if (event.key !== "Escape" || event.defaultPrevented) {
+    return;
+  }
+  if (state.settingsOpen === true) {
+    event.preventDefault();
+    closeSettings();
+    return;
+  }
+  if (state.route !== "chats") {
     return;
   }
   if ($("#modal")?.open === true || $("#layer-root")?.childElementCount > 0) {
@@ -4399,42 +4566,26 @@ document.addEventListener(
 const FOCUSABLE_FIELDS = new Set(["INPUT", "TEXTAREA"]);
 
 /**
- * The Settings page's position across the whole-app render below.
+ * The Settings dialog's position across the whole-app render below.
  *
  * Settings controls redraw the screen to show their new value. That replaces
  * the `.scroll` node and gives its replacement a fresh `scrollTop` of zero,
  * sending somebody back to the first card after every click. Keying this one
- * surface makes navigation safe too: when entering or leaving Settings only
- * one side of the render has the key, so no position crosses between screens.
- *
- * Advanced is a settings page as well and its toggles redraw in exactly the
- * same way, so it is keyed too — under its own name. The name travels with
- * the offset and the restore insists on both, which is what stops Settings'
- * position being dropped onto Advanced when the render between them is the
- * navigation from one to the other.
+ * surface makes opening and closing safe too: only the dialog has the key,
+ * so its offset can never be dropped onto the conversation underneath.
  */
 function captureSettingsScroll() {
   const settings = document.querySelector('[data-scroll-key="settings"]');
-  if (settings !== null) {
-    return { key: "settings", top: settings.scrollTop };
-  }
-  const advanced = document.querySelector('[data-scroll-key="advanced"]');
-  return advanced === null
-    ? undefined
-    : { key: "advanced", top: advanced.scrollTop };
+  return settings === null ? undefined : settings.scrollTop;
 }
 
 function restoreSettingsScroll(saved) {
   if (saved === undefined) {
     return;
   }
-  const scroller = document.querySelector(
-    saved.key === "advanced"
-      ? '[data-scroll-key="advanced"]'
-      : '[data-scroll-key="settings"]',
-  );
+  const scroller = document.querySelector('[data-scroll-key="settings"]');
   if (scroller !== null) {
-    scroller.scrollTop = saved.top;
+    scroller.scrollTop = saved;
   }
 }
 
@@ -5293,11 +5444,12 @@ function renderNow() {
   root.innerHTML = `<div class="app">
     <div class="main${BARE.has(state.route) ? " bare" : ""}${
       state.loadError === undefined ? "" : " has-banner"
-    }">
+    }"${state.settingsOpen === true ? " inert" : ""}>
       ${banner()}
       ${BARE.has(state.route) ? "" : topbar()}
       ${screen()}
     </div>
+    ${state.settingsOpen === true ? settingsDialog() : ""}
   </div>`;
 
   // Drafts can be restored without producing an input event. Size them from
@@ -5429,7 +5581,7 @@ function renderNow() {
       });
     }
   }
-  if (state.route === "settings") {
+  if (state.settingsOpen === true) {
     const repositoryId = activeChannelId();
     // Once per repository, same claim pattern as previews: `undefined` is
     // "not asked", `null` is "asked, still counting", and a real object is
@@ -5437,7 +5589,7 @@ function renderNow() {
     if (repositoryId && state.channelStats[repositoryId] === undefined) {
       state.channelStats[repositoryId] = null;
       void loadChannelStats(repositoryId).then(() => {
-        if (state.route === "settings") {
+        if (state.settingsOpen === true) {
           render();
         }
       });
@@ -5544,12 +5696,54 @@ function loadOpenedDirectMessage(userId) {
   });
 }
 
+function openSettings(section = "general") {
+  state.settingsOpen = true;
+  state.settingsSection = SETTINGS_SECTIONS.some(
+    (candidate) => candidate.id === section,
+  )
+    ? section
+    : "general";
+  state.settingsRenamingId = undefined;
+  state.openWheel = undefined;
+  closePopover();
+  render();
+  window.queueMicrotask(() =>
+    document.querySelector("[data-act='settings-close']")?.focus(),
+  );
+}
+
+function closeSettings() {
+  if (state.settingsOpen !== true) {
+    return;
+  }
+  state.settingsOpen = false;
+  state.settingsRenamingId = undefined;
+  state.openWheel = undefined;
+  if (/^#(?:settings|advanced)$/u.test(window.location.hash)) {
+    window.history.replaceState(null, "", `#${state.route}`);
+  }
+  render();
+  window.queueMicrotask(() =>
+    document
+      .querySelector('[data-act="nav"][data-value="settings"]')
+      ?.focus(),
+  );
+}
+
 function navigate(route) {
+  // Settings categories are a dialog over the current conversation, not
+  // destinations that replace it. Keep accepting the historical "advanced"
+  // value so an old bookmark opens the right category in the new surface.
+  if (route === "settings" || route === "advanced") {
+    openSettings(route === "advanced" ? "advanced" : "general");
+    return;
+  }
   // A link or a stored route from before Code and Coordinator were folded into
   // the channel lands here; chats is the landing view, so it is the fallback.
   if (!ROUTES.has(route)) {
     route = "chats";
   }
+  state.settingsOpen = false;
   state.route = route;
   // An open rename field belongs to the screen it was opened on; leaving and
   // coming back to Settings should not find it still open on an old value.
@@ -5602,7 +5796,17 @@ function applyHash() {
     return;
   }
   const route = window.location.hash.replace(/^#/u, "") || "chats";
-  if (ROUTES.has(route) && route !== state.route) {
+  if (route === "settings" || route === "advanced") {
+    state.settingsOpen = true;
+    state.settingsSection = route === "advanced" ? "advanced" : "general";
+    render();
+    return;
+  }
+  if (
+    ROUTES.has(route) &&
+    (route !== state.route || state.settingsOpen === true)
+  ) {
+    state.settingsOpen = false;
     state.route = route;
     render();
   }
@@ -5854,6 +6058,38 @@ document.addEventListener("click", (event) => {
           alt: image.alt,
         },
       });
+      return;
+    }
+    case "settings-dialog":
+      // The dialog itself owns otherwise-empty presses so they do not bubble
+      // up to the backdrop action wrapped around it.
+      return;
+    case "settings-backdrop":
+      if (event.target === node) {
+        closeSettings();
+      }
+      return;
+    case "settings-close":
+      closeSettings();
+      return;
+    case "settings-section":
+      if (!SETTINGS_SECTIONS.some((section) => section.id === value)) {
+        return;
+      }
+      state.settingsSection = value;
+      state.settingsRenamingId = undefined;
+      state.openWheel = undefined;
+      render();
+      document.querySelector('[data-scroll-key="settings"]')?.scrollTo(0, 0);
+      return;
+    case "settings-theme":
+      setMyTheme(value);
+      render();
+      return;
+    case "settings-sounds": {
+      const enabled = window.localStorage.getItem("ag.messageSounds") !== "false";
+      window.localStorage.setItem("ag.messageSounds", enabled ? "false" : "true");
+      render();
       return;
     }
     case "nav":
@@ -8656,12 +8892,12 @@ async function boot() {
   });
   void loadProviders().then(() => render());
   void loadGitHub().then(() => {
-    if (state.route === "settings") {
+    if (state.settingsOpen === true) {
       render();
     }
   });
   void loadInvitations().then(() => {
-    if (state.route === "settings") {
+    if (state.settingsOpen === true) {
       render();
     }
   });
@@ -8692,15 +8928,10 @@ async function boot() {
     // Private mail, delivered to the two people in it rather than to the
     // project (`sendToUsers`), and so never arriving here for anyone else.
     if (frame?.type === "direct-message") {
+      // Reading it as it arrives — when it arrives in the conversation that is
+      // open — happens inside `noteDirectMessage`, which is the only place
+      // that knows whose conversation the message belongs to.
       noteDirectMessage(frame);
-      if (state.activeDm !== undefined && !renameFieldFocused()) {
-        // Reading it as it arrives, so the badge does not appear and clear.
-        void api(
-          `/projects/${encodeURIComponent(state.projectId)}/direct-messages/` +
-            `${encodeURIComponent(state.activeDm)}/read`,
-          { method: "POST" },
-        ).catch(() => undefined);
-      }
       if (!renameFieldFocused()) {
         render();
       }
@@ -8791,6 +9022,7 @@ async function boot() {
         void refreshChannelMessages(channelRepositoryId).then(() => {
           openPromptedThread(channelRepositoryId);
           openReadyPlan(channelRepositoryId);
+          markChannelReadIfWatching(channelRepositoryId);
           render();
         });
       }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS));

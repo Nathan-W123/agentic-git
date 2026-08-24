@@ -306,12 +306,6 @@ export function icon(name, extra = "") {
  * these appear only inside {@link pillBar}.
  */
 const PILL_ART = {
-  agent: {
-    from: "#b7a7ff",
-    to: "#5b3df5",
-    glyph:
-      '<rect x="6.6" y="7.4" width="10.8" height="8.6" rx="3" fill="#fff"/><path d="M12 7.4V5.2" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="4.5" r="1.1" fill="#fff"/><circle cx="9.7" cy="11.6" r="1.15" fill="#4c31d8"/><circle cx="14.3" cy="11.6" r="1.15" fill="#4c31d8"/>',
-  },
   file: {
     from: "#8fd0ff",
     to: "#2b6ef5",
@@ -408,6 +402,15 @@ export function pillIcon(name) {
  *
  * Pills with no label are dropped rather than drawn empty: callers assemble
  * these from record fields that are often missing.
+ *
+ * A pill that names an agent — `icon: "agent"`, with or without the record
+ * itself — is drawn as that agent's own mark and never as a rendered object.
+ * There used to be a bot in the set beside the file and the clock, and it was
+ * what a digest showed for Zeus: the same anonymous purple robot on every
+ * row, in a panel whose whole job is saying *who* did the work. The mark
+ * carries the vendor in its shape and the owner in its colour, which is the
+ * thing a reader is actually looking for, so the object has been taken out of
+ * the set rather than left as a fallback something could reach again.
  */
 export function pillBar(pills, note = "") {
   const chips = pills
@@ -417,7 +420,7 @@ export function pillBar(pills, note = "") {
         `<span class="pill"${
           pill.title ? ` title="${esc(pill.title)}"` : ""
         }>${
-          pill.agent === undefined
+          pill.agent === undefined && pill.icon !== "agent"
             ? pillIcon(pill.icon)
             : agentFace(pill.agent, 18, { showPresence: false })
         }<span class="pill-label">${esc(
@@ -641,6 +644,24 @@ const VENDOR_MARKS = {
       1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L
       12.23 22.918c-.062.107-.229.064-.229-.06V12.335a
       .59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"/>`,
+  // Copilot and Kiro are providers this deployment connects to whose own
+  // marks are not vendored here. Drawn rather than left to fall through to
+  // `generic`: the fallback is the one shape that says nothing about which
+  // vendor an agent runs on, and an agent that lands on it reads as the
+  // anonymous bot this panel was drawing before. Each is a filled silhouette
+  // with its features cut out (`evenodd`), so it sits in the same family as
+  // the vendor marks above rather than beside the outlined fallback below.
+  copilot: `<path fill-rule="evenodd" fill="currentColor"
+      d="M12 3.1c-4.6 0-8.4 3.1-8.4 6.9v4.4c0 3.8 3.8 6.5 8.4 6.5s
+      8.4-2.7 8.4-6.5V10c0-3.8-3.8-6.9-8.4-6.9m-3.4 7.5c1.2 0 2.1 1.1
+      2.1 2.4s-.9 2.4-2.1 2.4-2.1-1.1-2.1-2.4.9-2.4 2.1-2.4m6.8 0c1.2 0
+      2.1 1.1 2.1 2.4s-.9 2.4-2.1 2.4-2.1-1.1-2.1-2.4.9-2.4 2.1-2.4"/>`,
+  kiro: `<path fill-rule="evenodd" fill="currentColor"
+      d="M6.4 3.9h11.2A2.5 2.5 0 0 1 20.1 6.4v11.2a2.5 2.5 0 0 1-2.5
+      2.5H6.4a2.5 2.5 0 0 1-2.5-2.5V6.4a2.5 2.5 0 0 1 2.5-2.5m2.9
+      5.5a1.75 1.75 0 1 0 0 3.5 1.75 1.75 0 0 0 0-3.5m5.4 0a1.75 1.75 0
+      1 0 0 3.5 1.75 1.75 0 0 0 0-3.5M8.5 15.2a.95.95 0 0 0 0 1.9h7a
+      .95.95 0 0 1 0-1.9z"/>`,
   // Anything this deployment can run but has no mark for. Ours to draw,
   // because there is no vendor to be faithful to.
   generic: `<g stroke="currentColor" stroke-width="1.7" fill="none"
@@ -1140,6 +1161,24 @@ export function agentDoodle(kind) {
 }
 
 /**
+ * The dot a face carries for each status the roster can compute.
+ *
+ * The badge on a face and the badge in a roster row are the same statement
+ * about the same agent, so they carry the same colours: green working, amber
+ * idle, red for an agent only its owner can task, grey for one whose account
+ * has no usage left (see `.status-*` in styles.css, which these mirror).
+ * Anything unrecognised is offline, which is the honest answer for a face
+ * drawn from a connection record rather than from a computed status.
+ */
+const FACE_PRESENCE = {
+  working: "online",
+  online: "online",
+  idle: "idle",
+  personal: "personal",
+  exhausted: "exhausted",
+};
+
+/**
  * One agent, as its owner's colour.
  *
  * `agent.color` is the owner's identity colour; callers pass the colour of
@@ -1148,12 +1187,12 @@ export function agentDoodle(kind) {
 export function agentFace(agent, size = 34, indicator = {}) {
   const kind = agentKindOf(agent?.provider ?? agent?.id);
   const status = indicator.status ?? agent?.presence ?? "offline";
-  const presence =
-    status === "working" || status === "online"
-      ? "online"
-      : status === "idle"
-        ? "idle"
-        : "offline";
+  // `Object.hasOwn` rather than a bare lookup: `status` reaches here from a
+  // server-supplied record, and a name off the prototype ("constructor") would
+  // otherwise be stringified straight into the class and the attribute.
+  const presence = Object.hasOwn(FACE_PRESENCE, status)
+    ? FACE_PRESENCE[status]
+    : "offline";
   const progress = Number(indicator.progress);
   const working = Number.isFinite(progress);
   const color = safeColor(agent?.color) ?? "var(--accent)";
@@ -1855,6 +1894,9 @@ let toneContext;
 
 export function chime(kind = "sent") {
   try {
+    if (window.localStorage.getItem("ag.messageSounds") === "false") {
+      return;
+    }
     const Context = window.AudioContext ?? window.webkitAudioContext;
     if (Context === undefined) {
       return;
