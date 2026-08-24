@@ -1913,14 +1913,22 @@ async function saveAppearanceChoice(patch) {
 async function inviteSomebody(rerender, repositoryId) {
   const fixed = typeof repositoryId === "string" && repositoryId.length > 0;
   const preselected = repositoryId ?? currentRepository()?.id ?? "";
+  const accessDetail = fixed
+    ? `They will get access to ${repositoryId}, and nothing else in this project.`
+    : "Access is granted per repository. Pick the one to share, or share " +
+      "everything if they are joining the team properly.";
   const values = await showModal({
     title: fixed ? `Invite someone to #${repositoryId}` : "Invite someone to collaborate",
-    subtitle: fixed
-      ? `They will get access to ${repositoryId}, and nothing else in this project.`
-      : "Access is granted per repository. Pick the one to share, or share " +
-        "everything if they are joining the team properly.",
+    subtitle:
+      `${accessDetail} The readable name is the link's key, so anyone who ` +
+      "guesses it can use the invitation.",
     confirm: "Create invite link",
-    body: `${
+    body: `<label class="field">
+        <span>Name for the invite link</span>
+        <input class="input" name="recipientName" autocomplete="off"
+          autocapitalize="characters" spellcheck="false" minlength="6" maxlength="48"
+          pattern="[A-Za-z0-9]+([ -][A-Za-z0-9]+)*" placeholder="Nathan" required autofocus>
+      </label>${
         fixed
           ? `<input type="hidden" name="repositoryId" value="${esc(repositoryId)}">`
           : `<label class="field">
@@ -1954,7 +1962,11 @@ async function inviteSomebody(rerender, repositoryId) {
     // No address. The button makes the link, and where the link goes is not
     // this app's business — most of the time it is the group chat the team
     // is already in, which was never something an email field could express.
-    const created = await createInvitation(values.role, values.repositoryId);
+    const created = await createInvitation(
+      values.recipientName,
+      values.role,
+      values.repositoryId,
+    );
     rerender();
     await showInviteLink(created.token, values.repositoryId);
   } catch (error) {
@@ -1976,8 +1988,9 @@ async function showInviteLink(token, repositoryId) {
     subtitle: `Anyone who opens it joins ${
       repositoryId ? `#${repositoryId}` : "this project"
     }, and as many people can as you send it to. It works for seven days
-      unless you revoke it, and it is not stored — so this is the only time
-      it can be copied.`,
+      unless you revoke it. The readable name is the link's key, so anyone
+      who guesses it can use this invitation. The link is not stored — so
+      this is the only time it can be copied.`,
     confirm: "Copy link",
     cancel: "Done",
     body: `<div class="invite-link"><code>${esc(link)}</code></div>`,
