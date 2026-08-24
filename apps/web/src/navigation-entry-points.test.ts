@@ -248,6 +248,40 @@ test("direct messages are offered with people and with nobody else", async () =>
   );
 });
 
+test("settings dialog enter animation only plays when the dialog opens", async () => {
+  const app = await publicFile("app.js");
+  const dialog = slice(
+    app,
+    "function settingsDialog() {",
+    "\n/**\n * The user's own GitHub",
+  );
+
+  // The overlay is a new node on every render, so an animation on the bare
+  // class would replay from opacity 0 whenever a settings control called
+  // render — the panel going away and coming back while it was still open.
+  assert.doesNotMatch(
+    dialog,
+    /\.settings-layer\{[^}]*animation:scrim-in/u,
+  );
+  assert.doesNotMatch(
+    dialog,
+    /\.settings-dialog\{[^}]*animation:settings-in/u,
+  );
+  assert.match(
+    dialog,
+    /\.settings-layer\.settings-entering\{[^}]*animation:scrim-in/u,
+  );
+  assert.match(
+    dialog,
+    /\.settings-layer\.settings-entering \.settings-dialog\{[^}]*animation:settings-in/u,
+  );
+
+  const motion = slice(app, "const MOTION_SURFACES = [", "const surfaceNodes");
+  assert.match(motion, /selector:\s*"\.settings-layer"/u);
+  assert.match(motion, /enter:\s*"settings-entering"/u);
+  assert.match(motion, /leave:\s*"settings-leaving"/u);
+});
+
 test("Advanced is a category in the settings dialog", async () => {
   const app = await publicFile("app.js");
 

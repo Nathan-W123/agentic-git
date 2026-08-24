@@ -1478,9 +1478,14 @@ function settingsDialog() {
     SETTINGS_SECTIONS.find((candidate) => candidate.id === selected) ??
     SETTINGS_SECTIONS[0];
   return `<style id="settings-dialog-styles">
-    .settings-layer{position:fixed;inset:0;z-index:84;display:grid;place-items:center;padding:24px;background:rgba(4,5,9,.58);backdrop-filter:blur(3px);animation:scrim-in var(--motion-scrim) ease}
-    .settings-dialog{width:min(980px,calc(100vw - 48px));height:min(720px,calc(100dvh - 48px));min-height:min(520px,calc(100dvh - 48px));display:grid;grid-template-columns:220px minmax(0,1fr);overflow:hidden;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:16px;box-shadow:var(--shadow-pop);animation:settings-in var(--motion-pop) ease;color:var(--text)}
+    .settings-layer{position:fixed;inset:0;z-index:84;display:grid;place-items:center;padding:24px;background:rgba(4,5,9,.58);backdrop-filter:blur(3px)}
+    .settings-dialog{width:min(980px,calc(100vw - 48px));height:min(720px,calc(100dvh - 48px));min-height:min(520px,calc(100dvh - 48px));display:grid;grid-template-columns:220px minmax(0,1fr);overflow:hidden;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:16px;box-shadow:var(--shadow-pop);color:var(--text)}
+    .settings-layer.settings-entering{animation:scrim-in var(--motion-scrim) ease}
+    .settings-layer.settings-entering .settings-dialog{animation:settings-in var(--motion-pop) ease}
+    .settings-layer.settings-leaving{animation:scrim-out var(--motion-scrim) ease forwards;pointer-events:none}
+    .settings-layer.settings-leaving .settings-dialog{animation:settings-out var(--motion-pop) ease forwards}
     @keyframes settings-in{from{opacity:0;transform:translateY(6px) scale(.99)}}
+    @keyframes settings-out{to{opacity:0;transform:translateY(6px) scale(.99)}}
     .settings-sidebar{min-width:0;display:flex;flex-direction:column;padding:18px 12px 14px;background:var(--bg-panel);border-right:1px solid var(--border-soft)}
     .settings-brand{display:flex;align-items:center;gap:9px;padding:2px 9px 16px;font-size:15px;font-weight:650;letter-spacing:-.01em}.settings-brand .ui-icon{width:17px;height:17px;color:var(--text-2)}
     .settings-nav{display:grid;gap:3px}.settings-nav-item{width:100%;min-height:38px;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;color:var(--text-2);font-size:13px;text-align:left}.settings-nav-item:hover{background:var(--bg-hover);color:var(--text)}.settings-nav-item.active{background:var(--bg-active);color:var(--text);font-weight:550}.settings-nav-item .ui-icon{width:15px;height:15px;color:var(--text-3)}.settings-nav-item.active .ui-icon{color:var(--text)}
@@ -4802,6 +4807,17 @@ const MOTION_SURFACES = [
     parent: ".code-shell",
     enter: "scrim-entering",
     leave: "scrim-leaving",
+  },
+  // Settings is redrawn with the rest of the app. An animation on the bare
+  // dialog would play from opacity 0 on every control that calls render —
+  // theme, section, sounds — so the panel would vanish and settle again
+  // while it was already open. The class is applied only when the overlay
+  // was not on the last tree.
+  {
+    selector: ".settings-layer",
+    parent: ".app",
+    enter: "settings-entering",
+    leave: "settings-leaving",
   },
 ];
 
