@@ -954,6 +954,15 @@ export interface DeferredScopeRequest {
  * progress, and spinning on it forever would strand the run silently — the
  * failure mode this whole mechanism exists to end.
  */
+/**
+ * How often a waiter looks again at a holder that has not written yet.
+ *
+ * Only used while speculating beside a working wave, where the first look is
+ * always too early: the holder's workspace exists within a few hundred
+ * milliseconds of being admitted, and its first edit does not.
+ */
+const SPECULATION_POLL_MS = 2_000;
+
 const MAX_CONSECUTIVE_DEFERRED_WAVES = 240;
 
 /**
@@ -1510,6 +1519,35 @@ export class Coordinator {
           pending.splice(pending.indexOf(selected), 1);
         }
 
+        // The waiters' head start, taken while this wave works rather than
+        // only in a wave where nothing could start at all.
+        //
+        // That branch above is the only place speculation used to happen, and
+        // it cannot fire while anybody is executing — a wave that admitted
+        // something falls straight through to `prepareTask` and awaits every
+        // admitted task to completion before looking at `pending` again. So a
+        // task deferred behind a holder in its own run did not plan while that
+        // holder coded; it planned afterwards, in the next wave, cold. The
+        // head start existed only for holders in *other* runs.
+        //
+        // Safe here for the reasons speculation is safe anywhere: it takes no
+        // lease, admits nothing, and writes only to its own waiter's entry and
+        // its own agent session. The wave's execution touches neither. If the
+        // holder ends up landing something else, `speculationLanded` catches
+        // it and the waiter falls back to a cold replan, exactly as before.
+        const waveDone = new AbortController();
+        const headStart =
+          pending.length === 0
+            ? undefined
+            : this.speculateDuringDeferredWait(
+                input,
+                [...pending],
+                waveVersion,
+                recorder,
+                runAudit,
+                waveDone.signal,
+              ).catch(() => undefined);
+
         const prepared = await Promise.all(
           admittedWave.map(async (entry) =>
             await this.prepareTask(
@@ -1523,6 +1561,12 @@ export class Coordinator {
             ),
           ),
         );
+
+        // Stopped before anything reads `pending` again — integration below
+        // can promote canonical, and `cancelFailedDependents` rewrites the
+        // very entries this was editing.
+        waveDone.abort();
+        await headStart;
 
         const failedProducers: PlannedTask[] = [];
         for (const result of prepared) {
@@ -2550,6 +2594,16 @@ export class Coordinator {
     version: CanonicalVersion,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
+    /**
+     * Set when this runs beside a working wave rather than instead of one.
+     *
+     * A holder that started a moment ago has written nothing yet, so a single
+     * look finds no edits and the waiter gets no head start at all — which is
+     * the whole of what this call is for. Given a signal, the sweep repeats
+     * until each waiter has something to plan against or the wave it is
+     * racing finishes.
+     */
+    until?: AbortSignal,
   ): Promise<void> {
     if (this.workspaces.listWorkingChanges === undefined) {
       return;
@@ -2558,6 +2612,48 @@ export class Coordinator {
     if (waiters.length === 0) {
       return;
     }
+    const outstanding = new Set(waiters);
+    for (;;) {
+      await this.speculateOnce(
+        input,
+        [...outstanding],
+        version,
+        recorder,
+        runAudit,
+        outstanding,
+      );
+      if (until === undefined || until.aborted || outstanding.size === 0) {
+        return;
+      }
+      // Long enough that watching a holder costs a fraction of what the
+      // holder is doing, short enough that the head start is still a start.
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, SPECULATION_POLL_MS);
+        until.addEventListener("abort", () => {
+          clearTimeout(timer);
+          resolve(undefined);
+        }, { once: true });
+      });
+      if (until.aborted) {
+        return;
+      }
+    }
+  }
+
+  /**
+   * One sweep: every waiter that still has no head start tries to take one.
+   *
+   * Waiters that succeed are dropped from `outstanding`, so a repeat sweep
+   * asks only about the ones still waiting and nobody replans twice.
+   */
+  private async speculateOnce(
+    input: CoordinatorRunInput,
+    waiters: readonly PlannedTask[],
+    version: CanonicalVersion,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+    outstanding: Set<PlannedTask>,
+  ): Promise<void> {
     // Built at most once, and only if some waiter turns out to have holder
     // work to plan against. Kept lazy — a wave where no holder has written
     // anything yet should not pay for an index nobody reads — and kept to one
@@ -2622,6 +2718,7 @@ export class Coordinator {
             overlay.changes,
           );
           entry.speculatedAdvance = overlay.advance;
+          outstanding.delete(entry);
         } catch {
           // Speculation is a head start, and one waiter losing it must not
           // cost the others theirs. A failure leaves this waiter on today's

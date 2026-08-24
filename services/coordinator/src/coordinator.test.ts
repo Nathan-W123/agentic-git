@@ -3389,6 +3389,115 @@ test("waiters speculate concurrently, not one agent call at a time", async () =>
   }
 });
 
+test("a waiter plans while the holder is still coding, not after it", async () => {
+  // Speculation only ever ran in the branch where *nothing* could be
+  // admitted, and that branch cannot be reached while anybody is executing: a
+  // wave that admits something falls through to `prepareTask` and awaits every
+  // admitted task to completion before it looks at the deferred ones again. So
+  // a task deferred behind a holder in its own run did not plan while that
+  // holder coded — it planned afterwards, cold, in the next wave. The head
+  // start existed only for holders in other runs.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-headstart-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const editing = { now: false, seenByWaiter: [] as boolean[] };
+
+    class HolderAgent extends TestAgent {
+      public override async sendContext(
+        sessionId: string,
+        context: CoordinatorContext,
+      ): Promise<void> {
+        editing.now = true;
+        try {
+          await super.sendContext(sessionId, context);
+        } finally {
+          editing.now = false;
+        }
+      }
+    }
+
+    class WaiterAgent extends TestAgent {
+      public override async requestReplan(
+        sessionId: string,
+        request: ReplanRequest,
+      ): Promise<AgentPlan> {
+        if (request.canonicalChange.reason.includes("in progress")) {
+          editing.seenByWaiter.push(editing.now);
+        }
+        return await super.requestReplan(sessionId, request);
+      }
+    }
+
+    // Longer than one speculation poll, so the waiter gets a look after the
+    // holder has actually written something and while it is still working.
+    const holder = new HolderAgent(
+      "agent_holder",
+      plan("task_holder", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      false,
+      undefined,
+      undefined,
+      5_000,
+    );
+    // Disjoint and seeded, so nothing but the authority below defers it.
+    const waiter = new WaiterAgent(
+      "agent_waiter",
+      plan("task_waiter", ["src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/b.txt",
+    );
+
+    let admits = 0;
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      planAuthority: {
+        async admit(request) {
+          admits += 1;
+          // The holder starts; the waiter is held behind it for one wave, so
+          // the two are live at the same moment.
+          if (request.plan.taskId === "task_waiter" && admits <= 2) {
+            return {
+              outcome: "deferred",
+              retryAfterMs: 5,
+              blockedBy: ["task_holder"],
+              explanation: "src/a.txt is leased to task_holder",
+            };
+          }
+          return { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_holder"), adapter: holder },
+        { task: task("task_waiter"), adapter: waiter },
+      ],
+    });
+
+    assert.equal(result.tasks.length, 2);
+    assert.ok(
+      editing.seenByWaiter.length > 0,
+      "the waiter never speculated against the holder's work in progress",
+    );
+    // The point of the whole thing: taken while the holder was mid-edit, not
+    // once it had finished and the next wave came round.
+    assert.ok(
+      editing.seenByWaiter.includes(true),
+      `waiter only speculated after the holder stopped editing (${JSON.stringify(editing.seenByWaiter)})`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * Writes fixed replacement text over a seeded file, so a test can control
  * exactly which lines a run's patch touches.
