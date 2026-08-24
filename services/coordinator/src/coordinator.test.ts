@@ -3269,6 +3269,235 @@ test("a deferred waiter plans against the holder's in-progress edits", async () 
   }
 });
 
+test("waiters speculate concurrently, not one agent call at a time", async () => {
+  // Each speculative replan is a full round trip to an agent. Issued one at a
+  // time they dominate the wait they exist to remove: eight tasks deferred
+  // behind one holder meant eight sequential agent calls, and the head start
+  // took longer than the work it was racing. The two other replan loops in the
+  // coordinator already say this; this one was doing it serially anyway.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-speculate-many-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const version = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const holderWorkspace = await fixture.workspaces.create({
+      taskId: "task_holder",
+      rootPath: path.join(root, "holder-workspaces"),
+      repository: fixture.repository,
+      baseVersion: version,
+    });
+    await writeFile(
+      path.join(holderWorkspace.path, "src", "a.txt"),
+      "holder wip\n",
+      "utf8",
+    );
+    const holderRun = await store.createRun({
+      repository: fixture.repository,
+      mode: "coordinated",
+      baseVersion: version,
+    });
+    await store.saveWorkspace(holderRun.id, {
+      id: holderWorkspace.id,
+      runId: holderRun.id,
+      taskId: "task_holder",
+      path: holderWorkspace.path,
+      isolation: holderWorkspace.isolation,
+      baseRevision: version.revision,
+      createdAt: holderWorkspace.createdAt,
+    });
+
+    // Counts how many replans are in flight together. Serial issue can never
+    // put the peak above one however slow each call is.
+    const inFlight = { now: 0, peak: 0, total: 0 };
+    class CountingAgent extends TestAgent {
+      public override async requestReplan(
+        sessionId: string,
+        request: ReplanRequest,
+      ): Promise<AgentPlan> {
+        inFlight.now += 1;
+        inFlight.total += 1;
+        inFlight.peak = Math.max(inFlight.peak, inFlight.now);
+        try {
+          // Long enough that a serial loop cannot overlap by accident.
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return await super.requestReplan(sessionId, request);
+        } finally {
+          inFlight.now -= 1;
+        }
+      }
+    }
+
+    const waiters = ["task_w1", "task_w2", "task_w3"];
+    // Disjoint *and* grounded, both on purpose, because either one missing
+    // makes this test measure a queue it built itself. Sharing a file put w2
+    // behind w1 on structural overlap; declaring files the fixture does not
+    // contain made every plan ungrounded, and `buildBlockers` chains an
+    // unverifiable plan behind related pending work by submission order. Both
+    // left exactly one task waiting on the *holder* — which is the serial
+    // shape this test exists to reject.
+    const seeded = ["src/b.txt", "src/c.txt", "src/d.txt"];
+    const tasks = waiters.map((id, position) => {
+      const file = seeded[position] ?? "src/b.txt";
+      return {
+        task: task(id),
+        adapter: new CountingAgent(
+          `agent_${id}`,
+          plan(id, [file]),
+          fixture.repository,
+          fixture.workspaces,
+          file,
+        ),
+      };
+    });
+
+    let admits = 0;
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+      planAuthority: {
+        async admit(request) {
+          admits += 1;
+          if (admits <= waiters.length) {
+            return {
+              outcome: "deferred",
+              retryAfterMs: 5,
+              blockedBy: ["task_holder"],
+              explanation: "src/a.txt is leased to task_holder",
+            };
+          }
+          return { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks,
+    });
+
+    assert.equal(result.tasks.length, waiters.length);
+    assert.ok(
+      inFlight.peak >= 2,
+      `speculative replans never overlapped (peak ${String(inFlight.peak)} of ${String(inFlight.total)})`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a waiter plans while the holder is still coding, not after it", async () => {
+  // Speculation only ever ran in the branch where *nothing* could be
+  // admitted, and that branch cannot be reached while anybody is executing: a
+  // wave that admits something falls through to `prepareTask` and awaits every
+  // admitted task to completion before it looks at the deferred ones again. So
+  // a task deferred behind a holder in its own run did not plan while that
+  // holder coded — it planned afterwards, cold, in the next wave. The head
+  // start existed only for holders in other runs.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-headstart-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const editing = { now: false, seenByWaiter: [] as boolean[] };
+
+    class HolderAgent extends TestAgent {
+      public override async sendContext(
+        sessionId: string,
+        context: CoordinatorContext,
+      ): Promise<void> {
+        editing.now = true;
+        try {
+          await super.sendContext(sessionId, context);
+        } finally {
+          editing.now = false;
+        }
+      }
+    }
+
+    class WaiterAgent extends TestAgent {
+      public override async requestReplan(
+        sessionId: string,
+        request: ReplanRequest,
+      ): Promise<AgentPlan> {
+        if (request.canonicalChange.reason.includes("in progress")) {
+          editing.seenByWaiter.push(editing.now);
+        }
+        return await super.requestReplan(sessionId, request);
+      }
+    }
+
+    // Longer than one speculation poll, so the waiter gets a look after the
+    // holder has actually written something and while it is still working.
+    const holder = new HolderAgent(
+      "agent_holder",
+      plan("task_holder", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      false,
+      undefined,
+      undefined,
+      5_000,
+    );
+    // Disjoint and seeded, so nothing but the authority below defers it.
+    const waiter = new WaiterAgent(
+      "agent_waiter",
+      plan("task_waiter", ["src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/b.txt",
+    );
+
+    let admits = 0;
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      planAuthority: {
+        async admit(request) {
+          admits += 1;
+          // The holder starts; the waiter is held behind it for one wave, so
+          // the two are live at the same moment.
+          if (request.plan.taskId === "task_waiter" && admits <= 2) {
+            return {
+              outcome: "deferred",
+              retryAfterMs: 5,
+              blockedBy: ["task_holder"],
+              explanation: "src/a.txt is leased to task_holder",
+            };
+          }
+          return { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_holder"), adapter: holder },
+        { task: task("task_waiter"), adapter: waiter },
+      ],
+    });
+
+    assert.equal(result.tasks.length, 2);
+    assert.ok(
+      editing.seenByWaiter.length > 0,
+      "the waiter never speculated against the holder's work in progress",
+    );
+    // The point of the whole thing: taken while the holder was mid-edit, not
+    // once it had finished and the next wave came round.
+    assert.ok(
+      editing.seenByWaiter.includes(true),
+      `waiter only speculated after the holder stopped editing (${JSON.stringify(editing.seenByWaiter)})`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * Writes fixed replacement text over a seeded file, so a test can control
  * exactly which lines a run's patch touches.
