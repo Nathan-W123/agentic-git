@@ -440,18 +440,22 @@ export const CLAUDE_PROFILE: PromptCliProfile = {
   planningArgs: (model, effort, jsonSchema) => [
     "-p",
     "--output-format",
-    "json",
+    "stream-json",
+    // `stream-json` is refused without it.
+    "--verbose",
     "--permission-mode",
     "plan",
     ...(model === undefined ? [] : ["--model", model]),
     ...(effort === undefined ? [] : ["--effort", effort]),
     ...(jsonSchema === undefined ? [] : ["--json-schema", jsonSchema]),
   ],
-  // Execution streams; planning does not. A plan is one answer and arrives at
-  // the end either way, so streaming it would buy nothing and put the schema
-  // parse behind a second format. Execution is the long half — the stretch
-  // where the run has plenty to say and said none of it, because with
-  // `--output-format json` the adapter hears nothing until the process exits.
+  // Both halves stream. The plan itself still arrives all at once at the end,
+  // so this buys nothing for the parse — `claudeResultEnvelope` reads the
+  // `result` event out of a stream exactly as it reads a lone envelope, which
+  // is why the switch costs nothing. What it buys is the wait: planning is
+  // minutes of a room being told "Planning" and nothing else, because with
+  // `--output-format json` the adapter hears nothing at all until the process
+  // exits. There was plenty being said; none of it was reaching anyone.
   executionArgs: (model, effort, jsonSchema) => [
     "-p",
     "--output-format",
@@ -2101,8 +2105,11 @@ export class PromptCliAdapter implements AgentAdapter {
       resumable ? [...args, ...resumeArgs(resume)] : [...args],
       prompt,
       timeoutMs,
-      // Only execution streams; see the Claude profile's `executionArgs`.
-      phase === "execution",
+      // Both phases, now that planning streams too. A profile that does not
+      // stream, or has no narrator, is unaffected: the narrator is only
+      // attached where `narrate` is defined, and a lone JSON envelope simply
+      // yields no line it recognises.
+      true,
     );
     if (
       output.exitCode !== 0 &&
