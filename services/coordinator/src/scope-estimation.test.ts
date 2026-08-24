@@ -346,3 +346,93 @@ test("a terse objective still finds the declaration it named", () => {
     ["notificationBell"],
   );
 });
+
+test("a word most of the repository declares anchors nothing", () => {
+  // The case that made this matter. "We have failed builds fix please" names
+  // no file, no directory and no function; every word but "failed" is dropped
+  // as a stop word, and "failed" is a substring of `taskFailed`, `failedRuns`,
+  // `integrationFailures` and every other name an error-handling codebase is
+  // full of. The estimate came back "anchored" over forty files, a blanket
+  // claim was granted against them, and a request that said nothing at all
+  // put everybody else in a queue behind it.
+  //
+  // Sized so the two ratios actually disagree: 20 of 200 files declare it, so
+  // the old 15% ceiling (30) let it through and the new 5% one (10) does not.
+  // A smaller fixture proves nothing — at forty files even 15% excludes a word
+  // this common, and the test would pass against the behaviour it is meant to
+  // reject.
+  const index = repositoryIndex([
+    ...Array.from({ length: 20 }, (_unused, position) =>
+      file(`services/thing_${String(position)}/src/run.ts`, {
+        symbols: [`taskFailed_${String(position)}`],
+      }),
+    ),
+    ...Array.from({ length: 180 }, (_unused, position) =>
+      file(`packages/other_${String(position)}/src/main.ts`, {
+        symbols: [`alpha_${String(position)}`],
+      }),
+    ),
+  ]);
+
+  const estimate = estimateScope("We have failed builds fix please", index);
+
+  assert.equal(estimate.confidence, "none");
+  assert.deepEqual(estimate.files, []);
+  assert.ok(
+    estimate.notes.some((note) => note.includes("too common to localize")),
+    estimate.notes.join(" | "),
+  );
+});
+
+test("a word a handful of files declare still anchors them", () => {
+  // The other half of the same rule: tightening ubiquity must not cost the
+  // estimator the specific objectives it exists for. Here `cursor` names two
+  // files out of forty, which is exactly the kind of localization a claim
+  // should be allowed to make.
+  const index = repositoryIndex([
+    ...Array.from({ length: 198 }, (_unused, position) =>
+      file(`services/thing_${String(position)}/src/run.ts`, {
+        symbols: [`taskFailed_${String(position)}`],
+      }),
+    ),
+    file("apps/web/src/cursor-usage.ts", { symbols: ["readCursorUsage"] }),
+    file("apps/web/src/providers.ts", { symbols: ["cursorQuota"] }),
+  ]);
+
+  const estimate = estimateScope("Fix the cursor usage readout", index);
+
+  assert.equal(estimate.confidence, "anchored");
+  assert.deepEqual(
+    estimate.files.map((entry) => entry.path).sort(),
+    ["apps/web/src/cursor-usage.ts", "apps/web/src/providers.ts"],
+  );
+});
+
+test("an estimate that ran out of room is not a footprint", () => {
+  // `maxFiles` truncation was recorded in the notes and nowhere else, and only
+  // the verdict is read. The strongest forty of ninety-five files are neither
+  // the footprint nor a narrowing of it, so calling that "anchored" let a
+  // guess that had run out of room become a repository-wide claim. Demoted, it
+  // costs one planning round trip and leaves the room open.
+  const index = repositoryIndex(
+    Array.from({ length: 30 }, (_unused, position) =>
+      file(`services/cursor_${String(position)}/src/run.ts`, {
+        symbols: [`cursorThing_${String(position)}`],
+      }),
+    ),
+  );
+
+  // Ubiquity is left wide on purpose: this is about the cap, and the two
+  // filters must be able to fail independently.
+  const estimate = estimateScope("Fix the cursor thing", index, {
+    maxFiles: 5,
+    ubiquityRatio: 1,
+  });
+
+  assert.equal(estimate.files.length, 5);
+  assert.equal(estimate.confidence, "weak");
+  assert.ok(
+    estimate.notes.some((note) => note.includes("can name")),
+    estimate.notes.join(" | "),
+  );
+});
