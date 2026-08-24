@@ -264,11 +264,20 @@ export async function computeCoordinationMetrics(
           // A withheld symbol means the file it lives in was granted to this
           // task while somebody else was working inside it. A withheld file
           // means only that the file was kept whole, which every lease does.
+          //
+          // Type alone cannot tell those apart. Deferring a file also defers
+          // every symbol claimed only through it, recorded one by one so
+          // enforcement can check them and marked `implied` because they are
+          // the same loss counted again. Reading type alone therefore called
+          // every whole-file deferral a within-file split — precisely the
+          // thing this number exists to distinguish — and reported sharing
+          // that no lease had actually done.
           const finerThanFile = withheld.some(
             (entry) =>
               typeof entry === "object" &&
               entry !== null &&
-              (entry as { resourceType?: unknown }).resourceType === "symbol",
+              (entry as { resourceType?: unknown }).resourceType === "symbol" &&
+              (entry as { implied?: unknown }).implied !== true,
           );
           if (finerThanFile) {
             withinFileAdmissions += 1;

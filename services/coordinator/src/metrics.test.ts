@@ -302,3 +302,36 @@ test("a task admitted before its blocker released is not counted as a pickup", a
   assert.equal(metrics.sharing.releases, 1);
   assert.equal(metrics.sharing.pickupsAfterRelease, 0);
 });
+
+test("a whole-file deferral is not a within-file split, whatever it drags along", async () => {
+  const store = new InMemoryCoordinationStore();
+
+  // The shape admission actually records when it defers a whole file: the
+  // file, plus every symbol claimed only through it, each marked `implied`
+  // because it is the same loss counted again rather than a loss of its own.
+  // The test above deferred a bare file with nothing inside it, which is not
+  // a shape `derivedFrom` can produce whenever the index can read the file.
+  await append(store, "plan_admitted", "task_b", {
+    status: "approved_with_constraints",
+    partial: true,
+    grantedFiles: ["src/b.ts"],
+    deferredResources: [
+      { resourceType: "file", resourceId: "src/shared.ts", heldBy: ["task_a"] },
+      {
+        resourceType: "symbol",
+        resourceId: "insideShared",
+        heldBy: ["task_a"],
+        implied: true,
+      },
+    ],
+  });
+
+  const metrics = await computeCoordinationMetrics(store);
+
+  assert.equal(metrics.sharing.partialAdmissions, 1);
+  // Nobody is working inside a file this task kept. Withholding a file whole
+  // is what any lease can do — which is the distinction this number exists to
+  // draw, and the reason it cannot be drawn by resource type alone.
+  assert.equal(metrics.sharing.withinFileAdmissions, 0);
+  assert.equal(metrics.sharing.filesSharedBetweenTasks, 0);
+});

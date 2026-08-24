@@ -831,7 +831,7 @@ async function runMetrics(json: boolean): Promise<void> {
       console.log(JSON.stringify(metrics, undefined, 2));
       return;
     }
-    const { conflicts, rework, throughput, approvals } = metrics;
+    const { conflicts, rework, throughput, approvals, sharing } = metrics;
     console.log(`Audit events analysed: ${metrics.window.events}`);
     console.log("");
     console.log("Conflicts");
@@ -870,6 +870,19 @@ async function runMetrics(json: boolean): Promise<void> {
     );
     console.log(`  Active leases:           ${metrics.cost.activeLeases}`);
     console.log(`  Settled leases:          ${metrics.cost.settledLeases}`);
+    console.log("");
+    // The section that says whether coordination is doing the thing a lock
+    // cannot. It was computed and then dropped on the floor here: every other
+    // group was destructured and printed, so `coord metrics` reported holds
+    // and rework — what contention cost — and nothing at all about what
+    // sharing bought, unless you thought to ask for --json.
+    console.log("Sharing");
+    console.log(`  Partial admissions:      ${sharing.partialAdmissions}`);
+    console.log(`  Finer than a file:       ${sharing.withinFileAdmissions}`);
+    console.log(`  Files shared:            ${sharing.filesSharedBetweenTasks}`);
+    console.log(`  Mid-run releases:        ${sharing.releases}`);
+    console.log(`  Files handed back:       ${sharing.releasedFiles}`);
+    console.log(`  Started after release:   ${sharing.pickupsAfterRelease}`);
     console.log("");
     console.log("Approvals");
     console.log(`  Requested:               ${approvals.requested}`);
