@@ -7764,33 +7764,83 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 
 /* One agent's work in this repository. Sits in the middle row of
    `.thread-panel`'s grid, which is the row that stretches, so the list
-   scrolls rather than pushing anything off the bottom. Active work stays
-   in a tight stack; finished work sits quieter underneath. */
+   scrolls under a search box and filter strip that stay put. Each task is a
+   card: outcome, request, who ran it, what came back, what to do next. */
 .agent-history {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  /* Measured against the panel, not the window: this panel is dragged wider
+     and narrower, and a viewport query would keep five columns in a column
+     the reader has just squeezed to a third of the screen. */
+  container-type: inline-size;
+}
+
+.agent-history.empty {
+  display: block;
+  overflow-y: auto;
+}
+
+.agent-history-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.agent-history-head .search {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
+
+.agent-history .ah-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-history .ah-filter-label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.agent-history-list {
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 8px 12px 12px;
 }
 
 .agent-history-active,
 .agent-history-finished {
   display: grid;
+  gap: 8px;
 }
 
 .agent-history-active + .agent-history-finished {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-soft);
+  margin-top: 12px;
+}
+
+/* The one word above each half. The list used to separate them with a rule,
+   which said there were two groups without saying which was which. */
+.agent-history .ah-section-label {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
 }
 
 .agent-history-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 4px 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1.4fr) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
   font-size: 12px;
   line-height: 1.35;
-  border-left: 2px solid transparent;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
 }
 
 /* Only the rows that go somewhere look like they do. A task with no channel
@@ -7801,63 +7851,118 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 .agent-history-row[role="button"]:hover {
-  background: var(--bg-inset);
-  border-left-color: var(--accent-line);
+  border-color: var(--accent-line);
 }
 
-.agent-history-row .ah-glyph {
-  display: grid;
-  place-items: center;
-  align-self: center;
-  width: 11px;
-  flex: none;
-  color: var(--text-3);
+/* The outcome, said in a word rather than left to a ring's colour. */
+.agent-history-row .ah-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+  color: var(--text-2);
 }
 
-.agent-history-row .ah-glyph .ui-icon {
-  width: 11px;
-  height: 11px;
+.agent-history-row .ah-status .ui-icon {
+  width: 12px;
+  height: 12px;
 }
 
-.agent-history-row.integrated .ah-glyph {
+.agent-history-row .ah-status-ok {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
   color: var(--green);
 }
 
-.agent-history-row.failed .ah-glyph {
+.agent-history-row .ah-status-bad {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
   color: var(--red);
 }
 
-.agent-history-row.awaiting_approval .ah-glyph {
+.agent-history-row .ah-status-warn {
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
   color: var(--orange);
 }
 
-.agent-history-row.open .ah-glyph {
+.agent-history-row .ah-status-live {
+  background: color-mix(in srgb, var(--salmon) 16%, transparent);
   color: var(--accent-bright);
 }
 
+.agent-history-row .ah-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
 .agent-history-row .ah-objective {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
 }
 
+/* An absolute time, not an age: this list is scanned for "the one from
+   yesterday afternoon", which "2 days ago" cannot answer. */
 .agent-history-row .ah-when {
-  flex: none;
   color: var(--text-3);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
-/* Finished work keeps the same row shape but reads as archive: softer type
-   and quieter marks. */
+.agent-history-row .ah-face {
+  display: grid;
+  place-items: center;
+}
+
+.agent-history-row .ah-preview {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.agent-history-row .ah-preview-label {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.agent-history-row .ah-preview-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.agent-history-row .ah-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Finished work keeps the same card but reads as archive: softer type. */
 .agent-history-finished .agent-history-row {
   color: var(--text-2);
 }
 
-.agent-history-finished .agent-history-row .ah-glyph {
-  opacity: 0.72;
+/* A narrow panel drops the preview column rather than squeezing five things
+   into a width that fits three. The outcome, the request and the controls are
+   what the row is for; the summary is one hover away on the conversation. */
+@container (max-width: 620px) {
+  .agent-history-row {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+  }
+
+  .agent-history-row .ah-preview {
+    display: none;
+  }
 }
 
 /* ---------------------------------------------------- agent spec (details) --
@@ -11246,7 +11351,7 @@ dialog.modal[open]::backdrop {
 }
 
 /* Live and finished work share one card stack. State is colour and content
-   (wash, edge, check) — not a second silhouette for completed rows. */
+   (wash and edge) — not a second silhouette for completed rows. */
 .thread-list-active {
   display: grid;
   gap: 6px;
@@ -11316,25 +11421,13 @@ dialog.modal[open]::backdrop {
 }
 
 /* Completed work uses the same multi-line card as active, pending, and held.
-   Quieter fill and a green check carry the finished state; the full title,
-   author, reply count, and time remain in the accessible label and tooltip. */
+   Its quieter fill and placement in the completed group carry the state. */
 .thread-item-ended {
   background: var(--bg-inset);
 }
 
 .thread-item-ended:hover {
   background: var(--bg-card-2);
-}
-
-.thread-item-ended .ti-done {
-  display: inline-flex;
-  flex: none;
-  color: var(--green);
-}
-
-.thread-item-ended .ti-done svg {
-  width: 13px;
-  height: 13px;
 }
 
 .thread-item-pending {
@@ -11776,16 +11869,26 @@ dialog.modal[open]::backdrop {
 }
 
 /* ------------------------------------------------- thread summary ---- */
-/* One thread in the pullout: what the work is called, and a quiet second line
-   saying who is in it and how much was actually said. This shape belongs to
-   the pullout alone. The channel used to share these rules, so the two
+/* One thread in the pullout: who started it, what the work is called, and a
+   quiet second line saying who is in it and how much was actually said. This
+   shape belongs to the pullout alone. The channel used to share these rules, so the two
    surfaces were one design seen twice — but a card in the channel repeats the
    message directly above it, which is why the channel now gets a plain tinted
    count (`.cmsg-thread-link`) and these selectors name only `.thread-item`.
 
-   The row used to open with a glyph, and there is deliberately no rule for one
-   now: it was the same terminal mark on every thread, which described none of
-   them and misdescribed all of them. The name starts the row instead. */
+   The creator's face opens the row, identifying its origin without using a
+   generic state glyph. */
+
+.thread-item .ti-creator {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+}
+
+.thread-item .ti-creator .presence,
+.thread-item .ti-participants .presence {
+  display: none;
+}
 
 /* The chevron only promises there is somewhere to go, so it is the dimmest
    thing in the row and never competes with the name. */
@@ -11820,9 +11923,11 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
-/* Current phase, then who and how much — one quiet metadata line. */
+/* Current phase, reply count and latest activity, with everyone who took part
+   gathered at the bottom-right — one quiet metadata line. */
 .thread-item .ti-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   font-size: 11.5px;
@@ -11840,18 +11945,38 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
-.thread-item .ti-who {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
+.thread-item .ti-count,
+.thread-item .ti-time {
+  color: var(--text-4);
+  flex: none;
   white-space: nowrap;
 }
 
-.thread-item .ti-count {
-  color: var(--text-4);
+.thread-item .ti-time::before {
+  content: "\00b7";
+  margin-right: 6px;
+}
+
+.thread-item .ti-participants {
   flex: none;
+  margin-left: auto;
+  padding-right: 2px;
+}
+
+.thread-item .ti-participants > * {
+  position: relative;
+  border-radius: 50%;
+  background: var(--bg-card);
+  box-shadow: 0 0 0 2px var(--bg-card);
+  margin-right: -6px;
+}
+
+.thread-item .ti-participants > *:last-child {
+  margin-right: 0;
+}
+
+.thread-item .ti-participants .avatar {
+  border: 0;
 }
 
 .thread-item-ended .ti-text {

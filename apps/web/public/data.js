@@ -359,6 +359,16 @@ export const state = {
    * agent owned by this account.
    */
   agentPanelTab: "spec",
+  /**
+   * Which slice of an agent's task history is on screen, and what was typed
+   * into the search box above it.
+   *
+   * Held here rather than on the input because every background poll rebuilds
+   * the panel: a filter that lived in the DOM was reset to "all" on whatever
+   * schedule the room happened to refresh on.
+   */
+  agentHistoryFilter: "all",
+  agentHistoryQuery: "",
   /*
    * Whether a turn's thinking block is unfolded, keyed by thread and turn.
    *
@@ -5893,6 +5903,10 @@ export function putAwayRightPanel(kind) {
       return;
     case "agent":
       state.activeAgentPanel = undefined;
+      // The next agent opened starts on its whole history, not on whatever
+      // the last one happened to be narrowed to.
+      state.agentHistoryFilter = "all";
+      state.agentHistoryQuery = "";
       return;
     case "dm":
       state.activeDm = undefined;
