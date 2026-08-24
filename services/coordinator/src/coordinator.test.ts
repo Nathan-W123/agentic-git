@@ -3269,6 +3269,126 @@ test("a deferred waiter plans against the holder's in-progress edits", async () 
   }
 });
 
+test("waiters speculate concurrently, not one agent call at a time", async () => {
+  // Each speculative replan is a full round trip to an agent. Issued one at a
+  // time they dominate the wait they exist to remove: eight tasks deferred
+  // behind one holder meant eight sequential agent calls, and the head start
+  // took longer than the work it was racing. The two other replan loops in the
+  // coordinator already say this; this one was doing it serially anyway.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-speculate-many-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const version = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const holderWorkspace = await fixture.workspaces.create({
+      taskId: "task_holder",
+      rootPath: path.join(root, "holder-workspaces"),
+      repository: fixture.repository,
+      baseVersion: version,
+    });
+    await writeFile(
+      path.join(holderWorkspace.path, "src", "a.txt"),
+      "holder wip\n",
+      "utf8",
+    );
+    const holderRun = await store.createRun({
+      repository: fixture.repository,
+      mode: "coordinated",
+      baseVersion: version,
+    });
+    await store.saveWorkspace(holderRun.id, {
+      id: holderWorkspace.id,
+      runId: holderRun.id,
+      taskId: "task_holder",
+      path: holderWorkspace.path,
+      isolation: holderWorkspace.isolation,
+      baseRevision: version.revision,
+      createdAt: holderWorkspace.createdAt,
+    });
+
+    // Counts how many replans are in flight together. Serial issue can never
+    // put the peak above one however slow each call is.
+    const inFlight = { now: 0, peak: 0, total: 0 };
+    class CountingAgent extends TestAgent {
+      public override async requestReplan(
+        sessionId: string,
+        request: ReplanRequest,
+      ): Promise<AgentPlan> {
+        inFlight.now += 1;
+        inFlight.total += 1;
+        inFlight.peak = Math.max(inFlight.peak, inFlight.now);
+        try {
+          // Long enough that a serial loop cannot overlap by accident.
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return await super.requestReplan(sessionId, request);
+        } finally {
+          inFlight.now -= 1;
+        }
+      }
+    }
+
+    const waiters = ["task_w1", "task_w2", "task_w3"];
+    // Disjoint *and* grounded, both on purpose, because either one missing
+    // makes this test measure a queue it built itself. Sharing a file put w2
+    // behind w1 on structural overlap; declaring files the fixture does not
+    // contain made every plan ungrounded, and `buildBlockers` chains an
+    // unverifiable plan behind related pending work by submission order. Both
+    // left exactly one task waiting on the *holder* — which is the serial
+    // shape this test exists to reject.
+    const seeded = ["src/b.txt", "src/c.txt", "src/d.txt"];
+    const tasks = waiters.map((id, position) => {
+      const file = seeded[position] ?? "src/b.txt";
+      return {
+        task: task(id),
+        adapter: new CountingAgent(
+          `agent_${id}`,
+          plan(id, [file]),
+          fixture.repository,
+          fixture.workspaces,
+          file,
+        ),
+      };
+    });
+
+    let admits = 0;
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+      planAuthority: {
+        async admit(request) {
+          admits += 1;
+          if (admits <= waiters.length) {
+            return {
+              outcome: "deferred",
+              retryAfterMs: 5,
+              blockedBy: ["task_holder"],
+              explanation: "src/a.txt is leased to task_holder",
+            };
+          }
+          return { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks,
+    });
+
+    assert.equal(result.tasks.length, waiters.length);
+    assert.ok(
+      inFlight.peak >= 2,
+      `speculative replans never overlapped (peak ${String(inFlight.peak)} of ${String(inFlight.total)})`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * Writes fixed replacement text over a seeded file, so a test can control
  * exactly which lines a run's patch touches.

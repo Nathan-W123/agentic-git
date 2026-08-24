@@ -2558,50 +2558,77 @@ export class Coordinator {
     if (waiters.length === 0) {
       return;
     }
-    let index: RepositoryIndex | undefined;
-    for (const entry of waiters) {
-      try {
-        const overlay = await this.collectHolderWorkingChanges(
-          input,
-          entry.decision.blockedBy,
-          version,
-        );
-        if (overlay.changes.length === 0) {
-          continue;
+    // Built at most once, and only if some waiter turns out to have holder
+    // work to plan against. Kept lazy — a wave where no holder has written
+    // anything yet should not pay for an index nobody reads — and kept to one
+    // build, because every waiter below wants the same revision.
+    // Shared for the round: waiters behind the same holder are asking one
+    // question, and asking it once is both faster and the only way two of
+    // them cannot collide reading the same worktree.
+    const holderReads = new Map<
+      string,
+      Promise<Array<{ path: string; status: FilePatchStatus }>>
+    >();
+    let building: Promise<RepositoryIndex> | undefined;
+    const sharedIndex = async (): Promise<RepositoryIndex> => {
+      building ??= this.intelligence.index(input.repository, version.revision);
+      return await building;
+    };
+    // Concurrently, for the reason the disturbance loop above already states:
+    // each of these is a full round trip to an agent, and issued one at a time
+    // they dominate the wait they were meant to remove. Eight tasks deferred
+    // behind one holder meant eight sequential agent calls before any of them
+    // had a plan — the head start took longer than the work it was racing.
+    //
+    // They are independent in exactly the way that loop describes. A
+    // speculative replan reads canonical, the holder's working changes and the
+    // shared index — all fixed for the duration — and writes only to its own
+    // entry and its own agent session. Audit appends are serialised by the
+    // store, so the chain stays intact; only the interleaving changes.
+    await Promise.all(
+      waiters.map(async (entry) => {
+        try {
+          const overlay = await this.collectHolderWorkingChanges(
+            input,
+            entry.decision.blockedBy,
+            version,
+            holderReads,
+          );
+          if (overlay.changes.length === 0) {
+            return;
+          }
+          await this.replanTask(
+            input,
+            entry,
+            version,
+            await sharedIndex(),
+            recorder,
+            runAudit,
+            {
+              reason:
+                "Blocking work is in progress; plan against its current edits",
+              // Copied rather than aliased. A CanonicalAdvance is readonly and
+              // a notice is not, so the notice takes its own array — which also
+              // means nothing can reach back through the notice and mutate the
+              // advance the speculation is graded against.
+              changedFiles: [...overlay.advance.changedFiles],
+              changedSymbols: [...overlay.advance.changedSymbols],
+              changedApis: [...overlay.advance.changedApis],
+              changedSchemas: [...overlay.advance.changedSchemas],
+              changedConfigKeys: [...overlay.advance.changedConfigKeys],
+              changedTests: [...overlay.advance.changedTests],
+              changedServices: [...overlay.advance.changedServices],
+            },
+            overlay.changes,
+          );
+          entry.speculatedAdvance = overlay.advance;
+        } catch {
+          // Speculation is a head start, and one waiter losing it must not
+          // cost the others theirs. A failure leaves this waiter on today's
+          // path: sleep, then replan cold if canonical moved.
         }
-        index =
-          index ??
-          (await this.intelligence.index(input.repository, version.revision));
-        await this.replanTask(
-          input,
-          entry,
-          version,
-          index,
-          recorder,
-          runAudit,
-          {
-            reason:
-              "Blocking work is in progress; plan against its current edits",
-            // Copied rather than aliased. A CanonicalAdvance is readonly and
-            // a notice is not, so the notice takes its own array — which also
-            // means nothing can reach back through the notice and mutate the
-            // advance the speculation is graded against.
-            changedFiles: [...overlay.advance.changedFiles],
-            changedSymbols: [...overlay.advance.changedSymbols],
-            changedApis: [...overlay.advance.changedApis],
-            changedSchemas: [...overlay.advance.changedSchemas],
-            changedConfigKeys: [...overlay.advance.changedConfigKeys],
-            changedTests: [...overlay.advance.changedTests],
-            changedServices: [...overlay.advance.changedServices],
-          },
-          overlay.changes,
-        );
-        entry.speculatedAdvance = overlay.advance;
-      } catch {
-        // Speculation is a head start. A failure leaves the waiter on today's
-        // path: sleep, then replan cold if canonical moved.
-      }
-    }
+      }),
+    );
   }
 
   /**
@@ -2611,6 +2638,22 @@ export class Coordinator {
     input: CoordinatorRunInput,
     holderTaskIds: readonly string[],
     version: CanonicalVersion,
+    /**
+     * One read per holder for the caller's whole round, shared by every
+     * waiter behind it.
+     *
+     * Not an optimisation — a correctness requirement once waiters speculate
+     * concurrently. `git diff <base>` refreshes the worktree's index and so
+     * takes `index.lock`; two reads of one holder's workspace at the same
+     * moment contend for it, and the loser throws. That throw is caught below
+     * and becomes "this holder has written nothing", which silently costs the
+     * waiter the head start it was owed. Reading once and sharing removes the
+     * contention rather than tolerating it.
+     */
+    holderReads?: Map<
+      string,
+      Promise<Array<{ path: string; status: FilePatchStatus }>>
+    >,
   ): Promise<{
     changes: HolderWorkingChange[];
     advance: CanonicalAdvance;
@@ -2635,7 +2678,9 @@ export class Coordinator {
       }
       let working: Array<{ path: string; status: FilePatchStatus }>;
       try {
-        working = await list(workspace);
+        const started = holderReads?.get(holderId) ?? list(workspace);
+        holderReads?.set(holderId, started);
+        working = await started;
       } catch {
         continue;
       }
