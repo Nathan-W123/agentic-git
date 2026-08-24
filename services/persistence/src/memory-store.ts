@@ -237,6 +237,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly channelReadCursors = new Map<string, string>();
   /** Keyed by `projectId\0userId`. */
   private readonly catchUpCursors = new Map<string, string>();
+  /** Keyed by `repositoryId\0userId` — present only while muted. */
+  private readonly channelMutes = new Map<string, string>();
   private readonly auditorCursors = new Map<string, AuditorCursor>();
 
   public constructor() {
@@ -1172,6 +1174,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     for (const key of [...this.channelReadCursors.keys()]) {
       if (key.startsWith(`${id}\0`)) {
         this.channelReadCursors.delete(key);
+      }
+    }
+    for (const key of [...this.channelMutes.keys()]) {
+      if (key.startsWith(`${id}\0`)) {
+        this.channelMutes.delete(key);
       }
     }
     this.channelMembershipBackfilled.delete(id);
@@ -2767,6 +2774,30 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     userId: string,
   ): Promise<string | undefined> {
     return this.channelReadCursors.get(this.channelReadKey(repositoryId, userId));
+  }
+
+  public async setChannelMuted(
+    repositoryId: string,
+    userId: string,
+    muted: boolean,
+  ): Promise<void> {
+    const key = this.channelReadKey(repositoryId, userId);
+    if (muted) {
+      this.channelMutes.set(key, new Date().toISOString());
+    } else {
+      this.channelMutes.delete(key);
+    }
+  }
+
+  public async listMutedChannels(userId: string): Promise<string[]> {
+    const muted: string[] = [];
+    for (const key of this.channelMutes.keys()) {
+      const [repositoryId = "", owner = ""] = key.split("\0");
+      if (owner === userId) {
+        muted.push(repositoryId);
+      }
+    }
+    return muted.sort((left, right) => left.localeCompare(right));
   }
 
   public async getCatchUpCursor(

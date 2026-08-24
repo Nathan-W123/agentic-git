@@ -1144,6 +1144,24 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "repository-display-names",
     statements: [`ALTER TABLE repositories ADD COLUMN display_name TEXT`],
   },
+  {
+    // Which channels one person has asked to be quiet. A row per (repository,
+    // person) rather than a column on the repository: muting is a personal
+    // preference, and one member silencing a room must not silence it for
+    // everybody else in it. Presence of the row is the whole fact — unmuting
+    // deletes it rather than storing a false, so the table holds only the
+    // rooms somebody actually chose to quieten.
+    version: 42,
+    name: "channel-mutes",
+    statements: [
+      `CREATE TABLE channel_mutes (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        muted_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

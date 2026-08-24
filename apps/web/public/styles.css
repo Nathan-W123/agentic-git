@@ -4706,6 +4706,20 @@ button.chip.lg:hover {
   place-items: center;
 }
 
+/* A muted room is dimmed rather than hidden or moved: it is still somewhere
+   to go, and a list that reordered itself when somebody muted a channel would
+   take away the muscle memory that makes the rail worth having. The active
+   room is exempt — dimming the channel being read would say the wrong thing
+   about where the reader is. */
+.channel-rail-entry.muted:not(.active) .channel-rail-button {
+  opacity: 0.5;
+}
+
+.channel-rail-entry.muted:not(.active):hover .channel-rail-button,
+.channel-rail-entry.muted:not(.active):focus-within .channel-rail-button {
+  opacity: 1;
+}
+
 .channel-rail-entry.active::before {
   content: "";
   position: absolute;
@@ -11348,6 +11362,13 @@ dialog.modal[open]::backdrop {
 .ch-count svg {
   width: 13px;
   height: 13px;
+}
+
+/* Quieter than the two counts beside it. It reports a setting rather than a
+   fact about the room, so it must not compete with how many people are in it. */
+.ch-muted {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 /* Live and finished work share one card stack. State is colour and content
