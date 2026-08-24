@@ -276,6 +276,14 @@ test("settings dialog enter animation only plays when the dialog opens", async (
     /\.settings-layer\.settings-entering \.settings-dialog\{[^}]*animation:settings-in/u,
   );
 
+  // Closing motion temporarily reattaches only the overlay node after the
+  // render has removed Settings. Its scoped styles therefore have to travel
+  // inside that node or the unstyled brand gear flashes at its natural size.
+  assert.match(
+    dialog,
+    /<div class="settings-layer" data-act="settings-backdrop">\s*<style id="settings-dialog-styles">/u,
+  );
+
   const motion = slice(app, "const MOTION_SURFACES = [", "const surfaceNodes");
   assert.match(motion, /selector:\s*"\.settings-layer"/u);
   assert.match(motion, /enter:\s*"settings-entering"/u);
