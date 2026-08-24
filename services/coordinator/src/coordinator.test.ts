@@ -3498,6 +3498,58 @@ test("a waiter plans while the holder is still coding, not after it", async () =
   }
 });
 
+test("a planning agent is told where the repository says the work lives", async () => {
+  // Planning is an agent reading its way into a repository a tool call at a
+  // time, and most of that reading is a search for something already
+  // computed: the index this wave built for arbitration knows which files
+  // declare the names the objective used. The solo fast path has read it for
+  // exactly this purpose all along; every contended task was told to start
+  // from nothing.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-hint-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const finder = new TestAgent(
+      "agent_finder",
+      plan("task_finder", ["src/ab.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/ab.txt",
+    );
+    const other = new TestAgent(
+      "agent_other",
+      plan("task_other", ["src/d.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/d.txt",
+    );
+
+    await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      // Two, so the run builds the index at all: a solo run has nothing to
+      // arbitrate and skips it, and the fast path reads the estimate itself.
+      tasks: [
+        { task: { ...task("task_finder"), objective: "Rewrite src/ab.txt" }, adapter: finder },
+        { task: { ...task("task_other"), objective: "Rewrite src/d.txt" }, adapter: other },
+      ],
+    });
+
+    const context = finder.startInputs[0]?.priorContext ?? "";
+    assert.match(context, /src\/ab\.txt/u, context);
+    // Offered, not imposed. An agent that read this as its scope would plan
+    // the estimate instead of the task.
+    assert.match(context, /not a scope/u, context);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * Writes fixed replacement text over a seeded file, so a test can control
  * exactly which lines a run's patch touches.

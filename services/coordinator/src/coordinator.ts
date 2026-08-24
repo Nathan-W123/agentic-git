@@ -101,7 +101,10 @@ import {
   ScopeExpansionError,
   assertChangeSetWithinPlan,
 } from "./scope-validator.js";
-import { estimateScope } from "./scope-estimation.js";
+import {
+  estimateScope,
+  type ScopeEstimate,
+} from "./scope-estimation.js";
 
 export interface CoordinatedTask {
   task: TaskDefinition;
@@ -963,6 +966,47 @@ export interface DeferredScopeRequest {
  */
 const SPECULATION_POLL_MS = 2_000;
 
+/** How many files a starting-point note names before it stops helping. */
+const SCOPE_STARTING_POINTS = 12;
+
+/**
+ * The scope estimate, written for an agent about to plan.
+ *
+ * Deliberately not phrased as a scope. The estimate is lexical — it knows
+ * which files declare names the objective used, not what the work is — so an
+ * agent that adopted it wholesale would plan the estimate rather than the
+ * task. What it is good for is the first look: it saves reading the
+ * repository to find the file whose name the request already contained.
+ *
+ * Empty unless the estimate anchored. "weak" means it matched file names and
+ * nothing else, and "none" means it matched nothing; neither is worth a
+ * paragraph of the prompt, and a list of coincidences would send the agent
+ * somewhere wrong with more confidence than it had on its own.
+ */
+function scopeStartingPoints(estimate: ScopeEstimate): string {
+  if (estimate.confidence !== "anchored") {
+    return "";
+  }
+  const named = estimate.files
+    .filter((file) => file.anchored)
+    .slice(0, SCOPE_STARTING_POINTS);
+  if (named.length === 0) {
+    return "";
+  }
+  return [
+    "Files in this repository whose contents match the words of this " +
+      "objective, strongest first. A starting point for reading, not a " +
+      "scope: confirm each one before planning it, and plan whatever else " +
+      "the work needs whether or not it is listed.",
+    ...named.map(
+      (file) => `- ${file.path} (${file.reasons[0] ?? "matches the objective"})`,
+    ),
+    ...(estimate.files.filter((file) => file.anchored).length > named.length
+      ? [`- and ${String(estimate.files.filter((file) => file.anchored).length - named.length)} more, less strongly`]
+      : []),
+  ].join("\n");
+}
+
 const MAX_CONSECUTIVE_DEFERRED_WAVES = 240;
 
 /**
@@ -1767,10 +1811,37 @@ export class Coordinator {
                   runAudit,
                 )
               : { note: "" };
+          // Where the repository says this objective probably lives.
+          //
+          // Planning is not one inference, it is an agent reading its way
+          // into a repository a tool call at a time — measured at ~55s median
+          // per call against a small fixture, and stated as minutes for a
+          // real model in `docs/benchmarks/blanket-claim.md`. Most of that is
+          // the search, and the search is for something already computed: the
+          // index that arbitration builds for this very wave knows which
+          // files declare the names the objective uses, and the solo fast
+          // path has been reading it for exactly this purpose all along.
+          // Every contended task — the slow ones — was told to start from
+          // nothing instead.
+          //
+          // Offered, never imposed. It goes in `priorContext`, which the
+          // planning prompt already frames as background to be verified
+          // rather than fact, and it says so again in its own words: an agent
+          // that treats a lexical guess as its scope would plan the estimate
+          // instead of the task. Silent below "anchored", because an estimate
+          // that could not localize anything has nothing to offer and
+          // pointing at forty files would be worse than pointing at none.
+          const likelyFiles =
+            index === undefined
+              ? ""
+              : scopeStartingPoints(
+                  estimateScope(entry.task.objective, index),
+                );
           const priorContext = [
             entry.task.context?.trim() ?? "",
             turnStart.note,
             leaseNote,
+            likelyFiles,
             seeded,
           ]
             .filter((part) => part !== "")
