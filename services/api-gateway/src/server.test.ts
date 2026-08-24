@@ -27,6 +27,7 @@ import {
   explainAnswerFailure,
   looksLikeTaskRequest,
   narrateTaskEvent,
+  normaliseThreadTitle,
   parseAnswerTaskDirective,
   parseAutoClaimVerdict,
   readsAsEchoOfRequest,
@@ -36,6 +37,7 @@ import {
   summariseAuditData,
   summariseChannelThread,
   summariseObjective,
+  summariseThreadTitle,
   truncateToTokens,
   type ApiOperations,
   type ChannelMemoThread,
@@ -388,6 +390,8 @@ async function startRuntime(
      * from loading one to prove something unrelated.
      */
     catchUpSummariser?: CatchUpSummariser;
+    /** Writes thread names without loading the real local model in tests. */
+    threadTitleSummariser?: CatchUpSummariser;
     /** The direct push result returned to the channel. */
     pushOutcome?: {
       outcome: "done" | "refused";
@@ -921,6 +925,8 @@ async function startRuntime(
       available: async () => true,
     },
     catchUpSummariser: options.catchUpSummariser ?? (async () => undefined),
+    threadTitleSummariser:
+      options.threadTitleSummariser ?? (async () => undefined),
     mailer: async (message) => {
       mail.push(message);
     },
@@ -4265,8 +4271,14 @@ test("an org-wide agent accepts a stranger's @mention and dispatches under the o
   );
 });
 
-test("dispatch immediately acknowledges, then contextualizes the same reply", async (t) => {
-  const runtime = await startRuntime(t);
+test("dispatch locally names the thread, then contextualizes the same reply", async (t) => {
+  const titlePrompts: string[] = [];
+  const runtime = await startRuntime(t, {
+    threadTitleSummariser: async (prompt) => {
+      titlePrompts.push(prompt);
+      return "Token refresh reliability";
+    },
+  });
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const repositoryId = await invitableRepository(owner, "ack-own-voice");
@@ -4276,15 +4288,23 @@ test("dispatch immediately acknowledges, then contextualizes the same reply", as
     { provider: "anthropic", visibility: "org" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
+  const assigned = await owner.request(`${base}/agents/anthropic`, {
+    method: "POST",
+    body: { role: "Token Reliability Engineer" },
+  });
+  assert.equal(assigned.status, 200, JSON.stringify(assigned.data));
   runtime.chatAnswer.text =
-    "Repair token refresh\n" +
     "I'll inspect the refresh flow, update the retry behavior, and verify it with focused tests.";
   // The acknowledgement must not wait for this contextual opening to finish.
   runtime.chatAnswer.delayMs = 500;
 
+  const attachmentId = `${"a".repeat(32)}.png`;
+  const visibleRequest =
+    `please fix the token refresh ` +
+    `![trace](attachment:${attachmentId})`;
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
-    body: { content: "@Claude (Owner) please fix the token refresh" },
+    body: { content: `@Claude (Owner) ${visibleRequest}` },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
@@ -4303,6 +4323,25 @@ test("dispatch immediately acknowledges, then contextualizes the same reply", as
       event.data["messageId"] === posted.data.message.id,
   ).length;
   assert.equal(runtime.submittedTasks.length, 1);
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return (listed.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some(
+        (reply: any) => reply.content === "Task: Token refresh reliability",
+      ),
+    );
+  }, "the local title was not persisted in the task thread");
+  assert.equal(titlePrompts.length, 1);
+  assert.ok((titlePrompts[0] ?? "").endsWith(`Request:\n${visibleRequest}`));
+  assert.doesNotMatch(
+    titlePrompts[0] ?? "",
+    /@Claude|Token Reliability Engineer|Your final message|open this file|\/var\/data/u,
+  );
+  const executionObjective = runtime.submittedTasks[0]?.objective ?? "";
+  assert.match(executionObjective, /Token Reliability Engineer/u);
+  assert.match(executionObjective, /Your final message/u);
+  assert.match(executionObjective, /open this file/u);
+  assert.match(executionObjective, /\/var\/data/u);
   assert.ok(
     runtime.chatPrompts.every(
       (entry) => !/only the acknowledgement|picking it up/iu.test(entry.prompt),
@@ -4331,8 +4370,10 @@ test("dispatch immediately acknowledges, then contextualizes the same reply", as
   assert.equal(auditCountAfterContext, auditCountBeforeContext + 1);
 });
 
-test("dispatch keeps the generic acknowledgement when opening context fails", async (t) => {
-  const runtime = await startRuntime(t);
+test("provider opening failure does not prevent the local thread title", async (t) => {
+  const runtime = await startRuntime(t, {
+    threadTitleSummariser: async () => "Token refresh repair",
+  });
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const repositoryId = await invitableRepository(owner, "ack-context-failure");
@@ -4352,7 +4393,7 @@ test("dispatch keeps the generic acknowledgement when opening context fails", as
   await waitFor(
     async () =>
       runtime.chatPrompts.some((entry) =>
-        entry.prompt.includes("Reply with a short title on the first line"),
+        entry.prompt.includes("Reply with one or two concise first-person lines"),
       ),
     "the contextual opening was not attempted",
   );
@@ -4365,6 +4406,14 @@ test("dispatch keeps the generic acknowledgement when opening context fails", as
     speech[0]?.content,
     "I've taken this task and I'm working on it.",
   );
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return (listed.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some(
+        (reply: any) => reply.content === "Task: Token refresh repair",
+      ),
+    );
+  }, "the local title disappeared with the failed provider opening");
 });
 
 test("work acknowledges inside the user request's thread", async (t) => {
@@ -5385,7 +5434,7 @@ test("a question answer that proposes a repository change starts one scoped task
   // The task-opening call is separate from the answer and should not repeat
   // the answer's private routing line.
   runtime.chatAnswer.text =
-    "Cap retry routes\nI will update the retry guard and verify its route tests.";
+    "I will update the retry guard and verify its route tests.";
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -5545,6 +5594,49 @@ test("an opening line summarises the request rather than repeating it", () => {
   assert.ok(long.length <= 91, long);
   assert.ok(long.endsWith("…"), long);
   assert.ok(!/\w…$/u.test(long.replace(/\s\S*…$/u, "")), long);
+});
+
+test("thread titles use one short clean line or a bounded fallback", () => {
+  assert.equal(
+    normaliseThreadTitle(
+      '"Title: Token refresh reliability."\nThis line is explanation.',
+      "fix token refresh",
+    ),
+    "Token refresh reliability",
+  );
+  assert.equal(
+    normaliseThreadTitle(
+      "This model response contains far too many words to be a thread title",
+      "repair token rotation and refresh retry handling across the application",
+    ),
+    "repair token rotation and refresh retry",
+  );
+  assert.equal(
+    normaliseThreadTitle("\n\n", "repair token refresh behavior"),
+    "repair token refresh behavior",
+  );
+  assert.equal(normaliseThreadTitle("Task:", ""), "Software task");
+});
+
+test("the local thread-title writer receives only the visible request", async () => {
+  let received = "";
+  const title = await summariseThreadTitle(
+    "please repair token refresh behavior",
+    async (prompt) => {
+      received = prompt;
+      return "- Refresh token reliability";
+    },
+  );
+  assert.equal(title, "Refresh token reliability");
+  assert.match(received, /Request:\nplease repair token refresh behavior$/u);
+
+  const fallback = await summariseThreadTitle(
+    "please repair token refresh behavior",
+    async () => {
+      throw new Error("local model unavailable");
+    },
+  );
+  assert.equal(fallback, "repair token refresh behavior");
 });
 
 /**
@@ -6868,8 +6960,9 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   assert.ok((plan[0]?.content ?? "").trim().length > 0);
   // And the thread still names itself, so every surface that reads a title
   // off the "Task:" line keeps working.
-  assert.ok(
-    (root?.replies ?? []).some((reply) => /^Task: /u.test(reply.content)),
+  assert.equal(
+    (root?.replies ?? []).filter((reply) => /^Task: /u.test(reply.content)).length,
+    1,
     JSON.stringify(root?.replies),
   );
   // The plan was thought about with the code open. `/plan` used to be
@@ -13295,11 +13388,21 @@ test("the task root and acknowledgement exist immediately", async (t) => {
   );
 });
 
-test("the work is queued without waiting for the thread's opening thoughts", async (t) => {
+test("the work is queued without waiting for opening thoughts or its local title", async (t) => {
   // The second half of the same complaint. `planOpening` is a model call
   // allowed two minutes, and the run used to start only after it returned —
   // so a thread could say it had picked something up while nothing ran.
-  const runtime = await startRuntime(t);
+  let releaseTitle!: (title: string) => void;
+  let titleStarted = false;
+  const pendingTitle = new Promise<string>((resolve) => {
+    releaseTitle = resolve;
+  });
+  const runtime = await startRuntime(t, {
+    threadTitleSummariser: async () => {
+      titleStarted = true;
+      return await pendingTitle;
+    },
+  });
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const ownerId = bootstrapped.user.id;
@@ -13326,6 +13429,24 @@ test("the work is queued without waiting for the thread's opening thoughts", asy
     Date.now() - startedAt < 1_000,
     "starting the work waited on a model call rather than on none",
   );
+  assert.equal(titleStarted, true);
+  const beforeTitle = await owner.request(`${base}/messages`);
+  assert.equal(
+    (beforeTitle.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some((reply: any) => /^Task: /u.test(reply.content)),
+    ),
+    false,
+  );
+
+  releaseTitle("Retry loop reliability");
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return (listed.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some(
+        (reply: any) => reply.content === "Task: Retry loop reliability",
+      ),
+    );
+  }, "the completed local title was not attached asynchronously");
 });
 
 test("an image in a request reaches the agent as a file it can open", async (t) => {
@@ -13897,9 +14018,12 @@ test("a thread opens on the request that caused it, in the words it was asked in
   );
   assert.equal(quiet?.kind, "user");
   assert.equal(quiet?.content, asked);
-  assert.equal(quiet?.replies?.length, 1);
+  const quietSpeech = (quiet?.replies ?? []).filter(
+    (reply: any) => reply.kind === "agent",
+  );
+  assert.equal(quietSpeech.length, 1);
   assert.equal(
-    quiet?.replies?.[0]?.content,
+    quietSpeech[0]?.content,
     "I've taken this task and I'm working on it.",
   );
 

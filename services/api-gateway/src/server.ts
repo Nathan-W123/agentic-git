@@ -89,6 +89,7 @@ import {
   createChatterFilter,
   createLocalSummariser,
   type ChatterFilter,
+  type LocalSummariser,
 } from "@coord/local-triage";
 import {
   authorizeOrganization,
@@ -1322,6 +1323,74 @@ export function summariseObjective(objective: string): string {
   return `${(lastSpace > 40 ? clipped.slice(0, lastSpace) : clipped).trim()}…`;
 }
 
+/** The most a generated thread name may contain. */
+const THREAD_TITLE_MAX_WORDS = 6;
+const THREAD_TITLE_MAX_CHARS = 64;
+
+/**
+ * Turns a model's first line into the compact noun phrase the thread library
+ * needs, falling back to a bounded reading of the request when it did not
+ * follow the format.
+ */
+export function normaliseThreadTitle(
+  written: string | null | undefined,
+  fallback: string,
+): string {
+  const clean = (value: string): string =>
+    (value.split(/\r?\n/u).find((line) => line.trim().length > 0) ?? "")
+      .replace(/^\s*(?:[-*#]+|\d+[.)])\s*/u, "")
+      .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/gu, "")
+      .replace(/^\s*(?:task|thread|title)\s*:\s*/iu, "")
+      .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/gu, "")
+      .replace(/[.!?:;,\s]+$/gu, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+  const fallbackWords = clean(fallback)
+    .split(" ")
+    .filter((word) => word.length > 0)
+    .slice(0, THREAD_TITLE_MAX_WORDS);
+  const boundedFallback: string[] = [];
+  for (const word of fallbackWords) {
+    const next = [...boundedFallback, word].join(" ");
+    if (next.length > THREAD_TITLE_MAX_CHARS) {
+      break;
+    }
+    boundedFallback.push(word);
+  }
+  const candidate = clean(written ?? "");
+  const words = candidate === "" ? [] : candidate.split(" ");
+  return candidate !== "" &&
+    words.length <= THREAD_TITLE_MAX_WORDS &&
+    candidate.length <= THREAD_TITLE_MAX_CHARS
+    ? candidate
+    : boundedFallback.join(" ") || "Software task";
+}
+
+/**
+ * Names a thread with the small in-process text model. This is presentation,
+ * so every model failure falls back to deterministic, bounded text rather
+ * than delaying or failing the task that the thread follows.
+ */
+export async function summariseThreadTitle(
+  objective: string,
+  summariser: CatchUpSummariser | undefined,
+): Promise<string> {
+  const fallback = summariseObjective(objective);
+  if (summariser === undefined) {
+    return normaliseThreadTitle(undefined, fallback);
+  }
+  const prompt =
+    "Name this software-work thread. Reply with only a three-to-six-word " +
+    "noun phrase describing its topic, not a quote or restatement of the " +
+    "request. Use no label, bullets, quotation marks, or ending punctuation." +
+    `\n\nRequest:\n${objective}`;
+  try {
+    return normaliseThreadTitle(await summariser(prompt), fallback);
+  } catch {
+    return normaliseThreadTitle(undefined, fallback);
+  }
+}
+
 /**
  * Prefixes an objective with the role the mentioned agent currently holds in
  * this repository's channel, so the CLI prompt the agent actually receives
@@ -2518,23 +2587,23 @@ function defaultChatterFilter(): ChatterFilter {
 }
 
 /**
- * The local model that phrases the catch-up, or nothing.
+ * The local text model shared by catch-up prose and thread names, or nothing.
  *
  * Shares `COORD_LOCAL_TRIAGE` with the chatter filter: both are the same
  * bargain — a small model on the machine, no network, no vendor bill — so a
  * deployment that has turned local models off should not quietly keep one.
- * Switched off, this returns `undefined` and the digest keeps its
- * deterministic wording, which is what every failure produces anyway.
+ * Switched off, both callers keep their deterministic wording, which is what
+ * every failure produces anyway. One instance matters: loading a second ONNX
+ * session solely to name threads would double the memory cost of the feature.
  */
-function defaultCatchUpSummariser(): CatchUpSummariser | undefined {
+function defaultLocalSummariser(): LocalSummariser | undefined {
   const raw = process.env["COORD_LOCAL_TRIAGE"]?.trim().toLowerCase() ?? "";
   if (["0", "false", "off", "no"].includes(raw)) {
     return undefined;
   }
-  const local = createLocalSummariser({
+  return createLocalSummariser({
     budgetMs: CATCH_UP_SUMMARY_TIMEOUT_MS,
   });
-  return async (prompt) => await local.write(prompt);
 }
 
 /** The proposal out of an offer message, or nothing if this is not one. */
@@ -3640,6 +3709,14 @@ export interface ApiGatewayOptions {
    */
   catchUpSummariser?: CatchUpSummariser;
   /**
+   * Writes compact thread names with the local text model.
+   *
+   * Defaults to the same in-process model as catch-up prose and follows the
+   * same `COORD_LOCAL_TRIAGE` switch. Injectable so tests never load ONNX or
+   * download model artifacts for an unrelated channel assertion.
+   */
+  threadTitleSummariser?: CatchUpSummariser;
+  /**
    * Absolute origin this deployment is reached at, used to build links that
    * travel outside the browser. Defaults to `COORD_PUBLIC_URL`, and failing
    * that to the `Host` of the request that asked for the link.
@@ -4267,6 +4344,8 @@ export class ApiGateway {
   private readonly chatterFilter: ChatterFilter;
   /** The local model that phrases the catch-up, when the deployment has one. */
   private readonly catchUpSummariser: CatchUpSummariser | undefined;
+  /** The local model that names task threads, when the deployment has one. */
+  private readonly threadTitleSummariser: CatchUpSummariser | undefined;
   /** Configured origin for links that leave the browser, or "" to infer one. */
   private readonly publicUrl: string;
 
@@ -4279,8 +4358,22 @@ export class ApiGateway {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
     this.chatterFilter = options.chatterFilter ?? defaultChatterFilter();
-    this.catchUpSummariser =
-      options.catchUpSummariser ?? defaultCatchUpSummariser();
+    const localSummariser =
+      options.catchUpSummariser === undefined ||
+      options.threadTitleSummariser === undefined
+        ? defaultLocalSummariser()
+        : undefined;
+    const catchUpWriter =
+      localSummariser === undefined
+        ? undefined
+        : async (prompt: string) => await localSummariser.write(prompt);
+    const titleWriter =
+      localSummariser === undefined
+        ? undefined
+        : async (prompt: string) => await localSummariser.write(prompt, 24);
+    this.catchUpSummariser = options.catchUpSummariser ?? catchUpWriter;
+    this.threadTitleSummariser =
+      options.threadTitleSummariser ?? titleWriter;
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
     if (!Number.isSafeInteger(this.bodyLimit) || this.bodyLimit < 1) {
       throw new RangeError("Request body limit must be a positive integer");
@@ -12434,6 +12527,20 @@ export class ApiGateway {
         : threadDetail === undefined
           ? channelMemo
           : `${channelMemo}\n\n${threadDetail}`;
+    // Keep presentation input separate from the execution objective. The
+    // latter gains role text, attachment paths and coordinator directives;
+    // feeding those to a title model is how an internal instruction becomes
+    // the name people see in the thread library.
+    const visibleObjective =
+      (input.objective ?? withoutMentions(content)) || content;
+    // Only a new thread needs a name. A continuation keeps the subject its
+    // participants already chose, and `/plan` gets its title from the deeper
+    // repository-aware plan below. Started before task submission so local
+    // generation overlaps the durable writes without standing in their way.
+    const titlePromise =
+      continuing === undefined && input.planOnly !== true
+        ? summariseThreadTitle(visibleObjective, this.threadTitleSummariser)
+        : undefined;
     // A new task hangs directly off the request that caused it. If an internal
     // caller ever has no posted request, persist the request itself as the
     // root instead of manufacturing an agent acknowledgement.
@@ -12519,9 +12626,7 @@ export class ApiGateway {
         objective: withRoleContext(
           candidate.role,
           [
-            await this.describeAttachments(
-              (input.objective ?? withoutMentions(content)) || content,
-            ),
+            await this.describeAttachments(visibleObjective),
             ANSWER_NOT_STATUS_DIRECTIVE,
             ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
             ...(input.forceQuestion === true ? [FORCE_QUESTION_MARKER] : []),
@@ -12592,18 +12697,30 @@ export class ApiGateway {
           occurredAt: new Date().toISOString(),
         });
       }
-      // Inside the thread, not beside it: the channel already says who took
-      // this, and the detail belongs where somebody following the work will
-      // look for it.
-      // The thread gets a name and the agent's own opening intent, both
-      // from one call so the wait is paid once. A task id says nothing to the
-      // person who asked; "Task: architecture for chess" does.
       // Which work this thread is the story of. Recorded rather than only
       // remembered, so the file summary hanging off it stays attributable
       // after the process that watched the run has gone.
       await this.options.store
         .setChannelMessageTask(repositoryId, threadRootId, task.id)
         .catch(() => undefined);
+      // A title is presentation, not part of execution. Persist it as the
+      // existing `Task:` reply as soon as the local model (or its fallback)
+      // answers, independently of provider opening thoughts and independently
+      // of whether a compact task ever grows a narrated transcript.
+      if (titlePromise !== undefined) {
+        void titlePromise
+          .then(async (title) => {
+            await this.appendChannelThreadReply({
+              projectId,
+              repositoryId,
+              messageId: threadRootId,
+              authorId: `${candidate.userId}:${candidate.provider}`,
+              content: `Task: ${title}`,
+              kind: "progress",
+            });
+          })
+          .catch(() => undefined);
+      }
       // Confirm the handoff in the task's thread as soon as the task exists.
       // This is deliberately a fixed sentence rather than another provider
       // call: the acknowledgement is useful only when it arrives immediately,
@@ -12640,20 +12757,17 @@ export class ApiGateway {
       // picked up. The opening is a caption on the run, so the run comes
       // first and the caption catches up.
       //
-      // `planOnly` skips the caption entirely, and is the one path that
-      // waits. Nothing runs there until a person says so, so there is no work
-      // for a caption to catch up with — and what that person needs is not
-      // three lines of first impressions from the cheap ceremonial model with
-      // no sight of the repository, it is {@link deepPlan}: the same agent,
-      // its own model, the code open in front of it, and a document at the
-      // end worth deciding from.
+      // `planOnly` skips these first impressions entirely, and is the one
+      // path that waits. Nothing runs there until a person says so, so there
+      // is no work for a caption to catch up with — and what that person needs
+      // is not three lines of first impressions from the cheap ceremonial
+      // model with no sight of the repository, it is {@link deepPlan}: the
+      // same agent, its own model, the code open in front of it, and a
+      // document at the end worth deciding from.
       const openingPromise =
         input.planOnly === true || task.afterTaskId !== undefined
-          ? Promise.resolve({
-              title: summariseObjective(task.objective),
-              thoughts: [],
-            })
-          : this.planOpening(candidate, task.objective);
+          ? Promise.resolve([] as string[])
+          : this.planOpening(candidate, visibleObjective);
       if (input.planOnly === true) {
         // Planned, and stopped there.
         //
@@ -12780,12 +12894,10 @@ export class ApiGateway {
         // From zero: the task is new, so nothing already in the log carries
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
-        // Nothing held yet. The title and the agent's opening intent are a
-        // caption on a run that has already started, and waiting for them here
-        // put a two-minute model call in front of the person who asked. They
-        // are pushed in below when they land; if the run says something
-        // substantive first, they simply arrive with the next line rather than
-        // holding one up.
+        // Nothing held yet. The agent's opening intent is a caption on a run
+        // that has already started, and waiting for it here put a two-minute
+        // provider call in front of the person who asked. The locally written
+        // title is persisted separately and never waits for this narration.
         pending: [],
         // Held with the narration for the reason above: posting it now would
         // open a thread this task may never deserve.
@@ -12801,12 +12913,12 @@ export class ApiGateway {
       // has already done its job by then, so replace that same reply with the
       // agent's actual intent rather than leaving a generic promise above a
       // duplicate progress paragraph. If no usable intent arrives, the fixed
-      // line remains and the thoughts can still accompany the eventual task
-      // title when narration opens.
+      // line remains and the thoughts can still accompany narration when it
+      // opens. Thread naming is deliberately absent from this provider path.
       void openingPromise
-        .then(async (opening) => {
+        .then(async (thoughts) => {
           let contextualized = false;
-          const intent = opening.thoughts.join("\n").trim();
+          const intent = thoughts.join("\n").trim();
           if (acknowledgement !== undefined && intent.length > 0) {
             contextualized = await this.updateChannelThreadReplyContent({
               projectId,
@@ -12819,10 +12931,7 @@ export class ApiGateway {
               .catch(() => false);
           }
           const watched = this.watchedChannelTasks.get(task.id);
-          watched?.pending.unshift(
-            `Task: ${opening.title}`,
-            ...(contextualized ? [] : opening.thoughts),
-          );
+          watched?.pending.unshift(...(contextualized ? [] : thoughts));
         })
         .catch(() => undefined);
     } catch (error) {
@@ -12969,25 +13078,22 @@ export class ApiGateway {
   }
 
   /**
-   * The thread's name and the agent's opening intent.
+   * The agent's opening intent.
    *
-   * One call for both, because each costs the same wait and the person is
-   * watching an empty thread until it lands. The intent is the agent's own —
-   * what it will inspect, change, and verify — rather than a description of
-   * the pipeline, which is what the audit narration afterwards already
-   * provides. Falls back to the request itself as a title and no intent,
-   * which is worse but never blank.
+   * The thread name is written independently by the local model. This paid
+   * provider call is only the agent's own account of what it will inspect,
+   * change, and verify, rather than a description of the pipeline that the
+   * audit narration afterwards already provides.
    */
   private async planOpening(
     candidate: ChannelMentionCandidate,
     objective: string,
-  ): Promise<{ title: string; thoughts: string[] }> {
+  ): Promise<string[]> {
     const answer = await this.askAgent(
       candidate,
       "You have just been asked to do the following in a software project.\n" +
-        "Reply with a short title on the first line — under six words, no " +
-        "punctuation at the end — then one or two concise first-person lines " +
-        "that tell the person what you are going to inspect, change, and " +
+        "Reply with one or two concise first-person lines that tell the " +
+        "person what you are going to inspect, change, and " +
         "verify. Be specific to their request, use future-tense action rather " +
         "than restating the request, and use no bullets or numbering.\n\nRequest: " +
         objective,
@@ -12995,33 +13101,27 @@ export class ApiGateway {
       true,
     );
     if (answer.text === undefined) {
-      return { title: summariseObjective(objective), thoughts: [] };
+      return [];
     }
-    const lines = answer.text
+    return answer.text
       .split("\n")
       .map((line) => line.replace(/^[-*\d.\s]+/u, "").trim())
-      .filter((line) => line.length > 0);
-    const [title, ...thoughts] = lines;
-    return {
-      title:
-        title === undefined || title.length > 80
-          ? summariseObjective(objective)
-          : title,
+      .filter((line) => line.length > 0)
       // Bounded: a model that ignores "one or two lines" must not turn the
       // thread into an essay before the work has even started.
-      thoughts: thoughts.slice(0, 4).map((line) => line.slice(0, 300)),
-    };
+      .slice(0, 4)
+      .map((line) => line.slice(0, 300));
   }
 
   /**
    * The plan `/plan` was asked for: thought about properly, and written down.
    *
-   * `planOpening` is a caption — a title and three lines of first impressions,
-   * run on the cheap ceremonial model at low effort with no sight of the
-   * repository. It is the right shape for a run that is already underway and
-   * the wrong one for the only gate in this system that comes *before* the
-   * work is paid for: somebody deciding whether to spend an agent on this
-   * deserves more than a restatement of their own request.
+   * `planOpening` is a few lines of first impressions, run on the cheap
+   * ceremonial model at low effort with no sight of the repository. It is the
+   * right shape for a run that is already underway and the wrong one for the
+   * only gate in this system that comes *before* the work is paid for:
+   * somebody deciding whether to spend an agent on this deserves more than a
+   * restatement of their own request.
    *
    * So this call is the opposite of ceremonial in both senses that matter.
    * `ceremonial` is left off, so it runs on the account's own model at the
