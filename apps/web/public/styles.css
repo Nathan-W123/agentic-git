@@ -1087,6 +1087,18 @@ svg.ui-icon {
   background: var(--text-4);
 }
 
+/* The same two meanings the roster's own dots carry, at face size: red is a
+   private agent, grey is one that has run out of usage. See `.status-personal`
+   and `.status-exhausted` — a colour must not say one thing on a row and
+   another on the face in it. */
+.presence-personal {
+  background: var(--danger, #ef4444);
+}
+
+.presence-exhausted {
+  background: var(--text-4);
+}
+
 .dot {
   width: 7px;
   height: 7px;
@@ -5175,7 +5187,7 @@ button.chip.lg:hover {
   flex: none;
 }
 
-/* One dot, four meanings, all of them stated here rather than computed in the
+/* One dot, five meanings, all of them stated here rather than computed in the
    two rosters that draw it — people and agents must not drift apart on what a
    colour means. The ring is the panel background, so the dot reads as sitting
    on the avatar rather than punched out of it. */
@@ -5210,11 +5222,20 @@ button.chip.lg:hover {
   background: var(--warn, #f59e0b);
 }
 
-/* Red, twice over: a person who is not here, and an agent only its owner can
-   task. Both are "do not expect an answer from this one right now". */
+/* Red, twice over: a person who is not here, and a private agent — one only
+   its owner can task. Both are "do not expect an answer from this one right
+   now". */
 .status-personal,
 .status-away {
   background: var(--danger, #ef4444);
+}
+
+/* Grey: an agent whose account has spent its usage limit. It is connected and
+   it is not private; there is simply nothing left for it to work with until
+   the window resets, which is why it is drawn as absent rather than as a
+   fault. */
+.status-exhausted {
+  background: var(--text-4, #9ca3af);
 }
 
 .rr-badge {
@@ -6361,7 +6382,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 /* The dot means what it means everywhere else — the palette lives in
-   `.status-dot` and its four colours, and only the placement changes: pinned
+   `.status-dot` and its colours, and only the placement changes: pinned
    to the corner of a face, and simply sitting in a line of text here. */
 .pcard-status .status-dot {
   position: static;
@@ -9121,6 +9142,16 @@ body.resizing-panel {
 /* An agent that is not connected is not moving. */
 .agent-face[data-presence="offline"] svg,
 .agent-face[data-presence="offline"] svg * {
+  animation: none;
+}
+
+/* Nor is one that cannot be tasked from here, or that has no usage left —
+   both used to be drawn as offline and inherited this stillness from the rule
+   above; they have their own dot colour now and must keep it. */
+.agent-face[data-presence="personal"] svg,
+.agent-face[data-presence="personal"] svg *,
+.agent-face[data-presence="exhausted"] svg,
+.agent-face[data-presence="exhausted"] svg * {
   animation: none;
 }
 

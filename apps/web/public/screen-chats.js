@@ -1213,7 +1213,8 @@ function isAuditor(agent) {
 const AGENT_STATUS_TITLE = {
   working: "Working now",
   idle: "Idle",
-  personal: "Personal agent — only its owner can task it here",
+  personal: "Private agent — only its owner can task it here",
+  exhausted: "Out of usage — its account's limit is spent",
 };
 
 /**

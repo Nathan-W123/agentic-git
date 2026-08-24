@@ -1161,6 +1161,24 @@ export function agentDoodle(kind) {
 }
 
 /**
+ * The dot a face carries for each status the roster can compute.
+ *
+ * The badge on a face and the badge in a roster row are the same statement
+ * about the same agent, so they carry the same colours: green working, amber
+ * idle, red for an agent only its owner can task, grey for one whose account
+ * has no usage left (see `.status-*` in styles.css, which these mirror).
+ * Anything unrecognised is offline, which is the honest answer for a face
+ * drawn from a connection record rather than from a computed status.
+ */
+const FACE_PRESENCE = {
+  working: "online",
+  online: "online",
+  idle: "idle",
+  personal: "personal",
+  exhausted: "exhausted",
+};
+
+/**
  * One agent, as its owner's colour.
  *
  * `agent.color` is the owner's identity colour; callers pass the colour of
@@ -1169,12 +1187,12 @@ export function agentDoodle(kind) {
 export function agentFace(agent, size = 34, indicator = {}) {
   const kind = agentKindOf(agent?.provider ?? agent?.id);
   const status = indicator.status ?? agent?.presence ?? "offline";
-  const presence =
-    status === "working" || status === "online"
-      ? "online"
-      : status === "idle"
-        ? "idle"
-        : "offline";
+  // `Object.hasOwn` rather than a bare lookup: `status` reaches here from a
+  // server-supplied record, and a name off the prototype ("constructor") would
+  // otherwise be stringified straight into the class and the attribute.
+  const presence = Object.hasOwn(FACE_PRESENCE, status)
+    ? FACE_PRESENCE[status]
+    : "offline";
   const progress = Number(indicator.progress);
   const working = Number.isFinite(progress);
   const color = safeColor(agent?.color) ?? "var(--accent)";

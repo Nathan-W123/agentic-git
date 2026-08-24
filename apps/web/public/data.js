@@ -3587,17 +3587,61 @@ export function dmUnreadFrom(userId) {
 }
 
 /**
- * What an agent's dot should say: working, idle, or personal.
+ * Where this agent's usage report is filed, for a caller that only has the
+ * agent record.
  *
- * Working wins over personal. Both are true of a personal agent that is
- * mid-task, and which one to show is a question of what the reader is looking
- * for — "is anything happening" is the more urgent of the two, and the one
- * they cannot find out any other way. Personal is visible in the role line
- * regardless.
+ * The vendor and the owner are resolved exactly as `usageProviderId` and
+ * `usageOwner` in screen-chats.js resolve them for the fetch — the two must
+ * agree or the dot would read a key nothing was ever stored under.
+ */
+function agentUsageKey(agent) {
+  const provider =
+    agent?.provider ?? String(agent?.id ?? "").split(":").at(-1) ?? "";
+  return usageKey(
+    provider,
+    agent?.mine === true ? undefined : (agent?.userId ?? undefined),
+  );
+}
+
+/**
+ * Whether this agent's account has nothing left to spend.
+ *
+ * Read from the usage report the profile card already fetches rather than
+ * from a request of its own: the figure costs a CLI invocation server-side
+ * (see `ensureProviderUsage`), so the dot answers once the report is in hand
+ * and says nothing before that. Any single window at its ceiling is enough —
+ * a spent five-hour limit stops the work as surely as a spent weekly one.
+ */
+export function agentOutOfUsage(agent) {
+  const report = state.providerUsage[agentUsageKey(agent)];
+  if (
+    report === undefined ||
+    report.loading === true ||
+    report.unavailableReason !== undefined
+  ) {
+    return false;
+  }
+  return (report.windows ?? []).some(
+    (window) => (Number(window?.percentUsed) || 0) >= 100,
+  );
+}
+
+/**
+ * What an agent's dot should say: working, out of usage, personal, or idle.
+ *
+ * Working wins over the rest. Several are true at once of a personal agent
+ * that is mid-task, and which one to show is a question of what the reader is
+ * looking for — "is anything happening" is the most urgent of them, and the
+ * one they cannot find out any other way. Out of usage comes next, because it
+ * is the answer to "will @mentioning this accomplish anything" and nothing
+ * else on the row says it. Personal is visible in the role line regardless.
  */
 export function agentStatus(agent, repositoryId) {
   if (agentIsWorking(agent, repositoryId)) {
     return "working";
+  }
+  if (agentOutOfUsage(agent)) {
+    return "exhausted";
   }
   return agent.visibility === "personal" ? "personal" : "idle";
 }

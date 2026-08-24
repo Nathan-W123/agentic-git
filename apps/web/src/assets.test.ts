@@ -1835,6 +1835,14 @@ type LivenessModule = {
   state: {
     tasks: LivenessTask[];
     agentBusy: Record<string, { expiresAt: number; at: number }>;
+    providerUsage: Record<
+      string,
+      {
+        loading?: boolean;
+        unavailableReason?: string;
+        windows?: { label?: string; percentUsed?: number }[];
+      }
+    >;
   };
   agentStatus: (
     agent: {
@@ -1988,6 +1996,93 @@ test("a teammate's busy frame leaves this account's same-provider agent idle", a
       "repo",
     ),
     "working",
+  );
+});
+
+test("red is a private agent and grey is an account with nothing left", async () => {
+  const data = await liveness();
+  data.state.tasks = [];
+  data.state.agentBusy = {};
+  data.state.providerUsage = {};
+
+  const mine = { ...LIVENESS_AGENT, mine: true, visibility: "personal" };
+  assert.equal(data.agentStatus(mine, "repo"), "personal");
+
+  // Grey is a spent limit, read from the report the profile card fetches and
+  // filed under the same key: the bare vendor for one's own agent.
+  data.state.providerUsage = {
+    openai: { windows: [{ label: "Weekly", percentUsed: 100 }] },
+  };
+  assert.equal(data.agentStatus(mine, "repo"), "exhausted");
+
+  // A teammate's agent of the same vendor reads its owner's figures, not
+  // this account's — the key carries the owner for exactly that reason.
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "idle");
+  data.state.providerUsage["u1:openai"] = {
+    windows: [
+      { label: "5-hour", percentUsed: 42 },
+      { label: "Weekly", percentUsed: 100 },
+    ],
+  };
+  assert.equal(
+    data.agentStatus(LIVENESS_AGENT, "repo"),
+    "exhausted",
+    "any one window at its ceiling stops the work",
+  );
+
+  // A question that has not been answered is not an answer: a report still
+  // in flight, or one that could not be read, must not grey the dot.
+  data.state.providerUsage = { openai: { loading: true } };
+  assert.equal(data.agentStatus(mine, "repo"), "personal");
+  data.state.providerUsage = {
+    openai: { unavailableReason: "No usage reported." },
+  };
+  assert.equal(data.agentStatus(mine, "repo"), "personal");
+
+  // Working still wins over both. What is happening now is the thing the
+  // reader cannot find out any other way.
+  data.state.providerUsage = {
+    "u1:openai": { windows: [{ percentUsed: 100 }] },
+  };
+  data.state.tasks = [livenessTask()];
+  assert.equal(data.agentStatus(LIVENESS_AGENT, "repo"), "working");
+});
+
+test("a face and a roster row agree on what each dot colour means", async () => {
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+
+  // The face's badge is looked up from the status rather than folded into
+  // "offline", which is what used to paint a private agent grey.
+  assert.match(
+    ui,
+    /const presence = Object\.hasOwn\(FACE_PRESENCE, status\)\s*\n\s*\? FACE_PRESENCE\[status\]\s*\n\s*: "offline";/u,
+  );
+  assert.match(ui, /personal: "personal",/u);
+  assert.match(ui, /exhausted: "exhausted",/u);
+
+  // Red for private, grey for out of usage — in both dot vocabularies.
+  assert.match(
+    css,
+    /\.status-personal,\s*\n\.status-away \{\s*\n\s*background: var\(--danger/u,
+  );
+  assert.match(
+    css,
+    /\.status-exhausted \{\s*\n\s*background: var\(--text-4/u,
+  );
+  assert.match(
+    css,
+    /\.presence-personal \{\s*\n\s*background: var\(--danger/u,
+  );
+  assert.match(
+    css,
+    /\.presence-exhausted \{\s*\n\s*background: var\(--text-4\);/u,
+  );
+
+  // Neither new state moves, the way both did while they were drawn offline.
+  assert.match(
+    css,
+    /\.agent-face\[data-presence="personal"\] svg,[\s\S]{0,200}\.agent-face\[data-presence="exhausted"\] svg \* \{\s*\n\s*animation: none;/u,
   );
 });
 
