@@ -171,6 +171,12 @@ async function serve(
   // evicts the oldest — now for the first time actually reached, since the
   // instance outlives the call.
   const intelligence = new CodeIntelligenceService(repositories);
+  // Started now, while nothing is waiting on it. The parse threads cannot
+  // answer until they have loaded the TypeScript compiler, and paying for that
+  // inside the first index build makes that build slower than never threading
+  // at all — so it is paid here, at startup, against an idle process. A build
+  // that arrives before they are ready simply parses on its own thread.
+  void intelligence.warmUp();
   const overlays = new OverlayWorkspaceService(
     project,
     store,
