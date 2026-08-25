@@ -11268,6 +11268,44 @@ test("channel stats keep an inconsistent token report inside its own bounds", as
   assert.equal(response.data.tokensIncomplete, false);
 });
 
+test("a channel route will not read a repository from another project", async (t) => {
+  // The last two `/channel/*` routes that authorized the repository without
+  // checking it belongs to the project in the path. An organization role
+  // reaches every repository the organization has, so `authorizeRepository`
+  // alone lets any member name any repository under any project id — and
+  // `channel/stats` answers with that room's message counts and an
+  // afternoon's token spend.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "channel-tenancy");
+  // A second project in the same organization, so the caller is genuinely
+  // authorized and only the pairing is wrong.
+  const elsewhere = await runtime.store.createProject({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    slug: "elsewhere",
+    name: "Elsewhere",
+  });
+
+  const stats = await owner.request(
+    `/api/v1/projects/${elsewhere.id}/repositories/${repo}/channel/stats`,
+  );
+  assert.equal(stats.status, 404, JSON.stringify(stats.data));
+
+  const simplify = await owner.request(
+    `/api/v1/projects/${elsewhere.id}/repositories/${repo}/channel/replies/reply_1/simplify`,
+    { method: "POST", body: { text: "something long" } },
+  );
+  assert.equal(simplify.status, 404, JSON.stringify(simplify.data));
+
+  // The same calls under the project it really belongs to still work, or the
+  // guard would be a regression rather than a fix.
+  const paired = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/stats`,
+  );
+  assert.equal(paired.status, 200, JSON.stringify(paired.data));
+});
+
 test("a worker report without a fresh figure still separates cached context", () => {
   // Rollout reality: a worker built before the fresh field existed reports
   // the split and nothing else. Its total exceeding the two sides means the

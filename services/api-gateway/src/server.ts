@@ -8215,6 +8215,16 @@ export class ApiGateway {
         repositoryId,
         "view",
       );
+      // `authorizeRepository` proves the caller may reach this repository; it
+      // does not prove the repository is under the project in the path. An
+      // organization member reaches every repository their organization has,
+      // so without this the pair is unchecked and the id is simply resolved
+      // globally further down. Every other `/channel/*` route carries it.
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
       const body = objectBody(await this.readJson(request));
       const text = stringField(body["text"], "text", { max: 20_000 }) ?? "";
       if (text.trim().length === 0) {
@@ -8812,6 +8822,14 @@ export class ApiGateway {
         repositoryId,
         "view",
       );
+      // Same pairing check as every other `/channel/*` route. Message counts
+      // and an afternoon's token spend are exactly what a competitor would
+      // read off somebody else's room.
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
       // Counted in the store, not measured off a page. Reading the newest
       // two hundred roots and taking their length reported "200+" for every
       // busier room, which is the one number a stats line must not guess at.
