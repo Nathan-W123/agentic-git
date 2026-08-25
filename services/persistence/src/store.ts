@@ -1524,6 +1524,30 @@ export interface CoordinationStore {
   acceptInvitation(id: string, userId: UserId, at: string): Promise<boolean>;
   revokeInvitation(id: string, at: string): Promise<void>;
 
+  /**
+   * Runs a body with every write inside one transaction.
+   *
+   * The store had no way to compose one. Transactions existed in both SQL
+   * backends and were private to single methods, so anything built from
+   * several calls — creating an account is five — was five separate commits
+   * with no rollback between them. A failure partway left the earlier ones
+   * durable, which is how a sign-up came to leave a user row that could sign
+   * in and belonged to nothing.
+   *
+   * The body is handed the same store back. Calls made on it inside the body
+   * join the transaction; a call made on any other reference does not, so
+   * take the argument rather than closing over the outer store.
+   *
+   * Nesting joins rather than throwing, so a composite method that opens its
+   * own transaction is safe to call from inside a body. Rollback then belongs
+   * to the outermost call, which is the only one that can honour it.
+   *
+   * The in-memory store keeps this contract by snapshotting, which is
+   * sufficient for a single process and is not durable — it is a test and
+   * local-development backend, and this does not change that.
+   */
+  runInTransaction<T>(body: (store: CoordinationStore) => Promise<T>): Promise<T>;
+
   createSignupIntent(intent: SignupIntentRecord): Promise<void>;
   getSignupIntent(id: string): Promise<SignupIntentRecord | undefined>;
   /** The sign-up that minted an organization id, for the webhook that lands. */

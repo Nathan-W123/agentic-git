@@ -1014,6 +1014,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   /* ---------------------------------------------------- password resets ---- */
 
   private readonly signupIntents = new Map<string, SignupIntentRecord>();
+  /** Held while a `runInTransaction` body runs, for rollback. */
+  private transactionSnapshot: Map<string, Map<unknown, unknown>> | undefined;
 
   public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {
     this.signupIntents.set(intent.id, { ...intent });
@@ -2974,6 +2976,62 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       paused,
       updatedAt: new Date().toISOString(),
     });
+  }
+
+  public async runInTransaction<T>(
+    body: (store: CoordinationStore) => Promise<T>,
+  ): Promise<T> {
+    // Snapshot and restore, which is what "transaction" can mean for a store
+    // that is a set of maps in one process. It gives the same guarantee the
+    // SQL backends give a caller — a body that throws leaves nothing behind —
+    // and it is not durable, which this backend never was.
+    //
+    // Nesting joins, matching the SQL backends: only the outermost call holds
+    // a snapshot, so only it can roll back.
+    if (this.transactionSnapshot !== undefined) {
+      return await body(this);
+    }
+    const snapshot = new Map<string, Map<unknown, unknown>>();
+    for (const [name, map] of this.mutableCollections()) {
+      snapshot.set(name, new Map(map));
+    }
+    this.transactionSnapshot = snapshot;
+    try {
+      const result = await body(this);
+      return result;
+    } catch (error) {
+      for (const [name, map] of this.mutableCollections()) {
+        const saved = snapshot.get(name);
+        if (saved === undefined) {
+          continue;
+        }
+        map.clear();
+        for (const [key, value] of saved) {
+          map.set(key, value);
+        }
+      }
+      throw error;
+    } finally {
+      this.transactionSnapshot = undefined;
+    }
+  }
+
+  /**
+   * The maps a rollback has to put back.
+   *
+   * Listed rather than discovered, because a map this misses is one a failed
+   * transaction would leave written — so the list is the contract, and a new
+   * collection has to be added to it deliberately.
+   */
+  private mutableCollections(): Array<[string, Map<unknown, unknown>]> {
+    return [
+      ["users", this.users as unknown as Map<unknown, unknown>],
+      ["organizations", this.organizations as unknown as Map<unknown, unknown>],
+      ["memberships", this.memberships as unknown as Map<unknown, unknown>],
+      ["projects", this.projects as unknown as Map<unknown, unknown>],
+      ["subscriptions", this.subscriptions as unknown as Map<unknown, unknown>],
+      ["signupIntents", this.signupIntents as unknown as Map<unknown, unknown>],
+    ];
   }
 
   public async close(): Promise<void> {

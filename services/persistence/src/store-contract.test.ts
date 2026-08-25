@@ -2569,6 +2569,96 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a transaction that throws leaves nothing behind`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      // The guarantee the store could not previously offer. Creating an
+      // account is five writes; without this they were five commits, and a
+      // failure partway left a user able to sign in and belonging to nothing.
+      await assert.rejects(
+        async () =>
+          await store.runInTransaction(async (inner) => {
+            const organization = await inner.createOrganization({
+              slug: "rolled-back",
+              name: "Rolled back",
+            });
+            const user = await inner.createUser({
+              email: "rolled.back@example.com",
+              displayName: "Rolled Back",
+              passwordDigest: "digest",
+              systemAdmin: false,
+            });
+            await inner.saveMembership({
+              organizationId: organization.id,
+              userId: user.id,
+              role: "owner",
+            });
+            throw new Error("the database went away");
+          }),
+        /database went away/u,
+      );
+
+      // Not one of the three survives — in particular the address is free, so
+      // whoever it was can simply sign up again.
+      assert.equal(
+        await store.getUserByEmail("rolled.back@example.com"),
+        undefined,
+      );
+      assert.equal(
+        (await store.listOrganizations()).some(
+          (entry) => entry.slug === "rolled-back",
+        ),
+        false,
+      );
+
+      // And a body that returns commits, so the transaction is not simply
+      // discarding everything.
+      const kept = await store.runInTransaction(async (inner) => {
+        const organization = await inner.createOrganization({
+          slug: "kept",
+          name: "Kept",
+        });
+        const user = await inner.createUser({
+          email: "kept@example.com",
+          displayName: "Kept",
+          passwordDigest: "digest",
+          systemAdmin: false,
+        });
+        await inner.saveMembership({
+          organizationId: organization.id,
+          userId: user.id,
+          role: "owner",
+        });
+        return organization.id;
+      });
+      assert.deepEqual(
+        (
+          await store.listOrganizations(
+            (await store.getUserByEmail("kept@example.com"))?.id ?? "",
+          )
+        ).map((entry) => entry.id),
+        [kept],
+      );
+
+      // Nesting joins the outer transaction rather than opening a second, so
+      // a composite store method is safe to call from inside a body.
+      await store.runInTransaction(async (outer) => {
+        await outer.runInTransaction(async (nested) => {
+          await nested.createOrganization({ slug: "nested", name: "Nested" });
+        });
+      });
+      assert.equal(
+        (await store.listOrganizations()).some(
+          (entry) => entry.slug === "nested",
+        ),
+        true,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a signup intent settles exactly once`, async () => {
     const { store, cleanup } = await backend.open();
     try {

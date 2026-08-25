@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import pg from "pg";
 
 import {
@@ -206,6 +208,8 @@ const MIGRATE_LOCK_KEY = 810275;
  */
 export class PostgresCoordinationStore implements CoordinationStore {
   private readonly pool: pg.Pool;
+  /** The connection a `runInTransaction` body must use, while one is open. */
+  private readonly ambientClient = new AsyncLocalStorage<PoolClient>();
   /** Migrations run lazily; every public method awaits this first. */
   private readonly ready: Promise<void>;
 
@@ -286,12 +290,44 @@ export class PostgresCoordinationStore implements CoordinationStore {
     }
   }
 
+  public async runInTransaction<T>(
+    body: (store: CoordinationStore) => Promise<T>,
+  ): Promise<T> {
+    if (this.ambientClient.getStore() !== undefined) {
+      return await body(this);
+    }
+    await this.ready;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await this.ambientClient.run(
+        client,
+        async () => await body(this),
+      );
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original failure matters more than a rollback on a dead socket.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private async query(
     statement: string,
     values: unknown[] = [],
   ): Promise<QueryResult> {
     await this.ready;
-    return await this.pool.query(statement, values);
+    // Inside `runInTransaction` every statement has to travel the one
+    // connection holding the transaction, or it commits independently of it
+    // — which is the bug this exists to remove, reintroduced one level down.
+    const client = this.ambientClient.getStore();
+    return await (client ?? this.pool).query(statement, values);
   }
 
   private async row(
@@ -312,6 +348,17 @@ export class PostgresCoordinationStore implements CoordinationStore {
     body: (client: PoolClient) => Promise<T>,
     options: { serialize?: boolean } = {},
   ): Promise<T> {
+    // Already inside one: join it rather than opening a second on a different
+    // connection, which would deadlock against the lock the outer one holds.
+    // Rollback stays with the outermost caller, the only one that can honour
+    // it.
+    const ambient = this.ambientClient.getStore();
+    if (ambient !== undefined) {
+      if (options.serialize === true) {
+        await ambient.query(WRITE_LOCK);
+      }
+      return await body(ambient);
+    }
     await this.ready;
     const client = await this.pool.connect();
     try {

@@ -170,6 +170,8 @@ function optionalJson<T>(row: Row, column: string): T | undefined {
  */
 export class SqliteCoordinationStore implements CoordinationStore {
   private readonly db: DatabaseSync;
+  /** Depth of open transactions; SQLite cannot nest a real one. */
+  private transactionDepth = 0;
 
   private constructor(db: DatabaseSync) {
     this.db = db;
@@ -221,7 +223,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       if (migration.version <= applied) {
         continue;
       }
-      this.db.exec("BEGIN");
+      const owned = this.begin();
       try {
         for (const statement of migration.statements) {
           this.db.exec(statement);
@@ -229,9 +231,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
         this.db
           .prepare("INSERT INTO schema_version (version) VALUES (?)")
           .run(migration.version);
-        this.db.exec("COMMIT");
+        this.commit(owned);
       } catch (error) {
-        this.db.exec("ROLLBACK");
+        this.rollback(owned);
         throw error;
       }
     }
@@ -816,7 +818,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     // BEGIN IMMEDIATE takes the write lock up front, so two workers polling at
     // the same moment serialise here rather than both reading the same
     // pending row and racing to claim it.
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       const now = new Date();
       const nowIso = now.toISOString();
@@ -881,7 +883,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         )
         .get(...values) as Row | undefined;
       if (row === undefined) {
-        this.db.exec("COMMIT");
+        this.commit(owned);
         return undefined;
       }
 
@@ -926,10 +928,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
           lease.expiresAt,
           lease.heartbeatAt,
         );
-      this.db.exec("COMMIT");
+      this.commit(owned);
       return { lease, task: { ...task, status: "claimed", claimedAt: lease.issuedAt } };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -985,13 +987,13 @@ export class SqliteCoordinationStore implements CoordinationStore {
     // BEGIN IMMEDIATE takes the write lock before the admitted set is read, so
     // two workers arbitrating overlapping plans serialise here: the second
     // sees the first's admission and is told its view was stale.
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       const row = this.db
         .prepare("SELECT * FROM work_leases WHERE id = ? AND status = 'active'")
         .get(input.leaseId) as Row | undefined;
       if (row === undefined) {
-        this.db.exec("COMMIT");
+        this.commit(owned);
         return { outcome: "lease_lost" };
       }
       const lease = this.toWorkLease(row);
@@ -1000,7 +1002,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         lease.plan !== undefined &&
         planAdmissionApproved(lease.plan.admission)
       ) {
-        this.db.exec("COMMIT");
+        this.commit(owned);
         return { outcome: "already_admitted", lease };
       }
       const approvedLeaseIds = this.approvedPlanLeaseIds(
@@ -1008,19 +1010,19 @@ export class SqliteCoordinationStore implements CoordinationStore {
         lease.id,
       );
       if (!sameLeaseIdSet(approvedLeaseIds, input.observedApprovedLeaseIds)) {
-        this.db.exec("COMMIT");
+        this.commit(owned);
         return { outcome: "stale", approvedLeaseIds };
       }
       this.db
         .prepare("UPDATE work_leases SET plan_json = ? WHERE id = ?")
         .run(JSON.stringify(input.submission), lease.id);
-      this.db.exec("COMMIT");
+      this.commit(owned);
       return {
         outcome: "saved",
         lease: { ...lease, plan: structuredClone(input.submission) },
       };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -1070,19 +1072,19 @@ export class SqliteCoordinationStore implements CoordinationStore {
     at: string,
     detail?: string,
   ): Promise<boolean> {
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       const row = this.db
         .prepare("SELECT * FROM work_leases WHERE id = ? AND status = 'active'")
         .get(id) as Row | undefined;
       if (row === undefined) {
-        this.db.exec("COMMIT");
+        this.commit(owned);
         return false;
       }
       const lease = this.toWorkLease(row);
       const lapsed = lease.expiresAt <= at;
       if (status === "expired" ? !lapsed : lapsed) {
-        this.db.exec("COMMIT");
+        this.commit(owned);
         return false;
       }
       this.db
@@ -1102,10 +1104,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
           )
           .run(lease.taskId);
       }
-      this.db.exec("COMMIT");
+      this.commit(owned);
       return true;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -1740,7 +1742,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
    * working state belongs to the repository it works.
    */
   public async removeRepository(id: string): Promise<void> {
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       this.db
         .prepare(
@@ -1839,9 +1841,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare("DELETE FROM submitted_tasks WHERE repository_id = ?")
         .run(id);
       this.db.prepare("DELETE FROM repositories WHERE id = ?").run(id);
-      this.db.exec("COMMIT");
+      this.commit(owned);
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -1906,7 +1908,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       runId: undefined,
     };
 
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       if (task.afterTaskId === undefined && input.queueAfterCurrent === true) {
         const predecessor = this.db
@@ -1963,9 +1965,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
           task.effort ?? null,
           task.afterTaskId ?? null,
         );
-      this.db.exec("COMMIT");
+      this.commit(owned);
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
     return task;
@@ -2000,7 +2002,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     repositoryId: string,
     projectId?: ProjectId,
   ): Promise<SubmittedTask[]> {
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       const projectClause =
         projectId === undefined ? "" : " AND project_id = ?";
@@ -2028,14 +2030,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
       for (const row of rows) {
         update.run(claimedAt, text(row, "id"));
       }
-      this.db.exec("COMMIT");
+      this.commit(owned);
       return rows.map((row) => ({
         ...this.toSubmittedTask(row),
         status: "claimed" as const,
         claimedAt,
       }));
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -2336,7 +2338,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       plan: structuredClone(input.plan),
       createdAt: new Date().toISOString(),
     };
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       this.db
         .prepare(
@@ -2363,10 +2365,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
       if (updated.changes === 0) {
         throw new Error(`Unknown task ${taskId} in run ${runId}`);
       }
-      this.db.exec("COMMIT");
+      this.commit(owned);
       return revision;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -2600,7 +2602,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async saveChangeSet(runId: string, changeSet: ChangeSet): Promise<void> {
-    this.db.exec("BEGIN");
+    const owned = this.begin();
     try {
       const inserted = this.db
         .prepare(
@@ -2642,9 +2644,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
           );
         });
       }
-      this.db.exec("COMMIT");
+      this.commit(owned);
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -2831,7 +2833,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     };
 
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       const previousHash = this.latestChainHash();
       const payloadHash = hashAuditPayload(event);
@@ -2853,9 +2855,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
           previousHash,
           chainHash(previousHash, payloadHash),
         );
-      this.db.exec("COMMIT");
+      this.commit(owned);
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
 
@@ -3016,7 +3018,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       );
     }
 
-    this.db.exec("BEGIN IMMEDIATE");
+    const owned = this.begin();
     try {
       const clauses: string[] = [];
       const values: (string | number)[] = [];
@@ -3040,7 +3042,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         )
         .all(...values) as Row[];
       if (rows.length === 0) {
-        this.db.exec("COMMIT");
+        this.commit(owned);
         return undefined;
       }
 
@@ -3114,7 +3116,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db
         .prepare("DELETE FROM audit_events WHERE sequence <= ?")
         .run(checkpoint.throughSequence);
-      this.db.exec("COMMIT");
+      this.commit(owned);
 
       return {
         checkpoint,
@@ -3128,7 +3130,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         }),
       };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -3936,7 +3938,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     repositoryId: string,
     messageId: string,
   ): Promise<void> {
-    this.db.exec("BEGIN");
+    const owned = this.begin();
     try {
       // Reactions hang off replies as well as off the message, and both
       // reference it, so they go first or the delete violates the foreign
@@ -3957,9 +3959,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
           "DELETE FROM channel_messages WHERE repository_id = ? AND id = ?",
         )
         .run(repositoryId, messageId);
-      this.db.exec("COMMIT");
+      this.commit(owned);
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -3969,7 +3971,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     messageId: string,
     input: { deletedAt: string; deletedBy: string },
   ): Promise<void> {
-    this.db.exec("BEGIN");
+    const owned = this.begin();
     try {
       // `deleted_at IS NULL` so a second pass cannot restamp who unsaid it.
       const result = this.db
@@ -3988,9 +3990,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
           .prepare("DELETE FROM channel_message_reactions WHERE message_id = ?")
           .run(messageId);
       }
-      this.db.exec("COMMIT");
+      this.commit(owned);
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -4010,7 +4012,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (row === undefined) {
       return undefined;
     }
-    this.db.exec("BEGIN");
+    const owned = this.begin();
     try {
       this.db
         .prepare("DELETE FROM channel_message_reactions WHERE message_id = ?")
@@ -4024,16 +4026,16 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db
         .prepare("DELETE FROM channel_message_replies WHERE id = ?")
         .run(replyId);
-      this.db.exec("COMMIT");
+      this.commit(owned);
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
     return this.toChannelReply(row);
   }
 
   public async deleteChannelMessages(repositoryId: string): Promise<number> {
-    this.db.exec("BEGIN");
+    const owned = this.begin();
     try {
       const ids = (
         this.db
@@ -4056,10 +4058,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
       this.db
         .prepare("DELETE FROM channel_messages WHERE repository_id = ?")
         .run(repositoryId);
-      this.db.exec("COMMIT");
+      this.commit(owned);
       return ids.length;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback(owned);
       throw error;
     }
   }
@@ -4524,6 +4526,59 @@ export class SqliteCoordinationStore implements CoordinationStore {
       result[emoji] = { emoji, count: userIds.size, mine: userIds.has(viewerId) };
     }
     return result;
+  }
+
+  /**
+   * Opens a write transaction, or joins the one already open.
+   *
+   * Returns whether this caller owns it. SQLite has no nested transactions,
+   * so a composite method called from inside a `runInTransaction` body must
+   * take part in the outer one rather than trying to start a second — and
+   * only the owner may commit or roll back, because doing either from the
+   * inside would settle work the outer caller has not finished.
+   */
+  private begin(): boolean {
+    if (this.transactionDepth > 0) {
+      this.transactionDepth += 1;
+      return false;
+    }
+    // BEGIN IMMEDIATE takes the write lock up front, so two writers racing
+    // serialise here rather than discovering the conflict at commit time.
+    this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth = 1;
+    return true;
+  }
+
+  private commit(owned: boolean): void {
+    this.transactionDepth = Math.max(0, this.transactionDepth - 1);
+    if (owned) {
+      this.db.exec("COMMIT");
+    }
+  }
+
+  private rollback(owned: boolean): void {
+    this.transactionDepth = Math.max(0, this.transactionDepth - 1);
+    if (owned) {
+      this.db.exec("ROLLBACK");
+    }
+  }
+
+  public async runInTransaction<T>(
+    body: (store: CoordinationStore) => Promise<T>,
+  ): Promise<T> {
+    const owned = this.begin();
+    try {
+      const result = await body(this);
+      this.commit(owned);
+      return result;
+    } catch (error) {
+      try {
+        this.rollback(owned);
+      } catch {
+        // The original failure matters more than a rollback that cannot run.
+      }
+      throw error;
+    }
   }
 
   public async close(): Promise<void> {

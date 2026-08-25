@@ -515,7 +515,13 @@ export class AuthService {
     passwordDigest: string;
     organizationName?: string;
   }): Promise<UserAccount> {
-    // The account is built back to front, and that ordering is the whole
+    // One transaction, so the five writes below land together or not at all.
+    //
+    // The ordering underneath it is kept rather than reverted: it is what
+    // makes the failure survivable on a backend where the transaction is a
+    // snapshot rather than a write-ahead log, and it costs nothing to keep.
+    return await this.store.runInTransaction(async (store) => {
+    // The account is built back to front, and that is the second half of the
     // safety property here.
     //
     // These are five separate writes and the store has no transaction to put
@@ -540,7 +546,7 @@ export class AuthService {
     // The slug is random rather than derived from the user id, because the
     // user id does not exist yet. It is not shown anywhere a person reads.
     const slug = `team-${randomBytes(8).toString("hex")}`;
-    const organization = await this.store.createOrganization({
+    const organization = await store.createOrganization({
       slug,
       name:
         input.organizationName !== undefined && input.organizationName !== ""
@@ -549,7 +555,7 @@ export class AuthService {
     });
     // A repository has to live in a project, so a brand new account with no
     // project could not do the first thing it came to do.
-    await this.store.createProject({
+    await store.createProject({
       organizationId: organization.id,
       slug: "default",
       name: "My Project",
@@ -559,23 +565,24 @@ export class AuthService {
     // dispatch would mean an account that signed up, looked around, and came
     // back a month later still had its whole trial — which sounds generous and
     // is really just an unbounded free tier wearing a trial's name.
-    await this.store.saveSubscription({
+    await store.saveSubscription({
       organizationId: organization.id,
       status: "trialing",
       trialEndsAt: trialEndsAtFrom(),
     });
-    const user = await this.store.createUser({
+    const user = await store.createUser({
       email: input.email,
       displayName: input.displayName,
       passwordDigest: input.passwordDigest,
       systemAdmin: false,
     });
-    await this.store.saveMembership({
+    await store.saveMembership({
       organizationId: organization.id,
       userId: user.id,
       role: "owner",
     });
     return user;
+    });
   }
 
   /**
@@ -635,28 +642,33 @@ export class AuthService {
       );
     }
     const passwordDigest = await hashPassword(input.password);
-    const user = await this.store.createUser({
+    // Hashing first, outside the transaction: scrypt is deliberately slow and
+    // holding a write lock across it would serialise every other writer
+    // behind somebody's password.
+    return await this.store.runInTransaction(async (store) => {
+    const user = await store.createUser({
       email: input.intent.email,
       displayName,
       passwordDigest,
       systemAdmin: false,
     });
-    if (!(await this.store.attachSignupIntentUser(input.intent.id, user.id))) {
+    if (!(await store.attachSignupIntentUser(input.intent.id, user.id))) {
       // Somebody else won the race between the two reads above. Their account
       // is the real one; hand it back rather than leaving this caller with a
       // second.
-      const winner = (await this.store.getSignupIntent(input.intent.id))?.userId;
-      const account = winner === undefined ? undefined : await this.store.getUser(winner);
+      const winner = (await store.getSignupIntent(input.intent.id))?.userId;
+      const account = winner === undefined ? undefined : await store.getUser(winner);
       if (account !== undefined) {
         return account;
       }
     }
-    await this.store.saveMembership({
+    await store.saveMembership({
       organizationId: input.intent.organizationId,
       userId: user.id,
       role: "owner",
     });
     return user;
+    });
   }
 
   public async registerUnconfirmed(input: {
