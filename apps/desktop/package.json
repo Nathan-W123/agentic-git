@@ -4,11 +4,16 @@
   "private": true,
   "description": "Kumi as a desktop app: a window onto your deployment, signed in through your browser.",
   "author": "Kumi",
+  "homepage": "https://github.com/Nathan-W123/kumi-",
   "type": "module",
   "main": "electron/main.mjs",
+  "desktopName": "kumi.desktop",
   "exports": {
     ".": "./dist/index.js",
     "./electron": "./electron/main.mjs"
+  },
+  "kumi": {
+    "releasesRepo": "Nathan-W123/kumi-"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

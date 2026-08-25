@@ -16,26 +16,90 @@ compile would put a desktop dependency between the server and production.
 ```
 cd apps/desktop
 npm i -D electron
-KUMI_SERVER=https://your-kumi npm run desktop
+npm run desktop
 ```
 
-The server address is remembered after the first launch.
+It will ask for the server address on first launch and remember it. Setting
+`KUMI_SERVER` overrides the saved one, which is convenient for pointing a build
+at a local gateway without disturbing the settings a real launch wrote.
 
 ## Signing in
 
-On first launch the app opens your browser at `/authorize` on that deployment.
-You approve it there — signed in as yourself, reading what is being approved —
-and the app receives the result on a listener bound to `127.0.0.1`.
+The app opens your browser at `/authorize` on that deployment. You approve it
+there — signed in as yourself, reading what is being approved — and the app
+receives the result on a listener bound to `127.0.0.1`.
 
 Nothing is copied or pasted. The redirect carries a single-use code rather than
 the token, so no credential lands in browser history; the app exchanges that
 code over a POST. The token is sealed with `safeStorage`, which uses OS-backed
-keys, so the settings file is unreadable on any other machine.
+keys, so the settings file is unreadable on any other machine. It reaches the
+page over IPC rather than on the renderer's command line, which anything that
+can list processes would be able to read.
 
 Revoke it any time in **Settings → Advanced → App tokens**.
+
+On a Linux machine with no keyring — a headless box, a minimal desktop —
+`safeStorage` has nowhere safe to put the token, so nothing is written and the
+app asks for approval again next launch. That is the intended trade: a token
+written in the clear would be worse than one that has to be re-issued.
 
 ## What the app may do
 
 `view` and `run_task` — read the room and start work. Deliberately not
 everything its owner can do, since the token lives on a laptop rather than in a
 session that expires.
+
+## Getting unstuck
+
+A downloaded copy has no shell to delete a settings file from, so the two
+states it cannot recover from on its own are in the menu:
+
+- **Help → Sign Out and Restart** — for a token that was revoked, or one that
+  belongs to somebody else.
+- **Help → Change Server…** — for a deployment that moved, or an address typed
+  wrong and saved.
+
+## Releasing
+
+`.github/workflows/desktop-release.yml` builds macOS, Windows, and Linux
+installers and uploads them to the repository named in `package.json` under
+`kumi.releasesRepo`. It runs on a tag:
+
+```
+# bump "version" in apps/desktop/package.json first — the workflow refuses a
+# tag that disagrees with it
+git tag desktop-v0.1.0
+git push origin desktop-v0.1.0
+```
+
+Running the workflow by hand builds all three and publishes nothing, which is
+how to check that packaging still works without cutting a release.
+
+Publishing needs a `KUMI_RELEASES_TOKEN` secret: a fine-grained personal access
+token with **Contents: write** on the releases repository. The automatic
+`GITHUB_TOKEN` cannot be used, because it is scoped to this repository and the
+installers go to a different one.
+
+### Unsigned, on purpose for now
+
+No certificate is configured for either macOS or Windows, so each will warn
+once on first launch — `RELEASE_NOTES.md` tells people how to get past it, and
+those notes become the body of every release.
+
+macOS is *ad-hoc* signed rather than unsigned, which is not the same thing.
+Apple silicon refuses outright to launch a binary carrying no signature at all,
+and no amount of clicking through System Settings changes that — so
+`identity: "-"` gives the app a signature that claims nothing about who made
+it. That leaves a Gatekeeper warning a person can wave through, instead of an
+app that dies on double-click. `hardenedRuntime` is off for the same reason:
+combined with ad-hoc signing it enforces library validation, which rejects the
+frameworks Electron itself ships.
+
+The cost of changing that is money and identity, not code: an Apple Developer
+account for notarization, and a code-signing certificate for Windows. When
+there is one, `identity` and `hardenedRuntime: true` go in
+`electron-builder.yml` and nothing else here changes.
+
+Automatic updates are the one thing that stays off regardless. An unsigned app
+is not permitted to replace its own binary, so **Help → Check for Updates…**
+opens the releases page instead of pretending to do more.
