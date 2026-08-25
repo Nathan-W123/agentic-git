@@ -20,10 +20,18 @@ directories:
   output: release
   buildResources: build
 
-# Predictable, spaces-free, and self-describing, because these end up as
-# download links people paste to each other. The default would give Windows a
-# file called "Kumi Setup 0.1.0.exe" and give both Macs the same name.
-artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+# Predictable, spaces-free, and — deliberately — without the version in it.
+#
+# GitHub serves `releases/latest/download/<name>`, which redirects to whatever
+# the newest release calls that exact file. A version in the name would defeat
+# that: every release would mint new URLs, and the download page would have to
+# be edited to match or would quietly go on offering the old one. Without it
+# the links on the website are written once and stay correct forever.
+#
+# The version is not lost. It is on the release, in the installer, and in the
+# app. It is only absent from the filename, which is the one place it was
+# costing something.
+artifactName: ${productName}-${os}-${arch}.${ext}
 
 # What goes in the package, and nothing else. The dashboard is not here: it is
 # served by the control plane and loaded at runtime, which is what keeps a UI

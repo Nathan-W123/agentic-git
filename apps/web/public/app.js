@@ -732,6 +732,12 @@ function renderAuth() {
               ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
               : `New here? <a class="link-muted" href="#register" data-act="auth-mode" data-value="register">Create an account</a>.`
       }</p>
+      ${
+        bootstrap
+          ? ""
+          : `<p class="auth-foot">Prefer it in its own window? <a
+              class="link-muted" href="/download">Get Kumi for desktop</a>.</p>`
+      }
     </div>
   </main>`;
 }
@@ -1481,6 +1487,17 @@ function apiTokensCard() {
       <div><h3>App tokens</h3>
       <p>Sign in a Kumi app on your machine. It reads the room and starts
         work, the same as this browser does.</p></div>
+    </div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Kumi for desktop</div>
+        <div class="sr-sub">Mac, Windows and Linux. It signs itself in through
+          your browser, so it needs none of the tokens below.</div>
+      </span>
+      <span class="sr-ctl">
+        <a class="btn btn-sm" href="/download" target="_blank"
+          rel="noopener">Download</a>
+      </span>
     </div>
     ${
       minted === undefined
