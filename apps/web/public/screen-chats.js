@@ -1575,16 +1575,18 @@ function chanSidebar(activeRepositoryId) {
         cls: "drawer-close",
       })}
     </div>
-    <div class="chan-sidebar-head chan-quick-links">
+    <nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">
       <button type="button" class="chan-quick-link${state.chanThreadList === true ? " on" : ""}"
-        data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}">
+        data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}"
+        title="Browse channel threads">
         ${icon("reply")}<span>Threads</span>
       </button>
       <button type="button" class="chan-quick-link${state.chanTree === true ? " on" : ""}"
-        data-act="chan-tree-toggle" aria-pressed="${state.chanTree === true}">
+        data-act="chan-tree-toggle" aria-pressed="${state.chanTree === true}"
+        title="Browse repository files">
         ${icon("folder")}<span>Files</span>
       </button>
-    </div>
+    </nav>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
          its own scrollbar capped at 38vh and the roster had a second one
@@ -2855,7 +2857,10 @@ function messageRow(
           : changedBlock
       }
       ${channelThread ? changedBlock : ""}
-    </div>
+      <!-- Keep the message tools on the message surface. When they were a
+           sibling of the body, the absolute position was measured from the
+           full transcript row and the toolbar floated at the far edge of a
+           wide room, detached from the words it acted on. -->
     <span class="cmsg-actions">
       ${
         // Behind the same guard as the tally above, for the reason given
@@ -2921,6 +2926,7 @@ function messageRow(
             })
       }
     </span>
+    </div>
   </div>`;
 }
 
@@ -3216,11 +3222,9 @@ function messageList(repositoryId) {
 /**
  * The emoji the picker offers, in the order every chat offers them.
  *
- * A short fixed set rather than a full emoji keyboard: the picker is for
- * answering a message without typing, and the long tail of emoji is a
- * different feature with a search box in it. These are the six or so that
- * carry an actual reply — yes, done, thanks, funny, watching, thinking — plus
- * the two that stand in for applause and disagreement.
+ * The first row stays the familiar quick reactions. The rest are common
+ * reactions somebody can now reach by name instead of already having to know
+ * which eight the interface happened to choose for them.
  */
 const REACTION_CHOICES = [
   "\u{1F44D}",
@@ -3231,7 +3235,61 @@ const REACTION_CHOICES = [
   "\u{1F602}",
   "\u{1F914}",
   "\u{1F44E}",
+  "\u2764\uFE0F",
+  "\u{1F525}",
+  "\u{1F680}",
+  "\u{1F4AF}",
+  "\u{1F44F}",
+  "\u{1F64C}",
+  "\u{1F91D}",
+  "\u{1F4AA}",
+  "\u{1F4A1}",
+  "\u{1F62E}",
+  "\u{1F622}",
+  "\u{1F620}",
+  "\u{1F615}",
+  "\u{1F973}",
+  "\u{1F91E}",
+  "\u{1F923}",
+  "\u{1F60D}",
+  "\u{1F6A8}",
+  "\u26A0\uFE0F",
+  "\u270B",
+  "\u{1F44B}",
 ];
+
+/** Search words for the reaction catalogue, kept out of the visible picker. */
+const REACTION_SEARCH_TERMS = {
+  "\u{1F44D}": "thumbs up like approve yes good",
+  "\u{1F389}": "party celebrate celebration tada congrats",
+  "\u2705": "check done complete approved yes",
+  "\u{1F440}": "eyes watching look review",
+  "\u{1F64F}": "pray please thanks thank you",
+  "\u{1F602}": "laugh laughing funny joy tears",
+  "\u{1F914}": "thinking think question unsure",
+  "\u{1F44E}": "thumbs down dislike reject no",
+  "\u2764\uFE0F": "heart love appreciate",
+  "\u{1F525}": "fire hot great",
+  "\u{1F680}": "rocket launch ship fast",
+  "\u{1F4AF}": "hundred perfect agree",
+  "\u{1F44F}": "clap applause well done",
+  "\u{1F64C}": "raised hands hooray celebrate",
+  "\u{1F91D}": "handshake deal agree partnership",
+  "\u{1F4AA}": "strong muscle effort",
+  "\u{1F4A1}": "idea light bulb insight",
+  "\u{1F62E}": "wow surprised open mouth",
+  "\u{1F622}": "sad cry tear",
+  "\u{1F620}": "angry mad",
+  "\u{1F615}": "confused unsure",
+  "\u{1F973}": "party face celebrate",
+  "\u{1F91E}": "fingers crossed hope luck",
+  "\u{1F923}": "rolling laugh hilarious",
+  "\u{1F60D}": "heart eyes love amazing",
+  "\u{1F6A8}": "alert siren urgent",
+  "\u26A0\uFE0F": "warning caution",
+  "\u270B": "raised hand stop question",
+  "\u{1F44B}": "wave hello goodbye",
+};
 
 /**
  * The emoji choices, anchored to the button that asked for them.
@@ -3261,10 +3319,41 @@ export function reactionPicker(anchor, repositoryId, messageId) {
         reactions[emoji]?.mine === true ? " mine" : ""
       }" data-act="channel-react-choose"
         data-value="${esc(messageId)}" data-emoji="${esc(emoji)}"
+        data-search="${esc(`${emoji} ${REACTION_SEARCH_TERMS[emoji] ?? ""}`)}"
         title="${esc(emoji)}" aria-label="React with ${esc(emoji)}"
         aria-pressed="${reactions[emoji]?.mine === true ? "true" : "false"}">${emoji}</button>`,
   ).join("");
-  showPopover(anchor, `<div class="react-grid">${body}</div>`, { width: 236 });
+  const popover = showPopover(
+    anchor,
+    `<div class="react-picker">
+      <label class="react-search">
+        ${icon("search")}
+        <span class="sr-only">Search reactions</span>
+        <input type="search" data-reaction-search placeholder="Search emoji"
+          aria-label="Search reactions" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="react-grid" data-reaction-grid>${body}</div>
+      <p class="react-empty" data-reaction-empty role="status" hidden>No emoji found</p>
+    </div>`,
+    { width: 288 },
+  );
+  const search = popover.querySelector("[data-reaction-search]");
+  const choices = [...popover.querySelectorAll(".react-choice")];
+  const empty = popover.querySelector("[data-reaction-empty]");
+  search?.addEventListener("input", () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    let matches = 0;
+    for (const choice of choices) {
+      const terms = (choice.dataset.search ?? "").toLocaleLowerCase();
+      choice.hidden = query !== "" && !terms.includes(query);
+      if (!choice.hidden) {
+        matches += 1;
+      }
+    }
+    if (empty !== null) {
+      empty.hidden = matches !== 0;
+    }
+  });
 }
 
 /**

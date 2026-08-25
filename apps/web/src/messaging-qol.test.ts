@@ -56,6 +56,62 @@ test("a reaction can be any emoji, not only the one the client could send", asyn
   assert.match(chats, /reactions\[emoji\]\?\.mine === true \? " mine" : ""/u);
   assert.match(css, /\.react-choice\.mine \{/u);
   assert.match(css, /\.cmsg-react-add \{/u);
+
+  // The common quick reactions remain first, while the larger catalogue can
+  // be reached by a word such as "party", "warning" or "thanks". Filtering
+  // happens inside the open popover so typing does not rebuild the channel.
+  assert.match(chats, /const REACTION_SEARCH_TERMS = \{/u);
+  assert.match(
+    chats,
+    /type="search" data-reaction-search placeholder="Search emoji"/u,
+  );
+  assert.match(chats, /data-search="\$\{esc\(`/u);
+  assert.match(
+    chats,
+    /const choices = \[\.\.\.popover\.querySelectorAll\("\.react-choice"\)\]/u,
+  );
+  assert.match(
+    chats,
+    /choice\.hidden = query !== "" && !terms\.includes\(query\)/u,
+  );
+  assert.match(chats, /empty\.hidden = matches !== 0/u);
+  assert.match(chats, /data-reaction-empty role="status" hidden>No emoji found/u);
+  assert.match(css, /\.react-search input \{/u);
+  assert.match(css, /\.react-empty \{/u);
+});
+
+test("channel messages and workspace links use compact, bounded surfaces", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // Threads and Files are one semantic navigation group with matching rows,
+  // instead of two loose controls occupying their own unrelated spacing.
+  assert.match(
+    chats,
+    /<nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">/u,
+  );
+  assert.match(
+    css,
+    /\.chan-sidebar-head\.chan-quick-links \{[\s\S]{0,320}margin: 7px 8px 5px;[\s\S]{0,180}border: 1px solid var\(--border-soft\);/u,
+  );
+  assert.match(
+    css,
+    /\.chan-quick-link \{[\s\S]{0,220}min-height: 34px;[\s\S]{0,100}padding: 6px 8px;/u,
+  );
+
+  // The body is the bubble and owns its hover tools. It remains a fitted item
+  // in the ordinary left-hand transcript; no sender-specific right lane is
+  // introduced.
+  assert.match(
+    css,
+    /\.cmsg-row \.cmsg-body \{[\s\S]{0,520}width: fit-content;[\s\S]{0,260}border: 1px solid var\(--border-soft\);[\s\S]{0,100}border-radius: 5px 12px 12px 12px;/u,
+  );
+  assert.match(
+    chats,
+    /<div class="cmsg-body">[\s\S]*<span class="cmsg-actions">[\s\S]*<\/span>\s*<\/div>\s*<\/div>`;/u,
+  );
+  assert.doesNotMatch(chats, /cmsg-mine/u);
+  assert.doesNotMatch(css, /cmsg-mine/u);
 });
 
 test("the unread line is taken before opening the room marks it read", async () => {
