@@ -1,0 +1,57 @@
+# How the window becomes something you can double-click.
+#
+# Kept out of `package.json` on purpose. Everything in that file is read by
+# `npm ci` at the repository root — which the control plane's Docker build
+# runs — and packaging settings have no business being parsed there. This file
+# is read only by `electron-builder`, which is installed only in the job that
+# builds installers.
+#
+# Publishing is deliberately absent. The repository that receives the
+# installers is named once, in the release workflow, rather than here as well:
+# the URL an app checks for updates is baked into every copy that ships, so
+# there must be exactly one place it can be wrong.
+
+appId: dev.kumi.desktop
+productName: Kumi
+copyright: Kumi
+
+directories:
+  output: release
+  buildResources: build
+
+# What goes in the package, and nothing else. The dashboard is not here: it is
+# served by the control plane and loaded at runtime, which is what keeps a UI
+# change a deploy rather than a release. `dist` carries the sign-in flow, which
+# is the only compiled code the app itself runs.
+files:
+  - electron/**/*
+  - dist/**/*
+  - package.json
+
+# A source of truth for what the app is allowed to reach on macOS. Nothing
+# unusual: it opens a browser and talks to a server over the network.
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  # Signing is not configured, and the absence is deliberate rather than an
+  # oversight — see the README. An unsigned build is openable from System
+  # Settings and is exactly what an early tester needs; nothing here has to
+  # change to add a certificate later.
+  identity: null
+
+win:
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+
+linux:
+  category: Development
+  target:
+    - AppImage
+    - deb
