@@ -81,7 +81,13 @@ api,
   typingOn,
   waitingTasks,
 } from "./data.js";
-import { chatComposer, chatProgress, chatThread } from "./chat.js";
+import {
+  chatComposer,
+  chatProgress,
+  chatThread,
+  composerCount,
+  paintComposerCount,
+} from "./chat.js";
 import { handleChannelCommandResult } from "./screen-repos.js";
 import {
   FLAG_FOR_STATUS,
@@ -3817,6 +3823,7 @@ function composer(repositoryId) {
           ? `<span class="composer-note">attaching ${esc(String(state.attaching))} image(s)…</span>`
           : ""}
         <span class="spacer"></span>
+        ${composerCount("channel", state.chatDraft)}
         <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
       </div>
     </form>
@@ -5592,6 +5599,7 @@ function dmPanel() {
             ? `<span class="composer-note">attaching ${esc(String(state.dmAttaching))} image(s)…</span>`
             : ""}
           <span class="spacer"></span>
+          ${composerCount("dm", state.dmDraft)}
           <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
         </div>
       </form>
@@ -5713,6 +5721,7 @@ function threadPanel(repositoryId, selectedMessageId) {
             ? `<span class="composer-note">attaching ${esc(String(state.threadAttaching))} image(s)…</span>`
             : ""}
           <span class="spacer"></span>
+          ${composerCount("thread", state.threadDraft)}
           <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
         </div>
       </form>
@@ -7302,6 +7311,10 @@ export function updateComposerPresentation(node, target) {
   const before = autocompleteSnapshot();
   updateMentionState(node, target);
   resizeComposer(node);
+  // Counted off the stored draft rather than the textarea, because a staged
+  // image lives in the draft as reference lines the box does not show — and
+  // those lines are sent, so they count against the cap.
+  paintComposerCount(node, target, composerDraft(target, node));
 
   if (autocompleteSnapshot() !== before) {
     paintComposerSuggestions(activeChannelId());

@@ -3065,6 +3065,34 @@ svg.ui-icon {
   cursor: not-allowed;
 }
 
+/* How much of the allowance is left, said only when it is nearly gone.
+   Quiet while it is a countdown, and in the warning tone once the message is
+   over the cap — the number then is how much has to come out, which is the
+   only thing anybody can do about it. */
+.composer-count {
+  order: 2;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.composer-count[hidden] {
+  display: none;
+}
+
+.composer-count.is-over {
+  color: var(--danger, #d9534f);
+  font-weight: 600;
+}
+
+/* Over the limit the arrow goes quiet: the refusal is on screen before the
+   button is pressed, rather than only as a toast afterwards. */
+.composer.is-over-limit .send-btn {
+  background: transparent;
+  color: var(--danger, #d9534f);
+}
+
 /* Nothing written yet, so nothing to send. The arrow keeps its place but waits
    in the shared muted tone. `.is-expanded` covers an image-only send. */
 .composer:not(.is-expanded):has(textarea:placeholder-shown) .send-btn {

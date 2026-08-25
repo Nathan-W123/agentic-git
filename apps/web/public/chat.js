@@ -15,6 +15,8 @@ import {
   currentUserId,
   currentUserName,
   loadProviderOptions,
+  messageLengthNotice,
+  messageTooLong,
   myAvatar,
   providerAllowsCustomModel,
   providerEffortOptions,
@@ -186,6 +188,46 @@ export function chatThread(agent) {
 }
 
 /**
+ * The length counter every composer carries, on the row beside send.
+ *
+ * It lives here rather than in a screen because all four composers need the
+ * same one — the room, a thread, a private conversation and this panel — and
+ * this module is the only one each of them already imports without importing
+ * each other. The span is always drawn, and hidden while there is nothing to
+ * say, so `paintComposerCount` can update it on a keystroke without a render.
+ */
+export function composerCount(target, text) {
+  const notice = messageLengthNotice(text, target);
+  return `<span class="composer-count${
+    notice?.over === true ? " is-over" : ""
+  }" data-composer-count="${esc(target)}" aria-live="polite"${
+    notice === undefined ? " hidden" : ""
+  }>${esc(notice?.text ?? "")}</span>`;
+}
+
+/**
+ * Puts the current count on screen, without rebuilding anything.
+ *
+ * A render per keystroke is what the composers deliberately avoid — it throws
+ * away the textarea being typed into — so the counter is written straight to
+ * the node, the same way the box's own height is.
+ */
+export function paintComposerCount(node, target = "channel", text) {
+  const form = node?.closest?.(".composer") ?? undefined;
+  const label = form?.querySelector?.("[data-composer-count]");
+  if (form === undefined || label === null || label === undefined) {
+    return;
+  }
+  const notice = messageLengthNotice(text ?? node?.value ?? "", target);
+  label.textContent = notice?.text ?? "";
+  label.hidden = notice === undefined;
+  label.classList.toggle("is-over", notice?.over === true);
+  // The form carries it too: over the limit the send arrow goes quiet, so the
+  // refusal is visible before the button is pressed rather than only after.
+  form.classList.toggle("is-over-limit", notice?.over === true);
+}
+
+/**
  * The composer.
  *
  * Every control sits on one row under the text box: one "+" on the left for
@@ -262,6 +304,7 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
               : ""
         }
         ${miniSelect("chat-effort", efforts, agent?.effort ?? "", "Reasoning effort")}
+        ${composerCount("chat", agentChatDraft(agent?.id))}
         <button class="send-btn" type="submit" title="Send"${
           busy || !ready ? " disabled" : ""
         }>
@@ -307,6 +350,14 @@ export function scrollThread() {
 export async function sendChat(agentId, text, rerender) {
   const trimmed = String(text ?? "").trim();
   if (trimmed === "" || state.sending[agentId]) {
+    return;
+  }
+  // Before the turn is pushed into the conversation, so an over-long message
+  // never becomes a row the panel then has to fail: the provider would refuse
+  // it anyway, and the caller keeps the draft to shorten.
+  const tooLong = messageTooLong(trimmed, "chat");
+  if (tooLong !== undefined) {
+    toast(tooLong, "error");
     return;
   }
   const conversation = conversationFor(agentId);
