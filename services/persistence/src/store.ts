@@ -207,6 +207,40 @@ export interface PasswordResetRecord {
   consumedAt: string | undefined;
 }
 
+/**
+ * Somebody who is partway through a paid sign-up.
+ *
+ * Deliberately not an account, and deliberately holding no secret worth
+ * stealing. There is no password here: the card is taken before any details
+ * are, so a name and a password are only ever collected once the payment has
+ * cleared, and they go straight into the account rather than through this
+ * table. An abandoned checkout therefore leaves a row that names an
+ * organization nobody made and an email nobody claimed.
+ *
+ * The organization id is minted when the intent is written rather than when
+ * the organization is created, so it can be stamped into Stripe's metadata at
+ * checkout. Every later event — an invoice three months from now — then names
+ * an organization that exists, with no lookup table and no metadata written
+ * back.
+ */
+export interface SignupIntentRecord {
+  id: string;
+  /** Minted now, created once payment clears, named by Stripe in between. */
+  organizationId: string;
+  /** Collected before checkout so a duplicate is caught before any charge. */
+  email: string;
+  organizationName: string | undefined;
+  /** The claim link's secret, hashed the way a password reset's is. */
+  secretHash: string;
+  stripeSessionId: string | undefined;
+  /** Set once the account exists, so finishing twice cannot make two. */
+  userId: string | undefined;
+  createdAt: string;
+  expiresAt: string;
+  /** Set when payment provisioned the organization. */
+  completedAt: string | undefined;
+}
+
 export interface UserAppearance {
   accent?: string;
   /**
@@ -1300,6 +1334,15 @@ export const DEFAULT_PROJECT_ID = "project_local";
  */
 export interface CoordinationStore {
   createOrganization(input: {
+    /**
+     * The id to create it under, when the caller has already committed to one.
+     *
+     * A paid sign-up mints the organization id before the organization, so it
+     * can be stamped into Stripe's metadata at checkout — which is what makes
+     * every later event about that subscription attributable without a lookup
+     * table. Omitted, one is generated as before.
+     */
+    id?: string;
     slug: string;
     name: string;
   }): Promise<Organization>;
@@ -1480,6 +1523,52 @@ export interface CoordinationStore {
   /** Marks it used. Returns false when it was already used or revoked. */
   acceptInvitation(id: string, userId: UserId, at: string): Promise<boolean>;
   revokeInvitation(id: string, at: string): Promise<void>;
+
+  /**
+   * Runs a body with every write inside one transaction.
+   *
+   * The store had no way to compose one. Transactions existed in both SQL
+   * backends and were private to single methods, so anything built from
+   * several calls — creating an account is five — was five separate commits
+   * with no rollback between them. A failure partway left the earlier ones
+   * durable, which is how a sign-up came to leave a user row that could sign
+   * in and belonged to nothing.
+   *
+   * The body is handed the same store back. Calls made on it inside the body
+   * join the transaction; a call made on any other reference does not, so
+   * take the argument rather than closing over the outer store.
+   *
+   * Nesting joins rather than throwing, so a composite method that opens its
+   * own transaction is safe to call from inside a body. Rollback then belongs
+   * to the outermost call, which is the only one that can honour it.
+   *
+   * The in-memory store keeps this contract by snapshotting, which is
+   * sufficient for a single process and is not durable — it is a test and
+   * local-development backend, and this does not change that.
+   */
+  runInTransaction<T>(body: (store: CoordinationStore) => Promise<T>): Promise<T>;
+
+  createSignupIntent(intent: SignupIntentRecord): Promise<void>;
+  getSignupIntent(id: string): Promise<SignupIntentRecord | undefined>;
+  /** The sign-up that minted an organization id, for the webhook that lands. */
+  getSignupIntentByOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined>;
+  /**
+   * Marks an intent provisioned, and says whether this caller is the one that
+   * did it.
+   *
+   * Conditional on still being open, like {@link consumePasswordReset}: Stripe
+   * redelivers, and `checkout.session.completed` can arrive after
+   * `customer.subscription.created` has already provisioned from the same
+   * intent. Whichever gets here second is told `false` and does nothing —
+   * which is what stops a retry sending a second welcome email.
+   */
+  completeSignupIntent(id: string, at: string): Promise<boolean>;
+  /** Records the account a finished sign-up created, once. */
+  attachSignupIntentUser(id: string, userId: UserId): Promise<boolean>;
+  /** Sweeps abandoned checkouts; nothing was created, so nothing is lost. */
+  deleteExpiredSignupIntents(before: string): Promise<void>;
 
   createPasswordReset(reset: PasswordResetRecord): Promise<void>;
   getPasswordReset(id: string): Promise<PasswordResetRecord | undefined>;

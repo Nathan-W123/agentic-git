@@ -2569,6 +2569,161 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a transaction that throws leaves nothing behind`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      // The guarantee the store could not previously offer. Creating an
+      // account is five writes; without this they were five commits, and a
+      // failure partway left a user able to sign in and belonging to nothing.
+      await assert.rejects(
+        async () =>
+          await store.runInTransaction(async (inner) => {
+            const organization = await inner.createOrganization({
+              slug: "rolled-back",
+              name: "Rolled back",
+            });
+            const user = await inner.createUser({
+              email: "rolled.back@example.com",
+              displayName: "Rolled Back",
+              passwordDigest: "digest",
+              systemAdmin: false,
+            });
+            await inner.saveMembership({
+              organizationId: organization.id,
+              userId: user.id,
+              role: "owner",
+            });
+            throw new Error("the database went away");
+          }),
+        /database went away/u,
+      );
+
+      // Not one of the three survives — in particular the address is free, so
+      // whoever it was can simply sign up again.
+      assert.equal(
+        await store.getUserByEmail("rolled.back@example.com"),
+        undefined,
+      );
+      assert.equal(
+        (await store.listOrganizations()).some(
+          (entry) => entry.slug === "rolled-back",
+        ),
+        false,
+      );
+
+      // And a body that returns commits, so the transaction is not simply
+      // discarding everything.
+      const kept = await store.runInTransaction(async (inner) => {
+        const organization = await inner.createOrganization({
+          slug: "kept",
+          name: "Kept",
+        });
+        const user = await inner.createUser({
+          email: "kept@example.com",
+          displayName: "Kept",
+          passwordDigest: "digest",
+          systemAdmin: false,
+        });
+        await inner.saveMembership({
+          organizationId: organization.id,
+          userId: user.id,
+          role: "owner",
+        });
+        return organization.id;
+      });
+      assert.deepEqual(
+        (
+          await store.listOrganizations(
+            (await store.getUserByEmail("kept@example.com"))?.id ?? "",
+          )
+        ).map((entry) => entry.id),
+        [kept],
+      );
+
+      // Nesting joins the outer transaction rather than opening a second, so
+      // a composite store method is safe to call from inside a body.
+      await store.runInTransaction(async (outer) => {
+        await outer.runInTransaction(async (nested) => {
+          await nested.createOrganization({ slug: "nested", name: "Nested" });
+        });
+      });
+      assert.equal(
+        (await store.listOrganizations()).some(
+          (entry) => entry.slug === "nested",
+        ),
+        true,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a signup intent settles exactly once`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      // The row that exists between somebody entering their details and
+      // Stripe confirming their card. It is deliberately not an account: no
+      // user, no organization, no claim on the email address.
+      const intent = {
+        id: "signup_1",
+        organizationId: "org_preminted",
+        email: "buyer@example.com",
+        organizationName: "Buyer's team",
+        secretHash: "hash",
+        stripeSessionId: "cs_1",
+        userId: undefined,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-01-02T00:00:00.000Z",
+        completedAt: undefined,
+      };
+      await store.createSignupIntent(intent);
+      assert.deepEqual(await store.getSignupIntent("signup_1"), intent);
+
+      // Stripe redelivers, and two different events can both name this
+      // intent. Exactly one of them may provision — the other must be told so
+      // it does not send a second welcome email or build a second account.
+      assert.equal(
+        await store.completeSignupIntent("signup_1", "2026-01-01T00:05:00.000Z"),
+        true,
+      );
+      assert.equal(
+        await store.completeSignupIntent("signup_1", "2026-01-01T00:06:00.000Z"),
+        false,
+        "a redelivery must not provision a second time",
+      );
+      assert.equal(
+        (await store.getSignupIntent("signup_1"))?.completedAt,
+        "2026-01-01T00:05:00.000Z",
+        "the winner's timestamp stands",
+      );
+
+      // An abandoned checkout is swept; a completed one is kept, because it
+      // is the record of what a real payment provisioned.
+      await store.createSignupIntent({
+        ...intent,
+        id: "signup_abandoned",
+        organizationId: "org_never_made",
+      });
+      await store.deleteExpiredSignupIntents("2026-06-01T00:00:00.000Z");
+      assert.equal(await store.getSignupIntent("signup_abandoned"), undefined);
+      assert.notEqual(await store.getSignupIntent("signup_1"), undefined);
+
+      // And the account it eventually builds is recorded once, so two
+      // requests racing one claim link cannot both build one.
+      assert.equal(await store.attachSignupIntentUser("signup_1", "user_a"), true);
+      assert.equal(
+        await store.attachSignupIntentUser("signup_1", "user_b"),
+        false,
+        "a second claim must not build a second account",
+      );
+      assert.equal((await store.getSignupIntent("signup_1"))?.userId, "user_a");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: audit events belong to the project of the run they were written under`, async () => {
     const { store, cleanup } = await backend.open();
     try {

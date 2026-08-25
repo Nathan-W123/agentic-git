@@ -93,6 +93,7 @@ import type {
   TokenUsageRecord,
   InvitationRecord,
   PasswordResetRecord,
+  SignupIntentRecord,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -273,6 +274,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   public async createOrganization(input: {
+    id?: string;
     slug: string;
     name: string;
   }): Promise<Organization> {
@@ -285,7 +287,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       throw new Error(`Organization slug is already in use: ${slug}`);
     }
     const organization: Organization = {
-      id: createId("org"),
+      id: input.id ?? createId("org"),
       slug,
       name: input.name.trim(),
       createdAt: new Date().toISOString(),
@@ -1010,6 +1012,68 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   /* ---------------------------------------------------- password resets ---- */
+
+  private readonly signupIntents = new Map<string, SignupIntentRecord>();
+  /** Held while a `runInTransaction` body runs, for rollback. */
+  private transactionSnapshot: Map<string, Map<unknown, unknown>> | undefined;
+
+  public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {
+    this.signupIntents.set(intent.id, { ...intent });
+  }
+
+  public async getSignupIntent(
+    id: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    const found = this.signupIntents.get(id);
+    return found === undefined ? undefined : { ...found };
+  }
+
+  public async completeSignupIntent(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still being open, so a Stripe redelivery — or the second
+    // of two events that both name this intent — provisions nothing twice.
+    const found = this.signupIntents.get(id);
+    if (found === undefined || found.completedAt !== undefined) {
+      return false;
+    }
+    found.completedAt = at;
+    return true;
+  }
+
+  public async getSignupIntentByOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    for (const intent of this.signupIntents.values()) {
+      if (intent.organizationId === organizationId) {
+        return { ...intent };
+      }
+    }
+    return undefined;
+  }
+
+  public async attachSignupIntentUser(
+    id: string,
+    userId: string,
+  ): Promise<boolean> {
+    // Conditional, so two requests racing one claim link cannot both build an
+    // account against the same paid organization.
+    const found = this.signupIntents.get(id);
+    if (found === undefined || found.userId !== undefined) {
+      return false;
+    }
+    found.userId = userId;
+    return true;
+  }
+
+  public async deleteExpiredSignupIntents(before: string): Promise<void> {
+    for (const [id, intent] of this.signupIntents) {
+      if (intent.completedAt === undefined && intent.expiresAt < before) {
+        this.signupIntents.delete(id);
+      }
+    }
+  }
 
   private readonly passwordResets = new Map<string, PasswordResetRecord>();
 
@@ -2912,6 +2976,62 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       paused,
       updatedAt: new Date().toISOString(),
     });
+  }
+
+  public async runInTransaction<T>(
+    body: (store: CoordinationStore) => Promise<T>,
+  ): Promise<T> {
+    // Snapshot and restore, which is what "transaction" can mean for a store
+    // that is a set of maps in one process. It gives the same guarantee the
+    // SQL backends give a caller — a body that throws leaves nothing behind —
+    // and it is not durable, which this backend never was.
+    //
+    // Nesting joins, matching the SQL backends: only the outermost call holds
+    // a snapshot, so only it can roll back.
+    if (this.transactionSnapshot !== undefined) {
+      return await body(this);
+    }
+    const snapshot = new Map<string, Map<unknown, unknown>>();
+    for (const [name, map] of this.mutableCollections()) {
+      snapshot.set(name, new Map(map));
+    }
+    this.transactionSnapshot = snapshot;
+    try {
+      const result = await body(this);
+      return result;
+    } catch (error) {
+      for (const [name, map] of this.mutableCollections()) {
+        const saved = snapshot.get(name);
+        if (saved === undefined) {
+          continue;
+        }
+        map.clear();
+        for (const [key, value] of saved) {
+          map.set(key, value);
+        }
+      }
+      throw error;
+    } finally {
+      this.transactionSnapshot = undefined;
+    }
+  }
+
+  /**
+   * The maps a rollback has to put back.
+   *
+   * Listed rather than discovered, because a map this misses is one a failed
+   * transaction would leave written — so the list is the contract, and a new
+   * collection has to be added to it deliberately.
+   */
+  private mutableCollections(): Array<[string, Map<unknown, unknown>]> {
+    return [
+      ["users", this.users as unknown as Map<unknown, unknown>],
+      ["organizations", this.organizations as unknown as Map<unknown, unknown>],
+      ["memberships", this.memberships as unknown as Map<unknown, unknown>],
+      ["projects", this.projects as unknown as Map<unknown, unknown>],
+      ["subscriptions", this.subscriptions as unknown as Map<unknown, unknown>],
+      ["signupIntents", this.signupIntents as unknown as Map<unknown, unknown>],
+    ];
   }
 
   public async close(): Promise<void> {

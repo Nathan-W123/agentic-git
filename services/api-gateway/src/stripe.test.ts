@@ -230,6 +230,79 @@ test("quantity and period end are read off the first item", () => {
   );
 });
 
+test("a Stripe-run trial's end date is read and survives the round trip", () => {
+  // Once the card is captured at sign-up, the fourteen days belong to Stripe
+  // rather than to our own arithmetic — and the store's copy is what every
+  // entitlement check reads, so it has to be told what Stripe decided.
+  const trialing = readSubscription({
+    id: "sub_1",
+    status: "trialing",
+    customer: "cus_1",
+    trial_end: 1_800_000_000,
+    current_period_end: 1_800_000_000,
+  });
+  assert.equal(trialing.trialEnd, 1_800_000_000);
+  assert.equal(
+    isoFromUnixSeconds(trialing.trialEnd),
+    new Date(1_800_000_000 * 1000).toISOString(),
+  );
+
+  // A subscription that never had a trial says so by omission, not by zero:
+  // Stripe leaves the field out, and a 0 would be read as 1970.
+  assert.equal(
+    readSubscription({ id: "sub_1", status: "active", customer: "cus_1" })
+      .trialEnd,
+    undefined,
+  );
+});
+
+test("a checkout that asks for a trial takes the card anyway", async () => {
+  // The founder's model in one request: fourteen free days, card captured on
+  // day zero, billed on day fifteen. Every one of these lives under
+  // `subscription_data` — a top-level `trial_period_days` belongs to the
+  // Subscriptions API and earns a 400 here.
+  const sent: string[] = [];
+  const client = new HttpStripeClient("sk_test_x", (async (
+    _url: string,
+    init: { body?: string },
+  ) => {
+    sent.push(init.body ?? "");
+    return {
+      ok: true,
+      json: async () => ({ id: "cs_1", url: "https://checkout.example/1" }),
+    };
+  }) as unknown as typeof fetch);
+
+  await client.createCheckoutSession({
+    organizationId: "org_1",
+    priceId: "price_1",
+    quantity: 1,
+    successUrl: "https://kumi.test/#billing-done",
+    cancelUrl: "https://kumi.test/#billing",
+    trialPeriodDays: 14,
+  });
+  const body = sent[0] ?? "";
+  assert.match(body, /subscription_data%5Btrial_period_days%5D=14/u);
+  assert.match(body, /payment_method_collection=always/u);
+  // A card removed mid-trial cancels rather than raising an invoice nobody
+  // can pay against a subscription that is somehow still alive.
+  assert.match(
+    body,
+    /subscription_data%5Btrial_settings%5D%5Bend_behavior%5D%5Bmissing_payment_method%5D=cancel/u,
+  );
+
+  // And a checkout that asks for no trial still charges immediately, which is
+  // what an existing team pressing Subscribe should get.
+  await client.createCheckoutSession({
+    organizationId: "org_1",
+    priceId: "price_1",
+    quantity: 1,
+    successUrl: "https://kumi.test/#billing-done",
+    cancelUrl: "https://kumi.test/#billing",
+  });
+  assert.doesNotMatch(sent[1] ?? "", /trial_period_days/u);
+});
+
 test("a subscription missing its items is read without throwing", () => {
   // Stripe omits fields rather than sending nulls, and a webhook payload is
   // not always the fully expanded object.

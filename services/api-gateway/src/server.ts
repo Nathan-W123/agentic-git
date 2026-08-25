@@ -28,6 +28,8 @@ import type {
   Organization,
   OrganizationRole,
   ProjectRecord,
+  RepositoryGrant,
+  SignupIntentRecord,
   WorkLease,
   WorkerRecord,
   StoredRepository,
@@ -89,7 +91,7 @@ import {
   verifyWebhookSignature,
   type StripeClient,
 } from "./stripe.js";
-import { billableSeats } from "./billing.js";
+import { billableSeats, TRIAL_DAYS } from "./billing.js";
 import {
   arbitrationLine,
   type DeferredRef,
@@ -4880,6 +4882,10 @@ export class ApiGateway {
           // it belongs on the stricter limiter with the other two.
           `${API_PREFIX}/auth/register`,
           `${API_PREFIX}/auth/register/confirm`,
+          // Paid sign-up reaches Stripe on an unauthenticated request, so an
+          // unthrottled one is a way to make this deployment mint checkout
+          // sessions and customers for a stranger.
+          `${API_PREFIX}/auth/signup`,
         ].includes(url.pathname) ||
         // Password reset belongs here too, and more than any of them: it sends
         // mail to an address the caller chose, so an unthrottled one is a way
@@ -4956,7 +4962,20 @@ export class ApiGateway {
             // signed-in person clicked through, single-use, and dead within
             // two minutes.
             `${API_PREFIX}/auth/app-authorization/exchange`,
+            // Nobody has an account yet; buying one is what this does. It
+            // creates nothing durable that anybody can sign in to — an
+            // abandoned checkout leaves a row naming an organization that was
+            // never made and an email that was never claimed.
+            `${API_PREFIX}/auth/signup`,
           ].includes(url.pathname)) ||
+        (request.method === "POST" &&
+          new RegExp(`^${API_PREFIX}/auth/signup/[^/]+/complete$`, "u").test(
+            url.pathname,
+          )) ||
+        (request.method === "GET" &&
+          new RegExp(`^${API_PREFIX}/auth/signup/[^/]+$`, "u").test(
+            url.pathname,
+          )) ||
         (request.method === "POST" &&
           url.pathname.endsWith("/accept") &&
           invitationPath);
@@ -5173,9 +5192,15 @@ export class ApiGateway {
       return;
     }
 
-    if (method === "POST" && path === `${API_PREFIX}/auth/register`) {
-      // Open by default so a shared deployment link is enough to create an
-      // account. See `registrationOpen` for the invitation-only opt-out.
+    if (method === "POST" && path === `${API_PREFIX}/auth/signup`) {
+      // Step one of a paid sign-up: an address, and a card.
+      //
+      // Nothing durable that anybody can sign in to is created here. The
+      // address is checked for a duplicate before any money moves — telling
+      // somebody they already have an account is kinder and cheaper than
+      // charging them for a second one — and the organization id is minted
+      // now so it can be stamped into Stripe's metadata, which is what makes
+      // an invoice three months from now attributable with no lookup table.
       if (!registrationOpen(process.env)) {
         throw new HttpError(
           403,
@@ -5183,78 +5208,127 @@ export class ApiGateway {
           "This control plane does not accept new accounts",
         );
       }
-      const body = objectBody(await this.readJson(request));
-      this.assertAccountConfirmations(body);
-      const account = {
-        email: emailField(body["email"]) ?? "",
-        displayName:
-          stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
-        password: stringField(body["password"], "password", { max: 256 }) ?? "",
-        ...(body["organizationName"] === undefined
-          ? {}
-          : {
-              organizationName:
-                stringField(body["organizationName"], "organizationName", {
-                  max: 120,
-                }) ?? "",
-            }),
-      };
-      // No mailbox challenge unless this deployment asks for one: the account
-      // is created here and the caller is signed in, exactly as confirming a
-      // code would have done. See `emailConfirmationRequired`.
-      if (!emailConfirmationRequired(process.env)) {
-        const user = await this.auth.registerUnconfirmed(account);
-        const issued = await this.auth.issueSession(
-          user,
-          this.remoteAddress(request),
-          request.headers["user-agent"] ?? "",
-          context.secure,
+      const stripe = this.requireStripe();
+      const priceId = this.stripePriceId;
+      if (priceId === undefined) {
+        throw new HttpError(
+          501,
+          "billing_not_configured",
+          "No price is configured for this deployment",
         );
-        response.setHeader("Set-Cookie", issued.cookies);
-        await this.options.store.appendAudit(undefined, {
-          type: "user_authenticated",
-          data: { userId: user.id, registered: true },
-        });
-        this.sendJson(response, 201, {
-          user: issued.principal.user,
-          memberships: issued.principal.memberships,
-          csrfToken: issued.csrfToken,
-        });
-        return;
       }
-      const registration = await this.auth.startRegistration(account);
-      this.sendJson(response, 202, registration);
+      const body = objectBody(await this.readJson(request));
+      const email = (emailField(body["email"]) ?? "").trim().toLowerCase();
+      if (email === "") {
+        throw new HttpError(400, "invalid_request", "An email is required");
+      }
+      if ((await this.options.store.getUserByEmail(email)) !== undefined) {
+        // Said plainly, matching what `/auth/register` already answers for
+        // the same case. This route is no more of an address oracle than the
+        // sign-in form beside it, and quietly taking the money instead would
+        // be worse than the disclosure.
+        throw new HttpError(
+          409,
+          "account_exists",
+          "An account already uses that email address. Sign in instead.",
+        );
+      }
+      const organizationName =
+        stringField(body["organizationName"], "organizationName", {
+          max: 120,
+          optional: true,
+        }) ?? "";
+      const intentId = `signup_${randomBytes(9).toString("base64url")}`;
+      const secret = randomBytes(32).toString("base64url");
+      const organizationId = createId("org");
+      const now = new Date();
+      const session = await stripe.createCheckoutSession({
+        organizationId,
+        priceId,
+        // One seat: the person standing at the checkout is the only member
+        // this organization has, and Stripe refuses a quantity of zero.
+        quantity: 1,
+        customerEmail: email,
+        trialPeriodDays: TRIAL_DAYS,
+        successUrl: `${this.appBaseUrl}/#welcome/${intentId}.${secret}`,
+        cancelUrl: `${this.appBaseUrl}/#signup`,
+      });
+      await this.options.store.createSignupIntent({
+        id: intentId,
+        organizationId,
+        email,
+        organizationName: organizationName === "" ? undefined : organizationName,
+        secretHash: hashSecret(secret),
+        stripeSessionId: session.id,
+        userId: undefined,
+        createdAt: now.toISOString(),
+        // A day is generous for a card form and short enough that an
+        // abandoned intent does not sit around naming an unused id.
+        expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+        completedAt: undefined,
+      });
+      // Mailed now rather than when the payment lands, because the link is
+      // built from a secret this deployment deliberately does not keep — only
+      // its hash is stored, exactly as a password reset's is. Sending it here
+      // is what stops the browser tab being the only copy: somebody who pays
+      // and then closes the tab has otherwise paid for an organization they
+      // can never reach.
+      //
+      // Safe to send before the money clears, because the link cannot build
+      // an account until it has: the completion route refuses while the
+      // sign-up is unpaid, and says so.
+      const link = `${this.appBaseUrl}/#welcome/${intentId}.${secret}`;
+      try {
+        await this.mailer({
+          to: email,
+          subject: "Finish setting up Kumi",
+          text:
+            `Your Kumi trial is starting.\n\n` +
+            `Open this link to choose a name and a password, and your team ` +
+            `is ready:\n\n${link}\n\n` +
+            `Fourteen days are free. Your card is billed after that unless ` +
+            `you cancel first.\n\n` +
+            `If you did not start this, ignore this message — no account has ` +
+            `been created and nothing has been charged.\n`,
+        });
+      } catch (error) {
+        // A relay that is down must not fail the sign-up: the checkout is
+        // already made, the person is about to be sent to it, and the tab
+        // they are holding carries the same link. The operator sees this;
+        // they see their card form.
+        console.error(
+          `[mail] Could not send the sign-up link for ${intentId}: ` +
+            describeError(error),
+        );
+      }
+      this.sendJson(response, 200, { url: session.url });
       return;
     }
 
-    if (
-      method === "POST" &&
-      path === `${API_PREFIX}/auth/register/confirm`
-    ) {
-      if (!registrationOpen(process.env)) {
-        throw new HttpError(
-          403,
-          "registration_closed",
-          "This control plane does not accept new accounts",
-        );
-      }
-      // A client left over from a deployment that asked for codes, talking to
-      // one that does not. Say so plainly rather than refusing a code that was
-      // never issued as though it were wrong.
-      if (!emailConfirmationRequired(process.env)) {
+    const signupCompleteMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/auth/signup/([^/]+)/complete$`, "u"),
+    );
+    if (signupCompleteMatch !== undefined && method === "POST") {
+      // Step three: the payment has cleared and the organization exists, so
+      // now — and only now — a name and a password build the account.
+      const intent = await this.signupIntentFor(signupCompleteMatch[0] ?? "");
+      if (intent.completedAt === undefined) {
+        // The webhook has not arrived yet. Telling them to wait is the honest
+        // answer; building the account here would mean building it before the
+        // money is confirmed.
         throw new HttpError(
           409,
-          "registration_confirmation_disabled",
-          "This control plane does not confirm sign-up by email. Sign in with the account you just created.",
+          "payment_not_confirmed",
+          "The payment has not been confirmed yet. Try again in a moment.",
         );
       }
       const body = objectBody(await this.readJson(request));
-      const user = await this.auth.confirmRegistration({
-        registrationId:
-          stringField(body["registrationId"], "registrationId", {
-            max: 128,
-          }) ?? "",
-        code: stringField(body["code"], "code", { max: 32 }) ?? "",
+      const user = await this.auth.completePaidSignup({
+        intent,
+        displayName:
+          stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
+        password: stringField(body["password"], "password", { max: 256 }) ?? "",
       });
       const issued = await this.auth.issueSession(
         user,
@@ -5263,10 +5337,6 @@ export class ApiGateway {
         context.secure,
       );
       response.setHeader("Set-Cookie", issued.cookies);
-      await this.options.store.appendAudit(undefined, {
-        type: "user_authenticated",
-        data: { userId: user.id, registered: true },
-      });
       this.sendJson(response, 201, {
         user: issued.principal.user,
         memberships: issued.principal.memberships,
@@ -5274,6 +5344,44 @@ export class ApiGateway {
       });
       return;
     }
+
+    const signupMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/auth/signup/([^/]+)$`, "u"),
+    );
+    if (signupMatch !== undefined && method === "GET") {
+      // What the welcome screen asks while it waits: has the payment landed,
+      // and is there still an account to build? Nothing here is a secret the
+      // holder of the link does not already have.
+      const intent = await this.signupIntentFor(signupMatch[0] ?? "");
+      this.sendJson(response, 200, {
+        email: intent.email,
+        paid: intent.completedAt !== undefined,
+        claimed: intent.userId !== undefined,
+      });
+      return;
+    }
+
+    if (
+      method === "POST" &&
+      (path === `${API_PREFIX}/auth/register` ||
+        path === `${API_PREFIX}/auth/register/confirm`)
+    ) {
+      // Retired. Sign-up takes a card now, and this route made an account
+      // without one — so leaving it reachable would leave the paywall with a
+      // door beside it.
+      //
+      // 410 rather than 404: it existed, it is gone deliberately, and a
+      // client still calling it should be told that rather than left to
+      // wonder whether it moved. `POST /auth/signup` is the way in.
+      throw new HttpError(
+        410,
+        "registration_retired",
+        "Accounts are created by starting a trial at /auth/signup.",
+      );
+    }
+
+
 
     if (method === "POST" && path === `${API_PREFIX}/auth/login`) {
       const body = objectBody(await this.readJson(request));
@@ -6402,6 +6510,19 @@ export class ApiGateway {
     }
     if (method === "POST" && path === `${API_PREFIX}/organizations`) {
       assertTokenScope(principal, "manage_organization");
+      if (!principal.user.systemAdmin) {
+        // An operator's tool, not a self-serve one. This route wrote no
+        // subscription row, and a missing row used to be read as a fresh
+        // fourteen-day trial — so anybody signed in could mint themselves
+        // another fortnight whenever the last one ran out, and orphan the
+        // organization they were supposed to be paying for. Sign-up is the
+        // way to get an organization; that path takes a card.
+        throw new HttpError(
+          403,
+          "forbidden",
+          "New organizations are created by signing up",
+        );
+      }
       const body = objectBody(await this.readJson(request));
       const slug = slugField(body["slug"]) ?? "";
       if (
@@ -6423,6 +6544,14 @@ export class ApiGateway {
         organizationId: organization.id,
         userId: principal.user.id,
         role: "owner",
+      });
+      // Written explicitly, because a missing row is now no entitlement at
+      // all rather than a fortnight's grace. An organization an operator
+      // makes by hand is one nobody is going to be invoiced for, and saying
+      // so here is what keeps it working.
+      await this.options.store.saveSubscription({
+        organizationId: organization.id,
+        status: "comped",
       });
       await this.options.store.appendAudit(undefined, {
         type: "organization_changed",
@@ -11231,7 +11360,10 @@ export class ApiGateway {
           status: subscription?.status ?? "trialing",
           trialEndsAt: subscription?.trialEndsAt,
           currentPeriodEnd: subscription?.currentPeriodEnd,
-          seats: billableSeats(memberships),
+          seats: billableSeats(
+            memberships,
+            await this.organizationGrants(organizationId),
+          ),
           // Whether a portal link can be made at all. A team that has never
           // paid has no Stripe customer, and offering "manage billing" that
           // can only fail is worse than not offering it.
@@ -11287,7 +11419,13 @@ export class ApiGateway {
         // At least one: an organization with no billable seat yet still has
         // somebody standing at the checkout, and Stripe refuses a quantity of
         // zero. They are buying the seat they are about to use.
-        quantity: Math.max(1, billableSeats(memberships)),
+        quantity: Math.max(
+          1,
+          billableSeats(
+            memberships,
+            await this.organizationGrants(organizationId),
+          ),
+        ),
         // Fragments, not paths. The dashboard routes on `location.hash`, so a
         // path-shaped return lands on the default screen with nothing said —
         // somebody would pay and be shown the room they started in. The
@@ -11542,6 +11680,119 @@ export class ApiGateway {
    * memberships lead; everything they can only reach by administration or by
    * grant follows.
    */
+  /** The open sign-up that minted this organization id, if there is one. */
+  private async findSignupIntentForOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    return await this.options.store
+      .getSignupIntentByOrganization(organizationId)
+      .catch(() => undefined);
+  }
+
+  /**
+   * Turns a cleared payment into the organization it paid for.
+   *
+   * Runs before the entitlement is written and does nothing at all unless a
+   * sign-up is waiting on this exact id — so an ordinary team's renewal three
+   * months from now passes straight through, and a redelivery of the event
+   * that already provisioned finds the work done.
+   *
+   * The person is deliberately not created here. They have paid, but they
+   * have not yet chosen a name or a password, and inventing an account they
+   * cannot sign in to would put back exactly the half-made state this
+   * codebase has just spent a day removing. The organization waits for them
+   * behind the claim link instead.
+   */
+  private async provisionPaidSignup(organizationId: string): Promise<void> {
+    const intent = await this.findSignupIntentForOrganization(organizationId);
+    if (intent === undefined || intent.completedAt !== undefined) {
+      return;
+    }
+    if (
+      !(await this.options.store.completeSignupIntent(
+        intent.id,
+        new Date().toISOString(),
+      ))
+    ) {
+      // Another delivery of the same payment got here first.
+      return;
+    }
+    await this.options.store.createOrganization({
+      id: organizationId,
+      slug: `team-${randomBytes(8).toString("hex")}`,
+      name:
+        intent.organizationName ?? `${intent.email.split("@")[0] ?? "New"}'s team`,
+    });
+    await this.options.store.createProject({
+      organizationId,
+      slug: "default",
+      name: "My Project",
+      description: "Repositories you create live here.",
+    });
+  }
+
+  /**
+   * The sign-up a claim link names, or a refusal that says nothing extra.
+   *
+   * Every way a link can be wrong — unknown, mistyped, expired, or already
+   * spent — answers the same way, because the alternative is a route that
+   * tells a stranger which links exist.
+   */
+  private async signupIntentFor(token: string): Promise<SignupIntentRecord> {
+    const separator = token.indexOf(".");
+    const refused = new HttpError(
+      404,
+      "signup_not_found",
+      "That sign-up link is not usable.",
+    );
+    if (separator <= 0) {
+      throw refused;
+    }
+    const intent = await this.options.store.getSignupIntent(
+      token.slice(0, separator),
+    );
+    if (
+      intent === undefined ||
+      !secretMatches(token.slice(separator + 1), intent.secretHash)
+    ) {
+      throw refused;
+    }
+    // An expired intent that has been paid is still good: the money cleared,
+    // and the deadline was only ever there to sweep abandoned checkouts.
+    if (intent.completedAt === undefined && intent.expiresAt <= new Date().toISOString()) {
+      throw refused;
+    }
+    return intent;
+  }
+
+  /**
+   * Every repository grant held inside one organization.
+   *
+   * Walked rather than queried because a grant is keyed by repository and
+   * repositories reach an organization through projects. It is a handful of
+   * reads on the two paths that count seats, both of which already do more
+   * work than this.
+   */
+  private async organizationGrants(
+    organizationId: string,
+  ): Promise<RepositoryGrant[]> {
+    const grants: RepositoryGrant[] = [];
+    for (const project of await this.options.store.listProjects(
+      organizationId,
+    )) {
+      for (const repository of await this.options.store.listProjectRepositories(
+        project.id,
+      )) {
+        grants.push(
+          ...(await this.options.store
+            .listRepositoryGrants(repository.id)
+            .catch(() => [])),
+        );
+      }
+    }
+    return grants;
+  }
+
   private async reachableOrganizations(
     principal: AuthenticatedPrincipal,
   ): Promise<Organization[]> {
@@ -19984,6 +20235,7 @@ export class ApiGateway {
         ),
         status: subscriptionStatusFrom(subscription.status),
         currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+        trialEndsAt: isoFromUnixSeconds(subscription.trialEnd),
         stripeCustomerId: subscription.customerId,
         stripeSubscriptionId: subscription.id,
       });
@@ -20040,6 +20292,7 @@ export class ApiGateway {
           ? "canceled"
           : subscriptionStatusFrom(subscription.status),
       currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+      trialEndsAt: isoFromUnixSeconds(subscription.trialEnd),
       stripeCustomerId: subscription.customerId,
       stripeSubscriptionId: subscription.id,
     });
@@ -20050,6 +20303,16 @@ export class ApiGateway {
     organizationId: string;
     status: "active" | "past_due" | "canceled";
     currentPeriodEnd: string | undefined;
+    /**
+     * What Stripe says the trial ends at, carried so the row keeps it.
+     *
+     * `saveSubscription` writes the row whole — deliberately — so every write
+     * that omitted this erased it. Harmless only for as long as a status of
+     * `active` meant nothing consulted it; the moment a trial is stored as a
+     * trial, the erased date is what decides whether somebody who has just
+     * paid may work.
+     */
+    trialEndsAt: string | undefined;
     stripeCustomerId: string;
     stripeSubscriptionId: string;
   }): Promise<void> {
@@ -20061,12 +20324,21 @@ export class ApiGateway {
       );
       return;
     }
-    if ((await this.options.store.getOrganization(input.organizationId)) === undefined) {
+    if (
+      (await this.options.store.getOrganization(input.organizationId)) ===
+        undefined &&
+      (await this.findSignupIntentForOrganization(input.organizationId)) ===
+        undefined
+    ) {
       process.stderr.write(
         `[stripe] event named unknown organization ${input.organizationId}\n`,
       );
       return;
     }
+    // A paid sign-up's organization does not exist until its payment clears,
+    // and this is where that happens — before the entitlement is written,
+    // because the entitlement is what the organization is for.
+    await this.provisionPaidSignup(input.organizationId);
     const existing = await this.options.store.getSubscription(
       input.organizationId,
     );
@@ -20094,6 +20366,9 @@ export class ApiGateway {
       ...(input.currentPeriodEnd === undefined
         ? {}
         : { currentPeriodEnd: input.currentPeriodEnd }),
+      ...(input.trialEndsAt === undefined
+        ? {}
+        : { trialEndsAt: input.trialEndsAt }),
       ...(input.stripeCustomerId === ""
         ? {}
         : { stripeCustomerId: input.stripeCustomerId }),
@@ -20139,7 +20414,13 @@ export class ApiGateway {
       }
       const memberships =
         await this.options.store.listMemberships(organizationId);
-      const seats = Math.max(1, billableSeats(memberships));
+      const seats = Math.max(
+        1,
+        billableSeats(
+          memberships,
+          await this.organizationGrants(organizationId),
+        ),
+      );
       const current = await this.stripe.getSubscription(subscriptionId);
       if (current.quantity === seats) {
         // Stripe prorates every quantity write, so writing the number it
