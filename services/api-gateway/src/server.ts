@@ -5040,6 +5040,23 @@ export class ApiGateway {
         // and cannot be filled in correctly. Says whether a secret is needed,
         // never anything about what it is.
         bootstrapTokenRequired: this.bootstrapToken !== undefined,
+        // Which billing variables actually reached this process, as three
+        // booleans and never a character of any of them.
+        //
+        // Setting these is a four-step job spread across two dashboards, and
+        // every way of getting it wrong — a name typo, the wrong service, a
+        // save that never redeployed — produces one indistinguishable
+        // symptom: Stripe posts an event and the deployment answers 501. From
+        // outside there is no way to tell "not set" from "set on the wrong
+        // service" from "set but this container predates it", and the person
+        // configuring it is the one person who cannot see inside the process.
+        // `build.startedAt` above already says which container is answering;
+        // this says what it was handed.
+        billing: {
+          secretKey: this.stripe !== undefined,
+          webhookSecret: this.stripeWebhookSecret !== undefined,
+          priceId: this.stripePriceId !== undefined,
+        },
         webSocketConnections: this.webSockets.connections,
         ...(docker === undefined ? {} : { docker }),
         // Which code is answering, so a deploy can be confirmed from outside
