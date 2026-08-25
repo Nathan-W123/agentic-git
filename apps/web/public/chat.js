@@ -10,6 +10,7 @@
 
 import {
   API_ROOT,
+  authorizeRequest,
   contextPercentFor,
   currentUserId,
   currentUserName,
@@ -365,14 +366,14 @@ export async function sendChat(agentId, text, rerender) {
 
 async function streamChat(body, rerender) {
   const conversation = conversationFor(body.provider);
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    Accept: "application/x-ndjson",
+  });
   const response = await fetch(`${API_ROOT}/chat/stream`, {
     method: "POST",
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/x-ndjson",
-      "X-CSRF-Token": csrf(),
-    },
+    credentials: authorizeRequest(headers, "POST"),
+    headers,
     body: JSON.stringify(body),
   });
 
@@ -445,14 +446,14 @@ async function streamChat(body, rerender) {
 }
 
 async function completeChat(body) {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  });
   const response = await fetch(`${API_ROOT}/chat/complete`, {
     method: "POST",
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "X-CSRF-Token": csrf(),
-    },
+    credentials: authorizeRequest(headers, "POST"),
+    headers,
     body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({}));
@@ -464,15 +465,6 @@ async function completeChat(body) {
   return data.reply ?? { text: "", usage: {} };
 }
 
-function csrf() {
-  return (
-    document.cookie
-      .split(";")
-      .map((part) => part.trim())
-      .find((part) => part.startsWith("coord_csrf="))
-      ?.slice("coord_csrf=".length) ?? ""
-  );
-}
 
 /** Loads the model/effort lists the account reports, once per provider. */
 export async function ensureAgentOptions(agentId, rerender) {

@@ -1,0 +1,13 @@
+{
+  "name": "@coord/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/*.test.js",
+    "desktop": "electron electron/main.mjs"
+  }
+}
