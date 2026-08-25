@@ -11231,6 +11231,8 @@ export class ApiGateway {
         principal,
         organizationId,
         "manage_organization",
+        // A lapsed subscription must not block the act that ends the lapse.
+        { ignoreEntitlement: true },
       );
       const stripe = this.requireStripe();
       const priceId = this.stripePriceId;
@@ -11278,6 +11280,8 @@ export class ApiGateway {
         principal,
         organizationId,
         "manage_organization",
+        // A lapsed subscription must not block the act that ends the lapse.
+        { ignoreEntitlement: true },
       );
       const stripe = this.requireStripe();
       const subscription =
