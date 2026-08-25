@@ -17,6 +17,8 @@ import {
 
 import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
 
+import type { StripeClient } from "./stripe.js";
+
 import {
   agentIdentity,
   ApiGateway,
@@ -9998,6 +10000,9 @@ async function startBareGateway(
     mailer?: Mailer;
     authRateLimitPerMinute?: number;
     allowedOrigins?: readonly string[];
+    stripe?: StripeClient;
+    stripeWebhookSecret?: string;
+    stripePriceId?: string;
   },
 ): Promise<{
   client: TestClient;
@@ -10018,6 +10023,13 @@ async function startBareGateway(
     ...(options.allowedOrigins === undefined
       ? {}
       : { allowedOrigins: options.allowedOrigins }),
+    ...(options.stripe === undefined ? {} : { stripe: options.stripe }),
+    ...(options.stripeWebhookSecret === undefined
+      ? {}
+      : { stripeWebhookSecret: options.stripeWebhookSecret }),
+    ...(options.stripePriceId === undefined
+      ? {}
+      : { stripePriceId: options.stripePriceId }),
     // Never the real one: a test that opens a socket to a mail relay is a test
     // that fails on somebody else's network.
     mailer:
@@ -10100,6 +10112,40 @@ test("an empty token is the same as none, not a token nobody can send", async (t
     },
   });
   assert.equal(created.status, 201, JSON.stringify(created.data));
+});
+
+test("health says which billing variables reached the process", async (t) => {
+  // The symptom this exists for: every way of misconfiguring Stripe — a name
+  // typo, the variables on the wrong service, a save that never redeployed —
+  // looks identical from outside, a 501 on the webhook. Three booleans, and
+  // never any part of a value.
+  const bare = await startBareGateway(t, {});
+  const unset = await bare.client.request("/api/v1/health");
+  assert.deepEqual(unset.data.billing, {
+    secretKey: false,
+    webhookSecret: false,
+    priceId: false,
+  });
+
+  const configured = await startBareGateway(t, {
+    // The gateway is handed a constructed client rather than the key, so a
+    // stub standing in for one is exactly what "a secret key was configured"
+    // means from in here.
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+  });
+  const set = await configured.client.request("/api/v1/health");
+  assert.deepEqual(set.data.billing, {
+    secretKey: true,
+    webhookSecret: true,
+    priceId: true,
+  });
+
+  // Never the values themselves, however the payload grows later.
+  const body = JSON.stringify(set.data);
+  assert.ok(!body.includes("whsec_example"), "the signing secret must not leak");
+  assert.ok(!body.includes("price_example"), "no configured value is echoed");
 });
 
 test("a configured token is still required, and still says so", async (t) => {
