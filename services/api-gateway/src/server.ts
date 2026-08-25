@@ -1690,6 +1690,19 @@ const AUDIT_THREAD_TITLE = "Audit log";
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
 
 /**
+ * How often the seat count on every paying subscription is checked against
+ * the people who can actually work.
+ *
+ * Six hours, which is neither a real-time guarantee nor meant to be one. The
+ * eight places that change a seat all sync as they go; this exists because
+ * "they all sync" is a claim about code and an invoice is a claim about
+ * money, and only one of those can be checked. A pass costs one Stripe read
+ * per paying organization, so a deployment with a hundred of them spends four
+ * hundred reads a day on knowing its billing is right.
+ */
+const BILLING_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+
+/**
  * Whether a terminal event is itself the thing the reader asked for.
  *
  * The no-thread ending exists for work whose whole story is "started, done":
@@ -3845,6 +3858,11 @@ export interface ApiGatewayOptions {
    */
   threadReconcileIntervalMs?: number;
   /**
+   * How often seats are reconciled against Stripe, and expired sign-up
+   * intents swept. A test that is about the pass cannot wait out six hours.
+   */
+  billingReconcileIntervalMs?: number;
+  /**
    * How long a held `/plan` waits for somebody to start it before it lapses.
    * Defaults to `COORD_PLAN_HOLD_TTL_MINUTES`, and failing that to
    * {@link PLAN_HOLD_TTL_MS}.
@@ -4432,6 +4450,8 @@ export class ApiGateway {
   private channelProgressTimer: NodeJS.Timeout | undefined;
   private auditorTimer: NodeJS.Timeout | undefined;
   private threadReconcileTimer: NodeJS.Timeout | undefined;
+
+  private billingReconcileTimer: NodeJS.Timeout | undefined;
   /**
    * The coordinator's temporary conflict lines currently standing in a room,
    * by message id.
@@ -4740,6 +4760,7 @@ export class ApiGateway {
     this.collaboration.start();
     this.startAuditorWatch();
     this.startThreadReconcile();
+    this.startBillingReconcile();
   }
 
   /**
@@ -4769,6 +4790,82 @@ export class ApiGateway {
       void this.lapseStalePlanHolds().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
+  }
+
+  /**
+   * Checks what Stripe is charging for against who can actually work.
+   *
+   * The eight places a seat changes all sync as they go — and for a long time
+   * three of them did not, which is exactly the point. "Every call site
+   * syncs" is a claim about code that nothing verifies; the invoice is the
+   * only thing the customer sees, and until something compares the two, a
+   * missed call site is invisible from inside the product and shows up as
+   * money. The doc comment on `syncSeatQuantity` promises drift "heals at the
+   * next purchase or seat change"; nothing guaranteed one ever happens, and a
+   * steady team makes neither for months.
+   *
+   * `syncSeatQuantity` already reads Stripe's current quantity and writes
+   * only when it differs, so the pass is that call for every paying
+   * organization and nothing else. A correction is logged, because a
+   * reconciler that silently fixes things hides the bug it just found.
+   *
+   * Skipped entirely where Stripe is not configured, which is a supported way
+   * to run this.
+   */
+  private startBillingReconcile(): void {
+    if (this.billingReconcileTimer !== undefined || this.stripe === undefined) {
+      return;
+    }
+    const interval =
+      this.options.billingReconcileIntervalMs ?? BILLING_RECONCILE_INTERVAL_MS;
+    void this.reconcileBilling().catch(() => undefined);
+    this.billingReconcileTimer = setInterval(() => {
+      void this.reconcileBilling().catch(() => undefined);
+    }, interval);
+    this.billingReconcileTimer.unref?.();
+  }
+
+  private async reconcileBilling(): Promise<void> {
+    // Abandoned checkouts, swept on the way past. An intent that was never
+    // paid is a row nobody will ever use again, and `deleteExpiredSignupIntents`
+    // has had no caller since it was written — so they accumulate forever,
+    // each one holding an email address that then reads as taken.
+    await this.options.store
+      .deleteExpiredSignupIntents(new Date().toISOString())
+      .catch((error: unknown) => {
+        process.stderr.write(
+          `[billing] sweeping expired sign-ups failed: ${describeError(error)}
+`,
+        );
+      });
+    // Walked rather than queried. A dedicated store method would be one round
+    // trip instead of one per organization, but it is three backends and a
+    // contract suite for a pass that runs four times a day, and the read it
+    // saves is not the expensive half — the Stripe call inside the sync is.
+    const organizations = await this.options.store
+      .listOrganizations()
+      .catch(() => []);
+    for (const organization of organizations) {
+      const subscription = await this.options.store
+        .getSubscription(organization.id)
+        .catch(() => undefined);
+      if (
+        subscription?.stripeSubscriptionId === undefined ||
+        subscription.status === "canceled"
+      ) {
+        // Nothing to reconcile against: a comped or unpaid organization has
+        // no quantity, and a cancelled one is not being charged.
+        continue;
+      }
+      const corrected = await this.syncSeatQuantity(organization.id);
+      if (corrected !== undefined) {
+        process.stderr.write(
+          `[billing] seat drift corrected for ${organization.id}: ` +
+            `now ${String(corrected)}
+`,
+        );
+      }
+    }
   }
 
   private async routeUpgrade(
@@ -4805,6 +4902,10 @@ export class ApiGateway {
     if (this.auditorTimer !== undefined) {
       clearInterval(this.auditorTimer);
       this.auditorTimer = undefined;
+    }
+    if (this.billingReconcileTimer !== undefined) {
+      clearInterval(this.billingReconcileTimer);
+      this.billingReconcileTimer = undefined;
     }
     if (this.threadReconcileTimer !== undefined) {
       clearInterval(this.threadReconcileTimer);
@@ -5334,6 +5435,13 @@ export class ApiGateway {
           "The payment has not been confirmed yet. Try again in a moment.",
         );
       }
+      // The latch says the payment cleared; whether the organization it
+      // bought exists is a separate question, and for any sign-up that went
+      // through the old latch-first provisioning the answer can be no. This
+      // is a no-op for every ordinary sign-up and the repair for the rest —
+      // pressing the link is the one thing a person in that state will
+      // certainly do, so it is where the recovery belongs.
+      await this.provisionPaidSignup(intent.organizationId);
       const body = objectBody(await this.readJson(request));
       const user = await this.auth.completePaidSignup({
         intent,
@@ -11799,7 +11907,25 @@ export class ApiGateway {
    */
   private async provisionPaidSignup(organizationId: string): Promise<void> {
     const intent = await this.findSignupIntentForOrganization(organizationId);
-    if (intent === undefined || intent.completedAt !== undefined) {
+    if (intent === undefined) {
+      return;
+    }
+    // The organization decides, not the latch.
+    //
+    // `completeSignupIntent` used to be set first and outside a transaction,
+    // so a death between the latch and the organization left a sign-up marked
+    // provisioned with nothing behind it: a payment that had bought nothing
+    // and a claim link that could never work. Nothing in the product can
+    // unset that flag, so reading it as the answer made that state permanent
+    // and only reachable by hand on the database.
+    //
+    // Asking whether the organization exists is both the honest question and
+    // the recovery: any later event for the same subscription — an invoice a
+    // month from now, or the claim link being pressed — rebuilds what was
+    // lost, and a sign-up that provisioned normally still costs one read.
+    if (
+      (await this.options.store.getOrganization(organizationId)) !== undefined
+    ) {
       return;
     }
     // One transaction, and the latch last.
@@ -11817,8 +11943,10 @@ export class ApiGateway {
     await this.options.store.runInTransaction(async (store) => {
       // Re-read inside the transaction: two deliveries of the same payment
       // can reach this together, and the loser must do nothing rather than
-      // build a second organization on the winner's id.
-      if ((await store.getSignupIntent(intent.id))?.completedAt !== undefined) {
+      // build a second organization on the winner's id. The organization is
+      // what is asked about, for the same reason as above — it is the thing
+      // that either exists or does not.
+      if ((await store.getOrganization(organizationId)) !== undefined) {
         return;
       }
       await store.createOrganization({
@@ -20367,6 +20495,17 @@ export class ApiGateway {
       return;
     }
 
+    // Three days out, Stripe warns that a trial is about to convert. It is
+    // the only notice a customer gets who has not opened the app since they
+    // signed up: the in-product countdown is real but they have to be looking
+    // at it, and the alternative is a first charge arriving with no warning
+    // at all. Best effort — a relay that is down must not make Stripe retry
+    // an event whose only effect is an email.
+    if (type === "customer.subscription.trial_will_end") {
+      await this.warnTrialEnding(object);
+      return;
+    }
+
     // A paid or failed invoice moves the same subscription between `active`
     // and `past_due`, which `customer.subscription.updated` also reports. Both
     // are handled because which one arrives first is not guaranteed, and the
@@ -20394,6 +20533,72 @@ export class ApiGateway {
         type,
       );
       return;
+    }
+  }
+
+  /**
+   * Tells a trialing team their card is about to be charged.
+   *
+   * Sent to the organization's owners and administrators — the people who can
+   * do something about it — and to nobody else, because a developer who
+   * cannot reach billing has nothing to act on. It says the date and where to
+   * cancel, and it does not pretend to be a receipt.
+   */
+  private async warnTrialEnding(
+    object: Record<string, unknown>,
+  ): Promise<void> {
+    const subscription = readSubscription(object);
+    const metadata = object["metadata"] as Record<string, unknown> | undefined;
+    let organizationId = String(metadata?.["organizationId"] ?? "");
+    if (organizationId === "" && this.stripe !== undefined) {
+      organizationId =
+        (
+          await this.stripe
+            .getSubscription(subscription.id)
+            .catch(() => undefined)
+        )?.metadata["organizationId"] ?? "";
+    }
+    if (organizationId === "") {
+      return;
+    }
+    const endsAt = isoFromUnixSeconds(subscription.trialEnd);
+    const when =
+      endsAt === undefined ? "in a few days" : `on ${endsAt.slice(0, 10)}`;
+    const memberships =
+      await this.options.store.listMemberships(organizationId);
+    for (const membership of memberships) {
+      if (membership.role !== "owner" && membership.role !== "admin") {
+        continue;
+      }
+      const user = await this.options.store.getUser(membership.userId);
+      if (user === undefined) {
+        continue;
+      }
+      try {
+        await this.mailer({
+          to: user.email,
+          subject: "Your Kumi trial ends soon",
+          text:
+            `Your Kumi trial ends ${when}, and the card on file is charged ` +
+            `then.
+
+` +
+            `Nothing is needed if you want to carry on. To change the card ` +
+            `or cancel, open Kumi and go to Settings — Billing:
+
+` +
+            `${this.appBaseUrl}/#settings
+`,
+        });
+      } catch (error) {
+        // One address failing must not cost the others theirs, and none of
+        // it is worth making Stripe redeliver: the charge happens either way
+        // and the in-product countdown still says so.
+        console.error(
+          `[mail] Could not warn ${user.email} that a trial is ending: ` +
+            describeError(error),
+        );
+      }
     }
   }
 
@@ -20539,16 +20744,18 @@ export class ApiGateway {
    * Nothing happens for an organization that has never paid: there is no
    * subscription to hold a quantity, and the count is taken fresh at checkout.
    */
-  private async syncSeatQuantity(organizationId: string): Promise<void> {
+  private async syncSeatQuantity(
+    organizationId: string,
+  ): Promise<number | undefined> {
     if (this.stripe === undefined) {
-      return;
+      return undefined;
     }
     try {
       const subscription =
         await this.options.store.getSubscription(organizationId);
       const subscriptionId = subscription?.stripeSubscriptionId;
       if (subscriptionId === undefined || subscription?.status === "canceled") {
-        return;
+        return undefined;
       }
       const memberships =
         await this.options.store.listMemberships(organizationId);
@@ -20564,22 +20771,26 @@ export class ApiGateway {
         // Stripe prorates every quantity write, so writing the number it
         // already holds would put a zero-value line on the invoice each time
         // anybody's role changed.
-        return;
+        return undefined;
       }
       const itemId = await this.stripe.getSubscriptionItemId(subscriptionId);
       if (itemId === undefined) {
-        return;
+        return undefined;
       }
       await this.stripe.updateSubscriptionQuantity({
         subscriptionId,
         subscriptionItemId: itemId,
         quantity: seats,
       });
+      // What was written, so a caller reconciling rather than reacting can
+      // say that it found drift. Every other caller ignores it.
+      return seats;
     } catch (error) {
       process.stderr.write(
         `[stripe] seat sync failed for ${organizationId}: ${describeError(error)}\n`,
       );
     }
+    return undefined;
   }
 
   private requireStripe(): StripeClient {

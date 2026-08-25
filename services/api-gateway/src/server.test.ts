@@ -47,7 +47,7 @@ import {
   type ApiOperations,
   type ChannelMemoThread,
 } from "./server.js";
-import { hashPassword } from "./auth.js";
+import { hashPassword, hashSecret } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
 import type { CodexUsageReader } from "./codex-subscription-usage.js";
 import type { CatchUpSummariser } from "./catch-up.js";
@@ -10343,6 +10343,7 @@ async function startBareGateway(
     stripeWebhookSecret?: string;
     stripePriceId?: string;
     appBaseUrl?: string;
+    billingReconcileIntervalMs?: number;
   },
 ): Promise<{
   client: TestClient;
@@ -10370,6 +10371,9 @@ async function startBareGateway(
     ...(options.stripePriceId === undefined
       ? {}
       : { stripePriceId: options.stripePriceId }),
+    ...(options.billingReconcileIntervalMs === undefined
+      ? {}
+      : { billingReconcileIntervalMs: options.billingReconcileIntervalMs }),
     // Stripe needs somewhere absolute to send a browser back to, and the
     // sign-up route refuses without one rather than letting Stripe answer
     // that for it.
@@ -10598,6 +10602,54 @@ test("a paid sign-up takes the card first and builds the account last", async (t
   assert.equal(await store.countUsers(), 1);
 });
 
+test("a sign-up latched before its organization existed repairs itself", async (t) => {
+  // The state the old latch-first provisioning could leave behind, and which
+  // nothing in the product could undo: `completed_at` set, no organization,
+  // a payment that had bought nothing and a claim link that could never
+  // work. `completeSignupIntent` has no inverse, so reading the latch as the
+  // answer made it permanent.
+  const { client, store } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+  });
+  const organizationId = "org_burned";
+  const secret = "burned-secret";
+  const created = new Date();
+  await store.createSignupIntent({
+    id: "signup_burned",
+    organizationId,
+    email: "burned@example.com",
+    organizationName: "Burned Team",
+    secretHash: hashSecret(secret),
+    stripeSessionId: undefined,
+    userId: undefined,
+    createdAt: created.toISOString(),
+    expiresAt: new Date(created.getTime() + 86_400_000).toISOString(),
+    // Latched, with nothing behind it.
+    completedAt: created.toISOString(),
+  });
+  assert.equal(await store.getOrganization(organizationId), undefined);
+
+  const finished = await client.request(
+    `/api/v1/auth/signup/${encodeURIComponent(`signup_burned.${secret}`)}/complete`,
+    {
+      method: "POST",
+      body: { displayName: "Burned", password: "BurnedSignupPassword123!" },
+    },
+  );
+  assert.equal(finished.status, 201, JSON.stringify(finished.data));
+  assert.equal(finished.data.user.email, "burned@example.com");
+  // The organization the payment bought, built on the id the subscription
+  // already points at rather than a new one.
+  assert.equal(finished.data.memberships[0]?.organizationId, organizationId);
+  assert.equal(finished.data.memberships[0]?.role, "owner");
+  assert.deepEqual(
+    (await store.listProjects(organizationId)).map((project) => project.slug),
+    ["default"],
+  );
+});
+
 test("day fifteen bills the trial and the team keeps working", async (t) => {
   // The half of the money nobody has watched happen. Everything up to here
   // has been proved by a real checkout; what follows it is a fortnight away
@@ -10724,6 +10776,177 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
     "owner",
     "and not folded to viewer by the conversion",
   );
+});
+
+test("the reconciler finds seat drift nothing else would have", async (t) => {
+  // "Every call site syncs" is a claim about code, and for a long time three
+  // of the eight did not. An invoice is a claim about money, and until
+  // something compares the two a missed call site is invisible from inside
+  // the product. The promise that drift "heals at the next purchase or seat
+  // change" has nothing behind it: a steady team makes neither for months.
+  const writes: number[] = [];
+  // What Stripe holds — one seat, as if the second person had joined while a
+  // sync was missing.
+  let held = 1;
+  const stripe = {
+    getSubscription: async (id: string) => ({
+      id,
+      status: "active",
+      customerId: "cus_drift",
+      currentPeriodEnd: undefined,
+      trialEnd: undefined,
+      quantity: held,
+      metadata: {},
+    }),
+    getSubscriptionItemId: async () => "si_drift",
+    updateSubscriptionQuantity: async (input: { quantity: number }) => {
+      writes.push(input.quantity);
+      held = input.quantity;
+    },
+  } as unknown as StripeClient;
+
+  const { store } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+    // The pass runs once at construction as well, which is what this is
+    // really testing; a short interval only keeps a stuck one from hiding.
+    billingReconcileIntervalMs: 50,
+  });
+  const organization = await store.createOrganization({
+    slug: "drifted",
+    name: "Drifted",
+  });
+  await store.saveSubscription({
+    organizationId: organization.id,
+    status: "active",
+    stripeCustomerId: "cus_drift",
+    stripeSubscriptionId: "sub_drift",
+  });
+  for (const name of ["one", "two", "three"]) {
+    const user = await store.createUser({
+      email: `${name}@example.com`,
+      displayName: name,
+      passwordDigest: "digest",
+      systemAdmin: false,
+    });
+    await store.saveMembership({
+      organizationId: organization.id,
+      userId: user.id,
+      role: "developer",
+    });
+  }
+
+  // A cancelled organization beside it, which must not be touched: it is not
+  // being charged, and writing a quantity to it would be a proration on a
+  // subscription nobody holds.
+  const gone = await store.createOrganization({ slug: "gone", name: "Gone" });
+  await store.saveSubscription({
+    organizationId: gone.id,
+    status: "canceled",
+    stripeSubscriptionId: "sub_gone",
+  });
+
+  // An abandoned checkout, swept on the way past. `deleteExpiredSignupIntents`
+  // had no caller at all, so these accumulated forever — each one holding an
+  // email address that then reads as taken when its owner tries again.
+  const abandoned = new Date(Date.now() - 86_400_000).toISOString();
+  await store.createSignupIntent({
+    id: "signup_abandoned",
+    organizationId: "org_never",
+    email: "abandoned@example.com",
+    organizationName: undefined,
+    secretHash: "hash",
+    stripeSessionId: undefined,
+    userId: undefined,
+    createdAt: abandoned,
+    expiresAt: abandoned,
+    completedAt: undefined,
+  });
+
+  await waitFor(
+    async () => writes.length > 0,
+    "the reconciler never corrected the seat count",
+  );
+  assert.deepEqual(writes, [3], "three people who can work, three seats");
+  await waitFor(
+    async () => (await store.getSignupIntent("signup_abandoned")) === undefined,
+    "the expired sign-up was never swept",
+  );
+
+  // And it settles: once Stripe holds the right number the pass writes
+  // nothing, because every write prorates.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(writes, [3], "a settled subscription is not rewritten");
+});
+
+test("three days out, the people who can cancel are told", async (t) => {
+  // The only notice reaching a customer who has not opened the app since
+  // signing up. The in-product countdown is real, but it has to be looked at,
+  // and the alternative is a first charge with no warning at all.
+  const secret = "whsec_example";
+  const { client, store, sent } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "ending-team",
+    name: "Ending Team",
+  });
+  const roles = ["owner", "admin", "developer", "viewer"] as const;
+  for (const role of roles) {
+    const user = await store.createUser({
+      email: `${role}@example.com`,
+      displayName: role,
+      passwordDigest: "digest",
+      systemAdmin: false,
+    });
+    await store.saveMembership({
+      organizationId: organization.id,
+      userId: user.id,
+      role,
+    });
+  }
+
+  const body = JSON.stringify({
+    type: "customer.subscription.trial_will_end",
+    data: {
+      object: {
+        id: "sub_ending",
+        status: "trialing",
+        customer: "cus_ending",
+        trial_end: 1_800_000_000,
+        metadata: { organizationId: organization.id },
+      },
+    },
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const delivered = await client.request("/api/v1/stripe/webhook", {
+    method: "POST",
+    raw: Buffer.from(body, "utf8"),
+    rawType: "application/json",
+    headers: {
+      "Stripe-Signature": `t=${String(timestamp)},v1=${createHmac("sha256", secret)
+        .update(`${String(timestamp)}.${body}`, "utf8")
+        .digest("hex")}`,
+    },
+  });
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.data));
+
+  // Only the people who can act on it. A developer who cannot reach billing
+  // has nothing to do with the message.
+  assert.deepEqual(
+    sent.map((message) => message.to).sort(),
+    ["admin@example.com", "owner@example.com"],
+  );
+  assert.match(sent[0]?.subject ?? "", /trial ends soon/iu);
+  // The date Stripe named, not a guess.
+  assert.match(sent[0]?.text ?? "", /2027-01-15/u);
+
+  // And the notice writes nothing: the entitlement is still whatever the
+  // subscription events said it was.
+  assert.equal(await store.getSubscription(organization.id), undefined);
 });
 
 test("a card that fails on day fifteen goes past due, not dark", async (t) => {
