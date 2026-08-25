@@ -241,6 +241,8 @@ export const state = {
   auditorPaused: {},
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
+  /** Entitlement and seat count — see `ensureBilling`. */
+  billing: undefined,
   activeChannelThread: undefined,
   /** Thread roots currently open as side tabs, oldest first. */
   activeChannelThreads: [],
@@ -5395,6 +5397,53 @@ export async function updateMemberRole(userId, role) {
  * Read from the principal rather than kept as its own flag, so it can never
  * disagree with what the server will actually allow.
  */
+/**
+ * What this organization is entitled to, and what it is being charged for.
+ *
+ * Cached like the other settings reads: the numbers change when somebody pays
+ * or a seat moves, neither of which happens while a dialog is open.
+ */
+export async function loadBilling() {
+  if (!state.organizationId) {
+    return undefined;
+  }
+  const response = await apiOptional(
+    `/organizations/${encodeURIComponent(state.organizationId)}/billing`,
+    undefined,
+  );
+  state.billing = response?.billing;
+  return state.billing;
+}
+
+export async function ensureBilling(rerender) {
+  if (state.billing !== undefined) {
+    return;
+  }
+  // Claimed before the request so a second render in the same tick does not
+  // fire it again — the same guard `ensureRepositoryGrants` uses.
+  state.billing = null;
+  await loadBilling();
+  rerender();
+}
+
+/** A Stripe Checkout URL for this organization, or throws with the reason. */
+export async function startCheckout() {
+  const response = await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/billing/checkout`,
+    { method: "POST", body: {} },
+  );
+  return response.url;
+}
+
+/** A Stripe billing-portal URL, for a team that has paid before. */
+export async function openBillingPortal() {
+  const response = await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/billing/portal`,
+    { method: "POST", body: {} },
+  );
+  return response.url;
+}
+
 export function iAmSystemAdmin() {
   return state.principal?.user?.systemAdmin === true;
 }

@@ -5298,6 +5298,9 @@ export class ApiGateway {
             userId: user.id,
             role: invitation.role,
           });
+          // Somebody joining is the commonest way a seat count changes, and
+          // the one most likely to be noticed on an invoice.
+          await this.syncSeatQuantity(invitation.organizationId);
         } else {
           await this.options.store.saveRepositoryGrant({
             repositoryId: invitation.repositoryId,
@@ -6417,6 +6420,9 @@ export class ApiGateway {
             actorId: principal.user.id,
           },
         });
+        // A promotion from viewer to developer is a seat starting to cost
+        // money, and a demotion is one stopping.
+        await this.syncSeatQuantity(organizationId);
         this.sendJson(response, 200, { membership });
         return;
       }
@@ -6432,6 +6438,7 @@ export class ApiGateway {
           );
         }
         await this.options.store.removeMembership(organizationId, userId);
+        await this.syncSeatQuantity(organizationId);
         await this.options.store.appendAudit(undefined, {
           type: "membership_changed",
           data: {
@@ -19499,6 +19506,59 @@ export class ApiGateway {
    * the edge rather than fail deeper with a message about a missing key —
    * self-hosting Kumi without billing is a legitimate way to run it.
    */
+  /**
+   * Brings the Stripe subscription's seat count back in line with reality.
+   *
+   * Best-effort on purpose, and this is the trade being made: a Stripe outage
+   * must not stop somebody adding a teammate. Adding a colleague is the moment
+   * a team is getting value out of this, and failing it to protect an invoice
+   * would be charging the customer for our own dependency being down.
+   *
+   * The cost is that seats can drift when a sync fails, so the failure is
+   * written to the log rather than swallowed, and checkout recomputes the
+   * quantity from memberships rather than trusting what Stripe holds. Drift
+   * therefore heals at the next purchase or seat change rather than accruing.
+   *
+   * Nothing happens for an organization that has never paid: there is no
+   * subscription to hold a quantity, and the count is taken fresh at checkout.
+   */
+  private async syncSeatQuantity(organizationId: string): Promise<void> {
+    if (this.stripe === undefined) {
+      return;
+    }
+    try {
+      const subscription =
+        await this.options.store.getSubscription(organizationId);
+      const subscriptionId = subscription?.stripeSubscriptionId;
+      if (subscriptionId === undefined || subscription?.status === "canceled") {
+        return;
+      }
+      const memberships =
+        await this.options.store.listMemberships(organizationId);
+      const seats = Math.max(1, billableSeats(memberships));
+      const current = await this.stripe.getSubscription(subscriptionId);
+      if (current.quantity === seats) {
+        // Stripe prorates every quantity write, so writing the number it
+        // already holds would put a zero-value line on the invoice each time
+        // anybody's role changed.
+        return;
+      }
+      const itemId = await this.stripe.getSubscriptionItemId(subscriptionId);
+      if (itemId === undefined) {
+        return;
+      }
+      await this.stripe.updateSubscriptionQuantity({
+        subscriptionId,
+        subscriptionItemId: itemId,
+        quantity: seats,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `[stripe] seat sync failed for ${organizationId}: ${describeError(error)}\n`,
+      );
+    }
+  }
+
   private requireStripe(): StripeClient {
     if (this.stripe === undefined) {
       throw new HttpError(
