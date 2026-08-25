@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .turbo/
+# Built installers. Hundreds of megabytes, rebuildable from a tag.
+release/
 .coordinator/
 coverage/
 *.tsbuildinfo

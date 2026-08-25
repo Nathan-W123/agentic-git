@@ -1,0 +1,191 @@
+# Turning a tag into something people can download.
+#
+# Installers are built from a tag rather than from every push: what somebody
+# downloads has to correspond to a nameable version, and three platform builds
+# is not a thing to run on every commit. Tag as `desktop-v<version>`, matching
+# the version in `apps/desktop/package.json`.
+#
+# `workflow_dispatch` runs the same builds and publishes nothing, which is how
+# to find out whether packaging still works without cutting a release.
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+
+jobs:
+  # Five seconds of checking before thirty minutes of building. A tag that
+  # disagrees with the manifest would produce installers whose filenames and
+  # whose release name say different versions, and the cheapest place to find
+  # that out is before any of them are built.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      repo: ${{ steps.read.outputs.repo }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          repo=$(node -p "require('./apps/desktop/package.json').kumi.releasesRepo")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tagged="${GITHUB_REF_NAME#desktop-v}"
+            if [ "$tagged" != "$version" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match the version in apps/desktop/package.json (${version}). Bump one or the other."
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "Kumi $version, publishing to $repo"
+
+  build:
+    needs: version
+    strategy:
+      # One platform failing should not deny the other two the chance to show
+      # whether they also fail.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Tested here as well as on every commit, because this is the last point
+      # at which a broken sign-in flow is still cheaper to find than to ship.
+      - name: Build and test the app
+        run: npx turbo run build test --filter=@coord/desktop
+
+      # Electron and the packager are installed here and nowhere else. Putting
+      # either in a manifest would drop a hundred-megabyte browser download
+      # into the control plane's Docker build, which has no use for it, so they
+      # are fetched without being written down.
+      - name: Install the packaging tools
+        run: npm install --no-save --no-audit --no-fund electron@^38.0.0 electron-builder@^26.0.0
+
+      - name: Build the installers
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          # The packaging tools live in the workspace root, which is where this
+          # package's own `node_modules` would have hoisted them to anyway.
+          export PATH="$(cd ../.. && pwd)/node_modules/.bin:$PATH"
+          # Passed explicitly: `electron` is deliberately absent from this
+          # package's manifest, which is the first place the packager looks.
+          electron_version=$(node -p "require('electron/package.json').version")
+          echo "Packaging with Electron $electron_version"
+          electron-builder \
+            --config electron-builder.yml \
+            -c.electronVersion="$electron_version" \
+            --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+
+  publish:
+    needs:
+      - version
+      - build
+    # A manual run builds and stops there. Only a tag publishes.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          pattern: installers-*
+          merge-multiple: true
+
+      # The one check that runs against reality rather than against another
+      # file. The download page's links are written by hand, and a name that
+      # was never right — `${os}` is `mac` and `win`, not `macos` and
+      # `windows` — produces a button that looks fine and 404s. Better to fail
+      # the release than to publish one.
+      - name: Check the download page against what was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
+              apps/web/public/download.html | sort -u); do
+            if [ -f "installers/$file" ]; then
+              echo "  ok       $file"
+            else
+              echo "::error::The download page offers $file, which this release does not contain."
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
+      - name: Publish to the releases repository
+        shell: bash
+        env:
+          # The automatic token is scoped to this repository, and the
+          # installers go to a different one, so it cannot be used here. What
+          # this needs is a fine-grained personal access token with Contents:
+          # write on the releases repository, stored as this secret.
+          GH_TOKEN: ${{ secrets.KUMI_RELEASES_TOKEN }}
+          REPO: ${{ needs.version.outputs.repo }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::KUMI_RELEASES_TOKEN is not set. Create a fine-grained personal access token with Contents: write on ${REPO} and add it to this repository's secrets."
+            exit 1
+          fi
+          echo "Uploading:"
+          ls -1 installers
+
+          notes=$(mktemp)
+          {
+            echo "## Kumi ${VERSION}"
+            echo
+            cat apps/desktop/RELEASE_NOTES.md
+          } > "$notes"
+
+          # Re-runnable on purpose. A single platform can fail, be fixed, and
+          # be re-run without the release having to be deleted by hand.
+          if gh release view "v${VERSION}" --repo "${REPO}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} exists; replacing its files."
+            gh release upload "v${VERSION}" --repo "${REPO}" --clobber installers/*
+          else
+            gh release create "v${VERSION}" \
+              --repo "${REPO}" \
+              --title "Kumi ${VERSION}" \
+              --notes-file "$notes" \
+              installers/*
+          fi

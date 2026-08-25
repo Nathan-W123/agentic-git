@@ -15,6 +15,7 @@ COPY adapters/codex/package.json ./adapters/codex/
 COPY adapters/generic-cli/package.json ./adapters/generic-cli/
 COPY adapters/prompt-cli/package.json ./adapters/prompt-cli/
 COPY apps/cli/package.json ./apps/cli/
+COPY apps/desktop/package.json ./apps/desktop/
 COPY apps/web/package.json ./apps/web/
 COPY apps/worker/package.json ./apps/worker/
 COPY packages/agent-protocol/package.json ./packages/agent-protocol/
