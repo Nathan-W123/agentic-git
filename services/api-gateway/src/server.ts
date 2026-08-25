@@ -5733,6 +5733,11 @@ export class ApiGateway {
             comped: invitation.comped,
             createdAt: new Date().toISOString(),
           });
+          // A grant is a seat too. The membership branch above has always
+          // synced; this one never did, and every invitation a customer can
+          // create today lands here — the route requires a repository — so in
+          // practice no invitation reached Stripe at all.
+          await this.syncSeatQuantity(invitation.organizationId);
         }
         await this.options.store.appendAudit(undefined, {
           type: "membership_changed",
@@ -6722,10 +6727,42 @@ export class ApiGateway {
         const repositoryId = stringField(body["repositoryId"], "repositoryId", {
           max: 128,
         });
-        const owned = await this.options.store.listProjectRepositories(
-          stringField(body["projectId"], "projectId", { max: 128 }) ?? "",
+        // Authorized, not merely looked up.
+        //
+        // This read `listProjectRepositories` on a project id taken raw from
+        // the body, and that lookup is keyed on the project alone in all
+        // three backends — so the only question asked was "does this
+        // repository exist somewhere under that project", never "may this
+        // caller give it away". A grant on one repository is enough to learn
+        // an organization's project id, and the route then answered 201 for a
+        // repository the caller had no access to and 404 for one that did not
+        // exist: an oracle, and then an invitation to somebody else's code
+        // which acceptance turns into a real grant.
+        //
+        // `manage_members` rather than `view`, because handing out access is
+        // what this does, and the caller must hold that on the repository
+        // itself — a grant carries a role, and an `owner` grant on a
+        // repository is exactly who should be able to share it.
+        const invitedProjectId =
+          stringField(body["projectId"], "projectId", { max: 128 }) ?? "";
+        if (repositoryId === undefined || repositoryId === "") {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "A repository is required",
+          );
+        }
+        const { project: invitedProject } = await authorizeRepository(
+          this.options.store,
+          principal,
+          invitedProjectId,
+          repositoryId,
+          "manage_members",
         );
-        if (!owned.some((entry) => entry.id === repositoryId)) {
+        // And the repository has to live under the organization the path
+        // named, or an owner-grant holder could mint invitations for a
+        // foreign repository under an organization they do administer.
+        if (invitedProject.organizationId !== organizationId) {
           throw new HttpError(
             404,
             "not_found",
@@ -6893,6 +6930,9 @@ export class ApiGateway {
           userId: user.id,
           role,
         });
+        // The PATCH and DELETE routes below have always synced; adding
+        // somebody never did, which is the commonest of the three.
+        await this.syncSeatQuantity(organizationId);
         await this.options.store.appendAudit(undefined, {
           type: "membership_changed",
           data: {
@@ -7326,12 +7366,25 @@ export class ApiGateway {
     );
     if (syncMatch !== undefined && method === "POST") {
       const [projectId = "", repositoryId = ""] = syncMatch;
-      await authorizeProject(
+      // The repository, not just the project it was claimed under.
+      //
+      // `authorizeProject` cannot see a repository id, and the id in the path
+      // was then handed to the operation unchecked — which resolves it
+      // globally, so naming somebody else's repository under a project of
+      // your own reached it. The sibling `/push` route immediately below has
+      // always done both halves; this one did neither.
+      await authorizeRepository(
         this.options.store,
         principal,
         projectId,
+        repositoryId,
         "import_repository",
       );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
       const syncRepository = this.options.operations.syncRepository;
       if (syncRepository === undefined) {
         throw new HttpError(
@@ -7651,6 +7704,8 @@ export class ApiGateway {
         comped: false,
         createdAt: new Date().toISOString(),
       });
+      // It says so directly above: an ordinary paid seat. It was never billed.
+      await this.syncSeatQuantity(project?.organizationId ?? "");
       await this.options.store.appendAudit(undefined, {
         type: "membership_changed",
         data: {
@@ -7706,6 +7761,11 @@ export class ApiGateway {
           throw new HttpError(404, "not_found", "You do not hold a grant on this repository");
         }
         await this.options.store.removeRepositoryGrant(repositoryId, userId);
+        // A revoked seat kept being invoiced until something else
+        // happened to resync — which for a steady team is never.
+        await this.syncSeatQuantity(
+          (await this.options.store.getProject(projectId))?.organizationId ?? "",
+        );
         await this.options.store.appendAudit(undefined, {
           type: "membership_changed",
           data: {
@@ -7733,6 +7793,11 @@ export class ApiGateway {
         throw new HttpError(404, "not_found", "That user does not hold a grant on this repository");
       }
       await this.options.store.removeRepositoryGrant(repositoryId, userId);
+      // A revoked seat kept being invoiced until something else
+      // happened to resync — which for a steady team is never.
+      await this.syncSeatQuantity(
+        (await this.options.store.getProject(projectId))?.organizationId ?? "",
+      );
       await this.options.store.appendAudit(undefined, {
         type: "membership_changed",
         data: {
@@ -11719,26 +11784,39 @@ export class ApiGateway {
     if (intent === undefined || intent.completedAt !== undefined) {
       return;
     }
-    if (
-      !(await this.options.store.completeSignupIntent(
-        intent.id,
-        new Date().toISOString(),
-      ))
-    ) {
-      // Another delivery of the same payment got here first.
-      return;
-    }
-    await this.options.store.createOrganization({
-      id: organizationId,
-      slug: `team-${randomBytes(8).toString("hex")}`,
-      name:
-        intent.organizationName ?? `${intent.email.split("@")[0] ?? "New"}'s team`,
-    });
-    await this.options.store.createProject({
-      organizationId,
-      slug: "default",
-      name: "My Project",
-      description: "Repositories you create live here.",
+    // One transaction, and the latch last.
+    //
+    // This was written latch-first and bare: `completeSignupIntent` marks the
+    // sign-up provisioned, and it is the only record that provisioning ever
+    // happened — nothing in the product can unset it. So a death between the
+    // latch and the organization left a payment that had bought nothing, a
+    // claim link that could never work, and a Stripe subscription pointed at
+    // an organization that would never exist. Which is `register()`'s bug,
+    // rebuilt an hour after `register()` stopped having it.
+    //
+    // Ordered the other way round, a failure leaves an intent still open and
+    // Stripe's own redelivery provisions cleanly.
+    await this.options.store.runInTransaction(async (store) => {
+      // Re-read inside the transaction: two deliveries of the same payment
+      // can reach this together, and the loser must do nothing rather than
+      // build a second organization on the winner's id.
+      if ((await store.getSignupIntent(intent.id))?.completedAt !== undefined) {
+        return;
+      }
+      await store.createOrganization({
+        id: organizationId,
+        slug: `team-${randomBytes(8).toString("hex")}`,
+        name:
+          intent.organizationName ??
+          `${intent.email.split("@")[0] ?? "New"}'s team`,
+      });
+      await store.createProject({
+        organizationId,
+        slug: "default",
+        name: "My Project",
+        description: "Repositories you create live here.",
+      });
+      await store.completeSignupIntent(intent.id, new Date().toISOString());
     });
   }
 
