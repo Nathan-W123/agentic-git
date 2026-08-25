@@ -154,6 +154,17 @@ export const state = {
   ),
 
   invitations: [],
+  apiTokens: [],
+  /**
+   * The one moment a token's secret exists outside the client holding it.
+   *
+   * Only the response that created it carries the secret; the store keeps a
+   * digest and the list route can never show it again. So it is held here
+   * until the person has copied it, and deliberately not persisted — a
+   * credential that survives a reload is a credential in somebody's session
+   * storage.
+   */
+  newApiToken: undefined,
 
   /**
    * Which colour wheel is open in Appearance, by its `data-act` prefix, or
@@ -1753,6 +1764,47 @@ export function closeSocket() {
 
 export function socketLive() {
   return state.socket?.readyState === WebSocket.OPEN;
+}
+
+/* ---------------------------------------------------------- api tokens ---- */
+
+/**
+ * What a token minted from this screen may do.
+ *
+ * The two a client needs to be the dashboard: read the room, and start work.
+ * Deliberately not everything the owner can do — a token is a credential that
+ * lives on somebody's laptop rather than in a session that expires, so the
+ * default is the smallest set that makes it useful. The server refuses any
+ * scope above the owner's role regardless.
+ */
+export const DESKTOP_TOKEN_SCOPES = ["view", "run_task"];
+
+export async function loadApiTokens() {
+  const response = await apiOptional("/auth/tokens", { tokens: [] });
+  state.apiTokens = response.tokens ?? [];
+  return state.apiTokens;
+}
+
+/**
+ * Mints a token and hands back its secret, once.
+ *
+ * The server allows this only from a signed-in session — a token that could
+ * mint another would put revocation out of reach — so this is a thing you do
+ * in a browser, and the app you paste it into never needs one.
+ */
+export async function createApiToken(name) {
+  const response = await api("/auth/tokens", {
+    method: "POST",
+    body: { name, scopes: [...DESKTOP_TOKEN_SCOPES] },
+  });
+  state.newApiToken = response.token;
+  await loadApiTokens();
+  return response.token;
+}
+
+export async function revokeApiToken(id) {
+  await api(`/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await loadApiTokens();
 }
 
 /* -------------------------------------------------------- invitations ---- */

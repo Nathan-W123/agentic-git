@@ -16823,3 +16823,49 @@ test("a bad ticket is refused rather than quietly falling back to the cookie", a
   );
   assert.equal(refused.upgraded, false);
 });
+
+test("a token can be created, seen in the list, and revoked from a session", async (t) => {
+  // The three calls the settings card makes, in the order it makes them. The
+  // routes predate any UI reaching them, so this is the first thing to hold
+  // them to the shape a screen actually reads: a secret exactly once, an
+  // `active` flag to hide what has been revoked, and the fields the rows show.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const empty = await client.request("/api/v1/auth/tokens");
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.data.tokens, []);
+
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "My laptop", scopes: ["view", "run_task"] },
+  });
+  assert.equal(created.status, 201);
+  assert.match(created.data.token as string, /^coord_pat_/u);
+
+  const listed = await client.request("/api/v1/auth/tokens");
+  assert.equal(listed.data.tokens.length, 1);
+  const [row] = listed.data.tokens as Array<Record<string, unknown>>;
+  assert.equal(row?.name, "My laptop");
+  assert.equal(row?.active, true);
+  assert.equal(typeof row?.createdAt, "string");
+  // Never again. The store keeps a digest, so the list cannot show a secret
+  // even to the person who made it — which is why the card has to.
+  assert.equal(row?.token, undefined);
+  assert.equal(row?.secret, undefined);
+
+  const revoked = await client.request(
+    `/api/v1/auth/tokens/${encodeURIComponent(String(row?.id))}`,
+    { method: "DELETE" },
+  );
+  assert.ok(revoked.status === 200 || revoked.status === 204, String(revoked.status));
+
+  const after = await client.request("/api/v1/auth/tokens");
+  assert.equal(
+    (after.data.tokens as Array<{ active?: boolean }>).filter(
+      (entry) => entry.active !== false,
+    ).length,
+    0,
+  );
+});
