@@ -5746,9 +5746,9 @@ button.chip.lg:hover {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  padding: 4px 6px;
+  padding: 6px;
   background: none;
   border: none;
   border-radius: 6px;
@@ -5762,7 +5762,38 @@ button.chip.lg:hover {
   background: var(--bg-hover);
 }
 
+.chan-pin-jump .cp-avatar {
+  display: flex;
+  flex: none;
+}
+
+.chan-pin-jump .cp-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chan-pin-jump .cp-meta {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.chan-pin-jump .cp-sender {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .chan-pin-jump .cp-title {
+  display: block;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -5770,7 +5801,6 @@ button.chip.lg:hover {
 }
 
 .chan-pin-jump .cp-time {
-  margin-left: auto;
   flex: none;
   color: var(--text-4);
   font-size: 11px;
