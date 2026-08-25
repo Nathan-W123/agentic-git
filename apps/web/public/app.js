@@ -3329,7 +3329,13 @@ function billingCard() {
         <div class="sr-sub">${esc(detail)}</div>
       </span>
       ${
-        canManage
+        // A comped team is offered nothing. `manageable` is false for them —
+        // they have no Stripe customer — so the ternary below used to route
+        // every one of them to Subscribe, rendered directly beside "Nothing to
+        // do", and a click on it is how a permanent comp gets spent.
+        billing.status === "comped"
+          ? ""
+          : canManage
           ? billing.manageable === true
             ? `<button type="button" class="btn btn-sm" data-act="billing-portal">
                  ${icon("external")} Manage billing</button>`

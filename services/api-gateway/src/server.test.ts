@@ -5,6 +5,7 @@ import {
   type IncomingHttpHeaders,
 } from "node:http";
 import net from "node:net";
+import { createHmac } from "node:crypto";
 import test, { type TestContext } from "node:test";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
@@ -10112,6 +10113,62 @@ test("an empty token is the same as none, not a token nobody can send", async (t
     },
   });
   assert.equal(created.status, 201, JSON.stringify(created.data));
+});
+
+test("a Stripe event never overwrites a comped organization", async (t) => {
+  // The destructive path needs no bad luck. Every organization that predates
+  // billing was comped by migration; `subscriptionStatusFrom` reads every
+  // status it does not recognise as `canceled`, `incomplete` among them; and
+  // `incomplete` is exactly what an abandoned checkout leaves behind. The
+  // subscription row is written whole, so one stray event would turn a
+  // permanently free team into a cancelled one — and nothing in the product
+  // grants a comp, so there would be no way back from inside.
+  const secret = "whsec_example";
+  const { client, store } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "grandfathered",
+    name: "Grandfathered",
+  });
+  await store.saveSubscription({
+    organizationId: organization.id,
+    status: "comped",
+  });
+
+  // A real signed event, through the real route: the guard has to hold where
+  // Stripe actually reaches it, not where a test can call it directly.
+  const body = JSON.stringify({
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_abandoned",
+        status: "incomplete",
+        customer: "cus_abandoned",
+        metadata: { organizationId: organization.id },
+      },
+    },
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = createHmac("sha256", secret)
+    .update(`${String(timestamp)}.${body}`, "utf8")
+    .digest("hex");
+  const delivered = await client.request("/api/v1/stripe/webhook", {
+    method: "POST",
+    raw: Buffer.from(body, "utf8"),
+    rawType: "application/json",
+    headers: { "Stripe-Signature": `t=${String(timestamp)},v1=${signature}` },
+  });
+
+  // Accepted, because refusing would make Stripe retry it for days.
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.data));
+  assert.equal(
+    (await store.getSubscription(organization.id))?.status,
+    "comped",
+    "a comp is a decision a person made; Stripe has no opinion about it",
+  );
 });
 
 test("health says which billing variables reached the process", async (t) => {
