@@ -10018,6 +10018,7 @@ async function startBareGateway(
     stripe?: StripeClient;
     stripeWebhookSecret?: string;
     stripePriceId?: string;
+    appBaseUrl?: string;
   },
 ): Promise<{
   client: TestClient;
@@ -10045,6 +10046,10 @@ async function startBareGateway(
     ...(options.stripePriceId === undefined
       ? {}
       : { stripePriceId: options.stripePriceId }),
+    // Stripe needs somewhere absolute to send a browser back to, and the
+    // sign-up route refuses without one rather than letting Stripe answer
+    // that for it.
+    appBaseUrl: options.appBaseUrl ?? "https://kumi.test",
     // Never the real one: a test that opens a socket to a mail relay is a test
     // that fails on somebody else's network.
     mailer:
@@ -10345,6 +10350,7 @@ test("health says which billing variables reached the process", async (t) => {
     secretKey: false,
     webhookSecret: false,
     priceId: false,
+    appUrl: "https://kumi.test",
   });
 
   const configured = await startBareGateway(t, {
@@ -10360,6 +10366,7 @@ test("health says which billing variables reached the process", async (t) => {
     secretKey: true,
     webhookSecret: true,
     priceId: true,
+    appUrl: "https://kumi.test",
   });
 
   // Never the values themselves, however the payload grows later.
