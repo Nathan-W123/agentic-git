@@ -990,4 +990,43 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     name: "runs-by-project",
     statements: [`CREATE INDEX runs_by_project ON runs(project_id, id)`],
   },
+  {
+    // Mirrors the SQLite migration of the same version. The backfill's date
+    // arithmetic is written in this dialect's own terms and must produce the
+    // same ISO-8601 Z string the gateway writes, or `Date.parse` reads it as
+    // local time on the way back out.
+    version: 47,
+    name: "paywalled-signup",
+    statements: [
+      `CREATE TABLE signup_intents (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        organization_name TEXT,
+        password_digest TEXT NOT NULL,
+        secret_hash TEXT NOT NULL,
+        stripe_session_id TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT
+      )`,
+      `CREATE INDEX signup_intents_by_organization
+         ON signup_intents(organization_id)`,
+      `INSERT INTO subscriptions (
+         organization_id, status, trial_ends_at, created_at, updated_at
+       )
+       SELECT o.id,
+              'trialing',
+              to_char(
+                (o.created_at::timestamptz + interval '14 days')
+                  AT TIME ZONE 'UTC',
+                'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+              ),
+              o.created_at,
+              o.created_at
+         FROM organizations o
+        WHERE o.id NOT IN (SELECT organization_id FROM subscriptions)`,
+    ],
+  },
 ];

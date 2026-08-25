@@ -93,6 +93,7 @@ import type {
   TokenUsageRecord,
   InvitationRecord,
   PasswordResetRecord,
+  SignupIntentRecord,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1010,6 +1011,41 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   /* ---------------------------------------------------- password resets ---- */
+
+  private readonly signupIntents = new Map<string, SignupIntentRecord>();
+
+  public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {
+    this.signupIntents.set(intent.id, { ...intent });
+  }
+
+  public async getSignupIntent(
+    id: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    const found = this.signupIntents.get(id);
+    return found === undefined ? undefined : { ...found };
+  }
+
+  public async completeSignupIntent(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still being open, so a Stripe redelivery — or the second
+    // of two events that both name this intent — provisions nothing twice.
+    const found = this.signupIntents.get(id);
+    if (found === undefined || found.completedAt !== undefined) {
+      return false;
+    }
+    found.completedAt = at;
+    return true;
+  }
+
+  public async deleteExpiredSignupIntents(before: string): Promise<void> {
+    for (const [id, intent] of this.signupIntents) {
+      if (intent.completedAt === undefined && intent.expiresAt < before) {
+        this.signupIntents.delete(id);
+      }
+    }
+  }
 
   private readonly passwordResets = new Map<string, PasswordResetRecord>();
 

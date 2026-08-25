@@ -2569,6 +2569,62 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a signup intent settles exactly once`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      // The row that exists between somebody entering their details and
+      // Stripe confirming their card. It is deliberately not an account: no
+      // user, no organization, no claim on the email address.
+      const intent = {
+        id: "signup_1",
+        organizationId: "org_preminted",
+        email: "buyer@example.com",
+        displayName: "Buyer",
+        organizationName: "Buyer's team",
+        passwordDigest: "unusable",
+        secretHash: "hash",
+        stripeSessionId: "cs_1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-01-02T00:00:00.000Z",
+        completedAt: undefined,
+      };
+      await store.createSignupIntent(intent);
+      assert.deepEqual(await store.getSignupIntent("signup_1"), intent);
+
+      // Stripe redelivers, and two different events can both name this
+      // intent. Exactly one of them may provision — the other must be told so
+      // it does not send a second welcome email or build a second account.
+      assert.equal(
+        await store.completeSignupIntent("signup_1", "2026-01-01T00:05:00.000Z"),
+        true,
+      );
+      assert.equal(
+        await store.completeSignupIntent("signup_1", "2026-01-01T00:06:00.000Z"),
+        false,
+        "a redelivery must not provision a second time",
+      );
+      assert.equal(
+        (await store.getSignupIntent("signup_1"))?.completedAt,
+        "2026-01-01T00:05:00.000Z",
+        "the winner's timestamp stands",
+      );
+
+      // An abandoned checkout is swept; a completed one is kept, because it
+      // is the record of what a real payment provisioned.
+      await store.createSignupIntent({
+        ...intent,
+        id: "signup_abandoned",
+        organizationId: "org_never_made",
+      });
+      await store.deleteExpiredSignupIntents("2026-06-01T00:00:00.000Z");
+      assert.equal(await store.getSignupIntent("signup_abandoned"), undefined);
+      assert.notEqual(await store.getSignupIntent("signup_1"), undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: audit events belong to the project of the run they were written under`, async () => {
     const { store, cleanup } = await backend.open();
     try {

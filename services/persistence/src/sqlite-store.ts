@@ -101,6 +101,7 @@ import type {
   SubmittedTaskStatus,
   InvitationRecord,
   PasswordResetRecord,
+  SignupIntentRecord,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1443,6 +1444,62 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : this.toPasswordReset(row);
   }
 
+  public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO signup_intents
+           (id, organization_id, email, display_name, organization_name,
+            password_digest, secret_hash, stripe_session_id, created_at,
+            expires_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        intent.id,
+        intent.organizationId,
+        intent.email,
+        intent.displayName,
+        intent.organizationName ?? null,
+        intent.passwordDigest,
+        intent.secretHash,
+        intent.stripeSessionId ?? null,
+        intent.createdAt,
+        intent.expiresAt,
+        intent.completedAt ?? null,
+      );
+  }
+
+  public async getSignupIntent(
+    id: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM signup_intents WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toSignupIntent(row);
+  }
+
+  public async completeSignupIntent(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still being open, so a Stripe redelivery — or the second
+    // of two events that both name this intent — provisions nothing twice.
+    const result = this.db
+      .prepare(
+        `UPDATE signup_intents SET completed_at = ?
+         WHERE id = ? AND completed_at IS NULL`,
+      )
+      .run(at, id);
+    return Number(result.changes) === 1;
+  }
+
+  public async deleteExpiredSignupIntents(before: string): Promise<void> {
+    this.db
+      .prepare(
+        "DELETE FROM signup_intents WHERE completed_at IS NULL AND expires_at < ?",
+      )
+      .run(before);
+  }
+
   public async consumePasswordReset(id: string, at: string): Promise<boolean> {
     // Conditional on still being unused, so two requests racing the same link
     // cannot both come away believing they set the password.
@@ -1457,6 +1514,22 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   public async deletePasswordResetsForUser(userId: string): Promise<void> {
     this.db.prepare("DELETE FROM password_resets WHERE user_id = ?").run(userId);
+  }
+
+  private toSignupIntent(row: Row): SignupIntentRecord {
+    return {
+      id: text(row, "id"),
+      organizationId: text(row, "organization_id"),
+      email: text(row, "email"),
+      displayName: text(row, "display_name"),
+      organizationName: optionalText(row, "organization_name"),
+      passwordDigest: text(row, "password_digest"),
+      secretHash: text(row, "secret_hash"),
+      stripeSessionId: optionalText(row, "stripe_session_id"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      completedAt: optionalText(row, "completed_at"),
+    };
   }
 
   private toPasswordReset(row: Row): PasswordResetRecord {

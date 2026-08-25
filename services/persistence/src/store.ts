@@ -207,6 +207,36 @@ export interface PasswordResetRecord {
   consumedAt: string | undefined;
 }
 
+/**
+ * Somebody who has entered their details but not yet paid.
+ *
+ * Deliberately not an account. It carries a password digest and a pre-minted
+ * organization id and nothing that can be signed in to, so an abandoned
+ * checkout leaves no user, no organization, and no claim on the email
+ * address — the sign-up is paywalled, and a row here is what "not yet
+ * through the paywall" looks like.
+ *
+ * The organization id is minted here rather than at provisioning time so it
+ * can be stamped into Stripe's metadata at checkout. Every later event — an
+ * invoice three months from now — then names an organization that exists,
+ * with no lookup table to maintain and no metadata written back.
+ */
+export interface SignupIntentRecord {
+  id: string;
+  /** Minted now, created by the webhook, named by Stripe in between. */
+  organizationId: string;
+  email: string;
+  displayName: string;
+  organizationName: string | undefined;
+  passwordDigest: string;
+  /** The claim secret, hashed the way a password reset's is. */
+  secretHash: string;
+  stripeSessionId: string | undefined;
+  createdAt: string;
+  expiresAt: string;
+  completedAt: string | undefined;
+}
+
 export interface UserAppearance {
   accent?: string;
   /**
@@ -1480,6 +1510,22 @@ export interface CoordinationStore {
   /** Marks it used. Returns false when it was already used or revoked. */
   acceptInvitation(id: string, userId: UserId, at: string): Promise<boolean>;
   revokeInvitation(id: string, at: string): Promise<void>;
+
+  createSignupIntent(intent: SignupIntentRecord): Promise<void>;
+  getSignupIntent(id: string): Promise<SignupIntentRecord | undefined>;
+  /**
+   * Marks an intent provisioned, and says whether this caller is the one that
+   * did it.
+   *
+   * Conditional on still being open, like {@link consumePasswordReset}: Stripe
+   * redelivers, and `checkout.session.completed` can arrive after
+   * `customer.subscription.created` has already provisioned from the same
+   * intent. Whichever gets here second is told `false` and does nothing —
+   * which is what stops a retry sending a second welcome email.
+   */
+  completeSignupIntent(id: string, at: string): Promise<boolean>;
+  /** Sweeps abandoned checkouts; nothing was created, so nothing is lost. */
+  deleteExpiredSignupIntents(before: string): Promise<void>;
 
   createPasswordReset(reset: PasswordResetRecord): Promise<void>;
   getPasswordReset(id: string): Promise<PasswordResetRecord | undefined>;
