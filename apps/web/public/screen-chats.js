@@ -3928,10 +3928,10 @@ function catchUpPanel() {
     return "";
   }
   const count = catchUp.tasks.length;
-  const repository = state.repositories.find(
-    (entry) => entry.id === catchUp.repositoryId,
-  );
-  const repositoryName = repository?.name ?? catchUp.repositoryId;
+  // Through the same helper every other channel title goes through: this
+  // read a `name` field no repository has, so a renamed channel's digest
+  // kept announcing itself by the id the rename was meant to retire.
+  const repositoryName = repositoryLabel(catchUp.repositoryId);
   const workers = new Map();
   let touched = 0;
   const rows = catchUp.tasks
@@ -5085,7 +5085,7 @@ function agentSpec(agent, repositoryId) {
           </div>
           <div class="aspec-pills">
             ${statusText === "" ? "" : specPill(statusText, { dot: status })}
-            ${specPill(`#${repositoryId}`, {
+            ${specPill(`#${repositoryLabel(repositoryId)}`, {
               title: "The channel this panel was opened from",
             })}
             ${specPill(
@@ -5123,9 +5123,9 @@ function agentSpec(agent, repositoryId) {
               }</strong>
               <span>${
                 task === undefined
-                  ? `Nothing running in #${esc(repositoryId)}`
+                  ? `Nothing running in #${esc(repositoryLabel(repositoryId))}`
                   : `${esc(String(task.status ?? "working").replaceAll("_", " "))} · #${esc(
-                      taskRepositoryId,
+                      repositoryLabel(taskRepositoryId),
                     )} · ${esc(relativeTime(task.submittedAt))}`
               }</span>
             </span>
@@ -5148,7 +5148,11 @@ function agentSpec(agent, repositoryId) {
               <span class="aspec-count">${channels.length}</span>
             </div>
             <div class="aspec-channel-list">${channels
-              .map((repository) => specPill(`#${repository.id}`))
+              .map((repository) =>
+                specPill(`#${repositoryLabel(repository.id)}`, {
+                  title: repository.id,
+                }),
+              )
               .join("")}</div>
             ${
               allChannelsLoaded
