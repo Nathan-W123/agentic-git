@@ -132,20 +132,34 @@ test("a trial with no end date, or an unreadable one, is spent", () => {
   );
 });
 
-test("no recorded subscription is read as the organization's first trial", () => {
-  // Self-healing rather than fail-closed, and the reasoning is in `billing.ts`:
-  // refusing outright would make every future organization-creating path
-  // silently load-bearing for billing. Bounded to the same fourteen days.
+test("no recorded subscription is no entitlement, however new the organization", () => {
+  // This used to read a missing row as a fresh fourteen days from
+  // `createdAt`, on the reasoning that it was self-healing and could not be
+  // farmed "because the only way to get a new organization is to sign up".
+  // That stopped being true: `POST /organizations` wrote no row, so anybody
+  // signed in could mint another fortnight whenever the last ran out.
+  //
+  // Migration 47 backfilled a real row for every organization that lacked
+  // one, computing exactly what this fallback was granting, so inverting it
+  // changes no existing organization's answer — and every path that creates
+  // an organization is now load-bearing for billing on purpose.
   const young = new Date("2026-01-10T00:00:00.000Z");
-  assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, young), true);
-  // And spent for anything older, so it is a grace period rather than a hole.
+  assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, young), false);
   assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, NOW), false);
+  assert.equal(subscriptionAllowsWork(undefined, undefined, NOW), false);
+  assert.equal(effectiveRole("owner", undefined, ORG_CREATED, young), "viewer");
 });
 
-test("an organization with no creation date to measure from is refused", () => {
-  // Nothing to date the grace from is not evidence of entitlement.
-  assert.equal(subscriptionAllowsWork(undefined, undefined, NOW), false);
-  assert.equal(effectiveRole("owner", undefined, undefined, NOW), "viewer");
+test("a trial is honoured only when a row records it", () => {
+  // The replacement for the fallback: the entitlement comes from the row the
+  // sign-up wrote, not from the organization's age.
+  const young = new Date("2026-01-10T00:00:00.000Z");
+  const trialing = subscription({
+    status: "trialing",
+    trialEndsAt: "2026-01-15T00:00:00.000Z",
+  });
+  assert.equal(subscriptionAllowsWork(trialing, ORG_CREATED, young), true);
+  assert.equal(subscriptionAllowsWork(trialing, ORG_CREATED, NOW), false);
 });
 
 test("a trial runs for fourteen days from when it starts", () => {

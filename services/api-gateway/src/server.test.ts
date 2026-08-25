@@ -2636,6 +2636,17 @@ test("a project-bound worker token cannot pull another tenant's queue", async (t
     slug: "worker-second",
     name: "Worker Second",
   });
+  // These are made straight through the store, which every production path
+  // that creates an organization now does alongside writing a subscription
+  // row — a missing row is no entitlement, so without this both tenants fold
+  // to `viewer` and the test measures the billing gate rather than the tenant
+  // boundary it is about.
+  for (const organization of [firstOrganization, secondOrganization]) {
+    await runtime.store.saveSubscription({
+      organizationId: organization.id,
+      status: "comped",
+    });
+  }
   const firstProject = await runtime.store.createProject({
     organizationId: firstOrganization.id,
     slug: "first",

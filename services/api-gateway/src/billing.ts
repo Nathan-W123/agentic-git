@@ -53,15 +53,24 @@ export function billableSeats(
 /**
  * Whether an organization may do work right now.
  *
- * A missing row is read as the organization's initial trial, measured from
- * when the organization itself was created. Refusing outright was the first
- * instinct and it is the wrong one: it makes every future path that creates an
- * organization silently load-bearing for billing, so the one that forgets to
- * write the row takes that whole organization offline rather than costing a
- * little money. Reading it as a trial from `createdAt` is self-healing, is
- * still bounded — the same fourteen days, and expired for anything older —
- * and cannot be farmed, because the only way to get a new organization is to
- * sign up, which writes a real row anyway.
+ * A missing row is no entitlement. It used to be read as the organization's
+ * initial trial, measured from `createdAt`, on the reasoning that this was
+ * self-healing and "cannot be farmed, because the only way to get a new
+ * organization is to sign up, which writes a real row anyway".
+ *
+ * That reasoning stopped being true. `POST /organizations` creates an
+ * organization and writes no subscription row, so anybody signed in could
+ * mint themselves another fourteen days as often as they liked — and once a
+ * webhook creates organizations too, a fallback that hands out a fortnight to
+ * any row it has never seen is a vending machine rather than a safety net.
+ *
+ * Migration 47 backfilled a real row for every organization that lacked one,
+ * computing exactly the entitlement this fallback was granting it, so
+ * inverting it changes no existing organization's answer. It does mean every
+ * path that creates an organization is now load-bearing for billing — which
+ * is the point: writing the row is the thing that must not be forgotten, and
+ * an organization that appears without one should stop rather than quietly
+ * become free.
  *
  * A trial is judged against its own end date rather than against its status,
  * so an expired trial nobody has swept stops working on time instead of when
@@ -75,11 +84,7 @@ export function subscriptionAllowsWork(
   now: Date = new Date(),
 ): boolean {
   if (subscription === undefined) {
-    return (
-      organizationCreatedAt !== undefined &&
-      Date.parse(trialEndsAtFrom(new Date(organizationCreatedAt))) >
-        now.getTime()
-    );
+    return false;
   }
   switch (subscription.status) {
     case "comped":

@@ -6381,6 +6381,19 @@ export class ApiGateway {
     }
     if (method === "POST" && path === `${API_PREFIX}/organizations`) {
       assertTokenScope(principal, "manage_organization");
+      if (!principal.user.systemAdmin) {
+        // An operator's tool, not a self-serve one. This route wrote no
+        // subscription row, and a missing row used to be read as a fresh
+        // fourteen-day trial — so anybody signed in could mint themselves
+        // another fortnight whenever the last one ran out, and orphan the
+        // organization they were supposed to be paying for. Sign-up is the
+        // way to get an organization; that path takes a card.
+        throw new HttpError(
+          403,
+          "forbidden",
+          "New organizations are created by signing up",
+        );
+      }
       const body = objectBody(await this.readJson(request));
       const slug = slugField(body["slug"]) ?? "";
       if (
@@ -6402,6 +6415,14 @@ export class ApiGateway {
         organizationId: organization.id,
         userId: principal.user.id,
         role: "owner",
+      });
+      // Written explicitly, because a missing row is now no entitlement at
+      // all rather than a fortnight's grace. An organization an operator
+      // makes by hand is one nobody is going to be invoiced for, and saying
+      // so here is what keeps it working.
+      await this.options.store.saveSubscription({
+        organizationId: organization.id,
+        status: "comped",
       });
       await this.options.store.appendAudit(undefined, {
         type: "organization_changed",

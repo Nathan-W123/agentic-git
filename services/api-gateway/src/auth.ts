@@ -474,6 +474,18 @@ export class AuthService {
         userId: user.id,
         role: "owner",
       });
+      // Said outright rather than inherited from a migration. A missing
+      // subscription row is no entitlement now, and this organization's row
+      // only ever existed because a backfill happened to reach it — which is
+      // true of a store that runs migrations and false of one that does not.
+      // The deployment's own organization is not something anybody invoices,
+      // so it is comped, and now it says so.
+      if ((await this.store.getSubscription(local.id)) === undefined) {
+        await this.store.saveSubscription({
+          organizationId: local.id,
+          status: "comped",
+        });
+      }
     }
     return user;
   }
