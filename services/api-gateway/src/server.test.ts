@@ -13686,8 +13686,34 @@ test("asking about work is not asking for it", () => {
     "did you see the bug? fix it",
     "which key changed, and can you revert it?",
     "when toggling this pullout the icons should be animated from the arrow",
+    // Plain instruction verbs. Every one of these was missed, which is how a
+    // request could name exactly what it wanted and still not read as work:
+    // the sender was answered rather than obeyed, and had to write "make that
+    // implementation" — one recognised word — to get it done.
+    'For the signin page instead of it saying kumi just put the logo and get rid of the punchline "one live codebase.."',
+    "put the logo on the sign in page",
+    "get rid of the punchline",
+    "hide the punchline",
+    "drop the subtitle from the header",
+    "take out the old banner",
+    "turn off the animation",
+    "shrink the sidebar",
   ]) {
     assert.equal(looksLikeTaskRequest(request), true, request);
+  }
+
+  // The other direction, kept beside it: widening the verb list must not turn
+  // chatter or a question about finished work into a task. "show" and "use"
+  // are deliberately still absent — "show me a summary of the codebase" is an
+  // answer request, and a task verb wins over that test, so adding them would
+  // trade this bug for its mirror image.
+  for (const notWork of [
+    "show me a summary of the codebase",
+    "give me an overview of the auth module",
+    "what did you get rid of?",
+    "which files were dropped?",
+  ]) {
+    assert.equal(looksLikeTaskRequest(notWork), false, notWork);
   }
 });
 
