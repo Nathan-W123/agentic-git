@@ -514,27 +514,37 @@ export class AuthService {
     passwordDigest: string;
     organizationName?: string;
   }): Promise<UserAccount> {
-    const user = await this.store.createUser({
-      email: input.email,
-      displayName: input.displayName,
-      passwordDigest: input.passwordDigest,
-      systemAdmin: false,
-    });
-    // Slugs have to be unique across the deployment, and a display name is
-    // neither unique nor URL-safe, so the user's own id is the only thing to
-    // hand that is guaranteed both.
-    const slug = `team-${user.id.replace(/^user_/u, "").slice(0, 12)}`;
+    // The account is built back to front, and that ordering is the whole
+    // safety property here.
+    //
+    // These are five separate writes and the store has no transaction to put
+    // them in, so any one can fail with the earlier ones already durable.
+    // Done in the obvious order — user first — a failure left a user row with
+    // a working password and nothing else: able to sign in forever, belonging
+    // to nothing, unable to create a repository, and holding the only claim
+    // on that email address, so signing up again was refused too. No path in
+    // the product finished the job and none undid it. That is not
+    // hypothetical; it happened, and the account it happened to could still
+    // log in.
+    //
+    // So everything that does not need a user is written first, and the user
+    // second to last. A failure before the account exists leaves an
+    // organization nobody belongs to — invisible, unreachable, costing
+    // nothing — while the person sees an error and can try again with the
+    // same address, which is the outcome they can actually act on. Only the
+    // final membership write can still strand somebody, and it is the
+    // smallest of the five: an upsert into a two-column table whose foreign
+    // keys were both satisfied by the writes immediately before it.
+    //
+    // The slug is random rather than derived from the user id, because the
+    // user id does not exist yet. It is not shown anywhere a person reads.
+    const slug = `team-${randomBytes(8).toString("hex")}`;
     const organization = await this.store.createOrganization({
       slug,
       name:
         input.organizationName !== undefined && input.organizationName !== ""
           ? input.organizationName
           : `${input.displayName}'s team`,
-    });
-    await this.store.saveMembership({
-      organizationId: organization.id,
-      userId: user.id,
-      role: "owner",
     });
     // A repository has to live in a project, so a brand new account with no
     // project could not do the first thing it came to do.
@@ -552,6 +562,17 @@ export class AuthService {
       organizationId: organization.id,
       status: "trialing",
       trialEndsAt: trialEndsAtFrom(),
+    });
+    const user = await this.store.createUser({
+      email: input.email,
+      displayName: input.displayName,
+      passwordDigest: input.passwordDigest,
+      systemAdmin: false,
+    });
+    await this.store.saveMembership({
+      organizationId: organization.id,
+      userId: user.id,
+      role: "owner",
     });
     return user;
   }
