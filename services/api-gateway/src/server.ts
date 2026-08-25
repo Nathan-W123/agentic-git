@@ -11235,8 +11235,13 @@ export class ApiGateway {
         // somebody standing at the checkout, and Stripe refuses a quantity of
         // zero. They are buying the seat they are about to use.
         quantity: Math.max(1, billableSeats(memberships)),
-        successUrl: `${this.appBaseUrl}/billing/done`,
-        cancelUrl: `${this.appBaseUrl}/billing/cancelled`,
+        // Fragments, not paths. The dashboard routes on `location.hash`, so a
+        // path-shaped return lands on the default screen with nothing said —
+        // somebody would pay and be shown the room they started in. The
+        // fragment is also never sent to the server, which is why the rest of
+        // this app's deep links use one.
+        successUrl: `${this.appBaseUrl}/#billing-done`,
+        cancelUrl: `${this.appBaseUrl}/#billing-cancelled`,
         ...(existing?.stripeCustomerId === undefined
           ? { customerEmail: principal.user.email }
           : { customerId: existing.stripeCustomerId }),
@@ -11269,7 +11274,7 @@ export class ApiGateway {
       }
       const session = await stripe.createPortalSession({
         customerId: subscription.stripeCustomerId,
-        returnUrl: `${this.appBaseUrl}/billing`,
+        returnUrl: `${this.appBaseUrl}/#billing`,
       });
       this.sendJson(response, 200, { url: session.url });
       return;
