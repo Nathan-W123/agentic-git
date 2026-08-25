@@ -45,8 +45,8 @@ yourself, and the window loads. Nothing is copied or pasted, and no token is
 ever shown.
 
 The app can do what you do in a working day — read the room, start and answer
-work, and push to or sync from GitHub. It cannot change your project, your
-organization, or who is in it. Revoke it any time in **Settings → Advanced →
+work, manage channels, and push to or sync from GitHub. It cannot add or
+remove people, or change what they may do. Revoke it any time in **Settings → Advanced →
 App tokens**.
 
 If you ever need to start over, **Help → Sign Out and Restart** or **Help →

@@ -2655,23 +2655,34 @@ const APP_AUTHORIZATION_TTL_MS = 120_000;
  * of Kumi. Answering a question and reviewing an agent's findings would have
  * been the next two walls.
  *
- * The line is drawn at administration instead. `manage_project`,
- * `manage_members` and `manage_organization` are absent on purpose: a laptop
- * that is lost or borrowed cannot rename a project, change who is in the
- * organization, or alter what they may do. Everything on this list is
- * something its owner does in the course of a working day.
+ * The line is drawn at access instead: `manage_members` and
+ * `manage_organization` are the two absences, and they are the two that decide
+ * who may use this Kumi at all. A laptop that is lost or borrowed cannot add
+ * somebody, remove somebody, or change what anybody may do.
+ *
+ * `manage_project` was on the wrong side of that line at first and cost a
+ * third round of the same discovery. It reads like administration and is not:
+ * it gates renaming and deleting a channel, rolling a repository back, and
+ * deleting messages — housekeeping its owner does constantly. Nothing it
+ * covers changes who has access to anything.
+ *
+ * `app-token-scopes.test.ts` now checks this list against every permission
+ * that exists, so a permission added later fails the build until somebody
+ * decides which side it belongs on. The first three walls were each found in
+ * production by somebody clicking a button.
  *
  * This is a ceiling, not a grant. `assertTokenScope` only ever narrows — a
  * session cookie carries no token and skips it entirely — so widening this
  * cannot let anybody past what their own role already permits, and
  * `issueApiToken` refuses anything above that role regardless.
  */
-const APP_TOKEN_SCOPES = [
+export const APP_TOKEN_SCOPES = [
   "view",
   "submit_task",
   "run_task",
   "import_repository",
   "review",
+  "manage_project",
 ] as const;
 
 /**
