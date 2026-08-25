@@ -170,6 +170,56 @@ test("a trial runs for fourteen days from when it starts", () => {
 
 /* ----------------------------------------------------- effective role --- */
 
+test("a seat is a person, and a repository grant is a way to be one", () => {
+  // A grant lets somebody work without being a member of the organization at
+  // all, so counting only memberships billed nothing for them however much
+  // work they did — and a team could put its whole staff on grants and pay
+  // for one owner.
+  const member = {
+    organizationId: "org_1",
+    userId: "user_1",
+    role: "developer" as const,
+    comped: false,
+    createdAt: NOW.toISOString(),
+  };
+  const grantee = {
+    repositoryId: "repo_1",
+    userId: "user_2",
+    role: "developer" as const,
+    grantedBy: undefined,
+    comped: false,
+    createdAt: NOW.toISOString(),
+  };
+  assert.equal(billableSeats([member]), 1, "a grant nobody counted is free work");
+  assert.equal(billableSeats([member], [grantee]), 2);
+
+  // A comped grant stays free. That is what the operators hand out on
+  // purpose, one person and one repository at a time.
+  assert.equal(
+    billableSeats([member], [{ ...grantee, comped: true }]),
+    1,
+  );
+
+  // And a seat is a person, not a row: one human with a membership and two
+  // grants is one seat, not three.
+  assert.equal(
+    billableSeats(
+      [member],
+      [
+        { ...grantee, userId: "user_1" },
+        { ...grantee, repositoryId: "repo_2", userId: "user_1" },
+      ],
+    ),
+    1,
+  );
+
+  // A viewer grant is free for the same reason a viewer membership is.
+  assert.equal(
+    billableSeats([member], [{ ...grantee, role: "viewer" as const }]),
+    1,
+  );
+});
+
 test("a lapsed organization goes read-only rather than dark", () => {
   const canceled = subscription({ status: "canceled" });
   // Everything folds to viewer, which still carries `view`. Their repositories

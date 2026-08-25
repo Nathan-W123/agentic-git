@@ -372,7 +372,9 @@ function minutesValue(milliseconds) {
  */
 const AUTH_HASHES = new Map([
   ["signin", "login"],
-  ["register", "register"],
+  // `register` still maps, so an older bookmark opens the trial rather than
+  // a blank screen — the free form it used to open is gone.
+  ["register", "signup"],
   // Paid sign-up, and the screen somebody lands on coming back from Stripe.
   // `#welcome/<token>` carries its claim secret the way `#reset/<token>`
   // carries its own: in the fragment, which the browser never sends, so it

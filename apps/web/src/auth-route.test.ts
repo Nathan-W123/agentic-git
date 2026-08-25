@@ -25,7 +25,10 @@ test("the signed-out forms are named by a hash", async () => {
   // side, the form it opens on the other.
   for (const [hash, mode] of [
     ["signin", "login"],
-    ["register", "register"],
+    // `register` survives as an address but opens the paid trial: the free
+    // form it used to open is retired, and an older bookmark should land
+    // somewhere real rather than on a blank screen.
+    ["register", "signup"],
     ["setup", "bootstrap"],
     // Recovering a password is two more forms with two more addresses: one to
     // ask for a link, one the link itself opens.

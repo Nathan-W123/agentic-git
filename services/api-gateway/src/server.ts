@@ -28,6 +28,7 @@ import type {
   Organization,
   OrganizationRole,
   ProjectRecord,
+  RepositoryGrant,
   SignupIntentRecord,
   WorkLease,
   WorkerRecord,
@@ -5340,107 +5341,26 @@ export class ApiGateway {
       return;
     }
 
-    if (method === "POST" && path === `${API_PREFIX}/auth/register`) {
-      // Open by default so a shared deployment link is enough to create an
-      // account. See `registrationOpen` for the invitation-only opt-out.
-      if (!registrationOpen(process.env)) {
-        throw new HttpError(
-          403,
-          "registration_closed",
-          "This control plane does not accept new accounts",
-        );
-      }
-      const body = objectBody(await this.readJson(request));
-      this.assertAccountConfirmations(body);
-      const account = {
-        email: emailField(body["email"]) ?? "",
-        displayName:
-          stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
-        password: stringField(body["password"], "password", { max: 256 }) ?? "",
-        ...(body["organizationName"] === undefined
-          ? {}
-          : {
-              organizationName:
-                stringField(body["organizationName"], "organizationName", {
-                  max: 120,
-                }) ?? "",
-            }),
-      };
-      // No mailbox challenge unless this deployment asks for one: the account
-      // is created here and the caller is signed in, exactly as confirming a
-      // code would have done. See `emailConfirmationRequired`.
-      if (!emailConfirmationRequired(process.env)) {
-        const user = await this.auth.registerUnconfirmed(account);
-        const issued = await this.auth.issueSession(
-          user,
-          this.remoteAddress(request),
-          request.headers["user-agent"] ?? "",
-          context.secure,
-        );
-        response.setHeader("Set-Cookie", issued.cookies);
-        await this.options.store.appendAudit(undefined, {
-          type: "user_authenticated",
-          data: { userId: user.id, registered: true },
-        });
-        this.sendJson(response, 201, {
-          user: issued.principal.user,
-          memberships: issued.principal.memberships,
-          csrfToken: issued.csrfToken,
-        });
-        return;
-      }
-      const registration = await this.auth.startRegistration(account);
-      this.sendJson(response, 202, registration);
-      return;
-    }
-
     if (
       method === "POST" &&
-      path === `${API_PREFIX}/auth/register/confirm`
+      (path === `${API_PREFIX}/auth/register` ||
+        path === `${API_PREFIX}/auth/register/confirm`)
     ) {
-      if (!registrationOpen(process.env)) {
-        throw new HttpError(
-          403,
-          "registration_closed",
-          "This control plane does not accept new accounts",
-        );
-      }
-      // A client left over from a deployment that asked for codes, talking to
-      // one that does not. Say so plainly rather than refusing a code that was
-      // never issued as though it were wrong.
-      if (!emailConfirmationRequired(process.env)) {
-        throw new HttpError(
-          409,
-          "registration_confirmation_disabled",
-          "This control plane does not confirm sign-up by email. Sign in with the account you just created.",
-        );
-      }
-      const body = objectBody(await this.readJson(request));
-      const user = await this.auth.confirmRegistration({
-        registrationId:
-          stringField(body["registrationId"], "registrationId", {
-            max: 128,
-          }) ?? "",
-        code: stringField(body["code"], "code", { max: 32 }) ?? "",
-      });
-      const issued = await this.auth.issueSession(
-        user,
-        this.remoteAddress(request),
-        request.headers["user-agent"] ?? "",
-        context.secure,
+      // Retired. Sign-up takes a card now, and this route made an account
+      // without one — so leaving it reachable would leave the paywall with a
+      // door beside it.
+      //
+      // 410 rather than 404: it existed, it is gone deliberately, and a
+      // client still calling it should be told that rather than left to
+      // wonder whether it moved. `POST /auth/signup` is the way in.
+      throw new HttpError(
+        410,
+        "registration_retired",
+        "Accounts are created by starting a trial at /auth/signup.",
       );
-      response.setHeader("Set-Cookie", issued.cookies);
-      await this.options.store.appendAudit(undefined, {
-        type: "user_authenticated",
-        data: { userId: user.id, registered: true },
-      });
-      this.sendJson(response, 201, {
-        user: issued.principal.user,
-        memberships: issued.principal.memberships,
-        csrfToken: issued.csrfToken,
-      });
-      return;
     }
+
+
 
     if (method === "POST" && path === `${API_PREFIX}/auth/login`) {
       const body = objectBody(await this.readJson(request));
@@ -11419,7 +11339,10 @@ export class ApiGateway {
           status: subscription?.status ?? "trialing",
           trialEndsAt: subscription?.trialEndsAt,
           currentPeriodEnd: subscription?.currentPeriodEnd,
-          seats: billableSeats(memberships),
+          seats: billableSeats(
+            memberships,
+            await this.organizationGrants(organizationId),
+          ),
           // Whether a portal link can be made at all. A team that has never
           // paid has no Stripe customer, and offering "manage billing" that
           // can only fail is worse than not offering it.
@@ -11475,7 +11398,13 @@ export class ApiGateway {
         // At least one: an organization with no billable seat yet still has
         // somebody standing at the checkout, and Stripe refuses a quantity of
         // zero. They are buying the seat they are about to use.
-        quantity: Math.max(1, billableSeats(memberships)),
+        quantity: Math.max(
+          1,
+          billableSeats(
+            memberships,
+            await this.organizationGrants(organizationId),
+          ),
+        ),
         // Fragments, not paths. The dashboard routes on `location.hash`, so a
         // path-shaped return lands on the default screen with nothing said —
         // somebody would pay and be shown the room they started in. The
@@ -11813,6 +11742,34 @@ export class ApiGateway {
       throw refused;
     }
     return intent;
+  }
+
+  /**
+   * Every repository grant held inside one organization.
+   *
+   * Walked rather than queried because a grant is keyed by repository and
+   * repositories reach an organization through projects. It is a handful of
+   * reads on the two paths that count seats, both of which already do more
+   * work than this.
+   */
+  private async organizationGrants(
+    organizationId: string,
+  ): Promise<RepositoryGrant[]> {
+    const grants: RepositoryGrant[] = [];
+    for (const project of await this.options.store.listProjects(
+      organizationId,
+    )) {
+      for (const repository of await this.options.store.listProjectRepositories(
+        project.id,
+      )) {
+        grants.push(
+          ...(await this.options.store
+            .listRepositoryGrants(repository.id)
+            .catch(() => [])),
+        );
+      }
+    }
+    return grants;
   }
 
   private async reachableOrganizations(
@@ -20436,7 +20393,13 @@ export class ApiGateway {
       }
       const memberships =
         await this.options.store.listMemberships(organizationId);
-      const seats = Math.max(1, billableSeats(memberships));
+      const seats = Math.max(
+        1,
+        billableSeats(
+          memberships,
+          await this.organizationGrants(organizationId),
+        ),
+      );
       const current = await this.stripe.getSubscription(subscriptionId);
       if (current.quantity === seats) {
         // Stripe prorates every quantity write, so writing the number it

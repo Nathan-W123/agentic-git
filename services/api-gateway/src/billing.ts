@@ -1,5 +1,6 @@
 import type {
   OrganizationMembership,
+  RepositoryGrant,
   OrganizationRole,
   Subscription,
 } from "@coord/persistence";
@@ -44,10 +45,37 @@ export function roleIsBillable(role: OrganizationRole): boolean {
  */
 export function billableSeats(
   memberships: readonly OrganizationMembership[],
+  /**
+   * Repository grants held by people in this organization's repositories.
+   *
+   * Counted because a grant is a way to work without being a member. Somebody
+   * invited to a single repository holds no organization role at all, so a
+   * seat count that read only memberships billed nothing for them however
+   * much work they did — and a team could put its whole staff on grants and
+   * pay for one owner.
+   *
+   * A comped grant is still free: that is what the operators hand out
+   * deliberately, one person and one repository at a time, and it is the
+   * whole point of the mechanism. What is counted is the ordinary grant
+   * nobody comped.
+   */
+  grants: readonly RepositoryGrant[] = [],
 ): number {
-  return memberships.filter(
-    (membership) => roleIsBillable(membership.role) && !membership.comped,
-  ).length;
+  // By person, not by row. One human with a billable membership and three
+  // grants is one seat, and three grants on three repositories is one seat
+  // too — they are one person, and a seat is a person.
+  const billable = new Set<string>();
+  for (const membership of memberships) {
+    if (roleIsBillable(membership.role) && !membership.comped) {
+      billable.add(membership.userId);
+    }
+  }
+  for (const grant of grants) {
+    if (roleIsBillable(grant.role) && grant.comped !== true) {
+      billable.add(grant.userId);
+    }
+  }
+  return billable.size;
 }
 
 /**
