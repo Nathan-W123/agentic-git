@@ -29,6 +29,7 @@ api,
   canDeleteRepository,
   canLeaveRepository,
   canManageOrganization,
+  imagesNeedFetching,
   canManageRepository,
   iAmSystemAdmin,
   channelAgentsFor,
@@ -759,8 +760,12 @@ function rememberImageSize(node) {
  */
 function attachmentImage(base, image) {
   const ratio = imageSizes.get(image.id);
+  // `data-src` in a shell, `src` in a browser — see `imagesNeedFetching`. The
+  // link is left alone either way: it opens in the real browser, where the
+  // session cookie is, so full size still works from the app.
+  const source = imagesNeedFetching() ? "data-src" : "src";
   return `<a class="cmsg-image" href="${esc(base + image.id)}" target="_blank"
-             rel="noopener noreferrer"><img src="${esc(base + image.id)}"
+             rel="noopener noreferrer"><img ${source}="${esc(base + image.id)}"
              alt="${esc(image.alt)}" data-attachment="${esc(image.id)}"
              decoding="async"${ratio === undefined ? ' loading="lazy"' : ""}
              ${ratio === undefined ? "" : `style="aspect-ratio: ${esc(ratio)}"`}></a>`;
@@ -819,7 +824,8 @@ function draftAttachmentPreviews(
   return `<div class="composer-attachments" aria-label="Attached images">${attachments
     .map(
       (attachment) => `<div class="composer-attachment">
-        <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}"
+        <img ${imagesNeedFetching() ? "data-src" : "src"}="${esc(attachment.src)}"
+          alt="${esc(attachment.alt)}"
           data-attachment="${esc(attachment.id)}" decoding="async">
         <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
         <button type="button" class="composer-attachment-remove"

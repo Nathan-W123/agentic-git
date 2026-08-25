@@ -1212,6 +1212,14 @@ test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", as
   assert.equal(staticPage.status, 200);
   assert.equal(staticPage.headers.get("cache-control"), "no-cache");
   assert.equal(staticPage.headers.get("content-security-policy")?.includes("object-src 'none'"), true);
+  // A desktop shell cannot put a token on an `<img>` tag, so it fetches
+  // attachments the way it fetches everything else and hands the element an
+  // object URL. Tightening this back to `img-src 'self' data:` would leave
+  // every image in the app broken, and nothing would say why.
+  assert.equal(
+    staticPage.headers.get("content-security-policy")?.includes("img-src 'self' data: blob:"),
+    true,
+  );
   const etag = staticPage.headers.get("etag");
   assert.ok(etag);
   const unchangedPage = await client.request("/some/client/route", {
