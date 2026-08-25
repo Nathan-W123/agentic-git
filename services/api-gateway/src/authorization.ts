@@ -10,6 +10,7 @@ import {
   AuthenticationError,
   type AuthenticatedPrincipal,
 } from "./auth.js";
+import { effectiveRole } from "./billing.js";
 
 export type Permission =
   | "view"
@@ -23,7 +24,6 @@ export type Permission =
 
 const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, ReadonlySet<Permission>>> = {
   viewer: new Set(["view"]),
-  reviewer: new Set(["view", "review"]),
   developer: new Set([
     "view",
     "submit_task",
@@ -71,10 +71,9 @@ export interface AuthorizedProject extends AuthorizedOrganization {
 /** Roles in ascending order of what they can do, for taking the higher of two. */
 const ROLE_RANK: Readonly<Record<OrganizationRole, number>> = {
   viewer: 0,
-  reviewer: 1,
-  developer: 2,
-  admin: 3,
-  owner: 4,
+  developer: 1,
+  admin: 2,
+  owner: 3,
 };
 
 function higherRole(
@@ -100,6 +99,40 @@ function roleFor(
   return principal.memberships.find(
     (membership) => membership.organizationId === organizationId,
   )?.role;
+}
+
+/**
+ * The role a caller may exercise once the organization's entitlement is read.
+ *
+ * An organization whose subscription has lapsed is read-only: every role folds
+ * to `viewer`, so `view` still passes and everything that spends does not.
+ * The refusal is therefore the ordinary 403 rather than a special one, which
+ * is deliberate — a lapsed subscription is not a different kind of "no" from
+ * any other missing permission, and callers already handle this one.
+ *
+ * A system administrator is exempt. They run the deployment, their access is
+ * how a billing problem gets fixed, and locking them out of an organization
+ * over its own unpaid invoice would make the failure unrecoverable from
+ * inside the product.
+ *
+ * Costs one primary-key read per authorized request. That is the price of the
+ * gate living here rather than being spelled out at each of the routes, where
+ * the one that got forgotten would be the one that mattered.
+ */
+async function entitledRole(
+  store: CoordinationStore,
+  principal: AuthenticatedPrincipal,
+  organization: Organization,
+  role: OrganizationRole | undefined,
+): Promise<OrganizationRole | undefined> {
+  if (role === undefined || principal.user.systemAdmin) {
+    return role;
+  }
+  return effectiveRole(
+    role,
+    await store.getSubscription(organization.id),
+    organization.createdAt,
+  );
 }
 
 export const ALL_PERMISSIONS: readonly Permission[] = [
@@ -201,7 +234,12 @@ export async function authorizeOrganization(
       "not_found",
     );
   }
-  const role = roleFor(principal, organizationId);
+  const role = await entitledRole(
+    store,
+    principal,
+    organization,
+    roleFor(principal, organizationId),
+  );
   assertPermission(role, permission);
   // Effective permission is the intersection of role and scope, so a token
   // can only ever narrow what its owner could already do.
@@ -251,7 +289,26 @@ export async function authorizeProject(
     (highest, grant) => higherRole(highest, grant.role),
     undefined,
   );
-  const role = higherRole(organizationRole, grantRole);
+  // A comped grant stands on its own — see `authorizeRepository`, which makes
+  // the same allowance exactly. Taken as the higher of the two rather than as
+  // a bypass, so an unpaid organization still folds to `viewer` everywhere the
+  // comp does not reach; `repositories` below already narrows a grant-only
+  // caller to the repositories they actually hold.
+  const compedRole = grants
+    .filter((grant) => grant.comped)
+    .reduce<OrganizationRole | undefined>(
+      (highest, grant) => higherRole(highest, grant.role),
+      undefined,
+    );
+  const role = higherRole(
+    await entitledRole(
+      store,
+      principal,
+      organization,
+      higherRole(organizationRole, grantRole),
+    ),
+    compedRole,
+  );
   assertPermission(role, permission);
   assertTokenScope(principal, permission);
 
@@ -372,7 +429,16 @@ export async function authorizeRepository(
     }
   }
 
-  const role = higherRole(organizationRole, repositoryGrant?.role);
+  // A comped grant is entitlement in its own right. It was given away for
+  // this one repository by whoever runs the deployment, so it must not be
+  // folded to `viewer` because the organization that happens to own the
+  // repository has not paid — the person holding it is precisely the person
+  // who was told they would not have to.
+  const granted = higherRole(organizationRole, repositoryGrant?.role);
+  const role =
+    repositoryGrant?.comped === true
+      ? granted
+      : await entitledRole(store, principal, organization, granted);
   assertPermission(role, permission);
   // Checked against the permission actually requested, not "view" — a token
   // scoped to exactly one permission (e.g. `manage_project` without `view`)

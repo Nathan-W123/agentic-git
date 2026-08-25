@@ -3,7 +3,11 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 
-import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
+import {
+  ApiGateway,
+  HttpStripeClient,
+  type ApiOperations,
+} from "@coord/api-gateway";
 import { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
   ConversationRegistry,
@@ -46,6 +50,29 @@ import {
   UserCredentialStore,
   type UserCredentialKind,
 } from "@coord/workspace-manager";
+
+/** An environment value, or undefined when it is unset or blank. */
+function trimmedEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
+/**
+ * Where Stripe sends a browser back to after checkout.
+ *
+ * Configured rather than derived from the request, because the thin desktop
+ * shell's own origin is not somewhere Stripe can redirect to — the return has
+ * to land on a real page, which then hands back to the app. Falls back to the
+ * first allowed origin so a plain web deployment needs no extra variable.
+ */
+function appBaseUrl(): string {
+  return (
+    trimmedEnv("KUMI_APP_URL") ??
+    trimmedEnv("COORD_PUBLIC_URL") ??
+    configuredOrigins()[0] ??
+    ""
+  );
+}
 
 /**
  * How often the queue is checked for work nothing is driving.
@@ -153,6 +180,9 @@ async function serve(
   // secret, it is a lockout. A deployment that wants the guard sets the
   // variable, and then it is stable because they chose it.
   const bootstrapToken = process.env["COORD_BOOTSTRAP_TOKEN"]?.trim();
+  const stripeSecretKey = trimmedEnv("STRIPE_SECRET_KEY");
+  const stripeWebhookSecret = trimmedEnv("STRIPE_WEBHOOK_SECRET");
+  const stripePriceId = trimmedEnv("STRIPE_PRICE_ID");
 
   const repositories = new RepositoryService();
   // One index for the whole process, like the credential store below.
@@ -763,6 +793,15 @@ async function serve(
     allowedOrigins: configuredOrigins(),
     secureCookies: process.env["COORD_SECURE_COOKIES"] === "true",
     staticAssets: await loadStaticAssets(),
+    // Billing is opt-in. Without a secret key every billing route answers 501
+    // and the entitlement gate falls back to what the store already says, so
+    // a self-hosted deployment runs exactly as it did before payment existed.
+    ...(stripeSecretKey === undefined
+      ? {}
+      : { stripe: new HttpStripeClient(stripeSecretKey) }),
+    ...(stripeWebhookSecret === undefined ? {} : { stripeWebhookSecret }),
+    ...(stripePriceId === undefined ? {} : { stripePriceId }),
+    appBaseUrl: appBaseUrl(),
   });
   servingGateway = runningGateway;
   // Loopback locally, every interface when a platform is hosting us. `PORT`

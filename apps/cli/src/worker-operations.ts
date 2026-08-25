@@ -996,7 +996,7 @@ async function gateRemotePlan(
     taskId: task.id,
     kind: "policy_override",
     requestedBy: task.agentId,
-    requiredRole: "reviewer",
+    requiredRole: "admin",
     reasons: [...reasons],
     expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
   });

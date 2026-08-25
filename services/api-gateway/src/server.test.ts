@@ -1336,7 +1336,7 @@ test("approval decisions are project-authorized and durably audited", async (t) 
     taskId: "task_test",
     kind: "changeset",
     requestedBy: setup.user.id,
-    requiredRole: "reviewer",
+    requiredRole: "admin",
     reasons: ["Protected changeset"],
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
   });
@@ -2393,6 +2393,7 @@ test("a catch-up carries only what its reader may see", async (t) => {
     userId: guest.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   await runtime.store.markCatchUpSeen(
@@ -2487,6 +2488,7 @@ test("muting a channel silences it for one person and nobody else", async (t) =>
     userId: colleague.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const colleagueClient = new TestClient(runtime.origin);
@@ -4098,6 +4100,7 @@ test("the channel roster is the real connected agents of everyone with access to
     userId: guest.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
 
@@ -8244,7 +8247,7 @@ test('"go ahead" releases a review gate from the thread it was announced in', as
     taskId: "task_gated",
     kind: "policy_override",
     requestedBy: "claude",
-    requiredRole: "reviewer",
+    requiredRole: "admin",
     reasons: ["schema change"],
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
   });
@@ -8387,7 +8390,7 @@ test("a gate's hold and release stay ordered and deduplicated in its thread", as
     projectId: DEFAULT_PROJECT_ID,
     repositoryId,
     approvalId: "approval_gate",
-    requiredRole: "reviewer",
+    requiredRole: "admin",
   };
   await runtime.store.appendAudit(undefined, {
     type: "approval_requested",
@@ -9254,6 +9257,7 @@ test("only an organization owner or a repository co-owner can delete a repositor
     userId: guest.id,
     role: "developer",
     grantedBy: undefined,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const guestClient = await loginAs(runtime.origin, guest.email);
@@ -9274,6 +9278,7 @@ test("only an organization owner or a repository co-owner can delete a repositor
     userId: guest.id,
     role: "owner",
     grantedBy: undefined,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const deleted = await guestClient.request(
@@ -9625,6 +9630,7 @@ test("promoting a repository-only guest to co-owner does not require organizatio
     userId: guest.id,
     role: "viewer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
 
@@ -9718,6 +9724,7 @@ test("a human can leave a repository held only through a grant, but not one reac
     userId: guest.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const guestClient = await loginAs(runtime.origin, guest.email);

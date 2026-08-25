@@ -101,6 +101,11 @@ import {
   setRepositoryGrant,
   revokeRepositoryGrant,
   updateMemberRole,
+  iAmSystemAdmin,
+  openBillingPortal,
+  startCheckout,
+  ensureBilling,
+  setSystemAdmin,
   removeMember,
   state,
   toggleChannelMessagePin,
@@ -1403,6 +1408,12 @@ const SETTINGS_SECTIONS = [
     description: "People and activity in the channel you have open.",
   },
   {
+    id: "billing",
+    label: "Billing",
+    iconName: "chart",
+    description: "Your plan, what it covers, and who is counted as a seat.",
+  },
+  {
     id: "advanced",
     label: "Advanced",
     iconName: "sliders",
@@ -1538,6 +1549,8 @@ function settingsSectionMarkup(section) {
       );
     case "workspace":
       return `${invitationsCard()}${channelStatsCard()}`;
+    case "billing":
+      return billingCard();
     case "advanced":
       return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
     default:
@@ -2001,11 +2014,22 @@ async function inviteSomebody(rerender, repositoryId) {
     ? `They will get access to ${repositoryId}, and nothing else in this project.`
     : "Access is granted per repository. Pick the one to share, or share " +
       "everything if they are joining the team properly.";
+  // Only a deployment administrator's link to a *named* repository is free —
+  // both halves, the same two conditions the server checks. Said here because
+  // otherwise these links are indistinguishable from paid ones at the moment
+  // they are handed out, which is the moment it matters.
+  const freeLink = iAmSystemAdmin();
+  const freeNote = freeLink
+    ? fixed
+      ? " Whoever accepts this gets full use of this repository at no charge."
+      : " If you name a repository, whoever accepts gets full use of it at no" +
+        " charge; sharing everything is an ordinary paid seat."
+    : "";
   const values = await showModal({
     title: fixed ? `Invite someone to #${repositoryId}` : "Invite someone to collaborate",
     subtitle:
-      `${accessDetail} The readable name is the link's key, so anyone who ` +
-      "guesses it can use the invitation.",
+      `${accessDetail}${freeNote} The readable name is the link's key, so ` +
+      "anyone who guesses it can use the invitation.",
     confirm: "Create invite link",
     body: `<label class="field">
         <span>Name for the invite link</span>
@@ -2772,6 +2796,40 @@ async function memberRoleAction(repositoryId, userId) {
 }
 
 /** Removes an organization member or repository-only guest from KUMI. */
+/**
+ * Grants or takes back deployment administration.
+ *
+ * Confirmed both ways. Granting hands somebody every organization on this
+ * control plane and the ability to give repositories away for free; revoking
+ * can lock the last administrator out of exactly the screens that would fix
+ * it. Neither belongs behind a single click in a context menu.
+ */
+async function systemAdminAction(userId, grant) {
+  const confirmed = await showModal({
+    title: grant ? "Make deployment admin?" : "Remove deployment admin?",
+    subtitle: grant
+      ? "They will reach every organization on this deployment, and their " +
+        "invite links to a repository will be free for whoever accepts them."
+      : "They will lose access to every organization they are not a member " +
+        "of, and their invite links will stop being free.",
+    confirm: grant ? "Make admin" : "Remove admin",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await setSystemAdmin(userId, grant);
+    toast(grant ? "Now a deployment admin" : "No longer a deployment admin", "ok");
+    // The flag is read off the roster, which is cached, so it is refetched
+    // rather than patched in place — this is rare enough that a round trip
+    // costs nothing and a stale menu here would be actively misleading.
+    delete state.channelPeople[activeChannelId()];
+    render();
+  } catch (error) {
+    toast(error.message ?? "That could not be changed.", "error");
+  }
+}
+
 async function removeMemberAction(repositoryId, userId) {
   const name = memberName(userId) ?? userId;
   const organizationRole = memberRole(userId);
@@ -2914,6 +2972,132 @@ async function revokeRepositoryGrantAction(repositoryId, userId) {
     void ensureRepositoryGrants(repositoryId, render);
     render();
     refreshChannelInfoPopover();
+  }
+}
+
+/* ------------------------------------------------------------ billing ---- */
+
+/** How a subscription status reads to somebody who is not an accountant. */
+const BILLING_STATUS = {
+  comped: {
+    title: "Included",
+    detail: "This team is not billed. Nothing to do.",
+  },
+  trialing: { title: "Trial", detail: "" },
+  active: { title: "Active", detail: "Your subscription is running." },
+  past_due: {
+    title: "Payment failed",
+    detail:
+      "Your last payment did not go through. Everything keeps working while " +
+      "the card is retried — update it to be safe.",
+  },
+  canceled: {
+    title: "Read-only",
+    detail:
+      "Your subscription has ended, so work cannot be dispatched. Your " +
+      "repositories, threads and history are all still here.",
+  },
+};
+
+/** Days between now and an ISO date, rounded toward the reader's advantage. */
+function daysUntil(iso) {
+  const target = Date.parse(iso ?? "");
+  if (!Number.isFinite(target)) {
+    return undefined;
+  }
+  return Math.max(0, Math.ceil((target - Date.now()) / 86_400_000));
+}
+
+/**
+ * The plan, what it covers, and what it costs — for the Settings screen.
+ *
+ * Seats are stated rather than implied, because "why is my bill that number"
+ * is the question this screen exists to answer, and the rule is not obvious:
+ * viewers are free, so a team of ten can be a bill for four.
+ */
+function billingCard() {
+  void ensureBilling(render);
+  const billing = state.billing;
+  if (billing === undefined || billing === null) {
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Billing</div>
+      <div class="sr-sub">Loading…</div></span></div></section>`;
+  }
+  if (billing.configured !== true) {
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Billing is not set up on this deployment</div>
+      <div class="sr-sub">This Kumi is running without payment configured,
+        which is a supported way to run it. Nothing here is chargeable.</div>
+    </span></div></section>`;
+  }
+  const status = BILLING_STATUS[billing.status] ?? BILLING_STATUS.trialing;
+  const trialDays = daysUntil(billing.trialEndsAt);
+  const detail =
+    billing.status === "trialing"
+      ? trialDays === undefined
+        ? "Your trial is running."
+        : trialDays === 0
+          ? "Your trial ends today."
+          : `${String(trialDays)} day${trialDays === 1 ? "" : "s"} left on your trial.`
+      : status.detail;
+  const canManage = canManageOrganization();
+  return `<section class="card">
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">${esc(status.title)}</div>
+        <div class="sr-sub">${esc(detail)}</div>
+      </span>
+      ${
+        canManage
+          ? billing.manageable === true
+            ? `<button type="button" class="btn btn-sm" data-act="billing-portal">
+                 ${icon("external")} Manage billing</button>`
+            : `<button type="button" class="btn btn-sm btn-primary" data-act="billing-checkout">
+                 ${icon("bolt")} Subscribe</button>`
+          : ""
+      }
+    </div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">${String(billing.seats)} paid seat${
+          billing.seats === 1 ? "" : "s"
+        }</div>
+        <!-- The rule stated outright. It is the whole explanation for a bill
+             that does not match the size of the team. -->
+        <div class="sr-sub">Everyone who can start work counts as a seat.
+          Viewers, and anyone invited on a free link, do not.</div>
+      </span>
+    </div>
+    ${
+      billing.currentPeriodEnd === undefined
+        ? ""
+        : `<div class="set-row"><span class="sr-body">
+             <div class="sr-title">Renews ${esc(formatDate(billing.currentPeriodEnd, { short: false }))}</div>
+             <div class="sr-sub">Seats added partway through a month are
+               charged for the part of the month they are used.</div>
+           </span></div>`
+    }
+  </section>`;
+}
+
+/**
+ * Sends somebody to Stripe, in the browser.
+ *
+ * `window.open` rather than a redirect: the desktop shell is not a browser
+ * tab to navigate away from, and payment has to happen somewhere the person
+ * can see the address bar they are typing a card into.
+ */
+async function billingAction(kind) {
+  try {
+    const url =
+      kind === "portal" ? await openBillingPortal() : await startCheckout();
+    // Reloaded on return rather than assumed: the webhook is what actually
+    // records a payment, and it may land before or after the person gets
+    // back here.
+    state.billing = undefined;
+    window.open(url, "_blank", "noopener");
+  } catch (error) {
+    toast(error.message ?? "Billing could not be opened.", "error");
   }
 }
 
@@ -7382,6 +7566,17 @@ document.addEventListener("click", (event) => {
         value.slice(0, separatorIndex),
         value.slice(separatorIndex + 1),
       );
+      return;
+    }
+    case "billing-checkout":
+    case "billing-portal": {
+      void billingAction(act === "billing-portal" ? "portal" : "checkout");
+      return;
+    }
+    case "system-admin-grant":
+    case "system-admin-revoke": {
+      closePopover();
+      void systemAdminAction(value, act === "system-admin-grant");
       return;
     }
     case "channel-grant-promote": {

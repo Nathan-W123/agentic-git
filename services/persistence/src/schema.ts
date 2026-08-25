@@ -1162,6 +1162,91 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+// The reviewer role is retired. It existed to let somebody approve a
+    // change without being able to manage the project, and that is now what
+    // `admin` is for.
+    //
+    // Existing reviewers land on `viewer` rather than on `admin` or
+    // `developer`, because those are the two ways to get this wrong: `admin`
+    // would silently hand people the power to add and remove members, and
+    // `developer` would silently hand them the power to spend money on runs.
+    // `viewer` keeps every reviewer able to read exactly what they could read
+    // before, and an owner promotes the ones who should approve — a decision
+    // that ought to be made deliberately rather than inherited from a role
+    // that no longer exists.
+    //
+    // Approvals already raised against the old role are rewritten too. A held
+    // approval whose `required_role` names a role nothing can hold any more is
+    // a gate with nobody behind it, and the run waiting on it would never move.
+    version: 43,
+    name: "retire-reviewer-role",
+    statements: [
+      `UPDATE organization_memberships SET role = 'viewer' WHERE role = 'reviewer'`,
+      `UPDATE invitations SET role = 'viewer' WHERE role = 'reviewer'`,
+      `UPDATE approvals SET required_role = 'admin' WHERE required_role = 'reviewer'`,
+    ],
+  },
+  {
+    // What an organization is entitled to, and who inside it is billable.
+    //
+    // One row per organization rather than per user: the subscription is the
+    // organization's, and a person who belongs to two organizations is a seat
+    // in each independently.
+    //
+    // Every organization that already exists is written as `comped`. A billing
+    // gate that switches on and immediately locks out the people already using
+    // the product would be a worse bug than having no gate at all, so existing
+    // organizations are grandfathered and only new ones start a trial.
+    //
+    // `comped` on a membership is the free seat: it belongs to the membership
+    // rather than to the user, because the same person can be a paid seat in
+    // one organization and a comped one in another. The invitation carries the
+    // flag so that accepting one settles the question at the moment the
+    // membership is created, rather than depending on who happens to be
+    // looking later.
+    version: 44,
+    name: "subscriptions-and-comped-seats",
+    statements: [
+      `CREATE TABLE subscriptions (
+        organization_id TEXT PRIMARY KEY REFERENCES organizations(id),
+        status TEXT NOT NULL,
+        trial_ends_at TEXT,
+        current_period_end TEXT,
+        stripe_customer_id TEXT,
+        stripe_subscription_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `INSERT INTO subscriptions (
+         organization_id, status, created_at, updated_at
+       )
+       SELECT id, 'comped', created_at, created_at FROM organizations`,
+      `ALTER TABLE organization_memberships
+         ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE invitations
+         ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
+  {
+    // A free seat is a repository, not an organization.
+    //
+    // The first attempt put the comp on the membership, which grants the whole
+    // organization — every repository it owns, present and future. What is
+    // actually being given away is access to the one repository somebody was
+    // invited to, so the flag belongs on the grant that names it.
+    //
+    // `organization_memberships.comped` stays. It is still what a system
+    // administrator's synthesised membership uses to keep itself off an
+    // invoice, and still the right shape if an organization-wide comp is ever
+    // wanted. It is simply no longer what an invitation sets.
+    version: 45,
+    name: "comped-repository-grants",
+    statements: [
+      `ALTER TABLE repository_grants
+         ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

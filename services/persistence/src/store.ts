@@ -111,7 +111,6 @@ export type OrganizationRole =
   | "owner"
   | "admin"
   | "developer"
-  | "reviewer"
   | "viewer";
 
 export interface Organization {
@@ -141,6 +140,18 @@ export interface RepositoryGrant {
   userId: UserId;
   role: OrganizationRole;
   grantedBy: UserId | undefined;
+  /**
+   * Access to this repository that costs nobody anything, and that stands on
+   * its own regardless of what the owning organization's subscription says.
+   *
+   * The deployment's operators hand these out: somebody they invited to one
+   * repository gets full use of that repository without paying and without
+   * the organization paying for them. It is deliberately the narrowest thing
+   * that can be given away — one person, one repository — because a comp that
+   * reached the whole organization would be giving away every repository it
+   * has, including ones that do not exist yet.
+   */
+  comped: boolean;
   createdAt: string;
 }
 
@@ -161,6 +172,15 @@ export interface InvitationRecord {
   role: OrganizationRole;
   secretHash: string;
   invitedBy: UserId;
+  /**
+   * Whether accepting this creates a seat nobody is charged for.
+   *
+   * Decided when the link is made, not when it is used, so the answer cannot
+   * change under the recipient between clicking and joining — and so that a
+   * link handed out as free stays free even if the person who made it later
+   * stops being able to make free ones.
+   */
+  comped: boolean;
   createdAt: string;
   expiresAt: string;
   acceptedAt: string | undefined;
@@ -213,7 +233,47 @@ export interface OrganizationMembership {
   organizationId: string;
   userId: UserId;
   role: OrganizationRole;
+  /**
+   * A seat that carries no charge — an invitation from whoever runs the
+   * deployment, rather than one the organization bought.
+   *
+   * On the membership rather than on the user: the same person can be a paid
+   * seat in one organization and a comped one in another, and which they are
+   * is a fact about the pair.
+   */
+  comped: boolean;
   createdAt: string;
+}
+
+/**
+ * What an organization is entitled to.
+ *
+ * `comped` never expires and is what every organization that predates billing
+ * holds. `trialing` is the fourteen days a new organization gets before it has
+ * to decide. `active` is a paid subscription; `past_due` is one whose payment
+ * failed but whose grace has not run out; `canceled` is one that has stopped.
+ *
+ * Only the first three permit work — see `subscriptionAllowsWork` in the
+ * gateway, which is the single place that judgement is made.
+ */
+export type SubscriptionStatus =
+  | "comped"
+  | "trialing"
+  | "active"
+  | "past_due"
+  | "canceled";
+
+export interface Subscription {
+  organizationId: string;
+  status: SubscriptionStatus;
+  /** When the trial runs out, for `trialing` only. */
+  trialEndsAt?: string;
+  /** What the current paid period is good through, for `active`/`past_due`. */
+  currentPeriodEnd?: string;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ProjectRecord {
@@ -777,7 +837,7 @@ export interface CreateApprovalInput {
   taskId: TaskId;
   kind: ApprovalKind;
   requestedBy: string;
-  requiredRole: "reviewer" | "admin" | "owner";
+  requiredRole: "admin" | "owner";
   reasons: string[];
   changeSetId?: string;
   scopeChangeId?: string;
@@ -1275,6 +1335,8 @@ export interface CoordinationStore {
     organizationId: string;
     userId: UserId;
     role: OrganizationRole;
+    /** Omitted keeps whatever the existing row says, or false for a new one. */
+    comped?: boolean;
   }): Promise<OrganizationMembership>;
   removeMembership(organizationId: string, userId: UserId): Promise<void>;
   listMemberships(
@@ -1284,6 +1346,24 @@ export interface CoordinationStore {
     organizationId: string,
     userId: UserId,
   ): Promise<OrganizationMembership | undefined>;
+
+  /**
+   * What an organization is entitled to, or undefined for one that predates
+   * the subscriptions table and was never backfilled.
+   *
+   * Callers treat undefined as "no entitlement recorded" rather than as
+   * permission: an organization the gate cannot find an answer for is not one
+   * it may quietly wave through.
+   */
+  getSubscription(organizationId: string): Promise<Subscription | undefined>;
+  saveSubscription(input: {
+    organizationId: string;
+    status: SubscriptionStatus;
+    trialEndsAt?: string;
+    currentPeriodEnd?: string;
+    stripeCustomerId?: string;
+    stripeSubscriptionId?: string;
+  }): Promise<Subscription>;
 
   createProject(input: {
     organizationId: string;

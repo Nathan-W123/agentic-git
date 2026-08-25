@@ -79,7 +79,7 @@ test("change role and remove use the member routes", async () => {
   assert.match(roleAction, /INVITE_ROLES\.map/u);
   assert.match(roleAction, /await updateMemberRole\(userId, role\)/u);
   assert.match(roleAction, /await setRepositoryGrant\(repositoryId, userId, role\)/u);
-  for (const role of ["admin", "developer", "reviewer", "viewer"]) {
+  for (const role of ["admin", "developer", "viewer"]) {
     assert.match(data, new RegExp(`value: "${role}"`, "u"));
   }
 

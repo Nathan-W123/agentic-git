@@ -82,6 +82,15 @@ import {
 } from "./auth.js";
 import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
+  WebhookSignatureError,
+  isoFromUnixSeconds,
+  readSubscription,
+  subscriptionStatusFrom,
+  verifyWebhookSignature,
+  type StripeClient,
+} from "./stripe.js";
+import { billableSeats } from "./billing.js";
+import {
   arbitrationLine,
   type DeferredRef,
 } from "./arbitration-line.js";
@@ -3020,7 +3029,6 @@ const ROLES: readonly OrganizationRole[] = [
   "owner",
   "admin",
   "developer",
-  "reviewer",
   "viewer",
 ];
 /**
@@ -3753,6 +3761,25 @@ export interface ApiGatewayOptions {
    */
   mailer?: Mailer;
   /**
+   * Talks to Stripe. Absent — no `STRIPE_SECRET_KEY` — leaves every billing
+   * route answering 501: a deployment nobody has configured for payment
+   * should say so plainly rather than fail somewhere deeper with a message
+   * about a missing key. Injected by tests, which must not call Stripe.
+   */
+  stripe?: StripeClient;
+  /** Signing secret for Stripe webhooks; without it no webhook is accepted. */
+  stripeWebhookSecret?: string;
+  /** The price a seat is sold at. Required before checkout can be started. */
+  stripePriceId?: string;
+  /**
+   * Where Checkout sends somebody back to.
+   *
+   * Configured rather than derived from the request, because the thin desktop
+   * shell's own origin is not a URL Stripe can redirect a browser to — the
+   * return has to land somewhere real that then hands back to the app.
+   */
+  appBaseUrl?: string;
+  /**
    * The local first pass over unaddressed channel messages.
    *
    * Defaults to the embedding filter, or to one that passes everything on
@@ -4478,6 +4505,10 @@ export class ApiGateway {
    * the system administrator.
    */
   private readonly bootstrapToken: string | undefined;
+  private readonly stripe: StripeClient | undefined;
+  private readonly stripeWebhookSecret: string | undefined;
+  private readonly stripePriceId: string | undefined;
+  private readonly appBaseUrl: string;
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -4492,6 +4523,15 @@ export class ApiGateway {
   public constructor(private readonly options: ApiGatewayOptions) {
     const configured = (options.bootstrapToken ?? "").trim();
     this.bootstrapToken = configured.length === 0 ? undefined : configured;
+    this.stripe = options.stripe;
+    const webhookSecret = (options.stripeWebhookSecret ?? "").trim();
+    this.stripeWebhookSecret =
+      webhookSecret.length === 0 ? undefined : webhookSecret;
+    const priceId = (options.stripePriceId ?? "").trim();
+    this.stripePriceId = priceId.length === 0 ? undefined : priceId;
+    // Trailing slash trimmed once here rather than at each use, so a value
+    // pasted with one does not produce `https://app//billing`.
+    this.appBaseUrl = (options.appBaseUrl ?? "").trim().replace(/\/+$/u, "");
     // Only meaningful when one is set: a token short enough to guess is worse
     // than none, because it reads as protection.
     if (this.bootstrapToken !== undefined && this.bootstrapToken.length < 24) {
@@ -4869,7 +4909,15 @@ export class ApiGateway {
       const passwordResetPath = url.pathname.startsWith(
         `${API_PREFIX}/auth/password-reset`,
       );
+      // Stripe is not a browser and holds no session: it authenticates by
+      // signing the body with a shared secret, which the handler verifies
+      // before reading a single field. Public here means "no cookie", not
+      // "unauthenticated" — an unsigned request never gets past the handler.
+      const stripeWebhookPath =
+        request.method === "POST" &&
+        url.pathname === `${API_PREFIX}/stripe/webhook`;
       const isPublic =
+        stripeWebhookPath ||
         (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
         (request.method === "GET" && invitationPath) ||
         (passwordResetPath &&
@@ -4929,6 +4977,47 @@ export class ApiGateway {
     const { request, response, url } = context;
     const method = request.method ?? "GET";
     const path = url.pathname;
+
+    if (method === "POST" && path === `${API_PREFIX}/stripe/webhook`) {
+      if (this.stripeWebhookSecret === undefined) {
+        // Refused rather than ignored. A deployment with no secret cannot tell
+        // a real event from a forged one, and answering 200 to both would let
+        // anyone who found this URL cancel somebody's subscription.
+        throw new HttpError(
+          501,
+          "billing_not_configured",
+          "This deployment accepts no Stripe webhooks",
+        );
+      }
+      const rawBody = await this.readRawBody(request);
+      try {
+        verifyWebhookSignature({
+          rawBody,
+          signatureHeader:
+            typeof request.headers["stripe-signature"] === "string"
+              ? request.headers["stripe-signature"]
+              : undefined,
+          secret: this.stripeWebhookSecret,
+        });
+      } catch (error) {
+        if (error instanceof WebhookSignatureError) {
+          throw new HttpError(400, "invalid_signature", error.message);
+        }
+        throw error;
+      }
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
+      } catch {
+        throw new HttpError(400, "invalid_json", "Webhook body was not JSON");
+      }
+      await this.applyStripeEvent(event);
+      // 200 on anything that verified, including an event type nothing here
+      // handles. Stripe retries a non-2xx for days, and retrying an event we
+      // have deliberately ignored is noise that hides the ones that matter.
+      this.sendJson(response, 200, { received: true });
+      return;
+    }
 
     if (method === "GET" && path === `${API_PREFIX}/health`) {
       let docker:
@@ -5472,12 +5561,19 @@ export class ApiGateway {
             userId: user.id,
             role: invitation.role,
           });
+          // Somebody joining is the commonest way a seat count changes, and
+          // the one most likely to be noticed on an invoice.
+          await this.syncSeatQuantity(invitation.organizationId);
         } else {
           await this.options.store.saveRepositoryGrant({
             repositoryId: invitation.repositoryId,
             userId: user.id,
             role: invitation.role,
             grantedBy: invitation.invitedBy,
+            // Free use of this one repository, if an operator's link is what
+            // brought them here. Carried from the invitation rather than
+            // re-derived, so it reflects who actually gave the access away.
+            comped: invitation.comped,
             createdAt: new Date().toISOString(),
           });
         }
@@ -6487,6 +6583,16 @@ export class ApiGateway {
           role,
           secretHash: hashSecret(secret),
           invitedBy: principal.user.id,
+          // A link from whoever runs the deployment, to one repository, is
+          // free use of that repository. Both halves are required: only an
+          // operator may give access away, and only a repository-scoped
+          // invitation is narrow enough to give. An organization-wide link
+          // would be handing over every repository the organization has,
+          // including ones that do not exist yet, so it is never comped.
+          //
+          // Settled here rather than at acceptance so the answer cannot change
+          // under the recipient between clicking and joining.
+          comped: principal.user.systemAdmin && repositoryId !== undefined,
           createdAt: now.toISOString(),
           expiresAt: new Date(
             now.getTime() + INVITATION_TTL_MS,
@@ -6684,6 +6790,9 @@ export class ApiGateway {
             actorId: principal.user.id,
           },
         });
+        // A promotion from viewer to developer is a seat starting to cost
+        // money, and a demotion is one stopping.
+        await this.syncSeatQuantity(organizationId);
         this.sendJson(response, 200, { membership });
         return;
       }
@@ -6699,6 +6808,7 @@ export class ApiGateway {
           );
         }
         await this.options.store.removeMembership(organizationId, userId);
+        await this.syncSeatQuantity(organizationId);
         await this.options.store.appendAudit(undefined, {
           type: "membership_changed",
           data: {
@@ -7358,6 +7468,9 @@ export class ApiGateway {
         userId,
         role,
         grantedBy: principal.user.id,
+        // Sharing a repository with a colleague is an ordinary paid seat. Only
+        // an operator's invitation link gives access away.
+        comped: false,
         createdAt: new Date().toISOString(),
       });
       await this.options.store.appendAudit(undefined, {
@@ -11052,6 +11165,113 @@ export class ApiGateway {
           record.event.data["projectId"] === projectId,
       );
       this.sendJson(response, 200, { events });
+      return;
+    }
+
+    const billingMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/billing$`, "u"),
+    );
+    if (billingMatch !== undefined && method === "GET") {
+      const organizationId = billingMatch[0] ?? "";
+      // `view`, not `manage_organization`: everybody in a team benefits from
+      // knowing the trial ends on Friday, and hiding it until somebody with
+      // billing rights notices is how a trial lapses by surprise.
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "view",
+      );
+      const subscription =
+        await this.options.store.getSubscription(organizationId);
+      const memberships =
+        await this.options.store.listMemberships(organizationId);
+      this.sendJson(response, 200, {
+        billing: {
+          configured: this.stripe !== undefined && this.stripePriceId !== undefined,
+          status: subscription?.status ?? "trialing",
+          trialEndsAt: subscription?.trialEndsAt,
+          currentPeriodEnd: subscription?.currentPeriodEnd,
+          seats: billableSeats(memberships),
+          // Whether a portal link can be made at all. A team that has never
+          // paid has no Stripe customer, and offering "manage billing" that
+          // can only fail is worse than not offering it.
+          manageable: subscription?.stripeCustomerId !== undefined,
+        },
+      });
+      return;
+    }
+
+    const checkoutMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/billing/checkout$`, "u"),
+    );
+    if (checkoutMatch !== undefined && method === "POST") {
+      const organizationId = checkoutMatch[0] ?? "";
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_organization",
+      );
+      const stripe = this.requireStripe();
+      const priceId = this.stripePriceId;
+      if (priceId === undefined) {
+        throw new HttpError(
+          501,
+          "billing_not_configured",
+          "No price is configured for this deployment",
+        );
+      }
+      const memberships =
+        await this.options.store.listMemberships(organizationId);
+      const existing =
+        await this.options.store.getSubscription(organizationId);
+      const session = await stripe.createCheckoutSession({
+        organizationId,
+        priceId,
+        // At least one: an organization with no billable seat yet still has
+        // somebody standing at the checkout, and Stripe refuses a quantity of
+        // zero. They are buying the seat they are about to use.
+        quantity: Math.max(1, billableSeats(memberships)),
+        successUrl: `${this.appBaseUrl}/billing/done`,
+        cancelUrl: `${this.appBaseUrl}/billing/cancelled`,
+        ...(existing?.stripeCustomerId === undefined
+          ? { customerEmail: principal.user.email }
+          : { customerId: existing.stripeCustomerId }),
+      });
+      this.sendJson(response, 200, { url: session.url });
+      return;
+    }
+
+    const portalMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/billing/portal$`, "u"),
+    );
+    if (portalMatch !== undefined && method === "POST") {
+      const organizationId = portalMatch[0] ?? "";
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_organization",
+      );
+      const stripe = this.requireStripe();
+      const subscription =
+        await this.options.store.getSubscription(organizationId);
+      if (subscription?.stripeCustomerId === undefined) {
+        throw new HttpError(
+          409,
+          "no_stripe_customer",
+          "This organization has never been billed, so there is nothing to manage",
+        );
+      }
+      const session = await stripe.createPortalSession({
+        customerId: subscription.stripeCustomerId,
+        returnUrl: `${this.appBaseUrl}/billing`,
+      });
+      this.sendJson(response, 200, { url: session.url });
       return;
     }
 
@@ -19577,6 +19797,244 @@ export class ApiGateway {
       // the sender's claim and a chunked body does not carry one at all.
       if (size > limit) {
         throw new HttpError(413, "body_too_large", "That image is too large");
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * The exact bytes of a request body.
+   *
+   * Stripe signs the body it sent, so a webhook cannot go through
+   * {@link readJson}: parsing to JSON and re-serialising changes key order and
+   * whitespace, and every signature over those bytes then fails. This is the
+   * only caller, and it is the reason it exists.
+   */
+  /**
+   * Applies one verified Stripe event to an organization's entitlement.
+   *
+   * Every event this cares about is *about a subscription*, so the
+   * organization is read off the subscription's own metadata rather than off
+   * the checkout session that started it. A session is a one-off; an invoice
+   * arriving three months later has no session to look back to, and a lookup
+   * table mapping customers to organizations is one more thing to keep
+   * correct.
+   *
+   * Unknown event types are ignored deliberately. Stripe sends whatever the
+   * endpoint is subscribed to plus anything added to that list later, and a
+   * gateway that threw on an unrecognised type would turn a dashboard change
+   * into an outage.
+   */
+  private async applyStripeEvent(event: Record<string, unknown>): Promise<void> {
+    const type = String(event["type"] ?? "");
+    const data = event["data"] as { object?: unknown } | undefined;
+    const object = (data?.object ?? {}) as Record<string, unknown>;
+
+    // The three subscription-shaped events carry the subscription itself.
+    if (
+      type === "customer.subscription.created" ||
+      type === "customer.subscription.updated" ||
+      type === "customer.subscription.deleted"
+    ) {
+      await this.recordStripeSubscription(object, type);
+      return;
+    }
+
+    // Checkout completing is the first time a subscription exists. The session
+    // names it, so it is fetched rather than guessed at: the session object
+    // carries an id, not the subscription's status or period.
+    if (type === "checkout.session.completed") {
+      const subscriptionId = object["subscription"];
+      if (typeof subscriptionId !== "string" || this.stripe === undefined) {
+        return;
+      }
+      const subscription = await this.stripe.getSubscription(subscriptionId);
+      await this.saveStripeEntitlement({
+        organizationId: String(
+          (object["metadata"] as Record<string, unknown> | undefined)?.[
+            "organizationId"
+          ] ?? "",
+        ),
+        status: subscriptionStatusFrom(subscription.status),
+        currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+        stripeCustomerId: subscription.customerId,
+        stripeSubscriptionId: subscription.id,
+      });
+      return;
+    }
+
+    // A paid or failed invoice moves the same subscription between `active`
+    // and `past_due`, which `customer.subscription.updated` also reports. Both
+    // are handled because which one arrives first is not guaranteed, and the
+    // write is idempotent either way.
+    if (type === "invoice.paid" || type === "invoice.payment_failed") {
+      const subscriptionId = object["subscription"];
+      if (typeof subscriptionId !== "string" || this.stripe === undefined) {
+        return;
+      }
+      const subscription = await this.stripe.getSubscription(subscriptionId);
+      await this.recordStripeSubscription(
+        {
+          id: subscription.id,
+          status: subscription.status,
+          customer: subscription.customerId,
+          current_period_end: subscription.currentPeriodEnd,
+          metadata: object["subscription_details"] ?? {},
+        },
+        type,
+      );
+      return;
+    }
+  }
+
+  /** Writes an entitlement from a Stripe subscription object. */
+  private async recordStripeSubscription(
+    object: Record<string, unknown>,
+    type: string,
+  ): Promise<void> {
+    const subscription = readSubscription(object);
+    const metadata = object["metadata"] as Record<string, unknown> | undefined;
+    let organizationId = String(metadata?.["organizationId"] ?? "");
+    if (organizationId === "" && this.stripe !== undefined) {
+      // An invoice's copy of a subscription does not always carry metadata, so
+      // the subscription itself is read rather than dropping the event.
+      const fetched = await this.stripe
+        .getSubscription(subscription.id)
+        .catch(() => undefined);
+      organizationId = fetched?.metadata["organizationId"] ?? "";
+    }
+    await this.saveStripeEntitlement({
+      organizationId,
+      // A deletion is a cancellation whatever the object's own status says —
+      // Stripe reports `canceled` there, but reading the event type means a
+      // future status spelling cannot quietly leave somebody entitled.
+      status:
+        type === "customer.subscription.deleted"
+          ? "canceled"
+          : subscriptionStatusFrom(subscription.status),
+      currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+      stripeCustomerId: subscription.customerId,
+      stripeSubscriptionId: subscription.id,
+    });
+  }
+
+  /** Stores an entitlement, refusing an event that names no organization. */
+  private async saveStripeEntitlement(input: {
+    organizationId: string;
+    status: "active" | "past_due" | "canceled";
+    currentPeriodEnd: string | undefined;
+    stripeCustomerId: string;
+    stripeSubscriptionId: string;
+  }): Promise<void> {
+    if (input.organizationId === "") {
+      // Nothing to apply it to. Logged rather than thrown: throwing would make
+      // Stripe retry an event that can never succeed, for days.
+      process.stderr.write(
+        `[stripe] event for subscription ${input.stripeSubscriptionId} named no organization\n`,
+      );
+      return;
+    }
+    if ((await this.options.store.getOrganization(input.organizationId)) === undefined) {
+      process.stderr.write(
+        `[stripe] event named unknown organization ${input.organizationId}\n`,
+      );
+      return;
+    }
+    await this.options.store.saveSubscription({
+      organizationId: input.organizationId,
+      status: input.status,
+      ...(input.currentPeriodEnd === undefined
+        ? {}
+        : { currentPeriodEnd: input.currentPeriodEnd }),
+      ...(input.stripeCustomerId === ""
+        ? {}
+        : { stripeCustomerId: input.stripeCustomerId }),
+      ...(input.stripeSubscriptionId === ""
+        ? {}
+        : { stripeSubscriptionId: input.stripeSubscriptionId }),
+    });
+  }
+
+  /**
+   * The Stripe client, or a 501 naming the reason.
+   *
+   * A deployment nobody has configured for payment should say so plainly at
+   * the edge rather than fail deeper with a message about a missing key —
+   * self-hosting Kumi without billing is a legitimate way to run it.
+   */
+  /**
+   * Brings the Stripe subscription's seat count back in line with reality.
+   *
+   * Best-effort on purpose, and this is the trade being made: a Stripe outage
+   * must not stop somebody adding a teammate. Adding a colleague is the moment
+   * a team is getting value out of this, and failing it to protect an invoice
+   * would be charging the customer for our own dependency being down.
+   *
+   * The cost is that seats can drift when a sync fails, so the failure is
+   * written to the log rather than swallowed, and checkout recomputes the
+   * quantity from memberships rather than trusting what Stripe holds. Drift
+   * therefore heals at the next purchase or seat change rather than accruing.
+   *
+   * Nothing happens for an organization that has never paid: there is no
+   * subscription to hold a quantity, and the count is taken fresh at checkout.
+   */
+  private async syncSeatQuantity(organizationId: string): Promise<void> {
+    if (this.stripe === undefined) {
+      return;
+    }
+    try {
+      const subscription =
+        await this.options.store.getSubscription(organizationId);
+      const subscriptionId = subscription?.stripeSubscriptionId;
+      if (subscriptionId === undefined || subscription?.status === "canceled") {
+        return;
+      }
+      const memberships =
+        await this.options.store.listMemberships(organizationId);
+      const seats = Math.max(1, billableSeats(memberships));
+      const current = await this.stripe.getSubscription(subscriptionId);
+      if (current.quantity === seats) {
+        // Stripe prorates every quantity write, so writing the number it
+        // already holds would put a zero-value line on the invoice each time
+        // anybody's role changed.
+        return;
+      }
+      const itemId = await this.stripe.getSubscriptionItemId(subscriptionId);
+      if (itemId === undefined) {
+        return;
+      }
+      await this.stripe.updateSubscriptionQuantity({
+        subscriptionId,
+        subscriptionItemId: itemId,
+        quantity: seats,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `[stripe] seat sync failed for ${organizationId}: ${describeError(error)}\n`,
+      );
+    }
+  }
+
+  private requireStripe(): StripeClient {
+    if (this.stripe === undefined) {
+      throw new HttpError(
+        501,
+        "billing_not_configured",
+        "This deployment is not configured for payment",
+      );
+    }
+    return this.stripe;
+  }
+
+  private async readRawBody(request: IncomingMessage): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > this.bodyLimit) {
+        throw new HttpError(413, "body_too_large", "Request body is too large");
       }
       chunks.push(buffer);
     }
