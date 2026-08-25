@@ -403,8 +403,6 @@ export function verifyWebhookSignature(input: {
   }
 }
 
-/** Stripe statuses that mean the subscription is worth honouring. */
-const STRIPE_ACTIVE = new Set(["active", "trialing"]);
 const STRIPE_PAST_DUE = new Set(["past_due", "unpaid"]);
 
 /**
@@ -414,11 +412,23 @@ const STRIPE_PAST_DUE = new Set(["past_due", "unpaid"]);
  * rather than a translation: `incomplete` — a subscription whose first payment
  * never completed — becomes `canceled` here, because nothing was ever paid and
  * treating it as entitlement would let an abandoned checkout buy access.
+ *
+ * `trialing` is kept as itself. It used to fold into `active`, which was true
+ * of what the gate needed to know — a trial is honoured — and false of
+ * everything a customer is shown. Every account now arrives through a paid
+ * sign-up with fourteen days of trial on it, so under the collapse a person on
+ * day two was told "Active — Your subscription is running", the countdown
+ * banner never appeared for anyone, and the first charge arrived with no
+ * in-product warning at all. The store has held `trialing` and `trial_ends_at`
+ * throughout; nothing was ever written into them from here.
  */
 export function subscriptionStatusFrom(
   stripeStatus: string,
-): "active" | "past_due" | "canceled" {
-  if (STRIPE_ACTIVE.has(stripeStatus)) {
+): "trialing" | "active" | "past_due" | "canceled" {
+  if (stripeStatus === "trialing") {
+    return "trialing";
+  }
+  if (stripeStatus === "active") {
     return "active";
   }
   if (STRIPE_PAST_DUE.has(stripeStatus)) {

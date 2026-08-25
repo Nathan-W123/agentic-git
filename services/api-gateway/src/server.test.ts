@@ -37,17 +37,20 @@ import {
   parseAutoClaimVerdict,
   readsAsEchoOfRequest,
   reportedFreshTokens,
+  requestFromObjective,
   selectChannelMemo,
   selectThreadContext,
   summariseAuditData,
   summariseChannelThread,
   summariseObjective,
   summariseThreadTitle,
+  textOverlap,
   truncateToTokens,
+  withRoleContext,
   type ApiOperations,
   type ChannelMemoThread,
 } from "./server.js";
-import { hashPassword } from "./auth.js";
+import { hashPassword, hashSecret } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
 import type { CodexUsageReader } from "./codex-subscription-usage.js";
 import type { CatchUpSummariser } from "./catch-up.js";
@@ -89,6 +92,13 @@ interface TestRuntime {
       callSign?: string;
     }>
   >;
+  /**
+   * Every call the fake `syncRepository` operation reached, in order. A route
+   * that authorizes badly is only visible here: the refusal has to happen
+   * before the operation, because the operation resolves a repository id
+   * globally and would happily move somebody else's mirror.
+   */
+  syncCalls: Array<{ projectId: string; repositoryId: string; actorId: string }>;
   /**
    * Every call the fake `submitTask` operation received, in order — for
    * asserting @mention dispatch submits under the *mentioned agent's owner*,
@@ -380,6 +390,12 @@ async function startRuntime(
     planHoldTtlMs?: number;
     codexUsageReader?: CodexUsageReader;
     /**
+     * Stands in for Stripe, so a test can watch what the seat count does to
+     * a live subscription. Absent for every other test, which is also what a
+     * deployment without billing configured looks like.
+     */
+    stripe?: StripeClient;
+    /**
      * Drops the optional `listAgents` operation, as a deployment that does
      * not implement it does — the fallback path for anything that joins
      * tasks to configured agents.
@@ -431,6 +447,7 @@ async function startRuntime(
   const chatConnections: TestRuntime["chatConnections"] = new Map();
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const pushCalls: TestRuntime["pushCalls"] = [];
+  const syncCalls: TestRuntime["syncCalls"] = [];
   const pushOutcomes = [...(options.pushOutcomes ?? [])];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
@@ -679,6 +696,21 @@ async function startRuntime(
       await store.linkRepository(input.projectId, repository.id);
       canonicalRepositoryNames.add(repository.id);
       return repository;
+    },
+    async syncRepository(input) {
+      syncCalls.push({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        actorId: input.actorId,
+      });
+      return {
+        status: "already_current" as const,
+        remoteUrl: "https://github.com/coord/example.git",
+        upstreamBranch: "main",
+        upstreamRevision: "rev1",
+        previousRevision: "rev1",
+        revision: "rev1",
+      };
     },
     async pushRepository(input) {
       pushCalls.push(input);
@@ -959,6 +991,7 @@ async function startRuntime(
     ...(options.codexUsageReader === undefined
       ? {}
       : { codexUsageReader: options.codexUsageReader }),
+    ...(options.stripe === undefined ? {} : { stripe: options.stripe }),
     staticAssets: new Map([
       [
         "/index.html",
@@ -998,6 +1031,7 @@ async function startRuntime(
     chatConnections,
     submittedTasks,
     pushCalls,
+    syncCalls,
     chatPrompts,
     chatAnswer,
     providerUsage,
@@ -3267,6 +3301,298 @@ test("an invitation brings in somebody who has no account yet", async (t) => {
   // Nobody could have had an account for that address before this test made
   // one, which is what the preview said.
   assert.equal(preview.data.invitation.accountExists, false);
+});
+
+test("an accepted repository invitation moves the seat count at Stripe", async (t) => {
+  // The bug this pins: every invitation a customer can create is
+  // repository-scoped — the route requires one — and that branch was the one
+  // branch that never called `syncSeatQuantity`. So a team could invite its
+  // whole staff, each of them able to work, and the subscription stayed at
+  // the quantity checkout happened to capture. Nobody would notice from
+  // inside the product; it shows up only as an invoice that is too small.
+  const writes: number[] = [];
+  // What Stripe currently holds, so the "already correct, do not write"
+  // shortcut is exercised by the same stub rather than assumed.
+  let held = 2;
+  const stripe = {
+    getSubscription: async (id: string) => ({
+      id,
+      status: "active",
+      customerId: "cus_seats",
+      currentPeriodEnd: undefined,
+      trialEnd: undefined,
+      quantity: held,
+      metadata: {},
+    }),
+    getSubscriptionItemId: async () => "si_seats",
+    updateSubscriptionQuantity: async (input: {
+      subscriptionId: string;
+      subscriptionItemId: string;
+      quantity: number;
+    }) => {
+      assert.equal(input.subscriptionId, "sub_seats");
+      assert.equal(input.subscriptionItemId, "si_seats");
+      writes.push(input.quantity);
+      held = input.quantity;
+    },
+  } as unknown as StripeClient;
+  const runtime = await startRuntime(t, { stripe });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "seat-repo");
+
+  // The invitation has to come from somebody who is not the operator: an
+  // operator's repository invitation is deliberately comped, and a comped
+  // grant is exactly the one that must not move the count.
+  const founder = await runtime.store.createUser({
+    email: "founder@example.com",
+    displayName: "Founder",
+    passwordDigest: await hashPassword(PASSWORD),
+    systemAdmin: false,
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: founder.id,
+    role: "owner",
+  });
+  // A real paying organization, which bootstrap's comped row is not.
+  await runtime.store.saveSubscription({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    status: "active",
+    stripeCustomerId: "cus_seats",
+    stripeSubscriptionId: "sub_seats",
+  });
+  const founderClient = new TestClient(runtime.origin);
+  const signedIn = await founderClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "founder@example.com", password: PASSWORD },
+  });
+  assert.equal(signedIn.status, 200, JSON.stringify(signedIn.data));
+
+  const invited = await founderClient.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: inviteBody("hired@example.com", "developer", repo),
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  // Issuing the invitation is not a seat. Nobody holds it yet, and billing
+  // for an unopened email is how a team ends up paying for a typo.
+  assert.deepEqual(writes, []);
+
+  const joiner = new TestClient(runtime.origin);
+  const accepted = await joiner.request(
+    `/api/v1/invitations/${String(invited.data.token)}/accept`,
+    { method: "POST", body: { displayName: "Hired", password: PASSWORD } },
+  );
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  // Two members and one ordinary grant, by person: three seats.
+  assert.deepEqual(
+    writes,
+    [3],
+    "the grant branch has to reach Stripe, not only the membership one",
+  );
+
+  // And an operator's invitation to the same repository is free, so the
+  // quantity does not move again — the comp is the point of that path.
+  const comped = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: inviteBody("guest@example.com", "developer", repo) },
+  );
+  assert.equal(comped.status, 201, JSON.stringify(comped.data));
+  const guest = new TestClient(runtime.origin);
+  const joinedFree = await guest.request(
+    `/api/v1/invitations/${String(comped.data.token)}/accept`,
+    { method: "POST", body: { displayName: "Guest", password: PASSWORD } },
+  );
+  assert.equal(joinedFree.status, 200, JSON.stringify(joinedFree.data));
+  assert.deepEqual(
+    writes,
+    [3],
+    "a comped grant is free, and writing the same quantity would prorate",
+  );
+});
+
+test("syncing checks the repository, not only the project it was named under", async (t) => {
+  // `/sync` authorized the project and then handed the path's repository id
+  // to the operation, which resolves it globally. So an owner of any project
+  // anywhere could name somebody else's repository under their own project
+  // and move that mirror — a write, on a repository they cannot even read.
+  // The sibling `/push` has always checked both halves.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const theirs = await invitableRepository(owner, "sync-target");
+
+  const outsider = await runtime.store.createUser({
+    email: "sync-outsider@example.com",
+    displayName: "Sync Outsider",
+    passwordDigest: await hashPassword(PASSWORD),
+    systemAdmin: false,
+  });
+  const other = await runtime.store.createOrganization({
+    slug: "sync-tenant",
+    name: "Sync Tenant",
+  });
+  await runtime.store.saveMembership({
+    organizationId: other.id,
+    userId: outsider.id,
+    role: "owner",
+  });
+  await runtime.store.saveSubscription({
+    organizationId: other.id,
+    status: "active",
+  });
+  const mine = await runtime.store.createProject({
+    organizationId: other.id,
+    slug: "sync-project",
+    name: "Sync Project",
+  });
+  const client = new TestClient(runtime.origin);
+  const signedIn = await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "sync-outsider@example.com", password: PASSWORD },
+  });
+  assert.equal(signedIn.status, 200, JSON.stringify(signedIn.data));
+
+  // Their own project, somebody else's repository.
+  const crossed = await client.request(
+    `/api/v1/projects/${mine.id}/repositories/${theirs}/sync`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(
+    crossed.status,
+    404,
+    JSON.stringify(crossed.data),
+  );
+
+  // The project it really belongs to, which they cannot reach at all.
+  const direct = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${theirs}/sync`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(direct.status, 403, JSON.stringify(direct.data));
+
+  // Neither refusal reached the operation, which is the only place the
+  // damage would have happened.
+  assert.equal(runtime.syncCalls.length, 0);
+
+  // And the owner can still sync their own, or the guard would be a
+  // regression rather than a fix.
+  const allowed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${theirs}/sync`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(allowed.status, 200, JSON.stringify(allowed.data));
+  assert.deepEqual(
+    runtime.syncCalls.map((call) => call.repositoryId),
+    [theirs],
+  );
+});
+
+test("an invitation cannot name a repository the sender does not own", async (t) => {
+  // Two holes, one route. The repository was looked up with
+  // `listProjectRepositories(body.projectId)` — keyed on the project alone —
+  // so the only question asked was whether the repository existed under the
+  // project id in the body. Nothing asked whether the sender could reach it,
+  // and nothing asked whether it belonged to the organization in the path.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const theirs = await invitableRepository(owner, "tenant-a-repo");
+
+  // Somebody who runs a different organization entirely, with no reach into
+  // the first one.
+  const outsider = await runtime.store.createUser({
+    email: "outsider@example.com",
+    displayName: "Outsider",
+    passwordDigest: await hashPassword(PASSWORD),
+    systemAdmin: false,
+  });
+  const other = await runtime.store.createOrganization({
+    slug: "other-tenant",
+    name: "Other Tenant",
+  });
+  await runtime.store.saveMembership({
+    organizationId: other.id,
+    userId: outsider.id,
+    role: "owner",
+  });
+  // Paid up, so nothing below is refused for the wrong reason: an
+  // organization with no subscription row folds every role to `viewer`, and
+  // this test is about tenancy, not entitlement.
+  await runtime.store.saveSubscription({
+    organizationId: other.id,
+    status: "active",
+  });
+  const client = new TestClient(runtime.origin);
+  const signedIn = await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "outsider@example.com", password: PASSWORD },
+  });
+  assert.equal(signedIn.status, 200, JSON.stringify(signedIn.data));
+
+  // 1. No access to that repository at all. The route used to answer 201 for
+  //    a repository that existed and 404 for one that did not, which also
+  //    made it an existence oracle for someone else's code.
+  const stranger = await client.request(
+    `/api/v1/organizations/${other.id}/invitations`,
+    {
+      method: "POST",
+      body: inviteBody("friend@example.com", "developer", theirs),
+    },
+  );
+  assert.equal(
+    stranger.status,
+    403,
+    JSON.stringify(stranger.data),
+  );
+
+  // 2. Now they can reach it — an ordinary owner grant, the access a
+  //    repository invitation itself hands out. Sharing it under their *own*
+  //    organization would be laundering: the invitation, the audit line and
+  //    the seat all land on the wrong organization, while the repository
+  //    stays on the other one.
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: theirs,
+    userId: outsider.id,
+    role: "owner",
+    grantedBy: outsider.id,
+    comped: false,
+    createdAt: new Date().toISOString(),
+  });
+  const launder = await client.request(
+    `/api/v1/organizations/${other.id}/invitations`,
+    {
+      method: "POST",
+      body: inviteBody("friend@example.com", "developer", theirs),
+    },
+  );
+  assert.equal(launder.status, 404, JSON.stringify(launder.data));
+
+  // And nothing was written on the way to either refusal.
+  assert.deepEqual(
+    (await runtime.store.listInvitations(other.id)).map(
+      (invitation) => invitation.id,
+    ),
+    [],
+  );
+
+  // A repository is still required: an invitation with no repository would be
+  // an organization-wide one, which is the thing this route no longer offers.
+  const wide = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: {
+        email: "friend@example.com",
+        role: "developer",
+        projectId: DEFAULT_PROJECT_ID,
+      },
+    },
+  );
+  assert.equal(wide.status, 400, JSON.stringify(wide.data));
 });
 
 test("a recipient name makes a readable invitation link", async (t) => {
@@ -10028,6 +10354,7 @@ async function startBareGateway(
     stripeWebhookSecret?: string;
     stripePriceId?: string;
     appBaseUrl?: string;
+    billingReconcileIntervalMs?: number;
   },
 ): Promise<{
   client: TestClient;
@@ -10055,6 +10382,9 @@ async function startBareGateway(
     ...(options.stripePriceId === undefined
       ? {}
       : { stripePriceId: options.stripePriceId }),
+    ...(options.billingReconcileIntervalMs === undefined
+      ? {}
+      : { billingReconcileIntervalMs: options.billingReconcileIntervalMs }),
     // Stripe needs somewhere absolute to send a browser back to, and the
     // sign-up route refuses without one rather than letting Stripe answer
     // that for it.
@@ -10221,8 +10551,28 @@ test("a paid sign-up takes the card first and builds the account last", async (t
   assert.notEqual(await store.getOrganization(organizationId), undefined);
   assert.equal(await store.countUsers(), 0, "still nobody to sign in as");
   const subscription = await store.getSubscription(organizationId);
-  assert.equal(subscription?.status, "active");
+  assert.equal(subscription?.status, "trialing");
   assert.notEqual(subscription?.trialEndsAt, undefined, "the trial date is kept");
+
+  // Stripe redelivers. Provisioning is one transaction that re-reads the
+  // intent inside it and sets the latch last, so a second delivery of the
+  // same payment finds the work done and builds nothing on top of it.
+  const redelivered = await client.request("/api/v1/stripe/webhook", {
+    method: "POST",
+    raw: Buffer.from(body, "utf8"),
+    rawType: "application/json",
+    headers: {
+      "Stripe-Signature": `t=${String(timestamp)},v1=${createHmac("sha256", secret)
+        .update(`${String(timestamp)}.${body}`, "utf8")
+        .digest("hex")}`,
+    },
+  });
+  assert.equal(redelivered.status, 200, JSON.stringify(redelivered.data));
+  assert.deepEqual(
+    (await store.listProjects(organizationId)).map((project) => project.slug),
+    ["default"],
+    "a redelivered payment must not build a second project",
+  );
 
   // The welcome screen can tell them the payment landed.
   const waiting = await client.request(
@@ -10263,6 +10613,54 @@ test("a paid sign-up takes the card first and builds the account last", async (t
   assert.equal(await store.countUsers(), 1);
 });
 
+test("a sign-up latched before its organization existed repairs itself", async (t) => {
+  // The state the old latch-first provisioning could leave behind, and which
+  // nothing in the product could undo: `completed_at` set, no organization,
+  // a payment that had bought nothing and a claim link that could never
+  // work. `completeSignupIntent` has no inverse, so reading the latch as the
+  // answer made it permanent.
+  const { client, store } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+  });
+  const organizationId = "org_burned";
+  const secret = "burned-secret";
+  const created = new Date();
+  await store.createSignupIntent({
+    id: "signup_burned",
+    organizationId,
+    email: "burned@example.com",
+    organizationName: "Burned Team",
+    secretHash: hashSecret(secret),
+    stripeSessionId: undefined,
+    userId: undefined,
+    createdAt: created.toISOString(),
+    expiresAt: new Date(created.getTime() + 86_400_000).toISOString(),
+    // Latched, with nothing behind it.
+    completedAt: created.toISOString(),
+  });
+  assert.equal(await store.getOrganization(organizationId), undefined);
+
+  const finished = await client.request(
+    `/api/v1/auth/signup/${encodeURIComponent(`signup_burned.${secret}`)}/complete`,
+    {
+      method: "POST",
+      body: { displayName: "Burned", password: "BurnedSignupPassword123!" },
+    },
+  );
+  assert.equal(finished.status, 201, JSON.stringify(finished.data));
+  assert.equal(finished.data.user.email, "burned@example.com");
+  // The organization the payment bought, built on the id the subscription
+  // already points at rather than a new one.
+  assert.equal(finished.data.memberships[0]?.organizationId, organizationId);
+  assert.equal(finished.data.memberships[0]?.role, "owner");
+  assert.deepEqual(
+    (await store.listProjects(organizationId)).map((project) => project.slug),
+    ["default"],
+  );
+});
+
 test("day fifteen bills the trial and the team keeps working", async (t) => {
   // The half of the money nobody has watched happen. Everything up to here
   // has been proved by a real checkout; what follows it is a fortnight away
@@ -10275,7 +10673,11 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
       status: "active",
       customerId: "cus_trial",
       currentPeriodEnd: 1_800_000_000,
-      trialEnd: undefined,
+      // Stripe keeps `trial_end` on a subscription after it converts — it
+      // records when the trial ended, it is not cleared. The invoice path
+      // builds a synthetic subscription object to re-record, and the row is
+      // written whole, so a copy that dropped this erased the date.
+      trialEnd: 1_700_000_000,
       quantity: 1,
       metadata: {},
     }),
@@ -10339,7 +10741,10 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
     200,
   );
   const trialing = await store.getSubscription(organization.id);
-  assert.equal(trialing?.status, "active");
+  // Stored as the trial it is. Folded into `active` — which is what this
+  // pinned before — the countdown banner never fired for anybody and the
+  // settings card told a day-two customer their subscription was running.
+  assert.equal(trialing?.status, "trialing");
   assert.notEqual(
     trialing?.trialEndsAt,
     undefined,
@@ -10367,6 +10772,11 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
 
   const paying = await store.getSubscription(organization.id);
   assert.equal(paying?.status, "active");
+  assert.notEqual(
+    paying?.trialEndsAt,
+    undefined,
+    "the invoice path must not erase the date on the way through",
+  );
   assert.equal(
     subscriptionAllowsWork(paying, organization.createdAt),
     true,
@@ -10377,6 +10787,177 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
     "owner",
     "and not folded to viewer by the conversion",
   );
+});
+
+test("the reconciler finds seat drift nothing else would have", async (t) => {
+  // "Every call site syncs" is a claim about code, and for a long time three
+  // of the eight did not. An invoice is a claim about money, and until
+  // something compares the two a missed call site is invisible from inside
+  // the product. The promise that drift "heals at the next purchase or seat
+  // change" has nothing behind it: a steady team makes neither for months.
+  const writes: number[] = [];
+  // What Stripe holds — one seat, as if the second person had joined while a
+  // sync was missing.
+  let held = 1;
+  const stripe = {
+    getSubscription: async (id: string) => ({
+      id,
+      status: "active",
+      customerId: "cus_drift",
+      currentPeriodEnd: undefined,
+      trialEnd: undefined,
+      quantity: held,
+      metadata: {},
+    }),
+    getSubscriptionItemId: async () => "si_drift",
+    updateSubscriptionQuantity: async (input: { quantity: number }) => {
+      writes.push(input.quantity);
+      held = input.quantity;
+    },
+  } as unknown as StripeClient;
+
+  const { store } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+    // The pass runs once at construction as well, which is what this is
+    // really testing; a short interval only keeps a stuck one from hiding.
+    billingReconcileIntervalMs: 50,
+  });
+  const organization = await store.createOrganization({
+    slug: "drifted",
+    name: "Drifted",
+  });
+  await store.saveSubscription({
+    organizationId: organization.id,
+    status: "active",
+    stripeCustomerId: "cus_drift",
+    stripeSubscriptionId: "sub_drift",
+  });
+  for (const name of ["one", "two", "three"]) {
+    const user = await store.createUser({
+      email: `${name}@example.com`,
+      displayName: name,
+      passwordDigest: "digest",
+      systemAdmin: false,
+    });
+    await store.saveMembership({
+      organizationId: organization.id,
+      userId: user.id,
+      role: "developer",
+    });
+  }
+
+  // A cancelled organization beside it, which must not be touched: it is not
+  // being charged, and writing a quantity to it would be a proration on a
+  // subscription nobody holds.
+  const gone = await store.createOrganization({ slug: "gone", name: "Gone" });
+  await store.saveSubscription({
+    organizationId: gone.id,
+    status: "canceled",
+    stripeSubscriptionId: "sub_gone",
+  });
+
+  // An abandoned checkout, swept on the way past. `deleteExpiredSignupIntents`
+  // had no caller at all, so these accumulated forever — each one holding an
+  // email address that then reads as taken when its owner tries again.
+  const abandoned = new Date(Date.now() - 86_400_000).toISOString();
+  await store.createSignupIntent({
+    id: "signup_abandoned",
+    organizationId: "org_never",
+    email: "abandoned@example.com",
+    organizationName: undefined,
+    secretHash: "hash",
+    stripeSessionId: undefined,
+    userId: undefined,
+    createdAt: abandoned,
+    expiresAt: abandoned,
+    completedAt: undefined,
+  });
+
+  await waitFor(
+    async () => writes.length > 0,
+    "the reconciler never corrected the seat count",
+  );
+  assert.deepEqual(writes, [3], "three people who can work, three seats");
+  await waitFor(
+    async () => (await store.getSignupIntent("signup_abandoned")) === undefined,
+    "the expired sign-up was never swept",
+  );
+
+  // And it settles: once Stripe holds the right number the pass writes
+  // nothing, because every write prorates.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(writes, [3], "a settled subscription is not rewritten");
+});
+
+test("three days out, the people who can cancel are told", async (t) => {
+  // The only notice reaching a customer who has not opened the app since
+  // signing up. The in-product countdown is real, but it has to be looked at,
+  // and the alternative is a first charge with no warning at all.
+  const secret = "whsec_example";
+  const { client, store, sent } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "ending-team",
+    name: "Ending Team",
+  });
+  const roles = ["owner", "admin", "developer", "viewer"] as const;
+  for (const role of roles) {
+    const user = await store.createUser({
+      email: `${role}@example.com`,
+      displayName: role,
+      passwordDigest: "digest",
+      systemAdmin: false,
+    });
+    await store.saveMembership({
+      organizationId: organization.id,
+      userId: user.id,
+      role,
+    });
+  }
+
+  const body = JSON.stringify({
+    type: "customer.subscription.trial_will_end",
+    data: {
+      object: {
+        id: "sub_ending",
+        status: "trialing",
+        customer: "cus_ending",
+        trial_end: 1_800_000_000,
+        metadata: { organizationId: organization.id },
+      },
+    },
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const delivered = await client.request("/api/v1/stripe/webhook", {
+    method: "POST",
+    raw: Buffer.from(body, "utf8"),
+    rawType: "application/json",
+    headers: {
+      "Stripe-Signature": `t=${String(timestamp)},v1=${createHmac("sha256", secret)
+        .update(`${String(timestamp)}.${body}`, "utf8")
+        .digest("hex")}`,
+    },
+  });
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.data));
+
+  // Only the people who can act on it. A developer who cannot reach billing
+  // has nothing to do with the message.
+  assert.deepEqual(
+    sent.map((message) => message.to).sort(),
+    ["admin@example.com", "owner@example.com"],
+  );
+  assert.match(sent[0]?.subject ?? "", /trial ends soon/iu);
+  // The date Stripe named, not a guess.
+  assert.match(sent[0]?.text ?? "", /2027-01-15/u);
+
+  // And the notice writes nothing: the entitlement is still whatever the
+  // subscription events said it was.
+  assert.equal(await store.getSubscription(organization.id), undefined);
 });
 
 test("a card that fails on day fifteen goes past due, not dark", async (t) => {
@@ -10481,6 +11062,96 @@ test("a paid sign-up refuses an address that already has an account", async (t) 
   });
   assert.equal(refused.status, 409);
   assert.equal(refused.data.error.code, "account_exists");
+});
+
+test("a forged webhook buys nothing, through the route rather than the verifier", async (t) => {
+  // The verifier has unit tests; the route is where it matters. This URL is
+  // public, it is the only thing that provisions a paid organization, and it
+  // writes entitlement — so an unsigned body reaching `applyStripeEvent`
+  // would be free service for anybody who found the path.
+  const secret = "whsec_example";
+  const { client, store } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "victim",
+    name: "Victim",
+  });
+  await store.saveSubscription({
+    organizationId: organization.id,
+    status: "active",
+    stripeSubscriptionId: "sub_victim",
+  });
+
+  const body = JSON.stringify({
+    type: "customer.subscription.deleted",
+    data: {
+      object: {
+        id: "sub_victim",
+        status: "canceled",
+        customer: "cus_victim",
+        metadata: { organizationId: organization.id },
+      },
+    },
+  });
+  const raw = Buffer.from(body, "utf8");
+  const now = Math.floor(Date.now() / 1000);
+  const sign = (payload: string, key: string, at: number) =>
+    `t=${String(at)},v1=${createHmac("sha256", key)
+      .update(`${String(at)}.${payload}`, "utf8")
+      .digest("hex")}`;
+  const post = async (headers: Record<string, string>) =>
+    await client.request("/api/v1/stripe/webhook", {
+      method: "POST",
+      raw,
+      rawType: "application/json",
+      headers,
+    });
+
+  // No header at all.
+  assert.equal((await post({})).status, 400);
+  // A header that is not a signature.
+  assert.equal((await post({ "Stripe-Signature": "nonsense" })).status, 400);
+  // Signed, correctly, with the wrong secret — somebody else's deployment,
+  // or a guess.
+  assert.equal(
+    (await post({ "Stripe-Signature": sign(body, "whsec_wrong", now) })).status,
+    400,
+  );
+  // A real signature over a different body: the tamper case, where a captured
+  // header is reused on a payload of the attacker's choosing.
+  assert.equal(
+    (await post({
+      "Stripe-Signature": sign('{"type":"ping"}', secret, now),
+    })).status,
+    400,
+  );
+  // A real signature that is too old to still be one — a captured replay.
+  assert.equal(
+    (await post({ "Stripe-Signature": sign(body, secret, now - 86_400) }))
+      .status,
+    400,
+  );
+
+  // Nothing any of them said was applied.
+  assert.equal(
+    (await store.getSubscription(organization.id))?.status,
+    "active",
+    "a refused webhook must not reach the entitlement",
+  );
+
+  // And the same body, signed properly, does apply — or the assertions above
+  // would pass on a route that refuses everything.
+  assert.equal(
+    (await post({ "Stripe-Signature": sign(body, secret, now) })).status,
+    200,
+  );
+  assert.equal(
+    (await store.getSubscription(organization.id))?.status,
+    "canceled",
+  );
 });
 
 test("a Stripe event never overwrites a comped organization", async (t) => {
@@ -10931,6 +11602,97 @@ test("channel stats keep an inconsistent token report inside its own bounds", as
   assert.equal(response.data.tokens, 5_400);
   // Both rows carry a cache split, so nothing here is a lower bound.
   assert.equal(response.data.tokensIncomplete, false);
+});
+
+test("a channel route will not read a repository from another project", async (t) => {
+  // The last two `/channel/*` routes that authorized the repository without
+  // checking it belongs to the project in the path. An organization role
+  // reaches every repository the organization has, so `authorizeRepository`
+  // alone lets any member name any repository under any project id — and
+  // `channel/stats` answers with that room's message counts and an
+  // afternoon's token spend.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "channel-tenancy");
+  // A second project in the same organization, so the caller is genuinely
+  // authorized and only the pairing is wrong.
+  const elsewhere = await runtime.store.createProject({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    slug: "elsewhere",
+    name: "Elsewhere",
+  });
+
+  const stats = await owner.request(
+    `/api/v1/projects/${elsewhere.id}/repositories/${repo}/channel/stats`,
+  );
+  assert.equal(stats.status, 404, JSON.stringify(stats.data));
+
+  const simplify = await owner.request(
+    `/api/v1/projects/${elsewhere.id}/repositories/${repo}/channel/replies/reply_1/simplify`,
+    { method: "POST", body: { text: "something long" } },
+  );
+  assert.equal(simplify.status, 404, JSON.stringify(simplify.data));
+
+  // The same calls under the project it really belongs to still work, or the
+  // guard would be a regression rather than a fix.
+  const paired = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/stats`,
+  );
+  assert.equal(paired.status, 200, JSON.stringify(paired.data));
+});
+
+test("a stored objective reads back as the request, not the coordinator's script", () => {
+  // What a worker is sent is the request wrapped in instructions: a role
+  // preamble in front, and behind it whichever directives applied — the
+  // answer-not-a-status-report one on every task, and `/simple` or `/dnc`
+  // when asked for. Six places read that string back as if it were the
+  // request. Some show it to people; some compare it, and those are the ones
+  // that broke, because boilerplate every objective shares drags every
+  // similarity score toward each other and away from the words that differ.
+  const request = "rework the retry policy and its tests";
+  const sent = withRoleContext(
+    "senior engineer",
+    [
+      request,
+      "Your final message is the answer, not a status report. If you " +
+        "delegated to a subagent, wait for its result before finishing — " +
+        "never end a turn saying a search is running or that you will " +
+        "report back. Do not state a conclusion while work you started is " +
+        "still outstanding. If you cannot answer, say what you checked and " +
+        "what would settle it.",
+      "Keep every reply as short and simple as it can possibly be: the " +
+        "fewest, plainest words that still say it, one short sentence when " +
+        "one is enough — no preamble, no restating the request, nothing " +
+        "extra.",
+    ].join("\n\n"),
+  );
+  assert.equal(requestFromObjective(sent), request);
+
+  // The measurement: against a merge bar of 0.42, two identical requests
+  // scored 0.11 while the directives were in the comparison.
+  assert.ok(
+    textOverlap(request, sent) < 0.42,
+    "the whole objective is what dropped the score under the bar",
+  );
+  assert.ok(textOverlap(request, requestFromObjective(sent)) > 0.9);
+
+  // A request that quotes a directive keeps it: the paragraphs are matched
+  // whole, not searched for.
+  const quoting = `${request}\n\nKeep every reply short.`;
+  assert.equal(requestFromObjective(quoting), quoting);
+
+  // And an objective that is nothing but a directive still reads back as
+  // something, rather than as an empty string a caller would render blank.
+  assert.notEqual(
+    requestFromObjective(
+      "Keep every reply as short and simple as it can possibly be: the " +
+        "fewest, plainest words that still say it, one short sentence when " +
+        "one is enough — no preamble, no restating the request, nothing " +
+        "extra.",
+    ),
+    "",
+  );
 });
 
 test("a worker report without a fresh figure still separates cached context", () => {

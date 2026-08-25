@@ -18,6 +18,7 @@ import {
   type BlanketFreezeRequest,
   type DeferredScopeRequest,
   type PlanAdmissionRequest,
+  type SalvagedConflictRequest,
   type PlanAuthority,
   type PlanAuthorityDecision,
   type WaitingWork,
@@ -793,6 +794,74 @@ export class LeasePlanAuthority implements PlanAuthority {
           .sort(),
       },
     });
+  }
+
+  /**
+   * Queues the files a conflict held back, once the rest of them are in
+   * canonical.
+   *
+   * The same shape as {@link deferRemainder} and for the same reason, but
+   * from the other kind of partial admission: there the plan authority
+   * withheld resources before the agent ran, here integration promoted what
+   * still applied and handed back what had collided. The follow-up carries
+   * the deferred-scope marker either way, which is what keeps one division
+   * per task — without it a task could shed a file per round forever, each
+   * round costing an agent run.
+   *
+   * The contested patches are not carried forward. They conflicted precisely
+   * because the revision they were written against moved, so replaying them
+   * would apply a diff to a base that no longer exists; the coordinator
+   * records them on the audit log as context for whoever picks this up.
+   */
+  public async deferSalvagedConflict(
+    request: SalvagedConflictRequest,
+  ): Promise<string | undefined> {
+    const paths = [
+      ...new Set(request.deferred.map((patch) => patch.path)),
+    ].sort();
+    if (paths.length === 0) {
+      return undefined;
+    }
+    // The submitted row rather than the definition, for the same reason
+    // `deferRemainder` reads it: a `TaskDefinition` carries neither
+    // `submittedBy` nor the model and effort a channel picked, and a follow-up
+    // without the first is queued and then never able to resolve credentials.
+    const original = (
+      await this.store.listSubmittedTasks({
+        repositoryId: request.repository.id,
+      })
+    ).find((candidate) => candidate.id === request.task.id);
+    const followUp = await this.store.submitTask({
+      repositoryId: request.repository.id,
+      ...(request.projectId === undefined
+        ? {}
+        : { projectId: request.projectId }),
+      objective: deferredScopeObjective(request.task.objective, [], paths),
+      agentId: request.task.agentId,
+      validationCommands: request.task.validationCommands,
+      ...(original?.submittedBy === undefined
+        ? {}
+        : { submittedBy: original.submittedBy }),
+      ...(original?.model === undefined ? {} : { model: original.model }),
+      ...(original?.effort === undefined ? {} : { effort: original.effort }),
+      ...(request.task.context === undefined
+        ? {}
+        : { context: request.task.context }),
+    });
+    await this.store.appendAudit(undefined, {
+      type: "task_submitted",
+      taskId: followUp.id,
+      data: {
+        ...(request.projectId === undefined
+          ? {}
+          : { projectId: request.projectId }),
+        repositoryId: request.repository.id,
+        objective: followUp.objective,
+        deferredFrom: request.task.id,
+        conflictedPaths: paths,
+      },
+    });
+    return followUp.id;
   }
 
   /**
