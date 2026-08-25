@@ -732,7 +732,23 @@ export async function taskCancel(
   if (taskId.trim().length === 0) {
     throw new Error("A task id is required");
   }
-  return await store.cancelSubmittedTask(taskId);
+  const cancelled = await store.cancelSubmittedTask(taskId);
+  // Announced the way the gateway's own cancel route announces it. A stop is
+  // a real ending — it is how a task most often finishes when somebody
+  // changes their mind — and a stop that writes no event is a task that
+  // simply vanishes from the accounting between submission and nothing.
+  await store
+    .appendAudit(undefined, {
+      type: "task_cancelled",
+      taskId,
+      data: {
+        projectId: cancelled.projectId,
+        repositoryId: cancelled.repositoryId,
+        reason: "Cancelled from the command line",
+      },
+    })
+    .catch(() => undefined);
+  return cancelled;
 }
 
 export interface CancelTasksInput {
@@ -844,6 +860,17 @@ export async function cancelTasks(
       // Settled between the listing and now. Its ending already happened.
       continue;
     }
+    await store
+      .appendAudit(undefined, {
+        type: "task_cancelled",
+        taskId: task.id,
+        data: {
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          reason: input.reason,
+        },
+      })
+      .catch(() => undefined);
     await input.cancellations?.cancel(task.id, input.reason);
     const lease = activeLeases.find(
       (candidate) => candidate.taskId === task.id,
@@ -1551,9 +1578,27 @@ export async function runPendingTasks(
       })
     ).filter((task) => claimedIds.has(task.id));
     const cleanup = await Promise.allSettled(
-      unresolved.map((task) =>
-        store.completeSubmittedTask(task.id, "failed"),
-      ),
+      unresolved.map(async (task) => {
+        await store.completeSubmittedTask(task.id, "failed");
+        // The row going terminal is not the ending; the audit event is. Every
+        // other failure path in this codebase writes one, and this one — the
+        // whole of what happens when a run cannot even get started — did not,
+        // so a batch killed by a bad workspace or an unreachable adapter left
+        // no trace at all. Nothing counted it, and `tasksFailed` read zero
+        // while the tasks were plainly gone.
+        await store
+          .appendAudit(undefined, {
+            type: "task_failed",
+            taskId: task.id,
+            data: {
+              projectId: task.projectId,
+              repositoryId: task.repositoryId,
+              stage: "dispatch_setup",
+              error: error instanceof Error ? error.message : String(error),
+            },
+          })
+          .catch(() => undefined);
+      }),
     );
     const cleanupFailures = cleanup
       .filter(
