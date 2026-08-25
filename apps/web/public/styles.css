@@ -3321,6 +3321,48 @@ svg.ui-icon {
   text-transform: capitalize;
 }
 
+/* The deployment dashboard's number tiles. A grid rather than a row so four
+   figures stay readable on a phone, where they wrap to two and two instead of
+   shrinking to nothing. */
+.dep-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 1px;
+  background: var(--border-soft);
+  border-top: 1px solid var(--border-soft);
+}
+
+.dep-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+}
+
+.dep-stat b {
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.dep-stat span {
+  font-size: 11.5px;
+  color: var(--text-4);
+}
+
+/* Tone carries meaning the caption cannot: a number worth acting on should be
+   findable without reading every tile. */
+.dep-stat-good b { color: var(--green); }
+/* No amber in this palette, and inventing one for a single tile would put a
+   colour on screen that means nothing anywhere else. A number worth chasing is
+   not yet a failure, so it takes the ordinary text colour and earns attention
+   from the line beneath it instead. */
+.dep-stat-warn b { color: var(--text); }
+.dep-stat-bad b { color: var(--red); }
+
 /* A seat nobody is paying for. Quiet by design — it is a fact about billing,
    not a status anyone needs to act on, and the row it sits in is already
    carrying a name, a role and a control. */

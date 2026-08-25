@@ -167,12 +167,19 @@ interface StoredChannelMessage {
 function matchesAuditFilter(
   entry: SequencedAuditEvent,
   filter: AuditEventFilter,
+  runs: ReadonlyMap<string, RunState>,
 ): boolean {
   return (
     (filter.runId === undefined || entry.runId === filter.runId) &&
     (filter.taskId === undefined || entry.event.taskId === filter.taskId) &&
+    // A payload stamp when the writer knew the project, and otherwise the
+    // project of the run the event was written under. `runs` is passed in
+    // rather than read off the entry because the association lives beside the
+    // entry, in a parallel array, rather than inside it.
     (filter.projectId === undefined ||
-      entry.event.data["projectId"] === filter.projectId) &&
+      entry.event.data["projectId"] === filter.projectId ||
+      (entry.runId !== undefined &&
+        runs.get(entry.runId)?.run.projectId === filter.projectId)) &&
     (filter.types === undefined || filter.types.includes(entry.event.type)) &&
     (filter.occurredAfter === undefined ||
       entry.event.occurredAt >= filter.occurredAfter) &&
@@ -1825,7 +1832,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           : { runId: this.auditRuns[index] }),
         event: copy(entry.event),
       }))
-      .filter((entry) => entry.sequence > after && matchesAuditFilter(entry, filter))
+      .filter(
+        (entry) =>
+          entry.sequence > after &&
+          matchesAuditFilter(entry, filter, this.runs),
+      )
       .slice(0, limit);
   }
 
@@ -1846,7 +1857,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         ...(row.runId === undefined ? {} : { runId: row.runId }),
         event: copy(row.entry.event),
       }))
-      .filter((entry) => entry.sequence > after && matchesAuditFilter(entry, filter))
+      .filter(
+        (entry) =>
+          entry.sequence > after &&
+          matchesAuditFilter(entry, filter, this.runs),
+      )
       .slice(0, limit);
   }
 

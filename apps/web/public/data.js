@@ -375,6 +375,8 @@ export const state = {
   repositoryGrants: {},
   /** Entitlement and seat count — see `ensureBilling`. */
   billing: undefined,
+  /** Deployment counts and coordination metrics — see `ensureDeployment`. */
+  deployment: undefined,
   activeChannelThread: undefined,
   /** Thread roots currently open as side tabs, oldest first. */
   activeChannelThreads: [],
@@ -777,6 +779,79 @@ export function authorizeRequest(headers, method = "GET") {
     headers.set("X-CSRF-Token", csrfToken());
   }
   return "same-origin";
+}
+
+/**
+ * Whether images have to be fetched rather than simply pointed at.
+ *
+ * A browser sends its session cookie with every `<img src>` without being
+ * asked, so an attachment behind authentication just loads. A desktop shell
+ * has no cookie — it carries a bearer token — and an `<img>` tag cannot send a
+ * header. The request goes out bare, the gateway answers 401, and the reader
+ * gets a broken-image glyph with no clue why.
+ *
+ * So in a shell the images are fetched the same way every other request is,
+ * and handed to the element as object URLs.
+ */
+export function imagesNeedFetching() {
+  return bearerToken() !== undefined;
+}
+
+/** Attachment path to object URL, so re-rendering does not re-download. */
+const attachmentObjectUrls = new Map();
+
+/** Beyond this, the oldest are released — a long channel is not a reason to
+ * hold every image it ever showed. */
+const MAX_HELD_IMAGES = 120;
+
+/**
+ * Gives every `data-src` image on the page a source it can actually load.
+ *
+ * Called after each render. Images already resolved keep their object URL, so
+ * this costs one request per attachment for the lifetime of the window rather
+ * than one per render.
+ *
+ * A failure deliberately leaves the element without a source: the alt text is
+ * what a reader gets, which says more than a broken-image glyph does.
+ */
+export async function resolveAttachmentImages(root = document) {
+  if (!imagesNeedFetching()) {
+    return;
+  }
+  await Promise.all(
+    [...root.querySelectorAll("img[data-src]")].map(async (image) => {
+      const source = image.getAttribute("data-src");
+      if (source === null) {
+        return;
+      }
+      // Removed first: a second render must not queue the same fetch again.
+      image.removeAttribute("data-src");
+      let resolved = attachmentObjectUrls.get(source);
+      if (resolved === undefined) {
+        try {
+          const headers = new Headers();
+          const credentials = authorizeRequest(headers);
+          const response = await fetch(`${SERVER_ORIGIN}${source}`, {
+            headers,
+            credentials,
+          });
+          if (!response.ok) {
+            throw new Error(String(response.status));
+          }
+          resolved = URL.createObjectURL(await response.blob());
+          attachmentObjectUrls.set(source, resolved);
+          while (attachmentObjectUrls.size > MAX_HELD_IMAGES) {
+            const [oldest] = attachmentObjectUrls.keys();
+            URL.revokeObjectURL(attachmentObjectUrls.get(oldest));
+            attachmentObjectUrls.delete(oldest);
+          }
+        } catch {
+          return;
+        }
+      }
+      image.src = resolved;
+    }),
+  );
 }
 
 export async function api(path, options = {}) {
@@ -5736,6 +5811,61 @@ export async function openBillingPortal() {
     { method: "POST", body: {} },
   );
   return response.url;
+}
+
+/**
+ * The deployment's own numbers, for whoever runs it.
+ *
+ * Two calls rather than one: the counts come from the store, and the
+ * coordination metrics are computed per project off the audit chain. They are
+ * fetched together and kept together, because reading either alone invites the
+ * mistake this screen exists to prevent — counting what integrated without
+ * counting what was submitted.
+ */
+export async function loadDeployment() {
+  const overview = await apiOptional("/admin/overview", undefined);
+  if (overview === undefined) {
+    state.deployment = null;
+    return state.deployment;
+  }
+  const projects = overview.projects ?? [];
+  const metrics = (
+    await Promise.all(
+      projects.map(async (project) => {
+        const response = await apiOptional(
+          `/projects/${encodeURIComponent(project.id)}/metrics`,
+          undefined,
+        );
+        return response?.metrics;
+      }),
+    )
+  ).filter((entry) => entry !== undefined);
+  state.deployment = { ...overview, metrics };
+  return state.deployment;
+}
+
+export async function ensureDeployment(rerender) {
+  if (state.deployment !== undefined) {
+    return;
+  }
+  state.deployment = null;
+  await loadDeployment();
+  rerender();
+}
+
+/**
+ * Answers one approval, then forgets the overview so it is read again.
+ *
+ * The cached copy is what the deployment screen renders from, and leaving it
+ * in place would show the approval still waiting after it had been decided —
+ * the exact thing this control exists to stop being true.
+ */
+export async function decideApproval(approvalId, status, comment) {
+  await api(`/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "POST",
+    body: { status, comment: comment ?? "" },
+  });
+  state.deployment = undefined;
 }
 
 export function iAmSystemAdmin() {

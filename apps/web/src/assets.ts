@@ -20,6 +20,12 @@ const PUBLIC_FILES = [
   // signed in — a link to it is the thing people send each other to get the
   // desktop app at all.
   ["download.html", "text/html; charset=utf-8"],
+  // The two standalone pages' behaviour. Separate files rather than inline
+  // scripts because `script-src 'self'` carries no `'unsafe-inline'`: inline,
+  // the browser silently declines to run them and both pages come up looking
+  // right and doing nothing.
+  ["authorize.js", "text/javascript; charset=utf-8"],
+  ["download.js", "text/javascript; charset=utf-8"],
   ["styles.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
   ["boot-plan.js", "text/javascript; charset=utf-8"],

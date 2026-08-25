@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,11 +23,25 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..", "..");
 
-async function releasesRepoInPage(): Promise<string> {
-  const page = await readFile(
-    path.join(repoRoot, "apps", "web", "public", "download.html"),
-    "utf8",
+/**
+ * The page and the script beside it, read as one thing.
+ *
+ * Both are searched because the links live in whichever of them happens to
+ * hold the behaviour, and that moved once already: extracting the script to
+ * satisfy the content security policy took every filename with it, and a
+ * check that read only the HTML found nothing and said so cheerfully.
+ */
+async function downloadPageSource(): Promise<string> {
+  const parts = await Promise.all(
+    ["download.html", "download.js"].map(async (name) =>
+      await readFile(path.join(repoRoot, "apps", "web", "public", name), "utf8"),
+    ),
   );
+  return parts.join("\n");
+}
+
+async function releasesRepoInPage(): Promise<string> {
+  const page = await downloadPageSource();
   const named = [
     ...page.matchAll(/https:\/\/github\.com\/([^/"'\s]+\/[^/"'\s]+)\/releases/gu),
   ].map((match) => match[1]);
@@ -89,10 +104,7 @@ test("every download the page offers is a file the packager actually builds", as
     "the artifact name template changed; the download page's links need to match",
   );
 
-  const page = await readFile(
-    path.join(repoRoot, "apps", "web", "public", "download.html"),
-    "utf8",
-  );
+  const page = await downloadPageSource();
   const offered = new Set(
     [...page.matchAll(/"(Kumi-[^"]+\.(?:dmg|zip|exe|AppImage|deb))"/gu)].map(
       (match) => match[1] as string,
@@ -123,4 +135,29 @@ test("every download the page offers is a file the packager actually builds", as
   for (const file of offered) {
     assert.ok(built.has(file), `the page offers ${file}, which nothing builds`);
   }
+});
+
+test("the address baked into every download is one that could work", () => {
+  // Not a check that the deployment is up — that is not a test's business —
+  // but that the string shipped inside every copy is an https origin rather
+  // than a typo. It cannot be corrected after the fact: an installed app has
+  // no redirect to follow, so a wrong address here is a re-download for
+  // everybody who already has one.
+  const manifest = JSON.parse(
+    readFileSync(
+      path.join(repoRoot, "apps", "desktop", "package.json"),
+      "utf8",
+    ),
+  ) as { kumi?: { defaultServer?: unknown } };
+  const address = manifest.kumi?.defaultServer;
+  assert.equal(typeof address, "string");
+  if (address === "") {
+    // Empty is a legitimate build: it asks on first run instead.
+    return;
+  }
+  const url = new URL(address as string);
+  assert.equal(url.protocol, "https:", "a shipped address must not be plain http");
+  assert.equal(url.search, "");
+  assert.equal(url.hash, "");
+  assert.ok(!(address as string).endsWith("/"), "a trailing slash doubles up in every request path");
 });

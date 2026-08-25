@@ -881,20 +881,25 @@ async function serve(
   // the work takes.
   const resuming = new Set<string>();
   const resumeQueuedWork = async (): Promise<void> => {
-    await store.expireWorkLeases(new Date().toISOString());
-    // And the work expiry cannot reach: a task still marked `claimed` with no
-    // lease behind it at all. Lease expiry hands its own task back, but a
-    // lease that was settled while its task never reached an outcome leaves
-    // the row claimed by nobody — queued behind nothing, worked on by
-    // nothing, and waiting forever. Requeued here, on the same pass and
-    // before the queue is read, so the dispatch below picks it up.
-    const stranded = await reapStrandedWork(store);
-    for (const taskId of stranded.requeuedTasks) {
-      console.log(`Requeued stranded task ${taskId}`);
-    }
-    for (const warning of stranded.warnings) {
-      console.warn(`Stranded work warning: ${warning}`);
-    }
+    const sweptAt = new Date().toISOString();
+    await store.expireWorkLeases(sweptAt);
+    // Approvals go stale the same way leases do, and for the same reason:
+    // nothing but the waiter was ever watching the deadline.
+    //
+    // `StoreApprovalController` polls its own request and expires it when the
+    // clock runs out — which works exactly as long as the process doing the
+    // polling is alive. A redeploy while somebody's run is stopped on a
+    // review kills the only thing that would ever have ended it, and the row
+    // is then pending forever: past its `expiresAt`, invisible to every
+    // deadline, holding a task that no sweep will settle because the task is
+    // not the thing that is stuck. The count of approvals requested rises and
+    // the count decided never moves.
+    //
+    // Only rows already past their own deadline are touched, so this can
+    // never take a decision away from somebody still thinking about one — it
+    // does what the waiter would have done on its next poll, for the waiters
+    // that are no longer there.
+    await store.expireApprovals(sweptAt).catch(() => undefined);
     const pending = await store.listSubmittedTasks({ status: "submitted" });
     const repositories = new Map(
       pending.map((task) => [

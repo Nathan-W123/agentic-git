@@ -5129,6 +5129,23 @@ export class ApiGateway {
         // and cannot be filled in correctly. Says whether a secret is needed,
         // never anything about what it is.
         bootstrapTokenRequired: this.bootstrapToken !== undefined,
+        // Which billing variables actually reached this process, as three
+        // booleans and never a character of any of them.
+        //
+        // Setting these is a four-step job spread across two dashboards, and
+        // every way of getting it wrong — a name typo, the wrong service, a
+        // save that never redeployed — produces one indistinguishable
+        // symptom: Stripe posts an event and the deployment answers 501. From
+        // outside there is no way to tell "not set" from "set on the wrong
+        // service" from "set but this container predates it", and the person
+        // configuring it is the one person who cannot see inside the process.
+        // `build.startedAt` above already says which container is answering;
+        // this says what it was handed.
+        billing: {
+          secretKey: this.stripe !== undefined,
+          webhookSecret: this.stripeWebhookSecret !== undefined,
+          priceId: this.stripePriceId !== undefined,
+        },
         webSocketConnections: this.webSockets.connections,
         ...(docker === undefined ? {} : { docker }),
         // Which code is answering, so a deploy can be confirmed from outside
@@ -11317,6 +11334,8 @@ export class ApiGateway {
         principal,
         organizationId,
         "manage_organization",
+        // A lapsed subscription must not block the act that ends the lapse.
+        { ignoreEntitlement: true },
       );
       const stripe = this.requireStripe();
       const priceId = this.stripePriceId;
@@ -11325,6 +11344,19 @@ export class ApiGateway {
           501,
           "billing_not_configured",
           "No price is configured for this deployment",
+        );
+      }
+      if (
+        (await this.options.store.getSubscription(organizationId))?.status ===
+        "comped"
+      ) {
+        // Refused at the route, not only hidden in the interface. A comped
+        // team has nothing to buy, and a checkout it completes — or abandons —
+        // is the one way its comp can be taken away from it.
+        throw new HttpError(
+          409,
+          "already_comped",
+          "This team is not billed. There is nothing to buy.",
         );
       }
       const memberships =
@@ -11364,6 +11396,8 @@ export class ApiGateway {
         principal,
         organizationId,
         "manage_organization",
+        // A lapsed subscription must not block the act that ends the lapse.
+        { ignoreEntitlement: true },
       );
       const stripe = this.requireStripe();
       const subscription =
@@ -11514,6 +11548,14 @@ export class ApiGateway {
       ).flat();
       const tasks = await this.options.store.listSubmittedTasks();
       const approvals = await this.options.store.listApprovals();
+      // Every status, not just the queued one. A deployment's health is the
+      // shape of this distribution rather than any single number in it: the
+      // gap between what was submitted and what integrated is where work goes
+      // missing, and a count of "pending" alone cannot show it.
+      const tasksByStatus: Record<string, number> = {};
+      for (const task of tasks) {
+        tasksByStatus[task.status] = (tasksByStatus[task.status] ?? 0) + 1;
+      }
       this.sendJson(response, 200, {
         counts: {
           users: await this.options.store.countUsers(),
@@ -11528,6 +11570,35 @@ export class ApiGateway {
           activeRuns: this.activeRuns.size,
           webSocketConnections: this.webSockets.connections,
         },
+        tasksByStatus,
+        // Named, so the dashboard can ask each one for its own coordination
+        // metrics rather than guessing at a project id.
+        projects: projects.map((project) => ({
+          id: project.id,
+          name: project.name,
+          organizationId: project.organizationId,
+        })),
+        // Named rather than counted. A pending approval is a run stopped on a
+        // person, and a bare count tells that person there is something to do
+        // without telling them where — which is how three of them sat unread
+        // long enough for the process holding them to be redeployed away.
+        // Repository and task are what turn the number into somewhere to go.
+        pendingApprovals: approvals
+          .filter((approval) => approval.status === "pending")
+          .slice(0, 20)
+          .map((approval) => ({
+            id: approval.id,
+            repositoryId: approval.repositoryId,
+            taskId: approval.taskId,
+            kind: approval.kind,
+            reasons: approval.reasons,
+            requestedAt: approval.requestedAt,
+            expiresAt: approval.expiresAt,
+            // Whether anything is still listening. An approval past its own
+            // deadline that is somehow still pending had nobody watching it:
+            // the waiter would have ended it otherwise.
+            stale: approval.expiresAt <= new Date().toISOString(),
+          })),
         recentRuns: await this.options.store.listRuns(20),
       });
       return;
@@ -15775,6 +15846,20 @@ export class ApiGateway {
           // Store-only deployments keep the old shape: the row flips, and a
           // run that happens to hold the task fights it out at settle time.
           await this.options.store.cancelSubmittedTask(task.id);
+          // The event too, not only the row. Without it this deployment shape
+          // stops tasks that the trail never records ending, which is one of
+          // the ways a task can leave the accounting silently.
+          await this.options.store
+            .appendAudit(undefined, {
+              type: "task_cancelled",
+              taskId: task.id,
+              data: {
+                projectId: input.projectId,
+                repositoryId: input.repositoryId,
+                actorId: input.viewerId,
+              },
+            })
+            .catch(() => undefined);
           await say("Cancelled.");
           this.watchedChannelTasks.delete(task.id);
           await this.withdrawArbitrationNotice({
@@ -17319,6 +17404,21 @@ export class ApiGateway {
         if (cancelled === undefined) {
           continue;
         }
+        // A held plan nobody approved before the deadline is still a task
+        // that ended, and the sweep that ends it is the only thing that
+        // knows. Left untraced, every expired hold was a submission with no
+        // recorded outcome.
+        await this.options.store
+          .appendAudit(undefined, {
+            type: "task_cancelled",
+            taskId: task.id,
+            data: {
+              projectId: cancelled.projectId,
+              repositoryId: cancelled.repositoryId,
+              reason: "The plan was never approved before it went stale",
+            },
+          })
+          .catch(() => undefined);
         // The hold is over however it ends, so the marker goes with it: a
         // later release must not find one still standing and answer it.
         this.announcedChannelHolds.delete(task.id);
@@ -20049,6 +20149,27 @@ export class ApiGateway {
       );
       return;
     }
+    const existing = await this.options.store.getSubscription(
+      input.organizationId,
+    );
+    if (existing?.status === "comped") {
+      // A comp is a decision a person made, and Stripe has no opinion about
+      // it. `saveSubscription` writes the row whole in all three backends —
+      // deliberately, so a half-updated row cannot hide a billing bug — so
+      // without this guard any event at all would overwrite the comp.
+      //
+      // The destructive case needs no bad luck: `subscriptionStatusFrom`
+      // reads every status it does not recognise as `canceled`, `incomplete`
+      // among them, and `incomplete` is what an abandoned checkout produces.
+      // So opening a checkout on a comped organization and closing the tab
+      // converts a permanently free team into a cancelled one — and nothing
+      // in the product writes `comped` back, because the migration that
+      // granted it is its only writer. There is no way out from inside.
+      process.stderr.write(
+        `[stripe] event for comped organization ${input.organizationId} ignored\n`,
+      );
+      return;
+    }
     await this.options.store.saveSubscription({
       organizationId: input.organizationId,
       status: input.status,
@@ -20464,7 +20585,7 @@ export class ApiGateway {
     response.setHeader(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-        "img-src 'self' data:; connect-src 'self' ws: wss:; " +
+        "img-src 'self' data: blob:; connect-src 'self' ws: wss:; " +
         "font-src 'self'; worker-src 'self'; object-src 'none'; " +
         "base-uri 'none'; frame-ancestors 'none'",
     );

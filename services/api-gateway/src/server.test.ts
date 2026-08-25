@@ -5,6 +5,7 @@ import {
   type IncomingHttpHeaders,
 } from "node:http";
 import net from "node:net";
+import { createHmac } from "node:crypto";
 import test, { type TestContext } from "node:test";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
@@ -16,6 +17,8 @@ import {
 } from "@coord/persistence";
 
 import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
+
+import type { StripeClient } from "./stripe.js";
 
 import {
   agentIdentity,
@@ -1210,6 +1213,14 @@ test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", as
   assert.equal(staticPage.status, 200);
   assert.equal(staticPage.headers.get("cache-control"), "no-cache");
   assert.equal(staticPage.headers.get("content-security-policy")?.includes("object-src 'none'"), true);
+  // A desktop shell cannot put a token on an `<img>` tag, so it fetches
+  // attachments the way it fetches everything else and hands the element an
+  // object URL. Tightening this back to `img-src 'self' data:` would leave
+  // every image in the app broken, and nothing would say why.
+  assert.equal(
+    staticPage.headers.get("content-security-policy")?.includes("img-src 'self' data: blob:"),
+    true,
+  );
   const etag = staticPage.headers.get("etag");
   assert.ok(etag);
   const unchangedPage = await client.request("/some/client/route", {
@@ -9998,6 +10009,9 @@ async function startBareGateway(
     mailer?: Mailer;
     authRateLimitPerMinute?: number;
     allowedOrigins?: readonly string[];
+    stripe?: StripeClient;
+    stripeWebhookSecret?: string;
+    stripePriceId?: string;
   },
 ): Promise<{
   client: TestClient;
@@ -10018,6 +10032,13 @@ async function startBareGateway(
     ...(options.allowedOrigins === undefined
       ? {}
       : { allowedOrigins: options.allowedOrigins }),
+    ...(options.stripe === undefined ? {} : { stripe: options.stripe }),
+    ...(options.stripeWebhookSecret === undefined
+      ? {}
+      : { stripeWebhookSecret: options.stripeWebhookSecret }),
+    ...(options.stripePriceId === undefined
+      ? {}
+      : { stripePriceId: options.stripePriceId }),
     // Never the real one: a test that opens a socket to a mail relay is a test
     // that fails on somebody else's network.
     mailer:
@@ -10100,6 +10121,96 @@ test("an empty token is the same as none, not a token nobody can send", async (t
     },
   });
   assert.equal(created.status, 201, JSON.stringify(created.data));
+});
+
+test("a Stripe event never overwrites a comped organization", async (t) => {
+  // The destructive path needs no bad luck. Every organization that predates
+  // billing was comped by migration; `subscriptionStatusFrom` reads every
+  // status it does not recognise as `canceled`, `incomplete` among them; and
+  // `incomplete` is exactly what an abandoned checkout leaves behind. The
+  // subscription row is written whole, so one stray event would turn a
+  // permanently free team into a cancelled one — and nothing in the product
+  // grants a comp, so there would be no way back from inside.
+  const secret = "whsec_example";
+  const { client, store } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "grandfathered",
+    name: "Grandfathered",
+  });
+  await store.saveSubscription({
+    organizationId: organization.id,
+    status: "comped",
+  });
+
+  // A real signed event, through the real route: the guard has to hold where
+  // Stripe actually reaches it, not where a test can call it directly.
+  const body = JSON.stringify({
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_abandoned",
+        status: "incomplete",
+        customer: "cus_abandoned",
+        metadata: { organizationId: organization.id },
+      },
+    },
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = createHmac("sha256", secret)
+    .update(`${String(timestamp)}.${body}`, "utf8")
+    .digest("hex");
+  const delivered = await client.request("/api/v1/stripe/webhook", {
+    method: "POST",
+    raw: Buffer.from(body, "utf8"),
+    rawType: "application/json",
+    headers: { "Stripe-Signature": `t=${String(timestamp)},v1=${signature}` },
+  });
+
+  // Accepted, because refusing would make Stripe retry it for days.
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.data));
+  assert.equal(
+    (await store.getSubscription(organization.id))?.status,
+    "comped",
+    "a comp is a decision a person made; Stripe has no opinion about it",
+  );
+});
+
+test("health says which billing variables reached the process", async (t) => {
+  // The symptom this exists for: every way of misconfiguring Stripe — a name
+  // typo, the variables on the wrong service, a save that never redeployed —
+  // looks identical from outside, a 501 on the webhook. Three booleans, and
+  // never any part of a value.
+  const bare = await startBareGateway(t, {});
+  const unset = await bare.client.request("/api/v1/health");
+  assert.deepEqual(unset.data.billing, {
+    secretKey: false,
+    webhookSecret: false,
+    priceId: false,
+  });
+
+  const configured = await startBareGateway(t, {
+    // The gateway is handed a constructed client rather than the key, so a
+    // stub standing in for one is exactly what "a secret key was configured"
+    // means from in here.
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+  });
+  const set = await configured.client.request("/api/v1/health");
+  assert.deepEqual(set.data.billing, {
+    secretKey: true,
+    webhookSecret: true,
+    priceId: true,
+  });
+
+  // Never the values themselves, however the payload grows later.
+  const body = JSON.stringify(set.data);
+  assert.ok(!body.includes("whsec_example"), "the signing secret must not leak");
+  assert.ok(!body.includes("price_example"), "no configured value is echoed");
 });
 
 test("a configured token is still required, and still says so", async (t) => {

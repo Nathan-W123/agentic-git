@@ -19,9 +19,26 @@ npm i -D electron
 npm run desktop
 ```
 
-It will ask for the server address on first launch and remember it. Setting
-`KUMI_SERVER` overrides the saved one, which is convenient for pointing a build
-at a local gateway without disturbing the settings a real launch wrote.
+Where it looks for a server, in order:
+
+1. `KUMI_SERVER` in the environment — a development override, so a real build
+   can be aimed at a local gateway without disturbing the settings a real
+   launch wrote
+2. what the last successful launch saved
+3. `kumi.defaultServer` in `package.json` — the deployment this build was made
+   for
+4. otherwise it asks, on a first-run window
+
+Set `kumi.defaultServer` for a build of the hosted product: nobody installing
+it should be asked to name a server there is only one answer to. Leave it empty
+for a self-hosted build, which asks. **Help → Change Server…** escapes a
+baked-in address; that is what the `askedToChange` flag in the settings file
+is for, and without it the menu item would clear the address, relaunch, fall
+straight back to the default, and look broken.
+
+The address is baked into every copy that ships, so a deployment that later
+moves leaves old installs pointing at nothing. Prefer a domain you control
+over a platform-assigned hostname.
 
 ## Signing in
 

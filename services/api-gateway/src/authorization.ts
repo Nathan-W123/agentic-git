@@ -224,6 +224,23 @@ export async function authorizeOrganization(
   principal: AuthenticatedPrincipal,
   organizationId: string,
   permission: Permission,
+  options: {
+    /**
+     * Authorize on the stored role rather than the entitled one.
+     *
+     * Paying is the one action a lapsed subscription must not block, because
+     * it is the action that un-lapses it. Without this the gate closes on the
+     * only door out of itself: `effectiveRole` folds a lapsed owner to
+     * `viewer`, `manage_organization` is owner-only, and the checkout route
+     * asks for exactly that — so on day fifteen of a fourteen-day trial the
+     * owner is told 403 by the endpoint that exists to take their money,
+     * while the interface goes on offering them the button.
+     *
+     * Passed from the billing routes and nowhere else. Every other route
+     * should keep folding, which is the whole point of the gate.
+     */
+    ignoreEntitlement?: boolean;
+  } = {},
 ): Promise<AuthorizedOrganization> {
   assertTokenOrganization(principal, organizationId);
   const organization = await store.getOrganization(organizationId);
@@ -234,12 +251,11 @@ export async function authorizeOrganization(
       "not_found",
     );
   }
-  const role = await entitledRole(
-    store,
-    principal,
-    organization,
-    roleFor(principal, organizationId),
-  );
+  const stored = roleFor(principal, organizationId);
+  const role =
+    options.ignoreEntitlement === true
+      ? stored
+      : await entitledRole(store, principal, organization, stored);
   assertPermission(role, permission);
   // Effective permission is the intersection of role and scope, so a token
   // can only ever narrow what its owner could already do.

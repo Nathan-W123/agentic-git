@@ -2569,6 +2569,98 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: audit events belong to the project of the run they were written under`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_other",
+        path: "/other.git",
+        branch: "main",
+      });
+      const mine = await store.createRun({
+        repository: REPOSITORY,
+        projectId: DEFAULT_PROJECT_ID,
+        mode: "coordinated",
+        baseVersion: BASE_VERSION,
+      });
+      const theirs = await store.createRun({
+        repository: { id: "repo_other", path: "/other.git", branch: "main" },
+        projectId: "project_other",
+        mode: "coordinated",
+        baseVersion: BASE_VERSION,
+      });
+
+      // The coordinator stamps a project into only four of its forty-six
+      // traces, and every `task_failed` is among the forty-two that do not.
+      // They are always written under a run, though, and the run knows the
+      // project — so an unstamped failure is placeable, and used not to be.
+      await store.appendAudit(mine.id, {
+        type: "task_failed",
+        taskId: "task_mine",
+        data: { stage: "integration" },
+      });
+      await store.appendAudit(theirs.id, {
+        type: "task_failed",
+        taskId: "task_theirs",
+        data: { stage: "integration" },
+      });
+      // Neither a stamp nor a run: still excluded rather than guessed at.
+      await store.appendAudit(undefined, {
+        type: "task_failed",
+        taskId: "task_orphan",
+        data: {},
+      });
+
+      assert.deepEqual(
+        (await store.listAuditEvents({ projectId: DEFAULT_PROJECT_ID })).map(
+          (entry) => entry.event.taskId,
+        ),
+        ["task_mine"],
+        "an unstamped event is placed by its run, and only by its own run",
+      );
+
+      // The widened term is one arm of a disjunction inside a clause list that
+      // is joined with AND. Written without its own parentheses it would
+      // rebind the others, so every remaining filter is exercised against a
+      // run-placed event rather than assumed still to work.
+      assert.deepEqual(
+        (
+          await store.listAuditEvents({
+            projectId: DEFAULT_PROJECT_ID,
+            types: ["plan_admitted"],
+          })
+        ).length,
+        0,
+        "the type filter still applies to a run-placed event",
+      );
+      assert.deepEqual(
+        (
+          await store.listAuditEvents({
+            projectId: DEFAULT_PROJECT_ID,
+            taskId: "task_theirs",
+          })
+        ).length,
+        0,
+        "the task filter still applies to a run-placed event",
+      );
+      const all = await store.listAuditEvents({});
+      const last = all.at(-1)?.sequence ?? 0;
+      assert.deepEqual(
+        (
+          await store.listAuditEvents({
+            projectId: DEFAULT_PROJECT_ID,
+            afterSequence: last,
+          })
+        ).length,
+        0,
+        "the cursor still applies — without this the metrics pager never ends",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: archiving compacts the audit log without breaking verification`, async () => {
     const { store, cleanup } = await backend.open();
     try {
