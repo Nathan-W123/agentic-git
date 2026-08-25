@@ -135,15 +135,17 @@ async function entitledRole(
   );
 }
 
+/**
+ * Every permission there is.
+ *
+ * Derived from the owner's set rather than listed again: the owner holds all
+ * of them by definition, so a permission added to the table above cannot go
+ * missing from here. Written out by hand, this drifts silently — and it is
+ * read by the check that decides whether a desktop app's grant covers the
+ * whole surface, which is a thing that has been wrong three times.
+ */
 export const ALL_PERMISSIONS: readonly Permission[] = [
-  "view",
-  "submit_task",
-  "run_task",
-  "import_repository",
-  "review",
-  "manage_project",
-  "manage_members",
-  "manage_organization",
+  ...ROLE_PERMISSIONS.owner,
 ];
 
 export function isPermission(value: string): value is Permission {
