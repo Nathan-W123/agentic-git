@@ -11053,6 +11053,96 @@ test("a paid sign-up refuses an address that already has an account", async (t) 
   assert.equal(refused.data.error.code, "account_exists");
 });
 
+test("a forged webhook buys nothing, through the route rather than the verifier", async (t) => {
+  // The verifier has unit tests; the route is where it matters. This URL is
+  // public, it is the only thing that provisions a paid organization, and it
+  // writes entitlement — so an unsigned body reaching `applyStripeEvent`
+  // would be free service for anybody who found the path.
+  const secret = "whsec_example";
+  const { client, store } = await startBareGateway(t, {
+    stripe: {} as unknown as StripeClient,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "victim",
+    name: "Victim",
+  });
+  await store.saveSubscription({
+    organizationId: organization.id,
+    status: "active",
+    stripeSubscriptionId: "sub_victim",
+  });
+
+  const body = JSON.stringify({
+    type: "customer.subscription.deleted",
+    data: {
+      object: {
+        id: "sub_victim",
+        status: "canceled",
+        customer: "cus_victim",
+        metadata: { organizationId: organization.id },
+      },
+    },
+  });
+  const raw = Buffer.from(body, "utf8");
+  const now = Math.floor(Date.now() / 1000);
+  const sign = (payload: string, key: string, at: number) =>
+    `t=${String(at)},v1=${createHmac("sha256", key)
+      .update(`${String(at)}.${payload}`, "utf8")
+      .digest("hex")}`;
+  const post = async (headers: Record<string, string>) =>
+    await client.request("/api/v1/stripe/webhook", {
+      method: "POST",
+      raw,
+      rawType: "application/json",
+      headers,
+    });
+
+  // No header at all.
+  assert.equal((await post({})).status, 400);
+  // A header that is not a signature.
+  assert.equal((await post({ "Stripe-Signature": "nonsense" })).status, 400);
+  // Signed, correctly, with the wrong secret — somebody else's deployment,
+  // or a guess.
+  assert.equal(
+    (await post({ "Stripe-Signature": sign(body, "whsec_wrong", now) })).status,
+    400,
+  );
+  // A real signature over a different body: the tamper case, where a captured
+  // header is reused on a payload of the attacker's choosing.
+  assert.equal(
+    (await post({
+      "Stripe-Signature": sign('{"type":"ping"}', secret, now),
+    })).status,
+    400,
+  );
+  // A real signature that is too old to still be one — a captured replay.
+  assert.equal(
+    (await post({ "Stripe-Signature": sign(body, secret, now - 86_400) }))
+      .status,
+    400,
+  );
+
+  // Nothing any of them said was applied.
+  assert.equal(
+    (await store.getSubscription(organization.id))?.status,
+    "active",
+    "a refused webhook must not reach the entitlement",
+  );
+
+  // And the same body, signed properly, does apply — or the assertions above
+  // would pass on a route that refuses everything.
+  assert.equal(
+    (await post({ "Stripe-Signature": sign(body, secret, now) })).status,
+    200,
+  );
+  assert.equal(
+    (await store.getSubscription(organization.id))?.status,
+    "canceled",
+  );
+});
+
 test("a Stripe event never overwrites a comped organization", async (t) => {
   // The destructive path needs no bad luck. Every organization that predates
   // billing was comped by migration; `subscriptionStatusFrom` reads every
