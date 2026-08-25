@@ -2547,6 +2547,15 @@ const PLAN_HOLD_TTL_MS = 15 * 60_000;
  * metadata, and the transcript has to be readable by the same reading a
  * person gives it.
  */
+/**
+ * How long a socket ticket is worth anything.
+ *
+ * Long enough for the round trip that mints it and the upgrade that spends
+ * it, and short enough that one written to a log is stale before anybody
+ * reads the log.
+ */
+const SOCKET_TICKET_TTL_MS = 30_000;
+
 const AUTO_CLAIM_OFFER_TAIL =
   'Say "yes" and I\'ll ask you what I need before I start — or @mention ' +
   "someone else.";
@@ -4158,6 +4167,43 @@ export class ApiGateway {
   private readonly limiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
   private readonly activeRuns = new Set<string>();
+  /**
+   * Permission to open one socket, held for seconds.
+   *
+   * A browser proves itself to the upgrade with its session cookie, which it
+   * attaches on its own. Nothing else can: `new WebSocket(url)` takes no
+   * headers, so a client holding a bearer token — a desktop shell, or
+   * anything else outside a browser — has no way to present it. The usual
+   * answer is to put the token in the query string, and the usual objection
+   * is that URLs are written to logs and proxy traces, where a long-lived
+   * credential does not belong.
+   *
+   * A ticket is what goes there instead: minted by an authenticated request
+   * that *can* carry a header, single-use, and dead within the minute. Held
+   * in memory rather than the store because it is worth nothing a minute from
+   * now and because this deployment is documented as a single control plane —
+   * the same assumption crash recovery already makes.
+   */
+  private readonly socketTickets = new Map<
+    string,
+    { principal: AuthenticatedPrincipal; expiresAt: number }
+  >();
+
+  /**
+   * Drops tickets nobody redeemed.
+   *
+   * Called when one is minted rather than on a timer: the map only grows by
+   * minting, so that is the one moment it can need it, and a deployment
+   * nobody is signing into does not want a timer for an empty map.
+   */
+  private pruneSocketTickets(): void {
+    const now = Date.now();
+    for (const [ticket, held] of this.socketTickets) {
+      if (held.expiresAt <= now) {
+        this.socketTickets.delete(ticket);
+      }
+    }
+  }
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
   /**
@@ -4447,13 +4493,37 @@ export class ApiGateway {
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
-    const authorizeSocket = async (
+    const redeemTicket = (
+      request: IncomingMessage,
+    ): AuthenticatedPrincipal | undefined => {
+      const url = new URL(request.url ?? "/", "http://socket.invalid");
+      const ticket = url.searchParams.get("ticket");
+      if (ticket === null || ticket === "") {
+        return undefined;
+      }
+      // Deleted whether or not it was still valid: single-use means a replay
+      // of the same URL fails even when it arrives inside the window.
+      const held = this.socketTickets.get(ticket);
+      this.socketTickets.delete(ticket);
+      if (held === undefined || held.expiresAt <= Date.now()) {
+        throw new AuthenticationError("Socket ticket is invalid or expired");
+      }
+      return held.principal;
+    };
+        const authorizeSocket = async (
       request: IncomingMessage,
       projectId: string,
       permission: "view" | "submit_task",
     ): Promise<WebSocketAuthorization> => {
       this.assertOrigin(request);
-      const principal = await this.auth.authenticate(request.headers.cookie);
+      // A ticket if one was presented, the session cookie otherwise. Not a
+      // fallback in either direction: a request that brought a ticket has
+      // said which credential it means, and quietly trying the other one
+      // after a bad ticket would make an expired ticket look like a working
+      // one wherever a stale cookie happened to be lying around.
+      const ticketed = redeemTicket(request);
+      const principal =
+        ticketed ?? (await this.auth.authenticate(request.headers.cookie));
       const { project } = await authorizeProject(
         this.options.store,
         principal,
@@ -5857,6 +5927,26 @@ export class ApiGateway {
       }
 
       throw new HttpError(405, "method_not_allowed", "Unsupported lease action");
+    }
+
+    if (path === `${API_PREFIX}/auth/ws-ticket` && method === "POST") {
+      // Any credential may mint one, a bearer token included — which is the
+      // whole point, since a token is exactly what cannot be presented to an
+      // upgrade. Unlike minting an API token, this grants nothing durable: a
+      // ticket opens one socket within the minute and cannot mint anything
+      // further, so it does not put revocation out of reach the way a
+      // token minting tokens would.
+      this.pruneSocketTickets();
+      const ticket = randomBytes(32).toString("base64url");
+      this.socketTickets.set(ticket, {
+        principal,
+        expiresAt: Date.now() + SOCKET_TICKET_TTL_MS,
+      });
+      this.sendJson(response, 201, {
+        ticket,
+        expiresInMs: SOCKET_TICKET_TTL_MS,
+      });
+      return;
     }
 
     if (path === `${API_PREFIX}/auth/tokens` && method === "GET") {

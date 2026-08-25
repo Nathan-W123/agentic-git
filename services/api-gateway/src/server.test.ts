@@ -16721,3 +16721,105 @@ test("summariseAuditData skips bulk payload fields and respects the per-event ca
   assert.ok(sprawling.length <= 400, String(sprawling.length));
   assert.equal(summariseAuditData({}), "");
 });
+
+/** Opens an upgrade the way a shell does, and reports what came back. */
+async function upgradeEvents(
+  origin: string,
+  query: string,
+  cookie: string,
+): Promise<{ upgraded: boolean; status?: number }> {
+  const port = Number(new URL(origin).port);
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest({
+      port,
+      host: "127.0.0.1",
+      path: `/api/v1/events?${query}`,
+      headers: {
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": randomBytes(16).toString("base64"),
+        ...(cookie.length === 0 ? {} : { Cookie: cookie }),
+      },
+    });
+    const timer = setTimeout(() => {
+      request.destroy();
+      reject(new Error("timed out negotiating the event socket"));
+    }, 5_000);
+    request.on("upgrade", (_response, socket) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ upgraded: true });
+    });
+    request.on("response", (response) => {
+      clearTimeout(timer);
+      response.resume();
+      resolve({ upgraded: false, status: response.statusCode ?? 0 });
+    });
+    request.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    request.end();
+  });
+}
+
+test("a socket ticket is minted by any credential and spent exactly once", async (t) => {
+  // A browser proves itself to an upgrade with its session cookie, which it
+  // attaches on its own. `new WebSocket(url)` takes no headers, so a client
+  // holding a bearer token — a desktop shell — has no way to present it. The
+  // ticket is what goes in the URL instead of the token.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "desktop", scopes: ["view"] },
+  });
+  assert.equal(created.status, 201);
+  const token = created.data.token as string;
+
+  // Minted by the credential that cannot be presented to an upgrade, which is
+  // the entire reason this route exists.
+  const byToken = await bearer(runtime.origin, "/api/v1/auth/ws-ticket", token, {
+    method: "POST",
+  });
+  assert.equal(byToken.status, 201);
+  assert.equal(typeof byToken.data.ticket, "string");
+  assert.ok(byToken.data.expiresInMs > 0);
+
+  // And by a session, so the browser is not a special case in the other
+  // direction either.
+  const bySession = await client.request("/api/v1/auth/ws-ticket", {
+    method: "POST",
+  });
+  assert.equal(bySession.status, 201);
+  assert.notEqual(bySession.data.ticket, byToken.data.ticket);
+
+  // Spent. Whatever the upgrade then makes of the project, the ticket is gone.
+  const ticket = String(byToken.data.ticket);
+  const query = `projectId=absent&ticket=${encodeURIComponent(ticket)}`;
+  await upgradeEvents(runtime.origin, query, "");
+  const replayed = await upgradeEvents(runtime.origin, query, "");
+  assert.equal(replayed.upgraded, false);
+});
+
+test("a bad ticket is refused rather than quietly falling back to the cookie", async (t) => {
+  // The failure this shape invites: a client presents a ticket, the ticket is
+  // expired or already spent, and the server tries the cookie next. On a
+  // desktop shell there is no cookie and nothing happens — but in a browser,
+  // where a stale session is usually lying around, a dead ticket would look
+  // like a working one and the bug would only ever appear somewhere else.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const refused = await upgradeEvents(
+    runtime.origin,
+    "projectId=absent&ticket=not-a-real-ticket",
+    // A cookie that authenticates perfectly well on its own.
+    client.cookieHeader,
+  );
+  assert.equal(refused.upgraded, false);
+});
