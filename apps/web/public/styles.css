@@ -93,6 +93,27 @@
   --tree-w: 232px;
   --chat-w: 380px;
 
+  /* The chat screen's three columns, named so the rules that hide one and the
+     rules that size the rest cannot disagree about how wide it was. The rail
+     is only drawn when there is more than one channel to switch between — see
+     `showsChannelRail` — so on a single-channel account those sixty pixels go
+     back to the conversation. */
+  --rail-w: 60px;
+  --chan-sidebar-w: 256px;
+
+  /* And how wide the conversation itself is allowed to get.
+
+     A transcript that fills whatever width the window happens to have is a
+     transcript nobody can read: on a wide screen the eye leaves the end of
+     one line with no idea where the next one starts, and every message became
+     a full-width band of hover ground with a sentence in the corner of it.
+     `--room-column` is the column the messages are centred in, and
+     `--message-max` caps the words themselves at roughly the line length
+     prose is set at — measured in characters, so it follows the reader's own
+     text size rather than a pixel count taken at one of them. */
+  --room-column: 940px;
+  --message-max: 72ch;
+
   --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
   --shadow-card: 0 1px 0 rgb(255 255 255 / 2%), 0 8px 24px rgb(0 0 0 / 12%);
 
@@ -626,6 +647,20 @@ svg.ui-icon {
   transition:
     gap 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
     padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* The picture control that stands in for the rail's own when there is no
+   rail. A label rather than a button, because the thing it opens is a file
+   picker, and `.icon-btn` styles a control rather than an element — the two
+   only need to agree about the cursor. */
+.chan-crown-picture {
+  flex: none;
+  cursor: pointer;
+}
+
+.chan-crown-picture svg {
+  width: 15px;
+  height: 15px;
 }
 
 .chan-brand {
@@ -4645,7 +4680,7 @@ button.chip.lg:hover {
 /* A dedicated channel switcher stays narrow while the adjacent sidebar is
    free to hold tools and the active channel's roster. */
 .channel-rail {
-  width: 60px;
+  width: var(--rail-w);
   flex: none;
   display: flex;
   flex-direction: column;
@@ -4809,7 +4844,7 @@ button.chip.lg:hover {
 }
 
 .chan-sidebar {
-  width: 256px;
+  width: var(--chan-sidebar-w);
   flex: none;
   display: grid;
   /* Crown, search, everything else in one scroller, then the account footer.
@@ -5858,7 +5893,11 @@ button.chip.lg:hover {
 .chan-messages {
   overflow-y: auto;
   min-height: 0;
-  padding: 12px 24px 20px;
+  /* Centred in its own column rather than run edge to edge. The side padding
+     is the larger of the 24px a narrow room needs and whatever is left over
+     once the column has taken its share, so nothing moves until the window is
+     wider than the conversation wants to be. */
+  padding: 12px max(24px, (100% - var(--room-column)) / 2) 20px;
   position: relative;
   isolation: isolate;
 }
@@ -6011,35 +6050,11 @@ button.chip.lg:hover {
 }
 
 .cmsg-row {
-  /* One column for the whole connector, named once. `--cmsg-body-x` is the
-     distance from the row's left edge to the body's text — 8px of row
-     padding, the 32px face, the 12px column gap — and `--cmsg-stem-x` is
-     where the stem stands inside that gutter. The stem crossing a grouped
-     row is placed from the row, while the final segment and its elbow are
-     placed from the body, so the three only read as one line while they
-     agree about this column. Spelling it out is what stops them drifting
-     apart when any of those three numbers moves. */
+  /* The avatar gutter, named once: 8px of row padding, the 32px face, the
+     12px column gap. A grouped line has no face of its own and pays for the
+     gutter out of its own margin, which is the only thing left that has to
+     agree with this number. */
   --cmsg-body-x: 52px;
-  --cmsg-stem-x: 20px;
-  /* And the face the path turns into. Every branch ends beside a 20px replier
-     face, and the turn, its round cap and the foot of the final stem are all
-     measured from that face's centre line rather than from the summary's line
-     box: the summary grows a second line whenever an agent is working, and a
-     line box that changes height moved the stroke off the picture it points
-     at. The face is the one part of the link whose size never changes, so it
-     is what the connector is aimed at. */
-  --cmsg-face: 20px;
-  /* And the colour of that line, flattened. The connector is one stroke drawn
-     in several pieces — a stem for each grouped row, a final segment, and the
-     quarter turn into every thread link — and the pieces deliberately overlap
-     by a pixel or two so no hairline of rounding can break the line in half.
-     `--border-strong` is translucent, so each of those overlaps painted the
-     stroke twice and showed as a darker, discoloured tick exactly where the
-     line should read as continuous: at every row join and at every hook.
-     Mixed against the ground it is drawn on, the stroke stays opaque enough
-     to cross itself without changing shade. Eighteen percent keeps it behind
-     the message and faces instead of reading as another piece of content. */
-  --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--room-tint));
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
      a full-width line of its own, and the avatar and body wrap underneath it.
@@ -6061,8 +6076,8 @@ button.chip.lg:hover {
      is its own problem, so a picture settling inside one does not re-solve
      the rest of the conversation.
 
-     Layout containment only. `paint` would clip the hover actions and the
-     thread hairline that deliberately sit outside the row, and
+     Layout containment only. `paint` would clip the hover actions, which
+     deliberately sit above the top edge of the row, and
      `content-visibility` would have the browser guess the height of every row
      it has skipped — a guess that changes `scrollHeight` as the reader moves
      through it, which is the jumping this file is trying to stop. */
@@ -6075,9 +6090,6 @@ button.chip.lg:hover {
 
 @media (hover: hover) {
   .cmsg-row:not(.cmsg-system):hover {
-    /* An opaque stroke has to follow the surface under it, or the line would
-       stay at the room's shade while the row it crosses lightens. */
-    --cmsg-stem: color-mix(in srgb, var(--muted) 18%, var(--bg-hover));
     background: var(--bg-hover);
   }
 }
@@ -6107,69 +6119,13 @@ button.chip.lg:hover {
   margin-top: 0;
 }
 
-/* One stem belongs to the visible avatar, not to whichever compact message
-   happened to create a task. Rows before the group's final task carry that
-   stem all the way through, so two prompts read as branches of one path and a
-   task on the second prompt still leads back to the face above both of them. */
-.cmsg-row.cmsg-thread-path-through::before {
-  content: "";
-  position: absolute;
-  left: var(--cmsg-stem-x);
-  top: -1px;
-  bottom: -1px;
-  border-left: 2px solid var(--cmsg-stem);
-  border-top-left-radius: 3px;
-  pointer-events: none;
-}
-
-/* Every grouped path leaves from beneath its 32px avatar, regardless of the
-   height of that first message. A small break keeps the connector from
-   looking attached to the face and gives the quieter stroke room to begin. */
-.cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
-  top: 48px;
-}
-
-/* The final row owns a wrapper that stops immediately after the thread link.
-   Its stem can therefore end at that link without following the progress bar
-   or the changed-files disclosure when either grows. */
-.cmsg-thread-route {
-  position: relative;
-}
-
-/* Where the stem stops is the whole of whether the turn reads as one clean
-   line. The route's foot is the foot of the thread link itself — see the
-   `vertical-align` on `.cmsg-thread-link`, which takes the line-box descent
-   out of this sum. Half the face plus the link's two pixels of padding is
-   where that face's centre sits above the foot; eleven pixels higher is the
-   top tangent of the twelve-pixel turn below, which is where the stem stops.
-   Written against `--cmsg-face` rather than as a bare `22px`, the foot moves
-   with the face if the face is ever resized instead of quietly parting from
-   the corner it is supposed to meet. The old hook carried a seven-pixel upright
-   over this stem and the final segment deliberately ended inside it; that
-   double-painted the connector at every branch and left a dark, swollen join.
-   The stem and turn now meet once, edge to edge, so the stroke keeps one
-   weight all the way around the corner.
-
-   The stroke is dropped two pixels above the wrapper so it overlaps the stem
-   of the row above rather than meeting it exactly: a group whose prompts each
-   carry a task is one path drawn in several pieces, and a hairline of rounding
-   between two of those pieces is a broken line. That overlap is only free
-   because the stroke is opaque — see `--cmsg-stem` on `.cmsg-row`, which is
-   what stops the doubled pixels reading as a darker patch. */
-.cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before {
-  content: "";
-  position: absolute;
-  left: calc(var(--cmsg-stem-x) - var(--cmsg-body-x));
-  top: -2px;
-  bottom: calc(var(--cmsg-face) / 2 + 2px + 11px);
-  border-left: 2px solid var(--cmsg-stem);
-  pointer-events: none;
-}
-
-.cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
-  .cmsg-thread-route::before {
-  top: 39px;
-}
+/* The transcript used to draw a two-pixel connector from a prompt's avatar,
+   down past every grouped line under it, and around a quarter turn into each
+   thread link it passed — one stroke in five pieces, each measured from the
+   others so the joins would not show. It was scaffolding around content that
+   already says what it is: the thread link names its replies and carries
+   their faces, and the message it belongs to is the one directly above it.
+   The brackets are gone; the grouping they traced is unchanged. */
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
    order at the end of the room rather than tucked under the message it
@@ -6632,6 +6588,10 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   line-height: 1.6;
   color: var(--text);
   margin-top: 3px;
+  /* The words stop before the column does. A paragraph set across the whole
+     room is a paragraph read twice, and the room is wider than any comfortable
+     measure on a desktop. */
+  max-width: var(--message-max);
   word-break: break-word;
   white-space: pre-wrap;
 }
@@ -6957,75 +6917,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   margin-top: 6px;
   padding: 2px 0;
   text-align: left;
-  /* Sat on the baseline, the link left the descent of its line box below it,
-     and the wrapper the stem is measured from ended that far past the link.
-     The descent is whatever the inherited font metrics say — which is not the
-     same number on a phone, where the browser is free to inflate transcript
-     text — so the stem's foot moved while the elbow it has to meet did not,
-     and past four pixels of drift the two came apart. Aligned to the bottom
-     of the line box, the wrapper ends where the link ends, and the join is
-     the same on every screen. */
   vertical-align: bottom;
-}
-
-/* Each task turns out of the shared avatar stem at its thread summary. The
-   twelve-pixel quarter turn starts at the stem's tangent instead of laying a
-   second upright over it; the twelve-pixel gap gives the stroke and replier
-   face a little more breathing room than the tight channel path had, matching
-   the open thread panel's quiet spacing. Where the turn does still meet the
-   stem it meets it in the opaque `--cmsg-stem`, so the corner keeps the weight
-   and the shade of the rest of the line.
-
-   `border-box` is what makes the turn seamless rather than decorative. The
-   elbow is placed from its right edge, so under the default content box its
-   own left stroke hangs *outside* the declared width and pushes the whole
-   corner further left than the stem it turns out of —
-   a visible step where the two should be one line. Sized by the border box,
-   the gap plus the 20px of elbow put that stroke in the connector's own
-   column, exactly where the stem above it stands: the gap is read from
-   `--cmsg-body-x` and `--cmsg-stem-x` rather than written down, so it cannot
-   fall out of step with the stems either side of it.
-
-   Top and height are read together: the difference between them (12 - 11) is
-   the one pixel of the two-pixel stroke that falls below the link's middle,
-   which is to say the run is centred on it. The faces are the only thing
-   centred in that link (`align-items`), so its middle is their middle: the
-   stroke now crosses the replier's face on its own centre line instead of a
-   pixel under it, and the face no longer hangs out of the bottom of the line
-   it is supposed to sit on. Matching the height to the radius removes any
-   straight upright and keeps the same circular corner the open thread panel
-   already uses. */
-.cmsg-row.cmsg-threaded .cmsg-thread-link::before {
-  content: "";
-  position: absolute;
-  box-sizing: border-box;
-  top: calc(50% - 11px);
-  right: calc(100% + var(--cmsg-body-x) - var(--cmsg-stem-x) - 20px);
-  width: 20px;
-  height: 12px;
-  border-left: 2px solid var(--cmsg-stem);
-  border-bottom: 2px solid var(--cmsg-stem);
-  border-bottom-left-radius: 12px;
-  border-bottom-right-radius: 2px;
-  pointer-events: none;
-}
-
-/* The last turn closes the path with a round cap. At the same two pixels as
-   the stroke it reads as a softened endpoint rather than a new marker, but it
-   keeps the bottom branch from being mistaken for one more continuation.
-   Lifted the one pixel that centres a two-pixel dot on the middle it is
-   named after, so the cap and the run it closes are the same line rather
-   than two strokes a pixel apart. */
-.cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
-  content: "";
-  position: absolute;
-  top: calc(50% - 1px);
-  right: calc(100% + 10px);
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: var(--cmsg-stem);
-  pointer-events: none;
 }
 
 /* The count is the link, and it is the reader's own accent rather than a
@@ -10216,6 +10108,22 @@ dialog.modal[open]::backdrop {
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
     width: 0;
+  }
+
+  /* Except when it is the last column standing. The control that expands the
+     sidebar again lives in the rail, and with one channel there is no rail —
+     so a sidebar folded to nothing would have taken the only way back with
+     it. Folded to an icon column instead, which is what the crown is already
+     laid out as while collapsed. */
+  .chats-shell.no-rail.chan-collapsed > .chan-sidebar {
+    width: var(--rail-w);
+  }
+
+  /* The crown's two stand-in controls fold away with the rest of it: sixty
+     pixels holds the one button that brings the panel back, and nothing
+     else. */
+  .chats-shell.chan-collapsed :is(.chan-crown-picture, .chan-crown-new) {
+    display: none;
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-top {
