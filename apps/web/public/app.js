@@ -98,6 +98,8 @@ import {
   setRepositoryGrant,
   revokeRepositoryGrant,
   updateMemberRole,
+  iAmSystemAdmin,
+  setSystemAdmin,
   removeMember,
   state,
   toggleChannelMessagePin,
@@ -1917,11 +1919,22 @@ async function inviteSomebody(rerender, repositoryId) {
     ? `They will get access to ${repositoryId}, and nothing else in this project.`
     : "Access is granted per repository. Pick the one to share, or share " +
       "everything if they are joining the team properly.";
+  // Only a deployment administrator's link to a *named* repository is free —
+  // both halves, the same two conditions the server checks. Said here because
+  // otherwise these links are indistinguishable from paid ones at the moment
+  // they are handed out, which is the moment it matters.
+  const freeLink = iAmSystemAdmin();
+  const freeNote = freeLink
+    ? fixed
+      ? " Whoever accepts this gets full use of this repository at no charge."
+      : " If you name a repository, whoever accepts gets full use of it at no" +
+        " charge; sharing everything is an ordinary paid seat."
+    : "";
   const values = await showModal({
     title: fixed ? `Invite someone to #${repositoryId}` : "Invite someone to collaborate",
     subtitle:
-      `${accessDetail} The readable name is the link's key, so anyone who ` +
-      "guesses it can use the invitation.",
+      `${accessDetail}${freeNote} The readable name is the link's key, so ` +
+      "anyone who guesses it can use the invitation.",
     confirm: "Create invite link",
     body: `<label class="field">
         <span>Name for the invite link</span>
@@ -2660,6 +2673,40 @@ async function memberRoleAction(repositoryId, userId) {
 }
 
 /** Removes an organization member or repository-only guest from KUMI. */
+/**
+ * Grants or takes back deployment administration.
+ *
+ * Confirmed both ways. Granting hands somebody every organization on this
+ * control plane and the ability to give repositories away for free; revoking
+ * can lock the last administrator out of exactly the screens that would fix
+ * it. Neither belongs behind a single click in a context menu.
+ */
+async function systemAdminAction(userId, grant) {
+  const confirmed = await showModal({
+    title: grant ? "Make deployment admin?" : "Remove deployment admin?",
+    subtitle: grant
+      ? "They will reach every organization on this deployment, and their " +
+        "invite links to a repository will be free for whoever accepts them."
+      : "They will lose access to every organization they are not a member " +
+        "of, and their invite links will stop being free.",
+    confirm: grant ? "Make admin" : "Remove admin",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await setSystemAdmin(userId, grant);
+    toast(grant ? "Now a deployment admin" : "No longer a deployment admin", "ok");
+    // The flag is read off the roster, which is cached, so it is refetched
+    // rather than patched in place — this is rare enough that a round trip
+    // costs nothing and a stale menu here would be actively misleading.
+    delete state.channelPeople[activeChannelId()];
+    render();
+  } catch (error) {
+    toast(error.message ?? "That could not be changed.", "error");
+  }
+}
+
 async function removeMemberAction(repositoryId, userId) {
   const name = memberName(userId) ?? userId;
   const organizationRole = memberRole(userId);
@@ -7246,6 +7293,12 @@ document.addEventListener("click", (event) => {
         value.slice(0, separatorIndex),
         value.slice(separatorIndex + 1),
       );
+      return;
+    }
+    case "system-admin-grant":
+    case "system-admin-revoke": {
+      closePopover();
+      void systemAdminAction(value, act === "system-admin-grant");
       return;
     }
     case "channel-grant-promote": {

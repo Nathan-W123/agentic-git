@@ -3257,6 +3257,19 @@ svg.ui-icon {
   text-transform: capitalize;
 }
 
+/* A seat nobody is paying for. Quiet by design — it is a fact about billing,
+   not a status anyone needs to act on, and the row it sits in is already
+   carrying a name, a role and a control. */
+.pop-grant-free {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
 /* Leave / delete: separated from the ordinary facts above by a divider
    rather than another unlabeled block, since both are one-way actions. */
 .pop-block-danger {

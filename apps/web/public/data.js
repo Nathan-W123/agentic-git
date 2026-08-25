@@ -5389,6 +5389,30 @@ export async function updateMemberRole(userId, role) {
  * owns, not one channel. Repository-scoped grants they hold are theirs to
  * lose separately; see {@link revokeRepositoryGrant}.
  */
+/**
+ * Whether the signed-in person runs this deployment.
+ *
+ * Read from the principal rather than kept as its own flag, so it can never
+ * disagree with what the server will actually allow.
+ */
+export function iAmSystemAdmin() {
+  return state.principal?.user?.systemAdmin === true;
+}
+
+/**
+ * Grants or revokes deployment administration for somebody else.
+ *
+ * The one thing that cannot be done from any other screen, and the reason it
+ * is here: a second founder has to become an administrator somehow, and until
+ * now the only way was a hand-written API call.
+ */
+export async function setSystemAdmin(userId, systemAdmin) {
+  await api(`/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: { systemAdmin },
+  });
+}
+
 export async function removeMember(userId) {
   await api(
     `/organizations/${encodeURIComponent(state.organizationId)}/members/${encodeURIComponent(userId)}`,
