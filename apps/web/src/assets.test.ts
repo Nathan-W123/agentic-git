@@ -2620,8 +2620,7 @@ test("the user icon defaults to salmon", async () => {
 });
 
 test("the product is named Kumi throughout the browser surface", async () => {
-  // The auth wordmark names the image for assistive technology even though its
-  // visible first glyph is now artwork rather than a letter.
+  // The auth wordmark names the image for assistive technology.
   assert.match(
     await publicFile("ui.js"),
     /role="img" aria-label="Kumi"/u,
@@ -2648,27 +2647,55 @@ test("the product is named Kumi throughout the browser surface", async () => {
   }
 });
 
-test("the full wordmark remains without a standalone K badge", async () => {
+test("the standalone logo uses the supplied artwork without changing the wordmark", async () => {
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  assert.doesNotMatch(ui, /brandMark/u);
-  assert.doesNotMatch(app, /brandMark/u);
-  assert.doesNotMatch(chats, /brandMark|channel-rail-brand/u);
+  assert.match(app, /brandMark/u);
   assert.match(app, /brandWordmark\(\d+\)/u);
+
+  const markStart = ui.indexOf("export function brandMark");
+  assert.notEqual(
+    markStart,
+    -1,
+    "the standalone mark helper was not found in ui.js",
+  );
+  const mark = ui.slice(markStart, ui.indexOf("\n}", markStart));
+  assert.match(mark, /href="\/kumi-logo\.png"/u);
+  assert.match(mark, /overflow="hidden" aria-hidden="true"/u);
+  assert.match(chats, /class="channel-rail-brand"/u);
+  assert.match(chats, /title="Kumi" aria-label="Kumi">\$\{brandMark\(28\)\}/u);
 
   const start = ui.indexOf("export function brandWordmark");
   assert.notEqual(start, -1, "the wordmark helper was not found in ui.js");
   const wordmark = ui.slice(start, ui.indexOf("\n}", start));
   assert.match(wordmark, /preserveAspectRatio="xMidYMid meet"/u);
-  assert.match(wordmark, /href="\/kumi-logo\.png"/u);
-  assert.match(wordmark, /overflow="hidden" aria-hidden="true"/u);
-  // The supplied mark leads the remaining letters as one complete wordmark.
+  assert.doesNotMatch(wordmark, /kumi-logo/u);
   assert.match(wordmark, /\$\{BRAND_LETTERS\}/u);
 
+  const lettersStart = ui.indexOf("const BRAND_LETTERS");
+  const letters = ui.slice(lettersStart, ui.indexOf("`;", lettersStart));
+  assert.match(letters, /M8\.3 8V40/u);
+  assert.match(letters, /M42 11 13\.5 24 42 37/u);
+
   const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);
-  assert.ok(width > 0 && width <= 160, `the sign-in wordmark is ${width}px wide`);
+  assert.ok(width > 0 && width <= 160, `the auth wordmark is ${width}px wide`);
+});
+
+test("sign-in uses the standalone Kumi mark without the live-codebase punchline while other authentication modes retain their branding and copy", async () => {
+  const app = await publicFile("app.js");
+  const start = app.indexOf("function renderAuth");
+  const auth = app.slice(start, app.indexOf("\nfunction renderPasswordReset", start));
+
+  assert.notEqual(start, -1, "the auth renderer was not found in app.js");
+  assert.match(
+    auth,
+    /bootstrap \|\| register \? brandWordmark\(120\) : brandMark\(54\)/u,
+  );
+  assert.doesNotMatch(auth, /One live codebase/u);
+  assert.match(auth, /Create the first owner for this control plane\./u);
+  assert.match(auth, /You get your own team and project to start building in\./u);
 });
 
 /* ------------------------------------------------------------ controls ---- */

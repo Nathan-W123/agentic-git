@@ -706,6 +706,7 @@ svg.ui-icon {
 
 /* ------------------------------------------------------------- brand ---- */
 
+.brand-mark,
 .brand-wordmark {
   flex: none;
 }
@@ -4642,6 +4643,7 @@ button.chip.lg:hover {
   border-right: 1px solid var(--border-soft);
 }
 
+.channel-rail-brand,
 .channel-rail-toggle,
 .channel-rail-new,
 .channel-rail-button {
@@ -4654,6 +4656,7 @@ button.chip.lg:hover {
   transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
 }
 
+.channel-rail-brand:hover,
 .channel-rail-toggle:hover,
 .channel-rail-new:hover,
 .channel-rail-button:hover {
@@ -4662,6 +4665,7 @@ button.chip.lg:hover {
   border-radius: var(--radius-sm);
 }
 
+.channel-rail-brand:focus-visible,
 .channel-rail-toggle:focus-visible,
 .channel-rail-new:focus-visible,
 .channel-rail-button:focus-visible {
@@ -5742,9 +5746,9 @@ button.chip.lg:hover {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  padding: 4px 6px;
+  padding: 6px;
   background: none;
   border: none;
   border-radius: 6px;
@@ -5758,7 +5762,38 @@ button.chip.lg:hover {
   background: var(--bg-hover);
 }
 
+.chan-pin-jump .cp-avatar {
+  display: flex;
+  flex: none;
+}
+
+.chan-pin-jump .cp-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chan-pin-jump .cp-meta {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.chan-pin-jump .cp-sender {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .chan-pin-jump .cp-title {
+  display: block;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -5766,7 +5801,6 @@ button.chip.lg:hover {
 }
 
 .chan-pin-jump .cp-time {
-  margin-left: auto;
   flex: none;
   color: var(--text-4);
   font-size: 11px;
@@ -8269,17 +8303,11 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
  */
 .agent-spec .aspec-banner {
   height: clamp(58px, 9vh, 74px);
-  background:
-    radial-gradient(
-      circle at 86% 18%,
-      var(--aspec-accent, var(--accent)) 0 3px,
-      transparent 4px
-    ),
-    linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--aspec-accent, var(--accent)) 58%, var(--surface-2)),
-      color-mix(in srgb, var(--aspec-accent, var(--accent)) 16%, var(--surface-2))
-    );
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--aspec-accent, var(--accent)) 58%, var(--surface-2)),
+    color-mix(in srgb, var(--aspec-accent, var(--accent)) 16%, var(--surface-2))
+  );
 }
 
 .agent-spec .aspec-identity-body {
@@ -10622,6 +10650,7 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
+  .channel-rail-brand,
   .channel-rail-new,
   .channel-rail-button {
     width: 40px;

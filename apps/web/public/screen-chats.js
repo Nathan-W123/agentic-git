@@ -93,6 +93,7 @@ import {
   agentFace,
   agentLabelOf,
   avatar,
+  brandMark,
   chime,
   clockTime,
   esc,
@@ -143,6 +144,8 @@ function channelRail(activeRepositoryId) {
     left.id.localeCompare(right.id),
   );
   return `<nav class="channel-rail" aria-label="Channels">
+    <button type="button" class="channel-rail-brand" data-act="nav" data-value="chats"
+      title="Kumi" aria-label="Kumi">${brandMark(28)}</button>
     <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
       title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
       aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
@@ -7001,6 +7004,10 @@ function pinnedBanner(repositoryId) {
         <div class="chan-pins-list">${pins
         .map((entry) => {
           const title = threadTitle(entry) || "(no text)";
+          const resolvedAuthor = channelAuthor(repositoryId, entry);
+          const sender = String(resolvedAuthor?.name ?? "Unknown sender");
+          const author = { name: sender, agent: resolvedAuthor?.agent };
+          const sentAt = historyWhen(entry.at ?? entry.createdAt);
           const pinner =
             entry.pinnedBy === undefined
               ? "someone"
@@ -7009,8 +7016,14 @@ function pinnedBanner(repositoryId) {
                 <button type="button" class="chan-pin-jump"
                   data-act="channel-pinned-open" data-value="${esc(entry.id)}"
                   title="Pinned by ${esc(pinner)}">
-                  <span class="cp-title">${esc(title)}</span>
-                  <span class="cp-time">${esc(clockTime(entry.at ?? entry.createdAt))}</span>
+                  <span class="cp-avatar">${authorFace(author, 24, repositoryId)}</span>
+                  <span class="cp-copy">
+                    <span class="cp-meta">
+                      <span class="cp-sender">${esc(sender)}</span>
+                      <span class="cp-time">${esc(sentAt)}</span>
+                    </span>
+                    <span class="cp-title">${esc(title)}</span>
+                  </span>
                 </button>
                 ${iconButton("close", {
                   act: "channel-pin",
