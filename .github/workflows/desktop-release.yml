@@ -130,6 +130,27 @@ jobs:
           pattern: installers-*
           merge-multiple: true
 
+      # The one check that runs against reality rather than against another
+      # file. The download page's links are written by hand, and a name that
+      # was never right — `${os}` is `mac` and `win`, not `macos` and
+      # `windows` — produces a button that looks fine and 404s. Better to fail
+      # the release than to publish one.
+      - name: Check the download page against what was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
+              apps/web/public/download.html | sort -u); do
+            if [ -f "installers/$file" ]; then
+              echo "  ok       $file"
+            else
+              echo "::error::The download page offers $file, which this release does not contain."
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
       - name: Publish to the releases repository
         shell: bash
         env:

@@ -75,6 +75,14 @@ git push origin desktop-v0.1.0
 Running the workflow by hand builds all three and publishes nothing, which is
 how to check that packaging still works without cutting a release.
 
+Installer filenames carry no version, on purpose: that is what makes
+`releases/latest/download/<file>` a permanent address, and it is what the
+download page at `/download` on every deployment links to. Nothing there has
+to be edited when a version ships. Before publishing, the workflow checks that
+every file that page offers is one this release actually built — `${os}`
+expands to `mac` and `win`, not `macos` and `windows`, and a link that spells
+it the friendly way looks right and 404s.
+
 Publishing needs a `KUMI_RELEASES_TOKEN` secret: a fine-grained personal access
 token with **Contents: write** on the releases repository. The automatic
 `GITHUB_TOKEN` cannot be used, because it is scoped to this repository and the

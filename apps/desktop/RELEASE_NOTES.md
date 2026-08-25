@@ -9,10 +9,14 @@ new download when the window changes, which is rare.
 
 | Your machine | The one with this in its name |
 | --- | --- |
-| Mac, Apple silicon (M1 and later) | `macos-arm64` — `.dmg` |
-| Mac, Intel | `macos-x64` — `.dmg` |
-| Windows | `windows` — `.exe` |
+| Mac, Apple silicon (M1 and later) | `mac-arm64` — `.dmg` |
+| Mac, Intel | `mac-x64` — `.dmg` |
+| Windows | `win-x64` — `.exe` |
 | Linux | `linux` — `.AppImage`, or `.deb` on Debian and Ubuntu |
+
+Your own Kumi picks the right one for you: open **/download** on your
+deployment — the same address you sign in at — and it offers the file that
+matches the machine you are reading it on.
 
 The `.zip` files are the same Mac app without the disk image, for anyone who
 prefers to unpack it themselves.
