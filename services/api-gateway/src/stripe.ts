@@ -36,6 +36,11 @@ export interface StripeSubscription {
   /** Unix seconds; Stripe's own field name is `current_period_end`. */
   currentPeriodEnd: number | undefined;
   quantity: number | undefined;
+  /**
+   * Whatever was attached at checkout — this deployment puts `organizationId`
+   * here, because the subscription is the object every later event is about.
+   */
+  metadata: Record<string, string>;
 }
 
 export interface StripeClient {
@@ -240,7 +245,22 @@ export function readSubscription(
           ),
     currentPeriodEnd: typeof periodEnd === "number" ? periodEnd : undefined,
     quantity: firstSubscriptionQuantity(payload),
+    metadata: readMetadata(payload["metadata"]),
   };
+}
+
+/** Stripe metadata is always string-to-string; anything else is ignored. */
+function readMetadata(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null) {
+    return {};
+  }
+  const metadata: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === "string") {
+      metadata[key] = entry;
+    }
+  }
+  return metadata;
 }
 
 function subscriptionItems(
