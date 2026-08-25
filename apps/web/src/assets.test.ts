@@ -1633,7 +1633,7 @@ test("the composer is one card with bottom utilities and a send arrow", async ()
   );
   assert.match(
     await publicFile("ui.js"),
-    /send: S\('<path d="M5 12h14"\/><path d="m13 6 6 6-6 6"\/>'\),/u,
+    /send: S\('<path d="M[\d.]+ 12h[\d.]+"\/><path d="m[\d.]+ [\d.]+ [\d.]+ [\d.]+-[\d.]+ [\d.]+"\/>'\),/u,
   );
 });
 
@@ -2396,7 +2396,7 @@ test("every agent kind resolves to its own character", async () => {
   // path from key to drawing, not just that the table has six entries.
   const agents = /export const AGENTS = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
   const pairs = [...agents.matchAll(/(\w+): \{ label: "[^"]+", doodle: "(\w+)" \}/gu)];
-  assert.equal(pairs.length, 7, "six named agents plus a fallback");
+  assert.equal(pairs.length, 9, "eight named agents plus a fallback");
 
   const drawings = spriteTable(source);
   const resolved = new Set();
@@ -2852,7 +2852,13 @@ test("slash and mention filtering does not rebuild the app while typing", async 
   const handler = chats.slice(start, end);
 
   assert.match(handler, /paintComposerSuggestions\(activeChannelId\(\)\)/u);
-  assert.match(handler, /paintComposerMirror\(node\)/u);
+  // The mirror repaint now lives in resizeComposer, which the painter calls.
+  assert.match(handler, /resizeComposer\(node\)/u);
+  const resize = chats.slice(
+    chats.indexOf("function resizeComposer(node)"),
+    chats.indexOf("\n/** Sizes every newly rendered composer"),
+  );
+  assert.match(resize, /paintComposerMirror\(node\)/u);
   assert.equal(
     /\brerender\s*\(/u.test(handler),
     false,
@@ -3441,7 +3447,7 @@ test("a direct message can send image-only and mixed text/image content", async 
   const targetsEnd = app.indexOf("\n};", targetsStart) + 3;
   const targets = app.slice(targetsStart, targetsEnd);
   const submitStart = app.indexOf('case "dm-submit"');
-  const submitEnd = app.indexOf("\n    // Expanding a file", submitStart);
+  const submitEnd = app.indexOf('\n    case "channel-submit"', submitStart);
   const submit = app.slice(submitStart, submitEnd);
   const inputStart = app.indexOf('if (act === "dm-input")');
   const inputEnd = app.indexOf('if (act === "channel-thread-input")', inputStart);
@@ -3458,7 +3464,7 @@ test("a direct message can send image-only and mixed text/image content", async 
   assert.match(dmPanel, /messageBody\([\s\S]{0,100}message\.content/u);
   assert.match(submit, /const draft = state\.dmDraft\.trim\(\)/u);
   assert.match(submit, /draft\.length === 0/u);
-  assert.match(submit, /sendDirectMessage\(other, draft\)/u);
+  assert.match(submit, /sendDirectMessage\(other, draft, referencedMessageId\)/u);
   assert.match(input, /const attachments = String\(state\.dmDraft/u);
   assert.match(input, /attachments\.join\("\\n"\)/u);
   assert.match(input, /state\.dmDraft = `\$\{node\.value\}/u);
@@ -3584,7 +3590,7 @@ test("the thread slash picker surfaces its thread commands before the six-row li
 
   assert.deepEqual(
     candidates("repo").map((entry) => entry.name),
-    ["plan", "queue", "ask", "dnc", "simple", "push"],
+    ["plan", "queue", "ask", "dnc", "simple", "push", "retry", "cancel", "stop", "help"],
     "the channel keeps the server's general command order",
   );
   assert.deepEqual(
@@ -3766,7 +3772,7 @@ test("channel messages compact only an uninterrupted run from one person", async
   assert.notEqual(start, -1, "screen-chats.js declares the grouping rule");
   assert.notEqual(end, -1, "the grouping rule has a testable boundary");
   const createGroupingRule = new Function(
-    `${chats.slice(start, end)}\nreturn continuesUserMessageGroup;`,
+    `${chats.slice(start, end).replace(/^export /gmu, "")}\nreturn continuesUserMessageGroup;`,
   );
   const continues = createGroupingRule() as (
     previous: unknown,
@@ -3838,7 +3844,7 @@ test("channel task branches share the compact group's visible avatar", async () 
   const start = chats.indexOf("function continuesUserMessageGroup");
   const end = chats.indexOf("\n/**\n * The three dots", start);
   const createPaths = new Function(
-    `${chats.slice(start, end)}\nreturn messageThreadPaths;`,
+    `${chats.slice(start, end).replace(/^export /gmu, "")}\nreturn messageThreadPaths;`,
   );
   const paths = createPaths() as (
     timeline: unknown[],
@@ -5447,7 +5453,10 @@ test("agent details use the reference profile with supported controls", async ()
     /<button type="button" class="aspec-action" data-act="agent-panel-tab"[\s\S]*?data-value="history">[\s\S]*?<span>History<\/span>/u,
   );
   assert.match(css, /\.agent-spec \.aspec-action\s*\{/u);
-  assert.match(css, /\.agent-spec \.aspec-action:focus-visible\s*\{/u);
+  assert.match(
+    css,
+    /\.agent-spec \.aspec-action:focus-visible[^{]*\{[^}]*outline: 2px solid var\(--accent-line\);/su,
+  );
   // The retired wrapper was the stray centred hairline/box above the profile.
   assert.doesNotMatch(panel, /class="agent-panel-head"/u);
   assert.doesNotMatch(css, /^\.agent-panel-head\s*\{/mu);
@@ -5505,13 +5514,13 @@ test("agent details use the reference profile with supported controls", async ()
   );
   assert.match(
     openSpec,
-    /refreshProviderUsage\(opened\.provider \?\? opened\.id, render\)/u,
+    /refreshProviderUsage\(\s*usageProviderId\(opened\),\s*render,\s*usageOwner\(opened\),\s*\)/u,
   );
   assert.doesNotMatch(openSpec, /ensureProviderUsage/u);
   assert.match(returnToSpec, /if \(value === "spec"\)/u);
   assert.match(
     returnToSpec,
-    /refreshProviderUsage\(opened\.provider \?\? opened\.id, render\)/u,
+    /refreshProviderUsage\(\s*usageProviderId\(opened\),\s*render,\s*usageOwner\(opened\),\s*\)/u,
   );
 });
 
@@ -5876,9 +5885,9 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(agentCard, /label: "Model", value: model \|\| "Not reported"/u);
   assert.match(agentCard, /label: "Reasoning", value: effort \|\| "Provider default"/u);
   assert.match(agentCard, /subtitle: agentLabelOf\(providerId\)/u);
-  assert.match(agentCard, /usage: ""/u);
+  assert.match(agentCard, /usage: usageBlock\(agent\)/u);
   assert.doesNotMatch(agentCard, /Role here|Who may task it|Working on|Waiting to start/u);
-  assert.doesNotMatch(agentRow, /data-hover/u);
+  assert.doesNotMatch(agentRow, /class="roster-row-main"[^>]*data-hover/u);
 
   // A conversation opened from a search or a notification is the one place
   // somebody is read without the sidebar row that would otherwise explain them.
@@ -6365,7 +6374,7 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
   assert.match(chats, /act: "channel-grant-promote"/u);
   assert.match(chats, /act: "channel-grant-revoke"/u);
   assert.match(chats, /label: "Promote to co-owner"/u);
-  assert.match(chats, /label: "Remove co-owner"/u);
+  assert.match(chats, /label: "Demote from co-owner"/u);
 
   assert.match(app, /case "roster-person-menu":/u);
   assert.match(app, /showMenu\(node, personMenuItems\(value\)\)/u);

@@ -105,6 +105,7 @@ import {
   openBillingPortal,
   startCheckout,
   ensureBilling,
+  loadBilling,
   setSystemAdmin,
   removeMember,
   state,
@@ -3424,7 +3425,70 @@ function screen() {
  * refresh fails the data silently goes stale, and a toast that clears itself
  * leaves no sign that what you are reading is old.
  */
+/**
+ * The one line that says the subscription needs attention.
+ *
+ * Shown in the app rather than only on the Billing screen, because the
+ * alternative is a trial that ends while nobody is looking: work simply stops
+ * being dispatched, and the explanation sits two screens away behind a
+ * settings dialog nobody had a reason to open.
+ *
+ * Deliberately quiet until it is nearly true. A banner standing for the whole
+ * fourteen days is furniture by day three, and would be ignored on the day it
+ * finally mattered.
+ */
+const TRIAL_WARNING_DAYS = 3;
+
+function billingBanner() {
+  const billing = state.billing;
+  if (billing === undefined || billing === null || billing.configured !== true) {
+    return "";
+  }
+  const canManage = canManageOrganization();
+  const upgrade = canManage
+    ? `<span class="spacer"></span>
+       <button class="btn btn-sm btn-primary" data-act="billing-checkout">
+         Subscribe</button>`
+    : "";
+  if (billing.status === "canceled") {
+    return `<div class="banner" role="status">${icon("alert")}
+      <span>Kumi is read-only — your subscription has ended. Everything is
+        still here; new work cannot be started.</span>${upgrade}</div>`;
+  }
+  if (billing.status === "past_due") {
+    // Not an alert: nothing has stopped working, and saying so keeps this from
+    // reading as an outage when it is a card that needs re-entering.
+    return `<div class="banner" role="status">${icon("info")}
+      <span>Your last payment did not go through. Everything keeps working
+        while it is retried.</span>${
+          canManage
+            ? `<span class="spacer"></span>
+               <button class="btn btn-sm" data-act="billing-portal">
+                 Update payment</button>`
+            : ""
+        }</div>`;
+  }
+  if (billing.status !== "trialing") {
+    return "";
+  }
+  const days = daysUntil(billing.trialEndsAt);
+  if (days === undefined || days > TRIAL_WARNING_DAYS) {
+    return "";
+  }
+  return `<div class="banner" role="status">${icon("clock")}
+    <span>${
+      days === 0
+        ? "Your trial ends today."
+        : `${String(days)} day${days === 1 ? "" : "s"} left on your trial.`
+    } After it ends, Kumi stays readable but new work cannot be
+      started.</span>${upgrade}</div>`;
+}
+
 function banner() {
+  const billingLine = billingBanner();
+  if (billingLine !== "") {
+    return billingLine;
+  }
   if (state.refreshing === true && state.loadError === undefined) {
     return `<div class="banner banner-busy" role="status">
       ${icon("refresh")}<span>Refreshing…</span></div>`;
@@ -9334,8 +9398,27 @@ function dismissSinceYouLeft() {
   ).catch(() => undefined);
 }
 
+/**
+ * What Stripe sent this browser back with, if anything.
+ *
+ * Read once and cleared from the address bar, so a refresh does not re-announce
+ * a payment that happened minutes ago — and so the fragment does not survive
+ * into a link somebody pastes to a colleague.
+ */
+function takeBillingReturn() {
+  const hash = window.location.hash.replace(/^#/u, "");
+  if (hash !== "billing-done" && hash !== "billing-cancelled") {
+    return undefined;
+  }
+  window.history.replaceState(null, "", window.location.pathname);
+  return hash === "billing-done" ? "done" : "cancelled";
+}
+
 async function boot() {
   renderLoadingShell();
+  // Taken before the invite link is considered, because both live in the
+  // fragment and a payment return is never also an invitation.
+  const billingReturn = takeBillingReturn();
   if (await handleInviteLink()) {
     return;
   }
@@ -9389,6 +9472,21 @@ async function boot() {
   showApp();
   applyHash();
   render();
+  if (billingReturn !== undefined) {
+    // The webhook is what records a payment, and it may land before or after
+    // the person gets back here. So this says what happened rather than
+    // claiming a state, and re-reads the entitlement instead of assuming it.
+    toast(
+      billingReturn === "done"
+        ? "Thanks — your subscription is being confirmed."
+        : "Checkout cancelled. Nothing was charged.",
+      billingReturn === "done" ? "ok" : "info",
+    );
+    if (billingReturn === "done") {
+      state.billing = undefined;
+      void loadBilling().then(() => render());
+    }
+  }
   // Everything below this line happens with a screen already up. The audit
   // feed, the run history, the metrics tile and the worker fleet are read on
   // screens somebody has to navigate to first, so they no longer stand between
@@ -9406,6 +9504,9 @@ async function boot() {
   // request in the cold-start wave would cost the wait it saves.
   void loadChannelMutes().then(() => render());
   void loadProviders().then(() => render());
+  // The entitlement banner reads this, so it cannot wait for somebody to open
+  // the Billing screen — that is the person who already knows.
+  void loadBilling().then(() => render());
   void loadGitHub().then(() => {
     if (state.settingsOpen === true) {
       render();
