@@ -68,8 +68,35 @@ export interface ReworkMetrics {
 
 export interface ThroughputMetrics {
   tasksSubmitted: number;
+  /** Tasks that moved canonical: they landed a change. */
   tasksIntegrated: number;
+  /**
+   * Tasks that succeeded without changing a file.
+   *
+   * A question answered, a file read out, an explanation written. The
+   * coordinator settles these as `integrated` and the person who asked got
+   * what they asked for, but there is no changeset and canonical never
+   * moved, so `canonical_promoted` is never written and nothing here used to
+   * count them. On a conversational deployment that is not a rounding error:
+   * most turns in a chat are questions, and every one of them fell out of the
+   * accounting between `tasksSubmitted` and `tasksIntegrated`.
+   */
+  tasksReported: number;
   tasksFailed: number;
+  /** Tasks somebody stopped. Not a failure — nothing went wrong. */
+  tasksCancelled: number;
+  /**
+   * Submitted tasks with no ending of any kind on the trail.
+   *
+   * The honest residual, and the only number here that is a question rather
+   * than an answer. Some of it is work still running, which is fine and
+   * expected. The rest is tasks whose run died between the claim and the
+   * ending — a redeploy, a crashed process — leaving a row nothing will ever
+   * settle and no event to say so. Kept separate from `tasksFailed` because
+   * conflating "this failed" with "we do not know" is how a 40% hole in the
+   * accounting reads as a healthy zero.
+   */
+  tasksUnaccounted: number;
   /** Mean milliseconds from task_submitted to canonical_promoted. */
   averageTimeToIntegrationMs: number | undefined;
 }
@@ -207,6 +234,8 @@ export async function computeCoordinationMetrics(
   const predictedPairs = new Map<string, string[]>();
   const contendedTasks = new Set<string>();
   const deferredTasks = new Set<string>();
+  const reportedTasks = new Set<string>();
+  const cancelledTasks = new Set<string>();
   const integratedTasks = new Set<string>();
   const failedTasks = new Set<string>();
   const submittedAt = new Map<string, string>();
@@ -391,6 +420,18 @@ export async function computeCoordinationMetrics(
         }
         break;
       }
+      case "task_reported": {
+        if (taskId !== undefined) {
+          reportedTasks.add(taskId);
+        }
+        break;
+      }
+      case "task_cancelled": {
+        if (taskId !== undefined) {
+          cancelledTasks.add(taskId);
+        }
+        break;
+      }
       case "approval_requested": {
         const id = event.data["approvalId"];
         if (typeof id === "string") {
@@ -418,6 +459,18 @@ export async function computeCoordinationMetrics(
     }
   }
 
+  // Every way a task can be over. A prediction waits for its members to
+  // finish before it means anything, and "finished" has to name all four
+  // endings: a pair whose tasks answered a question and stopped was left
+  // waiting forever on `canonical_promoted` events that were never coming,
+  // so its verdict sat in `openPredictions` rather than being decided.
+  const settledTasks = new Set<string>([
+    ...integratedTasks,
+    ...reportedTasks,
+    ...failedTasks,
+    ...cancelledTasks,
+  ]);
+
   let confirmedByContention = 0;
   let confirmedByOwnHold = 0;
   let falsePositives = 0;
@@ -438,9 +491,7 @@ export async function computeCoordinationMetrics(
     // both land.
     if (taskIds.some((id) => contendedTasks.has(id))) {
       confirmedByContention += 1;
-    } else if (
-      !taskIds.every((id) => integratedTasks.has(id) || failedTasks.has(id))
-    ) {
+    } else if (!taskIds.every((id) => settledTasks.has(id))) {
       openPredictions += 1;
     } else if (taskIds.some((id) => deferredTasks.has(id))) {
       confirmedByOwnHold += 1;
@@ -517,7 +568,16 @@ export async function computeCoordinationMetrics(
     throughput: {
       tasksSubmitted: submittedAt.size,
       tasksIntegrated: integratedTasks.size,
+      tasksReported: reportedTasks.size,
       tasksFailed: failedTasks.size,
+      tasksCancelled: cancelledTasks.size,
+      // Counted against the submissions this window actually saw, and by
+      // membership rather than subtraction: a task can carry more than one
+      // ending — a cancel landing on something already failing — so summing
+      // the buckets and subtracting would report a negative remainder.
+      tasksUnaccounted: [...submittedAt.keys()].filter(
+        (id) => !settledTasks.has(id),
+      ).length,
       averageTimeToIntegrationMs: average(integrationDurations),
     },
     approvals: {

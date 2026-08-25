@@ -855,7 +855,10 @@ async function runMetrics(json: boolean): Promise<void> {
     console.log("Throughput");
     console.log(`  Tasks submitted:         ${throughput.tasksSubmitted}`);
     console.log(`  Tasks integrated:        ${throughput.tasksIntegrated}`);
+    console.log(`  Tasks reported:          ${throughput.tasksReported}`);
     console.log(`  Tasks failed:            ${throughput.tasksFailed}`);
+    console.log(`  Tasks cancelled:         ${throughput.tasksCancelled}`);
+    console.log(`  Tasks unaccounted:       ${throughput.tasksUnaccounted}`);
     console.log(
       `  Avg time to integration: ${
         throughput.averageTimeToIntegrationMs === undefined

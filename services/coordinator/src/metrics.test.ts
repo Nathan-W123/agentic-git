@@ -204,6 +204,65 @@ test("throughput, restarts, and approval latency come from event timestamps", as
   await store.close();
 });
 
+test("every submitted task lands in exactly one throughput bucket", async () => {
+  const store = new InMemoryCoordinationStore();
+  // Five submissions and five different endings, including the two that used
+  // to have nowhere to go. A task answered without editing anything is the
+  // ordinary case in a chat, and it reached this function looking exactly
+  // like a task that was never finished at all.
+  for (const id of ["task_1", "task_2", "task_3", "task_4", "task_5"]) {
+    await append(store, "task_submitted", id, {});
+  }
+  await append(store, "canonical_promoted", "task_1", {});
+  await append(store, "task_reported", "task_2", {
+    explanation: "Read the file out; nothing to change.",
+  });
+  await append(store, "task_failed", "task_3", {});
+  await append(store, "task_cancelled", "task_4", {});
+  // task_5 gets nothing: still running, or its run died holding it.
+
+  const metrics = await computeCoordinationMetrics(store);
+  const throughput = metrics.throughput;
+  assert.equal(throughput.tasksSubmitted, 5);
+  assert.equal(throughput.tasksIntegrated, 1);
+  assert.equal(throughput.tasksReported, 1);
+  assert.equal(throughput.tasksFailed, 1);
+  assert.equal(throughput.tasksCancelled, 1);
+  assert.equal(throughput.tasksUnaccounted, 1);
+  // The property worth having, and the one the old shape could not state:
+  // the endings and the residual add back up to what was asked for.
+  assert.equal(
+    throughput.tasksIntegrated +
+      throughput.tasksReported +
+      throughput.tasksFailed +
+      throughput.tasksCancelled +
+      throughput.tasksUnaccounted,
+    throughput.tasksSubmitted,
+  );
+
+  await store.close();
+});
+
+test("a prediction over tasks that only answered questions is not left open", async () => {
+  const store = new InMemoryCoordinationStore();
+  await append(store, "task_submitted", "task_1", {});
+  await append(store, "task_submitted", "task_2", {});
+  await append(store, "conflict_detected", "task_1", {
+    taskIds: ["task_1", "task_2"],
+    disposition: "observe",
+  });
+  // Both finished, neither by moving canonical. Waiting for a promotion that
+  // was never coming parked this verdict in `openPredictions` for good.
+  await append(store, "task_reported", "task_1", {});
+  await append(store, "task_cancelled", "task_2", {});
+
+  const metrics = await computeCoordinationMetrics(store);
+  assert.equal(metrics.conflicts.openPredictions, 0);
+  assert.equal(metrics.conflicts.falsePositives, 1);
+
+  await store.close();
+});
+
 test("a project filter keeps only events stamped with that project", async () => {
   const store = new InMemoryCoordinationStore();
   await append(store, "task_submitted", "task_here", {
