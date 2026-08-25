@@ -102,6 +102,7 @@ import {
   revokeRepositoryGrant,
   updateMemberRole,
   iAmSystemAdmin,
+  canManageOrganization,
   openBillingPortal,
   startCheckout,
   ensureBilling,
