@@ -1533,6 +1533,21 @@ function admissionsCard() {
       </div>
       <div class="set-row">
         <span class="sr-body">
+          <div class="sr-title">Review every changeset</div>
+          <div class="sr-sub">Pause on the diff as well as the plan, whatever
+            its risk.</div>
+        </span>
+        <span class="sr-ctl">
+          <button type="button" class="switch${
+            approvals.requireChangesetReview === true ? " on" : ""
+          }" data-act="toggle" data-field="requireChangesetReview"
+            aria-label="Review every changeset"></button>
+          <input type="hidden" name="requireChangesetReview"
+            value="${approvals.requireChangesetReview === true ? "true" : "false"}">
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="sr-body">
           <div class="sr-title">Protected paths</div>
           <div class="sr-sub">One glob per line. Changes here always need review.</div>
         </span>
@@ -1562,6 +1577,19 @@ function admissionsCard() {
         <span class="sr-ctl">
           <input class="input" name="maxTaskRuntimeMinutes" style="width:110px"
             value="${esc(minutesValue(budgets.maxTaskRuntimeMs))}"
+            placeholder="Unlimited">
+        </span>
+      </div>
+      <div class="set-row">
+        <span class="sr-body">
+          <div class="sr-title">Daily runtime budget</div>
+          <div class="sr-sub">Minutes every task in this project may run
+            between one midnight and the next.</div>
+        </span>
+        <span class="sr-ctl">
+          <input class="input" name="maxProjectRuntimeMinutesPerDay"
+            style="width:110px"
+            value="${esc(minutesValue(budgets.maxProjectRuntimeMsPerDay))}"
             placeholder="Unlimited">
         </span>
       </div>
@@ -3651,8 +3679,19 @@ async function savePolicy(form) {
       protectedPaths: String(data.get("protectedPaths") ?? ""),
       approvalTimeoutMinutes: String(data.get("approvalTimeoutMinutes") ?? ""),
       maxTaskRuntimeMinutes: String(data.get("maxTaskRuntimeMinutes") ?? ""),
+      maxProjectRuntimeMinutesPerDay: String(
+        data.get("maxProjectRuntimeMinutesPerDay") ?? "",
+      ),
     });
-    await api(`/projects/${encodeURIComponent(state.projectId)}/policy`, {
+    // The project itself. There has never been a `/policy` sub-route — every
+    // project sub-pattern in the gateway is anchored, so this PATCH fell
+    // through to "Route was not found" and the whole card silently saved
+    // nothing: human approval, schema review, protected paths, the approval
+    // timeout and the runtime cap, which are the controls a team sets before
+    // letting agents write to their repository. `policyPayload` already
+    // returns `{ policy }`, which is exactly what `PATCH /projects/:id`
+    // takes.
+    await api(`/projects/${encodeURIComponent(state.projectId)}`, {
       method: "PATCH",
       body,
     });

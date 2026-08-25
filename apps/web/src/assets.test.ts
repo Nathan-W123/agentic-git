@@ -505,11 +505,25 @@ async function publicFile(name: string): Promise<string> {
 
 /** Lifts one self-contained top-level function out of the browser bundle. */
 function extract<T>(source: string, name: string, nextName: string): T {
+  return new Function(
+    `${sourceOf(source, name, nextName)}\nreturn ${name};`,
+  )() as T;
+}
+
+/**
+ * One function's text, for the assertions that are about what it *says*
+ * rather than what it returns.
+ *
+ * A function that reaches for `api`, `state` and `render` cannot be lifted
+ * out and called — but its URL and its form field names are readable, and
+ * those are exactly the halves nothing else checks.
+ */
+function sourceOf(source: string, name: string, nextName: string): string {
   const start = source.indexOf(`function ${name}`);
   const end = source.indexOf(`\nfunction ${nextName}`, start);
   assert.notEqual(start, -1, `${name} was not found in app.js`);
   assert.notEqual(end, -1, `${nextName} was not found after ${name}`);
-  return new Function(`${source.slice(start, end)}\nreturn ${name};`)() as T;
+  return source.slice(start, end);
 }
 
 /* -------------------------------------------------------- policy form ---- */
@@ -533,6 +547,43 @@ async function policyForm(): Promise<(input: PolicyInput) => PolicyBody> {
     "minutesValue",
   );
 }
+
+test("the admissions form saves to a route that exists, with every field on it", async () => {
+  // Two failures nothing here could see, because every policy test lifted
+  // `policyPayload` out and checked the body it builds.
+  //
+  // The body was always right. It was PATCHed to `/projects/{id}/policy`,
+  // and there is no such route — every project sub-pattern in the gateway is
+  // anchored, so it fell through to "Route was not found" and the entire
+  // Admissions card saved nothing. And `savePolicy` read a
+  // `requireChangesetReview` field the card never rendered, so the one
+  // control that could have been set was submitted as `false` on every save.
+  const source = await browserSource();
+  const save = sourceOf(source, "savePolicy", "applyTheme");
+  // Read out of the call rather than matched against the whole function, so
+  // prose about the bug cannot satisfy the assertion about the fix.
+  const url = /api\(\s*`([^`]*)`/u.exec(save)?.[1];
+  assert.equal(
+    url,
+    "/projects/${encodeURIComponent(state.projectId)}",
+    "the policy goes to the project route itself; no sub-route exists",
+  );
+
+  // Every field the save reads has to be a field the form renders, or it is
+  // submitted as its empty value however the person set it.
+  const card = sourceOf(source, "admissionsCard", "repositoryCard");
+  const read = [...save.matchAll(/data\.get\("([^"]+)"\)/gu)].map(
+    (match) => match[1],
+  );
+  assert.ok(read.length >= 7, `expected the whole form, saw ${String(read.length)}`);
+  for (const field of read) {
+    assert.match(
+      card,
+      new RegExp(`name="${String(field)}"`, "u"),
+      `savePolicy reads ${String(field)}, which the form never renders`,
+    );
+  }
+});
 
 test("an untouched policy form clears the policy rather than storing an empty one", async () => {
   const policyPayload = await policyForm();
