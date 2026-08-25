@@ -11243,6 +11243,19 @@ export class ApiGateway {
           "No price is configured for this deployment",
         );
       }
+      if (
+        (await this.options.store.getSubscription(organizationId))?.status ===
+        "comped"
+      ) {
+        // Refused at the route, not only hidden in the interface. A comped
+        // team has nothing to buy, and a checkout it completes — or abandons —
+        // is the one way its comp can be taken away from it.
+        throw new HttpError(
+          409,
+          "already_comped",
+          "This team is not billed. There is nothing to buy.",
+        );
+      }
       const memberships =
         await this.options.store.listMemberships(organizationId);
       const existing =
@@ -20030,6 +20043,27 @@ export class ApiGateway {
     if ((await this.options.store.getOrganization(input.organizationId)) === undefined) {
       process.stderr.write(
         `[stripe] event named unknown organization ${input.organizationId}\n`,
+      );
+      return;
+    }
+    const existing = await this.options.store.getSubscription(
+      input.organizationId,
+    );
+    if (existing?.status === "comped") {
+      // A comp is a decision a person made, and Stripe has no opinion about
+      // it. `saveSubscription` writes the row whole in all three backends —
+      // deliberately, so a half-updated row cannot hide a billing bug — so
+      // without this guard any event at all would overwrite the comp.
+      //
+      // The destructive case needs no bad luck: `subscriptionStatusFrom`
+      // reads every status it does not recognise as `canceled`, `incomplete`
+      // among them, and `incomplete` is what an abandoned checkout produces.
+      // So opening a checkout on a comped organization and closing the tab
+      // converts a permanently free team into a cancelled one — and nothing
+      // in the product writes `comped` back, because the migration that
+      // granted it is its only writer. There is no way out from inside.
+      process.stderr.write(
+        `[stripe] event for comped organization ${input.organizationId} ignored\n`,
       );
       return;
     }
