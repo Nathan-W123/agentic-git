@@ -25,6 +25,7 @@ import {
   elidedHistoryNotice,
   estimateTokens,
   explainAnswerFailure,
+  isLoopbackCallback,
   looksLikeTaskRequest,
   narrateTaskEvent,
   normaliseThreadTitle,
@@ -1594,6 +1595,27 @@ test("open WebSockets are closed when their user is disabled", async (t) => {
 
   assert.equal(closeCode, 1008);
 });
+
+/**
+ * A POST with no credential of any kind, standing in for an app that does not
+ * have one yet.
+ */
+async function bareRequest(
+  origin: string,
+  path: string,
+  body: unknown,
+): Promise<{ status: number; data: any }> {
+  const response = await fetch(`${origin}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    data: text.length === 0 ? undefined : JSON.parse(text),
+  };
+}
 
 /** A bare fetch with no cookies, standing in for a CLI, worker, or agent. */
 async function bearer(
@@ -16868,4 +16890,137 @@ test("a token can be created, seen in the list, and revoked from a session", asy
     ).length,
     0,
   );
+});
+
+test("an app callback is only ever an address on this machine", () => {
+  // The one check this flow cannot get wrong. The browser is about to be sent
+  // to this address carrying a code that buys a token, so anything that is not
+  // loopback is not an open redirect — it is a way to have somebody sign in
+  // and hand the result to whoever asked.
+  for (const allowed of [
+    "http://127.0.0.1:53127/callback",
+    "http://localhost:8123/cb",
+    "http://[::1]:9000/cb",
+    // Any port, because the app takes whatever was free at startup.
+    "http://127.0.0.1:1/cb",
+  ]) {
+    assert.equal(isLoopbackCallback(allowed), true, allowed);
+  }
+
+  for (const refused of [
+    // The obvious one, and the whole reason for the check.
+    "http://evil.example.com/cb",
+    "https://evil.example.com/cb",
+    // Hostnames that merely start or end like loopback.
+    "http://127.0.0.1.evil.example.com/cb",
+    "http://localhost.evil.example.com/cb",
+    "http://notlocalhost/cb",
+    // Credentials in the URL, which some parsers read as the host.
+    "http://127.0.0.1@evil.example.com/cb",
+    "http://user:pass@127.0.0.1/cb",
+    // Schemes that are not a loopback listener at all.
+    "file:///tmp/cb",
+    "javascript:alert(1)",
+    "data:text/html,<script>",
+    "app://kumi/cb",
+    // Not a URL.
+    "",
+    "not a url",
+    "//127.0.0.1/cb",
+  ]) {
+    assert.equal(isLoopbackCallback(refused), false, refused);
+  }
+});
+
+test("approving an app hands the browser a code, and the code buys one token", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const approved = await client.request(
+    "/api/v1/auth/app-authorization/approve",
+    {
+      method: "POST",
+      body: {
+        name: "Kumi on my laptop",
+        redirectUri: "http://127.0.0.1:53127/callback",
+        state: "abc123",
+      },
+    },
+  );
+  assert.equal(approved.status, 201);
+
+  // The redirect carries a code, never the token: a token in a redirect is a
+  // token in the browser's history and in whatever the loopback server logs.
+  const target = new URL(approved.data.redirectTo as string);
+  assert.equal(target.origin, "http://127.0.0.1:53127");
+  assert.equal(target.searchParams.get("state"), "abc123");
+  const code = target.searchParams.get("code") ?? "";
+  assert.ok(code.length > 20, code);
+  assert.equal(target.searchParams.get("token"), null);
+
+  // Exchanged with no credential at all, which is the point: the app has none
+  // yet, and acquiring one is what the call is for.
+  const exchanged = await bareRequest(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/exchange",
+    { code },
+  );
+  assert.equal(exchanged.status, 201);
+  assert.match(exchanged.data.token as string, /^coord_pat_/u);
+  assert.equal(exchanged.data.name, "Kumi on my laptop");
+
+  // Spent. A second attempt with the same code is refused.
+  const replayed = await bareRequest(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/exchange",
+    { code },
+  );
+  assert.equal(replayed.status, 400);
+
+  // And the token it handed over actually works.
+  const me = await bearer(
+    runtime.origin,
+    "/api/v1/auth/me",
+    exchanged.data.token as string,
+  );
+  assert.equal(me.status, 200);
+  assert.equal(me.data.credential, "api_token");
+});
+
+test("an app cannot be approved for somewhere else, or by another app", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const offsite = await client.request(
+    "/api/v1/auth/app-authorization/approve",
+    {
+      method: "POST",
+      body: {
+        name: "Definitely fine",
+        redirectUri: "https://evil.example.com/cb",
+        state: "x",
+      },
+    },
+  );
+  assert.equal(offsite.status, 400);
+  assert.equal(offsite.data.error.code, "callback_rejected");
+
+  // A token approving the next app would make revoking this one pointless —
+  // the same rule minting a token by hand already follows.
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "existing", scopes: ["view"] },
+  });
+  const byToken = await bearer(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/approve",
+    created.data.token as string,
+    {
+      method: "POST",
+      body: { name: "chained", redirectUri: "http://127.0.0.1:1/cb", state: "" },
+    },
+  );
+  assert.equal(byToken.status, 403);
 });

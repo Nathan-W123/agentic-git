@@ -2556,6 +2556,58 @@ const PLAN_HOLD_TTL_MS = 15 * 60_000;
  */
 const SOCKET_TICKET_TTL_MS = 30_000;
 
+/**
+ * How long an approved app has to collect its token.
+ *
+ * Longer than a socket ticket because a person is in the loop — the browser
+ * has to redirect and the waiting app has to notice — and still short enough
+ * that an abandoned approval is not a credential lying around.
+ */
+const APP_AUTHORIZATION_TTL_MS = 120_000;
+
+/**
+ * What an app approved through the browser may do.
+ *
+ * Read the room and start work — the two a client needs to be the dashboard,
+ * and deliberately not everything its owner can do. The token lives on a
+ * laptop rather than in a session that expires, so it gets the smallest set
+ * that still makes it useful; `issueApiToken` refuses anything above the
+ * owner's role regardless.
+ */
+const APP_TOKEN_SCOPES = ["view", "run_task"] as const;
+
+/**
+ * Whether a desktop app's callback is somewhere only that app can hear.
+ *
+ * The one check this flow cannot get wrong. The browser is about to be sent
+ * to this address carrying a code that can be exchanged for a token, so an
+ * unchecked value here is not an open redirect — it is a way to have somebody
+ * sign in and hand the result to an attacker. Loopback is the whole allowance:
+ * an app running on the person's own machine, reachable from nowhere else.
+ *
+ * Any port, because the app picks a free one at startup and cannot know it
+ * in advance. No credentials in the URL, no https — a loopback listener has
+ * no certificate anybody could verify, which is exactly why the standard
+ * carve-out for it exists.
+ */
+export function isLoopbackCallback(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:") {
+    return false;
+  }
+  if (url.username !== "" || url.password !== "") {
+    return false;
+  }
+  // `hostname` rather than `host`: the port is separate there, and IPv6
+  // arrives bracketed in one and bare in the other.
+  return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
+}
+
 const AUTO_CLAIM_OFFER_TAIL =
   'Say "yes" and I\'ll ask you what I need before I start — or @mention ' +
   "someone else.";
@@ -4190,12 +4242,54 @@ export class ApiGateway {
   >();
 
   /**
+   * Apps a person has approved, waiting to collect their token.
+   *
+   * The redirect carries this rather than the token itself. A token in a
+   * redirect URL is a token in the browser's history, in whatever the
+   * loopback server logs, and in any extension watching navigation; a code is
+   * worth nothing without the exchange that spends it, and the exchange is a
+   * POST that leaves no such trail. Single-use and short-lived, held in
+   * memory for the same reason socket tickets are.
+   */
+  private readonly appAuthorizations = new Map<
+    string,
+    {
+      token: string;
+      tokenId: string;
+      name: string;
+      approver: AuthenticatedPrincipal;
+      expiresAt: number;
+    }
+  >();
+
+  /**
    * Drops tickets nobody redeemed.
    *
    * Called when one is minted rather than on a timer: the map only grows by
    * minting, so that is the one moment it can need it, and a deployment
    * nobody is signing into does not want a timer for an empty map.
    */
+  /**
+   * Drops approvals nobody collected, and withdraws the token with them.
+   *
+   * An app that was approved and then never started leaves a credential
+   * nobody is holding. Revoking it is what keeps "approve" from quietly
+   * meaning "issue a token to no one" — and it is why the token may be minted
+   * before it is collected at all.
+   */
+  private pruneAppAuthorizations(): void {
+    const now = Date.now();
+    for (const [code, approved] of this.appAuthorizations) {
+      if (approved.expiresAt > now) {
+        continue;
+      }
+      this.appAuthorizations.delete(code);
+      void this.auth
+        .revokeApiToken(approved.approver, approved.tokenId, "never_collected")
+        .catch(() => undefined);
+    }
+  }
+
   private pruneSocketTickets(): void {
     const now = Date.now();
     for (const [ticket, held] of this.socketTickets) {
@@ -4787,6 +4881,12 @@ export class ApiGateway {
             // Creating an account cannot require an account.
             `${API_PREFIX}/auth/register`,
             `${API_PREFIX}/auth/register/confirm`,
+            // The app collecting its token has no credential to present —
+            // acquiring one is the entire point of the call. What stands in
+            // for authentication is the code: minted only by an approval a
+            // signed-in person clicked through, single-use, and dead within
+            // two minutes.
+            `${API_PREFIX}/auth/app-authorization/exchange`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
           url.pathname.endsWith("/accept") &&
@@ -5411,6 +5511,30 @@ export class ApiGateway {
       throw new HttpError(405, "method_not_allowed", "Unsupported method");
     }
 
+    if (
+      path === `${API_PREFIX}/auth/app-authorization/exchange` &&
+      method === "POST"
+    ) {
+      const body = objectBody(await this.readJson(request));
+      const code = String(body["code"] ?? "");
+      const approved = this.appAuthorizations.get(code);
+      // Deleted whether or not it was still good: a code is spent by being
+      // presented, so a replay fails even inside the window.
+      this.appAuthorizations.delete(code);
+      if (approved === undefined || approved.expiresAt <= Date.now()) {
+        throw new HttpError(
+          400,
+          "authorization_expired",
+          "That approval is no longer valid — start the sign-in again",
+        );
+      }
+      this.sendJson(response, 201, {
+        token: approved.token,
+        name: approved.name,
+      });
+      return;
+    }
+
     const principal = this.requirePrincipal(context);
     if (method === "POST" && path === `${API_PREFIX}/auth/logout`) {
       // A bearer token has no session to end; revoking it is a separate,
@@ -5927,6 +6051,69 @@ export class ApiGateway {
       }
 
       throw new HttpError(405, "method_not_allowed", "Unsupported lease action");
+    }
+
+    if (
+      path === `${API_PREFIX}/auth/app-authorization/approve` &&
+      method === "POST"
+    ) {
+      // Session only, exactly as minting a token by hand is: an app that
+      // could approve the next app would make revoking this one pointless.
+      if (principal.credential !== "session") {
+        throw new HttpError(
+          403,
+          "session_required",
+          "Approving an app requires a signed-in session",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const callback = String(body["redirectUri"] ?? "");
+      if (!isLoopbackCallback(callback)) {
+        throw new HttpError(
+          400,
+          "callback_rejected",
+          "An app callback must be an http address on this machine",
+        );
+      }
+      const user = await this.options.store.getUser(principal.user.id);
+      if (user === undefined) {
+        throw new HttpError(404, "not_found", "User was not found");
+      }
+      const name = stringField(body["name"], "name", { max: 120 }) ?? "Kumi app";
+      // Minted here rather than at collection, because here is where the
+      // session is: bounding a token by what its owner may actually do takes
+      // the live principal and its role, and the route that already does that
+      // correctly is this side of the redirect. What the code carries is the
+      // finished token, and an uncollected one is withdrawn below rather than
+      // left lying about.
+      const issued = await this.auth.issueApiToken({
+        user,
+        name,
+        scopes: [...APP_TOKEN_SCOPES],
+        ...(principal.sessionId === undefined
+          ? {}
+          : { createdBySession: principal.sessionId }),
+      });
+      this.pruneAppAuthorizations();
+      const code = randomBytes(32).toString("base64url");
+      this.appAuthorizations.set(code, {
+        token: issued.token,
+        tokenId: issued.record.id,
+        name,
+        approver: principal,
+        expiresAt: Date.now() + APP_AUTHORIZATION_TTL_MS,
+      });
+      // Built here rather than in the page: the callback has been checked on
+      // this side, and handing back a finished address is what stops the
+      // browser being pointed anywhere the check did not see.
+      const target = new URL(callback);
+      target.searchParams.set("code", code);
+      const state = String(body["state"] ?? "");
+      if (state !== "") {
+        target.searchParams.set("state", state);
+      }
+      this.sendJson(response, 201, { redirectTo: target.toString() });
+      return;
     }
 
     if (path === `${API_PREFIX}/auth/ws-ticket` && method === "POST") {

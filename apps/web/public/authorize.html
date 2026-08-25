@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Approve app · Kumi</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+      .authorize-page {
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .authorize-card {
+        width: min(420px, 100%);
+        display: grid;
+        gap: 16px;
+        padding: 26px 24px;
+        background: var(--bg-card);
+        border: 1px solid var(--border-strong);
+        border-radius: 16px;
+        box-shadow: var(--shadow-pop);
+      }
+      .authorize-card h1 {
+        font-size: 19px;
+        letter-spacing: -0.02em;
+      }
+      .authorize-card p {
+        color: var(--text-3);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .authorize-app {
+        padding: 10px 12px;
+        background: var(--bg-inset);
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        font-size: 13px;
+        font-weight: 550;
+        word-break: break-word;
+      }
+      .authorize-grants {
+        display: grid;
+        gap: 6px;
+        margin: 0;
+        padding-left: 18px;
+        color: var(--text-3);
+        font-size: 12.5px;
+      }
+      .authorize-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+      .authorize-note {
+        color: var(--text-4);
+        font-size: 11.5px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="authorize-page">
+      <section class="authorize-card">
+        <h1 id="heading">Approve this app?</h1>
+        <div class="authorize-app" id="app-name">A Kumi app</div>
+        <p id="detail">
+          It will sign in as you on this machine, and you can revoke it any
+          time in Settings → Advanced.
+        </p>
+        <ul class="authorize-grants">
+          <li>Read your projects, channels, and agents</li>
+          <li>Start and follow work, the same as this browser</li>
+        </ul>
+        <p class="authorize-note" id="note"></p>
+        <div class="authorize-actions">
+          <button class="btn" id="cancel" type="button">Cancel</button>
+          <button class="btn btn-primary" id="approve" type="button">
+            Approve
+          </button>
+        </div>
+      </section>
+    </main>
+    <script type="module">
+      /**
+       * The page an app sends somebody to so they can say yes.
+       *
+       * Deliberately its own document rather than a route in the dashboard.
+       * It is reached from outside — a desktop app opens it — and it must be
+       * legible and decidable on its own: one thing being asked for, by name,
+       * with the two buttons that answer it. Loading the whole control room to
+       * render a confirmation would also mean every one of its modules runs
+       * before the person can read the question.
+       */
+      const params = new URLSearchParams(window.location.search);
+      const redirectUri = params.get("redirect_uri") ?? "";
+      const state = params.get("state") ?? "";
+      const name = (params.get("name") ?? "").trim() || "A Kumi app";
+
+      const heading = document.getElementById("heading");
+      const note = document.getElementById("note");
+      const approve = document.getElementById("approve");
+      const cancel = document.getElementById("cancel");
+      document.getElementById("app-name").textContent = name;
+
+      /**
+       * The same check the server makes, made again here.
+       *
+       * Not a substitute for it — the server's is the one that matters, and it
+       * refuses anything else — but a person should be told the address is
+       * wrong before they approve it, rather than after.
+       */
+      function isLoopback(value) {
+        try {
+          const url = new URL(value);
+          return (
+            url.protocol === "http:" &&
+            url.username === "" &&
+            url.password === "" &&
+            ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+          );
+        } catch {
+          return false;
+        }
+      }
+
+      function csrfToken() {
+        return (
+          document.cookie
+            .split(";")
+            .map((part) => part.trim())
+            .find((part) => part.startsWith("coord_csrf="))
+            ?.slice("coord_csrf=".length) ?? ""
+        );
+      }
+
+      if (!isLoopback(redirectUri)) {
+        heading.textContent = "This sign-in link is not valid";
+        note.textContent =
+          "An app can only be approved for an address on this machine. " +
+          "Start the sign-in again from the app itself.";
+        approve.disabled = true;
+        cancel.textContent = "Close";
+      }
+
+      cancel.addEventListener("click", () => {
+        window.location.assign("/");
+      });
+
+      approve.addEventListener("click", async () => {
+        approve.disabled = true;
+        note.textContent = "Approving…";
+        try {
+          const response = await fetch(
+            "/api/v1/auth/app-authorization/approve",
+            {
+              method: "POST",
+              credentials: "same-origin",
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+                "X-CSRF-Token": csrfToken(),
+              },
+              body: JSON.stringify({ name, redirectUri, state }),
+            },
+          );
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            if (response.status === 401) {
+              // Signing in is the missing step, not a failure. Come back here
+              // afterwards so the app is not left waiting for nothing.
+              const back = encodeURIComponent(
+                window.location.pathname + window.location.search,
+              );
+              window.location.assign(`/#auth?next=${back}`);
+              return;
+            }
+            throw new Error(
+              data?.error?.message ?? `Approval failed (${response.status})`,
+            );
+          }
+          heading.textContent = "Approved";
+          note.textContent = "Returning you to the app…";
+          // The address the server built, not the one this page was handed:
+          // it was checked on that side, and this is what keeps the browser
+          // from being sent somewhere the check never saw.
+          window.location.assign(data.redirectTo);
+        } catch (error) {
+          approve.disabled = false;
+          note.textContent = error.message;
+        }
+      });
+    </script>
+  </body>
+</html>
