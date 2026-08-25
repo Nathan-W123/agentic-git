@@ -20482,7 +20482,7 @@ export class ApiGateway {
     response.setHeader(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-        "img-src 'self' data:; connect-src 'self' ws: wss:; " +
+        "img-src 'self' data: blob:; connect-src 'self' ws: wss:; " +
         "font-src 'self'; worker-src 'self'; object-src 'none'; " +
         "base-uri 'none'; frame-ancestors 'none'",
     );

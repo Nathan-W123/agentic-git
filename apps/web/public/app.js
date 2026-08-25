@@ -103,6 +103,7 @@ import {
   updateMemberRole,
   iAmSystemAdmin,
   canManageOrganization,
+  resolveAttachmentImages,
   openBillingPortal,
   startCheckout,
   ensureBilling,
@@ -6264,6 +6265,9 @@ function renderNow() {
       });
     }
   }
+  // Images that could not carry a credential in their tag. A no-op in a
+  // browser, where the cookie went with them.
+  void resolveAttachmentImages(root);
   if (state.settingsOpen === true) {
     const repositoryId = activeChannelId();
     // Once per repository, same claim pattern as previews: `undefined` is
