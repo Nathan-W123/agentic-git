@@ -72,17 +72,19 @@ test("a lapsed owner is still refused everything else", async () => {
   try {
     // The gate itself is not being weakened: folding is still what happens on
     // every ordinary route, which is the whole reason it exists.
-    await assert.rejects(
-      async () =>
-        await authorizeOrganization(
-          store,
-          principal,
-          organizationId,
-          "run_task",
-        ),
-      /forbidden|permission/iu,
-      "a lapsed owner must not be able to start work",
-    );
+    for (const permission of ["run_task", "import_repository"] as const) {
+      await assert.rejects(
+        async () =>
+          await authorizeOrganization(
+            store,
+            principal,
+            organizationId,
+            permission,
+          ),
+        /forbidden|permission/iu,
+        `a lapsed owner must not be able to ${permission}`,
+      );
+    }
   } finally {
     await store.close();
   }
