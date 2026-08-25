@@ -22,8 +22,18 @@ test("loads every control-room asset with an explicit content type", async () =>
     "application/manifest+json",
   );
   assert.equal(assets.get("/kumi-logo.png")?.contentType, "image/png");
+  // Narrowed rather than asserted through: `StaticAsset.body` is
+  // `Buffer | string` because text assets are served as text, and a PNG that
+  // arrived as a string is already corrupt before its header can be read. So
+  // "is it bytes" is the first half of "is it a PNG", not a type-checker
+  // formality.
+  const logo = assets.get("/kumi-logo.png")?.body;
+  assert.ok(
+    Buffer.isBuffer(logo),
+    "the Kumi artwork should be served as bytes, not decoded text",
+  );
   assert.equal(
-    assets.get("/kumi-logo.png")?.body.subarray(0, 8).toString("hex"),
+    logo.subarray(0, 8).toString("hex"),
     "89504e470d0a1a0a",
     "the served Kumi artwork should be a PNG",
   );
