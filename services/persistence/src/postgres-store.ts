@@ -2795,9 +2795,22 @@ export class PostgresCoordinationStore implements CoordinationStore {
       clauses.push(`task_id = ${bind(values, filter.taskId)}`);
     }
     if (filter.projectId !== undefined) {
-      // Stamped inside the event payload rather than promoted to a column.
+      // Stamped inside the event payload when the writer knew it, and carried
+      // by the run it was written under when it did not. The coordinator
+      // stamps only four of its forty-six traces, and every `task_failed` is
+      // among the forty-two that do not — so a payload-only test discarded
+      // every failure, every reported task and every restart before the
+      // metrics ever saw them, and the dashboard read them as zero.
+      //
+      // The whole disjunction is parenthesized. This list is joined with AND
+      // and OR binds looser, so a bare `a = $n OR ...` would split the WHERE
+      // into two arms and let each half bypass the other half's filters —
+      // including `sequence >`, whose loss makes the metrics pager loop
+      // forever on the same page.
+      const project = bind(values, filter.projectId);
       clauses.push(
-        `(data_json::jsonb ->> 'projectId') = ${bind(values, filter.projectId)}`,
+        `((data_json::jsonb ->> 'projectId') = ${project}
+          OR run_id IN (SELECT id FROM runs WHERE project_id = ${project}))`,
       );
     }
     if (filter.types !== undefined) {

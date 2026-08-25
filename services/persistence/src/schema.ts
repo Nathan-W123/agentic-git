@@ -1247,6 +1247,16 @@ export const MIGRATIONS: readonly Migration[] = [
          ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
     ],
   },
+  {
+    // The project filter on audit events now resolves an unstamped event
+    // through the run it was written under, so `runs` is probed by project on
+    // every filtered audit read — and the metrics pager makes one such read
+    // per 5,000 events. `(project_id, id)` rather than `(project_id)` so the
+    // semi-join can be answered from the index alone.
+    version: 46,
+    name: "runs-by-project",
+    statements: [`CREATE INDEX runs_by_project ON runs(project_id, id)`],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

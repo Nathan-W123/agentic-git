@@ -2808,10 +2808,19 @@ export class SqliteCoordinationStore implements CoordinationStore {
       values.push(filter.taskId);
     }
     if (filter.projectId !== undefined) {
-      // Stamped inside the event payload rather than promoted to a column, so
-      // it is read back out of the JSON.
-      clauses.push("json_extract(data_json, '$.projectId') = ?");
-      values.push(filter.projectId);
+      // Stamped inside the event payload when the writer knew it, and carried
+      // by the run it was written under when it did not. See the matching
+      // comment in postgres-store.ts for why a payload-only test read every
+      // coordinator failure as zero.
+      //
+      // The whole disjunction is parenthesized, because this list is joined
+      // with AND and OR binds looser. Two placeholders, so the value is bound
+      // twice — and before `limit`, which is pushed last.
+      clauses.push(
+        `(json_extract(data_json, '$.projectId') = ?
+          OR run_id IN (SELECT id FROM runs WHERE project_id = ?))`,
+      );
+      values.push(filter.projectId, filter.projectId);
     }
     if (filter.types !== undefined) {
       if (filter.types.length === 0) {
