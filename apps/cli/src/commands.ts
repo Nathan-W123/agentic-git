@@ -925,17 +925,6 @@ export async function cancelTasks(
       // Settled between the listing and now. Its ending already happened.
       continue;
     }
-    await store
-      .appendAudit(undefined, {
-        type: "task_cancelled",
-        taskId: task.id,
-        data: {
-          projectId: task.projectId,
-          repositoryId: task.repositoryId,
-          reason: input.reason,
-        },
-      })
-      .catch(() => undefined);
     await input.cancellations?.cancel(task.id, input.reason);
     const lease = activeLeases.find(
       (candidate) => candidate.taskId === task.id,
