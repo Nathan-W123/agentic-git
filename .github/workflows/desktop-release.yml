@@ -132,7 +132,7 @@ jobs:
           missing=0
           checked=0
           for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
-              apps/web/public/download.html | sort -u); do
+              apps/web/public/download.html apps/web/public/download.js | sort -u); do
             case "$file" in
               "Kumi-$KEY-"*) ;;
               *) continue ;;
@@ -188,7 +188,7 @@ jobs:
           set -euo pipefail
           missing=0
           for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
-              apps/web/public/download.html | sort -u); do
+              apps/web/public/download.html apps/web/public/download.js | sort -u); do
             if [ -f "installers/$file" ]; then
               echo "  ok       $file"
             else
