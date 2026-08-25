@@ -54,10 +54,13 @@ test("the footer links are addresses rather than dead hashes", async () => {
     /href="#signin" data-act="auth-mode" data-value="login"/u,
     "the sign-in link should point at #signin",
   );
+  // New people are sent to the paid trial now, not to the free form. The
+  // assertion is the same one either way: the link out of sign-in is a real
+  // address somebody can be sent, rather than a dead `#`.
   assert.match(
     app,
-    /href="#register" data-act="auth-mode" data-value="register"/u,
-    "the create-account link should point at #register",
+    /href="#signup" data-act="auth-mode" data-value="signup"/u,
+    "the create-account link should point at #signup",
   );
   const auth = app.slice(app.indexOf("function renderAuth()"));
   const foot = auth.slice(0, auth.indexOf("async function submitLogin"));
@@ -286,4 +289,57 @@ test("the signed-out shell keeps the secret in a reset link", async () => {
     /!window\.location\.hash\.startsWith\(`#\$\{hash\}`\)/u,
     "the reset token should survive the hash being normalised",
   );
+});
+
+test("the paid sign-up has a page, a return address, and no card of its own", async () => {
+  const app = await publicFile("app.js");
+
+  // Two more addresses: where a trial starts, and where Stripe sends the
+  // browser back to. `#welcome/<token>` carries its claim secret in the
+  // fragment for the same reason `#reset/<token>` does — the browser never
+  // sends it, so it stays out of access logs and out of `Referer`.
+  for (const [hash, mode] of [
+    ["signup", "signup"],
+    ["welcome", "welcome"],
+  ]) {
+    assert.match(
+      app,
+      new RegExp(`\\["${hash}", "${mode}"\\]`, "u"),
+      `${hash} should open the ${mode} form`,
+    );
+  }
+
+  // The card is collected on Stripe's page and nowhere else. A card field on
+  // this origin would be a different product with a different compliance
+  // burden, so its absence is worth asserting rather than assuming.
+  const signup = app.slice(
+    app.indexOf("function renderSignup()"),
+    app.indexOf("function renderWelcome()"),
+  );
+  assert.match(signup, /name="email"/u);
+  // Card *fields*, not the word — `auth-card` is the form's own class, and a
+  // regex that cannot tell those apart proves nothing.
+  assert.doesNotMatch(signup, /name="(card|cvc|cc-|expiry)/iu);
+  assert.doesNotMatch(signup, /autocomplete="cc-/iu);
+  assert.match(signup, /data-act="signup"/u);
+
+  // The trial's terms are stated where the card is asked for, not buried.
+  assert.match(signup, /Fourteen days free/u);
+  assert.match(signup, /bill you on day\s*\n?\s*fifteen/u);
+
+  // Coming back from Stripe, the account is made here — after the payment,
+  // never before it.
+  const welcome = app.slice(
+    app.indexOf("function renderWelcome()"),
+    app.indexOf("function renderPasswordReset()"),
+  );
+  assert.match(welcome, /data-act="signup-complete"/u);
+  assert.match(welcome, /name="displayName"/u);
+  assert.match(welcome, /name="password"/u);
+  // Arriving before the webhook lands is ordinary, not a failure.
+  assert.match(welcome, /Confirming your payment/u);
+  assert.match(app, /welcomePoll = window\.setTimeout/u);
+
+  // Sign-in sends new people to the paid trial rather than the free form.
+  assert.match(app, /href="#signup"[^>]*data-value="signup"/u);
 });

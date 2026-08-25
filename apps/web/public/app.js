@@ -373,6 +373,13 @@ function minutesValue(milliseconds) {
 const AUTH_HASHES = new Map([
   ["signin", "login"],
   ["register", "register"],
+  // Paid sign-up, and the screen somebody lands on coming back from Stripe.
+  // `#welcome/<token>` carries its claim secret the way `#reset/<token>`
+  // carries its own: in the fragment, which the browser never sends, so it
+  // stays out of access logs and out of `Referer` on the way to whatever the
+  // page loads next.
+  ["signup", "signup"],
+  ["welcome", "welcome"],
   ["setup", "bootstrap"],
   ["forgot", "forgot"],
   ["reset", "reset"],
@@ -409,6 +416,8 @@ function passwordResetTokenFromHash() {
  * undefined until the answer comes back.
  */
 let resetState;
+let welcomeState;
+let welcomePoll;
 /** The mailed-code challenge returned before a self-service account exists. */
 let pendingRegistration;
 
@@ -611,6 +620,12 @@ function renderAuth() {
   if (authMode === "forgot" || authMode === "reset") {
     return renderPasswordReset();
   }
+  if (authMode === "signup") {
+    return renderSignup();
+  }
+  if (authMode === "welcome") {
+    return renderWelcome();
+  }
   if (authMode === "register" && pendingRegistration !== undefined) {
     return renderRegistrationConfirmation();
   }
@@ -733,7 +748,11 @@ function renderAuth() {
             ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
             : register
               ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
-              : `New here? <a class="link-muted" href="#register" data-act="auth-mode" data-value="register">Create an account</a>.`
+              : // Points at the paid sign-up, which is the one that takes a
+                // card and starts the trial. `#register` still resolves, so a
+                // link somebody already has keeps working until the free path
+                // is retired in its own commit.
+                `New here? <a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
       }</p>
     </div>
   </main>`;
@@ -747,6 +766,99 @@ function renderAuth() {
  * share the shell — and because the reset half has to say something useful
  * when the link has expired, which is the state people actually arrive in.
  */
+/** Where a paid sign-up starts: an address, then Stripe takes the card. */
+function renderSignup() {
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandWordmark(120)}
+        <div>
+          <h1>Start your free trial</h1>
+          <p>Fourteen days free. We take your card now and bill you on day
+            fifteen — cancel any time before then and you pay nothing.</p>
+        </div>
+      </div>
+      <form class="auth-card" data-act="signup">
+        <label class="field">
+          <span>Work email</span>
+          <input class="input" name="email" type="email"
+            autocomplete="email" required placeholder="you@company.com">
+        </label>
+        <label class="field">
+          <span>Team name <span class="muted">(optional)</span></span>
+          <input class="input" name="organizationName"
+            placeholder="Your team">
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Continue to payment
+        </button>
+        <p class="auth-msg" id="auth-msg"></p>
+        <p class="auth-alt">Already have an account?
+          <a href="#signin">Sign in</a></p>
+      </form>
+    </div>
+  </main>`;
+}
+
+/**
+ * Where Stripe sends them back to, and where the account is finally made.
+ *
+ * The payment is confirmed by a webhook rather than by this redirect, so
+ * arriving before it lands is ordinary rather than exceptional — the screen
+ * says so and asks again, instead of showing a failure for something that is
+ * merely a second early.
+ */
+function renderWelcome() {
+  const state_ = welcomeState;
+  if (state_?.error !== undefined) {
+    return `<main class="auth-shell"><div class="auth-box">
+      <div class="auth-mascot">${brandWordmark(120)}
+        <div><h1>That link is not usable</h1>
+        <p>${esc(state_.error)}</p></div></div>
+      <p class="auth-alt"><a href="#signin">Sign in</a> ·
+        <a href="#signup">Start again</a></p>
+    </div></main>`;
+  }
+  if (state_ === undefined || state_.paid !== true) {
+    return `<main class="auth-shell"><div class="auth-box">
+      <div class="auth-mascot">${brandWordmark(120)}
+        <div><h1>Confirming your payment…</h1>
+        <p>This usually takes a second or two. Keep this page open.</p></div>
+      </div>
+    </div></main>`;
+  }
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandWordmark(120)}
+        <div>
+          <h1>You're paid up — finish your account</h1>
+          <p>Your team is ready for ${esc(state_.email ?? "you")}. Choose a
+            name and a password and you're in.</p>
+        </div>
+      </div>
+      <form class="auth-card" data-act="signup-complete">
+        <label class="field"><span>Your name</span>
+          <input class="input" name="displayName" autocomplete="name" required>
+        </label>
+        <label class="field"><span>Password</span>
+          <input class="input" name="password" type="password" minlength="12"
+            autocomplete="new-password" required placeholder="••••••••••••">
+        </label>
+        <label class="field"><span>Confirm password</span>
+          <input class="input" name="confirmPassword" type="password"
+            minlength="12" autocomplete="new-password" required
+            placeholder="••••••••••••">
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Create my account
+        </button>
+        <p class="auth-msg" id="auth-msg"></p>
+      </form>
+    </div>
+  </main>`;
+}
+
 function renderPasswordReset() {
   const reset = authMode === "reset";
   const token = passwordResetTokenFromHash();
@@ -809,6 +921,94 @@ function renderPasswordReset() {
       }</p>
     </div>
   </main>`;
+}
+
+/** The claim secret out of a `#welcome/<token>` link, or "" when absent. */
+function welcomeTokenFromHash() {
+  return window.location.hash.replace(/^#/u, "").split("/").slice(1).join("/");
+}
+
+/**
+ * Asks whether the payment has landed, and keeps asking while it has not.
+ *
+ * Stripe redirects the browser back the instant the card is accepted, but the
+ * event that confirms it arrives separately — so being a second early here is
+ * the ordinary case rather than a failure, and the screen waits rather than
+ * telling somebody who has just paid that something went wrong.
+ */
+async function loadWelcome() {
+  const token = welcomeTokenFromHash();
+  if (token === "") {
+    welcomeState = { error: "That link is incomplete." };
+  } else {
+    try {
+      const answer = await api(`/auth/signup/${encodeURIComponent(token)}`);
+      welcomeState = {
+        email: answer?.email ?? "",
+        paid: answer?.paid === true,
+        claimed: answer?.claimed === true,
+      };
+    } catch (error) {
+      welcomeState = { error: error.message };
+    }
+  }
+  const root = $("#auth-root");
+  if (root !== null && !root.hidden && authMode === "welcome") {
+    root.innerHTML = renderAuth();
+  }
+  window.clearTimeout(welcomePoll);
+  if (welcomeState?.error === undefined && welcomeState?.paid !== true) {
+    welcomePoll = window.setTimeout(() => void loadWelcome(), 2000);
+  }
+}
+
+/** Starts a paid sign-up: an address in, a Stripe checkout out. */
+async function submitSignup(form) {
+  const data = new FormData(form);
+  const organizationName = String(data.get("organizationName") ?? "").trim();
+  try {
+    const answer = await api("/auth/signup", {
+      method: "POST",
+      body: {
+        email: String(data.get("email") ?? ""),
+        // Omitted rather than sent empty, so the server names the team after
+        // them instead of calling it the empty string.
+        ...(organizationName === "" ? {} : { organizationName }),
+      },
+    });
+    // Leaving Kumi entirely: the card is collected on Stripe's own page, and
+    // it is the only page in this flow that ever sees it.
+    window.location.href = answer.url;
+  } catch (error) {
+    $("#auth-msg").textContent = error.message;
+  }
+}
+
+/** Finishes a paid sign-up: the account is made here and nowhere earlier. */
+async function submitSignupComplete(form) {
+  const data = new FormData(form);
+  if (String(data.get("password")) !== String(data.get("confirmPassword"))) {
+    $("#auth-msg").textContent = "Those passwords do not match.";
+    return;
+  }
+  try {
+    await api(
+      `/auth/signup/${encodeURIComponent(welcomeTokenFromHash())}/complete`,
+      {
+        method: "POST",
+        body: {
+          displayName: String(data.get("displayName") ?? ""),
+          password: String(data.get("password") ?? ""),
+        },
+      },
+    );
+    welcomeState = undefined;
+    authMode = "login";
+    window.location.hash = "#chats";
+    await boot();
+  } catch (error) {
+    $("#auth-msg").textContent = error.message;
+  }
 }
 
 /**
@@ -6452,9 +6652,15 @@ function applyHash() {
       if (mode === "reset") {
         resetState = undefined;
       }
+      if (mode === "welcome") {
+        welcomeState = undefined;
+      }
       authRoot.innerHTML = renderAuth();
       if (mode === "reset") {
         void loadPasswordReset();
+      }
+      if (mode === "welcome") {
+        void loadWelcome();
       }
     }
     return;
@@ -8625,6 +8831,12 @@ document.addEventListener("submit", (event) => {
     case "password-reset":
       void submitPasswordReset(form);
       return;
+    case "signup":
+      void submitSignup(form);
+      return;
+    case "signup-complete":
+      void submitSignupComplete(form);
+      return;
     case "policy-save":
       void savePolicy(form);
       return;
@@ -9309,6 +9521,9 @@ function showAuth() {
   $("#auth-root").innerHTML = renderAuth();
   if (authMode === "reset" && resetState === undefined) {
     void loadPasswordReset();
+  }
+  if (authMode === "welcome" && welcomeState === undefined) {
+    void loadWelcome();
   }
 }
 
