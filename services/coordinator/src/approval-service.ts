@@ -323,7 +323,7 @@ export class StoreApprovalController implements ApprovalController {
       taskId: input.taskId,
       kind: input.kind,
       requestedBy: input.requestedBy,
-      requiredRole: "reviewer",
+      requiredRole: "admin",
       reasons: [...input.reasons],
       ...(input.changeSetId === undefined
         ? {}
@@ -416,7 +416,7 @@ export class AutoApprovalController implements ApprovalController {
       taskId: input.taskId,
       kind: input.kind,
       requestedBy: input.requestedBy,
-      requiredRole: "reviewer",
+      requiredRole: "admin",
       reasons: [...input.reasons],
       ...(input.changeSetId === undefined
         ? {}

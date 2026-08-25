@@ -16,6 +16,7 @@ import type {
 import { createId } from "@coord/shared-types";
 
 import { mailDeliveryMode, type Mailer } from "./mailer.js";
+import { trialEndsAtFrom } from "./billing.js";
 
 const SESSION_COOKIE = "coord_session";
 const CSRF_COOKIE = "coord_csrf";
@@ -530,6 +531,15 @@ export class AuthService {
       slug: "default",
       name: "My Project",
       description: "Repositories you create live here.",
+    });
+    // The trial starts here rather than at first use. Starting it on the first
+    // dispatch would mean an account that signed up, looked around, and came
+    // back a month later still had its whole trial — which sounds generous and
+    // is really just an unbounded free tier wearing a trial's name.
+    await this.store.saveSubscription({
+      organizationId: organization.id,
+      status: "trialing",
+      trialEndsAt: trialEndsAtFrom(),
     });
     return user;
   }
@@ -1408,6 +1418,10 @@ export class AuthService {
             organizationId: organization.id,
             userId: user.id,
             role: "owner" as const,
+            // Synthesised for a system administrator, who holds every
+            // organization by virtue of running the deployment. Nobody bought
+            // this seat, so it must never appear on anyone's invoice.
+            comped: true,
             createdAt: user.createdAt,
           },
       ),

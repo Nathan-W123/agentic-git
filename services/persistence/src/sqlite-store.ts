@@ -77,6 +77,8 @@ import type {
   CreateRunInput,
   Organization,
   OrganizationMembership,
+  Subscription,
+  SubscriptionStatus,
   OrganizationRole,
   ProjectRecord,
   RunDetail,
@@ -436,17 +438,30 @@ export class SqliteCoordinationStore implements CoordinationStore {
     organizationId: string;
     userId: string;
     role: OrganizationRole;
+    comped?: boolean;
   }): Promise<OrganizationMembership> {
     const createdAt = new Date().toISOString();
+    // An omitted `comped` keeps what the row already says. A role change must
+    // not quietly start charging for a seat that was given away, and the
+    // caller changing somebody's role is rarely the one who knows.
     this.db
       .prepare(
         `INSERT INTO organization_memberships
-           (organization_id, user_id, role, created_at)
-         VALUES (?, ?, ?, ?)
+           (organization_id, user_id, role, comped, created_at)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(organization_id, user_id)
-         DO UPDATE SET role = excluded.role`,
+         DO UPDATE SET
+           role = excluded.role,
+           comped = COALESCE(?, organization_memberships.comped)`,
       )
-      .run(input.organizationId, input.userId, input.role, createdAt);
+      .run(
+        input.organizationId,
+        input.userId,
+        input.role,
+        input.comped === true ? 1 : 0,
+        createdAt,
+        input.comped === undefined ? null : input.comped ? 1 : 0,
+      );
     const membership = await this.getMembership(
       input.organizationId,
       input.userId,
@@ -492,6 +507,59 @@ export class SqliteCoordinationStore implements CoordinationStore {
       )
       .get(organizationId, userId) as Row | undefined;
     return row === undefined ? undefined : this.toMembership(row);
+  }
+
+  public async getSubscription(
+    organizationId: string,
+  ): Promise<Subscription | undefined> {
+    const row = this.db
+      .prepare(`SELECT * FROM subscriptions WHERE organization_id = ?`)
+      .get(organizationId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubscription(row);
+  }
+
+  public async saveSubscription(input: {
+    organizationId: string;
+    status: SubscriptionStatus;
+    trialEndsAt?: string;
+    currentPeriodEnd?: string;
+    stripeCustomerId?: string;
+    stripeSubscriptionId?: string;
+  }): Promise<Subscription> {
+    const now = new Date().toISOString();
+    // Written whole rather than merged: a status change carries its own dates,
+    // and a half-updated row — `active` still holding the trial's end date —
+    // is the shape that makes a billing bug hard to see.
+    this.db
+      .prepare(
+        `INSERT INTO subscriptions
+           (organization_id, status, trial_ends_at, current_period_end,
+            stripe_customer_id, stripe_subscription_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(organization_id)
+         DO UPDATE SET
+           status = excluded.status,
+           trial_ends_at = excluded.trial_ends_at,
+           current_period_end = excluded.current_period_end,
+           stripe_customer_id = excluded.stripe_customer_id,
+           stripe_subscription_id = excluded.stripe_subscription_id,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.organizationId,
+        input.status,
+        input.trialEndsAt ?? null,
+        input.currentPeriodEnd ?? null,
+        input.stripeCustomerId ?? null,
+        input.stripeSubscriptionId ?? null,
+        now,
+        now,
+      );
+    const saved = await this.getSubscription(input.organizationId);
+    if (saved === undefined) {
+      throw new Error("Subscription was not persisted");
+    }
+    return saved;
   }
 
   public async createProject(input: {
@@ -1210,16 +1278,17 @@ export class SqliteCoordinationStore implements CoordinationStore {
     this.db
       .prepare(
         `INSERT INTO repository_grants
-           (repository_id, user_id, role, granted_by, created_at)
-         VALUES (?, ?, ?, ?, ?)
+           (repository_id, user_id, role, granted_by, comped, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(repository_id, user_id)
-         DO UPDATE SET role = excluded.role`,
+         DO UPDATE SET role = excluded.role, comped = excluded.comped`,
       )
       .run(
         grant.repositoryId,
         grant.userId,
         grant.role,
         grant.grantedBy ?? null,
+        grant.comped ? 1 : 0,
         grant.createdAt,
       );
   }
@@ -1259,6 +1328,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       userId: text(row, "user_id"),
       role: text(row, "role") as RepositoryGrant["role"],
       grantedBy: optionalText(row, "granted_by"),
+      comped: integer(row, "comped") === 1,
       createdAt: text(row, "created_at"),
     };
   }
@@ -1268,9 +1338,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO invitations
            (id, organization_id, repository_id, email, role, secret_hash,
-            invited_by, created_at, expires_at, accepted_at, accepted_by,
-            revoked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+            invited_by, comped, created_at, expires_at, accepted_at,
+            accepted_by, revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
       )
       .run(
         invitation.id,
@@ -1280,6 +1350,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         invitation.role,
         invitation.secretHash,
         invitation.invitedBy,
+        invitation.comped ? 1 : 0,
         invitation.createdAt,
         invitation.expiresAt,
       );
@@ -1337,6 +1408,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       role: text(row, "role") as InvitationRecord["role"],
       secretHash: text(row, "secret_hash"),
       invitedBy: text(row, "invited_by"),
+      comped: integer(row, "comped") === 1,
       createdAt: text(row, "created_at"),
       expiresAt: text(row, "expires_at"),
       acceptedAt: optionalText(row, "accepted_at"),
@@ -4405,7 +4477,33 @@ export class SqliteCoordinationStore implements CoordinationStore {
       organizationId: text(row, "organization_id"),
       userId: text(row, "user_id"),
       role: text(row, "role") as OrganizationRole,
+      comped: integer(row, "comped") === 1,
       createdAt: text(row, "created_at"),
+    };
+  }
+
+  private toSubscription(row: Row): Subscription {
+    const optional = (column: string): string | undefined => {
+      const value = row[column];
+      return typeof value === "string" && value.length > 0 ? value : undefined;
+    };
+    return {
+      organizationId: text(row, "organization_id"),
+      status: text(row, "status") as SubscriptionStatus,
+      ...(optional("trial_ends_at") === undefined
+        ? {}
+        : { trialEndsAt: optional("trial_ends_at") as string }),
+      ...(optional("current_period_end") === undefined
+        ? {}
+        : { currentPeriodEnd: optional("current_period_end") as string }),
+      ...(optional("stripe_customer_id") === undefined
+        ? {}
+        : { stripeCustomerId: optional("stripe_customer_id") as string }),
+      ...(optional("stripe_subscription_id") === undefined
+        ? {}
+        : { stripeSubscriptionId: optional("stripe_subscription_id") as string }),
+      createdAt: text(row, "created_at"),
+      updatedAt: text(row, "updated_at"),
     };
   }
 

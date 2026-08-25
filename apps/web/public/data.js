@@ -13,7 +13,30 @@ import {
 } from "./boot-plan.js";
 import { toast } from "./ui.js";
 
-export const API_ROOT = "/api/v1";
+/**
+ * Where the control plane lives, as a prefix every request is built on.
+ *
+ * Empty in a browser, which is every deployment today: the dashboard is
+ * served by the control plane, so a relative path already points at it and
+ * the string below is exactly what it has always been. A desktop shell loads
+ * these same files and sets `KUMI_SERVER` to the deployment it was pointed
+ * at — that one value, and the token beside it, is the whole difference
+ * between the two clients.
+ */
+export const SERVER_ORIGIN = readServerOrigin();
+
+function readServerOrigin() {
+  const configured = window.KUMI_SERVER;
+  if (typeof configured !== "string" || configured.trim() === "") {
+    return "";
+  }
+  // Trailing slashes trimmed here rather than at every join: a shell
+  // configured with "https://kumi.example.com/" must not produce
+  // "https://kumi.example.com//api/v1".
+  return configured.trim().replace(/\/+$/u, "");
+}
+
+export const API_ROOT = `${SERVER_ORIGIN}/api/v1`;
 
 const stored = (key, fallback = "") =>
   window.localStorage.getItem(key) ?? fallback;
@@ -131,6 +154,17 @@ export const state = {
   ),
 
   invitations: [],
+  apiTokens: [],
+  /**
+   * The one moment a token's secret exists outside the client holding it.
+   *
+   * Only the response that created it carries the secret; the store keeps a
+   * digest and the list route can never show it again. So it is held here
+   * until the person has copied it, and deliberately not persisted — a
+   * credential that survives a reload is a credential in somebody's session
+   * storage.
+   */
+  newApiToken: undefined,
 
   /**
    * Which colour wheel is open in Appearance, by its `data-act` prefix, or
@@ -252,6 +286,8 @@ export const state = {
   auditorPaused: {},
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
+  /** Entitlement and seat count — see `ensureBilling`. */
+  billing: undefined,
   activeChannelThread: undefined,
   /** Thread roots currently open as side tabs, oldest first. */
   activeChannelThreads: [],
@@ -620,6 +656,42 @@ function csrfToken() {
   );
 }
 
+/** The bearer token a desktop shell was signed in with, if this is one. */
+function bearerToken() {
+  const token = window.KUMI_TOKEN;
+  return typeof token === "string" && token.trim() !== ""
+    ? token.trim()
+    : undefined;
+}
+
+/**
+ * Puts this client's credentials on a request, and answers how `fetch` should
+ * treat cookies.
+ *
+ * One helper for both callers because there were two, and they had already
+ * drifted: `chat.js` carried its own copy of the cookie read. A second client
+ * is exactly the kind of change that turns a duplicate into a bug — one of
+ * them gets the bearer path and the other keeps sending a CSRF header nobody
+ * set a cookie for.
+ *
+ * A browser has no token and is unchanged: same-origin cookies, and the CSRF
+ * header on anything that writes. A shell has a token and needs neither — the
+ * gateway skips its CSRF check for bearer requests, saying why: nothing
+ * attaches a bearer token on its own, so there is no cross-site request to
+ * forge.
+ */
+export function authorizeRequest(headers, method = "GET") {
+  const token = bearerToken();
+  if (token !== undefined) {
+    headers.set("Authorization", `Bearer ${token}`);
+    return "omit";
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers.set("X-CSRF-Token", csrfToken());
+  }
+  return "same-origin";
+}
+
 export async function api(path, options = {}) {
   const method = options.method ?? "GET";
   const headers = new Headers(options.headers ?? {});
@@ -631,12 +703,10 @@ export async function api(path, options = {}) {
   if (options.body !== undefined) {
     headers.set("Content-Type", raw ? options.contentType : "application/json");
   }
-  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
-    headers.set("X-CSRF-Token", csrfToken());
-  }
+  const credentials = authorizeRequest(headers, method);
   const response = await fetch(`${API_ROOT}${path}`, {
     method,
-    credentials: "same-origin",
+    credentials,
     headers,
     // A last "seen" write made as the tab is being backgrounded must be
     // allowed to outlive the page. Kept opt-in because ordinary requests are
@@ -1205,21 +1275,61 @@ export function connectSocket(onEvent) {
   closeSocket();
   socketHandler = onEvent;
   socketRetryMs = 1_000;
-  openEventSocket();
+  void openEventSocket();
 }
 
-function openEventSocket() {
+/**
+ * A one-shot permission to open the socket, for a client that cannot present
+ * its credential to an upgrade.
+ *
+ * `undefined` in a browser, and that is not a degraded case: a session cookie
+ * rides along on the upgrade by itself, which is exactly what a bearer token
+ * cannot do — `new WebSocket(url)` takes no headers. So a shell trades its
+ * token, over an ordinary request that *can* carry one, for something safe to
+ * put in a URL: single-use, and dead within the minute.
+ */
+async function socketTicket() {
+  if (bearerToken() === undefined) {
+    return undefined;
+  }
+  const { ticket } = await api("/auth/ws-ticket", { method: "POST" });
+  return typeof ticket === "string" && ticket !== "" ? ticket : undefined;
+}
+
+/** Where the event socket lives, however this client is addressing the API. */
+async function eventSocketUrl(after) {
+  // Resolved rather than concatenated: `API_ROOT` is a path in a browser and
+  // an absolute URL in a shell, and `new URL` handles both — the base is
+  // ignored the moment the first argument is absolute.
+  const url = new URL(`${API_ROOT}/events`, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  // The hub listens on one path and scopes the subscription by query, so a
+  // single upgrade handler serves every project.
+  url.searchParams.set("projectId", state.projectId);
+  url.searchParams.set("after", String(after));
+  const ticket = await socketTicket();
+  if (ticket !== undefined) {
+    url.searchParams.set("ticket", ticket);
+  }
+  return url.toString();
+}
+
+async function openEventSocket() {
   const onEvent = socketHandler;
   if (onEvent === undefined || !state.projectId) {
     return;
   }
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  // The hub listens on one path and scopes the subscription by query, so a
-  // single upgrade handler serves every project.
   const after = eventCursor();
-  const url =
-    `${protocol}://${window.location.host}${API_ROOT}/events` +
-    `?projectId=${encodeURIComponent(state.projectId)}&after=${after}`;
+  let url;
+  try {
+    url = await eventSocketUrl(after);
+  } catch {
+    // A ticket this client could not get is a socket it cannot open yet. The
+    // same backoff a refused upgrade uses, for the same reason: whatever is
+    // wrong is usually wrong for a moment.
+    scheduleSocketRetry();
+    return;
+  }
   try {
     const socket = new WebSocket(url);
     state.socket = socket;
@@ -1252,7 +1362,7 @@ function scheduleSocketRetry() {
   window.clearTimeout(socketRetryTimer);
   socketRetryTimer = window.setTimeout(() => {
     if (socketHandler !== undefined && state.socket === undefined) {
-      openEventSocket();
+      void openEventSocket();
     }
   }, socketRetryMs);
   socketRetryMs = Math.min(socketRetryMs * 2, SOCKET_RETRY_MAX_MS);
@@ -1278,7 +1388,7 @@ export function ensureSocketAlive() {
   }
   window.clearTimeout(socketRetryTimer);
   socketRetryMs = 1_000;
-  openEventSocket();
+  void openEventSocket();
 }
 
 /* ------------------------------------------------------------- typing ---- */
@@ -1658,6 +1768,47 @@ export function socketLive() {
   return state.socket?.readyState === WebSocket.OPEN;
 }
 
+/* ---------------------------------------------------------- api tokens ---- */
+
+/**
+ * What a token minted from this screen may do.
+ *
+ * The two a client needs to be the dashboard: read the room, and start work.
+ * Deliberately not everything the owner can do — a token is a credential that
+ * lives on somebody's laptop rather than in a session that expires, so the
+ * default is the smallest set that makes it useful. The server refuses any
+ * scope above the owner's role regardless.
+ */
+export const DESKTOP_TOKEN_SCOPES = ["view", "run_task"];
+
+export async function loadApiTokens() {
+  const response = await apiOptional("/auth/tokens", { tokens: [] });
+  state.apiTokens = response.tokens ?? [];
+  return state.apiTokens;
+}
+
+/**
+ * Mints a token and hands back its secret, once.
+ *
+ * The server allows this only from a signed-in session — a token that could
+ * mint another would put revocation out of reach — so this is a thing you do
+ * in a browser, and the app you paste it into never needs one.
+ */
+export async function createApiToken(name) {
+  const response = await api("/auth/tokens", {
+    method: "POST",
+    body: { name, scopes: [...DESKTOP_TOKEN_SCOPES] },
+  });
+  state.newApiToken = response.token;
+  await loadApiTokens();
+  return response.token;
+}
+
+export async function revokeApiToken(id) {
+  await api(`/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await loadApiTokens();
+}
+
 /* -------------------------------------------------------- invitations ---- */
 
 /**
@@ -1668,7 +1819,6 @@ export function socketLive() {
  */
 export const INVITE_ROLES = [
   { value: "developer", label: "Developer", detail: "Submit and run work" },
-  { value: "reviewer", label: "Reviewer", detail: "Approve changes" },
   { value: "viewer", label: "Viewer", detail: "Read-only" },
   { value: "admin", label: "Admin", detail: "Manage people and settings" },
 ];
@@ -5418,6 +5568,77 @@ export async function updateMemberRole(userId, role) {
  * owns, not one channel. Repository-scoped grants they hold are theirs to
  * lose separately; see {@link revokeRepositoryGrant}.
  */
+/**
+ * Whether the signed-in person runs this deployment.
+ *
+ * Read from the principal rather than kept as its own flag, so it can never
+ * disagree with what the server will actually allow.
+ */
+/**
+ * What this organization is entitled to, and what it is being charged for.
+ *
+ * Cached like the other settings reads: the numbers change when somebody pays
+ * or a seat moves, neither of which happens while a dialog is open.
+ */
+export async function loadBilling() {
+  if (!state.organizationId) {
+    return undefined;
+  }
+  const response = await apiOptional(
+    `/organizations/${encodeURIComponent(state.organizationId)}/billing`,
+    undefined,
+  );
+  state.billing = response?.billing;
+  return state.billing;
+}
+
+export async function ensureBilling(rerender) {
+  if (state.billing !== undefined) {
+    return;
+  }
+  // Claimed before the request so a second render in the same tick does not
+  // fire it again — the same guard `ensureRepositoryGrants` uses.
+  state.billing = null;
+  await loadBilling();
+  rerender();
+}
+
+/** A Stripe Checkout URL for this organization, or throws with the reason. */
+export async function startCheckout() {
+  const response = await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/billing/checkout`,
+    { method: "POST", body: {} },
+  );
+  return response.url;
+}
+
+/** A Stripe billing-portal URL, for a team that has paid before. */
+export async function openBillingPortal() {
+  const response = await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/billing/portal`,
+    { method: "POST", body: {} },
+  );
+  return response.url;
+}
+
+export function iAmSystemAdmin() {
+  return state.principal?.user?.systemAdmin === true;
+}
+
+/**
+ * Grants or revokes deployment administration for somebody else.
+ *
+ * The one thing that cannot be done from any other screen, and the reason it
+ * is here: a second founder has to become an administrator somehow, and until
+ * now the only way was a hand-written API call.
+ */
+export async function setSystemAdmin(userId, systemAdmin) {
+  await api(`/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: { systemAdmin },
+  });
+}
+
 export async function removeMember(userId) {
   await api(
     `/organizations/${encodeURIComponent(state.organizationId)}/members/${encodeURIComponent(userId)}`,

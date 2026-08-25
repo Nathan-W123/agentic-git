@@ -101,6 +101,11 @@ import {
   setRepositoryGrant,
   revokeRepositoryGrant,
   updateMemberRole,
+  iAmSystemAdmin,
+  openBillingPortal,
+  startCheckout,
+  ensureBilling,
+  setSystemAdmin,
   removeMember,
   state,
   toggleChannelMessagePin,
@@ -193,7 +198,10 @@ import {
   createInvitation,
   invitationLink,
   keptRightPanels,
+  createApiToken,
+  loadApiTokens,
   loadInvitations,
+  revokeApiToken,
   loadPendingQuestions,
   newestRightPanel,
   pendingQuestionFor,
@@ -1400,6 +1408,12 @@ const SETTINGS_SECTIONS = [
     description: "People and activity in the channel you have open.",
   },
   {
+    id: "billing",
+    label: "Billing",
+    iconName: "chart",
+    description: "Your plan, what it covers, and who is counted as a seat.",
+  },
+  {
     id: "advanced",
     label: "Advanced",
     iconName: "sliders",
@@ -1445,6 +1459,82 @@ function preferencesCard() {
   </section>`;
 }
 
+/**
+ * Tokens for signing in a client that has no browser to hold a cookie.
+ *
+ * The endpoints have existed since headless workers did; nothing in the UI
+ * ever reached them, so the only way to get one was to call the API by hand.
+ * That is fine for a CLI and useless for a desktop app, where the person
+ * signing in is the one who needs the token.
+ */
+function apiTokensCard() {
+  // Revoked tokens stay in the list the server returns, as the record that
+  // they existed. They are not something anybody can act on, and offering
+  // "Revoke" beside one already revoked reads as a button that does nothing —
+  // the same reason the invitations card above shows only what is pending.
+  const tokens = (state.apiTokens ?? []).filter(
+    (token) => token.active !== false,
+  );
+  const minted = state.newApiToken;
+  return `<section class="card">
+    <div class="panel-head">
+      <div><h3>App tokens</h3>
+      <p>Sign in a Kumi app on your machine. It reads the room and starts
+        work, the same as this browser does.</p></div>
+    </div>
+    ${
+      minted === undefined
+        ? ""
+        : `<div class="set-row"><span class="sr-body">
+            <div class="sr-title">Copy this now</div>
+            <div class="sr-sub">It is shown once. Kumi keeps only a
+              fingerprint, so nobody — including us — can read it back.</div>
+            <code class="token-secret">${esc(minted)}</code>
+          </span><span class="sr-ctl">
+            <button class="btn btn-sm" data-act="token-copy">Copy</button>
+            <button class="btn btn-sm" data-act="token-dismiss">Done</button>
+          </span></div>`
+    }
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">New token</div>
+        <div class="sr-sub">Name it after the machine you will use it on, so
+          revoking the right one later is obvious.</div>
+      </span>
+      <span class="sr-ctl">
+        <input class="input input-sm" data-token-name placeholder="My laptop"
+          aria-label="Token name">
+        <button class="btn btn-sm btn-primary" data-act="token-create">Create</button>
+      </span>
+    </div>
+    ${
+      tokens.length === 0
+        ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
+            No tokens yet.</div></span></div>`
+        : tokens
+            .map(
+              (token) => `<div class="set-row">
+                <span class="sr-body">
+                  <div class="sr-title">${esc(token.name ?? "Unnamed")}</div>
+                  <div class="sr-sub">created ${esc(
+                    relativeTime(token.createdAt),
+                  )}${
+                    token.lastUsedAt === undefined
+                      ? " · never used"
+                      : ` · last used ${esc(relativeTime(token.lastUsedAt))}`
+                  }</div>
+                </span>
+                <span class="sr-ctl">
+                  <button class="btn btn-sm" data-act="token-revoke"
+                    data-value="${esc(token.id)}">Revoke</button>
+                </span>
+              </div>`,
+            )
+            .join("")
+    }
+  </section>`;
+}
+
 function settingsSectionMarkup(section) {
   switch (section) {
     case "agents":
@@ -1459,8 +1549,10 @@ function settingsSectionMarkup(section) {
       );
     case "workspace":
       return `${invitationsCard()}${channelStatsCard()}`;
+    case "billing":
+      return billingCard();
     case "advanced":
-      return `${repositoryCard()}${admissionsCard()}`;
+      return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
     default:
       return `${accountCard()}${appearanceCard()}${preferencesCard()}`;
   }
@@ -1497,6 +1589,7 @@ function settingsDialog() {
     .settings-sidebar-account{display:flex;align-items:center;gap:9px;margin-top:auto;padding:12px 9px 2px;border-top:1px solid var(--border-soft);min-width:0}.settings-sidebar-account-copy{min-width:0}.settings-sidebar-account-name,.settings-sidebar-account-email{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.settings-sidebar-account-name{font-size:12.5px;font-weight:550}.settings-sidebar-account-email{font-size:11px;color:var(--text-4);margin-top:1px}
     .settings-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg-card)}
     .settings-main-head{min-height:86px;display:flex;align-items:flex-start;gap:18px;padding:23px 26px 18px;border-bottom:1px solid var(--border-soft)}.settings-main-title{min-width:0}.settings-main-title h2{font-size:20px;line-height:1.25;letter-spacing:-.025em}.settings-main-title p{margin-top:5px;color:var(--text-3);font-size:12.5px}.settings-close{margin-left:auto;flex:none}
+    .token-secret{display:block;margin-top:8px;padding:8px 10px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:8px;font-size:12px;word-break:break-all;user-select:all}
     .settings-content.scroll{min-height:0;padding:22px 26px 30px}.settings-content-inner{display:grid;gap:14px;max-width:680px;margin:0 auto}.settings-content .card{box-shadow:none;border-color:var(--border-soft);background:var(--bg-card-2)}.settings-content .panel-head{padding:16px 17px 10px}.settings-content .panel-head h3{font-size:14px}.settings-content .panel-head p{margin-top:3px}.settings-account-avatar{flex:none}.settings-choice{display:inline-flex;gap:3px;padding:3px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:9px}.settings-choice button{padding:5px 10px;border-radius:6px;color:var(--text-3);font-size:12px}.settings-choice button:hover{color:var(--text)}.settings-choice button.active{background:var(--bg-active);color:var(--text);box-shadow:0 1px 2px rgb(0 0 0 / 18%)}
     @media(max-width:700px){.settings-layer{padding:0}.settings-dialog{width:100vw;height:100dvh;min-height:0;border:0;border-radius:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.settings-sidebar{padding:calc(10px + var(--safe-top)) 12px 10px;border-right:0;border-bottom:1px solid var(--border-soft)}.settings-brand{padding:0 4px 10px}.settings-nav{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}.settings-nav::-webkit-scrollbar{display:none}.settings-nav-item{width:auto;min-height:34px;flex:none;padding:7px 10px}.settings-sidebar-account{display:none}.settings-main-head{min-height:78px;padding:16px 18px 14px}.settings-main-title p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.settings-content.scroll{padding:16px 14px calc(24px + var(--safe-bottom))}.settings-content .set-row{align-items:flex-start;flex-wrap:wrap}.settings-content .set-row .sr-ctl{margin-left:auto}.settings-choice button{padding:6px 9px}}
   </style>
@@ -1921,11 +2014,22 @@ async function inviteSomebody(rerender, repositoryId) {
     ? `They will get access to ${repositoryId}, and nothing else in this project.`
     : "Access is granted per repository. Pick the one to share, or share " +
       "everything if they are joining the team properly.";
+  // Only a deployment administrator's link to a *named* repository is free —
+  // both halves, the same two conditions the server checks. Said here because
+  // otherwise these links are indistinguishable from paid ones at the moment
+  // they are handed out, which is the moment it matters.
+  const freeLink = iAmSystemAdmin();
+  const freeNote = freeLink
+    ? fixed
+      ? " Whoever accepts this gets full use of this repository at no charge."
+      : " If you name a repository, whoever accepts gets full use of it at no" +
+        " charge; sharing everything is an ordinary paid seat."
+    : "";
   const values = await showModal({
     title: fixed ? `Invite someone to #${repositoryId}` : "Invite someone to collaborate",
     subtitle:
-      `${accessDetail} The readable name is the link's key, so anyone who ` +
-      "guesses it can use the invitation.",
+      `${accessDetail}${freeNote} The readable name is the link's key, so ` +
+      "anyone who guesses it can use the invitation.",
     confirm: "Create invite link",
     body: `<label class="field">
         <span>Name for the invite link</span>
@@ -2692,6 +2796,40 @@ async function memberRoleAction(repositoryId, userId) {
 }
 
 /** Removes an organization member or repository-only guest from KUMI. */
+/**
+ * Grants or takes back deployment administration.
+ *
+ * Confirmed both ways. Granting hands somebody every organization on this
+ * control plane and the ability to give repositories away for free; revoking
+ * can lock the last administrator out of exactly the screens that would fix
+ * it. Neither belongs behind a single click in a context menu.
+ */
+async function systemAdminAction(userId, grant) {
+  const confirmed = await showModal({
+    title: grant ? "Make deployment admin?" : "Remove deployment admin?",
+    subtitle: grant
+      ? "They will reach every organization on this deployment, and their " +
+        "invite links to a repository will be free for whoever accepts them."
+      : "They will lose access to every organization they are not a member " +
+        "of, and their invite links will stop being free.",
+    confirm: grant ? "Make admin" : "Remove admin",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await setSystemAdmin(userId, grant);
+    toast(grant ? "Now a deployment admin" : "No longer a deployment admin", "ok");
+    // The flag is read off the roster, which is cached, so it is refetched
+    // rather than patched in place — this is rare enough that a round trip
+    // costs nothing and a stale menu here would be actively misleading.
+    delete state.channelPeople[activeChannelId()];
+    render();
+  } catch (error) {
+    toast(error.message ?? "That could not be changed.", "error");
+  }
+}
+
 async function removeMemberAction(repositoryId, userId) {
   const name = memberName(userId) ?? userId;
   const organizationRole = memberRole(userId);
@@ -2834,6 +2972,132 @@ async function revokeRepositoryGrantAction(repositoryId, userId) {
     void ensureRepositoryGrants(repositoryId, render);
     render();
     refreshChannelInfoPopover();
+  }
+}
+
+/* ------------------------------------------------------------ billing ---- */
+
+/** How a subscription status reads to somebody who is not an accountant. */
+const BILLING_STATUS = {
+  comped: {
+    title: "Included",
+    detail: "This team is not billed. Nothing to do.",
+  },
+  trialing: { title: "Trial", detail: "" },
+  active: { title: "Active", detail: "Your subscription is running." },
+  past_due: {
+    title: "Payment failed",
+    detail:
+      "Your last payment did not go through. Everything keeps working while " +
+      "the card is retried — update it to be safe.",
+  },
+  canceled: {
+    title: "Read-only",
+    detail:
+      "Your subscription has ended, so work cannot be dispatched. Your " +
+      "repositories, threads and history are all still here.",
+  },
+};
+
+/** Days between now and an ISO date, rounded toward the reader's advantage. */
+function daysUntil(iso) {
+  const target = Date.parse(iso ?? "");
+  if (!Number.isFinite(target)) {
+    return undefined;
+  }
+  return Math.max(0, Math.ceil((target - Date.now()) / 86_400_000));
+}
+
+/**
+ * The plan, what it covers, and what it costs — for the Settings screen.
+ *
+ * Seats are stated rather than implied, because "why is my bill that number"
+ * is the question this screen exists to answer, and the rule is not obvious:
+ * viewers are free, so a team of ten can be a bill for four.
+ */
+function billingCard() {
+  void ensureBilling(render);
+  const billing = state.billing;
+  if (billing === undefined || billing === null) {
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Billing</div>
+      <div class="sr-sub">Loading…</div></span></div></section>`;
+  }
+  if (billing.configured !== true) {
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Billing is not set up on this deployment</div>
+      <div class="sr-sub">This Kumi is running without payment configured,
+        which is a supported way to run it. Nothing here is chargeable.</div>
+    </span></div></section>`;
+  }
+  const status = BILLING_STATUS[billing.status] ?? BILLING_STATUS.trialing;
+  const trialDays = daysUntil(billing.trialEndsAt);
+  const detail =
+    billing.status === "trialing"
+      ? trialDays === undefined
+        ? "Your trial is running."
+        : trialDays === 0
+          ? "Your trial ends today."
+          : `${String(trialDays)} day${trialDays === 1 ? "" : "s"} left on your trial.`
+      : status.detail;
+  const canManage = canManageOrganization();
+  return `<section class="card">
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">${esc(status.title)}</div>
+        <div class="sr-sub">${esc(detail)}</div>
+      </span>
+      ${
+        canManage
+          ? billing.manageable === true
+            ? `<button type="button" class="btn btn-sm" data-act="billing-portal">
+                 ${icon("external")} Manage billing</button>`
+            : `<button type="button" class="btn btn-sm btn-primary" data-act="billing-checkout">
+                 ${icon("bolt")} Subscribe</button>`
+          : ""
+      }
+    </div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">${String(billing.seats)} paid seat${
+          billing.seats === 1 ? "" : "s"
+        }</div>
+        <!-- The rule stated outright. It is the whole explanation for a bill
+             that does not match the size of the team. -->
+        <div class="sr-sub">Everyone who can start work counts as a seat.
+          Viewers, and anyone invited on a free link, do not.</div>
+      </span>
+    </div>
+    ${
+      billing.currentPeriodEnd === undefined
+        ? ""
+        : `<div class="set-row"><span class="sr-body">
+             <div class="sr-title">Renews ${esc(formatDate(billing.currentPeriodEnd, { short: false }))}</div>
+             <div class="sr-sub">Seats added partway through a month are
+               charged for the part of the month they are used.</div>
+           </span></div>`
+    }
+  </section>`;
+}
+
+/**
+ * Sends somebody to Stripe, in the browser.
+ *
+ * `window.open` rather than a redirect: the desktop shell is not a browser
+ * tab to navigate away from, and payment has to happen somewhere the person
+ * can see the address bar they are typing a card into.
+ */
+async function billingAction(kind) {
+  try {
+    const url =
+      kind === "portal" ? await openBillingPortal() : await startCheckout();
+    // Reloaded on return rather than assumed: the webhook is what actually
+    // records a payment, and it may land before or after the person gets
+    // back here.
+    state.billing = undefined;
+    window.open(url, "_blank", "noopener");
+  } catch (error) {
+    toast(error.message ?? "Billing could not be opened.", "error");
   }
 }
 
@@ -5774,6 +6038,14 @@ function openSettings(section = "general") {
     : "general";
   state.settingsRenamingId = undefined;
   state.openWheel = undefined;
+  // A secret from a previous visit is not still on screen when the dialog is
+  // reopened: it was shown to be copied once, and it has been.
+  state.newApiToken = undefined;
+  // Fetched on open rather than at boot: nobody who never opens settings
+  // needs their token list, and the card renders empty until it arrives.
+  void loadApiTokens()
+    .then(() => render())
+    .catch(() => undefined);
   closePopover();
   render();
   window.queueMicrotask(() =>
@@ -7296,6 +7568,17 @@ document.addEventListener("click", (event) => {
       );
       return;
     }
+    case "billing-checkout":
+    case "billing-portal": {
+      void billingAction(act === "billing-portal" ? "portal" : "checkout");
+      return;
+    }
+    case "system-admin-grant":
+    case "system-admin-revoke": {
+      closePopover();
+      void systemAdminAction(value, act === "system-admin-grant");
+      return;
+    }
     case "channel-grant-promote": {
       // People-row menus pass `${repositoryId}:${userId}`; the legacy picker
       // path still accepts a bare repository id.
@@ -7867,6 +8150,43 @@ document.addEventListener("click", (event) => {
         .catch((error) => toast(error.message, "error"));
       return;
     }
+    case "token-create": {
+      const field = document.querySelector("[data-token-name]");
+      const name = (field?.value ?? "").trim();
+      if (name === "") {
+        toast("Name the token after the machine it is for", "error");
+        return;
+      }
+      void createApiToken(name)
+        .then(() => {
+          if (field !== null) {
+            field.value = "";
+          }
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "token-copy":
+      // Best effort: a clipboard a browser will not hand over is not a reason
+      // to lose the secret, which is still on screen to select by hand.
+      void navigator.clipboard
+        ?.writeText(state.newApiToken ?? "")
+        .then(() => toast("Token copied", "ok"))
+        .catch(() => toast("Select the token and copy it", "error"));
+      return;
+    case "token-dismiss":
+      state.newApiToken = undefined;
+      render();
+      return;
+    case "token-revoke":
+      void revokeApiToken(value)
+        .then(() => {
+          toast("Token revoked", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
     case "invite-revoke":
       void revokeInvitation(value)
         .then(() => {

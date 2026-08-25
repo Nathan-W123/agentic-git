@@ -25,6 +25,7 @@ import {
   elidedHistoryNotice,
   estimateTokens,
   explainAnswerFailure,
+  isLoopbackCallback,
   looksLikeTaskRequest,
   narrateTaskEvent,
   normaliseThreadTitle,
@@ -1335,7 +1336,7 @@ test("approval decisions are project-authorized and durably audited", async (t) 
     taskId: "task_test",
     kind: "changeset",
     requestedBy: setup.user.id,
-    requiredRole: "reviewer",
+    requiredRole: "admin",
     reasons: ["Protected changeset"],
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
   });
@@ -1594,6 +1595,27 @@ test("open WebSockets are closed when their user is disabled", async (t) => {
 
   assert.equal(closeCode, 1008);
 });
+
+/**
+ * A POST with no credential of any kind, standing in for an app that does not
+ * have one yet.
+ */
+async function bareRequest(
+  origin: string,
+  path: string,
+  body: unknown,
+): Promise<{ status: number; data: any }> {
+  const response = await fetch(`${origin}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    data: text.length === 0 ? undefined : JSON.parse(text),
+  };
+}
 
 /** A bare fetch with no cookies, standing in for a CLI, worker, or agent. */
 async function bearer(
@@ -2371,6 +2393,7 @@ test("a catch-up carries only what its reader may see", async (t) => {
     userId: guest.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   await runtime.store.markCatchUpSeen(
@@ -2465,6 +2488,7 @@ test("muting a channel silences it for one person and nobody else", async (t) =>
     userId: colleague.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const colleagueClient = new TestClient(runtime.origin);
@@ -4076,6 +4100,7 @@ test("the channel roster is the real connected agents of everyone with access to
     userId: guest.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
 
@@ -8222,7 +8247,7 @@ test('"go ahead" releases a review gate from the thread it was announced in', as
     taskId: "task_gated",
     kind: "policy_override",
     requestedBy: "claude",
-    requiredRole: "reviewer",
+    requiredRole: "admin",
     reasons: ["schema change"],
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
   });
@@ -8365,7 +8390,7 @@ test("a gate's hold and release stay ordered and deduplicated in its thread", as
     projectId: DEFAULT_PROJECT_ID,
     repositoryId,
     approvalId: "approval_gate",
-    requiredRole: "reviewer",
+    requiredRole: "admin",
   };
   await runtime.store.appendAudit(undefined, {
     type: "approval_requested",
@@ -9232,6 +9257,7 @@ test("only an organization owner or a repository co-owner can delete a repositor
     userId: guest.id,
     role: "developer",
     grantedBy: undefined,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const guestClient = await loginAs(runtime.origin, guest.email);
@@ -9252,6 +9278,7 @@ test("only an organization owner or a repository co-owner can delete a repositor
     userId: guest.id,
     role: "owner",
     grantedBy: undefined,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const deleted = await guestClient.request(
@@ -9603,6 +9630,7 @@ test("promoting a repository-only guest to co-owner does not require organizatio
     userId: guest.id,
     role: "viewer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
 
@@ -9696,6 +9724,7 @@ test("a human can leave a repository held only through a grant, but not one reac
     userId: guest.id,
     role: "developer",
     grantedBy: bootstrapped.user.id,
+    comped: false,
     createdAt: new Date().toISOString(),
   });
   const guestClient = await loginAs(runtime.origin, guest.email);
@@ -13686,8 +13715,34 @@ test("asking about work is not asking for it", () => {
     "did you see the bug? fix it",
     "which key changed, and can you revert it?",
     "when toggling this pullout the icons should be animated from the arrow",
+    // Plain instruction verbs. Every one of these was missed, which is how a
+    // request could name exactly what it wanted and still not read as work:
+    // the sender was answered rather than obeyed, and had to write "make that
+    // implementation" — one recognised word — to get it done.
+    'For the signin page instead of it saying kumi just put the logo and get rid of the punchline "one live codebase.."',
+    "put the logo on the sign in page",
+    "get rid of the punchline",
+    "hide the punchline",
+    "drop the subtitle from the header",
+    "take out the old banner",
+    "turn off the animation",
+    "shrink the sidebar",
   ]) {
     assert.equal(looksLikeTaskRequest(request), true, request);
+  }
+
+  // The other direction, kept beside it: widening the verb list must not turn
+  // chatter or a question about finished work into a task. "show" and "use"
+  // are deliberately still absent — "show me a summary of the codebase" is an
+  // answer request, and a task verb wins over that test, so adding them would
+  // trade this bug for its mirror image.
+  for (const notWork of [
+    "show me a summary of the codebase",
+    "give me an overview of the auth module",
+    "what did you get rid of?",
+    "which files were dropped?",
+  ]) {
+    assert.equal(looksLikeTaskRequest(notWork), false, notWork);
   }
 });
 
@@ -16694,4 +16749,285 @@ test("summariseAuditData skips bulk payload fields and respects the per-event ca
   );
   assert.ok(sprawling.length <= 400, String(sprawling.length));
   assert.equal(summariseAuditData({}), "");
+});
+
+/** Opens an upgrade the way a shell does, and reports what came back. */
+async function upgradeEvents(
+  origin: string,
+  query: string,
+  cookie: string,
+): Promise<{ upgraded: boolean; status?: number }> {
+  const port = Number(new URL(origin).port);
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest({
+      port,
+      host: "127.0.0.1",
+      path: `/api/v1/events?${query}`,
+      headers: {
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": randomBytes(16).toString("base64"),
+        ...(cookie.length === 0 ? {} : { Cookie: cookie }),
+      },
+    });
+    const timer = setTimeout(() => {
+      request.destroy();
+      reject(new Error("timed out negotiating the event socket"));
+    }, 5_000);
+    request.on("upgrade", (_response, socket) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ upgraded: true });
+    });
+    request.on("response", (response) => {
+      clearTimeout(timer);
+      response.resume();
+      resolve({ upgraded: false, status: response.statusCode ?? 0 });
+    });
+    request.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    request.end();
+  });
+}
+
+test("a socket ticket is minted by any credential and spent exactly once", async (t) => {
+  // A browser proves itself to an upgrade with its session cookie, which it
+  // attaches on its own. `new WebSocket(url)` takes no headers, so a client
+  // holding a bearer token — a desktop shell — has no way to present it. The
+  // ticket is what goes in the URL instead of the token.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "desktop", scopes: ["view"] },
+  });
+  assert.equal(created.status, 201);
+  const token = created.data.token as string;
+
+  // Minted by the credential that cannot be presented to an upgrade, which is
+  // the entire reason this route exists.
+  const byToken = await bearer(runtime.origin, "/api/v1/auth/ws-ticket", token, {
+    method: "POST",
+  });
+  assert.equal(byToken.status, 201);
+  assert.equal(typeof byToken.data.ticket, "string");
+  assert.ok(byToken.data.expiresInMs > 0);
+
+  // And by a session, so the browser is not a special case in the other
+  // direction either.
+  const bySession = await client.request("/api/v1/auth/ws-ticket", {
+    method: "POST",
+  });
+  assert.equal(bySession.status, 201);
+  assert.notEqual(bySession.data.ticket, byToken.data.ticket);
+
+  // Spent. Whatever the upgrade then makes of the project, the ticket is gone.
+  const ticket = String(byToken.data.ticket);
+  const query = `projectId=absent&ticket=${encodeURIComponent(ticket)}`;
+  await upgradeEvents(runtime.origin, query, "");
+  const replayed = await upgradeEvents(runtime.origin, query, "");
+  assert.equal(replayed.upgraded, false);
+});
+
+test("a bad ticket is refused rather than quietly falling back to the cookie", async (t) => {
+  // The failure this shape invites: a client presents a ticket, the ticket is
+  // expired or already spent, and the server tries the cookie next. On a
+  // desktop shell there is no cookie and nothing happens — but in a browser,
+  // where a stale session is usually lying around, a dead ticket would look
+  // like a working one and the bug would only ever appear somewhere else.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const refused = await upgradeEvents(
+    runtime.origin,
+    "projectId=absent&ticket=not-a-real-ticket",
+    // A cookie that authenticates perfectly well on its own.
+    client.cookieHeader,
+  );
+  assert.equal(refused.upgraded, false);
+});
+
+test("a token can be created, seen in the list, and revoked from a session", async (t) => {
+  // The three calls the settings card makes, in the order it makes them. The
+  // routes predate any UI reaching them, so this is the first thing to hold
+  // them to the shape a screen actually reads: a secret exactly once, an
+  // `active` flag to hide what has been revoked, and the fields the rows show.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const empty = await client.request("/api/v1/auth/tokens");
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.data.tokens, []);
+
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "My laptop", scopes: ["view", "run_task"] },
+  });
+  assert.equal(created.status, 201);
+  assert.match(created.data.token as string, /^coord_pat_/u);
+
+  const listed = await client.request("/api/v1/auth/tokens");
+  assert.equal(listed.data.tokens.length, 1);
+  const [row] = listed.data.tokens as Array<Record<string, unknown>>;
+  assert.equal(row?.name, "My laptop");
+  assert.equal(row?.active, true);
+  assert.equal(typeof row?.createdAt, "string");
+  // Never again. The store keeps a digest, so the list cannot show a secret
+  // even to the person who made it — which is why the card has to.
+  assert.equal(row?.token, undefined);
+  assert.equal(row?.secret, undefined);
+
+  const revoked = await client.request(
+    `/api/v1/auth/tokens/${encodeURIComponent(String(row?.id))}`,
+    { method: "DELETE" },
+  );
+  assert.ok(revoked.status === 200 || revoked.status === 204, String(revoked.status));
+
+  const after = await client.request("/api/v1/auth/tokens");
+  assert.equal(
+    (after.data.tokens as Array<{ active?: boolean }>).filter(
+      (entry) => entry.active !== false,
+    ).length,
+    0,
+  );
+});
+
+test("an app callback is only ever an address on this machine", () => {
+  // The one check this flow cannot get wrong. The browser is about to be sent
+  // to this address carrying a code that buys a token, so anything that is not
+  // loopback is not an open redirect — it is a way to have somebody sign in
+  // and hand the result to whoever asked.
+  for (const allowed of [
+    "http://127.0.0.1:53127/callback",
+    "http://localhost:8123/cb",
+    "http://[::1]:9000/cb",
+    // Any port, because the app takes whatever was free at startup.
+    "http://127.0.0.1:1/cb",
+  ]) {
+    assert.equal(isLoopbackCallback(allowed), true, allowed);
+  }
+
+  for (const refused of [
+    // The obvious one, and the whole reason for the check.
+    "http://evil.example.com/cb",
+    "https://evil.example.com/cb",
+    // Hostnames that merely start or end like loopback.
+    "http://127.0.0.1.evil.example.com/cb",
+    "http://localhost.evil.example.com/cb",
+    "http://notlocalhost/cb",
+    // Credentials in the URL, which some parsers read as the host.
+    "http://127.0.0.1@evil.example.com/cb",
+    "http://user:pass@127.0.0.1/cb",
+    // Schemes that are not a loopback listener at all.
+    "file:///tmp/cb",
+    "javascript:alert(1)",
+    "data:text/html,<script>",
+    "app://kumi/cb",
+    // Not a URL.
+    "",
+    "not a url",
+    "//127.0.0.1/cb",
+  ]) {
+    assert.equal(isLoopbackCallback(refused), false, refused);
+  }
+});
+
+test("approving an app hands the browser a code, and the code buys one token", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const approved = await client.request(
+    "/api/v1/auth/app-authorization/approve",
+    {
+      method: "POST",
+      body: {
+        name: "Kumi on my laptop",
+        redirectUri: "http://127.0.0.1:53127/callback",
+        state: "abc123",
+      },
+    },
+  );
+  assert.equal(approved.status, 201);
+
+  // The redirect carries a code, never the token: a token in a redirect is a
+  // token in the browser's history and in whatever the loopback server logs.
+  const target = new URL(approved.data.redirectTo as string);
+  assert.equal(target.origin, "http://127.0.0.1:53127");
+  assert.equal(target.searchParams.get("state"), "abc123");
+  const code = target.searchParams.get("code") ?? "";
+  assert.ok(code.length > 20, code);
+  assert.equal(target.searchParams.get("token"), null);
+
+  // Exchanged with no credential at all, which is the point: the app has none
+  // yet, and acquiring one is what the call is for.
+  const exchanged = await bareRequest(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/exchange",
+    { code },
+  );
+  assert.equal(exchanged.status, 201);
+  assert.match(exchanged.data.token as string, /^coord_pat_/u);
+  assert.equal(exchanged.data.name, "Kumi on my laptop");
+
+  // Spent. A second attempt with the same code is refused.
+  const replayed = await bareRequest(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/exchange",
+    { code },
+  );
+  assert.equal(replayed.status, 400);
+
+  // And the token it handed over actually works.
+  const me = await bearer(
+    runtime.origin,
+    "/api/v1/auth/me",
+    exchanged.data.token as string,
+  );
+  assert.equal(me.status, 200);
+  assert.equal(me.data.credential, "api_token");
+});
+
+test("an app cannot be approved for somewhere else, or by another app", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const offsite = await client.request(
+    "/api/v1/auth/app-authorization/approve",
+    {
+      method: "POST",
+      body: {
+        name: "Definitely fine",
+        redirectUri: "https://evil.example.com/cb",
+        state: "x",
+      },
+    },
+  );
+  assert.equal(offsite.status, 400);
+  assert.equal(offsite.data.error.code, "callback_rejected");
+
+  // A token approving the next app would make revoking this one pointless —
+  // the same rule minting a token by hand already follows.
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "existing", scopes: ["view"] },
+  });
+  const byToken = await bearer(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/approve",
+    created.data.token as string,
+    {
+      method: "POST",
+      body: { name: "chained", redirectUri: "http://127.0.0.1:1/cb", state: "" },
+    },
+  );
+  assert.equal(byToken.status, 403);
 });

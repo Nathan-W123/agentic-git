@@ -76,6 +76,8 @@ import type {
   CreateRunInput,
   Organization,
   OrganizationMembership,
+  Subscription,
+  SubscriptionStatus,
   OrganizationRole,
   ProjectRecord,
   RunDetail,
@@ -521,14 +523,27 @@ export class PostgresCoordinationStore implements CoordinationStore {
     organizationId: string;
     userId: string;
     role: OrganizationRole;
+    comped?: boolean;
   }): Promise<OrganizationMembership> {
+    // An omitted `comped` keeps what the row already says. A role change must
+    // not quietly start charging for a seat that was given away, and the
+    // caller changing somebody's role is rarely the one who knows.
     await this.query(
       `INSERT INTO organization_memberships
-         (organization_id, user_id, role, created_at)
-       VALUES ($1, $2, $3, $4)
+         (organization_id, user_id, role, comped, created_at)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (organization_id, user_id)
-       DO UPDATE SET role = EXCLUDED.role`,
-      [input.organizationId, input.userId, input.role, new Date().toISOString()],
+       DO UPDATE SET
+         role = EXCLUDED.role,
+         comped = COALESCE($6, organization_memberships.comped)`,
+      [
+        input.organizationId,
+        input.userId,
+        input.role,
+        input.comped ?? false,
+        new Date().toISOString(),
+        input.comped ?? null,
+      ],
     );
     const membership = await this.getMembership(
       input.organizationId,
@@ -538,6 +553,59 @@ export class PostgresCoordinationStore implements CoordinationStore {
       throw new Error("Membership was not persisted");
     }
     return membership;
+  }
+
+  public async getSubscription(
+    organizationId: string,
+  ): Promise<Subscription | undefined> {
+    const row = await this.row(
+      `SELECT * FROM subscriptions WHERE organization_id = $1`,
+      [organizationId],
+    );
+    return row === undefined ? undefined : this.toSubscription(row);
+  }
+
+  public async saveSubscription(input: {
+    organizationId: string;
+    status: SubscriptionStatus;
+    trialEndsAt?: string;
+    currentPeriodEnd?: string;
+    stripeCustomerId?: string;
+    stripeSubscriptionId?: string;
+  }): Promise<Subscription> {
+    const now = new Date().toISOString();
+    // Written whole rather than merged: a status change carries its own dates,
+    // and a half-updated row — `active` still holding the trial's end date —
+    // is the shape that makes a billing bug hard to see.
+    await this.query(
+      `INSERT INTO subscriptions
+         (organization_id, status, trial_ends_at, current_period_end,
+          stripe_customer_id, stripe_subscription_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (organization_id)
+       DO UPDATE SET
+         status = EXCLUDED.status,
+         trial_ends_at = EXCLUDED.trial_ends_at,
+         current_period_end = EXCLUDED.current_period_end,
+         stripe_customer_id = EXCLUDED.stripe_customer_id,
+         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        input.organizationId,
+        input.status,
+        input.trialEndsAt ?? null,
+        input.currentPeriodEnd ?? null,
+        input.stripeCustomerId ?? null,
+        input.stripeSubscriptionId ?? null,
+        now,
+        now,
+      ],
+    );
+    const saved = await this.getSubscription(input.organizationId);
+    if (saved === undefined) {
+      throw new Error("Subscription was not persisted");
+    }
+    return saved;
   }
 
   public async removeMembership(
@@ -1252,15 +1320,16 @@ export class PostgresCoordinationStore implements CoordinationStore {
   public async saveRepositoryGrant(grant: RepositoryGrant): Promise<void> {
     await this.query(
       `INSERT INTO repository_grants
-         (repository_id, user_id, role, granted_by, created_at)
-       VALUES ($1, $2, $3, $4, $5)
+         (repository_id, user_id, role, granted_by, comped, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (repository_id, user_id)
-       DO UPDATE SET role = EXCLUDED.role`,
+       DO UPDATE SET role = EXCLUDED.role, comped = EXCLUDED.comped`,
       [
         grant.repositoryId,
         grant.userId,
         grant.role,
         grant.grantedBy ?? null,
+        grant.comped,
         grant.createdAt,
       ],
     );
@@ -1300,6 +1369,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       userId: text(row, "user_id"),
       role: text(row, "role") as RepositoryGrant["role"],
       grantedBy: optionalText(row, "granted_by"),
+      comped: flag(row, "comped"),
       createdAt: text(row, "created_at"),
     };
   }
@@ -1308,9 +1378,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO invitations
          (id, organization_id, repository_id, email, role, secret_hash,
-          invited_by, created_at, expires_at, accepted_at, accepted_by,
-          revoked_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, NULL)`,
+          invited_by, comped, created_at, expires_at, accepted_at,
+          accepted_by, revoked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL)`,
       [
         invitation.id,
         invitation.organizationId,
@@ -1322,6 +1392,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         invitation.role,
         invitation.secretHash,
         invitation.invitedBy,
+        invitation.comped,
         invitation.createdAt,
         invitation.expiresAt,
       ],
@@ -1374,6 +1445,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       role: text(row, "role") as InvitationRecord["role"],
       secretHash: text(row, "secret_hash"),
       invitedBy: text(row, "invited_by"),
+      comped: flag(row, "comped"),
       createdAt: text(row, "created_at"),
       expiresAt: text(row, "expires_at"),
       acceptedAt: optionalText(row, "accepted_at"),
@@ -4287,7 +4359,29 @@ export class PostgresCoordinationStore implements CoordinationStore {
       organizationId: text(row, "organization_id"),
       userId: text(row, "user_id"),
       role: text(row, "role") as OrganizationRole,
+      comped: flag(row, "comped"),
       createdAt: text(row, "created_at"),
+    };
+  }
+
+  private toSubscription(row: Row): Subscription {
+    const optional = (column: string): string | undefined => {
+      const value = row[column];
+      return typeof value === "string" && value.length > 0 ? value : undefined;
+    };
+    const trialEndsAt = optional("trial_ends_at");
+    const currentPeriodEnd = optional("current_period_end");
+    const stripeCustomerId = optional("stripe_customer_id");
+    const stripeSubscriptionId = optional("stripe_subscription_id");
+    return {
+      organizationId: text(row, "organization_id"),
+      status: text(row, "status") as SubscriptionStatus,
+      ...(trialEndsAt === undefined ? {} : { trialEndsAt }),
+      ...(currentPeriodEnd === undefined ? {} : { currentPeriodEnd }),
+      ...(stripeCustomerId === undefined ? {} : { stripeCustomerId }),
+      ...(stripeSubscriptionId === undefined ? {} : { stripeSubscriptionId }),
+      createdAt: text(row, "created_at"),
+      updatedAt: text(row, "updated_at"),
     };
   }
 

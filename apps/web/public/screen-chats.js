@@ -30,6 +30,7 @@ api,
   canLeaveRepository,
   canManageOrganization,
   canManageRepository,
+  iAmSystemAdmin,
   channelAgentsFor,
   channelAuthor,
   channelAwaitsGoAhead,
@@ -1193,7 +1194,7 @@ export function personMenuItems(userId) {
       act: "member-role",
       value: `${repositoryId}:${userId}`,
       label: "Change role",
-      hint: "Choose admin, developer, reviewer, or viewer",
+      hint: "Choose admin, developer, or viewer",
       iconName: "shield",
     });
     items.push({
@@ -1208,7 +1209,35 @@ export function personMenuItems(userId) {
       danger: true,
     });
   }
+  // Deployment administration, which is a different thing from a role inside
+  // one organization: it reaches every organization on this control plane, and
+  // it is what lets somebody hand out free repository access. Only an
+  // administrator can see it, because only an administrator can grant it.
+  if (iAmSystemAdmin()) {
+    const target = channelPersonById(repositoryId, userId);
+    const already = target?.user?.systemAdmin === true;
+    if (items.length > 0) {
+      items.push({ separator: true });
+    }
+    items.push({
+      act: already ? "system-admin-revoke" : "system-admin-grant",
+      value: userId,
+      label: already ? "Remove deployment admin" : "Make deployment admin",
+      hint: already
+        ? "Takes back access to every organization, and to free invites"
+        : "Full access to every organization, and can invite people for free",
+      iconName: "shield",
+      ...(already ? { danger: true } : {}),
+    });
+  }
   return items;
+}
+
+/** One person in a channel roster, by id, for reading what the server said. */
+function channelPersonById(repositoryId, userId) {
+  return (state.channelPeople[repositoryId] ?? []).find(
+    (person) => (person.user?.id ?? person.userId ?? person.id) === userId,
+  );
 }
 
 /** The role the roster acts on. */
@@ -6322,7 +6351,14 @@ export function coOwnerPanelHtml(repositoryId) {
                  .map(
                    (grant) => `<div class="pop-grant-row">
                      <span>${esc(grant.user?.displayName ?? grant.userId)}</span>
-                     <span class="pop-grant-role">${esc(grant.role)}</span>
+                     <span class="pop-grant-role">${esc(grant.role)}</span>${
+                       // Which of these seats nobody is paying for. Invisible
+                       // until now, which made a comp impossible to audit
+                       // without reading the database.
+                       grant.comped === true
+                         ? `<span class="pop-grant-free" title="Invited by a deployment admin — this seat is free">free</span>`
+                         : ""
+                     }
                      ${iconButton("close", {
                        act: "channel-grant-revoke",
                        value: `${repositoryId}:${grant.userId}`,

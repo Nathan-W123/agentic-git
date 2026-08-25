@@ -82,6 +82,15 @@ import {
 } from "./auth.js";
 import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
+  WebhookSignatureError,
+  isoFromUnixSeconds,
+  readSubscription,
+  subscriptionStatusFrom,
+  verifyWebhookSignature,
+  type StripeClient,
+} from "./stripe.js";
+import { billableSeats } from "./billing.js";
+import {
   arbitrationLine,
   type DeferredRef,
 } from "./arbitration-line.js";
@@ -2317,7 +2326,7 @@ const ACK_ONLY_RE =
  * precisely to do it.
  */
 const TASK_VERB_RE =
-  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|animate|animates|animated|animating|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|help|helps|helped|helping|solve|solves|solved|solving|address|addresses|addressed|addressing|finish|finishes|finished|finishing|complete|completes|completed|completing|test|tests|tested|testing|verify|verifies|verified|verifying|tackle|tackles|tackled|tackling|improve|improves|improved|improving|figure ?out|take (?:a look|care of)|pick ?up)\b/iu;
+  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|animate|animates|animated|animating|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|help|helps|helped|helping|solve|solves|solved|solving|address|addresses|addressed|addressing|finish|finishes|finished|finishing|complete|completes|completed|completing|test|tests|tested|testing|verify|verifies|verified|verifying|tackle|tackles|tackled|tackling|improve|improves|improved|improving|figure ?out|take (?:a look|care of)|pick ?up|put|puts|putting|get rid of|gets rid of|got rid of|getting rid of|hide|hides|hid|hiding|drop|drops|dropped|dropping|take out|takes out|took out|taking out|turn on|turn off|turns o[nf]f?|turned o[nf]f?|turning o[nf]f?|shrink|shrinks|shrank|shrunk|shrinking|enlarge|enlarges|enlarged|enlarging)\b/iu;
 
 /**
  * A question about the status of existing work — asked *with* a task verb
@@ -2547,6 +2556,67 @@ const PLAN_HOLD_TTL_MS = 15 * 60_000;
  * metadata, and the transcript has to be readable by the same reading a
  * person gives it.
  */
+/**
+ * How long a socket ticket is worth anything.
+ *
+ * Long enough for the round trip that mints it and the upgrade that spends
+ * it, and short enough that one written to a log is stale before anybody
+ * reads the log.
+ */
+const SOCKET_TICKET_TTL_MS = 30_000;
+
+/**
+ * How long an approved app has to collect its token.
+ *
+ * Longer than a socket ticket because a person is in the loop — the browser
+ * has to redirect and the waiting app has to notice — and still short enough
+ * that an abandoned approval is not a credential lying around.
+ */
+const APP_AUTHORIZATION_TTL_MS = 120_000;
+
+/**
+ * What an app approved through the browser may do.
+ *
+ * Read the room and start work — the two a client needs to be the dashboard,
+ * and deliberately not everything its owner can do. The token lives on a
+ * laptop rather than in a session that expires, so it gets the smallest set
+ * that still makes it useful; `issueApiToken` refuses anything above the
+ * owner's role regardless.
+ */
+const APP_TOKEN_SCOPES = ["view", "run_task"] as const;
+
+/**
+ * Whether a desktop app's callback is somewhere only that app can hear.
+ *
+ * The one check this flow cannot get wrong. The browser is about to be sent
+ * to this address carrying a code that can be exchanged for a token, so an
+ * unchecked value here is not an open redirect — it is a way to have somebody
+ * sign in and hand the result to an attacker. Loopback is the whole allowance:
+ * an app running on the person's own machine, reachable from nowhere else.
+ *
+ * Any port, because the app picks a free one at startup and cannot know it
+ * in advance. No credentials in the URL, no https — a loopback listener has
+ * no certificate anybody could verify, which is exactly why the standard
+ * carve-out for it exists.
+ */
+export function isLoopbackCallback(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:") {
+    return false;
+  }
+  if (url.username !== "" || url.password !== "") {
+    return false;
+  }
+  // `hostname` rather than `host`: the port is separate there, and IPv6
+  // arrives bracketed in one and bare in the other.
+  return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
+}
+
 const AUTO_CLAIM_OFFER_TAIL =
   'Say "yes" and I\'ll ask you what I need before I start — or @mention ' +
   "someone else.";
@@ -2959,7 +3029,6 @@ const ROLES: readonly OrganizationRole[] = [
   "owner",
   "admin",
   "developer",
-  "reviewer",
   "viewer",
 ];
 /**
@@ -3692,6 +3761,25 @@ export interface ApiGatewayOptions {
    */
   mailer?: Mailer;
   /**
+   * Talks to Stripe. Absent — no `STRIPE_SECRET_KEY` — leaves every billing
+   * route answering 501: a deployment nobody has configured for payment
+   * should say so plainly rather than fail somewhere deeper with a message
+   * about a missing key. Injected by tests, which must not call Stripe.
+   */
+  stripe?: StripeClient;
+  /** Signing secret for Stripe webhooks; without it no webhook is accepted. */
+  stripeWebhookSecret?: string;
+  /** The price a seat is sold at. Required before checkout can be started. */
+  stripePriceId?: string;
+  /**
+   * Where Checkout sends somebody back to.
+   *
+   * Configured rather than derived from the request, because the thin desktop
+   * shell's own origin is not a URL Stripe can redirect a browser to — the
+   * return has to land somewhere real that then hands back to the app.
+   */
+  appBaseUrl?: string;
+  /**
    * The local first pass over unaddressed channel messages.
    *
    * Defaults to the embedding filter, or to one that passes everything on
@@ -4158,6 +4246,85 @@ export class ApiGateway {
   private readonly limiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
   private readonly activeRuns = new Set<string>();
+  /**
+   * Permission to open one socket, held for seconds.
+   *
+   * A browser proves itself to the upgrade with its session cookie, which it
+   * attaches on its own. Nothing else can: `new WebSocket(url)` takes no
+   * headers, so a client holding a bearer token — a desktop shell, or
+   * anything else outside a browser — has no way to present it. The usual
+   * answer is to put the token in the query string, and the usual objection
+   * is that URLs are written to logs and proxy traces, where a long-lived
+   * credential does not belong.
+   *
+   * A ticket is what goes there instead: minted by an authenticated request
+   * that *can* carry a header, single-use, and dead within the minute. Held
+   * in memory rather than the store because it is worth nothing a minute from
+   * now and because this deployment is documented as a single control plane —
+   * the same assumption crash recovery already makes.
+   */
+  private readonly socketTickets = new Map<
+    string,
+    { principal: AuthenticatedPrincipal; expiresAt: number }
+  >();
+
+  /**
+   * Apps a person has approved, waiting to collect their token.
+   *
+   * The redirect carries this rather than the token itself. A token in a
+   * redirect URL is a token in the browser's history, in whatever the
+   * loopback server logs, and in any extension watching navigation; a code is
+   * worth nothing without the exchange that spends it, and the exchange is a
+   * POST that leaves no such trail. Single-use and short-lived, held in
+   * memory for the same reason socket tickets are.
+   */
+  private readonly appAuthorizations = new Map<
+    string,
+    {
+      token: string;
+      tokenId: string;
+      name: string;
+      approver: AuthenticatedPrincipal;
+      expiresAt: number;
+    }
+  >();
+
+  /**
+   * Drops tickets nobody redeemed.
+   *
+   * Called when one is minted rather than on a timer: the map only grows by
+   * minting, so that is the one moment it can need it, and a deployment
+   * nobody is signing into does not want a timer for an empty map.
+   */
+  /**
+   * Drops approvals nobody collected, and withdraws the token with them.
+   *
+   * An app that was approved and then never started leaves a credential
+   * nobody is holding. Revoking it is what keeps "approve" from quietly
+   * meaning "issue a token to no one" — and it is why the token may be minted
+   * before it is collected at all.
+   */
+  private pruneAppAuthorizations(): void {
+    const now = Date.now();
+    for (const [code, approved] of this.appAuthorizations) {
+      if (approved.expiresAt > now) {
+        continue;
+      }
+      this.appAuthorizations.delete(code);
+      void this.auth
+        .revokeApiToken(approved.approver, approved.tokenId, "never_collected")
+        .catch(() => undefined);
+    }
+  }
+
+  private pruneSocketTickets(): void {
+    const now = Date.now();
+    for (const [ticket, held] of this.socketTickets) {
+      if (held.expiresAt <= now) {
+        this.socketTickets.delete(ticket);
+      }
+    }
+  }
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
   /**
@@ -4338,6 +4505,10 @@ export class ApiGateway {
    * the system administrator.
    */
   private readonly bootstrapToken: string | undefined;
+  private readonly stripe: StripeClient | undefined;
+  private readonly stripeWebhookSecret: string | undefined;
+  private readonly stripePriceId: string | undefined;
+  private readonly appBaseUrl: string;
   /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
   /** The local pass that keeps ordinary conversation off the agents. */
@@ -4352,6 +4523,15 @@ export class ApiGateway {
   public constructor(private readonly options: ApiGatewayOptions) {
     const configured = (options.bootstrapToken ?? "").trim();
     this.bootstrapToken = configured.length === 0 ? undefined : configured;
+    this.stripe = options.stripe;
+    const webhookSecret = (options.stripeWebhookSecret ?? "").trim();
+    this.stripeWebhookSecret =
+      webhookSecret.length === 0 ? undefined : webhookSecret;
+    const priceId = (options.stripePriceId ?? "").trim();
+    this.stripePriceId = priceId.length === 0 ? undefined : priceId;
+    // Trailing slash trimmed once here rather than at each use, so a value
+    // pasted with one does not produce `https://app//billing`.
+    this.appBaseUrl = (options.appBaseUrl ?? "").trim().replace(/\/+$/u, "");
     // Only meaningful when one is set: a token short enough to guess is worse
     // than none, because it reads as protection.
     if (this.bootstrapToken !== undefined && this.bootstrapToken.length < 24) {
@@ -4447,13 +4627,37 @@ export class ApiGateway {
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
-    const authorizeSocket = async (
+    const redeemTicket = (
+      request: IncomingMessage,
+    ): AuthenticatedPrincipal | undefined => {
+      const url = new URL(request.url ?? "/", "http://socket.invalid");
+      const ticket = url.searchParams.get("ticket");
+      if (ticket === null || ticket === "") {
+        return undefined;
+      }
+      // Deleted whether or not it was still valid: single-use means a replay
+      // of the same URL fails even when it arrives inside the window.
+      const held = this.socketTickets.get(ticket);
+      this.socketTickets.delete(ticket);
+      if (held === undefined || held.expiresAt <= Date.now()) {
+        throw new AuthenticationError("Socket ticket is invalid or expired");
+      }
+      return held.principal;
+    };
+        const authorizeSocket = async (
       request: IncomingMessage,
       projectId: string,
       permission: "view" | "submit_task",
     ): Promise<WebSocketAuthorization> => {
       this.assertOrigin(request);
-      const principal = await this.auth.authenticate(request.headers.cookie);
+      // A ticket if one was presented, the session cookie otherwise. Not a
+      // fallback in either direction: a request that brought a ticket has
+      // said which credential it means, and quietly trying the other one
+      // after a bad ticket would make an expired ticket look like a working
+      // one wherever a stale cookie happened to be lying around.
+      const ticketed = redeemTicket(request);
+      const principal =
+        ticketed ?? (await this.auth.authenticate(request.headers.cookie));
       const { project } = await authorizeProject(
         this.options.store,
         principal,
@@ -4705,7 +4909,15 @@ export class ApiGateway {
       const passwordResetPath = url.pathname.startsWith(
         `${API_PREFIX}/auth/password-reset`,
       );
+      // Stripe is not a browser and holds no session: it authenticates by
+      // signing the body with a shared secret, which the handler verifies
+      // before reading a single field. Public here means "no cookie", not
+      // "unauthenticated" — an unsigned request never gets past the handler.
+      const stripeWebhookPath =
+        request.method === "POST" &&
+        url.pathname === `${API_PREFIX}/stripe/webhook`;
       const isPublic =
+        stripeWebhookPath ||
         (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
         (request.method === "GET" && invitationPath) ||
         (passwordResetPath &&
@@ -4717,6 +4929,12 @@ export class ApiGateway {
             // Creating an account cannot require an account.
             `${API_PREFIX}/auth/register`,
             `${API_PREFIX}/auth/register/confirm`,
+            // The app collecting its token has no credential to present —
+            // acquiring one is the entire point of the call. What stands in
+            // for authentication is the code: minted only by an approval a
+            // signed-in person clicked through, single-use, and dead within
+            // two minutes.
+            `${API_PREFIX}/auth/app-authorization/exchange`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
           url.pathname.endsWith("/accept") &&
@@ -4759,6 +4977,47 @@ export class ApiGateway {
     const { request, response, url } = context;
     const method = request.method ?? "GET";
     const path = url.pathname;
+
+    if (method === "POST" && path === `${API_PREFIX}/stripe/webhook`) {
+      if (this.stripeWebhookSecret === undefined) {
+        // Refused rather than ignored. A deployment with no secret cannot tell
+        // a real event from a forged one, and answering 200 to both would let
+        // anyone who found this URL cancel somebody's subscription.
+        throw new HttpError(
+          501,
+          "billing_not_configured",
+          "This deployment accepts no Stripe webhooks",
+        );
+      }
+      const rawBody = await this.readRawBody(request);
+      try {
+        verifyWebhookSignature({
+          rawBody,
+          signatureHeader:
+            typeof request.headers["stripe-signature"] === "string"
+              ? request.headers["stripe-signature"]
+              : undefined,
+          secret: this.stripeWebhookSecret,
+        });
+      } catch (error) {
+        if (error instanceof WebhookSignatureError) {
+          throw new HttpError(400, "invalid_signature", error.message);
+        }
+        throw error;
+      }
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
+      } catch {
+        throw new HttpError(400, "invalid_json", "Webhook body was not JSON");
+      }
+      await this.applyStripeEvent(event);
+      // 200 on anything that verified, including an event type nothing here
+      // handles. Stripe retries a non-2xx for days, and retrying an event we
+      // have deliberately ignored is noise that hides the ones that matter.
+      this.sendJson(response, 200, { received: true });
+      return;
+    }
 
     if (method === "GET" && path === `${API_PREFIX}/health`) {
       let docker:
@@ -5302,12 +5561,19 @@ export class ApiGateway {
             userId: user.id,
             role: invitation.role,
           });
+          // Somebody joining is the commonest way a seat count changes, and
+          // the one most likely to be noticed on an invoice.
+          await this.syncSeatQuantity(invitation.organizationId);
         } else {
           await this.options.store.saveRepositoryGrant({
             repositoryId: invitation.repositoryId,
             userId: user.id,
             role: invitation.role,
             grantedBy: invitation.invitedBy,
+            // Free use of this one repository, if an operator's link is what
+            // brought them here. Carried from the invitation rather than
+            // re-derived, so it reflects who actually gave the access away.
+            comped: invitation.comped,
             createdAt: new Date().toISOString(),
           });
         }
@@ -5339,6 +5605,30 @@ export class ApiGateway {
         return;
       }
       throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
+    if (
+      path === `${API_PREFIX}/auth/app-authorization/exchange` &&
+      method === "POST"
+    ) {
+      const body = objectBody(await this.readJson(request));
+      const code = String(body["code"] ?? "");
+      const approved = this.appAuthorizations.get(code);
+      // Deleted whether or not it was still good: a code is spent by being
+      // presented, so a replay fails even inside the window.
+      this.appAuthorizations.delete(code);
+      if (approved === undefined || approved.expiresAt <= Date.now()) {
+        throw new HttpError(
+          400,
+          "authorization_expired",
+          "That approval is no longer valid — start the sign-in again",
+        );
+      }
+      this.sendJson(response, 201, {
+        token: approved.token,
+        name: approved.name,
+      });
+      return;
     }
 
     const principal = this.requirePrincipal(context);
@@ -5859,6 +6149,89 @@ export class ApiGateway {
       throw new HttpError(405, "method_not_allowed", "Unsupported lease action");
     }
 
+    if (
+      path === `${API_PREFIX}/auth/app-authorization/approve` &&
+      method === "POST"
+    ) {
+      // Session only, exactly as minting a token by hand is: an app that
+      // could approve the next app would make revoking this one pointless.
+      if (principal.credential !== "session") {
+        throw new HttpError(
+          403,
+          "session_required",
+          "Approving an app requires a signed-in session",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const callback = String(body["redirectUri"] ?? "");
+      if (!isLoopbackCallback(callback)) {
+        throw new HttpError(
+          400,
+          "callback_rejected",
+          "An app callback must be an http address on this machine",
+        );
+      }
+      const user = await this.options.store.getUser(principal.user.id);
+      if (user === undefined) {
+        throw new HttpError(404, "not_found", "User was not found");
+      }
+      const name = stringField(body["name"], "name", { max: 120 }) ?? "Kumi app";
+      // Minted here rather than at collection, because here is where the
+      // session is: bounding a token by what its owner may actually do takes
+      // the live principal and its role, and the route that already does that
+      // correctly is this side of the redirect. What the code carries is the
+      // finished token, and an uncollected one is withdrawn below rather than
+      // left lying about.
+      const issued = await this.auth.issueApiToken({
+        user,
+        name,
+        scopes: [...APP_TOKEN_SCOPES],
+        ...(principal.sessionId === undefined
+          ? {}
+          : { createdBySession: principal.sessionId }),
+      });
+      this.pruneAppAuthorizations();
+      const code = randomBytes(32).toString("base64url");
+      this.appAuthorizations.set(code, {
+        token: issued.token,
+        tokenId: issued.record.id,
+        name,
+        approver: principal,
+        expiresAt: Date.now() + APP_AUTHORIZATION_TTL_MS,
+      });
+      // Built here rather than in the page: the callback has been checked on
+      // this side, and handing back a finished address is what stops the
+      // browser being pointed anywhere the check did not see.
+      const target = new URL(callback);
+      target.searchParams.set("code", code);
+      const state = String(body["state"] ?? "");
+      if (state !== "") {
+        target.searchParams.set("state", state);
+      }
+      this.sendJson(response, 201, { redirectTo: target.toString() });
+      return;
+    }
+
+    if (path === `${API_PREFIX}/auth/ws-ticket` && method === "POST") {
+      // Any credential may mint one, a bearer token included — which is the
+      // whole point, since a token is exactly what cannot be presented to an
+      // upgrade. Unlike minting an API token, this grants nothing durable: a
+      // ticket opens one socket within the minute and cannot mint anything
+      // further, so it does not put revocation out of reach the way a
+      // token minting tokens would.
+      this.pruneSocketTickets();
+      const ticket = randomBytes(32).toString("base64url");
+      this.socketTickets.set(ticket, {
+        principal,
+        expiresAt: Date.now() + SOCKET_TICKET_TTL_MS,
+      });
+      this.sendJson(response, 201, {
+        ticket,
+        expiresInMs: SOCKET_TICKET_TTL_MS,
+      });
+      return;
+    }
+
     if (path === `${API_PREFIX}/auth/tokens` && method === "GET") {
       this.sendJson(response, 200, {
         tokens: await this.auth.listApiTokens(principal.user.id),
@@ -6210,6 +6583,16 @@ export class ApiGateway {
           role,
           secretHash: hashSecret(secret),
           invitedBy: principal.user.id,
+          // A link from whoever runs the deployment, to one repository, is
+          // free use of that repository. Both halves are required: only an
+          // operator may give access away, and only a repository-scoped
+          // invitation is narrow enough to give. An organization-wide link
+          // would be handing over every repository the organization has,
+          // including ones that do not exist yet, so it is never comped.
+          //
+          // Settled here rather than at acceptance so the answer cannot change
+          // under the recipient between clicking and joining.
+          comped: principal.user.systemAdmin && repositoryId !== undefined,
           createdAt: now.toISOString(),
           expiresAt: new Date(
             now.getTime() + INVITATION_TTL_MS,
@@ -6407,6 +6790,9 @@ export class ApiGateway {
             actorId: principal.user.id,
           },
         });
+        // A promotion from viewer to developer is a seat starting to cost
+        // money, and a demotion is one stopping.
+        await this.syncSeatQuantity(organizationId);
         this.sendJson(response, 200, { membership });
         return;
       }
@@ -6422,6 +6808,7 @@ export class ApiGateway {
           );
         }
         await this.options.store.removeMembership(organizationId, userId);
+        await this.syncSeatQuantity(organizationId);
         await this.options.store.appendAudit(undefined, {
           type: "membership_changed",
           data: {
@@ -7081,6 +7468,9 @@ export class ApiGateway {
         userId,
         role,
         grantedBy: principal.user.id,
+        // Sharing a repository with a colleague is an ordinary paid seat. Only
+        // an operator's invitation link gives access away.
+        comped: false,
         createdAt: new Date().toISOString(),
       });
       await this.options.store.appendAudit(undefined, {
@@ -10775,6 +11165,113 @@ export class ApiGateway {
           record.event.data["projectId"] === projectId,
       );
       this.sendJson(response, 200, { events });
+      return;
+    }
+
+    const billingMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/billing$`, "u"),
+    );
+    if (billingMatch !== undefined && method === "GET") {
+      const organizationId = billingMatch[0] ?? "";
+      // `view`, not `manage_organization`: everybody in a team benefits from
+      // knowing the trial ends on Friday, and hiding it until somebody with
+      // billing rights notices is how a trial lapses by surprise.
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "view",
+      );
+      const subscription =
+        await this.options.store.getSubscription(organizationId);
+      const memberships =
+        await this.options.store.listMemberships(organizationId);
+      this.sendJson(response, 200, {
+        billing: {
+          configured: this.stripe !== undefined && this.stripePriceId !== undefined,
+          status: subscription?.status ?? "trialing",
+          trialEndsAt: subscription?.trialEndsAt,
+          currentPeriodEnd: subscription?.currentPeriodEnd,
+          seats: billableSeats(memberships),
+          // Whether a portal link can be made at all. A team that has never
+          // paid has no Stripe customer, and offering "manage billing" that
+          // can only fail is worse than not offering it.
+          manageable: subscription?.stripeCustomerId !== undefined,
+        },
+      });
+      return;
+    }
+
+    const checkoutMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/billing/checkout$`, "u"),
+    );
+    if (checkoutMatch !== undefined && method === "POST") {
+      const organizationId = checkoutMatch[0] ?? "";
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_organization",
+      );
+      const stripe = this.requireStripe();
+      const priceId = this.stripePriceId;
+      if (priceId === undefined) {
+        throw new HttpError(
+          501,
+          "billing_not_configured",
+          "No price is configured for this deployment",
+        );
+      }
+      const memberships =
+        await this.options.store.listMemberships(organizationId);
+      const existing =
+        await this.options.store.getSubscription(organizationId);
+      const session = await stripe.createCheckoutSession({
+        organizationId,
+        priceId,
+        // At least one: an organization with no billable seat yet still has
+        // somebody standing at the checkout, and Stripe refuses a quantity of
+        // zero. They are buying the seat they are about to use.
+        quantity: Math.max(1, billableSeats(memberships)),
+        successUrl: `${this.appBaseUrl}/billing/done`,
+        cancelUrl: `${this.appBaseUrl}/billing/cancelled`,
+        ...(existing?.stripeCustomerId === undefined
+          ? { customerEmail: principal.user.email }
+          : { customerId: existing.stripeCustomerId }),
+      });
+      this.sendJson(response, 200, { url: session.url });
+      return;
+    }
+
+    const portalMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/billing/portal$`, "u"),
+    );
+    if (portalMatch !== undefined && method === "POST") {
+      const organizationId = portalMatch[0] ?? "";
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_organization",
+      );
+      const stripe = this.requireStripe();
+      const subscription =
+        await this.options.store.getSubscription(organizationId);
+      if (subscription?.stripeCustomerId === undefined) {
+        throw new HttpError(
+          409,
+          "no_stripe_customer",
+          "This organization has never been billed, so there is nothing to manage",
+        );
+      }
+      const session = await stripe.createPortalSession({
+        customerId: subscription.stripeCustomerId,
+        returnUrl: `${this.appBaseUrl}/billing`,
+      });
+      this.sendJson(response, 200, { url: session.url });
       return;
     }
 
@@ -19300,6 +19797,244 @@ export class ApiGateway {
       // the sender's claim and a chunked body does not carry one at all.
       if (size > limit) {
         throw new HttpError(413, "body_too_large", "That image is too large");
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * The exact bytes of a request body.
+   *
+   * Stripe signs the body it sent, so a webhook cannot go through
+   * {@link readJson}: parsing to JSON and re-serialising changes key order and
+   * whitespace, and every signature over those bytes then fails. This is the
+   * only caller, and it is the reason it exists.
+   */
+  /**
+   * Applies one verified Stripe event to an organization's entitlement.
+   *
+   * Every event this cares about is *about a subscription*, so the
+   * organization is read off the subscription's own metadata rather than off
+   * the checkout session that started it. A session is a one-off; an invoice
+   * arriving three months later has no session to look back to, and a lookup
+   * table mapping customers to organizations is one more thing to keep
+   * correct.
+   *
+   * Unknown event types are ignored deliberately. Stripe sends whatever the
+   * endpoint is subscribed to plus anything added to that list later, and a
+   * gateway that threw on an unrecognised type would turn a dashboard change
+   * into an outage.
+   */
+  private async applyStripeEvent(event: Record<string, unknown>): Promise<void> {
+    const type = String(event["type"] ?? "");
+    const data = event["data"] as { object?: unknown } | undefined;
+    const object = (data?.object ?? {}) as Record<string, unknown>;
+
+    // The three subscription-shaped events carry the subscription itself.
+    if (
+      type === "customer.subscription.created" ||
+      type === "customer.subscription.updated" ||
+      type === "customer.subscription.deleted"
+    ) {
+      await this.recordStripeSubscription(object, type);
+      return;
+    }
+
+    // Checkout completing is the first time a subscription exists. The session
+    // names it, so it is fetched rather than guessed at: the session object
+    // carries an id, not the subscription's status or period.
+    if (type === "checkout.session.completed") {
+      const subscriptionId = object["subscription"];
+      if (typeof subscriptionId !== "string" || this.stripe === undefined) {
+        return;
+      }
+      const subscription = await this.stripe.getSubscription(subscriptionId);
+      await this.saveStripeEntitlement({
+        organizationId: String(
+          (object["metadata"] as Record<string, unknown> | undefined)?.[
+            "organizationId"
+          ] ?? "",
+        ),
+        status: subscriptionStatusFrom(subscription.status),
+        currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+        stripeCustomerId: subscription.customerId,
+        stripeSubscriptionId: subscription.id,
+      });
+      return;
+    }
+
+    // A paid or failed invoice moves the same subscription between `active`
+    // and `past_due`, which `customer.subscription.updated` also reports. Both
+    // are handled because which one arrives first is not guaranteed, and the
+    // write is idempotent either way.
+    if (type === "invoice.paid" || type === "invoice.payment_failed") {
+      const subscriptionId = object["subscription"];
+      if (typeof subscriptionId !== "string" || this.stripe === undefined) {
+        return;
+      }
+      const subscription = await this.stripe.getSubscription(subscriptionId);
+      await this.recordStripeSubscription(
+        {
+          id: subscription.id,
+          status: subscription.status,
+          customer: subscription.customerId,
+          current_period_end: subscription.currentPeriodEnd,
+          metadata: object["subscription_details"] ?? {},
+        },
+        type,
+      );
+      return;
+    }
+  }
+
+  /** Writes an entitlement from a Stripe subscription object. */
+  private async recordStripeSubscription(
+    object: Record<string, unknown>,
+    type: string,
+  ): Promise<void> {
+    const subscription = readSubscription(object);
+    const metadata = object["metadata"] as Record<string, unknown> | undefined;
+    let organizationId = String(metadata?.["organizationId"] ?? "");
+    if (organizationId === "" && this.stripe !== undefined) {
+      // An invoice's copy of a subscription does not always carry metadata, so
+      // the subscription itself is read rather than dropping the event.
+      const fetched = await this.stripe
+        .getSubscription(subscription.id)
+        .catch(() => undefined);
+      organizationId = fetched?.metadata["organizationId"] ?? "";
+    }
+    await this.saveStripeEntitlement({
+      organizationId,
+      // A deletion is a cancellation whatever the object's own status says —
+      // Stripe reports `canceled` there, but reading the event type means a
+      // future status spelling cannot quietly leave somebody entitled.
+      status:
+        type === "customer.subscription.deleted"
+          ? "canceled"
+          : subscriptionStatusFrom(subscription.status),
+      currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+      stripeCustomerId: subscription.customerId,
+      stripeSubscriptionId: subscription.id,
+    });
+  }
+
+  /** Stores an entitlement, refusing an event that names no organization. */
+  private async saveStripeEntitlement(input: {
+    organizationId: string;
+    status: "active" | "past_due" | "canceled";
+    currentPeriodEnd: string | undefined;
+    stripeCustomerId: string;
+    stripeSubscriptionId: string;
+  }): Promise<void> {
+    if (input.organizationId === "") {
+      // Nothing to apply it to. Logged rather than thrown: throwing would make
+      // Stripe retry an event that can never succeed, for days.
+      process.stderr.write(
+        `[stripe] event for subscription ${input.stripeSubscriptionId} named no organization\n`,
+      );
+      return;
+    }
+    if ((await this.options.store.getOrganization(input.organizationId)) === undefined) {
+      process.stderr.write(
+        `[stripe] event named unknown organization ${input.organizationId}\n`,
+      );
+      return;
+    }
+    await this.options.store.saveSubscription({
+      organizationId: input.organizationId,
+      status: input.status,
+      ...(input.currentPeriodEnd === undefined
+        ? {}
+        : { currentPeriodEnd: input.currentPeriodEnd }),
+      ...(input.stripeCustomerId === ""
+        ? {}
+        : { stripeCustomerId: input.stripeCustomerId }),
+      ...(input.stripeSubscriptionId === ""
+        ? {}
+        : { stripeSubscriptionId: input.stripeSubscriptionId }),
+    });
+  }
+
+  /**
+   * The Stripe client, or a 501 naming the reason.
+   *
+   * A deployment nobody has configured for payment should say so plainly at
+   * the edge rather than fail deeper with a message about a missing key —
+   * self-hosting Kumi without billing is a legitimate way to run it.
+   */
+  /**
+   * Brings the Stripe subscription's seat count back in line with reality.
+   *
+   * Best-effort on purpose, and this is the trade being made: a Stripe outage
+   * must not stop somebody adding a teammate. Adding a colleague is the moment
+   * a team is getting value out of this, and failing it to protect an invoice
+   * would be charging the customer for our own dependency being down.
+   *
+   * The cost is that seats can drift when a sync fails, so the failure is
+   * written to the log rather than swallowed, and checkout recomputes the
+   * quantity from memberships rather than trusting what Stripe holds. Drift
+   * therefore heals at the next purchase or seat change rather than accruing.
+   *
+   * Nothing happens for an organization that has never paid: there is no
+   * subscription to hold a quantity, and the count is taken fresh at checkout.
+   */
+  private async syncSeatQuantity(organizationId: string): Promise<void> {
+    if (this.stripe === undefined) {
+      return;
+    }
+    try {
+      const subscription =
+        await this.options.store.getSubscription(organizationId);
+      const subscriptionId = subscription?.stripeSubscriptionId;
+      if (subscriptionId === undefined || subscription?.status === "canceled") {
+        return;
+      }
+      const memberships =
+        await this.options.store.listMemberships(organizationId);
+      const seats = Math.max(1, billableSeats(memberships));
+      const current = await this.stripe.getSubscription(subscriptionId);
+      if (current.quantity === seats) {
+        // Stripe prorates every quantity write, so writing the number it
+        // already holds would put a zero-value line on the invoice each time
+        // anybody's role changed.
+        return;
+      }
+      const itemId = await this.stripe.getSubscriptionItemId(subscriptionId);
+      if (itemId === undefined) {
+        return;
+      }
+      await this.stripe.updateSubscriptionQuantity({
+        subscriptionId,
+        subscriptionItemId: itemId,
+        quantity: seats,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `[stripe] seat sync failed for ${organizationId}: ${describeError(error)}\n`,
+      );
+    }
+  }
+
+  private requireStripe(): StripeClient {
+    if (this.stripe === undefined) {
+      throw new HttpError(
+        501,
+        "billing_not_configured",
+        "This deployment is not configured for payment",
+      );
+    }
+    return this.stripe;
+  }
+
+  private async readRawBody(request: IncomingMessage): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > this.bodyLimit) {
+        throw new HttpError(413, "body_too_large", "Request body is too large");
       }
       chunks.push(buffer);
     }
