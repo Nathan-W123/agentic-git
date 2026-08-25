@@ -820,11 +820,30 @@ function renderWelcome() {
     </div></main>`;
   }
   if (state_ === undefined || state_.paid !== true) {
+    // Waiting is the ordinary case for a second or two. Past that it is more
+    // likely the checkout was never finished than that Stripe is slow, and
+    // saying so beats a spinner that never resolves — the link stays valid
+    // either way, so somebody who did pay can simply reopen it.
+    const stalled = (state_?.attempts ?? 0) > 6;
     return `<main class="auth-shell"><div class="auth-box">
       <div class="auth-mascot">${brandWordmark(120)}
-        <div><h1>Confirming your payment…</h1>
-        <p>This usually takes a second or two. Keep this page open.</p></div>
+        <div><h1>${
+          stalled ? "No payment yet" : "Confirming your payment…"
+        }</h1>
+        <p>${
+          stalled
+            ? `We have not had confirmation from Stripe. If you did not finish
+               the card form, you can start again — nothing has been charged.
+               If you did pay, this page will catch up on its own; the link in
+               your email works too.`
+            : "This usually takes a second or two. Keep this page open."
+        }</p></div>
       </div>
+      ${
+        stalled
+          ? `<p class="auth-alt"><a href="#signup">Start again</a></p>`
+          : ""
+      }
     </div></main>`;
   }
   return `<main class="auth-shell">
@@ -947,6 +966,7 @@ async function loadWelcome() {
         email: answer?.email ?? "",
         paid: answer?.paid === true,
         claimed: answer?.claimed === true,
+        attempts: (welcomeState?.attempts ?? 0) + 1,
       };
     } catch (error) {
       welcomeState = { error: error.message };

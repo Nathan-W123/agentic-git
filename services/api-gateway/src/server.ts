@@ -5245,6 +5245,40 @@ export class ApiGateway {
         expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
         completedAt: undefined,
       });
+      // Mailed now rather than when the payment lands, because the link is
+      // built from a secret this deployment deliberately does not keep — only
+      // its hash is stored, exactly as a password reset's is. Sending it here
+      // is what stops the browser tab being the only copy: somebody who pays
+      // and then closes the tab has otherwise paid for an organization they
+      // can never reach.
+      //
+      // Safe to send before the money clears, because the link cannot build
+      // an account until it has: the completion route refuses while the
+      // sign-up is unpaid, and says so.
+      const link = `${this.appBaseUrl}/#welcome/${intentId}.${secret}`;
+      try {
+        await this.mailer({
+          to: email,
+          subject: "Finish setting up Kumi",
+          text:
+            `Your Kumi trial is starting.\n\n` +
+            `Open this link to choose a name and a password, and your team ` +
+            `is ready:\n\n${link}\n\n` +
+            `Fourteen days are free. Your card is billed after that unless ` +
+            `you cancel first.\n\n` +
+            `If you did not start this, ignore this message — no account has ` +
+            `been created and nothing has been charged.\n`,
+        });
+      } catch (error) {
+        // A relay that is down must not fail the sign-up: the checkout is
+        // already made, the person is about to be sent to it, and the tab
+        // they are holding carries the same link. The operator sees this;
+        // they see their card form.
+        console.error(
+          `[mail] Could not send the sign-up link for ${intentId}: ` +
+            describeError(error),
+        );
+      }
       this.sendJson(response, 200, { url: session.url });
       return;
     }

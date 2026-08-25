@@ -10139,7 +10139,7 @@ test("a paid sign-up takes the card first and builds the account last", async (t
       return { id: "cs_paid", url: "https://checkout.example/cs_paid" };
     },
   } as unknown as StripeClient;
-  const { client, store } = await startBareGateway(t, {
+  const { client, store, sent } = await startBareGateway(t, {
     stripe,
     stripeWebhookSecret: secret,
     stripePriceId: "price_example",
@@ -10161,10 +10161,19 @@ test("a paid sign-up takes the card first and builds the account last", async (t
   assert.match(organizationId, /^org_/u);
   assert.equal(await store.getOrganization(organizationId), undefined);
 
-  // The claim link is the checkout's return address, so it is the one thing
-  // the person carries from Stripe back to us.
+  // The claim link is the checkout's return address — and it is also mailed,
+  // so the browser tab is not the only copy. Somebody who pays and closes the
+  // tab has otherwise bought an organization they can never reach.
   const token = String(checkout?.["successUrl"] ?? "").split("#welcome/")[1] ?? "";
   assert.notEqual(token, "");
+  assert.equal(sent.length, 1, "the link is mailed as well as redirected to");
+  assert.equal(sent[0]?.to, "buyer@example.com");
+  assert.match(sent[0]?.text ?? "", /#welcome\//u);
+  assert.match(
+    sent[0]?.text ?? "",
+    new RegExp(token.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"),
+    "the mailed link is the same claim link",
+  );
 
   // 2. Stripe confirms. The organization it paid for is built now — and
   //    still no account, because they have not chosen a password yet.
