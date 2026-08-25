@@ -1300,6 +1300,45 @@ const KEEP_IT_SIMPLE_DIRECTIVE =
   "— no preamble, no restating the request, nothing extra.";
 
 /**
+ * What the person actually asked, out of the objective the worker was sent.
+ *
+ * A submitted objective is the request wrapped in instructions the coordinator
+ * added: a role preamble in front, and behind it whichever directives applied
+ * — the answer-not-a-status-report one on every task, `/simple`, `/dnc`, the
+ * forced question marker. `withoutRoleContext` removes the front. Nothing
+ * removed the back, and the back is now unconditional and long.
+ *
+ * That is not cosmetic. Six places read a stored objective as if it were the
+ * request: some show it to people, and some compare it. The comparisons are
+ * the ones that broke — `findThreadToContinue` scores a new request against a
+ * thread's subject, and an objective that is four-fifths boilerplate drags
+ * every score under the merge bar, so a follow-up asked in the same words as
+ * the original opened its own thread instead of joining it. Measured at
+ * 0.11 against a threshold of 0.42, for two identical requests.
+ *
+ * Dropped by exact paragraph match rather than by pattern, so a request that
+ * happens to quote one of these sentences keeps it — and so a directive added
+ * later has to be added here deliberately, which is the failure this is.
+ */
+const COORDINATOR_DIRECTIVES: readonly string[] = [
+  ANSWER_NOT_STATUS_DIRECTIVE,
+  KEEP_IT_SIMPLE_DIRECTIVE,
+  DO_NOT_CODE_DIRECTIVE,
+  FORCE_QUESTION_MARKER,
+];
+
+export function requestFromObjective(objective: string): string {
+  const request = withoutRoleContext(objective);
+  const kept = request
+    .split(/\n[^\S\n]*\n/u)
+    .filter((paragraph) => !COORDINATOR_DIRECTIVES.includes(paragraph.trim()));
+  const joined = kept.join("\n\n").trim();
+  // Never nothing. A bare directive with no request behind it is still the
+  // only text a caller has to show.
+  return joined === "" ? request : joined;
+}
+
+/**
  * Politeness and preamble, which carry no information about the work.
  *
  * Stripped so an opening line reads as a summary rather than as the request
@@ -11352,7 +11391,7 @@ export class ApiGateway {
             change: {
               id: task.id,
               repositoryId: task.repositoryId,
-              objective: withoutRoleContext(task.objective),
+              objective: requestFromObjective(task.objective),
               at: landedAt(task) ?? outcome?.occurredAt ?? since,
               ...(typeof agentResponse === "string" ? { agentResponse } : {}),
               changedFiles,
@@ -12838,7 +12877,7 @@ export class ApiGateway {
                 return put === ""
                   ? undefined
                   : `- ${summariseObjective(
-                      withoutRoleContext(entry.objective),
+                      requestFromObjective(entry.objective),
                     )} — ${put}`;
               }),
             )
@@ -13166,7 +13205,11 @@ export class ApiGateway {
       .listSubmittedTasks({ repositoryId: input.repositoryId })
       .catch(() => []);
     const objectiveOf = new Map(
-      tasks.map((task) => [task.id, task.objective]),
+      // The request, not the objective the worker was sent. An objective
+      // carries the coordinator's own directives, and scoring against them
+      // buries the request under boilerplate every candidate shares — which
+      // dropped two identical requests to 0.11 against a bar of 0.42.
+      tasks.map((task) => [task.id, requestFromObjective(task.objective)]),
     );
     const now = Date.now();
     let best: { id: string; title: string; score: number } | undefined;
@@ -13262,7 +13305,7 @@ export class ApiGateway {
       if (messageId === undefined) {
         continue;
       }
-      const objective = withoutRoleContext(task.objective);
+      const objective = requestFromObjective(task.objective);
       const rootRequest =
         root === undefined ? "" : withoutMentions(root.content);
       // A request to undo, remove or disable work is new work even when every
@@ -17433,7 +17476,7 @@ export class ApiGateway {
       // Without the role preamble: the auditor is being told what the work was
       // asked to do, and "your role is auditor" is a sentence about a different
       // agent entirely.
-      .map((objective) => withoutRoleContext(objective).replace(/\s+/gu, " ").trim())
+      .map((objective) => requestFromObjective(objective).replace(/\s+/gu, " ").trim())
       .filter((objective) => objective.length > 0);
   }
 
@@ -17935,7 +17978,7 @@ export class ApiGateway {
       // Otherwise every hold in a repository with roles set reads "Your role in
       // this repository: auditor" and names nothing.
       const first =
-        withoutRoleContext(found?.objective ?? "another task").split("\n")[0] ??
+        requestFromObjective(found?.objective ?? "another task").split("\n")[0] ??
         "";
       return first.length > 40 ? `"${first.slice(0, 37)}…"` : `"${first}"`;
     };

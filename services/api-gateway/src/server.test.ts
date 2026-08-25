@@ -37,13 +37,16 @@ import {
   parseAutoClaimVerdict,
   readsAsEchoOfRequest,
   reportedFreshTokens,
+  requestFromObjective,
   selectChannelMemo,
   selectThreadContext,
   summariseAuditData,
   summariseChannelThread,
   summariseObjective,
   summariseThreadTitle,
+  textOverlap,
   truncateToTokens,
+  withRoleContext,
   type ApiOperations,
   type ChannelMemoThread,
 } from "./server.js";
@@ -11629,6 +11632,59 @@ test("a channel route will not read a repository from another project", async (t
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/stats`,
   );
   assert.equal(paired.status, 200, JSON.stringify(paired.data));
+});
+
+test("a stored objective reads back as the request, not the coordinator's script", () => {
+  // What a worker is sent is the request wrapped in instructions: a role
+  // preamble in front, and behind it whichever directives applied — the
+  // answer-not-a-status-report one on every task, and `/simple` or `/dnc`
+  // when asked for. Six places read that string back as if it were the
+  // request. Some show it to people; some compare it, and those are the ones
+  // that broke, because boilerplate every objective shares drags every
+  // similarity score toward each other and away from the words that differ.
+  const request = "rework the retry policy and its tests";
+  const sent = withRoleContext(
+    "senior engineer",
+    [
+      request,
+      "Your final message is the answer, not a status report. If you " +
+        "delegated to a subagent, wait for its result before finishing — " +
+        "never end a turn saying a search is running or that you will " +
+        "report back. Do not state a conclusion while work you started is " +
+        "still outstanding. If you cannot answer, say what you checked and " +
+        "what would settle it.",
+      "Keep every reply as short and simple as it can possibly be: the " +
+        "fewest, plainest words that still say it, one short sentence when " +
+        "one is enough — no preamble, no restating the request, nothing " +
+        "extra.",
+    ].join("\n\n"),
+  );
+  assert.equal(requestFromObjective(sent), request);
+
+  // The measurement: against a merge bar of 0.42, two identical requests
+  // scored 0.11 while the directives were in the comparison.
+  assert.ok(
+    textOverlap(request, sent) < 0.42,
+    "the whole objective is what dropped the score under the bar",
+  );
+  assert.ok(textOverlap(request, requestFromObjective(sent)) > 0.9);
+
+  // A request that quotes a directive keeps it: the paragraphs are matched
+  // whole, not searched for.
+  const quoting = `${request}\n\nKeep every reply short.`;
+  assert.equal(requestFromObjective(quoting), quoting);
+
+  // And an objective that is nothing but a directive still reads back as
+  // something, rather than as an empty string a caller would render blank.
+  assert.notEqual(
+    requestFromObjective(
+      "Keep every reply as short and simple as it can possibly be: the " +
+        "fewest, plainest words that still say it, one short sentence when " +
+        "one is enough — no preamble, no restating the request, nothing " +
+        "extra.",
+    ),
+    "",
+  );
 });
 
 test("a worker report without a fresh figure still separates cached context", () => {
