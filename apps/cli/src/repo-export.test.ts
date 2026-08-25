@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -309,6 +309,108 @@ test("an explicit per-user credential wins over the environment token", async ()
     } else {
       process.env["GITHUB_TOKEN"] = previousToken;
     }
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a mirror the store has never heard of does not block the name", async () => {
+  const harness = await createHarness();
+  try {
+    // The state a real deployment reached. A canonical mirror outlives the
+    // database that described it — a store reset beneath a surviving volume,
+    // a creation that failed after `git init`, a removal that renamed the
+    // mirror and then died — and the name is then one the store calls free
+    // and the filesystem refuses.
+    //
+    // The person met it as "Canonical repository already exists:
+    // /data/.coordinator/repositories/Test.git", naming a path they cannot
+    // see, for a repository no account owns and nobody can now create.
+    await mkdir(path.join(harness.project.repositoriesPath, "orphan.git"), {
+      recursive: true,
+    });
+    assert.equal(await harness.store.getRepository("orphan"), undefined);
+
+    const registered = await repoCreate(harness.project, harness.store, {
+      id: "orphan",
+    });
+
+    // Given the next free name rather than refused, exactly as a name taken
+    // by another tenant is — and called what was asked for, because the
+    // suffix is about where the mirror lives and not about what this is.
+    assert.equal(registered.id, "orphan-2");
+    assert.equal(registered.displayName, "orphan");
+    assert.equal(
+      (await harness.store.getRepository("orphan-2"))?.displayName,
+      "orphan",
+    );
+    const version = await harness.repositories.getCanonicalVersion({
+      id: registered.id,
+      path: registered.path,
+      branch: registered.branch,
+    });
+    assert.equal(version.revision.length, 40);
+
+    // And the orphan is left alone: it may be somebody's data, and guessing
+    // that it is not is not this code's decision to make.
+    await access(path.join(harness.project.repositoriesPath, "orphan.git"));
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("two tenants can both call a repository the same thing", async () => {
+  const harness = await createHarness();
+  try {
+    // The founder's question, as a test. Ids are one flat namespace across
+    // the deployment and cannot repeat; what people read is a display name,
+    // and that can.
+    const one = await harness.store.createOrganization({
+      slug: "tenant-one",
+      name: "Tenant One",
+    });
+    const two = await harness.store.createOrganization({
+      slug: "tenant-two",
+      name: "Tenant Two",
+    });
+    const mineProject = await harness.store.createProject({
+      organizationId: one.id,
+      slug: "default",
+      name: "My Project",
+    });
+    const theirProject = await harness.store.createProject({
+      organizationId: two.id,
+      slug: "default",
+      name: "My Project",
+    });
+
+    const mine = await repoCreate(harness.project, harness.store, {
+      id: "api",
+      projectId: mineProject.id,
+    });
+    const theirs = await repoCreate(harness.project, harness.store, {
+      id: "api",
+      projectId: theirProject.id,
+    });
+
+    assert.notEqual(mine.id, theirs.id, "the handles stay distinct");
+    assert.equal(theirs.id, "api-2");
+
+    // But both are called `api`, which is what each of them typed and what
+    // each of them sees. The first has no display name at all, so it is
+    // called by its id — which is already `api`.
+    assert.equal(mine.displayName, undefined);
+    assert.equal(mine.id, "api");
+    assert.equal(theirs.displayName, "api");
+
+    // Neither can see the other, so neither has any reason to know a suffix
+    // was involved.
+    assert.deepEqual(
+      (await harness.store.listProjectRepositories(theirProject.id)).map(
+        (entry) => entry.id,
+      ),
+      ["api-2"],
+    );
+  } finally {
     await rm(harness.root, { recursive: true, force: true });
   }
 });
