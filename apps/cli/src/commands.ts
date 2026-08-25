@@ -151,6 +151,58 @@ async function localRunnerWorkerId(
 }
 
 /**
+ * Hands back every lease this deployment's in-process runner is holding.
+ *
+ * The shutdown counterpart to the heartbeat below. A lease is a promise that
+ * some process is still working on a task, and a process that is about to
+ * exit is not — but nothing said so, so a redeploy left the lease active with
+ * nobody renewing it and the task sitting `claimed` behind it. Nothing could
+ * reclaim either until the lease reached its own expiry five minutes later,
+ * and the boot recovery of the container that replaced it ran seconds after
+ * the restart, long before that: it looked at a live lease and left it alone.
+ *
+ * Released rather than failed, because the work was not tried and found
+ * wanting — it was interrupted. The store returns a released lease's task to
+ * `submitted`, which is what puts it back in front of the queue sweep in the
+ * process that comes up next.
+ *
+ * Scoped to the local runner's own worker record, so a remote worker's leases
+ * — which belong to a process on another machine that is still very much
+ * alive — are never touched. It does assume the documented single control
+ * plane per store: two web processes sharing one database share this worker
+ * record, and either one shutting down would release both their work.
+ *
+ * Returns the ids of the tasks that went back to the queue.
+ */
+export async function releaseLocalRunnerLeases(
+  store: CoordinationStore,
+  detail = "the control plane restarted while this task was running",
+): Promise<string[]> {
+  const worker = (
+    await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID })
+  ).find((candidate) => candidate.name === LOCAL_RUNNER_WORKER_NAME);
+  if (worker === undefined) {
+    // Nothing has ever leased work here; there is nothing to hand back.
+    return [];
+  }
+  const requeued: string[] = [];
+  const at = new Date().toISOString();
+  for (const lease of await store.listWorkLeases({
+    workerId: worker.id,
+    status: "active",
+  })) {
+    // A lease already past its expiry is refused by the store — expiry is its
+    // own transition — and the sweep that expires it requeues the task the
+    // same way. Either path ends with the task queued, so a refusal here is
+    // not a failure.
+    if (await store.finishWorkLease(lease.id, "released", at, detail)) {
+      requeued.push(lease.taskId);
+    }
+  }
+  return requeued;
+}
+
+/**
  * Claims this repository's queued work, holding a durable lease per task.
  *
  * The lease is what makes a task visible to everything else running in the

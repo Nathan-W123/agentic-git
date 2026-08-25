@@ -24,7 +24,11 @@ import {
 } from "@coord/cli/commands";
 import { repoSync } from "@coord/cli/repo-export";
 import { CoordinatorProject } from "@coord/cli/project";
-import { recoverCoordinationState } from "@coord/cli/recovery";
+import {
+  drainInFlightWork,
+  reapStrandedWork,
+  recoverCoordinationState,
+} from "@coord/cli/recovery";
 import { rollbackCanonical } from "@coord/cli/rollback";
 import { workerOperations } from "@coord/cli/worker-operations";
 import type { CoordinationStore } from "@coord/persistence";
@@ -878,6 +882,19 @@ async function serve(
   const resuming = new Set<string>();
   const resumeQueuedWork = async (): Promise<void> => {
     await store.expireWorkLeases(new Date().toISOString());
+    // And the work expiry cannot reach: a task still marked `claimed` with no
+    // lease behind it at all. Lease expiry hands its own task back, but a
+    // lease that was settled while its task never reached an outcome leaves
+    // the row claimed by nobody — queued behind nothing, worked on by
+    // nothing, and waiting forever. Requeued here, on the same pass and
+    // before the queue is read, so the dispatch below picks it up.
+    const stranded = await reapStrandedWork(store);
+    for (const taskId of stranded.requeuedTasks) {
+      console.log(`Requeued stranded task ${taskId}`);
+    }
+    for (const warning of stranded.warnings) {
+      console.warn(`Stranded work warning: ${warning}`);
+    }
     const pending = await store.listSubmittedTasks({ status: "submitted" });
     const repositories = new Map(
       pending.map((task) => [
@@ -952,6 +969,25 @@ async function serve(
     }
     closing = true;
     try {
+      // Before anything else stops: this process is holding leases on work it
+      // is no longer going to do, and a lease nobody renews still reads as a
+      // live agent for the five minutes it takes to expire. Handing it back
+      // now is what lets the container that replaces this one find the task
+      // queued and resume it in seconds — the difference between a redeploy
+      // costing a restart and a redeploy stranding whatever was mid-flight.
+      //
+      // Before the gateway rather than after it, and best effort. Closing the
+      // gateway takes as long as its slowest connection; the drain is two
+      // indexed writes and is the one thing here that must not be missed. The
+      // cost of that order is a dispatch landing in the milliseconds between
+      // the two, whose lease then expires the old way.
+      await drainInFlightWork(store).catch((error: unknown) => {
+        console.error(
+          `Could not release in-flight work: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
       await runningGateway.close();
     } finally {
       // Previews are child processes holding ports and checkouts. Nothing else

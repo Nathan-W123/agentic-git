@@ -2,7 +2,11 @@ import { mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { IntegrationService } from "@coord/integration-service";
-import type { CoordinationStore, RunDetail } from "@coord/persistence";
+import type {
+  CoordinationStore,
+  RunDetail,
+  SubmittedTask,
+} from "@coord/persistence";
 import {
   agentCommitIdentity,
   RepositoryService,
@@ -14,6 +18,7 @@ import {
   type WorkspaceManager,
 } from "@coord/workspace-manager";
 
+import { releaseLocalRunnerLeases } from "./commands.js";
 import type { CoordinatorProject } from "./project.js";
 import { bundleRefFor } from "./worker-operations.js";
 
@@ -26,6 +31,12 @@ import { bundleRefFor } from "./worker-operations.js";
  * before the process serves anything — so everything it finds is genuinely
  * orphaned: in-process work cannot exist yet, and remote workers are
  * deliberately left alone because their leases are their liveness signal.
+ *
+ * One part of it does not stay at startup. {@link reapStrandedWork} is also a
+ * sweep a serving process repeats, because a task can be abandoned long after
+ * boot — and {@link drainInFlightWork} is its opposite number, run on the way
+ * out so a planned restart hands its work back instead of leaving it to be
+ * discovered.
  *
  * Recovery must only run where it is the sole control plane for the store
  * (the documented deployment shape). A second instance recovering a live
@@ -235,6 +246,25 @@ async function resumeStrandedResults(
         );
         if (submitted !== undefined && submitted.status === "claimed") {
           await store.completeSubmittedTask(task.id, "integrated", run.id);
+        } else if (submitted !== undefined && submitted.status === "submitted") {
+          // Back in the queue, because the process that was running it handed
+          // its lease back on the way out. Its work has just been promoted, so
+          // running it again would spend an agent redoing what is already in
+          // canonical. A row can only be completed from `claimed`, so it is
+          // claimed back first — and `claimSubmittedTasks` takes the whole
+          // queue for that repository, so everything else it caught is handed
+          // straight back.
+          const alsoClaimed = await store.claimSubmittedTasks(
+            submitted.repositoryId,
+            submitted.projectId,
+          );
+          await store.completeSubmittedTask(task.id, "integrated", run.id);
+          for (const other of alsoClaimed) {
+            if (other.id === task.id) {
+              continue;
+            }
+            await store.retrySubmittedTask(other.id).catch(() => undefined);
+          }
         }
         await store.appendAudit(run.id, {
           type: "canonical_promoted",
@@ -361,15 +391,15 @@ export async function recoverCoordinationState(
   // so the queue simply runs it again: this is what makes recovery automatic
   // rather than "retry it manually". Anything resumed above has already been
   // finalized and is no longer claimed, so it is not handed back.
-  const activeLeases = await store.listWorkLeases({ status: "active" });
-  const leasedTasks = new Set(activeLeases.map((lease) => lease.taskId));
-  for (const task of await store.listSubmittedTasks({ status: "claimed" })) {
-    if (leasedTasks.has(task.id)) {
-      continue;
-    }
-    await store.retrySubmittedTask(task.id);
-    report.requeuedTasks.push(task.id);
-  }
+  //
+  // No grace at boot: nothing in this process has claimed anything yet, so
+  // every unleased claim on the store belongs to a process that is gone,
+  // however recently it was made.
+  const stranded = await reapStrandedWork(store, {
+    claimedBefore: new Date().toISOString(),
+  });
+  report.requeuedTasks.push(...stranded.requeuedTasks);
+  report.warnings.push(...stranded.warnings);
 
   // A run still `running` at boot died with its process. Its non-terminal
   // tasks are failed with an explanation rather than left in a phantom
@@ -435,4 +465,189 @@ export async function recoverCoordinationState(
     });
   }
   return report;
+}
+
+/**
+ * How long a claim may sit with no lease behind it before it is treated as
+ * dead work rather than live work.
+ *
+ * A run mints its lease inside the same transaction that claims the task, so
+ * a live claim is only ever unleased for the microseconds between those two
+ * rows being read by a sweep that reads them separately. Two minutes is far
+ * past that and far short of the five-minute lease TTL, so this reclaims the
+ * cases lease expiry cannot see — a lease settled while its task never
+ * reached an outcome — without ever racing a run that is still going.
+ */
+export const CLAIMED_GRACE_MS = 2 * 60_000;
+
+/** What one stranded-work sweep found and did about it. */
+export interface StrandedWorkReport {
+  /** Claimed tasks with nothing working on them, returned to the queue. */
+  requeuedTasks: string[];
+  /** Non-fatal problems, e.g. a row the store refused to requeue. */
+  warnings: string[];
+}
+
+/**
+ * What a thread is told when the work behind it is queued again.
+ *
+ * Fixed wording so the sweep can recognise its own line and not repeat it,
+ * the same way the gateway's thread reconciliation recognises the endings it
+ * writes.
+ */
+const RESTART_REQUEUE_LINE =
+  "The deployment restarted while I was working on this, so the task has " +
+  "been put back in the queue and will start again shortly.";
+
+/**
+ * Says in the thread that this task's work was interrupted and requeued.
+ *
+ * Without it the thread's last word is whatever progress line the dead
+ * process happened to leave, which reads as an agent still thinking — the
+ * complaint this whole path exists for. A restart is not the agent's silence
+ * and should not look like it.
+ *
+ * Best effort by design, and idempotent: a thread that already carries this
+ * line, or that has already been given an ending, is left alone.
+ */
+export async function announceRestartRequeue(
+  store: CoordinationStore,
+  task: SubmittedTask,
+): Promise<boolean> {
+  // The most recent page of the room. A thread whose work was in flight when
+  // the process died is by definition recent, so one page finds it.
+  const messages = await store.listChannelMessages(task.repositoryId, "", {
+    limit: 200,
+  });
+  const root = messages.find((message) => message.taskId === task.id);
+  if (root === undefined || root.endedAt !== undefined) {
+    return false;
+  }
+  const replies = root.replies ?? [];
+  if (replies.some((reply) => reply.content === RESTART_REQUEUE_LINE)) {
+    return false;
+  }
+  await store.addChannelReply({
+    repositoryId: task.repositoryId,
+    messageId: root.id,
+    kind: "system",
+    authorId: "system",
+    content: RESTART_REQUEUE_LINE,
+  });
+  return true;
+}
+
+/**
+ * Returns work nothing is doing to the queue, and says so in its thread.
+ *
+ * The half of crash recovery that cannot only run at boot. A container
+ * restart takes seconds and a work lease lives for five minutes, so the boot
+ * pass looks at a lease that is still comfortably active — issued by a
+ * process that no longer exists, heartbeated by nobody — decides the task is
+ * being worked on, and never looks again. Lease expiry eventually returns
+ * those tasks to the queue on its own; what it cannot return is a task whose
+ * lease was already settled while its row stayed `claimed`, which is a run
+ * that ended without an outcome for it. That row is claimed by nothing,
+ * queued behind nothing, and waits forever.
+ *
+ * So this is a sweep, not a boot step: a claimed task with no active lease
+ * behind it, older than {@link CLAIMED_GRACE_MS}, goes back to `submitted`
+ * where the queue resume can pick it up.
+ *
+ * `claimedBefore` is how a caller states what it knows. Boot recovery passes
+ * the current time, because nothing it can see is its own. A running process
+ * passes the grace bound, so a claim made moments ago — possibly by itself —
+ * is never mistaken for debris.
+ *
+ * The grace is only safe because a run leases what it claims: the lease is
+ * minted in the claiming transaction, so live work is never unleased. The one
+ * path that claims without leasing is a project with no user account to
+ * register a worker under, which warns loudly when it takes that route and
+ * has no queue sweep running over it.
+ */
+export async function reapStrandedWork(
+  store: CoordinationStore,
+  options: { claimedBefore?: string } = {},
+): Promise<StrandedWorkReport> {
+  const report: StrandedWorkReport = { requeuedTasks: [], warnings: [] };
+  const claimedBefore =
+    options.claimedBefore ??
+    new Date(Date.now() - CLAIMED_GRACE_MS).toISOString();
+  const candidates = (
+    await store.listSubmittedTasks({ status: "claimed" })
+  ).filter(
+    (task) => task.claimedAt === undefined || task.claimedAt < claimedBefore,
+  );
+  if (candidates.length === 0) {
+    // The common case, and the cheap one: no lease read, no channel read.
+    return report;
+  }
+  const leased = new Set(
+    (await store.listWorkLeases({ status: "active" })).map(
+      (lease) => lease.taskId,
+    ),
+  );
+  for (const task of candidates) {
+    if (leased.has(task.id)) {
+      continue;
+    }
+    try {
+      await store.retrySubmittedTask(task.id);
+    } catch (error) {
+      // A row that has moved on since it was listed — cancelled from a
+      // thread, completed by a run finishing between the two reads. Not this
+      // sweep's business, and not worth failing the pass for.
+      report.warnings.push(
+        `Could not requeue stranded task ${task.id}: ${errorMessage(error)}`,
+      );
+      continue;
+    }
+    report.requeuedTasks.push(task.id);
+    await announceRestartRequeue(store, task).catch((error: unknown) => {
+      report.warnings.push(
+        `Could not announce the requeue of ${task.id}: ${errorMessage(error)}`,
+      );
+    });
+  }
+  return report;
+}
+
+/**
+ * Hands back everything this process is holding, on the way out.
+ *
+ * The graceful counterpart to recovery: a redeploy is a planned event and the
+ * process gets a SIGTERM before it dies, which is long enough to say that the
+ * work it was doing is no longer being done. Releasing the leases returns
+ * their tasks to `submitted` immediately, so the container that replaces this
+ * one finds queued work at boot and resumes it in seconds — instead of the
+ * five minutes it takes an abandoned lease to expire, or forever when the
+ * lease was already settled.
+ *
+ * Returns the ids of the tasks that went back to the queue.
+ */
+export async function drainInFlightWork(
+  store: CoordinationStore,
+): Promise<string[]> {
+  const released = await releaseLocalRunnerLeases(store);
+  const requeued = new Set(released);
+  // Anything claimed with nothing behind it goes back too, whatever its age:
+  // this process is leaving, so none of it is live.
+  const stranded = await reapStrandedWork(store, {
+    claimedBefore: new Date().toISOString(),
+  });
+  for (const taskId of stranded.requeuedTasks) {
+    requeued.add(taskId);
+  }
+  if (released.length > 0) {
+    const tasks = new Map(
+      (await store.listSubmittedTasks()).map((task) => [task.id, task]),
+    );
+    for (const taskId of released) {
+      const task = tasks.get(taskId);
+      if (task !== undefined) {
+        await announceRestartRequeue(store, task).catch(() => undefined);
+      }
+    }
+  }
+  return [...requeued];
 }
