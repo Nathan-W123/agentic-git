@@ -504,12 +504,23 @@ const BRAND_LETTERS = `<path d="M8.3 8V40"/>
     <path d="M102.3 10.5 123 30l20.7-19.5"/>
     <path d="M158.3 8V40"/>`;
 
-/** The supplied standalone mark, cropped from its wide source artwork. */
+/**
+ * The supplied standalone mark, cropped from its wide source artwork.
+ *
+ * The source has an opaque black field. Using its luminance as a mask removes
+ * that field, then `currentColor` draws the mark in the theme's own text colour
+ * so it remains legible on both dark and light backgrounds.
+ */
 export function brandMark(size = 34) {
   return `<svg class="brand-mark" width="${size}" height="${size}"
     viewBox="0 0 48 48" overflow="hidden" aria-hidden="true">
-    <image href="/kumi-logo.png" x="-33" y="-7" width="114" height="62"
-      preserveAspectRatio="xMidYMid meet"/>
+    <mask id="brand-mark-mask" maskUnits="userSpaceOnUse"
+      x="0" y="0" width="48" height="48" style="mask-type:luminance">
+      <image href="/kumi-logo.png" x="-33" y="-7" width="114" height="62"
+        preserveAspectRatio="xMidYMid meet"/>
+    </mask>
+    <rect width="48" height="48" fill="currentColor"
+      mask="url(#brand-mark-mask)"/>
   </svg>`;
 }
 

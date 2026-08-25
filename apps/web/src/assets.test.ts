@@ -2647,10 +2647,11 @@ test("the product is named Kumi throughout the browser surface", async () => {
   }
 });
 
-test("the standalone logo uses the supplied artwork without changing the wordmark", async () => {
+test("the standalone logo follows the theme without changing the wordmark or appearing in the channel rail", async () => {
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
 
   assert.match(app, /brandMark/u);
   assert.match(app, /brandWordmark\(\d+\)/u);
@@ -2664,8 +2665,11 @@ test("the standalone logo uses the supplied artwork without changing the wordmar
   const mark = ui.slice(markStart, ui.indexOf("\n}", markStart));
   assert.match(mark, /href="\/kumi-logo\.png"/u);
   assert.match(mark, /overflow="hidden" aria-hidden="true"/u);
-  assert.match(chats, /class="channel-rail-brand"/u);
-  assert.match(chats, /title="Kumi" aria-label="Kumi">\$\{brandMark\(28\)\}/u);
+  assert.match(mark, /style="mask-type:luminance"/u);
+  assert.match(mark, /fill="currentColor"/u);
+  assert.match(mark, /mask="url\(#brand-mark-mask\)"/u);
+  assert.doesNotMatch(chats, /channel-rail-brand|brandMark/u);
+  assert.doesNotMatch(css, /channel-rail-brand/u);
 
   const start = ui.indexOf("export function brandWordmark");
   assert.notEqual(start, -1, "the wordmark helper was not found in ui.js");
