@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -309,6 +309,45 @@ test("an explicit per-user credential wins over the environment token", async ()
     } else {
       process.env["GITHUB_TOKEN"] = previousToken;
     }
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a mirror the store has never heard of does not block the name", async () => {
+  const harness = await createHarness();
+  try {
+    // The state a real deployment reached. A canonical mirror outlives the
+    // database that described it — a store reset beneath a surviving volume,
+    // a creation that failed after `git init`, a removal that renamed the
+    // mirror and then died — and the name is then one the store calls free
+    // and the filesystem refuses.
+    //
+    // The person met it as "Canonical repository already exists:
+    // /data/.coordinator/repositories/Test.git", naming a path they cannot
+    // see, for a repository no account owns and nobody can now create.
+    await mkdir(path.join(harness.project.repositoriesPath, "orphan.git"), {
+      recursive: true,
+    });
+    assert.equal(await harness.store.getRepository("orphan"), undefined);
+
+    const registered = await repoCreate(harness.project, harness.store, {
+      id: "orphan",
+    });
+
+    // Given the next free name rather than refused, exactly as a name taken
+    // by another tenant is.
+    assert.equal(registered.id, "orphan-2");
+    const version = await harness.repositories.getCanonicalVersion({
+      id: registered.id,
+      path: registered.path,
+      branch: registered.branch,
+    });
+    assert.equal(version.revision.length, 40);
+
+    // And the orphan is left alone: it may be somebody's data, and guessing
+    // that it is not is not this code's decision to make.
+    await access(path.join(harness.project.repositoriesPath, "orphan.git"));
+  } finally {
     await rm(harness.root, { recursive: true, force: true });
   }
 });
