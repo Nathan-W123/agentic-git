@@ -13,7 +13,8 @@
     "./electron": "./electron/main.mjs"
   },
   "kumi": {
-    "releasesRepo": "Nathan-W123/Kumi"
+    "releasesRepo": "Nathan-W123/Kumi",
+    "defaultServer": ""
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
