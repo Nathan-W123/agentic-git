@@ -2577,13 +2577,34 @@ const APP_AUTHORIZATION_TTL_MS = 120_000;
 /**
  * What an app approved through the browser may do.
  *
- * Read the room and start work — the two a client needs to be the dashboard,
- * and deliberately not everything its owner can do. The token lives on a
- * laptop rather than in a session that expires, so it gets the smallest set
- * that still makes it useful; `issueApiToken` refuses anything above the
- * owner's role regardless.
+ * Everything needed to do the work, and nothing that changes who may do it.
+ *
+ * The first cut of this was `view` and `run_task`, on the reasoning that a
+ * token living on a laptop should carry the smallest set that still makes it
+ * useful. It was too small to be useful: pushing to GitHub and syncing from it
+ * both need `import_repository`, so the app answered "This token does not
+ * carry the import_repository scope" on the ordinary path of getting work out
+ * of Kumi. Answering a question and reviewing an agent's findings would have
+ * been the next two walls.
+ *
+ * The line is drawn at administration instead. `manage_project`,
+ * `manage_members` and `manage_organization` are absent on purpose: a laptop
+ * that is lost or borrowed cannot rename a project, change who is in the
+ * organization, or alter what they may do. Everything on this list is
+ * something its owner does in the course of a working day.
+ *
+ * This is a ceiling, not a grant. `assertTokenScope` only ever narrows — a
+ * session cookie carries no token and skips it entirely — so widening this
+ * cannot let anybody past what their own role already permits, and
+ * `issueApiToken` refuses anything above that role regardless.
  */
-const APP_TOKEN_SCOPES = ["view", "run_task"] as const;
+const APP_TOKEN_SCOPES = [
+  "view",
+  "submit_task",
+  "run_task",
+  "import_repository",
+  "review",
+] as const;
 
 /**
  * Whether a desktop app's callback is somewhere only that app can hear.

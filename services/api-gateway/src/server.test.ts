@@ -17047,6 +17047,51 @@ test("approving an app hands the browser a code, and the code buys one token", a
   );
   assert.equal(me.status, 200);
   assert.equal(me.data.credential, "api_token");
+
+  // What the token may do, asked of the gateway rather than of a constant.
+  //
+  // The first version of this grant was `view` and `run_task`, and nothing
+  // here noticed, because the only thing asserted was that the token worked
+  // *somewhere*. It did — and then answered "This token does not carry the
+  // import_repository scope" the first time somebody pushed to GitHub, which
+  // is the ordinary way work leaves Kumi.
+  //
+  // Both directions are checked, and against a project that exists: the scope
+  // check runs *after* the lookup, so aiming this at a made-up id would 404
+  // before reaching the gate and pass no matter what the token carried.
+  const imported = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+    exchanged.data.token as string,
+    { method: "POST", body: {} },
+  );
+  assert.notEqual(
+    imported.data?.error?.code,
+    "token_scope_missing",
+    "the app cannot import, sync, or push without import_repository",
+  );
+
+  // And a scope it must not have has to be refused by the scope check itself,
+  // not merely by whatever role the approver happened to hold — the approver
+  // here is the owner, so a role check alone would let this through.
+  const organizations = await bearer(
+    runtime.origin,
+    "/api/v1/organizations",
+    exchanged.data.token as string,
+  );
+  assert.equal(organizations.status, 200);
+  const organizationId = (organizations.data.organizations ?? organizations.data)[0]
+    ?.id as string;
+  assert.ok(organizationId, "the bootstrap made no organization to rename");
+
+  const renamed = await bearer(
+    runtime.origin,
+    `/api/v1/organizations/${organizationId}`,
+    exchanged.data.token as string,
+    { method: "PATCH", body: { name: "Somewhere else" } },
+  );
+  assert.equal(renamed.status, 403);
+  assert.equal(renamed.data.error.code, "token_scope_missing");
 });
 
 test("an app cannot be approved for somewhere else, or by another app", async (t) => {

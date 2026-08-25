@@ -62,9 +62,16 @@ written in the clear would be worse than one that has to be re-issued.
 
 ## What the app may do
 
-`view` and `run_task` — read the room and start work. Deliberately not
-everything its owner can do, since the token lives on a laptop rather than in a
-session that expires.
+Everything its owner does in a working day — read the room, start and answer
+work, review an agent's findings, push to and sync from GitHub — and none of
+the administration. `manage_project`, `manage_members` and
+`manage_organization` are deliberately absent, so a laptop that is lost or
+borrowed cannot rename a project, change who is in the organization, or alter
+what they may do.
+
+This is a ceiling rather than a grant: the scope check narrows what a token
+may do and never widens it, so the app can never exceed the role of whoever
+approved it.
 
 ## Getting unstuck
 
