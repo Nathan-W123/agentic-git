@@ -229,6 +229,7 @@ import {
   resizeComposers,
   rosterMenuItems,
   personMenuItems,
+  messageOverflowMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
   scrollDirectMessageToLatest,
@@ -6741,6 +6742,11 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "channel-message-copy":
+      // Every message action can now be reached from the row's overflow menu
+      // as well as from the row itself, and a menu that stays up after its
+      // item has been taken reads as a click that did nothing. Harmless from
+      // the row, where there is no open popover to close.
+      closePopover();
       void copyMessageText(activeChannelId(), value);
       return;
     case "channel-jump-latest":
@@ -6750,6 +6756,7 @@ document.addEventListener("click", (event) => {
       requestAnimationFrame(paintJumpToLatest);
       return;
     case "channel-pin":
+      closePopover();
       // `render` travels with it so a refusal can put the banner back: the
       // POST resolves long after this turn's render has run.
       toggleChannelMessagePin(activeChannelId(), value, render);
@@ -6996,17 +7003,21 @@ document.addEventListener("click", (event) => {
       void deleteThreadAction(activeChannelId(), value);
       return;
     case "channel-message-delete":
+      closePopover();
       void deleteChannelMessageAction(activeChannelId(), value);
       return;
     case "channel-message-edit":
+      closePopover();
       void editChannelMessageAction(activeChannelId(), value);
       return;
     case "thread-reply-edit": {
+      closePopover();
       const [rootId = "", replyId = ""] = value.split("|");
       void editChannelReplyAction(activeChannelId(), rootId, replyId);
       return;
     }
     case "thread-reply-delete": {
+      closePopover();
       // `rootId|replyId`: deleting a reply is a write against the thread it
       // lives in, and the row only ever carries one value.
       const [rootId = "", replyId = ""] = value.split("|");
@@ -7484,6 +7495,16 @@ document.addEventListener("click", (event) => {
     case "roster-person-menu":
       showMenu(node, personMenuItems(value));
       return;
+    /**
+     * The rest of what can be done to a message — copy, pin, edit, revert,
+     * delete. They were seven permanent icons floating over every row the
+     * pointer crossed; react and reply stayed out here because they are what
+     * a reader actually does, and the items come from `messageRow`'s own
+     * conditions rather than being rebuilt at the click.
+     */
+    case "channel-message-menu":
+      showMenu(node, messageOverflowMenuItems(value));
+      return;
     /** Replaces the rendered name with its inline editor. */
     case "channel-settings-toggle": {
       closePopover();
@@ -7514,6 +7535,7 @@ document.addEventListener("click", (event) => {
       }
       return;
     case "chan-revert-task":
+      closePopover();
       void revertTaskAction(activeChannelId(), value);
       return;
     case "auditor-toggle":

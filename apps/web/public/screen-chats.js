@@ -138,7 +138,21 @@ function channelPictureMarkup(repositoryId, size = 34) {
   return `<span class="channel-picture channel-picture-fallback" style="width:${size}px;height:${size}px">${esc(initials)}</span>`;
 }
 
-/** The compact, always-visible channel switcher. */
+/**
+ * Whether the channel switcher earns the column it stands in.
+ *
+ * A rail is a way of choosing between things. With one channel there is
+ * nothing to choose, so it was sixty pixels of permanent furniture holding a
+ * single picture of the room the reader is already in — and it took those
+ * pixels from the conversation, which is the part of this screen anybody came
+ * for. The two controls that were only ever in the rail move into the
+ * sidebar's crown while it is away; see `chanSidebar`.
+ */
+function showsChannelRail() {
+  return state.repositories.length > 1;
+}
+
+/** The compact channel switcher, drawn when there is a choice to make. */
 function channelRail(activeRepositoryId) {
   const repositories = [...state.repositories].sort((left, right) =>
     left.id.localeCompare(right.id),
@@ -1522,6 +1536,27 @@ function chanSidebar(activeRepositoryId) {
         aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}">${icon(
           "columns",
         )}</button>
+      ${
+        // The two controls the rail used to own, for the case where there is
+        // no rail. Making a second channel is the only way out of the
+        // single-channel case, and the picture beside the name is the only
+        // place that picture can be set — neither may go away with the
+        // switcher they happened to be standing next to.
+        showsChannelRail()
+          ? ""
+          : `<label class="icon-btn chan-crown-picture"
+               title="Change picture for ${esc(repositoryLabel(activeRepositoryId ?? ""))}"
+               aria-label="Change picture for ${esc(repositoryLabel(activeRepositoryId ?? ""))}">${icon("pencil")}
+               <input type="file" accept="image/*" data-act="channel-picture-pick"
+                 data-repository="${channel}" hidden>
+             </label>
+             ${iconButton("plus", {
+               act: "channel-new",
+               value: activeRepositoryId ?? "",
+               title: "New channel",
+               cls: "chan-crown-new",
+             })}`
+      }
       ${iconButton("close", {
         act: "chan-sidebar-close",
         title: "Close",
@@ -2489,6 +2524,114 @@ function authorFace(author, size, repositoryId) {
       );
 }
 
+/**
+ * How a row names itself to its own overflow menu.
+ *
+ * A reply is a row in another table, so deleting or editing one is a write
+ * against the thread holding it: both ids travel, the way every reply-scoped
+ * action in this file already sends them.
+ */
+function overflowValue(entry) {
+  return entry.messageId === undefined
+    ? String(entry.id)
+    : `${entry.messageId}|${entry.id}`;
+}
+
+/** The message an {@link overflowValue} names, or nothing. */
+function channelEntryByOverflowValue(repositoryId, value) {
+  const [first, second] = String(value).split("|");
+  const messages = channelMessagesFor(repositoryId);
+  if (second === undefined) {
+    return messages.find((message) => message.id === first);
+  }
+  const root = messages.find((message) => message.id === first);
+  return (root?.replies ?? []).find((reply) => reply.id === second);
+}
+
+/**
+ * Everything a message can have done to it that is not "react" or "reply".
+ *
+ * Built here rather than at the click, and from the same conditions the row
+ * itself is drawn from: split across two files is how a menu ends up offering
+ * what the row would not — an edit somebody is not allowed to make, a pin
+ * whose POST can only 404. The row passes the entry it already holds; the
+ * delegated handler in app.js has only the value, and looks it up.
+ */
+export function messageOverflowMenuItems(
+  value,
+  known = undefined,
+  repository = undefined,
+) {
+  const repositoryId = repository ?? activeChannelId();
+  const entry = known ?? channelEntryByOverflowValue(repositoryId, value);
+  // A message somebody unsaid keeps its row, because the replies under it are
+  // still answering something — but everything the row could do went with the
+  // words.
+  if (entry === undefined || entry.deletedAt !== undefined) {
+    return [];
+  }
+  // What a row *is*, not how it is drawn: the thread panel renders its own
+  // root in the reply style, and that root is a channel message that can be
+  // pinned perfectly well.
+  const isReplyRow = entry.messageId !== undefined;
+  const items = [
+    {
+      // The words, not the row: what somebody wants off a message is the text
+      // they can paste somewhere else, without the attachment references the
+      // composer wrote into it or the mention markup.
+      act: "channel-message-copy",
+      value: String(entry.id),
+      label: "Copy text",
+      iconName: "copy",
+    },
+  ];
+  // Roots only. A pin lives on `channel_messages`; a reply is a row in
+  // another table, so offering it there sent a POST that could only 404 while
+  // the optimistic local pin stayed in the banner. The thread's own header
+  // carries the pin for everything inside it.
+  if (!isReplyRow) {
+    items.push({
+      act: "channel-pin",
+      value: String(entry.id),
+      label: entry.pinnedAt === undefined ? "Pin" : "Unpin",
+      iconName: "pin",
+    });
+  }
+  if (canEditChannelEntry(repositoryId, entry)) {
+    items.push({
+      act: isReplyRow ? "thread-reply-edit" : "channel-message-edit",
+      value: overflowValue(entry),
+      label: "Edit message",
+      iconName: "pencil",
+    });
+  }
+  // Undoing the work, not the message. Quiet enough to belong in this list:
+  // it was a labelled button under the file list, which gave "undo this task"
+  // more weight than the task itself had.
+  if (entry.taskId !== undefined && canManageRepository(repositoryId)) {
+    items.push({
+      act: "chan-revert-task",
+      value: String(entry.taskId),
+      label: "Revert this task",
+      hint: "Returns the repository to the state before this task",
+      iconName: "history",
+    });
+  }
+  // Its own words or a manager's reach — `canDeleteChannelEntry` is the
+  // client's copy of the rule the gateway holds, so the item is absent rather
+  // than present-and-refused.
+  if (canDeleteChannelEntry(repositoryId, entry)) {
+    items.push({
+      act: isReplyRow ? "thread-reply-delete" : "channel-message-delete",
+      value: overflowValue(entry),
+      label: isReplyRow ? "Delete this reply" : "Delete this message",
+      iconName: "trash",
+      danger: true,
+    });
+  }
+  return items;
+}
+
 function messageRow(
   entry,
   repositoryId,
@@ -2497,7 +2640,6 @@ function messageRow(
     inlineReplyTo = undefined,
     actions = "",
     compact = false,
-    threadPath = undefined,
   } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
@@ -2548,12 +2690,6 @@ function messageRow(
   // somebody and the name beside it does nothing is a worse answer than
   // neither being pressable.
   const identity = authorIdentity(repositoryId, entry, author);
-  // The path is assigned by `messageThreadPaths`, which can start it on an
-  // earlier compact-group message than the one that owns the task. A direct
-  // channel render still gets a complete standalone path as a safe fallback.
-  const path =
-    threadPath ??
-    (channelThread ? { start: true, through: false, end: true } : undefined);
   // Changed-file summaries belong to the focused thread, where the work they
   // describe can be reviewed in context. Keep the room's timeline to the
   // conversation itself, including for task roots and inline replies.
@@ -2569,11 +2705,7 @@ function messageRow(
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
-  }${channelThread ? " cmsg-threaded" : ""}${
-    path?.start === true ? " cmsg-thread-path-start" : ""
-  }${path?.through === true ? " cmsg-thread-path-through" : ""}${
-    path?.end === true ? " cmsg-thread-path-end" : ""
-  }${deleted ? " cmsg-deleted" : ""}${
+  }${channelThread ? " cmsg-threaded" : ""}${deleted ? " cmsg-deleted" : ""}${
     // A post whose write never reached the server. `sendChannelMessage` and
     // `postChannelReply` have set this flag all along and no renderer read
     // it, so a message that failed sat in the transcript looking exactly like
@@ -2630,7 +2762,6 @@ function messageRow(
           )}</span>`
     }
     <div class="cmsg-body">
-      ${channelThread ? `<div class="cmsg-thread-route">` : ""}
       ${
         compact
           ? ""
@@ -2707,31 +2838,13 @@ function messageRow(
                     title="Add a reaction" aria-label="Add a reaction">${icon("smile")}</button></div>`
       }
       ${
-        // The route ends at the thread link. The changed files are deliberately
-        // outside it, so opening them can never pull the grey connector down
-        // past the thing it identifies.
         channelThread
           ? threadSummaryLink(entry, replies, repositoryId, progress)
           : changedBlock
       }
-      ${channelThread ? `</div>${changedBlock}` : ""}
+      ${channelThread ? changedBlock : ""}
     </div>
     <span class="cmsg-actions">
-      ${
-        // Revert, as quiet as the actions beside it. It was a labelled button
-        // under the file list, which gave "undo this task" more visual weight
-        // than the task itself had.
-        deleted ||
-        entry.taskId === undefined ||
-        !canManageRepository(repositoryId)
-          ? ""
-          : iconButton("history", {
-              act: "chan-revert-task",
-              value: entry.taskId,
-              title: "Return the repository to the state before this task",
-              small: true,
-            })
-      }
       ${
         // Behind the same guard as the tally above, for the reason given
         // there: an affordance whose write can only 404 is worse than none.
@@ -2743,76 +2856,6 @@ function messageRow(
               title: "React",
               small: true,
             })
-      }
-      ${
-        // Copy the words, not the row: what somebody wants off a message is
-        // the text they can paste somewhere else, without the attachment
-        // references the composer wrote into it or the mention markup.
-        deleted
-          ? ""
-          : iconButton("copy", {
-              act: "channel-message-copy",
-              value: entry.id,
-              title: "Copy text",
-              small: true,
-            })
-      }
-      ${
-        // Roots only. A pin lives on `channel_messages`, and a reply is a row
-        // in another table entirely — offering the button on one sent a POST
-        // that could only ever 404, and the optimistic local pin it had
-        // already drawn stayed in the banner afterwards, advertising a pin the
-        // server had no record of. The thread's own header carries the pin for
-        // everything inside it, which is the affordance a reader wants anyway:
-        // you pin the conversation, not one line of it.
-        isReply || inlineReply || deleted
-          ? ""
-          : iconButton("pin", {
-              act: "channel-pin",
-              value: entry.id,
-              title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
-              small: true,
-            })
-      }
-      ${
-        canEditChannelEntry(repositoryId, entry)
-          ? iconButton("pencil", {
-              act:
-                entry.messageId === undefined
-                  ? "channel-message-edit"
-                  : "thread-reply-edit",
-              value:
-                entry.messageId === undefined
-                  ? entry.id
-                  : `${entry.messageId}|${entry.id}`,
-              title: "Edit message",
-              small: true,
-            })
-          : ""
-      }
-      ${
-        // Delete, in the same quiet set as the rest. Its own words or a
-        // manager's reach — `canDeleteChannelEntry` is the client's copy of
-        // the rule the gateway holds, so the button is absent rather than
-        // present-and-refused.
-        //
-        // Reply or root is decided by `messageId` rather than by `isReply`:
-        // the thread panel draws its own root in the compact reply style, so
-        // the flag says how a row looks and only the field says what it is.
-        // A reply carries its root's id too, because deleting one is a write
-        // against the thread it lives in.
-        (() => {
-          if (deleted || !canDeleteChannelEntry(repositoryId, entry)) {
-            return "";
-          }
-          const parentId = entry.messageId;
-          return iconButton("trash", {
-            act: parentId ? "thread-reply-delete" : "channel-message-delete",
-            value: parentId ? `${parentId}|${entry.id}` : entry.id,
-            title: parentId ? "Delete this reply" : "Delete this message",
-            small: true,
-          });
-        })()
       }
       ${
         // Anything the caller wants sitting beside the reply button — the
@@ -2845,6 +2888,25 @@ function messageRow(
                 title: "Reply in thread",
                 small: true,
               })
+      }
+      ${
+        // Everything else — copy, pin, edit, revert, delete — behind one
+        // button. Seven icons appeared over every message the pointer crossed,
+        // which is a toolbar rather than an affordance: the two things
+        // somebody does to a message they are reading (react to it, answer it)
+        // were the same size and the same shade as the one that deletes it.
+        // The menu is built from the row's own conditions — see
+        // `messageOverflowMenuItems` — so it offers exactly what the row would
+        // have drawn, and nothing is offered where its write could only fail.
+        messageOverflowMenuItems(overflowValue(entry), entry, repositoryId)
+          .length === 0
+          ? ""
+          : iconButton("dotsHorizontal", {
+              act: "channel-message-menu",
+              value: overflowValue(entry),
+              title: "More actions",
+              small: true,
+            })
       }
     </span>
   </div>`;
@@ -2883,57 +2945,6 @@ export function channelMessageHasTaskThread(entry) {
     replies.length > 0 &&
     (entry.kind !== "user" || entry.taskId !== undefined)
   );
-}
-
-/**
- * Assigns one connector path to every visible run of consecutive prompts.
- *
- * The path begins on the run's one visible avatar, crosses otherwise ordinary
- * compact messages when necessary, branches at every task, and ends at the
- * final task. Search results opt out because they are independent hits rather
- * than a trustworthy uninterrupted run.
- */
-function messageThreadPaths(timeline, groupConsecutive) {
-  const paths = timeline.map(() => undefined);
-  let groupStart = 0;
-  while (groupStart < timeline.length) {
-    let groupEnd = groupStart + 1;
-    if (groupConsecutive) {
-      while (groupEnd < timeline.length) {
-        const previous = timeline[groupEnd - 1];
-        const current = timeline[groupEnd];
-        const startsNewDay =
-          new Date(previous.at ?? 0).toDateString() !==
-          new Date(current.at ?? 0).toDateString();
-        if (!continuesUserMessageGroup(previous, current, startsNewDay)) {
-          break;
-        }
-        groupEnd += 1;
-      }
-    }
-
-    const branches = [];
-    for (let index = groupStart; index < groupEnd; index += 1) {
-      if (
-        timeline[index].inlineReplyTo === undefined &&
-        channelMessageHasTaskThread(timeline[index].entry)
-      ) {
-        branches.push(index);
-      }
-    }
-    if (branches.length > 0) {
-      const lastBranch = branches[branches.length - 1];
-      for (let index = groupStart; index <= lastBranch; index += 1) {
-        paths[index] = {
-          start: index === groupStart,
-          through: index < lastBranch,
-          end: index === lastBranch,
-        };
-      }
-    }
-    groupStart = groupEnd;
-  }
-  return paths;
 }
 
 /**
@@ -3138,7 +3149,6 @@ function messageList(repositoryId) {
   // every channel that had anything in it, the render died, and the room kept
   // whatever was painted before it. That was the loading skeleton, which is
   // why a working channel appeared to load forever.
-  const threadPaths = messageThreadPaths(timeline, true);
   let lastDay = "";
   // Where this visit found the room, as a timestamp — see `snapshotChannelRead`.
   const mark = channelUnreadMark(repositoryId);
@@ -3181,10 +3191,7 @@ function messageList(repositoryId) {
     );
     return (
       separator +
-      messageRow(entry, repositoryId, {
-        compact,
-        threadPath: threadPaths[index],
-      })
+      messageRow(entry, repositoryId, { compact })
     );
   });
   return `<div class="chan-messages" id="chan-messages" role="log"
@@ -6565,8 +6572,10 @@ export function renderChats() {
   // out of its own screen. A phone draws one however many are being held.
   const columns = phoneLayout() ? 1 : keptRightPanels().length;
 
-  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${columns > 1 ? ` panels-${columns}` : ""}">
-    ${channelRail(repositoryId)}
+  const rail = showsChannelRail();
+
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}${columns > 1 ? ` panels-${columns}` : ""}">
+    ${rail ? channelRail(repositoryId) : ""}
     ${chanSidebar(repositoryId)}
     ${
       // Phone-only scrim over the off-canvas `.chan-sidebar` — see the toggle
