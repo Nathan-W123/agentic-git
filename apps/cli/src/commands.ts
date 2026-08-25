@@ -513,9 +513,12 @@ export async function repoAdd(
 ): Promise<StoredRepository> {
   const sourcePath = path.resolve(options.sourcePath);
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
+  const requested = assertRepositoryId(
+    options.id ?? path.basename(sourcePath).toLowerCase(),
+  );
   const id = await availableRepositoryId(
     store,
-    assertRepositoryId(options.id ?? path.basename(sourcePath).toLowerCase()),
+    requested,
     projectId,
     project.repositoriesPath,
   );
@@ -548,6 +551,23 @@ export async function repoAdd(
     const version = await repositories.getCanonicalVersion(canonical);
     await store.saveRepository(stored);
     registered = true;
+    if (id !== requested) {
+      // The name they asked for, kept as the name they see.
+      //
+      // Ids are one flat namespace across the deployment — an id keys every
+      // row that references a repository and names its mirror directory — so
+      // the second tenant to want `api` is given `api-2` and there is no way
+      // around that short of a migration. What there is no reason for is that
+      // suffix being what they read. It is an implementation detail of where
+      // the mirror lives, and it was showing up as the channel's name for no
+      // reason anybody could see.
+      //
+      // Set only when the id was taken, so an uncontested name keeps meaning
+      // "no display name recorded, call it by its id" and a later rename is
+      // still recognisable as a rename.
+      await store.renameRepository(stored.id, requested);
+      stored.displayName = requested;
+    }
     await store.linkRepository(projectId, stored.id);
     await store.saveCanonicalVersion(stored.id, version);
 
