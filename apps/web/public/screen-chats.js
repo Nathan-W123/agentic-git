@@ -870,6 +870,61 @@ function slashMarkup(value) {
   );
 }
 
+/** Makes pasted web addresses clickable after the message has been escaped. */
+function linkMarkup(value) {
+  return value.replace(/\bhttps?:\/\/[^\s<>"'`*]+/giu, (match) => {
+    let href = match;
+    let suffix = "";
+
+    // Sentence punctuation and escaped closing quotes are prose around the
+    // address, not part of it. A closing bracket is kept only when the URL
+    // contains its matching opener, which preserves balanced URL paths while
+    // still handling a link pasted inside parentheses.
+    const moveSuffix = (length) => {
+      suffix = href.slice(-length) + suffix;
+      href = href.slice(0, -length);
+    };
+    let trimming = true;
+    while (trimming) {
+      trimming = false;
+      for (const entity of ["&quot;", "&#39;", "&gt;"]) {
+        if (href.endsWith(entity)) {
+          moveSuffix(entity.length);
+          trimming = true;
+          break;
+        }
+      }
+      if (trimming) {
+        continue;
+      }
+      if (
+        /[.,!?;:]$/u.test(href) &&
+        !/&(?:amp|lt|gt|quot|#39);$/u.test(href)
+      ) {
+        moveSuffix(1);
+        trimming = true;
+        continue;
+      }
+      for (const [open, close] of [
+        ["(", ")"],
+        ["[", "]"],
+        ["{", "}"],
+      ]) {
+        if (
+          href.endsWith(close) &&
+          href.split(close).length > href.split(open).length
+        ) {
+          moveSuffix(1);
+          trimming = true;
+          break;
+        }
+      }
+    }
+
+    return `<a class="message-link" href="${href}" target="_blank" rel="noopener noreferrer">${href}</a>${suffix}`;
+  });
+}
+
 /**
  * Marks the `@…` a person is part-way through typing.
  *
@@ -952,9 +1007,9 @@ function paintComposerMirror(node) {
  * author wrote is already an entity, so the only tags in the output are the
  * ones constructed below. Nothing an agent writes can become an element.
  *
- * Deliberately small. Headings, bold, bullets and paragraphs are what a
- * summary is actually made of; links, images, tables and raw HTML are not,
- * and every one of them is a way for text to do something other than be read.
+ * Deliberately small. Headings, bold, bullets, paragraphs and pasted web
+ * addresses are what a summary is actually made of; images, tables and raw
+ * HTML are not.
  */
 function richText(text, mentions) {
   const mentionNames = [
@@ -975,7 +1030,7 @@ function richText(text, mentions) {
   const inline = (value) =>
     slashMarkup(
       mentionMarkup(
-        value
+        linkMarkup(value)
           .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
           .replace(/`([^`]+)`/gu, "<code>$1</code>"),
         mentionNames,
