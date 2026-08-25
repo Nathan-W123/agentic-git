@@ -8270,7 +8270,11 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .agent-spec .aspec-banner {
   height: clamp(58px, 9vh, 74px);
   background:
-    radial-gradient(circle at 86% 18%, rgb(255 255 255 / 12%) 0 3px, transparent 4px),
+    radial-gradient(
+      circle at 86% 18%,
+      var(--aspec-accent, var(--accent)) 0 3px,
+      transparent 4px
+    ),
     linear-gradient(
       145deg,
       color-mix(in srgb, var(--aspec-accent, var(--accent)) 58%, var(--surface-2)),
