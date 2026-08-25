@@ -288,6 +288,8 @@ export const state = {
   repositoryGrants: {},
   /** Entitlement and seat count — see `ensureBilling`. */
   billing: undefined,
+  /** Deployment counts and coordination metrics — see `ensureDeployment`. */
+  deployment: undefined,
   activeChannelThread: undefined,
   /** Thread roots currently open as side tabs, oldest first. */
   activeChannelThreads: [],
@@ -5619,6 +5621,46 @@ export async function openBillingPortal() {
     { method: "POST", body: {} },
   );
   return response.url;
+}
+
+/**
+ * The deployment's own numbers, for whoever runs it.
+ *
+ * Two calls rather than one: the counts come from the store, and the
+ * coordination metrics are computed per project off the audit chain. They are
+ * fetched together and kept together, because reading either alone invites the
+ * mistake this screen exists to prevent — counting what integrated without
+ * counting what was submitted.
+ */
+export async function loadDeployment() {
+  const overview = await apiOptional("/admin/overview", undefined);
+  if (overview === undefined) {
+    state.deployment = null;
+    return state.deployment;
+  }
+  const projects = overview.projects ?? [];
+  const metrics = (
+    await Promise.all(
+      projects.map(async (project) => {
+        const response = await apiOptional(
+          `/projects/${encodeURIComponent(project.id)}/metrics`,
+          undefined,
+        );
+        return response?.metrics;
+      }),
+    )
+  ).filter((entry) => entry !== undefined);
+  state.deployment = { ...overview, metrics };
+  return state.deployment;
+}
+
+export async function ensureDeployment(rerender) {
+  if (state.deployment !== undefined) {
+    return;
+  }
+  state.deployment = null;
+  await loadDeployment();
+  rerender();
 }
 
 export function iAmSystemAdmin() {

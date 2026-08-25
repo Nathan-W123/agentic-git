@@ -105,6 +105,7 @@ import {
   openBillingPortal,
   startCheckout,
   ensureBilling,
+  ensureDeployment,
   loadBilling,
   setSystemAdmin,
   removeMember,
@@ -1415,6 +1416,13 @@ const SETTINGS_SECTIONS = [
     description: "Your plan, what it covers, and who is counted as a seat.",
   },
   {
+    id: "deployment",
+    label: "Deployment",
+    iconName: "database",
+    description: "How this control plane is doing, for whoever runs it.",
+    adminOnly: true,
+  },
+  {
     id: "advanced",
     label: "Advanced",
     iconName: "sliders",
@@ -1552,6 +1560,8 @@ function settingsSectionMarkup(section) {
       return `${invitationsCard()}${channelStatsCard()}`;
     case "billing":
       return billingCard();
+    case "deployment":
+      return deploymentCard();
     case "advanced":
       return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
     default:
@@ -1566,7 +1576,13 @@ function settingsSectionMarkup(section) {
  * that were visible underneath.
  */
 function settingsDialog() {
-  const selected = SETTINGS_SECTIONS.some(
+  // A section nobody may open is not offered. `adminOnly` is read here rather
+  // than inside each card so the rail, the default selection and the deep link
+  // all agree about what exists.
+  const sections = SETTINGS_SECTIONS.filter(
+    (section) => section.adminOnly !== true || iAmSystemAdmin(),
+  );
+  const selected = sections.some(
     (section) => section.id === state.settingsSection,
   )
     ? state.settingsSection
@@ -1599,7 +1615,7 @@ function settingsDialog() {
       <aside class="settings-sidebar">
         <div class="settings-brand">${icon("gear")}<span>Settings</span></div>
         <nav class="settings-nav" aria-label="Settings categories">
-          ${SETTINGS_SECTIONS.map(
+          ${sections.map(
             (item) => `<button type="button" class="settings-nav-item${
               item.id === selected ? " active" : ""
             }" data-act="settings-section" data-value="${esc(item.id)}"
@@ -2974,6 +2990,166 @@ async function revokeRepositoryGrantAction(repositoryId, userId) {
     render();
     refreshChannelInfoPopover();
   }
+}
+
+/* --------------------------------------------------------- deployment ---- */
+
+/** Milliseconds as the coarsest unit that still reads as a duration. */
+function humanDuration(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) {
+    return "—";
+  }
+  const minutes = ms / 60000;
+  if (minutes < 90) {
+    return `${minutes.toFixed(1)} min`;
+  }
+  const hours = minutes / 60;
+  return hours < 48
+    ? `${hours.toFixed(1)} hr`
+    : `${(hours / 24).toFixed(1)} days`;
+}
+
+/** One number with a caption, for the tiles across the top. */
+function statTile(value, label, tone = "") {
+  return `<div class="dep-stat${tone === "" ? "" : ` dep-stat-${tone}`}">
+    <b>${esc(String(value))}</b><span>${esc(label)}</span></div>`;
+}
+
+/** Sums one metrics field across every project on this deployment. */
+function metricsTotal(metrics, group, field) {
+  return metrics.reduce(
+    (total, entry) => total + (entry?.[group]?.[field] ?? 0),
+    0,
+  );
+}
+
+/**
+ * How this control plane is actually doing.
+ *
+ * Written around one number that no single endpoint reports: the difference
+ * between what was submitted and what integrated. Everything else here is a
+ * count somebody could have read off the API; that gap is the one that says
+ * whether the deployment is healthy, and it is invisible unless the two
+ * figures are put beside each other and subtracted.
+ */
+function deploymentCard() {
+  void ensureDeployment(render);
+  const deployment = state.deployment;
+  if (deployment === undefined || deployment === null) {
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Deployment</div>
+      <div class="sr-sub">Loading…</div></span></div></section>`;
+  }
+  const counts = deployment.counts ?? {};
+  const metrics = deployment.metrics ?? [];
+  const submitted = metricsTotal(metrics, "throughput", "tasksSubmitted");
+  const integrated = metricsTotal(metrics, "throughput", "tasksIntegrated");
+  const failed = metricsTotal(metrics, "throughput", "tasksFailed");
+  const unaccounted = Math.max(0, submitted - integrated - failed);
+  const deferrals = metricsTotal(metrics, "rework", "planTimeDeferrals");
+  const replans = metricsTotal(metrics, "rework", "replansRequested");
+  const restarts = metricsTotal(metrics, "rework", "taskRestarts");
+  const blocked = metrics.reduce(
+    (total, entry) =>
+      total + (entry?.conflicts?.predictionsByDisposition?.block ?? 0),
+    0,
+  );
+  const byContention = metricsTotal(metrics, "conflicts", "confirmedByContention");
+  const leaseMs = metricsTotal(metrics, "cost", "leaseRuntimeMs");
+  const settled = metricsTotal(metrics, "cost", "settledLeases");
+  const timeToIntegration =
+    metrics.length === 0
+      ? 0
+      : metricsTotal(metrics, "throughput", "averageTimeToIntegrationMs") /
+        metrics.length;
+  const landed = submitted === 0 ? 0 : Math.round((integrated / submitted) * 100);
+
+  return `<section class="card">
+    <div class="dep-stats">
+      ${statTile(counts.users ?? 0, counts.users === 1 ? "person" : "people")}
+      ${statTile(counts.organizations ?? 0, "teams")}
+      ${statTile(counts.repositories ?? 0, "repositories")}
+      ${statTile(counts.activeRuns ?? 0, "running now")}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="set-row"><span class="sr-body">
+      <div class="sr-title">Work</div>
+      <div class="sr-sub">Of ${String(submitted)} tasks submitted,
+        ${String(integrated)} landed — ${String(landed)}%.</div>
+    </span></div>
+    <div class="dep-stats">
+      ${statTile(submitted, "submitted")}
+      ${statTile(integrated, "landed", "good")}
+      ${statTile(failed, "failed", failed > 0 ? "bad" : "")}
+      ${statTile(unaccounted, "unaccounted", unaccounted > 0 ? "warn" : "")}
+    </div>
+    ${
+      unaccounted === 0
+        ? ""
+        : `<div class="set-row"><span class="sr-body">
+             <!-- The point of this screen. A task that neither landed nor
+                  failed is not a statistic, it is work somebody asked for and
+                  never got, and no other view puts it in front of anyone. -->
+             <div class="sr-title">${String(unaccounted)} tasks neither landed nor failed</div>
+             <div class="sr-sub">They are queued, waiting on a person, or were
+               abandoned without being recorded as a failure. This is the number
+               worth chasing before any other on this page.</div>
+           </span></div>`
+    }
+    ${
+      (counts.pendingApprovals ?? 0) === 0
+        ? ""
+        : `<div class="set-row"><span class="sr-body">
+             <div class="sr-title">${String(counts.pendingApprovals)} approvals waiting</div>
+             <div class="sr-sub">Each one is a run stopped on a person, not on
+               a machine. Nothing moves until somebody answers.</div>
+           </span></div>`
+    }
+  </section>
+
+  <section class="card">
+    <div class="set-row"><span class="sr-body">
+      <div class="sr-title">Rework</div>
+      <div class="sr-sub">Work paid for twice. A deferral is a planning round
+        trip that was thrown away, and it is counted nowhere else.</div>
+    </span></div>
+    <div class="dep-stats">
+      ${statTile(deferrals, "deferrals", deferrals > integrated / 4 ? "warn" : "")}
+      ${statTile(replans, "replans")}
+      ${statTile(restarts, "restarts")}
+      ${statTile(humanDuration(timeToIntegration), "avg to land")}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="set-row"><span class="sr-body">
+      <div class="sr-title">Coordination</div>
+      <div class="sr-sub">${
+        blocked === 0
+          ? "Nothing has been held back yet."
+          : `${String(blocked)} tasks were held back to avoid a collision.
+             ${String(byContention)} of those are confirmed by two tasks
+             actually contending — a hold that works leaves no evidence it was
+             needed, so this number stays low even when it is earning its
+             keep.`
+      }</div>
+    </span></div>
+    <div class="dep-stats">
+      ${statTile(blocked, "held back")}
+      ${statTile(byContention, "confirmed")}
+      ${statTile(humanDuration(leaseMs), "agent runtime")}
+      ${statTile(settled, "leases")}
+    </div>
+  </section>
+
+  <section class="card"><div class="set-row"><span class="sr-body">
+    <div class="sr-title">Revenue</div>
+    <div class="sr-sub">Nothing yet — no payments have been taken on this
+      deployment. This fills in once Stripe is configured and a subscription
+      is active.</div>
+  </span></div></section>`;
 }
 
 /* ------------------------------------------------------------ billing ---- */

@@ -11411,6 +11411,14 @@ export class ApiGateway {
       ).flat();
       const tasks = await this.options.store.listSubmittedTasks();
       const approvals = await this.options.store.listApprovals();
+      // Every status, not just the queued one. A deployment's health is the
+      // shape of this distribution rather than any single number in it: the
+      // gap between what was submitted and what integrated is where work goes
+      // missing, and a count of "pending" alone cannot show it.
+      const tasksByStatus: Record<string, number> = {};
+      for (const task of tasks) {
+        tasksByStatus[task.status] = (tasksByStatus[task.status] ?? 0) + 1;
+      }
       this.sendJson(response, 200, {
         counts: {
           users: await this.options.store.countUsers(),
@@ -11425,6 +11433,14 @@ export class ApiGateway {
           activeRuns: this.activeRuns.size,
           webSocketConnections: this.webSockets.connections,
         },
+        tasksByStatus,
+        // Named, so the dashboard can ask each one for its own coordination
+        // metrics rather than guessing at a project id.
+        projects: projects.map((project) => ({
+          id: project.id,
+          name: project.name,
+          organizationId: project.organizationId,
+        })),
         recentRuns: await this.options.store.listRuns(20),
       });
       return;
