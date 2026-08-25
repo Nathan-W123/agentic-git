@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>Connect to Kumi</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 28px;
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #0b0d12;
+        color: #e6e8ee;
+      }
+      main {
+        width: 100%;
+        max-width: 360px;
+        display: grid;
+        gap: 14px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 19px;
+        letter-spacing: -0.02em;
+      }
+      p {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #9aa3b2;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 12.5px;
+        color: #9aa3b2;
+      }
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        font: inherit;
+        font-size: 14px;
+        color: #e6e8ee;
+        background: #12151d;
+        border: 1px solid #262b36;
+        border-radius: 10px;
+      }
+      input:focus {
+        outline: none;
+        border-color: #4c7dfd;
+      }
+      button {
+        padding: 10px 14px;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 550;
+        color: #ffffff;
+        background: #3f6ef0;
+        border: 0;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+      #status {
+        min-height: 18px;
+        font-size: 12.5px;
+        color: #f0968c;
+      }
+      #status.working {
+        color: #9aa3b2;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Connect to Kumi</h1>
+      <p>
+        The address of your deployment. This app is a window onto it — the
+        dashboard, your projects, and your agents all live there.
+      </p>
+      <label>
+        Server address
+        <input
+          id="address"
+          type="text"
+          inputmode="url"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="https://kumi.example.com"
+        />
+      </label>
+      <button id="connect" type="button">Connect</button>
+      <p id="status"></p>
+    </main>
+    <script>
+      /**
+       * One field, and a check before it counts.
+       *
+       * The address is confirmed against the deployment's health route before
+       * it is written down, so a typo is a sentence here rather than a window
+       * that opens onto nothing. The request is made by the main process — see
+       * `setup-preload.mjs` for why.
+       */
+      const address = document.getElementById("address");
+      const connect = document.getElementById("connect");
+      const status = document.getElementById("status");
+
+      async function submit() {
+        const value = address.value.trim();
+        if (value === "") {
+          address.focus();
+          return;
+        }
+        connect.disabled = true;
+        address.disabled = true;
+        status.className = "working";
+        status.textContent = "Looking for Kumi at that address…";
+        const answer = await window.kumiSetup.connect(value);
+        // On success this window is closed from the other side, so there is
+        // deliberately nothing to do here but wait for it.
+        if (!answer.ok) {
+          connect.disabled = false;
+          address.disabled = false;
+          status.className = "";
+          status.textContent = answer.message;
+          address.focus();
+          address.select();
+        }
+      }
+
+      connect.addEventListener("click", () => void submit());
+      address.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          void submit();
+        }
+      });
+      address.focus();
+    </script>
+  </body>
+</html>
