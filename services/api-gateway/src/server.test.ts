@@ -2430,6 +2430,99 @@ test("a catch-up carries only what its reader may see", async (t) => {
   assert.equal(deniedSeen.status, 403);
 });
 
+test("muting a channel silences it for one person and nobody else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const noisy = await invitableRepository(owner, "mute-noisy");
+  const quiet = await invitableRepository(owner, "mute-quiet");
+  const mutesPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/channel/mutes`;
+  const mutePath = (repositoryId: string) =>
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/mute`;
+
+  const before = await owner.request(mutesPath);
+  assert.equal(before.status, 200);
+  assert.deepEqual(before.data.repositoryIds, []);
+
+  const muted = await owner.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: true },
+  });
+  assert.equal(muted.status, 200);
+  assert.equal(muted.data.muted, true);
+  const after = await owner.request(mutesPath);
+  assert.deepEqual(after.data.repositoryIds, [noisy]);
+
+  // Somebody else in the same rooms hears them exactly as before: a mute is a
+  // preference, not a property of the channel.
+  const colleague = await runtime.store.createUser({
+    email: "mute-colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: noisy,
+    userId: colleague.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    createdAt: new Date().toISOString(),
+  });
+  const colleagueClient = new TestClient(runtime.origin);
+  await colleagueClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: colleague.email, password: PASSWORD },
+  });
+  const theirs = await colleagueClient.request(mutesPath);
+  assert.equal(theirs.status, 200);
+  assert.deepEqual(theirs.data.repositoryIds, []);
+
+  // A grant holder is told about their own mutes on the repositories they can
+  // see, and never about one they cannot.
+  await colleagueClient.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: true },
+  });
+  // The same answer a repository that does not exist gets: somebody who
+  // reaches this project through one grant is not told what else is in it.
+  const refused = await colleagueClient.request(mutePath(quiet), {
+    method: "POST",
+    body: { muted: true },
+  });
+  assert.equal(refused.status, 404);
+  const narrowed = await colleagueClient.request(mutesPath);
+  assert.deepEqual(narrowed.data.repositoryIds, [noisy]);
+
+  // Unmuting is the same call the other way round, and the owner's own list
+  // is untouched by anything the colleague did.
+  const unmuted = await owner.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: false },
+  });
+  assert.equal(unmuted.status, 200);
+  assert.equal(unmuted.data.muted, false);
+  assert.deepEqual((await owner.request(mutesPath)).data.repositoryIds, []);
+  assert.deepEqual(
+    (await colleagueClient.request(mutesPath)).data.repositoryIds,
+    [noisy],
+  );
+
+  // The flag has to be a boolean: an absent or misspelled one would otherwise
+  // read as "unmute" and quietly undo somebody's setting.
+  const malformed = await owner.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: "yes" },
+  });
+  assert.equal(malformed.status, 400);
+  const missing = await owner.request(mutePath("repo_does_not_exist"), {
+    method: "POST",
+    body: { muted: true },
+  });
+  assert.equal(missing.status, 404);
+
+  const stranger = new TestClient(runtime.origin);
+  assert.equal((await stranger.request(mutesPath)).status, 401);
+});
+
 test("project policy is validated, stored, and clearable through the API", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

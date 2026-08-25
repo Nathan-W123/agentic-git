@@ -25,6 +25,7 @@ const PUBLIC_FILES = [
   ["screen-chats.js", "text/javascript; charset=utf-8"],
   ["screen-agents.js", "text/javascript; charset=utf-8"],
   ["screen-notifications.js", "text/javascript; charset=utf-8"],
+  ["kumi-logo.png", "image/png"],
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
 

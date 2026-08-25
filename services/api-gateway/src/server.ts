@@ -8964,6 +8964,86 @@ export class ApiGateway {
       return;
     }
 
+    // Which of this project's rooms this account has silenced. One call for
+    // the whole project rather than one per channel: the browser needs the
+    // answer for every room in the switcher before it can draw a single
+    // badge, and a fan-out over the channel list would be a request each.
+    const channelMutesMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/channel/mutes$`, "u"),
+    );
+    if (channelMutesMatch !== undefined && method === "GET") {
+      const projectId = channelMutesMatch[0] ?? "";
+      const { repositories } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      // A mute is recorded per repository, not per project, so the stored set
+      // spans every project this account can reach. Narrowed to what is
+      // actually in this one — and, for a grant holder, to what they may see
+      // — so the answer never names a repository the caller could not
+      // otherwise learn exists.
+      const muted = new Set(
+        await this.options.store.listMutedChannels(principal.user.id),
+      );
+      const inProject =
+        await this.options.store.listProjectRepositories(projectId);
+      const repositoryIds = inProject
+        .filter(
+          (entry) =>
+            muted.has(entry.id) &&
+            (repositories === undefined || repositories.has(entry.id)),
+        )
+        .map((entry) => entry.id);
+      this.sendJson(response, 200, { repositoryIds });
+      return;
+    }
+
+    // Silencing one room, for the person asking and nobody else. `view` is
+    // the right level: anybody who can read the channel can decide they would
+    // rather not be interrupted by it, and the write touches only their own
+    // preference.
+    const channelMuteMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/mute$`,
+        "u",
+      ),
+    );
+    if (channelMuteMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = ""] = channelMuteMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const body = objectBody(await this.readJson(request));
+      const { muted } = body;
+      if (typeof muted !== "boolean") {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "muted must be true or false",
+        );
+      }
+      await this.options.store.setChannelMuted(
+        repositoryId,
+        principal.user.id,
+        muted,
+      );
+      this.sendJson(response, 200, { muted });
+      return;
+    }
+
     // The real channel roster: every user with access to this repository —
     // by organization role or by a per-repository grant, the same two paths
     // `authorizeRepository` itself accepts, so nobody appears here who could

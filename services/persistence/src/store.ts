@@ -1952,6 +1952,28 @@ export interface CoordinationStore {
   ): Promise<string | undefined>;
 
   /**
+   * Silences a channel for one person, or lets it speak again.
+   *
+   * Per person, never per room: a mute is somebody deciding they do not want
+   * to be interrupted, not a property of the repository, so it must not reach
+   * anybody else reading the same conversation. Unmuting removes the record
+   * rather than storing a false — see the `channel-mutes` migration.
+   */
+  setChannelMuted(
+    repositoryId: string,
+    userId: UserId,
+    muted: boolean,
+  ): Promise<void>;
+  /**
+   * Every repository this person has muted, across all of them.
+   *
+   * Answered for the whole account rather than per repository so the browser
+   * can learn which rooms are quiet in one call at start-up instead of one
+   * call per channel in the list.
+   */
+  listMutedChannels(userId: UserId): Promise<string[]>;
+
+  /**
    * How far a viewer has been caught up on one project's news.
    *
    * Separate from the channel read cursor rather than derived from it: that

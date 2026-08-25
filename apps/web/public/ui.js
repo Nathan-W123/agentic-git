@@ -106,6 +106,12 @@ export const ICONS = {
   bell: S(
     '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/>',
   ),
+  // The same bell with a stroke through it, deliberately: a muted room is the
+  // notification mark negated, and inventing a second unrelated picture for
+  // it would make the pair harder to read than the one crossed-out one.
+  bellOff: S(
+    '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/><path d="M4.2 4.2 19.8 19.8"/>',
+  ),
   gear: S(
     '<circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   ),
@@ -484,19 +490,17 @@ if (typeof document !== "undefined") {
 }
 
 /**
- * The letters of the full KUMI wordmark used on the auth shell.
+ * The UMI letters of the full Kumi wordmark used on the auth shell.
  *
  * The letters are stroked polylines rather than filled outlines, because that
  * is what they are — one constant weight, flat cuts, no curves anywhere. The
- * K's arms run past the vertex into the stem so their ends are hidden under
- * it.
+ * leading symbol is the supplied Kumi artwork, cropped from its source image
+ * inside the same space the old K occupied.
  *
- * `currentColor` throughout: the wordmark takes the colour of the text beside
- * it, so it is right on dark and light without a second definition.
+ * The letters use `currentColor`, so they remain right on dark and light; the
+ * supplied black-and-white mark keeps its published treatment beside them.
  */
-const BRAND_LETTERS = `<path d="M8.3 8V40"/>
-    <path d="M42 11 13.5 24 42 37"/>
-    <path d="M54.3 8v22.7l6.3 6.3h20.8l6.3-6.3V8"/>
+const BRAND_LETTERS = `<path d="M54.3 8v22.7l6.3 6.3h20.8l6.3-6.3V8"/>
     <path d="M102.3 8V40"/>
     <path d="M143.7 8V40"/>
     <path d="M102.3 10.5 123 30l20.7-19.5"/>
@@ -511,6 +515,8 @@ const BRAND_LETTERS = `<path d="M8.3 8V40"/>
  * drawn at, and `meet` means the word is never cropped if something else
  * sizes the box. `aria-label` rather than `aria-hidden`: read out, this one is
  * the product's name, not decoration beside a heading that already says it.
+ * The nested viewport deliberately crops the supplied wide image to its main
+ * mark, excluding the surrounding canvas and the small sparkle at the right.
  */
 export function brandWordmark(width = 120) {
   const height = Math.round((width / 3.5) * 100) / 100;
@@ -518,6 +524,11 @@ export function brandWordmark(width = 120) {
     viewBox="0 0 168 48" preserveAspectRatio="xMidYMid meet"
     fill="none" stroke="currentColor" stroke-width="6.6"
     stroke-linecap="butt" stroke-linejoin="miter" role="img" aria-label="Kumi">
+    <svg x="0" y="0" width="48" height="48" viewBox="0 0 48 48"
+      overflow="hidden" aria-hidden="true">
+      <image href="/kumi-logo.png" x="-33" y="-7" width="114" height="62"
+        preserveAspectRatio="xMidYMid meet"/>
+    </svg>
     ${BRAND_LETTERS}
   </svg>`;
 }

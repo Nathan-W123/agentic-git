@@ -68,6 +68,9 @@ import {
   ensureProviderUsage,
   ensureRepositoryGrants,
   markChannelRead,
+  isChannelMuted,
+  loadChannelMutes,
+  setChannelMuted,
   refreshChannelMessages,
   refreshProviderUsage,
   takePromptedThread,
@@ -2596,6 +2599,34 @@ async function renameRepositoryAction(repositoryId) {
     toast(name === "" ? `Renamed back to ${repositoryId}` : `Renamed to ${name}`, "ok");
     render();
   } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Muting a channel, or letting it speak again.
+ *
+ * Personal and reversible, so it asks for no confirmation: the whole of what
+ * it does is stop this account's badges, notification rows and arrival sounds
+ * for one room, and clicking it again undoes that. Nothing about anybody
+ * else's view of the same conversation changes, which is why it sits beside
+ * rename, sync and delete rather than among them — the other three are edits
+ * to the repository, and this one is not.
+ */
+async function muteChannelAction(repositoryId) {
+  const muting = !isChannelMuted(repositoryId);
+  try {
+    await setChannelMuted(repositoryId, muting);
+    refreshChannelInfoPopover();
+    toast(
+      muting
+        ? `Muted #${repositoryLabel(repositoryId)}`
+        : `Unmuted #${repositoryLabel(repositoryId)}`,
+      "ok",
+    );
+    render();
+  } catch (error) {
+    render();
     toast(error.message, "error");
   }
 }
@@ -6268,6 +6299,12 @@ document.addEventListener("click", (event) => {
       closePopover();
       void syncRepositoryFromGitHub(value, render);
       return;
+    // Left open deliberately, unlike the two above: muting is the one control
+    // in this popover somebody might want to try and immediately undo, and the
+    // popover redraws in place to show which way it now reads.
+    case "channel-mute":
+      void muteChannelAction(value);
+      return;
     /* Chats */
     case "channel-new":
       showMenu(node, [
@@ -7640,6 +7677,17 @@ document.addEventListener("click", (event) => {
               },
             ]
           : []),
+        // Quietening the room. Offered to everybody who can see the channel,
+        // because it changes nothing but this account's own interruptions —
+        // no role gates deciding you would rather not be pinged.
+        {
+          act: "channel-mute",
+          value,
+          label: isChannelMuted(value)
+            ? `Unmute #${repositoryLabel(value)}`
+            : `Mute #${repositoryLabel(value)}`,
+          iconName: isChannelMuted(value) ? "bell" : "bellOff",
+        },
         // Leaving is only offered to somebody who can actually leave. Access
         // that comes from an organization role reaches every repository the
         // organization owns, so there is no per-repository grant to give up —
@@ -9014,6 +9062,11 @@ async function boot() {
     // work should lead with the agent's account of what was implemented.
     void showSinceYouLeft();
   });
+  // Which rooms are quiet, from the server rather than only from this
+  // browser's mirror. Deliberately not part of the first paint: the mirror in
+  // `state.channelMuted` already answers every badge drawn above, and one more
+  // request in the cold-start wave would cost the wait it saves.
+  void loadChannelMutes().then(() => render());
   void loadProviders().then(() => render());
   void loadGitHub().then(() => {
     if (state.settingsOpen === true) {
@@ -9163,7 +9216,10 @@ async function boot() {
               (key) => !audibleBefore.has(key),
             );
           render();
-          if (received) {
+          // A muted room makes no sound. The message still arrived and the
+          // transcript still shows it; what the mute switches off is being
+          // interrupted about it.
+          if (received && !isChannelMuted(channelRepositoryId)) {
             chime("received");
           }
         });

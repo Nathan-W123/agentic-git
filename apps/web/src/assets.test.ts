@@ -21,6 +21,12 @@ test("loads every control-room asset with an explicit content type", async () =>
     assets.get("/manifest.webmanifest")?.contentType,
     "application/manifest+json",
   );
+  assert.equal(assets.get("/kumi-logo.png")?.contentType, "image/png");
+  assert.equal(
+    assets.get("/kumi-logo.png")?.body.subarray(0, 8).toString("hex"),
+    "89504e470d0a1a0a",
+    "the served Kumi artwork should be a PNG",
+  );
   for (const icon of [
     "/mark.svg",
     "/apple-touch-icon.png",
@@ -2604,11 +2610,11 @@ test("the user icon defaults to salmon", async () => {
 });
 
 test("the product is named Kumi throughout the browser surface", async () => {
-  // The wordmark sits in the chat sidebar's crown, which is rendered by the
-  // chats screen rather than the shell.
+  // The auth wordmark names the image for assistive technology even though its
+  // visible first glyph is now artwork rather than a letter.
   assert.match(
-    await publicFile("screen-chats.js"),
-    /title="Kumi" aria-label="Kumi"/u,
+    await publicFile("ui.js"),
+    /role="img" aria-label="Kumi"/u,
   );
   assert.match(await publicFile("index.html"), /<title>Kumi<\/title>/u);
   for (const file of [
@@ -2646,7 +2652,9 @@ test("the full wordmark remains without a standalone K badge", async () => {
   assert.notEqual(start, -1, "the wordmark helper was not found in ui.js");
   const wordmark = ui.slice(start, ui.indexOf("\n}", start));
   assert.match(wordmark, /preserveAspectRatio="xMidYMid meet"/u);
-  // All four letters remain available as one complete wordmark.
+  assert.match(wordmark, /href="\/kumi-logo\.png"/u);
+  assert.match(wordmark, /overflow="hidden" aria-hidden="true"/u);
+  // The supplied mark leads the remaining letters as one complete wordmark.
   assert.match(wordmark, /\$\{BRAND_LETTERS\}/u);
 
   const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);

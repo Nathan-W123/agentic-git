@@ -46,6 +46,7 @@ api,
   dmUnreadFrom,
   dmUnreadTotal,
   flushChannelDrafts,
+  isChannelMuted,
   keptRightPanels,
   markChannelRead,
   memberName,
@@ -152,10 +153,15 @@ function channelRail(activeRepositoryId) {
           const active = repo.id === activeRepositoryId;
           const unread = channelUnreadCount(repo.id);
           const label = repositoryLabel(repo.id);
-          return `<div class="channel-rail-entry${active ? " active" : ""}">
+          // A muted room stays in the list — it is still somewhere to go — but
+          // it is dimmed and says so, because a channel that never raises a
+          // badge is otherwise indistinguishable from one where nothing is
+          // happening.
+          const muted = isChannelMuted(repo.id);
+          return `<div class="channel-rail-entry${active ? " active" : ""}${muted ? " muted" : ""}">
             <button type="button" class="channel-rail-button" data-act="channel-open"
-              data-value="${esc(repo.id)}" title="#${esc(label)}"
-              aria-label="Open channel ${esc(label)}"${active ? ' aria-current="page"' : ""}>
+              data-value="${esc(repo.id)}" title="#${esc(label)}${muted ? " (muted)" : ""}"
+              aria-label="Open channel ${esc(label)}${muted ? ", muted" : ""}"${active ? ' aria-current="page"' : ""}>
               ${channelPictureMarkup(repo.id, 36)}
               ${
                 unread > 0
@@ -1624,6 +1630,17 @@ function chanHeader(repositoryId) {
         <span class="ch-count" title="${roster.length} agent${
           roster.length === 1 ? "" : "s"
         }">${icon("robotBust")}${roster.length}</span>
+        ${
+          // Why this room is quiet, said in the one place somebody wondering
+          // about it is already looking. Without it a muted channel simply
+          // never raises a badge, which reads as nobody talking rather than as
+          // a choice this account made.
+          isChannelMuted(repositoryId)
+            ? `<span class="ch-count ch-muted" title="Muted — no badges or sounds from this channel">${icon(
+                "bellOff",
+              )}Muted</span>`
+            : ""
+        }
       </div>
     </div>
     <span class="spacer"></span>
@@ -3911,10 +3928,10 @@ function catchUpPanel() {
     return "";
   }
   const count = catchUp.tasks.length;
-  const repository = state.repositories.find(
-    (entry) => entry.id === catchUp.repositoryId,
-  );
-  const repositoryName = repository?.name ?? catchUp.repositoryId;
+  // Through the same helper every other channel title goes through: this
+  // read a `name` field no repository has, so a renamed channel's digest
+  // kept announcing itself by the id the rename was meant to retire.
+  const repositoryName = repositoryLabel(catchUp.repositoryId);
   const workers = new Map();
   let touched = 0;
   const rows = catchUp.tasks
@@ -5068,7 +5085,7 @@ function agentSpec(agent, repositoryId) {
           </div>
           <div class="aspec-pills">
             ${statusText === "" ? "" : specPill(statusText, { dot: status })}
-            ${specPill(`#${repositoryId}`, {
+            ${specPill(`#${repositoryLabel(repositoryId)}`, {
               title: "The channel this panel was opened from",
             })}
             ${specPill(
@@ -5106,9 +5123,9 @@ function agentSpec(agent, repositoryId) {
               }</strong>
               <span>${
                 task === undefined
-                  ? `Nothing running in #${esc(repositoryId)}`
+                  ? `Nothing running in #${esc(repositoryLabel(repositoryId))}`
                   : `${esc(String(task.status ?? "working").replaceAll("_", " "))} · #${esc(
-                      taskRepositoryId,
+                      repositoryLabel(taskRepositoryId),
                     )} · ${esc(relativeTime(task.submittedAt))}`
               }</span>
             </span>
@@ -5131,7 +5148,11 @@ function agentSpec(agent, repositoryId) {
               <span class="aspec-count">${channels.length}</span>
             </div>
             <div class="aspec-channel-list">${channels
-              .map((repository) => specPill(`#${repository.id}`))
+              .map((repository) =>
+                specPill(`#${repositoryLabel(repository.id)}`, {
+                  title: repository.id,
+                }),
+              )
               .join("")}</div>
             ${
               allChannelsLoaded
@@ -6383,6 +6404,29 @@ export function channelInfoPopoverHtml(repositoryId) {
            </div>`
         : ""
     }
+    <div class="pop-block">
+      ${
+        // Beside rename, sync and delete rather than in a settings screen of
+        // its own: this popover is where a person already comes to change what
+        // this channel does, and muting is the one of those four that is only
+        // about them. Everyone else's badges, notifications and sounds are
+        // untouched.
+        isChannelMuted(repositoryId)
+          ? `<button type="button" class="btn btn-sm" data-act="channel-mute"
+               data-value="${esc(repositoryId)}" aria-pressed="true">
+               ${icon("bell")} Unmute this channel
+             </button>
+             <p>Muted. Badges, notifications and sounds from this channel are
+               off for you — everyone else in it is unaffected.</p>`
+          : `<button type="button" class="btn btn-sm" data-act="channel-mute"
+               data-value="${esc(repositoryId)}" aria-pressed="false">
+               ${icon("bellOff")} Mute this channel
+             </button>
+             <p>Stops this channel raising badges, notifications and sounds
+               for you. Messages still arrive, and nobody else's view
+               changes.</p>`
+      }
+    </div>
     <div class="pop-block pop-block-danger">
       ${
         canDelete

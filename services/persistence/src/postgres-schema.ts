@@ -922,4 +922,17 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     name: "repository-display-names",
     statements: [`ALTER TABLE repositories ADD COLUMN display_name TEXT`],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 42,
+    name: "channel-mutes",
+    statements: [
+      `CREATE TABLE channel_mutes (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        muted_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+    ],
+  },
 ];

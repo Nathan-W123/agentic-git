@@ -162,6 +162,17 @@ export const state = {
   channelAgentOverrides: {},
   channelRead: JSON.parse(window.localStorage.getItem("ag.chanread") ?? "{}"),
   /**
+   * The rooms this account has asked to be quiet, keyed by repository id.
+   *
+   * Mirrored into `ag.chanmute` rather than read from the server on every
+   * paint: the badge, the notification list and the arrival chime all consult
+   * it, and all three are drawn before the first request can answer. The
+   * server's copy is the durable one and arrives a moment later through
+   * {@link loadChannelMutes}, which is what makes a mute set on a phone
+   * silence the same room on a laptop.
+   */
+  channelMuted: JSON.parse(window.localStorage.getItem("ag.chanmute") ?? "{}"),
+  /**
    * Where the "New messages" line goes, keyed by repository id.
    *
    * Separate from `channelRead` because the two answer different questions.
@@ -573,6 +584,7 @@ export function forgetOtherAccount(storage, userId) {
     "ag.avatar",
     "ag.chanCollapsed",
     "ag.chandrafts",
+    "ag.chanmute",
     "ag.chanread",
     "ag.chatOpen",
     "ag.eventCursor",
@@ -2707,7 +2719,13 @@ export function notifications() {
     });
   }
   rows.sort((left, right) => String(right.at).localeCompare(String(left.at)));
-  return rows.slice(0, 60);
+  // A muted channel keeps its news out of the notification list too. Silencing
+  // a room and then finding every one of its runs in the bell is the mute not
+  // having done anything; rows with no room behind them are nobody's channel
+  // and are never hidden.
+  return rows
+    .filter((row) => !isChannelMuted(row.repositoryId))
+    .slice(0, 60);
 }
 
 function notificationBody(event, task) {
@@ -5476,11 +5494,91 @@ export function markChannelRead(repositoryId) {
 }
 
 export function channelUnreadCount(repositoryId, { mentionsOnly = false } = {}) {
+  // A muted room raises no badge. The messages are still there and still
+  // unread — opening the channel shows them, and the "New messages" divider
+  // is still drawn where the reader left off — but a mute is a request not to
+  // be told about them, and a count in the switcher is exactly being told.
+  if (isChannelMuted(repositoryId)) {
+    return 0;
+  }
   return countChannelSince(
     repositoryId,
     state.channelRead[repositoryId] ?? 0,
     mentionsOnly,
   );
+}
+
+/** Whether this account has silenced a room. */
+export function isChannelMuted(repositoryId) {
+  return state.channelMuted[repositoryId] === true;
+}
+
+/**
+ * Which rooms are quiet, according to the server.
+ *
+ * Best-effort and safe to lose: the local mirror is already what every reader
+ * consults, so a deployment that has not learned this route yet simply keeps
+ * whatever this browser last knew rather than un-muting everything.
+ */
+export async function loadChannelMutes() {
+  if (!state.projectId) {
+    return;
+  }
+  let response;
+  try {
+    response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/channel/mutes`,
+    );
+  } catch {
+    // Swallowed rather than surfaced: this is called without an owner from
+    // `boot`, and a control plane that has not learned this route yet should
+    // leave the browser's mirror alone instead of tearing down a screen that
+    // is already up.
+    return;
+  }
+  const muted = {};
+  for (const repositoryId of response.repositoryIds ?? []) {
+    muted[repositoryId] = true;
+  }
+  // Replaced wholesale rather than merged: the server's list is the whole
+  // answer, so a room unmuted from another browser has to disappear from this
+  // one, which a merge would never let it do.
+  state.channelMuted = muted;
+  window.localStorage.setItem("ag.chanmute", JSON.stringify(state.channelMuted));
+}
+
+/**
+ * Silences a room, or lets it speak again.
+ *
+ * Written locally first so the switcher answers the click immediately, and
+ * put back if the server refuses — a control that looks like it worked and
+ * did not is worse than one that visibly failed.
+ */
+export async function setChannelMuted(repositoryId, muted) {
+  const previous = state.channelMuted[repositoryId] === true;
+  if (muted) {
+    state.channelMuted[repositoryId] = true;
+  } else {
+    delete state.channelMuted[repositoryId];
+  }
+  window.localStorage.setItem("ag.chanmute", JSON.stringify(state.channelMuted));
+  try {
+    await api(channelPath(repositoryId, "/mute"), {
+      method: "POST",
+      body: { muted },
+    });
+  } catch (error) {
+    if (previous) {
+      state.channelMuted[repositoryId] = true;
+    } else {
+      delete state.channelMuted[repositoryId];
+    }
+    window.localStorage.setItem(
+      "ag.chanmute",
+      JSON.stringify(state.channelMuted),
+    );
+    throw error;
+  }
 }
 
 /**
