@@ -15,6 +15,7 @@ import {
   type CanonicalVersion,
 } from "@coord/shared-types";
 
+import { GitBatchReader } from "./batch-reader.js";
 import { GitClient, GitCommandError } from "./git-client.js";
 
 /** One promotion in the canonical branch's history. */
@@ -467,6 +468,14 @@ function isErrorCode(error: unknown, code: string): boolean {
     "code" in error &&
     (error as NodeJS.ErrnoException).code === code
   );
+}
+
+/** One blob in a revision: where it lives and what it is. */
+export interface RepositoryFileEntry {
+  path: string;
+  oid: string;
+  /** `blob` for a file; `commit` for a submodule, which has no contents here. */
+  type: string;
 }
 
 export class RepositoryService {
@@ -1741,6 +1750,57 @@ export class RepositoryService {
       `${revision}:${safePath}`,
     ]);
     return result.stdout;
+  }
+
+  /**
+   * Every source path at this revision with the blob it resolves to.
+   *
+   * The object id is what makes an index reusable: content addresses this
+   * file's parse, so a revision that changed three files can keep the other
+   * four hundred without asking whether they moved, without a diff, and
+   * without trusting that two revisions are related at all.
+   */
+  public async listFileEntries(
+    repository: CanonicalRepository,
+    revision: string,
+  ): Promise<RepositoryFileEntry[]> {
+    const result = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "ls-tree",
+      "-r",
+      "-z",
+      "--full-tree",
+      revision,
+    ]);
+    return result.stdout
+      .split("\0")
+      .filter((entry) => entry.length > 0)
+      .flatMap((entry) => {
+        // `<mode> SP <type> SP <oid> TAB <path>`, and `-z` means the path is
+        // the raw remainder rather than a quoted string.
+        const tab = entry.indexOf("\t");
+        if (tab === -1) {
+          return [];
+        }
+        const [, type = "", oid = ""] = entry.slice(0, tab).split(" ");
+        // Submodules stay in the listing. They are real paths, and `listFiles`
+        // has always reported them, so dropping them here would quietly shrink
+        // the set that answers "does this declared path exist".
+        return [{ path: normalizeRepositoryPath(entry.slice(tab + 1)), oid, type }];
+      })
+      .sort((left, right) => (left.path < right.path ? -1 : 1));
+  }
+
+  /**
+   * A reader that answers many paths at this revision over one git process.
+   *
+   * The caller must `close()` it. Reads are answered in the order requested.
+   */
+  public openBatchReader(
+    repository: CanonicalRepository,
+    revision: string,
+  ): GitBatchReader {
+    return new GitBatchReader(repository.path, revision);
   }
 
   public async listFiles(

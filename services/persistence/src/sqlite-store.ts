@@ -1677,6 +1677,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare("DELETE FROM channel_read_cursors WHERE repository_id = ?")
         .run(id);
       this.db
+        .prepare("DELETE FROM channel_mutes WHERE repository_id = ?")
+        .run(id);
+      this.db
         .prepare(
           "DELETE FROM channel_membership_backfills WHERE repository_id = ?",
         )
@@ -4176,6 +4179,40 @@ export class SqliteCoordinationStore implements CoordinationStore {
       )
       .get(repositoryId, userId) as Row | undefined;
     return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  public async setChannelMuted(
+    repositoryId: string,
+    userId: string,
+    muted: boolean,
+  ): Promise<void> {
+    if (!muted) {
+      this.db
+        .prepare(
+          "DELETE FROM channel_mutes WHERE repository_id = ? AND user_id = ?",
+        )
+        .run(repositoryId, userId);
+      return;
+    }
+    // Muting twice is not a second mute: the row already says the room is
+    // quiet, and the original moment is the more useful one to keep.
+    this.db
+      .prepare(
+        `INSERT INTO channel_mutes (repository_id, user_id, muted_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(repository_id, user_id) DO NOTHING`,
+      )
+      .run(repositoryId, userId, new Date().toISOString());
+  }
+
+  public async listMutedChannels(userId: string): Promise<string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT repository_id FROM channel_mutes
+          WHERE user_id = ? ORDER BY repository_id`,
+      )
+      .all(userId) as Row[];
+    return rows.map((row) => text(row, "repository_id"));
   }
 
   public async getCatchUpCursor(

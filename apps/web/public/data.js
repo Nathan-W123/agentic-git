@@ -13,7 +13,30 @@ import {
 } from "./boot-plan.js";
 import { toast } from "./ui.js";
 
-export const API_ROOT = "/api/v1";
+/**
+ * Where the control plane lives, as a prefix every request is built on.
+ *
+ * Empty in a browser, which is every deployment today: the dashboard is
+ * served by the control plane, so a relative path already points at it and
+ * the string below is exactly what it has always been. A desktop shell loads
+ * these same files and sets `KUMI_SERVER` to the deployment it was pointed
+ * at — that one value, and the token beside it, is the whole difference
+ * between the two clients.
+ */
+export const SERVER_ORIGIN = readServerOrigin();
+
+function readServerOrigin() {
+  const configured = window.KUMI_SERVER;
+  if (typeof configured !== "string" || configured.trim() === "") {
+    return "";
+  }
+  // Trailing slashes trimmed here rather than at every join: a shell
+  // configured with "https://kumi.example.com/" must not produce
+  // "https://kumi.example.com//api/v1".
+  return configured.trim().replace(/\/+$/u, "");
+}
+
+export const API_ROOT = `${SERVER_ORIGIN}/api/v1`;
 
 const stored = (key, fallback = "") =>
   window.localStorage.getItem(key) ?? fallback;
@@ -131,6 +154,17 @@ export const state = {
   ),
 
   invitations: [],
+  apiTokens: [],
+  /**
+   * The one moment a token's secret exists outside the client holding it.
+   *
+   * Only the response that created it carries the secret; the store keeps a
+   * digest and the list route can never show it again. So it is held here
+   * until the person has copied it, and deliberately not persisted — a
+   * credential that survives a reload is a credential in somebody's session
+   * storage.
+   */
+  newApiToken: undefined,
 
   /**
    * Which colour wheel is open in Appearance, by its `data-act` prefix, or
@@ -161,6 +195,17 @@ export const state = {
   channelMessages: {},
   channelAgentOverrides: {},
   channelRead: JSON.parse(window.localStorage.getItem("ag.chanread") ?? "{}"),
+  /**
+   * The rooms this account has asked to be quiet, keyed by repository id.
+   *
+   * Mirrored into `ag.chanmute` rather than read from the server on every
+   * paint: the badge, the notification list and the arrival chime all consult
+   * it, and all three are drawn before the first request can answer. The
+   * server's copy is the durable one and arrives a moment later through
+   * {@link loadChannelMutes}, which is what makes a mute set on a phone
+   * silence the same room on a laptop.
+   */
+  channelMuted: JSON.parse(window.localStorage.getItem("ag.chanmute") ?? "{}"),
   /**
    * Where the "New messages" line goes, keyed by repository id.
    *
@@ -361,6 +406,16 @@ export const state = {
    * agent owned by this account.
    */
   agentPanelTab: "spec",
+  /**
+   * Which slice of an agent's task history is on screen, and what was typed
+   * into the search box above it.
+   *
+   * Held here rather than on the input because every background poll rebuilds
+   * the panel: a filter that lived in the DOM was reset to "all" on whatever
+   * schedule the room happened to refresh on.
+   */
+  agentHistoryFilter: "all",
+  agentHistoryQuery: "",
   /*
    * Whether a turn's thinking block is unfolded, keyed by thread and turn.
    *
@@ -565,6 +620,7 @@ export function forgetOtherAccount(storage, userId) {
     "ag.avatar",
     "ag.chanCollapsed",
     "ag.chandrafts",
+    "ag.chanmute",
     "ag.chanread",
     "ag.chatOpen",
     "ag.eventCursor",
@@ -600,6 +656,42 @@ function csrfToken() {
   );
 }
 
+/** The bearer token a desktop shell was signed in with, if this is one. */
+function bearerToken() {
+  const token = window.KUMI_TOKEN;
+  return typeof token === "string" && token.trim() !== ""
+    ? token.trim()
+    : undefined;
+}
+
+/**
+ * Puts this client's credentials on a request, and answers how `fetch` should
+ * treat cookies.
+ *
+ * One helper for both callers because there were two, and they had already
+ * drifted: `chat.js` carried its own copy of the cookie read. A second client
+ * is exactly the kind of change that turns a duplicate into a bug — one of
+ * them gets the bearer path and the other keeps sending a CSRF header nobody
+ * set a cookie for.
+ *
+ * A browser has no token and is unchanged: same-origin cookies, and the CSRF
+ * header on anything that writes. A shell has a token and needs neither — the
+ * gateway skips its CSRF check for bearer requests, saying why: nothing
+ * attaches a bearer token on its own, so there is no cross-site request to
+ * forge.
+ */
+export function authorizeRequest(headers, method = "GET") {
+  const token = bearerToken();
+  if (token !== undefined) {
+    headers.set("Authorization", `Bearer ${token}`);
+    return "omit";
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers.set("X-CSRF-Token", csrfToken());
+  }
+  return "same-origin";
+}
+
 export async function api(path, options = {}) {
   const method = options.method ?? "GET";
   const headers = new Headers(options.headers ?? {});
@@ -611,12 +703,10 @@ export async function api(path, options = {}) {
   if (options.body !== undefined) {
     headers.set("Content-Type", raw ? options.contentType : "application/json");
   }
-  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
-    headers.set("X-CSRF-Token", csrfToken());
-  }
+  const credentials = authorizeRequest(headers, method);
   const response = await fetch(`${API_ROOT}${path}`, {
     method,
-    credentials: "same-origin",
+    credentials,
     headers,
     // A last "seen" write made as the tab is being backgrounded must be
     // allowed to outlive the page. Kept opt-in because ordinary requests are
@@ -1185,21 +1275,61 @@ export function connectSocket(onEvent) {
   closeSocket();
   socketHandler = onEvent;
   socketRetryMs = 1_000;
-  openEventSocket();
+  void openEventSocket();
 }
 
-function openEventSocket() {
+/**
+ * A one-shot permission to open the socket, for a client that cannot present
+ * its credential to an upgrade.
+ *
+ * `undefined` in a browser, and that is not a degraded case: a session cookie
+ * rides along on the upgrade by itself, which is exactly what a bearer token
+ * cannot do — `new WebSocket(url)` takes no headers. So a shell trades its
+ * token, over an ordinary request that *can* carry one, for something safe to
+ * put in a URL: single-use, and dead within the minute.
+ */
+async function socketTicket() {
+  if (bearerToken() === undefined) {
+    return undefined;
+  }
+  const { ticket } = await api("/auth/ws-ticket", { method: "POST" });
+  return typeof ticket === "string" && ticket !== "" ? ticket : undefined;
+}
+
+/** Where the event socket lives, however this client is addressing the API. */
+async function eventSocketUrl(after) {
+  // Resolved rather than concatenated: `API_ROOT` is a path in a browser and
+  // an absolute URL in a shell, and `new URL` handles both — the base is
+  // ignored the moment the first argument is absolute.
+  const url = new URL(`${API_ROOT}/events`, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  // The hub listens on one path and scopes the subscription by query, so a
+  // single upgrade handler serves every project.
+  url.searchParams.set("projectId", state.projectId);
+  url.searchParams.set("after", String(after));
+  const ticket = await socketTicket();
+  if (ticket !== undefined) {
+    url.searchParams.set("ticket", ticket);
+  }
+  return url.toString();
+}
+
+async function openEventSocket() {
   const onEvent = socketHandler;
   if (onEvent === undefined || !state.projectId) {
     return;
   }
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  // The hub listens on one path and scopes the subscription by query, so a
-  // single upgrade handler serves every project.
   const after = eventCursor();
-  const url =
-    `${protocol}://${window.location.host}${API_ROOT}/events` +
-    `?projectId=${encodeURIComponent(state.projectId)}&after=${after}`;
+  let url;
+  try {
+    url = await eventSocketUrl(after);
+  } catch {
+    // A ticket this client could not get is a socket it cannot open yet. The
+    // same backoff a refused upgrade uses, for the same reason: whatever is
+    // wrong is usually wrong for a moment.
+    scheduleSocketRetry();
+    return;
+  }
   try {
     const socket = new WebSocket(url);
     state.socket = socket;
@@ -1232,7 +1362,7 @@ function scheduleSocketRetry() {
   window.clearTimeout(socketRetryTimer);
   socketRetryTimer = window.setTimeout(() => {
     if (socketHandler !== undefined && state.socket === undefined) {
-      openEventSocket();
+      void openEventSocket();
     }
   }, socketRetryMs);
   socketRetryMs = Math.min(socketRetryMs * 2, SOCKET_RETRY_MAX_MS);
@@ -1258,7 +1388,7 @@ export function ensureSocketAlive() {
   }
   window.clearTimeout(socketRetryTimer);
   socketRetryMs = 1_000;
-  openEventSocket();
+  void openEventSocket();
 }
 
 /* ------------------------------------------------------------- typing ---- */
@@ -1636,6 +1766,47 @@ export function closeSocket() {
 
 export function socketLive() {
   return state.socket?.readyState === WebSocket.OPEN;
+}
+
+/* ---------------------------------------------------------- api tokens ---- */
+
+/**
+ * What a token minted from this screen may do.
+ *
+ * The two a client needs to be the dashboard: read the room, and start work.
+ * Deliberately not everything the owner can do — a token is a credential that
+ * lives on somebody's laptop rather than in a session that expires, so the
+ * default is the smallest set that makes it useful. The server refuses any
+ * scope above the owner's role regardless.
+ */
+export const DESKTOP_TOKEN_SCOPES = ["view", "run_task"];
+
+export async function loadApiTokens() {
+  const response = await apiOptional("/auth/tokens", { tokens: [] });
+  state.apiTokens = response.tokens ?? [];
+  return state.apiTokens;
+}
+
+/**
+ * Mints a token and hands back its secret, once.
+ *
+ * The server allows this only from a signed-in session — a token that could
+ * mint another would put revocation out of reach — so this is a thing you do
+ * in a browser, and the app you paste it into never needs one.
+ */
+export async function createApiToken(name) {
+  const response = await api("/auth/tokens", {
+    method: "POST",
+    body: { name, scopes: [...DESKTOP_TOKEN_SCOPES] },
+  });
+  state.newApiToken = response.token;
+  await loadApiTokens();
+  return response.token;
+}
+
+export async function revokeApiToken(id) {
+  await api(`/auth/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await loadApiTokens();
 }
 
 /* -------------------------------------------------------- invitations ---- */
@@ -2698,7 +2869,13 @@ export function notifications() {
     });
   }
   rows.sort((left, right) => String(right.at).localeCompare(String(left.at)));
-  return rows.slice(0, 60);
+  // A muted channel keeps its news out of the notification list too. Silencing
+  // a room and then finding every one of its runs in the bell is the mute not
+  // having done anything; rows with no room behind them are nobody's channel
+  // and are never hidden.
+  return rows
+    .filter((row) => !isChannelMuted(row.repositoryId))
+    .slice(0, 60);
 }
 
 function notificationBody(event, task) {
@@ -5538,11 +5715,91 @@ export function markChannelRead(repositoryId) {
 }
 
 export function channelUnreadCount(repositoryId, { mentionsOnly = false } = {}) {
+  // A muted room raises no badge. The messages are still there and still
+  // unread — opening the channel shows them, and the "New messages" divider
+  // is still drawn where the reader left off — but a mute is a request not to
+  // be told about them, and a count in the switcher is exactly being told.
+  if (isChannelMuted(repositoryId)) {
+    return 0;
+  }
   return countChannelSince(
     repositoryId,
     state.channelRead[repositoryId] ?? 0,
     mentionsOnly,
   );
+}
+
+/** Whether this account has silenced a room. */
+export function isChannelMuted(repositoryId) {
+  return state.channelMuted[repositoryId] === true;
+}
+
+/**
+ * Which rooms are quiet, according to the server.
+ *
+ * Best-effort and safe to lose: the local mirror is already what every reader
+ * consults, so a deployment that has not learned this route yet simply keeps
+ * whatever this browser last knew rather than un-muting everything.
+ */
+export async function loadChannelMutes() {
+  if (!state.projectId) {
+    return;
+  }
+  let response;
+  try {
+    response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/channel/mutes`,
+    );
+  } catch {
+    // Swallowed rather than surfaced: this is called without an owner from
+    // `boot`, and a control plane that has not learned this route yet should
+    // leave the browser's mirror alone instead of tearing down a screen that
+    // is already up.
+    return;
+  }
+  const muted = {};
+  for (const repositoryId of response.repositoryIds ?? []) {
+    muted[repositoryId] = true;
+  }
+  // Replaced wholesale rather than merged: the server's list is the whole
+  // answer, so a room unmuted from another browser has to disappear from this
+  // one, which a merge would never let it do.
+  state.channelMuted = muted;
+  window.localStorage.setItem("ag.chanmute", JSON.stringify(state.channelMuted));
+}
+
+/**
+ * Silences a room, or lets it speak again.
+ *
+ * Written locally first so the switcher answers the click immediately, and
+ * put back if the server refuses — a control that looks like it worked and
+ * did not is worse than one that visibly failed.
+ */
+export async function setChannelMuted(repositoryId, muted) {
+  const previous = state.channelMuted[repositoryId] === true;
+  if (muted) {
+    state.channelMuted[repositoryId] = true;
+  } else {
+    delete state.channelMuted[repositoryId];
+  }
+  window.localStorage.setItem("ag.chanmute", JSON.stringify(state.channelMuted));
+  try {
+    await api(channelPath(repositoryId, "/mute"), {
+      method: "POST",
+      body: { muted },
+    });
+  } catch (error) {
+    if (previous) {
+      state.channelMuted[repositoryId] = true;
+    } else {
+      delete state.channelMuted[repositoryId];
+    }
+    window.localStorage.setItem(
+      "ag.chanmute",
+      JSON.stringify(state.channelMuted),
+    );
+    throw error;
+  }
 }
 
 /**
@@ -5965,6 +6222,10 @@ export function putAwayRightPanel(kind) {
       return;
     case "agent":
       state.activeAgentPanel = undefined;
+      // The next agent opened starts on its whole history, not on whatever
+      // the last one happened to be narrowed to.
+      state.agentHistoryFilter = "all";
+      state.agentHistoryQuery = "";
       return;
     case "dm":
       state.activeDm = undefined;

@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
+import { execFile as execFileCallback } from "node:child_process";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCallback);
 
 import { RepositoryService } from "@coord/repository-service";
 import type { AgentPlan } from "@coord/shared-types";
 
-import { CodeIntelligenceService } from "./index.js";
+import { CodeIntelligenceService, type RepositoryIndex } from "./index.js";
 
 test("indexes symbols, imports, APIs, schemas, configuration, tests, and services", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-index-"));
@@ -282,17 +286,21 @@ async function seedRepository(
 /**
  * Counts index builds by counting the listing every build starts with.
  *
- * `listFiles` is called exactly once per build, so this counts the builds the
- * cache is supposed to have made unnecessary as well as the ones it allowed.
+ * `listFileEntries` is called exactly once per build, so this counts the
+ * builds the cache is supposed to have made unnecessary as well as the ones it
+ * allowed. It counts builds and not parses on purpose: reusing a parsed file
+ * across revisions is an optimisation *inside* a build, and the cache this
+ * measures is the one that stops the build happening at all.
  */
 function countBuilds(repositories: RepositoryService): { builds: number } {
   const counter = { builds: 0 };
-  const listFiles = repositories.listFiles.bind(repositories);
-  (repositories as unknown as { listFiles: typeof listFiles }).listFiles =
-    async (...args: Parameters<typeof listFiles>) => {
-      counter.builds += 1;
-      return await listFiles(...args);
-    };
+  const listEntries = repositories.listFileEntries.bind(repositories);
+  (
+    repositories as unknown as { listFileEntries: typeof listEntries }
+  ).listFileEntries = async (...args: Parameters<typeof listEntries>) => {
+    counter.builds += 1;
+    return await listEntries(...args);
+  };
   return counter;
 }
 
@@ -383,6 +391,181 @@ test("the cache bound evicts the oldest index once the service is long-lived", a
     // And the one still held is free.
     await service.index(first.repository, first.revision);
     assert.equal(counter.builds, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** Moves canonical on, the way a promotion does, from a working clone. */
+async function advanceCanonical(
+  source: string,
+  repository: { path: string; branch: string },
+): Promise<void> {
+  await execFile("git", [
+    "-C",
+    source,
+    "push",
+    repository.path,
+    `HEAD:${repository.branch}`,
+  ]);
+}
+
+test("a revision that changed three files does not re-parse the rest", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-incremental-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    for (let n = 0; n < 12; n += 1) {
+      await writeFile(
+        path.join(source, "src", `mod_${String(n)}.ts`),
+        `export function fn_${String(n)}() { return ${String(n)}; }\n`,
+      );
+    }
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "example",
+    );
+    const before = await repositories.getCanonicalVersion(repository);
+
+    // A service that has read the repository once, as the coordinator's has
+    // by the time anything lands.
+    const warm = new CodeIntelligenceService(repositories);
+    const first = await warm.index(repository, before.revision);
+    assert.equal(first.files.length, 12);
+
+    await writeFile(
+      path.join(source, "src", "mod_0.ts"),
+      "export function renamed() { return 0; }\n",
+    );
+    await repositories.commitAll(source, "change one file");
+    await advanceCanonical(source, repository);
+    const after = await repositories.getCanonicalVersion(repository);
+    assert.notEqual(after.revision, before.revision);
+
+    const advanced = await warm.index(repository, after.revision);
+    // A service with no memory at all, at the same revision. The index is the
+    // contract: reuse is an implementation detail and may not show up in it.
+    const cold = new CodeIntelligenceService(repositories);
+    const rebuilt = await cold.index(repository, after.revision);
+
+    const comparable = (index: RepositoryIndex): string =>
+      JSON.stringify({ ...index, generatedAt: "" });
+    assert.equal(comparable(advanced), comparable(rebuilt));
+    assert.ok(
+      advanced.files
+        .find((entry) => entry.path === "src/mod_0.ts")
+        ?.symbols.includes("renamed"),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a file that moved is re-parsed, because its path is part of the parse", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-moved-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "here.ts"),
+      "export function moved() { return 1; }\n",
+    );
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "example",
+    );
+    const before = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    await service.index(repository, before.revision);
+
+    // Same bytes, different path. Keying the memory on contents alone would
+    // hand this back still claiming to be `src/here.ts`.
+    await rm(path.join(source, "src", "here.ts"));
+    await writeFile(
+      path.join(source, "src", "there.ts"),
+      "export function moved() { return 1; }\n",
+    );
+    await repositories.commitAll(source, "move it");
+    await advanceCanonical(source, repository);
+    const after = await repositories.getCanonicalVersion(repository);
+
+    const index = await service.index(repository, after.revision);
+    assert.deepEqual(
+      index.files.map((entry) => entry.path),
+      ["src/there.ts"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("parsing across threads produces exactly what one thread produces", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-threads-"));
+  try {
+    const source = path.join(root, "source");
+    const canonicalPath = path.join(root, "canonical.git");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    // Above PARALLEL_PARSE_THRESHOLD, or the pool is never reached and this
+    // asserts nothing.
+    for (let n = 0; n < 80; n += 1) {
+      await writeFile(
+        path.join(source, "src", `mod_${String(n)}.ts`),
+        [
+          `import { dep } from "./mod_${String((n + 1) % 80)}.js";`,
+          `export interface Shape_${String(n)} { id: string }`,
+          `export class Service_${String(n)} {`,
+          `  route(app: { get: (p: string, h: unknown) => void }) {`,
+          `    app.get("/thing_${String(n)}", dep);`,
+          "  }",
+          "}",
+          `export function fn_${String(n)}() { return process.env.KEY_${String(n)}; }`,
+        ].join("\n"),
+      );
+    }
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      canonicalPath,
+      "example",
+    );
+    const { revision } = await repositories.getCanonicalVersion(repository);
+
+    const threaded = new CodeIntelligenceService(repositories, {
+      maxParseWorkers: 3,
+    });
+    await threaded.warmUp();
+    const across = await threaded.index(repository, revision);
+
+    // `maxParseWorkers: 1` is below the width the pool needs, so this one
+    // never leaves its own thread.
+    const single = new CodeIntelligenceService(repositories, {
+      maxParseWorkers: 1,
+    });
+    await single.warmUp();
+    const here = await single.index(repository, revision);
+
+    const comparable = (index: RepositoryIndex): string =>
+      JSON.stringify({ ...index, generatedAt: "" });
+    assert.equal(comparable(across), comparable(here));
+    assert.equal(across.files.length, 80);
+    // Order is the part a split can silently lose: slots are claimed as the
+    // budget loop runs and filled afterwards.
+    assert.deepEqual(
+      across.files.map((entry) => entry.path),
+      here.files.map((entry) => entry.path),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

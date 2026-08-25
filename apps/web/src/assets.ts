@@ -13,6 +13,9 @@ import type { StaticAsset } from "@coord/api-gateway";
  */
 const PUBLIC_FILES = [
   ["index.html", "text/html; charset=utf-8"],
+  // Its own document, reached from outside the dashboard: a desktop app
+  // sends somebody here to approve it.
+  ["authorize.html", "text/html; charset=utf-8"],
   ["styles.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
   ["boot-plan.js", "text/javascript; charset=utf-8"],
@@ -25,6 +28,7 @@ const PUBLIC_FILES = [
   ["screen-chats.js", "text/javascript; charset=utf-8"],
   ["screen-agents.js", "text/javascript; charset=utf-8"],
   ["screen-notifications.js", "text/javascript; charset=utf-8"],
+  ["kumi-logo.png", "image/png"],
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
 
@@ -200,6 +204,12 @@ function withDigestedNames(
     // learned the old URL — but it revalidates, because it is still a name
     // that says nothing about its contents.
     assets.set(`/${name}`, { body, contentType: source.contentType });
+    if (name === "authorize.html") {
+      // Registered at the extensionless path too. `serveStatic` falls back to
+      // the dashboard for anything without a dot, so `/authorize` would
+      // otherwise render the control room instead of the question.
+      assets.set("/authorize", { body, contentType: source.contentType });
+    }
     const alias = digested.get(name);
     if (alias !== undefined) {
       assets.set(`/${alias}`, {

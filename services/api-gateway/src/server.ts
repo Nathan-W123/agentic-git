@@ -98,6 +98,7 @@ import {
   createChatterFilter,
   createLocalSummariser,
   type ChatterFilter,
+  type LocalSummariser,
 } from "@coord/local-triage";
 import {
   authorizeOrganization,
@@ -1331,6 +1332,74 @@ export function summariseObjective(objective: string): string {
   return `${(lastSpace > 40 ? clipped.slice(0, lastSpace) : clipped).trim()}…`;
 }
 
+/** The most a generated thread name may contain. */
+const THREAD_TITLE_MAX_WORDS = 6;
+const THREAD_TITLE_MAX_CHARS = 64;
+
+/**
+ * Turns a model's first line into the compact noun phrase the thread library
+ * needs, falling back to a bounded reading of the request when it did not
+ * follow the format.
+ */
+export function normaliseThreadTitle(
+  written: string | null | undefined,
+  fallback: string,
+): string {
+  const clean = (value: string): string =>
+    (value.split(/\r?\n/u).find((line) => line.trim().length > 0) ?? "")
+      .replace(/^\s*(?:[-*#]+|\d+[.)])\s*/u, "")
+      .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/gu, "")
+      .replace(/^\s*(?:task|thread|title)\s*:\s*/iu, "")
+      .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/gu, "")
+      .replace(/[.!?:;,\s]+$/gu, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+  const fallbackWords = clean(fallback)
+    .split(" ")
+    .filter((word) => word.length > 0)
+    .slice(0, THREAD_TITLE_MAX_WORDS);
+  const boundedFallback: string[] = [];
+  for (const word of fallbackWords) {
+    const next = [...boundedFallback, word].join(" ");
+    if (next.length > THREAD_TITLE_MAX_CHARS) {
+      break;
+    }
+    boundedFallback.push(word);
+  }
+  const candidate = clean(written ?? "");
+  const words = candidate === "" ? [] : candidate.split(" ");
+  return candidate !== "" &&
+    words.length <= THREAD_TITLE_MAX_WORDS &&
+    candidate.length <= THREAD_TITLE_MAX_CHARS
+    ? candidate
+    : boundedFallback.join(" ") || "Software task";
+}
+
+/**
+ * Names a thread with the small in-process text model. This is presentation,
+ * so every model failure falls back to deterministic, bounded text rather
+ * than delaying or failing the task that the thread follows.
+ */
+export async function summariseThreadTitle(
+  objective: string,
+  summariser: CatchUpSummariser | undefined,
+): Promise<string> {
+  const fallback = summariseObjective(objective);
+  if (summariser === undefined) {
+    return normaliseThreadTitle(undefined, fallback);
+  }
+  const prompt =
+    "Name this software-work thread. Reply with only a three-to-six-word " +
+    "noun phrase describing its topic, not a quote or restatement of the " +
+    "request. Use no label, bullets, quotation marks, or ending punctuation." +
+    `\n\nRequest:\n${objective}`;
+  try {
+    return normaliseThreadTitle(await summariser(prompt), fallback);
+  } catch {
+    return normaliseThreadTitle(undefined, fallback);
+  }
+}
+
 /**
  * Prefixes an objective with the role the mentioned agent currently holds in
  * this repository's channel, so the CLI prompt the agent actually receives
@@ -2257,7 +2326,7 @@ const ACK_ONLY_RE =
  * precisely to do it.
  */
 const TASK_VERB_RE =
-  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|animate|animates|animated|animating|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|help|helps|helped|helping|solve|solves|solved|solving|address|addresses|addressed|addressing|finish|finishes|finished|finishing|complete|completes|completed|completing|test|tests|tested|testing|verify|verifies|verified|verifying|tackle|tackles|tackled|tackling|improve|improves|improved|improving|figure ?out|take (?:a look|care of)|pick ?up)\b/iu;
+  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|animate|animates|animated|animating|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|help|helps|helped|helping|solve|solves|solved|solving|address|addresses|addressed|addressing|finish|finishes|finished|finishing|complete|completes|completed|completing|test|tests|tested|testing|verify|verifies|verified|verifying|tackle|tackles|tackled|tackling|improve|improves|improved|improving|figure ?out|take (?:a look|care of)|pick ?up|put|puts|putting|get rid of|gets rid of|got rid of|getting rid of|hide|hides|hid|hiding|drop|drops|dropped|dropping|take out|takes out|took out|taking out|turn on|turn off|turns o[nf]f?|turned o[nf]f?|turning o[nf]f?|shrink|shrinks|shrank|shrunk|shrinking|enlarge|enlarges|enlarged|enlarging)\b/iu;
 
 /**
  * A question about the status of existing work — asked *with* a task verb
@@ -2487,6 +2556,67 @@ const PLAN_HOLD_TTL_MS = 15 * 60_000;
  * metadata, and the transcript has to be readable by the same reading a
  * person gives it.
  */
+/**
+ * How long a socket ticket is worth anything.
+ *
+ * Long enough for the round trip that mints it and the upgrade that spends
+ * it, and short enough that one written to a log is stale before anybody
+ * reads the log.
+ */
+const SOCKET_TICKET_TTL_MS = 30_000;
+
+/**
+ * How long an approved app has to collect its token.
+ *
+ * Longer than a socket ticket because a person is in the loop — the browser
+ * has to redirect and the waiting app has to notice — and still short enough
+ * that an abandoned approval is not a credential lying around.
+ */
+const APP_AUTHORIZATION_TTL_MS = 120_000;
+
+/**
+ * What an app approved through the browser may do.
+ *
+ * Read the room and start work — the two a client needs to be the dashboard,
+ * and deliberately not everything its owner can do. The token lives on a
+ * laptop rather than in a session that expires, so it gets the smallest set
+ * that still makes it useful; `issueApiToken` refuses anything above the
+ * owner's role regardless.
+ */
+const APP_TOKEN_SCOPES = ["view", "run_task"] as const;
+
+/**
+ * Whether a desktop app's callback is somewhere only that app can hear.
+ *
+ * The one check this flow cannot get wrong. The browser is about to be sent
+ * to this address carrying a code that can be exchanged for a token, so an
+ * unchecked value here is not an open redirect — it is a way to have somebody
+ * sign in and hand the result to an attacker. Loopback is the whole allowance:
+ * an app running on the person's own machine, reachable from nowhere else.
+ *
+ * Any port, because the app picks a free one at startup and cannot know it
+ * in advance. No credentials in the URL, no https — a loopback listener has
+ * no certificate anybody could verify, which is exactly why the standard
+ * carve-out for it exists.
+ */
+export function isLoopbackCallback(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:") {
+    return false;
+  }
+  if (url.username !== "" || url.password !== "") {
+    return false;
+  }
+  // `hostname` rather than `host`: the port is separate there, and IPv6
+  // arrives bracketed in one and bare in the other.
+  return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
+}
+
 const AUTO_CLAIM_OFFER_TAIL =
   'Say "yes" and I\'ll ask you what I need before I start — or @mention ' +
   "someone else.";
@@ -2527,23 +2657,23 @@ function defaultChatterFilter(): ChatterFilter {
 }
 
 /**
- * The local model that phrases the catch-up, or nothing.
+ * The local text model shared by catch-up prose and thread names, or nothing.
  *
  * Shares `COORD_LOCAL_TRIAGE` with the chatter filter: both are the same
  * bargain — a small model on the machine, no network, no vendor bill — so a
  * deployment that has turned local models off should not quietly keep one.
- * Switched off, this returns `undefined` and the digest keeps its
- * deterministic wording, which is what every failure produces anyway.
+ * Switched off, both callers keep their deterministic wording, which is what
+ * every failure produces anyway. One instance matters: loading a second ONNX
+ * session solely to name threads would double the memory cost of the feature.
  */
-function defaultCatchUpSummariser(): CatchUpSummariser | undefined {
+function defaultLocalSummariser(): LocalSummariser | undefined {
   const raw = process.env["COORD_LOCAL_TRIAGE"]?.trim().toLowerCase() ?? "";
   if (["0", "false", "off", "no"].includes(raw)) {
     return undefined;
   }
-  const local = createLocalSummariser({
+  return createLocalSummariser({
     budgetMs: CATCH_UP_SUMMARY_TIMEOUT_MS,
   });
-  return async (prompt) => await local.write(prompt);
 }
 
 /** The proposal out of an offer message, or nothing if this is not one. */
@@ -3667,6 +3797,14 @@ export interface ApiGatewayOptions {
    */
   catchUpSummariser?: CatchUpSummariser;
   /**
+   * Writes compact thread names with the local text model.
+   *
+   * Defaults to the same in-process model as catch-up prose and follows the
+   * same `COORD_LOCAL_TRIAGE` switch. Injectable so tests never load ONNX or
+   * download model artifacts for an unrelated channel assertion.
+   */
+  threadTitleSummariser?: CatchUpSummariser;
+  /**
    * Absolute origin this deployment is reached at, used to build links that
    * travel outside the browser. Defaults to `COORD_PUBLIC_URL`, and failing
    * that to the `Host` of the request that asked for the link.
@@ -4108,6 +4246,85 @@ export class ApiGateway {
   private readonly limiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
   private readonly activeRuns = new Set<string>();
+  /**
+   * Permission to open one socket, held for seconds.
+   *
+   * A browser proves itself to the upgrade with its session cookie, which it
+   * attaches on its own. Nothing else can: `new WebSocket(url)` takes no
+   * headers, so a client holding a bearer token — a desktop shell, or
+   * anything else outside a browser — has no way to present it. The usual
+   * answer is to put the token in the query string, and the usual objection
+   * is that URLs are written to logs and proxy traces, where a long-lived
+   * credential does not belong.
+   *
+   * A ticket is what goes there instead: minted by an authenticated request
+   * that *can* carry a header, single-use, and dead within the minute. Held
+   * in memory rather than the store because it is worth nothing a minute from
+   * now and because this deployment is documented as a single control plane —
+   * the same assumption crash recovery already makes.
+   */
+  private readonly socketTickets = new Map<
+    string,
+    { principal: AuthenticatedPrincipal; expiresAt: number }
+  >();
+
+  /**
+   * Apps a person has approved, waiting to collect their token.
+   *
+   * The redirect carries this rather than the token itself. A token in a
+   * redirect URL is a token in the browser's history, in whatever the
+   * loopback server logs, and in any extension watching navigation; a code is
+   * worth nothing without the exchange that spends it, and the exchange is a
+   * POST that leaves no such trail. Single-use and short-lived, held in
+   * memory for the same reason socket tickets are.
+   */
+  private readonly appAuthorizations = new Map<
+    string,
+    {
+      token: string;
+      tokenId: string;
+      name: string;
+      approver: AuthenticatedPrincipal;
+      expiresAt: number;
+    }
+  >();
+
+  /**
+   * Drops tickets nobody redeemed.
+   *
+   * Called when one is minted rather than on a timer: the map only grows by
+   * minting, so that is the one moment it can need it, and a deployment
+   * nobody is signing into does not want a timer for an empty map.
+   */
+  /**
+   * Drops approvals nobody collected, and withdraws the token with them.
+   *
+   * An app that was approved and then never started leaves a credential
+   * nobody is holding. Revoking it is what keeps "approve" from quietly
+   * meaning "issue a token to no one" — and it is why the token may be minted
+   * before it is collected at all.
+   */
+  private pruneAppAuthorizations(): void {
+    const now = Date.now();
+    for (const [code, approved] of this.appAuthorizations) {
+      if (approved.expiresAt > now) {
+        continue;
+      }
+      this.appAuthorizations.delete(code);
+      void this.auth
+        .revokeApiToken(approved.approver, approved.tokenId, "never_collected")
+        .catch(() => undefined);
+    }
+  }
+
+  private pruneSocketTickets(): void {
+    const now = Date.now();
+    for (const [ticket, held] of this.socketTickets) {
+      if (held.expiresAt <= now) {
+        this.socketTickets.delete(ticket);
+      }
+    }
+  }
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
   /**
@@ -4298,6 +4515,8 @@ export class ApiGateway {
   private readonly chatterFilter: ChatterFilter;
   /** The local model that phrases the catch-up, when the deployment has one. */
   private readonly catchUpSummariser: CatchUpSummariser | undefined;
+  /** The local model that names task threads, when the deployment has one. */
+  private readonly threadTitleSummariser: CatchUpSummariser | undefined;
   /** Configured origin for links that leave the browser, or "" to infer one. */
   private readonly publicUrl: string;
 
@@ -4319,8 +4538,22 @@ export class ApiGateway {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
     this.chatterFilter = options.chatterFilter ?? defaultChatterFilter();
-    this.catchUpSummariser =
-      options.catchUpSummariser ?? defaultCatchUpSummariser();
+    const localSummariser =
+      options.catchUpSummariser === undefined ||
+      options.threadTitleSummariser === undefined
+        ? defaultLocalSummariser()
+        : undefined;
+    const catchUpWriter =
+      localSummariser === undefined
+        ? undefined
+        : async (prompt: string) => await localSummariser.write(prompt);
+    const titleWriter =
+      localSummariser === undefined
+        ? undefined
+        : async (prompt: string) => await localSummariser.write(prompt, 24);
+    this.catchUpSummariser = options.catchUpSummariser ?? catchUpWriter;
+    this.threadTitleSummariser =
+      options.threadTitleSummariser ?? titleWriter;
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
     if (!Number.isSafeInteger(this.bodyLimit) || this.bodyLimit < 1) {
       throw new RangeError("Request body limit must be a positive integer");
@@ -4394,13 +4627,37 @@ export class ApiGateway {
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
-    const authorizeSocket = async (
+    const redeemTicket = (
+      request: IncomingMessage,
+    ): AuthenticatedPrincipal | undefined => {
+      const url = new URL(request.url ?? "/", "http://socket.invalid");
+      const ticket = url.searchParams.get("ticket");
+      if (ticket === null || ticket === "") {
+        return undefined;
+      }
+      // Deleted whether or not it was still valid: single-use means a replay
+      // of the same URL fails even when it arrives inside the window.
+      const held = this.socketTickets.get(ticket);
+      this.socketTickets.delete(ticket);
+      if (held === undefined || held.expiresAt <= Date.now()) {
+        throw new AuthenticationError("Socket ticket is invalid or expired");
+      }
+      return held.principal;
+    };
+        const authorizeSocket = async (
       request: IncomingMessage,
       projectId: string,
       permission: "view" | "submit_task",
     ): Promise<WebSocketAuthorization> => {
       this.assertOrigin(request);
-      const principal = await this.auth.authenticate(request.headers.cookie);
+      // A ticket if one was presented, the session cookie otherwise. Not a
+      // fallback in either direction: a request that brought a ticket has
+      // said which credential it means, and quietly trying the other one
+      // after a bad ticket would make an expired ticket look like a working
+      // one wherever a stale cookie happened to be lying around.
+      const ticketed = redeemTicket(request);
+      const principal =
+        ticketed ?? (await this.auth.authenticate(request.headers.cookie));
       const { project } = await authorizeProject(
         this.options.store,
         principal,
@@ -4672,6 +4929,12 @@ export class ApiGateway {
             // Creating an account cannot require an account.
             `${API_PREFIX}/auth/register`,
             `${API_PREFIX}/auth/register/confirm`,
+            // The app collecting its token has no credential to present —
+            // acquiring one is the entire point of the call. What stands in
+            // for authentication is the code: minted only by an approval a
+            // signed-in person clicked through, single-use, and dead within
+            // two minutes.
+            `${API_PREFIX}/auth/app-authorization/exchange`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
           url.pathname.endsWith("/accept") &&
@@ -5344,6 +5607,30 @@ export class ApiGateway {
       throw new HttpError(405, "method_not_allowed", "Unsupported method");
     }
 
+    if (
+      path === `${API_PREFIX}/auth/app-authorization/exchange` &&
+      method === "POST"
+    ) {
+      const body = objectBody(await this.readJson(request));
+      const code = String(body["code"] ?? "");
+      const approved = this.appAuthorizations.get(code);
+      // Deleted whether or not it was still good: a code is spent by being
+      // presented, so a replay fails even inside the window.
+      this.appAuthorizations.delete(code);
+      if (approved === undefined || approved.expiresAt <= Date.now()) {
+        throw new HttpError(
+          400,
+          "authorization_expired",
+          "That approval is no longer valid — start the sign-in again",
+        );
+      }
+      this.sendJson(response, 201, {
+        token: approved.token,
+        name: approved.name,
+      });
+      return;
+    }
+
     const principal = this.requirePrincipal(context);
     if (method === "POST" && path === `${API_PREFIX}/auth/logout`) {
       // A bearer token has no session to end; revoking it is a separate,
@@ -5860,6 +6147,89 @@ export class ApiGateway {
       }
 
       throw new HttpError(405, "method_not_allowed", "Unsupported lease action");
+    }
+
+    if (
+      path === `${API_PREFIX}/auth/app-authorization/approve` &&
+      method === "POST"
+    ) {
+      // Session only, exactly as minting a token by hand is: an app that
+      // could approve the next app would make revoking this one pointless.
+      if (principal.credential !== "session") {
+        throw new HttpError(
+          403,
+          "session_required",
+          "Approving an app requires a signed-in session",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const callback = String(body["redirectUri"] ?? "");
+      if (!isLoopbackCallback(callback)) {
+        throw new HttpError(
+          400,
+          "callback_rejected",
+          "An app callback must be an http address on this machine",
+        );
+      }
+      const user = await this.options.store.getUser(principal.user.id);
+      if (user === undefined) {
+        throw new HttpError(404, "not_found", "User was not found");
+      }
+      const name = stringField(body["name"], "name", { max: 120 }) ?? "Kumi app";
+      // Minted here rather than at collection, because here is where the
+      // session is: bounding a token by what its owner may actually do takes
+      // the live principal and its role, and the route that already does that
+      // correctly is this side of the redirect. What the code carries is the
+      // finished token, and an uncollected one is withdrawn below rather than
+      // left lying about.
+      const issued = await this.auth.issueApiToken({
+        user,
+        name,
+        scopes: [...APP_TOKEN_SCOPES],
+        ...(principal.sessionId === undefined
+          ? {}
+          : { createdBySession: principal.sessionId }),
+      });
+      this.pruneAppAuthorizations();
+      const code = randomBytes(32).toString("base64url");
+      this.appAuthorizations.set(code, {
+        token: issued.token,
+        tokenId: issued.record.id,
+        name,
+        approver: principal,
+        expiresAt: Date.now() + APP_AUTHORIZATION_TTL_MS,
+      });
+      // Built here rather than in the page: the callback has been checked on
+      // this side, and handing back a finished address is what stops the
+      // browser being pointed anywhere the check did not see.
+      const target = new URL(callback);
+      target.searchParams.set("code", code);
+      const state = String(body["state"] ?? "");
+      if (state !== "") {
+        target.searchParams.set("state", state);
+      }
+      this.sendJson(response, 201, { redirectTo: target.toString() });
+      return;
+    }
+
+    if (path === `${API_PREFIX}/auth/ws-ticket` && method === "POST") {
+      // Any credential may mint one, a bearer token included — which is the
+      // whole point, since a token is exactly what cannot be presented to an
+      // upgrade. Unlike minting an API token, this grants nothing durable: a
+      // ticket opens one socket within the minute and cannot mint anything
+      // further, so it does not put revocation out of reach the way a
+      // token minting tokens would.
+      this.pruneSocketTickets();
+      const ticket = randomBytes(32).toString("base64url");
+      this.socketTickets.set(ticket, {
+        principal,
+        expiresAt: Date.now() + SOCKET_TICKET_TTL_MS,
+      });
+      this.sendJson(response, 201, {
+        ticket,
+        expiresInMs: SOCKET_TICKET_TTL_MS,
+      });
+      return;
     }
 
     if (path === `${API_PREFIX}/auth/tokens` && method === "GET") {
@@ -8981,6 +9351,86 @@ export class ApiGateway {
           principal.user.id,
         )) ?? at;
       this.sendJson(response, 200, { readAt });
+      return;
+    }
+
+    // Which of this project's rooms this account has silenced. One call for
+    // the whole project rather than one per channel: the browser needs the
+    // answer for every room in the switcher before it can draw a single
+    // badge, and a fan-out over the channel list would be a request each.
+    const channelMutesMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/channel/mutes$`, "u"),
+    );
+    if (channelMutesMatch !== undefined && method === "GET") {
+      const projectId = channelMutesMatch[0] ?? "";
+      const { repositories } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      // A mute is recorded per repository, not per project, so the stored set
+      // spans every project this account can reach. Narrowed to what is
+      // actually in this one — and, for a grant holder, to what they may see
+      // — so the answer never names a repository the caller could not
+      // otherwise learn exists.
+      const muted = new Set(
+        await this.options.store.listMutedChannels(principal.user.id),
+      );
+      const inProject =
+        await this.options.store.listProjectRepositories(projectId);
+      const repositoryIds = inProject
+        .filter(
+          (entry) =>
+            muted.has(entry.id) &&
+            (repositories === undefined || repositories.has(entry.id)),
+        )
+        .map((entry) => entry.id);
+      this.sendJson(response, 200, { repositoryIds });
+      return;
+    }
+
+    // Silencing one room, for the person asking and nobody else. `view` is
+    // the right level: anybody who can read the channel can decide they would
+    // rather not be interrupted by it, and the write touches only their own
+    // preference.
+    const channelMuteMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/mute$`,
+        "u",
+      ),
+    );
+    if (channelMuteMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = ""] = channelMuteMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const body = objectBody(await this.readJson(request));
+      const { muted } = body;
+      if (typeof muted !== "boolean") {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "muted must be true or false",
+        );
+      }
+      await this.options.store.setChannelMuted(
+        repositoryId,
+        principal.user.id,
+        muted,
+      );
+      this.sendJson(response, 200, { muted });
       return;
     }
 
@@ -12654,6 +13104,20 @@ export class ApiGateway {
         : threadDetail === undefined
           ? channelMemo
           : `${channelMemo}\n\n${threadDetail}`;
+    // Keep presentation input separate from the execution objective. The
+    // latter gains role text, attachment paths and coordinator directives;
+    // feeding those to a title model is how an internal instruction becomes
+    // the name people see in the thread library.
+    const visibleObjective =
+      (input.objective ?? withoutMentions(content)) || content;
+    // Only a new thread needs a name. A continuation keeps the subject its
+    // participants already chose, and `/plan` gets its title from the deeper
+    // repository-aware plan below. Started before task submission so local
+    // generation overlaps the durable writes without standing in their way.
+    const titlePromise =
+      continuing === undefined && input.planOnly !== true
+        ? summariseThreadTitle(visibleObjective, this.threadTitleSummariser)
+        : undefined;
     // A new task hangs directly off the request that caused it. If an internal
     // caller ever has no posted request, persist the request itself as the
     // root instead of manufacturing an agent acknowledgement.
@@ -12739,9 +13203,7 @@ export class ApiGateway {
         objective: withRoleContext(
           candidate.role,
           [
-            await this.describeAttachments(
-              (input.objective ?? withoutMentions(content)) || content,
-            ),
+            await this.describeAttachments(visibleObjective),
             ANSWER_NOT_STATUS_DIRECTIVE,
             ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
             ...(input.forceQuestion === true ? [FORCE_QUESTION_MARKER] : []),
@@ -12812,18 +13274,30 @@ export class ApiGateway {
           occurredAt: new Date().toISOString(),
         });
       }
-      // Inside the thread, not beside it: the channel already says who took
-      // this, and the detail belongs where somebody following the work will
-      // look for it.
-      // The thread gets a name and the agent's own opening intent, both
-      // from one call so the wait is paid once. A task id says nothing to the
-      // person who asked; "Task: architecture for chess" does.
       // Which work this thread is the story of. Recorded rather than only
       // remembered, so the file summary hanging off it stays attributable
       // after the process that watched the run has gone.
       await this.options.store
         .setChannelMessageTask(repositoryId, threadRootId, task.id)
         .catch(() => undefined);
+      // A title is presentation, not part of execution. Persist it as the
+      // existing `Task:` reply as soon as the local model (or its fallback)
+      // answers, independently of provider opening thoughts and independently
+      // of whether a compact task ever grows a narrated transcript.
+      if (titlePromise !== undefined) {
+        void titlePromise
+          .then(async (title) => {
+            await this.appendChannelThreadReply({
+              projectId,
+              repositoryId,
+              messageId: threadRootId,
+              authorId: `${candidate.userId}:${candidate.provider}`,
+              content: `Task: ${title}`,
+              kind: "progress",
+            });
+          })
+          .catch(() => undefined);
+      }
       // Confirm the handoff in the task's thread as soon as the task exists.
       // This is deliberately a fixed sentence rather than another provider
       // call: the acknowledgement is useful only when it arrives immediately,
@@ -12860,20 +13334,17 @@ export class ApiGateway {
       // picked up. The opening is a caption on the run, so the run comes
       // first and the caption catches up.
       //
-      // `planOnly` skips the caption entirely, and is the one path that
-      // waits. Nothing runs there until a person says so, so there is no work
-      // for a caption to catch up with — and what that person needs is not
-      // three lines of first impressions from the cheap ceremonial model with
-      // no sight of the repository, it is {@link deepPlan}: the same agent,
-      // its own model, the code open in front of it, and a document at the
-      // end worth deciding from.
+      // `planOnly` skips these first impressions entirely, and is the one
+      // path that waits. Nothing runs there until a person says so, so there
+      // is no work for a caption to catch up with — and what that person needs
+      // is not three lines of first impressions from the cheap ceremonial
+      // model with no sight of the repository, it is {@link deepPlan}: the
+      // same agent, its own model, the code open in front of it, and a
+      // document at the end worth deciding from.
       const openingPromise =
         input.planOnly === true || task.afterTaskId !== undefined
-          ? Promise.resolve({
-              title: summariseObjective(task.objective),
-              thoughts: [],
-            })
-          : this.planOpening(candidate, task.objective);
+          ? Promise.resolve([] as string[])
+          : this.planOpening(candidate, visibleObjective);
       if (input.planOnly === true) {
         // Planned, and stopped there.
         //
@@ -13000,12 +13471,10 @@ export class ApiGateway {
         // From zero: the task is new, so nothing already in the log carries
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
-        // Nothing held yet. The title and the agent's opening intent are a
-        // caption on a run that has already started, and waiting for them here
-        // put a two-minute model call in front of the person who asked. They
-        // are pushed in below when they land; if the run says something
-        // substantive first, they simply arrive with the next line rather than
-        // holding one up.
+        // Nothing held yet. The agent's opening intent is a caption on a run
+        // that has already started, and waiting for it here put a two-minute
+        // provider call in front of the person who asked. The locally written
+        // title is persisted separately and never waits for this narration.
         pending: [],
         // Held with the narration for the reason above: posting it now would
         // open a thread this task may never deserve.
@@ -13021,12 +13490,12 @@ export class ApiGateway {
       // has already done its job by then, so replace that same reply with the
       // agent's actual intent rather than leaving a generic promise above a
       // duplicate progress paragraph. If no usable intent arrives, the fixed
-      // line remains and the thoughts can still accompany the eventual task
-      // title when narration opens.
+      // line remains and the thoughts can still accompany narration when it
+      // opens. Thread naming is deliberately absent from this provider path.
       void openingPromise
-        .then(async (opening) => {
+        .then(async (thoughts) => {
           let contextualized = false;
-          const intent = opening.thoughts.join("\n").trim();
+          const intent = thoughts.join("\n").trim();
           if (acknowledgement !== undefined && intent.length > 0) {
             contextualized = await this.updateChannelThreadReplyContent({
               projectId,
@@ -13039,10 +13508,7 @@ export class ApiGateway {
               .catch(() => false);
           }
           const watched = this.watchedChannelTasks.get(task.id);
-          watched?.pending.unshift(
-            `Task: ${opening.title}`,
-            ...(contextualized ? [] : opening.thoughts),
-          );
+          watched?.pending.unshift(...(contextualized ? [] : thoughts));
         })
         .catch(() => undefined);
     } catch (error) {
@@ -13189,25 +13655,22 @@ export class ApiGateway {
   }
 
   /**
-   * The thread's name and the agent's opening intent.
+   * The agent's opening intent.
    *
-   * One call for both, because each costs the same wait and the person is
-   * watching an empty thread until it lands. The intent is the agent's own —
-   * what it will inspect, change, and verify — rather than a description of
-   * the pipeline, which is what the audit narration afterwards already
-   * provides. Falls back to the request itself as a title and no intent,
-   * which is worse but never blank.
+   * The thread name is written independently by the local model. This paid
+   * provider call is only the agent's own account of what it will inspect,
+   * change, and verify, rather than a description of the pipeline that the
+   * audit narration afterwards already provides.
    */
   private async planOpening(
     candidate: ChannelMentionCandidate,
     objective: string,
-  ): Promise<{ title: string; thoughts: string[] }> {
+  ): Promise<string[]> {
     const answer = await this.askAgent(
       candidate,
       "You have just been asked to do the following in a software project.\n" +
-        "Reply with a short title on the first line — under six words, no " +
-        "punctuation at the end — then one or two concise first-person lines " +
-        "that tell the person what you are going to inspect, change, and " +
+        "Reply with one or two concise first-person lines that tell the " +
+        "person what you are going to inspect, change, and " +
         "verify. Be specific to their request, use future-tense action rather " +
         "than restating the request, and use no bullets or numbering.\n\nRequest: " +
         objective,
@@ -13215,33 +13678,27 @@ export class ApiGateway {
       true,
     );
     if (answer.text === undefined) {
-      return { title: summariseObjective(objective), thoughts: [] };
+      return [];
     }
-    const lines = answer.text
+    return answer.text
       .split("\n")
       .map((line) => line.replace(/^[-*\d.\s]+/u, "").trim())
-      .filter((line) => line.length > 0);
-    const [title, ...thoughts] = lines;
-    return {
-      title:
-        title === undefined || title.length > 80
-          ? summariseObjective(objective)
-          : title,
+      .filter((line) => line.length > 0)
       // Bounded: a model that ignores "one or two lines" must not turn the
       // thread into an essay before the work has even started.
-      thoughts: thoughts.slice(0, 4).map((line) => line.slice(0, 300)),
-    };
+      .slice(0, 4)
+      .map((line) => line.slice(0, 300));
   }
 
   /**
    * The plan `/plan` was asked for: thought about properly, and written down.
    *
-   * `planOpening` is a caption — a title and three lines of first impressions,
-   * run on the cheap ceremonial model at low effort with no sight of the
-   * repository. It is the right shape for a run that is already underway and
-   * the wrong one for the only gate in this system that comes *before* the
-   * work is paid for: somebody deciding whether to spend an agent on this
-   * deserves more than a restatement of their own request.
+   * `planOpening` is a few lines of first impressions, run on the cheap
+   * ceremonial model at low effort with no sight of the repository. It is the
+   * right shape for a run that is already underway and the wrong one for the
+   * only gate in this system that comes *before* the work is paid for:
+   * somebody deciding whether to spend an agent on this deserves more than a
+   * restatement of their own request.
    *
    * So this call is the opposite of ceremonial in both senses that matter.
    * `ceremonial` is left off, so it runs on the account's own model at the

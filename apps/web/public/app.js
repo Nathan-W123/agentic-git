@@ -68,6 +68,9 @@ import {
   ensureProviderUsage,
   ensureRepositoryGrants,
   markChannelRead,
+  isChannelMuted,
+  loadChannelMutes,
+  setChannelMuted,
   refreshChannelMessages,
   refreshProviderUsage,
   takePromptedThread,
@@ -127,6 +130,7 @@ import {
   hslToHex,
   agentLabelOf,
   avatar,
+  brandMark,
   brandWordmark,
   esc,
   icon,
@@ -194,7 +198,10 @@ import {
   createInvitation,
   invitationLink,
   keptRightPanels,
+  createApiToken,
+  loadApiTokens,
   loadInvitations,
+  revokeApiToken,
   loadPendingQuestions,
   newestRightPanel,
   pendingQuestionFor,
@@ -610,7 +617,7 @@ function renderAuth() {
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
-        ${brandWordmark(120)}
+        ${bootstrap || register ? brandWordmark(120) : brandMark(54)}
         <div>
           <h1>${
             bootstrap
@@ -619,13 +626,13 @@ function renderAuth() {
                 ? "Create your account"
                 : "Sign in to Kumi"
           }</h1>
-          <p>${
+          ${
             bootstrap
-              ? "Create the first owner for this control plane."
+              ? "<p>Create the first owner for this control plane.</p>"
               : register
-                ? "You get your own team and project to start building in."
-                : "One live codebase, coordinated across your team and their agents."
-          }</p>
+                ? "<p>You get your own team and project to start building in.</p>"
+                : ""
+          }
         </div>
       </div>
 
@@ -1452,6 +1459,82 @@ function preferencesCard() {
   </section>`;
 }
 
+/**
+ * Tokens for signing in a client that has no browser to hold a cookie.
+ *
+ * The endpoints have existed since headless workers did; nothing in the UI
+ * ever reached them, so the only way to get one was to call the API by hand.
+ * That is fine for a CLI and useless for a desktop app, where the person
+ * signing in is the one who needs the token.
+ */
+function apiTokensCard() {
+  // Revoked tokens stay in the list the server returns, as the record that
+  // they existed. They are not something anybody can act on, and offering
+  // "Revoke" beside one already revoked reads as a button that does nothing —
+  // the same reason the invitations card above shows only what is pending.
+  const tokens = (state.apiTokens ?? []).filter(
+    (token) => token.active !== false,
+  );
+  const minted = state.newApiToken;
+  return `<section class="card">
+    <div class="panel-head">
+      <div><h3>App tokens</h3>
+      <p>Sign in a Kumi app on your machine. It reads the room and starts
+        work, the same as this browser does.</p></div>
+    </div>
+    ${
+      minted === undefined
+        ? ""
+        : `<div class="set-row"><span class="sr-body">
+            <div class="sr-title">Copy this now</div>
+            <div class="sr-sub">It is shown once. Kumi keeps only a
+              fingerprint, so nobody — including us — can read it back.</div>
+            <code class="token-secret">${esc(minted)}</code>
+          </span><span class="sr-ctl">
+            <button class="btn btn-sm" data-act="token-copy">Copy</button>
+            <button class="btn btn-sm" data-act="token-dismiss">Done</button>
+          </span></div>`
+    }
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">New token</div>
+        <div class="sr-sub">Name it after the machine you will use it on, so
+          revoking the right one later is obvious.</div>
+      </span>
+      <span class="sr-ctl">
+        <input class="input input-sm" data-token-name placeholder="My laptop"
+          aria-label="Token name">
+        <button class="btn btn-sm btn-primary" data-act="token-create">Create</button>
+      </span>
+    </div>
+    ${
+      tokens.length === 0
+        ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
+            No tokens yet.</div></span></div>`
+        : tokens
+            .map(
+              (token) => `<div class="set-row">
+                <span class="sr-body">
+                  <div class="sr-title">${esc(token.name ?? "Unnamed")}</div>
+                  <div class="sr-sub">created ${esc(
+                    relativeTime(token.createdAt),
+                  )}${
+                    token.lastUsedAt === undefined
+                      ? " · never used"
+                      : ` · last used ${esc(relativeTime(token.lastUsedAt))}`
+                  }</div>
+                </span>
+                <span class="sr-ctl">
+                  <button class="btn btn-sm" data-act="token-revoke"
+                    data-value="${esc(token.id)}">Revoke</button>
+                </span>
+              </div>`,
+            )
+            .join("")
+    }
+  </section>`;
+}
+
 function settingsSectionMarkup(section) {
   switch (section) {
     case "agents":
@@ -1469,7 +1552,7 @@ function settingsSectionMarkup(section) {
     case "billing":
       return billingCard();
     case "advanced":
-      return `${repositoryCard()}${admissionsCard()}`;
+      return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
     default:
       return `${accountCard()}${appearanceCard()}${preferencesCard()}`;
   }
@@ -1506,6 +1589,7 @@ function settingsDialog() {
     .settings-sidebar-account{display:flex;align-items:center;gap:9px;margin-top:auto;padding:12px 9px 2px;border-top:1px solid var(--border-soft);min-width:0}.settings-sidebar-account-copy{min-width:0}.settings-sidebar-account-name,.settings-sidebar-account-email{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.settings-sidebar-account-name{font-size:12.5px;font-weight:550}.settings-sidebar-account-email{font-size:11px;color:var(--text-4);margin-top:1px}
     .settings-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg-card)}
     .settings-main-head{min-height:86px;display:flex;align-items:flex-start;gap:18px;padding:23px 26px 18px;border-bottom:1px solid var(--border-soft)}.settings-main-title{min-width:0}.settings-main-title h2{font-size:20px;line-height:1.25;letter-spacing:-.025em}.settings-main-title p{margin-top:5px;color:var(--text-3);font-size:12.5px}.settings-close{margin-left:auto;flex:none}
+    .token-secret{display:block;margin-top:8px;padding:8px 10px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:8px;font-size:12px;word-break:break-all;user-select:all}
     .settings-content.scroll{min-height:0;padding:22px 26px 30px}.settings-content-inner{display:grid;gap:14px;max-width:680px;margin:0 auto}.settings-content .card{box-shadow:none;border-color:var(--border-soft);background:var(--bg-card-2)}.settings-content .panel-head{padding:16px 17px 10px}.settings-content .panel-head h3{font-size:14px}.settings-content .panel-head p{margin-top:3px}.settings-account-avatar{flex:none}.settings-choice{display:inline-flex;gap:3px;padding:3px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:9px}.settings-choice button{padding:5px 10px;border-radius:6px;color:var(--text-3);font-size:12px}.settings-choice button:hover{color:var(--text)}.settings-choice button.active{background:var(--bg-active);color:var(--text);box-shadow:0 1px 2px rgb(0 0 0 / 18%)}
     @media(max-width:700px){.settings-layer{padding:0}.settings-dialog{width:100vw;height:100dvh;min-height:0;border:0;border-radius:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.settings-sidebar{padding:calc(10px + var(--safe-top)) 12px 10px;border-right:0;border-bottom:1px solid var(--border-soft)}.settings-brand{padding:0 4px 10px}.settings-nav{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}.settings-nav::-webkit-scrollbar{display:none}.settings-nav-item{width:auto;min-height:34px;flex:none;padding:7px 10px}.settings-sidebar-account{display:none}.settings-main-head{min-height:78px;padding:16px 18px 14px}.settings-main-title p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.settings-content.scroll{padding:16px 14px calc(24px + var(--safe-bottom))}.settings-content .set-row{align-items:flex-start;flex-wrap:wrap}.settings-content .set-row .sr-ctl{margin-left:auto}.settings-choice button{padding:6px 9px}}
   </style>
@@ -2620,6 +2704,34 @@ async function renameRepositoryAction(repositoryId) {
     toast(name === "" ? `Renamed back to ${repositoryId}` : `Renamed to ${name}`, "ok");
     render();
   } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Muting a channel, or letting it speak again.
+ *
+ * Personal and reversible, so it asks for no confirmation: the whole of what
+ * it does is stop this account's badges, notification rows and arrival sounds
+ * for one room, and clicking it again undoes that. Nothing about anybody
+ * else's view of the same conversation changes, which is why it sits beside
+ * rename, sync and delete rather than among them — the other three are edits
+ * to the repository, and this one is not.
+ */
+async function muteChannelAction(repositoryId) {
+  const muting = !isChannelMuted(repositoryId);
+  try {
+    await setChannelMuted(repositoryId, muting);
+    refreshChannelInfoPopover();
+    toast(
+      muting
+        ? `Muted #${repositoryLabel(repositoryId)}`
+        : `Unmuted #${repositoryLabel(repositoryId)}`,
+      "ok",
+    );
+    render();
+  } catch (error) {
+    render();
     toast(error.message, "error");
   }
 }
@@ -5926,6 +6038,14 @@ function openSettings(section = "general") {
     : "general";
   state.settingsRenamingId = undefined;
   state.openWheel = undefined;
+  // A secret from a previous visit is not still on screen when the dialog is
+  // reopened: it was shown to be copied once, and it has been.
+  state.newApiToken = undefined;
+  // Fetched on open rather than at boot: nobody who never opens settings
+  // needs their token list, and the card renders empty until it arrives.
+  void loadApiTokens()
+    .then(() => render())
+    .catch(() => undefined);
   closePopover();
   render();
   window.queueMicrotask(() =>
@@ -6451,6 +6571,12 @@ document.addEventListener("click", (event) => {
     case "channel-sync":
       closePopover();
       void syncRepositoryFromGitHub(value, render);
+      return;
+    // Left open deliberately, unlike the two above: muting is the one control
+    // in this popover somebody might want to try and immediately undo, and the
+    // popover redraws in place to show which way it now reads.
+    case "channel-mute":
+      void muteChannelAction(value);
       return;
     /* Chats */
     case "channel-new":
@@ -7171,6 +7297,10 @@ document.addEventListener("click", (event) => {
       // "talk to my agent" and lands on the chat tab.
       state.activeAgentPanel = value;
       state.agentPanelTab = "spec";
+      // A search typed against one agent's work says nothing about the next
+      // one's, so the box and the filter strip start empty for each agent.
+      state.agentHistoryFilter = "all";
+      state.agentHistoryQuery = "";
       moveRightPanel("agent", "right");
       setChanDrawer(false);
       render();
@@ -7208,6 +7338,12 @@ document.addEventListener("click", (event) => {
           render();
         })();
       }
+      return;
+    // Which slice of the history is listed. Kept in state so a background
+    // poll redrawing the panel cannot quietly widen it back to everything.
+    case "agent-history-filter":
+      state.agentHistoryFilter = value;
+      render();
       return;
     case "agent-panel-tab":
       state.agentPanelTab = value;
@@ -7825,6 +7961,17 @@ document.addEventListener("click", (event) => {
               },
             ]
           : []),
+        // Quietening the room. Offered to everybody who can see the channel,
+        // because it changes nothing but this account's own interruptions —
+        // no role gates deciding you would rather not be pinged.
+        {
+          act: "channel-mute",
+          value,
+          label: isChannelMuted(value)
+            ? `Unmute #${repositoryLabel(value)}`
+            : `Mute #${repositoryLabel(value)}`,
+          iconName: isChannelMuted(value) ? "bell" : "bellOff",
+        },
         // Leaving is only offered to somebody who can actually leave. Access
         // that comes from an organization role reaches every repository the
         // organization owns, so there is no per-repository grant to give up —
@@ -8003,6 +8150,43 @@ document.addEventListener("click", (event) => {
         .catch((error) => toast(error.message, "error"));
       return;
     }
+    case "token-create": {
+      const field = document.querySelector("[data-token-name]");
+      const name = (field?.value ?? "").trim();
+      if (name === "") {
+        toast("Name the token after the machine it is for", "error");
+        return;
+      }
+      void createApiToken(name)
+        .then(() => {
+          if (field !== null) {
+            field.value = "";
+          }
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "token-copy":
+      // Best effort: a clipboard a browser will not hand over is not a reason
+      // to lose the secret, which is still on screen to select by hand.
+      void navigator.clipboard
+        ?.writeText(state.newApiToken ?? "")
+        .then(() => toast("Token copied", "ok"))
+        .catch(() => toast("Select the token and copy it", "error"));
+      return;
+    case "token-dismiss":
+      state.newApiToken = undefined;
+      render();
+      return;
+    case "token-revoke":
+      void revokeApiToken(value)
+        .then(() => {
+          toast("Token revoked", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
     case "invite-revoke":
       void revokeInvitation(value)
         .then(() => {
@@ -8466,6 +8650,17 @@ document.addEventListener("input", (event) => {
     render();
     if (focused) {
       const next = $("[data-act='agent-search']");
+      next?.focus();
+      next?.setSelectionRange(next.value.length, next.value.length);
+    }
+    return;
+  }
+  if (act === "agent-history-search") {
+    state.agentHistoryQuery = node.value;
+    const focused = document.activeElement === node;
+    render();
+    if (focused) {
+      const next = $("[data-act='agent-history-search']");
       next?.focus();
       next?.setSelectionRange(next.value.length, next.value.length);
     }
@@ -9188,6 +9383,11 @@ async function boot() {
     // work should lead with the agent's account of what was implemented.
     void showSinceYouLeft();
   });
+  // Which rooms are quiet, from the server rather than only from this
+  // browser's mirror. Deliberately not part of the first paint: the mirror in
+  // `state.channelMuted` already answers every badge drawn above, and one more
+  // request in the cold-start wave would cost the wait it saves.
+  void loadChannelMutes().then(() => render());
   void loadProviders().then(() => render());
   void loadGitHub().then(() => {
     if (state.settingsOpen === true) {
@@ -9337,7 +9537,10 @@ async function boot() {
               (key) => !audibleBefore.has(key),
             );
           render();
-          if (received) {
+          // A muted room makes no sound. The message still arrived and the
+          // transcript still shows it; what the mute switches off is being
+          // interrupted about it.
+          if (received && !isChannelMuted(channelRepositoryId)) {
             chime("received");
           }
         });

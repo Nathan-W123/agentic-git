@@ -1145,7 +1145,25 @@ export const MIGRATIONS: readonly Migration[] = [
     statements: [`ALTER TABLE repositories ADD COLUMN display_name TEXT`],
   },
   {
-    // The reviewer role is retired. It existed to let somebody approve a
+    // Which channels one person has asked to be quiet. A row per (repository,
+    // person) rather than a column on the repository: muting is a personal
+    // preference, and one member silencing a room must not silence it for
+    // everybody else in it. Presence of the row is the whole fact — unmuting
+    // deletes it rather than storing a false, so the table holds only the
+    // rooms somebody actually chose to quieten.
+    version: 42,
+    name: "channel-mutes",
+    statements: [
+      `CREATE TABLE channel_mutes (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        muted_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+    ],
+  },
+  {
+// The reviewer role is retired. It existed to let somebody approve a
     // change without being able to manage the project, and that is now what
     // `admin` is for.
     //
@@ -1161,7 +1179,7 @@ export const MIGRATIONS: readonly Migration[] = [
     // Approvals already raised against the old role are rewritten too. A held
     // approval whose `required_role` names a role nothing can hold any more is
     // a gate with nobody behind it, and the run waiting on it would never move.
-    version: 42,
+    version: 43,
     name: "retire-reviewer-role",
     statements: [
       `UPDATE organization_memberships SET role = 'viewer' WHERE role = 'reviewer'`,
@@ -1187,7 +1205,7 @@ export const MIGRATIONS: readonly Migration[] = [
     // flag so that accepting one settles the question at the moment the
     // membership is created, rather than depending on who happens to be
     // looking later.
-    version: 43,
+    version: 44,
     name: "subscriptions-and-comped-seats",
     statements: [
       `CREATE TABLE subscriptions (
@@ -1222,7 +1240,7 @@ export const MIGRATIONS: readonly Migration[] = [
     // administrator's synthesised membership uses to keep itself off an
     // invoice, and still the right shape if an organization-wide comp is ever
     // wanted. It is simply no longer what an invitation sets.
-    version: 44,
+    version: 45,
     name: "comped-repository-grants",
     statements: [
       `ALTER TABLE repository_grants

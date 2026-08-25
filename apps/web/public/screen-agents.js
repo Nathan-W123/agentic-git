@@ -24,6 +24,7 @@ import {
   myAgents,
   persist,
   providerSignInStatus,
+  repositoryLabel,
   startGitHubSignIn,
   startProviderSignIn,
   state,
@@ -100,7 +101,7 @@ function rowSubtitle(agent) {
     taskLine(agent),
     task?.repositoryId === undefined || task.repositoryId === ""
       ? undefined
-      : task.repositoryId,
+      : repositoryLabel(task.repositoryId),
   ]
     .filter((part) => part !== undefined && part !== "")
     .join(" · ");
@@ -341,7 +342,7 @@ function agentSpecs(agent) {
       "Repository",
       task?.repositoryId === undefined || task.repositoryId === ""
         ? "—"
-        : task.repositoryId,
+        : repositoryLabel(task.repositoryId),
     )}
     ${spec("Files", files, { tone: patches.length > 0 ? "green" : "" })}
   </div>`;
@@ -397,7 +398,7 @@ function tabBody(tab, agent) {
           "Repository",
           task.repositoryId === undefined || task.repositoryId === ""
             ? "—"
-            : task.repositoryId,
+            : repositoryLabel(task.repositoryId),
         )}
         ${spec("Status", String(task.status).replace(/_/gu, " "))}
         ${spec(

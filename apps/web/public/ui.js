@@ -106,6 +106,12 @@ export const ICONS = {
   bell: S(
     '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/>',
   ),
+  // The same bell with a stroke through it, deliberately: a muted room is the
+  // notification mark negated, and inventing a second unrelated picture for
+  // it would make the pair harder to read than the one crossed-out one.
+  bellOff: S(
+    '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/><path d="M4.2 4.2 19.8 19.8"/>',
+  ),
   gear: S(
     '<circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   ),
@@ -484,15 +490,11 @@ if (typeof document !== "undefined") {
 }
 
 /**
- * The letters of the full KUMI wordmark used on the auth shell.
+ * The full Kumi wordmark used on the auth shell.
  *
  * The letters are stroked polylines rather than filled outlines, because that
  * is what they are — one constant weight, flat cuts, no curves anywhere. The
- * K's arms run past the vertex into the stem so their ends are hidden under
- * it.
- *
- * `currentColor` throughout: the wordmark takes the colour of the text beside
- * it, so it is right on dark and light without a second definition.
+ * letters use `currentColor`, so they remain right on dark and light.
  */
 const BRAND_LETTERS = `<path d="M8.3 8V40"/>
     <path d="M42 11 13.5 24 42 37"/>
@@ -501,6 +503,26 @@ const BRAND_LETTERS = `<path d="M8.3 8V40"/>
     <path d="M143.7 8V40"/>
     <path d="M102.3 10.5 123 30l20.7-19.5"/>
     <path d="M158.3 8V40"/>`;
+
+/**
+ * The supplied standalone mark, cropped from its wide source artwork.
+ *
+ * The source has an opaque black field. Using its luminance as a mask removes
+ * that field, then `currentColor` draws the mark in the theme's own text colour
+ * so it remains legible on both dark and light backgrounds.
+ */
+export function brandMark(size = 34) {
+  return `<svg class="brand-mark" width="${size}" height="${size}"
+    viewBox="0 0 48 48" overflow="hidden" aria-hidden="true">
+    <mask id="brand-mark-mask" maskUnits="userSpaceOnUse"
+      x="0" y="0" width="48" height="48" style="mask-type:luminance">
+      <image href="/kumi-logo.png" x="-33" y="-7" width="114" height="62"
+        preserveAspectRatio="xMidYMid meet"/>
+    </mask>
+    <rect width="48" height="48" fill="currentColor"
+      mask="url(#brand-mark-mask)"/>
+  </svg>`;
+}
 
 /**
  * The whole word, for the surfaces with room for it — the sign-in card and

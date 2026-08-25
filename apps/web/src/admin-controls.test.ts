@@ -136,6 +136,35 @@ test("a channel offers renaming and deleting its repository", async () => {
   assert.match(chats, /repositoryLabel\(repositoryId \?\? ""\)/u);
 });
 
+test("the agent surfaces name a renamed channel by its new name", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const chats = await publicFile("screen-chats.js");
+
+  // My Agents reads the channel through the same helper the channel header
+  // does, rather than printing the raw id beside every agent and in the
+  // Repository field of its detail pane.
+  assert.match(agents, /^ {2}repositoryLabel,$/mu);
+  const subtitle = slice(agents, "function rowSubtitle(agent)", "/**");
+  assert.match(subtitle, /repositoryLabel\(task\.repositoryId\)/u);
+  assert.doesNotMatch(subtitle, /: task\.repositoryId,/u);
+  const specs = slice(agents, "function agentSpecs(agent)", "function detailPane");
+  assert.match(specs, /"Repository",[\s\S]*?repositoryLabel\(task\.repositoryId\)/u);
+
+  // The channel agent panel: the pill beside the status, both halves of the
+  // Activity line, and every pill in the Channels list.
+  const spec = slice(chats, "function agentSpec(agent, repositoryId)", "function agentPanel()");
+  assert.match(spec, /specPill\(`#\$\{repositoryLabel\(repositoryId\)\}`/u);
+  assert.match(spec, /Nothing running in #\$\{esc\(repositoryLabel\(repositoryId\)\)\}/u);
+  assert.match(spec, /repositoryLabel\(taskRepositoryId\)/u);
+  assert.match(spec, /specPill\(`#\$\{repositoryLabel\(repository\.id\)\}`/u);
+
+  // The catch-up digest read a `name` field no repository carries, so it
+  // always fell back to the id however the channel had been renamed.
+  const digest = slice(chats, "function catchUpPanel()", "function chanTreeNode");
+  assert.match(digest, /repositoryLabel\(catchUp\.repositoryId\)/u);
+  assert.doesNotMatch(digest, /repository\?\.name/u);
+});
+
 test("the channel menu offers delete repository only to owners and co-owners", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");

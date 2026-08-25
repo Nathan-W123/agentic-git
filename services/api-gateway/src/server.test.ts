@@ -25,8 +25,10 @@ import {
   elidedHistoryNotice,
   estimateTokens,
   explainAnswerFailure,
+  isLoopbackCallback,
   looksLikeTaskRequest,
   narrateTaskEvent,
+  normaliseThreadTitle,
   parseAnswerTaskDirective,
   parseAutoClaimVerdict,
   readsAsEchoOfRequest,
@@ -36,6 +38,7 @@ import {
   summariseAuditData,
   summariseChannelThread,
   summariseObjective,
+  summariseThreadTitle,
   truncateToTokens,
   type ApiOperations,
   type ChannelMemoThread,
@@ -388,6 +391,8 @@ async function startRuntime(
      * from loading one to prove something unrelated.
      */
     catchUpSummariser?: CatchUpSummariser;
+    /** Writes thread names without loading the real local model in tests. */
+    threadTitleSummariser?: CatchUpSummariser;
     /** The direct push result returned to the channel. */
     pushOutcome?: {
       outcome: "done" | "refused";
@@ -921,6 +926,8 @@ async function startRuntime(
       available: async () => true,
     },
     catchUpSummariser: options.catchUpSummariser ?? (async () => undefined),
+    threadTitleSummariser:
+      options.threadTitleSummariser ?? (async () => undefined),
     mailer: async (message) => {
       mail.push(message);
     },
@@ -1588,6 +1595,27 @@ test("open WebSockets are closed when their user is disabled", async (t) => {
 
   assert.equal(closeCode, 1008);
 });
+
+/**
+ * A POST with no credential of any kind, standing in for an app that does not
+ * have one yet.
+ */
+async function bareRequest(
+  origin: string,
+  path: string,
+  body: unknown,
+): Promise<{ status: number; data: any }> {
+  const response = await fetch(`${origin}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    data: text.length === 0 ? undefined : JSON.parse(text),
+  };
+}
 
 /** A bare fetch with no cookies, standing in for a CLI, worker, or agent. */
 async function bearer(
@@ -2423,6 +2451,100 @@ test("a catch-up carries only what its reader may see", async (t) => {
     { method: "POST" },
   );
   assert.equal(deniedSeen.status, 403);
+});
+
+test("muting a channel silences it for one person and nobody else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const noisy = await invitableRepository(owner, "mute-noisy");
+  const quiet = await invitableRepository(owner, "mute-quiet");
+  const mutesPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/channel/mutes`;
+  const mutePath = (repositoryId: string) =>
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/mute`;
+
+  const before = await owner.request(mutesPath);
+  assert.equal(before.status, 200);
+  assert.deepEqual(before.data.repositoryIds, []);
+
+  const muted = await owner.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: true },
+  });
+  assert.equal(muted.status, 200);
+  assert.equal(muted.data.muted, true);
+  const after = await owner.request(mutesPath);
+  assert.deepEqual(after.data.repositoryIds, [noisy]);
+
+  // Somebody else in the same rooms hears them exactly as before: a mute is a
+  // preference, not a property of the channel.
+  const colleague = await runtime.store.createUser({
+    email: "mute-colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: noisy,
+    userId: colleague.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    comped: false,
+    createdAt: new Date().toISOString(),
+  });
+  const colleagueClient = new TestClient(runtime.origin);
+  await colleagueClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: colleague.email, password: PASSWORD },
+  });
+  const theirs = await colleagueClient.request(mutesPath);
+  assert.equal(theirs.status, 200);
+  assert.deepEqual(theirs.data.repositoryIds, []);
+
+  // A grant holder is told about their own mutes on the repositories they can
+  // see, and never about one they cannot.
+  await colleagueClient.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: true },
+  });
+  // The same answer a repository that does not exist gets: somebody who
+  // reaches this project through one grant is not told what else is in it.
+  const refused = await colleagueClient.request(mutePath(quiet), {
+    method: "POST",
+    body: { muted: true },
+  });
+  assert.equal(refused.status, 404);
+  const narrowed = await colleagueClient.request(mutesPath);
+  assert.deepEqual(narrowed.data.repositoryIds, [noisy]);
+
+  // Unmuting is the same call the other way round, and the owner's own list
+  // is untouched by anything the colleague did.
+  const unmuted = await owner.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: false },
+  });
+  assert.equal(unmuted.status, 200);
+  assert.equal(unmuted.data.muted, false);
+  assert.deepEqual((await owner.request(mutesPath)).data.repositoryIds, []);
+  assert.deepEqual(
+    (await colleagueClient.request(mutesPath)).data.repositoryIds,
+    [noisy],
+  );
+
+  // The flag has to be a boolean: an absent or misspelled one would otherwise
+  // read as "unmute" and quietly undo somebody's setting.
+  const malformed = await owner.request(mutePath(noisy), {
+    method: "POST",
+    body: { muted: "yes" },
+  });
+  assert.equal(malformed.status, 400);
+  const missing = await owner.request(mutePath("repo_does_not_exist"), {
+    method: "POST",
+    body: { muted: true },
+  });
+  assert.equal(missing.status, 404);
+
+  const stranger = new TestClient(runtime.origin);
+  assert.equal((await stranger.request(mutesPath)).status, 401);
 });
 
 test("project policy is validated, stored, and clearable through the API", async (t) => {
@@ -4267,8 +4389,14 @@ test("an org-wide agent accepts a stranger's @mention and dispatches under the o
   );
 });
 
-test("dispatch immediately acknowledges, then contextualizes the same reply", async (t) => {
-  const runtime = await startRuntime(t);
+test("dispatch locally names the thread, then contextualizes the same reply", async (t) => {
+  const titlePrompts: string[] = [];
+  const runtime = await startRuntime(t, {
+    threadTitleSummariser: async (prompt) => {
+      titlePrompts.push(prompt);
+      return "Token refresh reliability";
+    },
+  });
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const repositoryId = await invitableRepository(owner, "ack-own-voice");
@@ -4278,15 +4406,23 @@ test("dispatch immediately acknowledges, then contextualizes the same reply", as
     { provider: "anthropic", visibility: "org" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
+  const assigned = await owner.request(`${base}/agents/anthropic`, {
+    method: "POST",
+    body: { role: "Token Reliability Engineer" },
+  });
+  assert.equal(assigned.status, 200, JSON.stringify(assigned.data));
   runtime.chatAnswer.text =
-    "Repair token refresh\n" +
     "I'll inspect the refresh flow, update the retry behavior, and verify it with focused tests.";
   // The acknowledgement must not wait for this contextual opening to finish.
   runtime.chatAnswer.delayMs = 500;
 
+  const attachmentId = `${"a".repeat(32)}.png`;
+  const visibleRequest =
+    `please fix the token refresh ` +
+    `![trace](attachment:${attachmentId})`;
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
-    body: { content: "@Claude (Owner) please fix the token refresh" },
+    body: { content: `@Claude (Owner) ${visibleRequest}` },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
@@ -4305,6 +4441,25 @@ test("dispatch immediately acknowledges, then contextualizes the same reply", as
       event.data["messageId"] === posted.data.message.id,
   ).length;
   assert.equal(runtime.submittedTasks.length, 1);
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return (listed.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some(
+        (reply: any) => reply.content === "Task: Token refresh reliability",
+      ),
+    );
+  }, "the local title was not persisted in the task thread");
+  assert.equal(titlePrompts.length, 1);
+  assert.ok((titlePrompts[0] ?? "").endsWith(`Request:\n${visibleRequest}`));
+  assert.doesNotMatch(
+    titlePrompts[0] ?? "",
+    /@Claude|Token Reliability Engineer|Your final message|open this file|\/var\/data/u,
+  );
+  const executionObjective = runtime.submittedTasks[0]?.objective ?? "";
+  assert.match(executionObjective, /Token Reliability Engineer/u);
+  assert.match(executionObjective, /Your final message/u);
+  assert.match(executionObjective, /open this file/u);
+  assert.match(executionObjective, /\/var\/data/u);
   assert.ok(
     runtime.chatPrompts.every(
       (entry) => !/only the acknowledgement|picking it up/iu.test(entry.prompt),
@@ -4333,8 +4488,10 @@ test("dispatch immediately acknowledges, then contextualizes the same reply", as
   assert.equal(auditCountAfterContext, auditCountBeforeContext + 1);
 });
 
-test("dispatch keeps the generic acknowledgement when opening context fails", async (t) => {
-  const runtime = await startRuntime(t);
+test("provider opening failure does not prevent the local thread title", async (t) => {
+  const runtime = await startRuntime(t, {
+    threadTitleSummariser: async () => "Token refresh repair",
+  });
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const repositoryId = await invitableRepository(owner, "ack-context-failure");
@@ -4354,7 +4511,7 @@ test("dispatch keeps the generic acknowledgement when opening context fails", as
   await waitFor(
     async () =>
       runtime.chatPrompts.some((entry) =>
-        entry.prompt.includes("Reply with a short title on the first line"),
+        entry.prompt.includes("Reply with one or two concise first-person lines"),
       ),
     "the contextual opening was not attempted",
   );
@@ -4367,6 +4524,14 @@ test("dispatch keeps the generic acknowledgement when opening context fails", as
     speech[0]?.content,
     "I've taken this task and I'm working on it.",
   );
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return (listed.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some(
+        (reply: any) => reply.content === "Task: Token refresh repair",
+      ),
+    );
+  }, "the local title disappeared with the failed provider opening");
 });
 
 test("work acknowledges inside the user request's thread", async (t) => {
@@ -5387,7 +5552,7 @@ test("a question answer that proposes a repository change starts one scoped task
   // The task-opening call is separate from the answer and should not repeat
   // the answer's private routing line.
   runtime.chatAnswer.text =
-    "Cap retry routes\nI will update the retry guard and verify its route tests.";
+    "I will update the retry guard and verify its route tests.";
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -5547,6 +5712,49 @@ test("an opening line summarises the request rather than repeating it", () => {
   assert.ok(long.length <= 91, long);
   assert.ok(long.endsWith("…"), long);
   assert.ok(!/\w…$/u.test(long.replace(/\s\S*…$/u, "")), long);
+});
+
+test("thread titles use one short clean line or a bounded fallback", () => {
+  assert.equal(
+    normaliseThreadTitle(
+      '"Title: Token refresh reliability."\nThis line is explanation.',
+      "fix token refresh",
+    ),
+    "Token refresh reliability",
+  );
+  assert.equal(
+    normaliseThreadTitle(
+      "This model response contains far too many words to be a thread title",
+      "repair token rotation and refresh retry handling across the application",
+    ),
+    "repair token rotation and refresh retry",
+  );
+  assert.equal(
+    normaliseThreadTitle("\n\n", "repair token refresh behavior"),
+    "repair token refresh behavior",
+  );
+  assert.equal(normaliseThreadTitle("Task:", ""), "Software task");
+});
+
+test("the local thread-title writer receives only the visible request", async () => {
+  let received = "";
+  const title = await summariseThreadTitle(
+    "please repair token refresh behavior",
+    async (prompt) => {
+      received = prompt;
+      return "- Refresh token reliability";
+    },
+  );
+  assert.equal(title, "Refresh token reliability");
+  assert.match(received, /Request:\nplease repair token refresh behavior$/u);
+
+  const fallback = await summariseThreadTitle(
+    "please repair token refresh behavior",
+    async () => {
+      throw new Error("local model unavailable");
+    },
+  );
+  assert.equal(fallback, "repair token refresh behavior");
 });
 
 /**
@@ -6870,8 +7078,9 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   assert.ok((plan[0]?.content ?? "").trim().length > 0);
   // And the thread still names itself, so every surface that reads a title
   // off the "Task:" line keeps working.
-  assert.ok(
-    (root?.replies ?? []).some((reply) => /^Task: /u.test(reply.content)),
+  assert.equal(
+    (root?.replies ?? []).filter((reply) => /^Task: /u.test(reply.content)).length,
+    1,
     JSON.stringify(root?.replies),
   );
   // The plan was thought about with the code open. `/plan` used to be
@@ -13301,11 +13510,21 @@ test("the task root and acknowledgement exist immediately", async (t) => {
   );
 });
 
-test("the work is queued without waiting for the thread's opening thoughts", async (t) => {
+test("the work is queued without waiting for opening thoughts or its local title", async (t) => {
   // The second half of the same complaint. `planOpening` is a model call
   // allowed two minutes, and the run used to start only after it returned —
   // so a thread could say it had picked something up while nothing ran.
-  const runtime = await startRuntime(t);
+  let releaseTitle!: (title: string) => void;
+  let titleStarted = false;
+  const pendingTitle = new Promise<string>((resolve) => {
+    releaseTitle = resolve;
+  });
+  const runtime = await startRuntime(t, {
+    threadTitleSummariser: async () => {
+      titleStarted = true;
+      return await pendingTitle;
+    },
+  });
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const ownerId = bootstrapped.user.id;
@@ -13332,6 +13551,24 @@ test("the work is queued without waiting for the thread's opening thoughts", asy
     Date.now() - startedAt < 1_000,
     "starting the work waited on a model call rather than on none",
   );
+  assert.equal(titleStarted, true);
+  const beforeTitle = await owner.request(`${base}/messages`);
+  assert.equal(
+    (beforeTitle.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some((reply: any) => /^Task: /u.test(reply.content)),
+    ),
+    false,
+  );
+
+  releaseTitle("Retry loop reliability");
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return (listed.data.messages as any[]).some((message) =>
+      (message.replies ?? []).some(
+        (reply: any) => reply.content === "Task: Retry loop reliability",
+      ),
+    );
+  }, "the completed local title was not attached asynchronously");
 });
 
 test("an image in a request reaches the agent as a file it can open", async (t) => {
@@ -13478,8 +13715,34 @@ test("asking about work is not asking for it", () => {
     "did you see the bug? fix it",
     "which key changed, and can you revert it?",
     "when toggling this pullout the icons should be animated from the arrow",
+    // Plain instruction verbs. Every one of these was missed, which is how a
+    // request could name exactly what it wanted and still not read as work:
+    // the sender was answered rather than obeyed, and had to write "make that
+    // implementation" — one recognised word — to get it done.
+    'For the signin page instead of it saying kumi just put the logo and get rid of the punchline "one live codebase.."',
+    "put the logo on the sign in page",
+    "get rid of the punchline",
+    "hide the punchline",
+    "drop the subtitle from the header",
+    "take out the old banner",
+    "turn off the animation",
+    "shrink the sidebar",
   ]) {
     assert.equal(looksLikeTaskRequest(request), true, request);
+  }
+
+  // The other direction, kept beside it: widening the verb list must not turn
+  // chatter or a question about finished work into a task. "show" and "use"
+  // are deliberately still absent — "show me a summary of the codebase" is an
+  // answer request, and a task verb wins over that test, so adding them would
+  // trade this bug for its mirror image.
+  for (const notWork of [
+    "show me a summary of the codebase",
+    "give me an overview of the auth module",
+    "what did you get rid of?",
+    "which files were dropped?",
+  ]) {
+    assert.equal(looksLikeTaskRequest(notWork), false, notWork);
   }
 });
 
@@ -13903,9 +14166,12 @@ test("a thread opens on the request that caused it, in the words it was asked in
   );
   assert.equal(quiet?.kind, "user");
   assert.equal(quiet?.content, asked);
-  assert.equal(quiet?.replies?.length, 1);
+  const quietSpeech = (quiet?.replies ?? []).filter(
+    (reply: any) => reply.kind === "agent",
+  );
+  assert.equal(quietSpeech.length, 1);
   assert.equal(
-    quiet?.replies?.[0]?.content,
+    quietSpeech[0]?.content,
     "I've taken this task and I'm working on it.",
   );
 
@@ -16483,4 +16749,285 @@ test("summariseAuditData skips bulk payload fields and respects the per-event ca
   );
   assert.ok(sprawling.length <= 400, String(sprawling.length));
   assert.equal(summariseAuditData({}), "");
+});
+
+/** Opens an upgrade the way a shell does, and reports what came back. */
+async function upgradeEvents(
+  origin: string,
+  query: string,
+  cookie: string,
+): Promise<{ upgraded: boolean; status?: number }> {
+  const port = Number(new URL(origin).port);
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest({
+      port,
+      host: "127.0.0.1",
+      path: `/api/v1/events?${query}`,
+      headers: {
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": randomBytes(16).toString("base64"),
+        ...(cookie.length === 0 ? {} : { Cookie: cookie }),
+      },
+    });
+    const timer = setTimeout(() => {
+      request.destroy();
+      reject(new Error("timed out negotiating the event socket"));
+    }, 5_000);
+    request.on("upgrade", (_response, socket) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ upgraded: true });
+    });
+    request.on("response", (response) => {
+      clearTimeout(timer);
+      response.resume();
+      resolve({ upgraded: false, status: response.statusCode ?? 0 });
+    });
+    request.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    request.end();
+  });
+}
+
+test("a socket ticket is minted by any credential and spent exactly once", async (t) => {
+  // A browser proves itself to an upgrade with its session cookie, which it
+  // attaches on its own. `new WebSocket(url)` takes no headers, so a client
+  // holding a bearer token — a desktop shell — has no way to present it. The
+  // ticket is what goes in the URL instead of the token.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "desktop", scopes: ["view"] },
+  });
+  assert.equal(created.status, 201);
+  const token = created.data.token as string;
+
+  // Minted by the credential that cannot be presented to an upgrade, which is
+  // the entire reason this route exists.
+  const byToken = await bearer(runtime.origin, "/api/v1/auth/ws-ticket", token, {
+    method: "POST",
+  });
+  assert.equal(byToken.status, 201);
+  assert.equal(typeof byToken.data.ticket, "string");
+  assert.ok(byToken.data.expiresInMs > 0);
+
+  // And by a session, so the browser is not a special case in the other
+  // direction either.
+  const bySession = await client.request("/api/v1/auth/ws-ticket", {
+    method: "POST",
+  });
+  assert.equal(bySession.status, 201);
+  assert.notEqual(bySession.data.ticket, byToken.data.ticket);
+
+  // Spent. Whatever the upgrade then makes of the project, the ticket is gone.
+  const ticket = String(byToken.data.ticket);
+  const query = `projectId=absent&ticket=${encodeURIComponent(ticket)}`;
+  await upgradeEvents(runtime.origin, query, "");
+  const replayed = await upgradeEvents(runtime.origin, query, "");
+  assert.equal(replayed.upgraded, false);
+});
+
+test("a bad ticket is refused rather than quietly falling back to the cookie", async (t) => {
+  // The failure this shape invites: a client presents a ticket, the ticket is
+  // expired or already spent, and the server tries the cookie next. On a
+  // desktop shell there is no cookie and nothing happens — but in a browser,
+  // where a stale session is usually lying around, a dead ticket would look
+  // like a working one and the bug would only ever appear somewhere else.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const refused = await upgradeEvents(
+    runtime.origin,
+    "projectId=absent&ticket=not-a-real-ticket",
+    // A cookie that authenticates perfectly well on its own.
+    client.cookieHeader,
+  );
+  assert.equal(refused.upgraded, false);
+});
+
+test("a token can be created, seen in the list, and revoked from a session", async (t) => {
+  // The three calls the settings card makes, in the order it makes them. The
+  // routes predate any UI reaching them, so this is the first thing to hold
+  // them to the shape a screen actually reads: a secret exactly once, an
+  // `active` flag to hide what has been revoked, and the fields the rows show.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const empty = await client.request("/api/v1/auth/tokens");
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.data.tokens, []);
+
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "My laptop", scopes: ["view", "run_task"] },
+  });
+  assert.equal(created.status, 201);
+  assert.match(created.data.token as string, /^coord_pat_/u);
+
+  const listed = await client.request("/api/v1/auth/tokens");
+  assert.equal(listed.data.tokens.length, 1);
+  const [row] = listed.data.tokens as Array<Record<string, unknown>>;
+  assert.equal(row?.name, "My laptop");
+  assert.equal(row?.active, true);
+  assert.equal(typeof row?.createdAt, "string");
+  // Never again. The store keeps a digest, so the list cannot show a secret
+  // even to the person who made it — which is why the card has to.
+  assert.equal(row?.token, undefined);
+  assert.equal(row?.secret, undefined);
+
+  const revoked = await client.request(
+    `/api/v1/auth/tokens/${encodeURIComponent(String(row?.id))}`,
+    { method: "DELETE" },
+  );
+  assert.ok(revoked.status === 200 || revoked.status === 204, String(revoked.status));
+
+  const after = await client.request("/api/v1/auth/tokens");
+  assert.equal(
+    (after.data.tokens as Array<{ active?: boolean }>).filter(
+      (entry) => entry.active !== false,
+    ).length,
+    0,
+  );
+});
+
+test("an app callback is only ever an address on this machine", () => {
+  // The one check this flow cannot get wrong. The browser is about to be sent
+  // to this address carrying a code that buys a token, so anything that is not
+  // loopback is not an open redirect — it is a way to have somebody sign in
+  // and hand the result to whoever asked.
+  for (const allowed of [
+    "http://127.0.0.1:53127/callback",
+    "http://localhost:8123/cb",
+    "http://[::1]:9000/cb",
+    // Any port, because the app takes whatever was free at startup.
+    "http://127.0.0.1:1/cb",
+  ]) {
+    assert.equal(isLoopbackCallback(allowed), true, allowed);
+  }
+
+  for (const refused of [
+    // The obvious one, and the whole reason for the check.
+    "http://evil.example.com/cb",
+    "https://evil.example.com/cb",
+    // Hostnames that merely start or end like loopback.
+    "http://127.0.0.1.evil.example.com/cb",
+    "http://localhost.evil.example.com/cb",
+    "http://notlocalhost/cb",
+    // Credentials in the URL, which some parsers read as the host.
+    "http://127.0.0.1@evil.example.com/cb",
+    "http://user:pass@127.0.0.1/cb",
+    // Schemes that are not a loopback listener at all.
+    "file:///tmp/cb",
+    "javascript:alert(1)",
+    "data:text/html,<script>",
+    "app://kumi/cb",
+    // Not a URL.
+    "",
+    "not a url",
+    "//127.0.0.1/cb",
+  ]) {
+    assert.equal(isLoopbackCallback(refused), false, refused);
+  }
+});
+
+test("approving an app hands the browser a code, and the code buys one token", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const approved = await client.request(
+    "/api/v1/auth/app-authorization/approve",
+    {
+      method: "POST",
+      body: {
+        name: "Kumi on my laptop",
+        redirectUri: "http://127.0.0.1:53127/callback",
+        state: "abc123",
+      },
+    },
+  );
+  assert.equal(approved.status, 201);
+
+  // The redirect carries a code, never the token: a token in a redirect is a
+  // token in the browser's history and in whatever the loopback server logs.
+  const target = new URL(approved.data.redirectTo as string);
+  assert.equal(target.origin, "http://127.0.0.1:53127");
+  assert.equal(target.searchParams.get("state"), "abc123");
+  const code = target.searchParams.get("code") ?? "";
+  assert.ok(code.length > 20, code);
+  assert.equal(target.searchParams.get("token"), null);
+
+  // Exchanged with no credential at all, which is the point: the app has none
+  // yet, and acquiring one is what the call is for.
+  const exchanged = await bareRequest(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/exchange",
+    { code },
+  );
+  assert.equal(exchanged.status, 201);
+  assert.match(exchanged.data.token as string, /^coord_pat_/u);
+  assert.equal(exchanged.data.name, "Kumi on my laptop");
+
+  // Spent. A second attempt with the same code is refused.
+  const replayed = await bareRequest(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/exchange",
+    { code },
+  );
+  assert.equal(replayed.status, 400);
+
+  // And the token it handed over actually works.
+  const me = await bearer(
+    runtime.origin,
+    "/api/v1/auth/me",
+    exchanged.data.token as string,
+  );
+  assert.equal(me.status, 200);
+  assert.equal(me.data.credential, "api_token");
+});
+
+test("an app cannot be approved for somewhere else, or by another app", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const offsite = await client.request(
+    "/api/v1/auth/app-authorization/approve",
+    {
+      method: "POST",
+      body: {
+        name: "Definitely fine",
+        redirectUri: "https://evil.example.com/cb",
+        state: "x",
+      },
+    },
+  );
+  assert.equal(offsite.status, 400);
+  assert.equal(offsite.data.error.code, "callback_rejected");
+
+  // A token approving the next app would make revoking this one pointless —
+  // the same rule minting a token by hand already follows.
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "existing", scopes: ["view"] },
+  });
+  const byToken = await bearer(
+    runtime.origin,
+    "/api/v1/auth/app-authorization/approve",
+    created.data.token as string,
+    {
+      method: "POST",
+      body: { name: "chained", redirectUri: "http://127.0.0.1:1/cb", state: "" },
+    },
+  );
+  assert.equal(byToken.status, 403);
 });

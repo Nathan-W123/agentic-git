@@ -21,6 +21,22 @@ test("loads every control-room asset with an explicit content type", async () =>
     assets.get("/manifest.webmanifest")?.contentType,
     "application/manifest+json",
   );
+  assert.equal(assets.get("/kumi-logo.png")?.contentType, "image/png");
+  // Narrowed rather than asserted through: `StaticAsset.body` is
+  // `Buffer | string` because text assets are served as text, and a PNG that
+  // arrived as a string is already corrupt before its header can be read. So
+  // "is it bytes" is the first half of "is it a PNG", not a type-checker
+  // formality.
+  const logo = assets.get("/kumi-logo.png")?.body;
+  assert.ok(
+    Buffer.isBuffer(logo),
+    "the Kumi artwork should be served as bytes, not decoded text",
+  );
+  assert.equal(
+    logo.subarray(0, 8).toString("hex"),
+    "89504e470d0a1a0a",
+    "the served Kumi artwork should be a PNG",
+  );
   for (const icon of [
     "/mark.svg",
     "/apple-touch-icon.png",
@@ -1341,6 +1357,29 @@ test("user-rooted tasks promote when their first reply arrives", async () => {
   );
 });
 
+test("the thread library shows its creator, participants, and latest activity", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const panel = chats.slice(
+    chats.indexOf("function threadListPanel("),
+    chats.indexOf("function threadPanel("),
+  );
+
+  assert.match(panel, /const creator = channelAuthor\(repositoryId, entry\);/u);
+  assert.match(
+    panel,
+    /threadParticipants\(\[entry, \.\.\.replies\], repositoryId\)/u,
+    "the participant stack should include every unique author in the thread",
+  );
+  assert.match(panel, /class="ti-creator"/u);
+  assert.match(panel, /class="avatar-stack ti-participants"/u);
+  assert.match(panel, /const updated = relativeTime\(lastActivity\(entry\)\);/u);
+  assert.match(panel, /class="ti-count"[\s\S]*class="ti-time"/u);
+  assert.doesNotMatch(panel, /ti-done|icon\("check"\)/u);
+  assert.match(css, /\.thread-item \.ti-participants \{[\s\S]*?margin-left: auto;/u);
+  assert.doesNotMatch(css, /\.thread-item-ended \.ti-done/u);
+});
+
 test("a long thread name cannot push the panel's close out of reach", async () => {
   const css = await publicFile("styles.css");
   const chats = await publicFile("screen-chats.js");
@@ -2581,11 +2620,10 @@ test("the user icon defaults to salmon", async () => {
 });
 
 test("the product is named Kumi throughout the browser surface", async () => {
-  // The wordmark sits in the chat sidebar's crown, which is rendered by the
-  // chats screen rather than the shell.
+  // The auth wordmark names the image for assistive technology.
   assert.match(
-    await publicFile("screen-chats.js"),
-    /title="Kumi" aria-label="Kumi"/u,
+    await publicFile("ui.js"),
+    /role="img" aria-label="Kumi"/u,
   );
   assert.match(await publicFile("index.html"), /<title>Kumi<\/title>/u);
   for (const file of [
@@ -2609,25 +2647,59 @@ test("the product is named Kumi throughout the browser surface", async () => {
   }
 });
 
-test("the full wordmark remains without a standalone K badge", async () => {
+test("the standalone logo follows the theme without changing the wordmark or appearing in the channel rail", async () => {
   const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
 
-  assert.doesNotMatch(ui, /brandMark/u);
-  assert.doesNotMatch(app, /brandMark/u);
-  assert.doesNotMatch(chats, /brandMark|channel-rail-brand/u);
+  assert.match(app, /brandMark/u);
   assert.match(app, /brandWordmark\(\d+\)/u);
+
+  const markStart = ui.indexOf("export function brandMark");
+  assert.notEqual(
+    markStart,
+    -1,
+    "the standalone mark helper was not found in ui.js",
+  );
+  const mark = ui.slice(markStart, ui.indexOf("\n}", markStart));
+  assert.match(mark, /href="\/kumi-logo\.png"/u);
+  assert.match(mark, /overflow="hidden" aria-hidden="true"/u);
+  assert.match(mark, /style="mask-type:luminance"/u);
+  assert.match(mark, /fill="currentColor"/u);
+  assert.match(mark, /mask="url\(#brand-mark-mask\)"/u);
+  assert.doesNotMatch(chats, /channel-rail-brand|brandMark/u);
+  assert.doesNotMatch(css, /channel-rail-brand/u);
 
   const start = ui.indexOf("export function brandWordmark");
   assert.notEqual(start, -1, "the wordmark helper was not found in ui.js");
   const wordmark = ui.slice(start, ui.indexOf("\n}", start));
   assert.match(wordmark, /preserveAspectRatio="xMidYMid meet"/u);
-  // All four letters remain available as one complete wordmark.
+  assert.doesNotMatch(wordmark, /kumi-logo/u);
   assert.match(wordmark, /\$\{BRAND_LETTERS\}/u);
 
+  const lettersStart = ui.indexOf("const BRAND_LETTERS");
+  const letters = ui.slice(lettersStart, ui.indexOf("`;", lettersStart));
+  assert.match(letters, /M8\.3 8V40/u);
+  assert.match(letters, /M42 11 13\.5 24 42 37/u);
+
   const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);
-  assert.ok(width > 0 && width <= 160, `the sign-in wordmark is ${width}px wide`);
+  assert.ok(width > 0 && width <= 160, `the auth wordmark is ${width}px wide`);
+});
+
+test("sign-in uses the standalone Kumi mark without the live-codebase punchline while other authentication modes retain their branding and copy", async () => {
+  const app = await publicFile("app.js");
+  const start = app.indexOf("function renderAuth");
+  const auth = app.slice(start, app.indexOf("\nfunction renderPasswordReset", start));
+
+  assert.notEqual(start, -1, "the auth renderer was not found in app.js");
+  assert.match(
+    auth,
+    /bootstrap \|\| register \? brandWordmark\(120\) : brandMark\(54\)/u,
+  );
+  assert.doesNotMatch(auth, /One live codebase/u);
+  assert.match(auth, /Create the first owner for this control plane\./u);
+  assert.match(auth, /You get your own team and project to start building in\./u);
 });
 
 /* ------------------------------------------------------------ controls ---- */
@@ -4634,7 +4706,7 @@ test("working thread summaries carry a concise sweeping activity", async () => {
   );
 });
 
-test("ended threads wrap as compact pills without live activity motion", async () => {
+test("ended threads stay compact without live activity motion", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const listStart = chats.indexOf("function threadListPanel(repositoryId)");
@@ -4644,10 +4716,7 @@ test("ended threads wrap as compact pills without live activity motion", async (
   );
 
   assert.match(list, /finished \? " thread-item-ended"/u);
-  assert.match(
-    list,
-    /finished\s*\n\s*\? `<span class="ti-done" aria-hidden="true">\$\{icon\("check"\)\}<\/span>`/u,
-  );
+  assert.doesNotMatch(list, /ti-done|icon\("check"\)/u);
   assert.match(list, /class="ti-main"/u);
   assert.match(list, /class="ti-meta"/u);
   assert.match(list, /class="ti-go"/u);
@@ -5126,6 +5195,7 @@ test("clicking an agent opens its details while chat and history stay explicit",
 test("agent history is a dense active-then-finished task list", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
+  const app = await browserSource();
   const historyStart = chats.indexOf("const TASK_ICON = {");
   const historyEnd = chats.indexOf(
     "/** Every loaded room this exact agent belongs to",
@@ -5135,7 +5205,10 @@ test("agent history is a dense active-then-finished task list", async () => {
   assert.notEqual(historyEnd, -1);
   const history = chats.slice(historyStart, historyEnd);
   assert.match(history, /function agentHistorySections\(rows\)/u);
-  assert.match(history, /function agentHistoryRow\(\{ task, message \}\)/u);
+  assert.match(
+    history,
+    /function agentHistoryRow\(\{ task, message \}, agent, repositoryId\)/u,
+  );
   assert.match(history, /FINISHED_HISTORY_STATUS/u);
   assert.match(history, /"integrated"/u);
   assert.match(history, /"failed"/u);
@@ -5146,16 +5219,74 @@ test("agent history is a dense active-then-finished task list", async () => {
   assert.match(history, /class="agent-history-row \$\{esc\(task\.status\)\}"/u);
   assert.match(history, /class="ah-objective"/u);
   assert.match(history, /class="ah-when"/u);
-  // Active work above finished work, same quiet split the thread list uses.
-  assert.match(history, /agentHistorySections\(rows\)/u);
+  // Active work above finished work, each half named rather than merely ruled
+  // off from the other.
+  assert.match(history, /agentHistorySections\(shown\)/u);
   assert.match(history, /class="agent-history-active"/u);
   assert.match(history, /class="agent-history-finished"/u);
   assert.match(history, /aria-label="Active"/u);
   assert.match(history, /aria-label="Finished"/u);
+  assert.match(history, /class="ah-section-label"/u);
   assert.match(css, /\.agent-history-active \+ \.agent-history-finished/u);
   assert.match(css, /\.agent-history-finished \.agent-history-row/u);
-  assert.match(css, /\.agent-history-row \{[^}]*padding:\s*4px 12px/su);
-  assert.match(css, /\.agent-history-row \{[^}]*font-size:\s*12px/su);
+
+  // The outcome is a word in a tinted pill, not a coloured ring a reader has
+  // to already know the palette to decode.
+  assert.match(history, /function historyStatusPill\(status\)/u);
+  assert.match(history, /function historyStatusLabel\(status\)/u);
+  assert.match(history, /function historyStatusTone\(status\)/u);
+  assert.match(history, /return "Completed";/u);
+  assert.match(
+    history,
+    /class="ah-status ah-status-\$\{esc\(historyStatusTone\(status\)\)\}"/u,
+  );
+  assert.match(css, /\.agent-history-row \.ah-status-ok/u);
+  assert.match(css, /\.agent-history-row \.ah-status-bad/u);
+
+  // A clock reading, because this list is scanned for the run from yesterday
+  // afternoon and "2 days ago" cannot answer that.
+  assert.match(history, /function historyWhen\(value\)/u);
+  assert.match(history, /Today at \$\{time\}/u);
+  assert.match(history, /Yesterday at \$\{time\}/u);
+  assert.match(history, /historyWhen\(task\.submittedAt\)/u);
+
+  // Who ran it, and what came back from it.
+  assert.match(history, /statusAgentFace\(agent, 26, repositoryId\)/u);
+  assert.match(history, /function taskOutputPreview\(task\)/u);
+  assert.match(history, /task\?\.summary/u);
+  assert.match(history, /class="ah-preview-text"/u);
+
+  // The two things a reader does next, as controls a touch reader can find
+  // rather than a row-wide click alone. Retry only where the server takes it.
+  assert.match(history, /iconButton\("eye", \{[\s\S]*?act: "channel-thread-open"/u);
+  assert.match(
+    history,
+    /FINISHED_HISTORY_STATUS\.has\(task\.status\)\s*\?\s*iconButton\("refresh", \{[\s\S]*?act: "task-retry"/u,
+  );
+
+  // Search and filter above the list, held in state so a background poll
+  // rebuilding the panel cannot widen it back to everything.
+  assert.match(history, /function agentHistoryHead\(\)/u);
+  assert.match(history, /searchBox\(\s*"Search recent tasks\.\.\.",/u);
+  assert.match(history, /segmented\(\s*"agent-history-filter",/u);
+  assert.match(history, /const HISTORY_FILTERS = \[/u);
+  assert.match(history, /\{ value: "all", label: "All tasks" \}/u);
+  assert.match(history, /\{ value: "completed", label: "Completed" \}/u);
+  assert.match(history, /\{ value: "processing", label: "Processing" \}/u);
+  assert.match(history, /\{ value: "errors", label: "Errors" \}/u);
+  assert.match(history, /const HISTORY_FILTER_STATUS = \{/u);
+  assert.match(history, /function agentHistoryFiltered\(rows\)/u);
+  assert.match(history, /function historyMatchesQuery\(\{ task, message \}, query\)/u);
+  assert.match(
+    app,
+    /case "agent-history-filter":\s*\n\s*state\.agentHistoryFilter = value;/u,
+  );
+  assert.match(
+    app,
+    /if \(act === "agent-history-search"\) \{\s*\n\s*state\.agentHistoryQuery = node\.value;/u,
+  );
+  assert.match(css, /\.agent-history-head/u);
+  assert.match(css, /\.agent-history-list/u);
 });
 
 test("the spec tab is where an agent is made org-wide or kept personal", async () => {

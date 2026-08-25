@@ -1699,6 +1699,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
         "DELETE FROM channel_read_cursors WHERE repository_id = $1",
         [id],
       );
+      await client.query("DELETE FROM channel_mutes WHERE repository_id = $1", [
+        id,
+      ]);
       await client.query(
         "DELETE FROM channel_membership_backfills WHERE repository_id = $1",
         [id],
@@ -3982,6 +3985,37 @@ export class PostgresCoordinationStore implements CoordinationStore {
       [repositoryId, userId],
     );
     return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  public async setChannelMuted(
+    repositoryId: string,
+    userId: string,
+    muted: boolean,
+  ): Promise<void> {
+    if (!muted) {
+      await this.query(
+        "DELETE FROM channel_mutes WHERE repository_id = $1 AND user_id = $2",
+        [repositoryId, userId],
+      );
+      return;
+    }
+    // Muting twice is not a second mute — the first moment is the one worth
+    // keeping, so a repeat leaves the row alone.
+    await this.query(
+      `INSERT INTO channel_mutes (repository_id, user_id, muted_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (repository_id, user_id) DO NOTHING`,
+      [repositoryId, userId, new Date().toISOString()],
+    );
+  }
+
+  public async listMutedChannels(userId: string): Promise<string[]> {
+    const rows = await this.rows(
+      `SELECT repository_id FROM channel_mutes
+        WHERE user_id = $1 ORDER BY repository_id`,
+      [userId],
+    );
+    return rows.map((row) => text(row, "repository_id"));
   }
 
   public async getCatchUpCursor(

@@ -925,6 +925,19 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
   {
     // Mirrors the SQLite migration of the same version.
     version: 42,
+    name: "channel-mutes",
+    statements: [
+      `CREATE TABLE channel_mutes (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        muted_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+    ],
+  },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 43,
     name: "retire-reviewer-role",
     statements: [
       `UPDATE organization_memberships SET role = 'viewer' WHERE role = 'reviewer'`,
@@ -935,7 +948,7 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
   {
     // Mirrors the SQLite migration of the same version. Booleans are real
     // BOOLEANs here, per the dialect note at the top of this file.
-    version: 43,
+    version: 44,
     name: "subscriptions-and-comped-seats",
     statements: [
       `CREATE TABLE subscriptions (
@@ -960,7 +973,7 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
   },
   {
     // Mirrors the SQLite migration of the same version.
-    version: 44,
+    version: 45,
     name: "comped-repository-grants",
     statements: [
       `ALTER TABLE repository_grants

@@ -3256,6 +3256,7 @@ for (const backend of backends) {
         alice.id,
         "2026-01-01T00:00:00.000Z",
       );
+      await store.setChannelMuted("repo_to_delete", alice.id, true);
       await store.saveRepositoryGrant({
         repositoryId: "repo_to_delete",
         userId: guest.id,
@@ -3289,6 +3290,10 @@ for (const backend of backends) {
         [],
       );
       assert.deepEqual(await store.listGrantsForUser(guest.id), []);
+      // A mute is scoped to the room, so it goes when the room does — a
+      // repository re-registered under the same id must not arrive silent for
+      // whoever had muted its predecessor.
+      assert.deepEqual(await store.listMutedChannels(alice.id), []);
 
       // A repository created later under the same id starts with none of
       // the deleted repository's channel or grants attached to it.
@@ -3305,6 +3310,61 @@ for (const backend of backends) {
         await store.listRepositoryGrants("repo_to_delete"),
         [],
       );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: muting a channel is one person's preference, not the room's`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_muted",
+        path: "/muted.git",
+        branch: "main",
+      });
+      await store.saveRepository({
+        id: "repo_loud",
+        path: "/loud.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "alice-mute@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "bob-mute@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+
+      assert.deepEqual(await store.listMutedChannels(alice.id), []);
+
+      await store.setChannelMuted("repo_muted", alice.id, true);
+      assert.deepEqual(await store.listMutedChannels(alice.id), ["repo_muted"]);
+      // The room is not muted; Alice is not being interrupted by it. Nobody
+      // else in it hears anything different.
+      assert.deepEqual(await store.listMutedChannels(bob.id), []);
+
+      // Muting twice is still muted once.
+      await store.setChannelMuted("repo_muted", alice.id, true);
+      assert.deepEqual(await store.listMutedChannels(alice.id), ["repo_muted"]);
+
+      await store.setChannelMuted("repo_loud", alice.id, true);
+      assert.deepEqual(await store.listMutedChannels(alice.id), [
+        "repo_loud",
+        "repo_muted",
+      ]);
+
+      await store.setChannelMuted("repo_muted", alice.id, false);
+      assert.deepEqual(await store.listMutedChannels(alice.id), ["repo_loud"]);
+      // Unmuting something that was never muted is not an error, and changes
+      // nothing: the browser retries a failed write, and a retry that lands
+      // twice must be the same as landing once.
+      await store.setChannelMuted("repo_muted", alice.id, false);
+      assert.deepEqual(await store.listMutedChannels(alice.id), ["repo_loud"]);
     } finally {
       await store.close();
       await cleanup();

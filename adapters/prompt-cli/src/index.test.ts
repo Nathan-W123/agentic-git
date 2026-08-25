@@ -1130,16 +1130,39 @@ test("narration is what the agent said, not what it did", () => {
   assert.equal(readClaudeNarration("not an object"), undefined);
 });
 
-test("execution streams and planning does not", () => {
-  // Planning is one answer that arrives at the end either way, so streaming it
-  // would buy nothing and put the schema parse behind a second format.
-  assert.ok(CLAUDE_PROFILE.executionArgs(undefined, undefined, undefined).includes("stream-json"));
-  assert.ok(CLAUDE_PROFILE.executionArgs(undefined, undefined, undefined).includes("--verbose"));
-  assert.ok(CLAUDE_PROFILE.planningArgs(undefined, undefined, undefined).includes("json"));
-  assert.equal(
-    CLAUDE_PROFILE.planningArgs(undefined, undefined, undefined).includes("stream-json"),
-    false,
-  );
+test("both phases stream, and planning keeps its plan-only permission", () => {
+  // Planning used to hold its output to the end. The plan still arrives all at
+  // once — nothing about the parse changes, because `claudeResultEnvelope`
+  // reads the `result` event out of a stream exactly as it reads a lone
+  // envelope — but the minutes before it are no longer silent.
+  const planning = CLAUDE_PROFILE.planningArgs(undefined, undefined, undefined);
+  const execution = CLAUDE_PROFILE.executionArgs(undefined, undefined, undefined);
+
+  for (const args of [planning, execution]) {
+    assert.ok(args.includes("stream-json"), args.join(" "));
+    // `stream-json` is refused without it.
+    assert.ok(args.includes("--verbose"), args.join(" "));
+  }
+  // Streaming must not have cost planning the thing that makes it planning.
+  assert.ok(planning.includes("--permission-mode"), planning.join(" "));
+  assert.ok(planning.includes("plan"), planning.join(" "));
+  assert.equal(execution.includes("--permission-mode"), false, execution.join(" "));
+});
+
+test("a streamed plan is still read out of its result event", () => {
+  // The half of the switch that could have broken silently: the envelope
+  // reader has to find the plan in a stream of events, not just in a lone
+  // JSON object.
+  const streamed = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "reading the repository" }] },
+    }),
+    JSON.stringify({ type: "result", is_error: false, result: '{"taskId":"t"}' }),
+  ].join("\n");
+
+  assert.equal(CLAUDE_PROFILE.unwrap(streamed), '{"taskId":"t"}');
 });
 
 test("the execution prompt asks for an ending a person can read", async () => {

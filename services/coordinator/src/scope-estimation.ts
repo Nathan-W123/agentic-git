@@ -118,7 +118,28 @@ export interface ScopeEstimationOptions {
   minScore?: number;
   /**
    * A token matching more than this fraction of indexed files is discarded as
-   * uninformative. Default 0.15.
+   * uninformative. Default 0.05.
+   *
+   * This was 0.15, which in a 435-file repository let a word naming a symbol
+   * in sixty-five files count as localizing. It does not: "We have failed
+   * builds fix please" survived on the single token "failed", matched every
+   * file declaring `taskFailed`, `failedRuns`, `integrationFailures` and the
+   * rest, and reported forty files as an *anchored* footprint. A blanket
+   * claim was then granted against those forty, and forty files of an
+   * error-handling codebase is most of the room — so a request that named
+   * nothing at all sequenced everybody behind it.
+   *
+   * 0.05 is not a new number: {@link likelySymbolsIn} already draws this exact
+   * line inside a file, where "a fragment a handful of declarations share is
+   * evidence about that handful; one that half the file shares is evidence
+   * about nothing". The same sentence is true of a repository, and the two
+   * scales now say it the same way.
+   *
+   * Measured against real objectives from this repository: at 0.15 the three
+   * vague ones anchored 40 files and the specific ones reached 95; at 0.05
+   * every vague one falls to `none` — no claim, plan properly — and the
+   * specific ones land between 6 and 38. Tightening further to 0.02 starts
+   * cutting real footprints down to two files, which is a different failure.
    */
   ubiquityRatio?: number;
   /**
@@ -368,7 +389,7 @@ export function estimateScope(
 ): ScopeEstimate {
   const maxFiles = options.maxFiles ?? 40;
   const minScore = options.minScore ?? 2;
-  const ubiquityRatio = options.ubiquityRatio ?? 0.15;
+  const ubiquityRatio = options.ubiquityRatio ?? 0.05;
   const ubiquityMinimumFiles = options.ubiquityMinimumFiles ?? 4;
   const minTokenLength = options.minTokenLength ?? 3;
 
@@ -580,7 +601,10 @@ export function estimateScope(
         Number(right.anchored) - Number(left.anchored) ||
         leftPath.localeCompare(rightPath),
     );
-  if (ranked.length > maxFiles) {
+  // Recorded here and read again below, where it decides the verdict rather
+  // than only annotating it.
+  const truncated = ranked.length > maxFiles;
+  if (truncated) {
     notes.push(
       `${ranked.length} files scored above the threshold; kept the ${maxFiles} strongest`,
     );
@@ -622,6 +646,19 @@ export function estimateScope(
     notes.push(
       "nothing in this objective matches the repository at this revision; " +
         "its footprint is unknown",
+    );
+  } else if (truncated) {
+    // The note already said this; the verdict did not, and only the verdict is
+    // read. An estimate that scored more files than it can carry has not
+    // located the work — it has run out of room, and the strongest forty of
+    // ninety-five are neither the footprint nor a narrowing of it. Calling
+    // that "anchored" is what let a truncated guess become a blanket claim,
+    // and a blanket claim is the whole room. Demoted, the task plans properly
+    // instead: one round trip, against everybody else's concurrency.
+    confidence = "weak";
+    notes.push(
+      "more files scored than this estimate can name, so what it did not " +
+        "localize is unknown rather than absent",
     );
   } else if (files.some((file) => file.anchored)) {
     confidence = "anchored";
