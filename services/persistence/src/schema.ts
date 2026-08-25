@@ -1169,6 +1169,47 @@ export const MIGRATIONS: readonly Migration[] = [
       `UPDATE approvals SET required_role = 'admin' WHERE required_role = 'reviewer'`,
     ],
   },
+  {
+    // What an organization is entitled to, and who inside it is billable.
+    //
+    // One row per organization rather than per user: the subscription is the
+    // organization's, and a person who belongs to two organizations is a seat
+    // in each independently.
+    //
+    // Every organization that already exists is written as `comped`. A billing
+    // gate that switches on and immediately locks out the people already using
+    // the product would be a worse bug than having no gate at all, so existing
+    // organizations are grandfathered and only new ones start a trial.
+    //
+    // `comped` on a membership is the free seat: it belongs to the membership
+    // rather than to the user, because the same person can be a paid seat in
+    // one organization and a comped one in another. The invitation carries the
+    // flag so that accepting one settles the question at the moment the
+    // membership is created, rather than depending on who happens to be
+    // looking later.
+    version: 43,
+    name: "subscriptions-and-comped-seats",
+    statements: [
+      `CREATE TABLE subscriptions (
+        organization_id TEXT PRIMARY KEY REFERENCES organizations(id),
+        status TEXT NOT NULL,
+        trial_ends_at TEXT,
+        current_period_end TEXT,
+        stripe_customer_id TEXT,
+        stripe_subscription_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `INSERT INTO subscriptions (
+         organization_id, status, created_at, updated_at
+       )
+       SELECT id, 'comped', created_at, created_at FROM organizations`,
+      `ALTER TABLE organization_memberships
+         ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE invitations
+         ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

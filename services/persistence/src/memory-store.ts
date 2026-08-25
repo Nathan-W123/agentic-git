@@ -71,6 +71,8 @@ import type {
   CreateRunInput,
   Organization,
   OrganizationMembership,
+  Subscription,
+  SubscriptionStatus,
   OrganizationRole,
   ProjectRecord,
   RunDetail,
@@ -213,6 +215,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly organizations = new Map<string, Organization>();
   private readonly users = new Map<string, UserAccount>();
   private readonly memberships = new Map<string, OrganizationMembership>();
+  private readonly subscriptions = new Map<string, Subscription>();
   private readonly projects = new Map<string, ProjectRecord>();
   private readonly projectRepositories = new Set<string>();
   private readonly authSessions = new Map<string, AuthSessionRecord>();
@@ -412,6 +415,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     organizationId: string;
     userId: string;
     role: OrganizationRole;
+    comped?: boolean;
   }): Promise<OrganizationMembership> {
     this.requireOrganization(input.organizationId);
     this.requireUser(input.userId);
@@ -421,10 +425,53 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       organizationId: input.organizationId,
       userId: input.userId,
       role: input.role,
+      // An omitted `comped` keeps what the row already says, so a role change
+      // cannot quietly start charging for a seat that was given away.
+      comped: input.comped ?? existing?.comped ?? false,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
     };
     this.memberships.set(key, membership);
     return copy(membership);
+  }
+
+  public async getSubscription(
+    organizationId: string,
+  ): Promise<Subscription | undefined> {
+    const found = this.subscriptions.get(organizationId);
+    return found === undefined ? undefined : copy(found);
+  }
+
+  public async saveSubscription(input: {
+    organizationId: string;
+    status: SubscriptionStatus;
+    trialEndsAt?: string;
+    currentPeriodEnd?: string;
+    stripeCustomerId?: string;
+    stripeSubscriptionId?: string;
+  }): Promise<Subscription> {
+    this.requireOrganization(input.organizationId);
+    const now = new Date().toISOString();
+    const existing = this.subscriptions.get(input.organizationId);
+    const subscription: Subscription = {
+      organizationId: input.organizationId,
+      status: input.status,
+      ...(input.trialEndsAt === undefined
+        ? {}
+        : { trialEndsAt: input.trialEndsAt }),
+      ...(input.currentPeriodEnd === undefined
+        ? {}
+        : { currentPeriodEnd: input.currentPeriodEnd }),
+      ...(input.stripeCustomerId === undefined
+        ? {}
+        : { stripeCustomerId: input.stripeCustomerId }),
+      ...(input.stripeSubscriptionId === undefined
+        ? {}
+        : { stripeSubscriptionId: input.stripeSubscriptionId }),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.subscriptions.set(input.organizationId, subscription);
+    return copy(subscription);
   }
 
   public async removeMembership(

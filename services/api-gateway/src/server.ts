@@ -5207,6 +5207,7 @@ export class ApiGateway {
             organizationId: invitation.organizationId,
             userId: user.id,
             role: invitation.role,
+            comped: invitation.comped,
           });
         } else {
           await this.options.store.saveRepositoryGrant({
@@ -6116,6 +6117,11 @@ export class ApiGateway {
           role,
           secretHash: hashSecret(secret),
           invitedBy: principal.user.id,
+          // A link from whoever runs the deployment is a free seat. This is
+          // how the founders hand out access without it landing on their own
+          // invoice, and it is settled here rather than at acceptance so the
+          // answer cannot change under the recipient between the two.
+          comped: principal.user.systemAdmin,
           createdAt: now.toISOString(),
           expiresAt: new Date(
             now.getTime() + INVITATION_TTL_MS,

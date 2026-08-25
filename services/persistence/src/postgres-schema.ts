@@ -932,4 +932,30 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `UPDATE approvals SET required_role = 'admin' WHERE required_role = 'reviewer'`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version. Booleans are real
+    // BOOLEANs here, per the dialect note at the top of this file.
+    version: 43,
+    name: "subscriptions-and-comped-seats",
+    statements: [
+      `CREATE TABLE subscriptions (
+        organization_id TEXT PRIMARY KEY REFERENCES organizations(id),
+        status TEXT NOT NULL,
+        trial_ends_at TEXT,
+        current_period_end TEXT,
+        stripe_customer_id TEXT,
+        stripe_subscription_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `INSERT INTO subscriptions (
+         organization_id, status, created_at, updated_at
+       )
+       SELECT id, 'comped', created_at, created_at FROM organizations`,
+      `ALTER TABLE organization_memberships
+         ADD COLUMN comped BOOLEAN NOT NULL DEFAULT FALSE`,
+      `ALTER TABLE invitations
+         ADD COLUMN comped BOOLEAN NOT NULL DEFAULT FALSE`,
+    ],
+  },
 ];
