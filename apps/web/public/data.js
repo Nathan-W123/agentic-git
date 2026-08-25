@@ -1646,7 +1646,6 @@ export function socketLive() {
  */
 export const INVITE_ROLES = [
   { value: "developer", label: "Developer", detail: "Submit and run work" },
-  { value: "reviewer", label: "Reviewer", detail: "Approve changes" },
   { value: "viewer", label: "Viewer", detail: "Read-only" },
   { value: "admin", label: "Admin", detail: "Manage people and settings" },
 ];

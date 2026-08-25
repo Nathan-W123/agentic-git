@@ -922,4 +922,14 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     name: "repository-display-names",
     statements: [`ALTER TABLE repositories ADD COLUMN display_name TEXT`],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 42,
+    name: "retire-reviewer-role",
+    statements: [
+      `UPDATE organization_memberships SET role = 'viewer' WHERE role = 'reviewer'`,
+      `UPDATE invitations SET role = 'viewer' WHERE role = 'reviewer'`,
+      `UPDATE approvals SET required_role = 'admin' WHERE required_role = 'reviewer'`,
+    ],
+  },
 ];

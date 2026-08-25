@@ -111,7 +111,6 @@ export type OrganizationRole =
   | "owner"
   | "admin"
   | "developer"
-  | "reviewer"
   | "viewer";
 
 export interface Organization {
@@ -777,7 +776,7 @@ export interface CreateApprovalInput {
   taskId: TaskId;
   kind: ApprovalKind;
   requestedBy: string;
-  requiredRole: "reviewer" | "admin" | "owner";
+  requiredRole: "admin" | "owner";
   reasons: string[];
   changeSetId?: string;
   scopeChangeId?: string;

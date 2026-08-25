@@ -23,7 +23,6 @@ export type Permission =
 
 const ROLE_PERMISSIONS: Readonly<Record<OrganizationRole, ReadonlySet<Permission>>> = {
   viewer: new Set(["view"]),
-  reviewer: new Set(["view", "review"]),
   developer: new Set([
     "view",
     "submit_task",
@@ -71,10 +70,9 @@ export interface AuthorizedProject extends AuthorizedOrganization {
 /** Roles in ascending order of what they can do, for taking the higher of two. */
 const ROLE_RANK: Readonly<Record<OrganizationRole, number>> = {
   viewer: 0,
-  reviewer: 1,
-  developer: 2,
-  admin: 3,
-  owner: 4,
+  developer: 1,
+  admin: 2,
+  owner: 3,
 };
 
 function higherRole(

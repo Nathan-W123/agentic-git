@@ -1634,7 +1634,7 @@ for (const backend of backends) {
         taskId: TASK.id,
         kind: "changeset",
         requestedBy: TASK.agentId,
-        requiredRole: "reviewer",
+        requiredRole: "admin",
         reasons: ["Protected changeset"],
         changeSetId: CHANGESET.id,
         expiresAt: "2026-01-01T01:00:00.000Z",
@@ -3112,13 +3112,13 @@ for (const backend of backends) {
       await store.saveRepositoryGrant({
         repositoryId: "repo_shared",
         userId: user.id,
-        role: "reviewer",
+        role: "viewer",
         grantedBy: undefined,
         createdAt: "2026-01-02T00:00:00.000Z",
       });
       const after = await store.listRepositoryGrants("repo_shared");
       assert.equal(after.length, 1);
-      assert.equal(after[0]?.role, "reviewer");
+      assert.equal(after[0]?.role, "viewer");
 
       await store.removeRepositoryGrant("repo_shared", user.id);
       assert.deepEqual(await store.listGrantsForUser(user.id), []);

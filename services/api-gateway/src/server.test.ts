@@ -1329,7 +1329,7 @@ test("approval decisions are project-authorized and durably audited", async (t) 
     taskId: "task_test",
     kind: "changeset",
     requestedBy: setup.user.id,
-    requiredRole: "reviewer",
+    requiredRole: "admin",
     reasons: ["Protected changeset"],
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
   });
@@ -8036,7 +8036,7 @@ test('"go ahead" releases a review gate from the thread it was announced in', as
     taskId: "task_gated",
     kind: "policy_override",
     requestedBy: "claude",
-    requiredRole: "reviewer",
+    requiredRole: "admin",
     reasons: ["schema change"],
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
   });
@@ -8179,7 +8179,7 @@ test("a gate's hold and release stay ordered and deduplicated in its thread", as
     projectId: DEFAULT_PROJECT_ID,
     repositoryId,
     approvalId: "approval_gate",
-    requiredRole: "reviewer",
+    requiredRole: "admin",
   };
   await runtime.store.appendAudit(undefined, {
     type: "approval_requested",

@@ -2890,7 +2890,6 @@ const ROLES: readonly OrganizationRole[] = [
   "owner",
   "admin",
   "developer",
-  "reviewer",
   "viewer",
 ];
 /**

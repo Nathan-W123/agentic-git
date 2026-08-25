@@ -1144,6 +1144,31 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "repository-display-names",
     statements: [`ALTER TABLE repositories ADD COLUMN display_name TEXT`],
   },
+  {
+    // The reviewer role is retired. It existed to let somebody approve a
+    // change without being able to manage the project, and that is now what
+    // `admin` is for.
+    //
+    // Existing reviewers land on `viewer` rather than on `admin` or
+    // `developer`, because those are the two ways to get this wrong: `admin`
+    // would silently hand people the power to add and remove members, and
+    // `developer` would silently hand them the power to spend money on runs.
+    // `viewer` keeps every reviewer able to read exactly what they could read
+    // before, and an owner promotes the ones who should approve — a decision
+    // that ought to be made deliberately rather than inherited from a role
+    // that no longer exists.
+    //
+    // Approvals already raised against the old role are rewritten too. A held
+    // approval whose `required_role` names a role nothing can hold any more is
+    // a gate with nobody behind it, and the run waiting on it would never move.
+    version: 42,
+    name: "retire-reviewer-role",
+    statements: [
+      `UPDATE organization_memberships SET role = 'viewer' WHERE role = 'reviewer'`,
+      `UPDATE invitations SET role = 'viewer' WHERE role = 'reviewer'`,
+      `UPDATE approvals SET required_role = 'admin' WHERE required_role = 'reviewer'`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),
