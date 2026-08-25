@@ -19,6 +19,7 @@ import {
 import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
 
 import type { StripeClient } from "./stripe.js";
+import { effectiveRole, subscriptionAllowsWork } from "./billing.js";
 
 import {
   agentIdentity,
@@ -10260,6 +10261,197 @@ test("a paid sign-up takes the card first and builds the account last", async (t
   assert.equal(again.status, 201);
   assert.equal(again.data.user.id, finished.data.user.id);
   assert.equal(await store.countUsers(), 1);
+});
+
+test("day fifteen bills the trial and the team keeps working", async (t) => {
+  // The half of the money nobody has watched happen. Everything up to here
+  // has been proved by a real checkout; what follows it is a fortnight away
+  // and arrives entirely as webhooks, so it is proved here instead.
+  const secret = "whsec_example";
+  const stripe = {
+    createCheckoutSession: async () => ({ id: "cs_1", url: "https://x/1" }),
+    getSubscription: async () => ({
+      id: "sub_trial",
+      status: "active",
+      customerId: "cus_trial",
+      currentPeriodEnd: 1_800_000_000,
+      trialEnd: undefined,
+      quantity: 1,
+      metadata: {},
+    }),
+  } as unknown as StripeClient;
+  const { client, store } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "trialing-team",
+    name: "Trialing Team",
+  });
+  const owner = await store.createUser({
+    email: "owner@example.com",
+    displayName: "Owner",
+    passwordDigest: "digest",
+    systemAdmin: false,
+  });
+  await store.saveMembership({
+    organizationId: organization.id,
+    userId: owner.id,
+    role: "owner",
+  });
+
+  const deliver = async (body: string) => {
+    const timestamp = Math.floor(Date.now() / 1000);
+    return await client.request("/api/v1/stripe/webhook", {
+      method: "POST",
+      raw: Buffer.from(body, "utf8"),
+      rawType: "application/json",
+      headers: {
+        "Stripe-Signature": `t=${String(timestamp)},v1=${createHmac(
+          "sha256",
+          secret,
+        )
+          .update(`${String(timestamp)}.${body}`, "utf8")
+          .digest("hex")}`,
+      },
+    });
+  };
+  const subscriptionEvent = (type: string, status: string, trialEnd?: number) =>
+    JSON.stringify({
+      type,
+      data: {
+        object: {
+          id: "sub_trial",
+          status,
+          customer: "cus_trial",
+          ...(trialEnd === undefined ? {} : { trial_end: trialEnd }),
+          current_period_end: 1_800_000_000,
+          metadata: { organizationId: organization.id },
+        },
+      },
+    });
+
+  // Day 0: the card was taken and Stripe is running the trial.
+  const trialEnd = Math.floor(Date.now() / 1000) + 14 * 86_400;
+  assert.equal(
+    (await deliver(subscriptionEvent("customer.subscription.created", "trialing", trialEnd))).status,
+    200,
+  );
+  const trialing = await store.getSubscription(organization.id);
+  assert.equal(trialing?.status, "active");
+  assert.notEqual(
+    trialing?.trialEndsAt,
+    undefined,
+    "the trial's end date is kept, not erased by the write",
+  );
+  assert.equal(
+    subscriptionAllowsWork(trialing, organization.createdAt),
+    true,
+    "working during the trial",
+  );
+
+  // Day 15: Stripe charges the card. Both events fire and the order between
+  // them is not guaranteed, so each is delivered and each must be harmless.
+  assert.equal(
+    (await deliver(JSON.stringify({
+      type: "invoice.paid",
+      data: { object: { subscription: "sub_trial", subscription_details: {} } },
+    }))).status,
+    200,
+  );
+  assert.equal(
+    (await deliver(subscriptionEvent("customer.subscription.updated", "active"))).status,
+    200,
+  );
+
+  const paying = await store.getSubscription(organization.id);
+  assert.equal(paying?.status, "active");
+  assert.equal(
+    subscriptionAllowsWork(paying, organization.createdAt),
+    true,
+    "still working the day after the trial converts",
+  );
+  assert.equal(
+    effectiveRole("owner", paying, organization.createdAt),
+    "owner",
+    "and not folded to viewer by the conversion",
+  );
+});
+
+test("a card that fails on day fifteen goes past due, not dark", async (t) => {
+  // The other ending. A failed payment is a card problem, and locking a team
+  // out of their repository over one is a worse answer than letting Stripe
+  // retry — so `past_due` still works, and only a cancellation stops it.
+  const secret = "whsec_example";
+  // Stamped at checkout and carried by the subscription ever after, which is
+  // exactly why it is stamped there: an invoice months later names the
+  // organization with no lookup table in between.
+  let organizationId = "";
+  const stripe = {
+    getSubscription: async () => ({
+      id: "sub_late",
+      status: "past_due",
+      customerId: "cus_late",
+      currentPeriodEnd: 1_800_000_000,
+      trialEnd: undefined,
+      quantity: 1,
+      metadata: { organizationId },
+    }),
+  } as unknown as StripeClient;
+  const { client, store } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+  const organization = await store.createOrganization({
+    slug: "late-team",
+    name: "Late Team",
+  });
+  organizationId = organization.id;
+
+  const deliver = async (body: string) => {
+    const timestamp = Math.floor(Date.now() / 1000);
+    return await client.request("/api/v1/stripe/webhook", {
+      method: "POST",
+      raw: Buffer.from(body, "utf8"),
+      rawType: "application/json",
+      headers: {
+        "Stripe-Signature": `t=${String(timestamp)},v1=${createHmac("sha256", secret)
+          .update(`${String(timestamp)}.${body}`, "utf8")
+          .digest("hex")}`,
+      },
+    });
+  };
+
+  await deliver(JSON.stringify({
+    type: "invoice.payment_failed",
+    data: { object: { subscription: "sub_late", subscription_details: {} } },
+  }));
+  const late = await store.getSubscription(organization.id);
+  assert.equal(late?.status, "past_due");
+  assert.equal(subscriptionAllowsWork(late, organization.createdAt), true);
+
+  // Cancelled is where it stops.
+  await deliver(JSON.stringify({
+    type: "customer.subscription.deleted",
+    data: {
+      object: {
+        id: "sub_late",
+        status: "canceled",
+        customer: "cus_late",
+        metadata: { organizationId: organization.id },
+      },
+    },
+  }));
+  const gone = await store.getSubscription(organization.id);
+  assert.equal(gone?.status, "canceled");
+  assert.equal(subscriptionAllowsWork(gone, organization.createdAt), false);
+  assert.equal(
+    effectiveRole("owner", gone, organization.createdAt),
+    "viewer",
+    "read-only rather than dark",
+  );
 });
 
 test("a paid sign-up refuses an address that already has an account", async (t) => {

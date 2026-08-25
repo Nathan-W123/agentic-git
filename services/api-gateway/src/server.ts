@@ -2277,6 +2277,19 @@ type AgentActivity = {
   recentObjectives: (candidate: ChannelMentionCandidate) => string[];
   /** Whether it already has work here that has not finished. */
   busy: (candidate: ChannelMentionCandidate) => boolean;
+  /**
+   * Whether it is occupying its provider *right now* — a task actually
+   * claimed by a runner, not merely waiting in the queue.
+   *
+   * Distinct from {@link AgentActivity.busy} because the two answer different
+   * questions and were being asked as one. "Has unfinished work" is right for
+   * deciding whether a new task should queue behind the current one. "Is
+   * occupying the provider" is right for deciding whether a plain question
+   * can be answered at all — and answering the first where the second was
+   * meant turned every question typed into a waiting thread into another
+   * agent run.
+   */
+  running: (candidate: ChannelMentionCandidate) => boolean;
 };
 
 /** One human participant whose displayed channel name can be @mentioned. */
@@ -14500,7 +14513,12 @@ export class ApiGateway {
       if (
         !answerOnly &&
         candidate !== undefined &&
-        (looksLikeTaskRequest(question) || queueAfterCurrent)
+        // A question becomes work only when it reads as a request, or when
+        // the agent is genuinely occupied and so cannot answer it now.
+        // Reading `queueAfterCurrent` here — "has unfinished work" — made a
+        // thread whose task was merely queued convert every question typed
+        // into it into another agent run.
+        (looksLikeTaskRequest(question) || activity.running(candidate))
       ) {
         await this.dispatchOneMention({
           projectId: input.projectId,
@@ -14696,7 +14714,9 @@ export class ApiGateway {
     if (
       !answerOnly &&
       firstAnswering !== undefined &&
-      (looksLikeTaskRequest(question) || queueAfterCurrent)
+      // See the sibling condition above: occupied now, not merely holding
+      // work that has not finished.
+      (looksLikeTaskRequest(question) || activity.running(firstAnswering))
     ) {
       const candidate = firstAnswering;
       if (candidate.visibility !== "personal" || candidate.userId === input.viewerId) {
@@ -16989,6 +17009,10 @@ export class ApiGateway {
     // whose run died, so an unfinished row past {@link BUSY_TASK_MAX_AGE_MS}
     // is a corpse, not a queue.
     const working = new Set<string>();
+    // The subset actually held by a runner. `working` deliberately counts
+    // `submitted` and `planned` too, because queue ordering cares about work
+    // that exists; occupying the provider is the narrower fact.
+    const claimed = new Set<string>();
     const staleBefore = Date.now() - BUSY_TASK_MAX_AGE_MS;
     // Newest first — see `recentFirst`. Never read `listSubmittedTasks`
     // directly here: it returns oldest first, and taking the first
@@ -17016,6 +17040,9 @@ export class ApiGateway {
         submittedAtMs > staleBefore
       ) {
         working.add(key);
+        if (task.status === "claimed") {
+          claimed.add(key);
+        }
       }
     }
     const keyFor = (candidate: ChannelMentionCandidate): string | undefined => {
@@ -17037,6 +17064,10 @@ export class ApiGateway {
       busy: (candidate) => {
         const key = keyFor(candidate);
         return key !== undefined && working.has(key);
+      },
+      running: (candidate) => {
+        const key = keyFor(candidate);
+        return key !== undefined && claimed.has(key);
       },
     };
   }
