@@ -20383,6 +20383,12 @@ export class ApiGateway {
           status: subscription.status,
           customer: subscription.customerId,
           current_period_end: subscription.currentPeriodEnd,
+          // `saveSubscription` writes the row whole, so a synthetic object
+          // that omits this erases `trialEndsAt` — and an `invoice.paid` is
+          // exactly what a trial's first charge produces. Harmless only while
+          // the date decided nothing; now that a trial is stored as one, it
+          // is the countdown a customer is shown.
+          trial_end: subscription.trialEnd,
           metadata: object["subscription_details"] ?? {},
         },
         type,
@@ -20426,7 +20432,7 @@ export class ApiGateway {
   /** Stores an entitlement, refusing an event that names no organization. */
   private async saveStripeEntitlement(input: {
     organizationId: string;
-    status: "active" | "past_due" | "canceled";
+    status: "trialing" | "active" | "past_due" | "canceled";
     currentPeriodEnd: string | undefined;
     /**
      * What Stripe says the trial ends at, carried so the row keeps it.
@@ -20485,15 +20491,22 @@ export class ApiGateway {
       );
       return;
     }
+    // Carried forward, not re-derived. `saveSubscription` writes the row
+    // whole in all three backends, so a field the incoming payload happens
+    // not to carry is a field this write erases — and "not carried" is not
+    // "no longer true". A `customer.subscription.updated` at conversion, or
+    // the synthetic subscription an invoice is turned into, can arrive
+    // without `trial_end` while the trial it names very much happened. Once
+    // the trial is stored as a trial, that date is the countdown a customer
+    // is shown and the thing the settings card reads.
+    const trialEndsAt = input.trialEndsAt ?? existing?.trialEndsAt;
     await this.options.store.saveSubscription({
       organizationId: input.organizationId,
       status: input.status,
       ...(input.currentPeriodEnd === undefined
         ? {}
         : { currentPeriodEnd: input.currentPeriodEnd }),
-      ...(input.trialEndsAt === undefined
-        ? {}
-        : { trialEndsAt: input.trialEndsAt }),
+      ...(trialEndsAt === undefined ? {} : { trialEndsAt }),
       ...(input.stripeCustomerId === ""
         ? {}
         : { stripeCustomerId: input.stripeCustomerId }),

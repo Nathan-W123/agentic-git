@@ -120,7 +120,22 @@ export function subscriptionAllowsWork(
     case "past_due":
       return true;
     case "trialing":
-      return trialRemainsOn(subscription, now);
+      // Whose trial it is decides who is believed about it.
+      //
+      // A subscription Stripe is running says `trialing` for exactly as long
+      // as Stripe honours it, and its status is more current than our mirror
+      // of the end date: at conversion Stripe moves the subscription to
+      // `active` and tells us afterwards, so between the trial's last second
+      // and that webhook landing, a date-based answer locks out a team that
+      // has just paid. `past_due` already resolves the same tension the same
+      // way — Stripe's retries are a better answer than a locked repository.
+      //
+      // A trial this deployment runs itself has no such authority behind it,
+      // and is judged against its own end date so an expired one stops on
+      // time rather than when some sweep next runs.
+      return subscription.stripeSubscriptionId !== undefined
+        ? true
+        : trialRemainsOn(subscription, now);
     case "canceled":
       return false;
   }

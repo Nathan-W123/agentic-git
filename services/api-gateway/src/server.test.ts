@@ -10536,7 +10536,7 @@ test("a paid sign-up takes the card first and builds the account last", async (t
   assert.notEqual(await store.getOrganization(organizationId), undefined);
   assert.equal(await store.countUsers(), 0, "still nobody to sign in as");
   const subscription = await store.getSubscription(organizationId);
-  assert.equal(subscription?.status, "active");
+  assert.equal(subscription?.status, "trialing");
   assert.notEqual(subscription?.trialEndsAt, undefined, "the trial date is kept");
 
   // Stripe redelivers. Provisioning is one transaction that re-reads the
@@ -10610,7 +10610,11 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
       status: "active",
       customerId: "cus_trial",
       currentPeriodEnd: 1_800_000_000,
-      trialEnd: undefined,
+      // Stripe keeps `trial_end` on a subscription after it converts — it
+      // records when the trial ended, it is not cleared. The invoice path
+      // builds a synthetic subscription object to re-record, and the row is
+      // written whole, so a copy that dropped this erased the date.
+      trialEnd: 1_700_000_000,
       quantity: 1,
       metadata: {},
     }),
@@ -10674,7 +10678,10 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
     200,
   );
   const trialing = await store.getSubscription(organization.id);
-  assert.equal(trialing?.status, "active");
+  // Stored as the trial it is. Folded into `active` — which is what this
+  // pinned before — the countdown banner never fired for anybody and the
+  // settings card told a day-two customer their subscription was running.
+  assert.equal(trialing?.status, "trialing");
   assert.notEqual(
     trialing?.trialEndsAt,
     undefined,
@@ -10702,6 +10709,11 @@ test("day fifteen bills the trial and the team keeps working", async (t) => {
 
   const paying = await store.getSubscription(organization.id);
   assert.equal(paying?.status, "active");
+  assert.notEqual(
+    paying?.trialEndsAt,
+    undefined,
+    "the invoice path must not erase the date on the way through",
+  );
   assert.equal(
     subscriptionAllowsWork(paying, organization.createdAt),
     true,

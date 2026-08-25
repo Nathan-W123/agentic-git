@@ -173,9 +173,14 @@ test("a v0 signature alone does not authenticate anything", () => {
 
 /* ------------------------------------------------------ status mapping --- */
 
-test("Stripe's statuses narrow to this deployment's three", () => {
+test("Stripe's statuses narrow to this deployment's four", () => {
   assert.equal(subscriptionStatusFrom("active"), "active");
-  assert.equal(subscriptionStatusFrom("trialing"), "active");
+  // Kept as itself rather than folded into `active`. The fold was true of
+  // what the gate needs — a trial is honoured — and false of everything a
+  // customer is shown: the countdown banner never fired for anybody, and the
+  // settings card told a day-two trial "Active — Your subscription is
+  // running".
+  assert.equal(subscriptionStatusFrom("trialing"), "trialing");
   assert.equal(subscriptionStatusFrom("past_due"), "past_due");
   assert.equal(subscriptionStatusFrom("unpaid"), "past_due");
   assert.equal(subscriptionStatusFrom("canceled"), "canceled");

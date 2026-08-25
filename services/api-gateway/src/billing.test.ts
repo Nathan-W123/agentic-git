@@ -132,6 +132,32 @@ test("a trial with no end date, or an unreadable one, is spent", () => {
   );
 });
 
+test("a trial Stripe is running is honoured on Stripe's word, not our date", () => {
+  // Who is running the trial decides who is believed about it. Ours has no
+  // authority behind it, so it is judged against its own end date and the two
+  // tests above still hold. Stripe's has Stripe: at conversion the
+  // subscription moves to `active` and we are told afterwards, so between the
+  // trial's last second and that webhook landing a date-based answer locks
+  // out a team that has just paid — for a delivery delay, on the one day of
+  // the fortnight where the money actually moves.
+  const stripeRun = subscription({
+    status: "trialing",
+    trialEndsAt: "2026-05-31T00:00:00.000Z",
+    stripeSubscriptionId: "sub_live",
+  });
+  assert.equal(subscriptionAllowsWork(stripeRun, ORG_CREATED, NOW), true);
+  // And a cancellation still stops it, because that arrives as a status
+  // rather than as a date.
+  assert.equal(
+    subscriptionAllowsWork(
+      { ...stripeRun, status: "canceled" },
+      ORG_CREATED,
+      NOW,
+    ),
+    false,
+  );
+});
+
 test("no recorded subscription is no entitlement, however new the organization", () => {
   // This used to read a missing row as a fresh fourteen days from
   // `createdAt`, on the reasoning that it was self-healing and could not be
