@@ -490,21 +490,28 @@ if (typeof document !== "undefined") {
 }
 
 /**
- * The UMI letters of the full Kumi wordmark used on the auth shell.
+ * The full Kumi wordmark used on the auth shell.
  *
  * The letters are stroked polylines rather than filled outlines, because that
  * is what they are — one constant weight, flat cuts, no curves anywhere. The
- * leading symbol is the supplied Kumi artwork, cropped from its source image
- * inside the same space the old K occupied.
- *
- * The letters use `currentColor`, so they remain right on dark and light; the
- * supplied black-and-white mark keeps its published treatment beside them.
+ * letters use `currentColor`, so they remain right on dark and light.
  */
-const BRAND_LETTERS = `<path d="M54.3 8v22.7l6.3 6.3h20.8l6.3-6.3V8"/>
+const BRAND_LETTERS = `<path d="M8.3 8V40"/>
+    <path d="M42 11 13.5 24 42 37"/>
+    <path d="M54.3 8v22.7l6.3 6.3h20.8l6.3-6.3V8"/>
     <path d="M102.3 8V40"/>
     <path d="M143.7 8V40"/>
     <path d="M102.3 10.5 123 30l20.7-19.5"/>
     <path d="M158.3 8V40"/>`;
+
+/** The supplied standalone mark, cropped from its wide source artwork. */
+export function brandMark(size = 34) {
+  return `<svg class="brand-mark" width="${size}" height="${size}"
+    viewBox="0 0 48 48" overflow="hidden" aria-hidden="true">
+    <image href="/kumi-logo.png" x="-33" y="-7" width="114" height="62"
+      preserveAspectRatio="xMidYMid meet"/>
+  </svg>`;
+}
 
 /**
  * The whole word, for the surfaces with room for it — the sign-in card and
@@ -515,8 +522,6 @@ const BRAND_LETTERS = `<path d="M54.3 8v22.7l6.3 6.3h20.8l6.3-6.3V8"/>
  * drawn at, and `meet` means the word is never cropped if something else
  * sizes the box. `aria-label` rather than `aria-hidden`: read out, this one is
  * the product's name, not decoration beside a heading that already says it.
- * The nested viewport deliberately crops the supplied wide image to its main
- * mark, excluding the surrounding canvas and the small sparkle at the right.
  */
 export function brandWordmark(width = 120) {
   const height = Math.round((width / 3.5) * 100) / 100;
@@ -524,11 +529,6 @@ export function brandWordmark(width = 120) {
     viewBox="0 0 168 48" preserveAspectRatio="xMidYMid meet"
     fill="none" stroke="currentColor" stroke-width="6.6"
     stroke-linecap="butt" stroke-linejoin="miter" role="img" aria-label="Kumi">
-    <svg x="0" y="0" width="48" height="48" viewBox="0 0 48 48"
-      overflow="hidden" aria-hidden="true">
-      <image href="/kumi-logo.png" x="-33" y="-7" width="114" height="62"
-        preserveAspectRatio="xMidYMid meet"/>
-    </svg>
     ${BRAND_LETTERS}
   </svg>`;
 }

@@ -706,6 +706,7 @@ svg.ui-icon {
 
 /* ------------------------------------------------------------- brand ---- */
 
+.brand-mark,
 .brand-wordmark {
   flex: none;
 }
@@ -4642,6 +4643,7 @@ button.chip.lg:hover {
   border-right: 1px solid var(--border-soft);
 }
 
+.channel-rail-brand,
 .channel-rail-toggle,
 .channel-rail-new,
 .channel-rail-button {
@@ -4654,6 +4656,7 @@ button.chip.lg:hover {
   transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
 }
 
+.channel-rail-brand:hover,
 .channel-rail-toggle:hover,
 .channel-rail-new:hover,
 .channel-rail-button:hover {
@@ -4662,6 +4665,7 @@ button.chip.lg:hover {
   border-radius: var(--radius-sm);
 }
 
+.channel-rail-brand:focus-visible,
 .channel-rail-toggle:focus-visible,
 .channel-rail-new:focus-visible,
 .channel-rail-button:focus-visible {
@@ -10616,6 +10620,7 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
+  .channel-rail-brand,
   .channel-rail-new,
   .channel-rail-button {
     width: 40px;

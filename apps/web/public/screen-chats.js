@@ -93,6 +93,7 @@ import {
   agentFace,
   agentLabelOf,
   avatar,
+  brandMark,
   chime,
   clockTime,
   esc,
@@ -143,6 +144,8 @@ function channelRail(activeRepositoryId) {
     left.id.localeCompare(right.id),
   );
   return `<nav class="channel-rail" aria-label="Channels">
+    <button type="button" class="channel-rail-brand" data-act="nav" data-value="chats"
+      title="Kumi" aria-label="Kumi">${brandMark(28)}</button>
     <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
       title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
       aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
