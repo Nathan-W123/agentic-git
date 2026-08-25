@@ -83,3 +83,42 @@ export async function verifyServer(
   }
   return { ok: true };
 }
+
+/** Everywhere a server address can come from, in the order they are believed. */
+export interface ServerSources {
+  /** `KUMI_SERVER` in the environment. A development override. */
+  configured?: string | undefined;
+  /** What the last successful launch wrote down. */
+  saved?: string | undefined;
+  /** The deployment this build was made for, baked in at package time. */
+  fallback?: string | undefined;
+  /** Set by "Change Server", and the reason the fallback can be escaped. */
+  askedToChange?: boolean | undefined;
+}
+
+/**
+ * Which deployment to open, or nothing if there is no answer but to ask.
+ *
+ * A build made for one hosted Kumi should not interrogate every person who
+ * installs it: it knows where it belongs, so `fallback` carries that and the
+ * first-run window never appears. A build made for nobody in particular — a
+ * self-hosted one — has no fallback and asks, which is what it did before.
+ *
+ * `askedToChange` is what keeps the fallback from becoming a trap. Without it,
+ * "Change Server" would clear the saved address, relaunch, fall straight back
+ * to the baked-in one, and look like a menu item that does nothing.
+ */
+export function resolveServer(sources: ServerSources): string | undefined {
+  const configured = normalizeServer(sources.configured);
+  if (configured !== undefined) {
+    return configured;
+  }
+  const saved = normalizeServer(sources.saved);
+  if (saved !== undefined) {
+    return saved;
+  }
+  if (sources.askedToChange === true) {
+    return undefined;
+  }
+  return normalizeServer(sources.fallback);
+}

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -123,4 +124,29 @@ test("every download the page offers is a file the packager actually builds", as
   for (const file of offered) {
     assert.ok(built.has(file), `the page offers ${file}, which nothing builds`);
   }
+});
+
+test("the address baked into every download is one that could work", () => {
+  // Not a check that the deployment is up — that is not a test's business —
+  // but that the string shipped inside every copy is an https origin rather
+  // than a typo. It cannot be corrected after the fact: an installed app has
+  // no redirect to follow, so a wrong address here is a re-download for
+  // everybody who already has one.
+  const manifest = JSON.parse(
+    readFileSync(
+      path.join(repoRoot, "apps", "desktop", "package.json"),
+      "utf8",
+    ),
+  ) as { kumi?: { defaultServer?: unknown } };
+  const address = manifest.kumi?.defaultServer;
+  assert.equal(typeof address, "string");
+  if (address === "") {
+    // Empty is a legitimate build: it asks on first run instead.
+    return;
+  }
+  const url = new URL(address as string);
+  assert.equal(url.protocol, "https:", "a shipped address must not be plain http");
+  assert.equal(url.search, "");
+  assert.equal(url.hash, "");
+  assert.ok(!(address as string).endsWith("/"), "a trailing slash doubles up in every request path");
 });

@@ -3,7 +3,11 @@ import { createServer, type Server } from "node:http";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
 
-import { normalizeServer, verifyServer } from "./server-address.js";
+import {
+  normalizeServer,
+  resolveServer,
+  verifyServer,
+} from "./server-address.js";
 
 test("an address is read the way somebody would write one", () => {
   // The scheme is the part people leave off, and refusing them for it would
@@ -99,4 +103,70 @@ test("an address nothing is listening on does not hang the setup screen", async 
   const checked = await verifyServer(origin, 2_000);
   assert.equal(checked.ok, false);
   assert.match(checked.ok ? "" : checked.message, /Could not reach/u);
+});
+
+test("a build made for one deployment opens it without asking", () => {
+  // The whole point of a hosted product: nobody installing it should be asked
+  // to name the server it was built for.
+  assert.equal(
+    resolveServer({ fallback: "https://kumi.example.com" }),
+    "https://kumi.example.com",
+  );
+});
+
+test("a build made for nobody in particular still asks", () => {
+  // Self-hosted, or an unconfigured build. `undefined` is what makes the
+  // first-run window appear.
+  assert.equal(resolveServer({}), undefined);
+  // And a fallback that is not an address is no fallback at all — better to
+  // ask than to open a window onto nothing.
+  assert.equal(resolveServer({ fallback: "not an address" }), undefined);
+  assert.equal(resolveServer({ fallback: "" }), undefined);
+});
+
+test("what somebody chose outranks what the build was made for", () => {
+  assert.equal(
+    resolveServer({
+      saved: "https://mine.example.com",
+      fallback: "https://kumi.example.com",
+    }),
+    "https://mine.example.com",
+  );
+});
+
+test("the environment outranks everything, which is what makes it useful", () => {
+  // Pointing a real build at a local gateway has to work without disturbing
+  // the settings a real launch wrote.
+  assert.equal(
+    resolveServer({
+      configured: "http://localhost:4000",
+      saved: "https://mine.example.com",
+      fallback: "https://kumi.example.com",
+    }),
+    "http://localhost:4000",
+  );
+});
+
+test("Change Server escapes the baked-in address rather than bouncing off it", () => {
+  // The failure this exists to prevent: Change Server clears the saved
+  // address, the app relaunches, falls straight back to the fallback, and the
+  // menu item looks broken. Somebody on a build with a default would have no
+  // way to point it anywhere else.
+  assert.equal(
+    resolveServer({
+      saved: "",
+      fallback: "https://kumi.example.com",
+      askedToChange: true,
+    }),
+    undefined,
+  );
+  // And once they have chosen, the flag is spent: the choice is what counts.
+  assert.equal(
+    resolveServer({
+      saved: "https://elsewhere.example.com",
+      fallback: "https://kumi.example.com",
+      askedToChange: true,
+    }),
+    "https://elsewhere.example.com",
+  );
 });

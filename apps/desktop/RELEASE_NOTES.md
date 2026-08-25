@@ -39,9 +39,10 @@ administrator.
 
 ## Signing in
 
-Kumi asks for the address of your deployment, checks that something Kumi-shaped
-is answering there, then opens your browser so you can approve the app while
-signed in as yourself. Nothing is copied or pasted, and no token is ever shown.
+Kumi already knows which deployment it belongs to, so there is nothing to
+configure. It opens your browser, you approve the app while signed in as
+yourself, and the window loads. Nothing is copied or pasted, and no token is
+ever shown.
 
 The app is granted `view` and `run_task` — enough to read the room and start
 work, deliberately not everything you can do. Revoke it any time in

@@ -36,7 +36,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { signIn } from "../dist/sign-in.js";
-import { normalizeServer, verifyServer } from "../dist/server-address.js";
+import {
+  normalizeServer,
+  resolveServer,
+  verifyServer,
+} from "../dist/server-address.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -49,6 +53,12 @@ const releasesUrl =
   typeof manifest.kumi?.releasesRepo === "string"
     ? `https://github.com/${manifest.kumi.releasesRepo}/releases`
     : undefined;
+
+// The deployment this build was made for. Present in a build of the hosted
+// product, where asking each person to name the server would be asking them
+// something only one answer fits; absent in a build for self-hosting, which
+// asks. Left blank rather than removed so the slot is visible.
+const defaultServer = manifest.kumi?.defaultServer;
 
 /** Set once sign-in is done; what every window after that is opened with. */
 let session;
@@ -67,6 +77,9 @@ async function readSettings() {
     const sealed = saved.token;
     return {
       server: typeof saved.server === "string" ? saved.server : "",
+      // Written by "Change Server" and cleared by choosing one. Without it, a
+      // build with a baked-in address would fall straight back to it.
+      askedToChange: saved.askedToChange === true,
       // Decrypted only here, and only on the machine that sealed it: OS-backed
       // keys, so copying the file to another laptop yields nothing readable.
       token:
@@ -75,11 +88,11 @@ async function readSettings() {
           : "",
     };
   } catch {
-    return { server: "", token: "" };
+    return { server: "", token: "", askedToChange: false };
   }
 }
 
-async function writeSettings(server, token) {
+async function writeSettings(server, token, askedToChange = false) {
   await mkdir(path.dirname(settingsPath()), { recursive: true });
   // An empty token is written as no token at all rather than as a sealed empty
   // string, so signing out leaves a file that plainly has nothing in it.
@@ -89,7 +102,11 @@ async function writeSettings(server, token) {
       : undefined;
   await writeFile(
     settingsPath(),
-    JSON.stringify({ server, ...(sealed === undefined ? {} : { token: sealed }) }),
+    JSON.stringify({
+      server,
+      ...(sealed === undefined ? {} : { token: sealed }),
+      ...(askedToChange ? { askedToChange: true } : {}),
+    }),
     "utf8",
   );
 }
@@ -174,8 +191,9 @@ async function signOutAndRestart() {
 
 async function changeServerAndRestart() {
   // The token goes with the server: it was issued by that deployment and means
-  // nothing to another one.
-  await writeSettings("", "");
+  // nothing to another one. The flag is what makes this menu item work at all
+  // on a build that has an address baked in — see `resolveServer`.
+  await writeSettings("", "", true);
   relaunch();
 }
 
@@ -252,8 +270,12 @@ function describe(error) {
 
 async function start() {
   const saved = await readSettings();
-  const configured = normalizeServer(process.env.KUMI_SERVER);
-  let server = configured ?? normalizeServer(saved.server);
+  let server = resolveServer({
+    configured: process.env.KUMI_SERVER,
+    saved: saved.server,
+    fallback: defaultServer,
+    askedToChange: saved.askedToChange,
+  });
   // A token is only good at the deployment that issued it. Compared after
   // both sides are normalized, so a stored address that merely spells the
   // same origin differently does not throw away a working credential.

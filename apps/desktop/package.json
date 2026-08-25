@@ -1,6 +1,6 @@
 {
   "name": "@coord/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Kumi as a desktop app: a window onto your deployment, signed in through your browser.",
   "author": "Kumi",
@@ -13,7 +13,8 @@
     "./electron": "./electron/main.mjs"
   },
   "kumi": {
-    "releasesRepo": "Nathan-W123/Kumi"
+    "releasesRepo": "Nathan-W123/Kumi",
+    "defaultServer": "https://kumi.up.railway.app"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
