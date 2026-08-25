@@ -5663,6 +5663,21 @@ export async function ensureDeployment(rerender) {
   rerender();
 }
 
+/**
+ * Answers one approval, then forgets the overview so it is read again.
+ *
+ * The cached copy is what the deployment screen renders from, and leaving it
+ * in place would show the approval still waiting after it had been decided —
+ * the exact thing this control exists to stop being true.
+ */
+export async function decideApproval(approvalId, status, comment) {
+  await api(`/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "POST",
+    body: { status, comment: comment ?? "" },
+  });
+  state.deployment = undefined;
+}
+
 export function iAmSystemAdmin() {
   return state.principal?.user?.systemAdmin === true;
 }
