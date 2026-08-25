@@ -140,6 +140,18 @@ export interface RepositoryGrant {
   userId: UserId;
   role: OrganizationRole;
   grantedBy: UserId | undefined;
+  /**
+   * Access to this repository that costs nobody anything, and that stands on
+   * its own regardless of what the owning organization's subscription says.
+   *
+   * The deployment's operators hand these out: somebody they invited to one
+   * repository gets full use of that repository without paying and without
+   * the organization paying for them. It is deliberately the narrowest thing
+   * that can be given away — one person, one repository — because a comp that
+   * reached the whole organization would be giving away every repository it
+   * has, including ones that do not exist yet.
+   */
+  comped: boolean;
   createdAt: string;
 }
 

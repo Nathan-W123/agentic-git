@@ -5207,7 +5207,6 @@ export class ApiGateway {
             organizationId: invitation.organizationId,
             userId: user.id,
             role: invitation.role,
-            comped: invitation.comped,
           });
         } else {
           await this.options.store.saveRepositoryGrant({
@@ -5215,6 +5214,10 @@ export class ApiGateway {
             userId: user.id,
             role: invitation.role,
             grantedBy: invitation.invitedBy,
+            // Free use of this one repository, if an operator's link is what
+            // brought them here. Carried from the invitation rather than
+            // re-derived, so it reflects who actually gave the access away.
+            comped: invitation.comped,
             createdAt: new Date().toISOString(),
           });
         }
@@ -6117,11 +6120,16 @@ export class ApiGateway {
           role,
           secretHash: hashSecret(secret),
           invitedBy: principal.user.id,
-          // A link from whoever runs the deployment is a free seat. This is
-          // how the founders hand out access without it landing on their own
-          // invoice, and it is settled here rather than at acceptance so the
-          // answer cannot change under the recipient between the two.
-          comped: principal.user.systemAdmin,
+          // A link from whoever runs the deployment, to one repository, is
+          // free use of that repository. Both halves are required: only an
+          // operator may give access away, and only a repository-scoped
+          // invitation is narrow enough to give. An organization-wide link
+          // would be handing over every repository the organization has,
+          // including ones that do not exist yet, so it is never comped.
+          //
+          // Settled here rather than at acceptance so the answer cannot change
+          // under the recipient between clicking and joining.
+          comped: principal.user.systemAdmin && repositoryId !== undefined,
           createdAt: now.toISOString(),
           expiresAt: new Date(
             now.getTime() + INVITATION_TTL_MS,
@@ -6993,6 +7001,9 @@ export class ApiGateway {
         userId,
         role,
         grantedBy: principal.user.id,
+        // Sharing a repository with a colleague is an ordinary paid seat. Only
+        // an operator's invitation link gives access away.
+        comped: false,
         createdAt: new Date().toISOString(),
       });
       await this.options.store.appendAudit(undefined, {

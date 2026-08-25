@@ -3102,6 +3102,7 @@ for (const backend of backends) {
         userId: user.id,
         role: "developer",
         grantedBy: undefined,
+        comped: false,
         createdAt: "2026-01-01T00:00:00.000Z",
       });
       const mine = await store.listGrantsForUser(user.id);
@@ -3116,6 +3117,7 @@ for (const backend of backends) {
         userId: user.id,
         role: "viewer",
         grantedBy: undefined,
+        comped: false,
         createdAt: "2026-01-02T00:00:00.000Z",
       });
       const after = await store.listRepositoryGrants("repo_shared");
@@ -3259,6 +3261,7 @@ for (const backend of backends) {
         userId: guest.id,
         role: "developer",
         grantedBy: alice.id,
+        comped: false,
         createdAt: "2026-01-01T00:00:00.000Z",
       });
 

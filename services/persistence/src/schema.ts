@@ -1210,6 +1210,25 @@ export const MIGRATIONS: readonly Migration[] = [
          ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
     ],
   },
+  {
+    // A free seat is a repository, not an organization.
+    //
+    // The first attempt put the comp on the membership, which grants the whole
+    // organization — every repository it owns, present and future. What is
+    // actually being given away is access to the one repository somebody was
+    // invited to, so the flag belongs on the grant that names it.
+    //
+    // `organization_memberships.comped` stays. It is still what a system
+    // administrator's synthesised membership uses to keep itself off an
+    // invoice, and still the right shape if an organization-wide comp is ever
+    // wanted. It is simply no longer what an invitation sets.
+    version: 44,
+    name: "comped-repository-grants",
+    statements: [
+      `ALTER TABLE repository_grants
+         ADD COLUMN comped INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

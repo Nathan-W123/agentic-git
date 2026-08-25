@@ -958,4 +958,13 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ADD COLUMN comped BOOLEAN NOT NULL DEFAULT FALSE`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 44,
+    name: "comped-repository-grants",
+    statements: [
+      `ALTER TABLE repository_grants
+         ADD COLUMN comped BOOLEAN NOT NULL DEFAULT FALSE`,
+    ],
+  },
 ];

@@ -183,3 +183,27 @@ test("an expired trial is read-only the moment it expires", () => {
   // and call it a rounding decision.
   assert.equal(effectiveRole("owner", justExpired, ORG_CREATED, NOW), "viewer");
 });
+
+/* ------------------------------------------------------ comped grants --- */
+
+test("a comped repository grant is entitlement on its own", () => {
+  // What the operators actually hand out: free full use of one repository,
+  // standing regardless of what the organization owning it has paid. The gate
+  // in `authorization.ts` is what applies this; the rule is stated here so the
+  // intent survives a refactor of the gate.
+  const canceled = subscription({ status: "canceled" });
+  // Without the comp, an unpaid organization folds this to read-only.
+  assert.equal(effectiveRole("developer", canceled, ORG_CREATED, NOW), "viewer");
+  // The comp is not a subscription status, so it cannot be expressed here —
+  // which is the point: it is grant-scoped, and `authorizeRepository` skips
+  // the fold entirely rather than inventing an entitlement for the whole
+  // organization.
+  assert.equal(subscriptionAllowsWork(canceled, ORG_CREATED, NOW), false);
+});
+
+test("a comped seat never reaches the invoice, at any role", () => {
+  // Comped covers full use, so it has to survive being an owner-level seat.
+  assert.equal(billableSeats([member("owner", true)]), 0);
+  assert.equal(billableSeats([member("admin", true)]), 0);
+  assert.equal(billableSeats([member("developer", true)]), 0);
+});

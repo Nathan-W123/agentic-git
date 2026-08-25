@@ -1320,15 +1320,16 @@ export class PostgresCoordinationStore implements CoordinationStore {
   public async saveRepositoryGrant(grant: RepositoryGrant): Promise<void> {
     await this.query(
       `INSERT INTO repository_grants
-         (repository_id, user_id, role, granted_by, created_at)
-       VALUES ($1, $2, $3, $4, $5)
+         (repository_id, user_id, role, granted_by, comped, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (repository_id, user_id)
-       DO UPDATE SET role = EXCLUDED.role`,
+       DO UPDATE SET role = EXCLUDED.role, comped = EXCLUDED.comped`,
       [
         grant.repositoryId,
         grant.userId,
         grant.role,
         grant.grantedBy ?? null,
+        grant.comped,
         grant.createdAt,
       ],
     );
@@ -1368,6 +1369,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       userId: text(row, "user_id"),
       role: text(row, "role") as RepositoryGrant["role"],
       grantedBy: optionalText(row, "granted_by"),
+      comped: flag(row, "comped"),
       createdAt: text(row, "created_at"),
     };
   }

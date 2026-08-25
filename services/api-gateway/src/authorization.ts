@@ -289,11 +289,25 @@ export async function authorizeProject(
     (highest, grant) => higherRole(highest, grant.role),
     undefined,
   );
-  const role = await entitledRole(
-    store,
-    principal,
-    organization,
-    higherRole(organizationRole, grantRole),
+  // A comped grant stands on its own — see `authorizeRepository`, which makes
+  // the same allowance exactly. Taken as the higher of the two rather than as
+  // a bypass, so an unpaid organization still folds to `viewer` everywhere the
+  // comp does not reach; `repositories` below already narrows a grant-only
+  // caller to the repositories they actually hold.
+  const compedRole = grants
+    .filter((grant) => grant.comped)
+    .reduce<OrganizationRole | undefined>(
+      (highest, grant) => higherRole(highest, grant.role),
+      undefined,
+    );
+  const role = higherRole(
+    await entitledRole(
+      store,
+      principal,
+      organization,
+      higherRole(organizationRole, grantRole),
+    ),
+    compedRole,
   );
   assertPermission(role, permission);
   assertTokenScope(principal, permission);
@@ -415,12 +429,16 @@ export async function authorizeRepository(
     }
   }
 
-  const role = await entitledRole(
-    store,
-    principal,
-    organization,
-    higherRole(organizationRole, repositoryGrant?.role),
-  );
+  // A comped grant is entitlement in its own right. It was given away for
+  // this one repository by whoever runs the deployment, so it must not be
+  // folded to `viewer` because the organization that happens to own the
+  // repository has not paid — the person holding it is precisely the person
+  // who was told they would not have to.
+  const granted = higherRole(organizationRole, repositoryGrant?.role);
+  const role =
+    repositoryGrant?.comped === true
+      ? granted
+      : await entitledRole(store, principal, organization, granted);
   assertPermission(role, permission);
   // Checked against the permission actually requested, not "view" — a token
   // scoped to exactly one permission (e.g. `manage_project` without `view`)

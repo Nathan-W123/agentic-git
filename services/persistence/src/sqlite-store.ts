@@ -1278,16 +1278,17 @@ export class SqliteCoordinationStore implements CoordinationStore {
     this.db
       .prepare(
         `INSERT INTO repository_grants
-           (repository_id, user_id, role, granted_by, created_at)
-         VALUES (?, ?, ?, ?, ?)
+           (repository_id, user_id, role, granted_by, comped, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(repository_id, user_id)
-         DO UPDATE SET role = excluded.role`,
+         DO UPDATE SET role = excluded.role, comped = excluded.comped`,
       )
       .run(
         grant.repositoryId,
         grant.userId,
         grant.role,
         grant.grantedBy ?? null,
+        grant.comped ? 1 : 0,
         grant.createdAt,
       );
   }
@@ -1327,6 +1328,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       userId: text(row, "user_id"),
       role: text(row, "role") as RepositoryGrant["role"],
       grantedBy: optionalText(row, "granted_by"),
+      comped: integer(row, "comped") === 1,
       createdAt: text(row, "created_at"),
     };
   }
