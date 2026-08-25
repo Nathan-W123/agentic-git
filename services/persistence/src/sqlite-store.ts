@@ -265,11 +265,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async createOrganization(input: {
+    id?: string;
     slug: string;
     name: string;
   }): Promise<Organization> {
     const organization: Organization = {
-      id: createId("org"),
+      id: input.id ?? createId("org"),
       slug: input.slug.trim().toLowerCase(),
       name: input.name.trim(),
       createdAt: new Date().toISOString(),
@@ -1448,20 +1449,18 @@ export class SqliteCoordinationStore implements CoordinationStore {
     this.db
       .prepare(
         `INSERT INTO signup_intents
-           (id, organization_id, email, display_name, organization_name,
-            password_digest, secret_hash, stripe_session_id, created_at,
-            expires_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, organization_id, email, organization_name, secret_hash,
+            stripe_session_id, user_id, created_at, expires_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         intent.id,
         intent.organizationId,
         intent.email,
-        intent.displayName,
         intent.organizationName ?? null,
-        intent.passwordDigest,
         intent.secretHash,
         intent.stripeSessionId ?? null,
+        intent.userId ?? null,
         intent.createdAt,
         intent.expiresAt,
         intent.completedAt ?? null,
@@ -1489,6 +1488,29 @@ export class SqliteCoordinationStore implements CoordinationStore {
          WHERE id = ? AND completed_at IS NULL`,
       )
       .run(at, id);
+    return Number(result.changes) === 1;
+  }
+
+  public async getSignupIntentByOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM signup_intents WHERE organization_id = ?")
+      .get(organizationId) as Row | undefined;
+    return row === undefined ? undefined : this.toSignupIntent(row);
+  }
+
+  public async attachSignupIntentUser(
+    id: string,
+    userId: string,
+  ): Promise<boolean> {
+    // Conditional, so two requests racing one claim link cannot both build an
+    // account against the same paid organization.
+    const result = this.db
+      .prepare(
+        "UPDATE signup_intents SET user_id = ? WHERE id = ? AND user_id IS NULL",
+      )
+      .run(userId, id);
     return Number(result.changes) === 1;
   }
 
@@ -1521,11 +1543,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
       id: text(row, "id"),
       organizationId: text(row, "organization_id"),
       email: text(row, "email"),
-      displayName: text(row, "display_name"),
       organizationName: optionalText(row, "organization_name"),
-      passwordDigest: text(row, "password_digest"),
       secretHash: text(row, "secret_hash"),
       stripeSessionId: optionalText(row, "stripe_session_id"),
+      userId: optionalText(row, "user_id"),
       createdAt: text(row, "created_at"),
       expiresAt: text(row, "expires_at"),
       completedAt: optionalText(row, "completed_at"),

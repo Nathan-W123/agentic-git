@@ -11,6 +11,7 @@ import type {
   OrganizationMembership,
   OrganizationRole,
   PasswordResetRecord,
+  SignupIntentRecord,
   UserAccount,
 } from "@coord/persistence";
 import { createId } from "@coord/shared-types";
@@ -586,6 +587,78 @@ export class AuthService {
    * path below is untouched and comes back the moment a deployment asks for
    * it, so nothing here has to be rebuilt to turn confirmation on.
    */
+  /**
+   * Builds the account a cleared payment has already paid for.
+   *
+   * The organization, its project and its subscription were created by the
+   * webhook when the money confirmed; what is missing is the person. So this
+   * is the ordinary provisioning sequence with its expensive half already
+   * done, and it runs in the same order for the same reason: the user is
+   * written before the membership because the membership points at it, and
+   * nothing before that point can strand anybody.
+   *
+   * Claiming twice builds one account. `attachSignupIntentUser` is
+   * conditional, so of two requests racing the same link exactly one may
+   * proceed — the loser is handed the account the winner made rather than an
+   * error, because both of them are the same person pressing the same button.
+   */
+  public async completePaidSignup(input: {
+    intent: SignupIntentRecord;
+    displayName: string;
+    password: string;
+  }): Promise<UserAccount> {
+    const existing = input.intent.userId;
+    if (existing !== undefined) {
+      const already = await this.store.getUser(existing);
+      if (already !== undefined) {
+        return already;
+      }
+    }
+    assertPassword(input.password);
+    const displayName = input.displayName.trim();
+    if (displayName === "") {
+      throw new AuthenticationError(
+        "A name is required",
+        400,
+        "invalid_request",
+      );
+    }
+    // Between paying and arriving here somebody could have registered this
+    // address by another route. Refusing is right — the money is not lost,
+    // it bought a subscription that the existing account can be moved onto —
+    // but it must not be silently attached to a stranger's account.
+    if ((await this.store.getUserByEmail(input.intent.email)) !== undefined) {
+      throw new AuthenticationError(
+        "An account already uses that email address",
+        409,
+        "account_exists",
+      );
+    }
+    const passwordDigest = await hashPassword(input.password);
+    const user = await this.store.createUser({
+      email: input.intent.email,
+      displayName,
+      passwordDigest,
+      systemAdmin: false,
+    });
+    if (!(await this.store.attachSignupIntentUser(input.intent.id, user.id))) {
+      // Somebody else won the race between the two reads above. Their account
+      // is the real one; hand it back rather than leaving this caller with a
+      // second.
+      const winner = (await this.store.getSignupIntent(input.intent.id))?.userId;
+      const account = winner === undefined ? undefined : await this.store.getUser(winner);
+      if (account !== undefined) {
+        return account;
+      }
+    }
+    await this.store.saveMembership({
+      organizationId: input.intent.organizationId,
+      userId: user.id,
+      role: "owner",
+    });
+    return user;
+  }
+
   public async registerUnconfirmed(input: {
     email: string;
     displayName: string;

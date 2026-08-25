@@ -10126,6 +10126,146 @@ test("an empty token is the same as none, not a token nobody can send", async (t
   assert.equal(created.status, 201, JSON.stringify(created.data));
 });
 
+test("a paid sign-up takes the card first and builds the account last", async (t) => {
+  // The whole flow, in the order a person meets it: an address, a card, then
+  // a name and a password. Nothing anybody can sign in to exists until the
+  // money has cleared, which is what makes the public route safe to expose
+  // and what stops a failed payment leaving an account behind.
+  const secret = "whsec_example";
+  let checkout: Record<string, unknown> | undefined;
+  const stripe = {
+    createCheckoutSession: async (input: Record<string, unknown>) => {
+      checkout = input;
+      return { id: "cs_paid", url: "https://checkout.example/cs_paid" };
+    },
+  } as unknown as StripeClient;
+  const { client, store } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: secret,
+    stripePriceId: "price_example",
+  });
+
+  // 1. An address. No account, no organization — only an intent naming an id
+  //    that does not exist yet.
+  const started = await client.request("/api/v1/auth/signup", {
+    method: "POST",
+    body: { email: "Buyer@Example.com", organizationName: "Buyer's team" },
+  });
+  assert.equal(started.status, 200, JSON.stringify(started.data));
+  assert.equal(started.data.url, "https://checkout.example/cs_paid");
+  assert.equal(await store.countUsers(), 0, "paying comes before the account");
+  // The card is taken today and the trial is Stripe's to run.
+  assert.equal(checkout?.["trialPeriodDays"], 14);
+  assert.equal(checkout?.["customerEmail"], "buyer@example.com");
+  const organizationId = String(checkout?.["organizationId"] ?? "");
+  assert.match(organizationId, /^org_/u);
+  assert.equal(await store.getOrganization(organizationId), undefined);
+
+  // The claim link is the checkout's return address, so it is the one thing
+  // the person carries from Stripe back to us.
+  const token = String(checkout?.["successUrl"] ?? "").split("#welcome/")[1] ?? "";
+  assert.notEqual(token, "");
+
+  // 2. Stripe confirms. The organization it paid for is built now — and
+  //    still no account, because they have not chosen a password yet.
+  const body = JSON.stringify({
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_paid",
+        status: "trialing",
+        customer: "cus_paid",
+        trial_end: 1_800_000_000,
+        metadata: { organizationId },
+      },
+    },
+  });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const delivered = await client.request("/api/v1/stripe/webhook", {
+    method: "POST",
+    raw: Buffer.from(body, "utf8"),
+    rawType: "application/json",
+    headers: {
+      "Stripe-Signature": `t=${String(timestamp)},v1=${createHmac("sha256", secret)
+        .update(`${String(timestamp)}.${body}`, "utf8")
+        .digest("hex")}`,
+    },
+  });
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.data));
+  assert.notEqual(await store.getOrganization(organizationId), undefined);
+  assert.equal(await store.countUsers(), 0, "still nobody to sign in as");
+  const subscription = await store.getSubscription(organizationId);
+  assert.equal(subscription?.status, "active");
+  assert.notEqual(subscription?.trialEndsAt, undefined, "the trial date is kept");
+
+  // The welcome screen can tell them the payment landed.
+  const waiting = await client.request(
+    `/api/v1/auth/signup/${encodeURIComponent(token)}`,
+  );
+  assert.equal(waiting.data.paid, true);
+  assert.equal(waiting.data.claimed, false);
+
+  // 3. Name and password. Only now does an account exist, and they are signed
+  //    straight in to the organization their card already paid for.
+  const finished = await client.request(
+    `/api/v1/auth/signup/${encodeURIComponent(token)}/complete`,
+    {
+      method: "POST",
+      body: { displayName: "Buyer", password: "PaidSignupPassword123!" },
+    },
+  );
+  assert.equal(finished.status, 201, JSON.stringify(finished.data));
+  assert.equal(finished.data.user.email, "buyer@example.com");
+  assert.equal(finished.data.memberships.length, 1);
+  assert.equal(finished.data.memberships[0]?.organizationId, organizationId);
+  assert.equal(finished.data.memberships[0]?.role, "owner");
+  assert.deepEqual(
+    (await store.listProjects(organizationId)).map((project) => project.slug),
+    ["default"],
+  );
+
+  // Pressing the link twice is one account, not two.
+  const again = await client.request(
+    `/api/v1/auth/signup/${encodeURIComponent(token)}/complete`,
+    {
+      method: "POST",
+      body: { displayName: "Buyer", password: "PaidSignupPassword123!" },
+    },
+  );
+  assert.equal(again.status, 201);
+  assert.equal(again.data.user.id, finished.data.user.id);
+  assert.equal(await store.countUsers(), 1);
+});
+
+test("a paid sign-up refuses an address that already has an account", async (t) => {
+  // Checked before any money moves. Telling somebody they already have an
+  // account is kinder and cheaper than charging them for a second one, and
+  // the sign-in form beside it is no less of an address oracle.
+  const stripe = {
+    createCheckoutSession: async () => {
+      throw new Error("checkout must not be reached");
+    },
+  } as unknown as StripeClient;
+  const { client, store } = await startBareGateway(t, {
+    stripe,
+    stripeWebhookSecret: "whsec_example",
+    stripePriceId: "price_example",
+  });
+  await store.createUser({
+    email: "taken@example.com",
+    displayName: "Taken",
+    passwordDigest: "digest",
+    systemAdmin: false,
+  });
+
+  const refused = await client.request("/api/v1/auth/signup", {
+    method: "POST",
+    body: { email: "Taken@Example.com" },
+  });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.data.error.code, "account_exists");
+});
+
 test("a Stripe event never overwrites a comped organization", async (t) => {
   // The destructive path needs no bad luck. Every organization that predates
   // billing was comped by migration; `subscriptionStatusFrom` reads every

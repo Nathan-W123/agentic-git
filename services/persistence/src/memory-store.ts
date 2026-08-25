@@ -274,6 +274,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   public async createOrganization(input: {
+    id?: string;
     slug: string;
     name: string;
   }): Promise<Organization> {
@@ -286,7 +287,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       throw new Error(`Organization slug is already in use: ${slug}`);
     }
     const organization: Organization = {
-      id: createId("org"),
+      id: input.id ?? createId("org"),
       slug,
       name: input.name.trim(),
       createdAt: new Date().toISOString(),
@@ -1036,6 +1037,31 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       return false;
     }
     found.completedAt = at;
+    return true;
+  }
+
+  public async getSignupIntentByOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    for (const intent of this.signupIntents.values()) {
+      if (intent.organizationId === organizationId) {
+        return { ...intent };
+      }
+    }
+    return undefined;
+  }
+
+  public async attachSignupIntentUser(
+    id: string,
+    userId: string,
+  ): Promise<boolean> {
+    // Conditional, so two requests racing one claim link cannot both build an
+    // account against the same paid organization.
+    const found = this.signupIntents.get(id);
+    if (found === undefined || found.userId !== undefined) {
+      return false;
+    }
+    found.userId = userId;
     return true;
   }
 

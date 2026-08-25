@@ -208,32 +208,36 @@ export interface PasswordResetRecord {
 }
 
 /**
- * Somebody who has entered their details but not yet paid.
+ * Somebody who is partway through a paid sign-up.
  *
- * Deliberately not an account. It carries a password digest and a pre-minted
- * organization id and nothing that can be signed in to, so an abandoned
- * checkout leaves no user, no organization, and no claim on the email
- * address — the sign-up is paywalled, and a row here is what "not yet
- * through the paywall" looks like.
+ * Deliberately not an account, and deliberately holding no secret worth
+ * stealing. There is no password here: the card is taken before any details
+ * are, so a name and a password are only ever collected once the payment has
+ * cleared, and they go straight into the account rather than through this
+ * table. An abandoned checkout therefore leaves a row that names an
+ * organization nobody made and an email nobody claimed.
  *
- * The organization id is minted here rather than at provisioning time so it
- * can be stamped into Stripe's metadata at checkout. Every later event — an
- * invoice three months from now — then names an organization that exists,
- * with no lookup table to maintain and no metadata written back.
+ * The organization id is minted when the intent is written rather than when
+ * the organization is created, so it can be stamped into Stripe's metadata at
+ * checkout. Every later event — an invoice three months from now — then names
+ * an organization that exists, with no lookup table and no metadata written
+ * back.
  */
 export interface SignupIntentRecord {
   id: string;
-  /** Minted now, created by the webhook, named by Stripe in between. */
+  /** Minted now, created once payment clears, named by Stripe in between. */
   organizationId: string;
+  /** Collected before checkout so a duplicate is caught before any charge. */
   email: string;
-  displayName: string;
   organizationName: string | undefined;
-  passwordDigest: string;
-  /** The claim secret, hashed the way a password reset's is. */
+  /** The claim link's secret, hashed the way a password reset's is. */
   secretHash: string;
   stripeSessionId: string | undefined;
+  /** Set once the account exists, so finishing twice cannot make two. */
+  userId: string | undefined;
   createdAt: string;
   expiresAt: string;
+  /** Set when payment provisioned the organization. */
   completedAt: string | undefined;
 }
 
@@ -1330,6 +1334,15 @@ export const DEFAULT_PROJECT_ID = "project_local";
  */
 export interface CoordinationStore {
   createOrganization(input: {
+    /**
+     * The id to create it under, when the caller has already committed to one.
+     *
+     * A paid sign-up mints the organization id before the organization, so it
+     * can be stamped into Stripe's metadata at checkout — which is what makes
+     * every later event about that subscription attributable without a lookup
+     * table. Omitted, one is generated as before.
+     */
+    id?: string;
     slug: string;
     name: string;
   }): Promise<Organization>;
@@ -1513,6 +1526,10 @@ export interface CoordinationStore {
 
   createSignupIntent(intent: SignupIntentRecord): Promise<void>;
   getSignupIntent(id: string): Promise<SignupIntentRecord | undefined>;
+  /** The sign-up that minted an organization id, for the webhook that lands. */
+  getSignupIntentByOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined>;
   /**
    * Marks an intent provisioned, and says whether this caller is the one that
    * did it.
@@ -1524,6 +1541,8 @@ export interface CoordinationStore {
    * which is what stops a retry sending a second welcome email.
    */
   completeSignupIntent(id: string, at: string): Promise<boolean>;
+  /** Records the account a finished sign-up created, once. */
+  attachSignupIntentUser(id: string, userId: UserId): Promise<boolean>;
   /** Sweeps abandoned checkouts; nothing was created, so nothing is lost. */
   deleteExpiredSignupIntents(before: string): Promise<void>;
 

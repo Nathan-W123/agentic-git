@@ -2579,11 +2579,10 @@ for (const backend of backends) {
         id: "signup_1",
         organizationId: "org_preminted",
         email: "buyer@example.com",
-        displayName: "Buyer",
         organizationName: "Buyer's team",
-        passwordDigest: "unusable",
         secretHash: "hash",
         stripeSessionId: "cs_1",
+        userId: undefined,
         createdAt: "2026-01-01T00:00:00.000Z",
         expiresAt: "2026-01-02T00:00:00.000Z",
         completedAt: undefined,
@@ -2619,6 +2618,16 @@ for (const backend of backends) {
       await store.deleteExpiredSignupIntents("2026-06-01T00:00:00.000Z");
       assert.equal(await store.getSignupIntent("signup_abandoned"), undefined);
       assert.notEqual(await store.getSignupIntent("signup_1"), undefined);
+
+      // And the account it eventually builds is recorded once, so two
+      // requests racing one claim link cannot both build one.
+      assert.equal(await store.attachSignupIntentUser("signup_1", "user_a"), true);
+      assert.equal(
+        await store.attachSignupIntentUser("signup_1", "user_b"),
+        false,
+        "a second claim must not build a second account",
+      );
+      assert.equal((await store.getSignupIntent("signup_1"))?.userId, "user_a");
     } finally {
       await store.close();
       await cleanup();

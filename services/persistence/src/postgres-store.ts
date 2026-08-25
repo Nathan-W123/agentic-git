@@ -361,11 +361,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
   }
 
   public async createOrganization(input: {
+    id?: string;
     slug: string;
     name: string;
   }): Promise<Organization> {
     const organization: Organization = {
-      id: createId("org"),
+      id: input.id ?? createId("org"),
       slug: input.slug.trim().toLowerCase(),
       name: input.name.trim(),
       createdAt: new Date().toISOString(),
@@ -1485,19 +1486,17 @@ export class PostgresCoordinationStore implements CoordinationStore {
   public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {
     await this.query(
       `INSERT INTO signup_intents
-         (id, organization_id, email, display_name, organization_name,
-          password_digest, secret_hash, stripe_session_id, created_at,
-          expires_at, completed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         (id, organization_id, email, organization_name, secret_hash,
+          stripe_session_id, user_id, created_at, expires_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         intent.id,
         intent.organizationId,
         intent.email,
-        intent.displayName,
         intent.organizationName ?? null,
-        intent.passwordDigest,
         intent.secretHash,
         intent.stripeSessionId ?? null,
+        intent.userId ?? null,
         intent.createdAt,
         intent.expiresAt,
         intent.completedAt ?? null,
@@ -1529,6 +1528,29 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return rows.length === 1;
   }
 
+  public async getSignupIntentByOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    const row = await this.row(
+      "SELECT * FROM signup_intents WHERE organization_id = $1",
+      [organizationId],
+    );
+    return row === undefined ? undefined : this.toSignupIntent(row);
+  }
+
+  public async attachSignupIntentUser(
+    id: string,
+    userId: string,
+  ): Promise<boolean> {
+    // Conditional, so two requests racing one claim link cannot both build an
+    // account against the same paid organization.
+    const rows = await this.rows(
+      "UPDATE signup_intents SET user_id = $1 WHERE id = $2 AND user_id IS NULL RETURNING id",
+      [userId, id],
+    );
+    return rows.length === 1;
+  }
+
   public async deleteExpiredSignupIntents(before: string): Promise<void> {
     await this.query(
       "DELETE FROM signup_intents WHERE completed_at IS NULL AND expires_at < $1",
@@ -1555,11 +1577,10 @@ export class PostgresCoordinationStore implements CoordinationStore {
       id: text(row, "id"),
       organizationId: text(row, "organization_id"),
       email: text(row, "email"),
-      displayName: text(row, "display_name"),
       organizationName: optionalText(row, "organization_name"),
-      passwordDigest: text(row, "password_digest"),
       secretHash: text(row, "secret_hash"),
       stripeSessionId: optionalText(row, "stripe_session_id"),
+      userId: optionalText(row, "user_id"),
       createdAt: text(row, "created_at"),
       expiresAt: text(row, "expires_at"),
       completedAt: optionalText(row, "completed_at"),

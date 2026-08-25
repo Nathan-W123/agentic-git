@@ -1002,11 +1002,10 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         id TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL,
         email TEXT NOT NULL,
-        display_name TEXT NOT NULL,
         organization_name TEXT,
-        password_digest TEXT NOT NULL,
         secret_hash TEXT NOT NULL,
         stripe_session_id TEXT,
+        user_id TEXT,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         completed_at TEXT
