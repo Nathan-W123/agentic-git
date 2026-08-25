@@ -19963,6 +19963,7 @@ export class ApiGateway {
         ),
         status: subscriptionStatusFrom(subscription.status),
         currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+        trialEndsAt: isoFromUnixSeconds(subscription.trialEnd),
         stripeCustomerId: subscription.customerId,
         stripeSubscriptionId: subscription.id,
       });
@@ -20019,6 +20020,7 @@ export class ApiGateway {
           ? "canceled"
           : subscriptionStatusFrom(subscription.status),
       currentPeriodEnd: isoFromUnixSeconds(subscription.currentPeriodEnd),
+      trialEndsAt: isoFromUnixSeconds(subscription.trialEnd),
       stripeCustomerId: subscription.customerId,
       stripeSubscriptionId: subscription.id,
     });
@@ -20029,6 +20031,16 @@ export class ApiGateway {
     organizationId: string;
     status: "active" | "past_due" | "canceled";
     currentPeriodEnd: string | undefined;
+    /**
+     * What Stripe says the trial ends at, carried so the row keeps it.
+     *
+     * `saveSubscription` writes the row whole — deliberately — so every write
+     * that omitted this erased it. Harmless only for as long as a status of
+     * `active` meant nothing consulted it; the moment a trial is stored as a
+     * trial, the erased date is what decides whether somebody who has just
+     * paid may work.
+     */
+    trialEndsAt: string | undefined;
     stripeCustomerId: string;
     stripeSubscriptionId: string;
   }): Promise<void> {
@@ -20073,6 +20085,9 @@ export class ApiGateway {
       ...(input.currentPeriodEnd === undefined
         ? {}
         : { currentPeriodEnd: input.currentPeriodEnd }),
+      ...(input.trialEndsAt === undefined
+        ? {}
+        : { trialEndsAt: input.trialEndsAt }),
       ...(input.stripeCustomerId === ""
         ? {}
         : { stripeCustomerId: input.stripeCustomerId }),
