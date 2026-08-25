@@ -65,6 +65,16 @@ test("loads every control-room asset with an explicit content type", async () =>
   }
 });
 
+test("uses the Kumi logo as the browser favicon", async () => {
+  const assets = await loadStaticAssets();
+  const html = assets.get("/index.html")?.body.toString("utf8") ?? "";
+
+  assert.match(
+    html,
+    /<link rel="icon" type="image\/png" href="\/kumi-logo\.png">/u,
+  );
+});
+
 test("every dashboard file also has a name that carries its own digest", async () => {
   const assets = await loadStaticAssets();
   // A stable name costs a phone one revalidation round trip per file on every
