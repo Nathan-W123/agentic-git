@@ -7479,6 +7479,18 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   padding: 0 3px;
 }
 
+.cmsg-text .message-link {
+  color: var(--lavender);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.cmsg-text .message-link:hover {
+  text-decoration-color: currentColor;
+}
+
 /* A ping is a quiet, static label in the reader's primary accent. The wash is
    derived from that same accent for both themes, so it stays light without
    introducing a second colour or motion. The same rule paints the draft's

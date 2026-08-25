@@ -65,6 +65,16 @@ test("loads every control-room asset with an explicit content type", async () =>
   }
 });
 
+test("uses the Kumi logo as the browser favicon", async () => {
+  const assets = await loadStaticAssets();
+  const html = assets.get("/index.html")?.body.toString("utf8") ?? "";
+
+  assert.match(
+    html,
+    /<link rel="icon" type="image\/png" href="\/kumi-logo\.png">/u,
+  );
+});
+
 test("every dashboard file also has a name that carries its own digest", async () => {
   const assets = await loadStaticAssets();
   // A stable name costs a phone one revalidation round trip per file on every
@@ -3699,6 +3709,51 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
     css,
     /\.cmsg-text \.mention-ping \{[\s\S]{0,320}text-reveal-word/u,
     "posted ping styling should note the shared arrival class",
+  );
+});
+
+test("pasted web addresses are safe clickable message links", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const start = chats.indexOf("function mentionMarkup");
+  const end = chats.indexOf("\nfunction messageBody", start);
+  assert.notEqual(start, -1, "screen-chats.js declares inline message markup");
+  assert.notEqual(end, -1, "inline message markup has a testable boundary");
+
+  const entities: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+  const richText = new Function(
+    "esc",
+    `${chats.slice(start, end)}\nreturn richText;`,
+  )((value: unknown) =>
+    String(value ?? "").replace(
+      /[&<>"']/gu,
+      (character) => entities[character] ?? character,
+    ),
+  ) as (value: string, mentions: Array<{ name: string }>) => string;
+
+  assert.equal(
+    richText("Visit https://kokonutui.com/.", []),
+    '<p>Visit <a class="message-link" href="https://kokonutui.com/" target="_blank" rel="noopener noreferrer">https://kokonutui.com/</a>.</p>',
+  );
+  assert.equal(
+    richText("(https://example.com/docs?q=a&lang=en)", []),
+    '<p>(<a class="message-link" href="https://example.com/docs?q=a&amp;lang=en" target="_blank" rel="noopener noreferrer">https://example.com/docs?q=a&amp;lang=en</a>)</p>',
+  );
+  assert.equal(
+    richText('https://example.com/path") <script>alert(1)</script>', []),
+    '<p><a class="message-link" href="https://example.com/path" target="_blank" rel="noopener noreferrer">https://example.com/path</a>&quot;) &lt;script&gt;alert(1)&lt;/script&gt;</p>',
+  );
+  assert.equal(richText("javascript:alert(1)", []), "<p>javascript:alert(1)</p>");
+  assert.match(css, /\.cmsg-text \.message-link \{/u);
+  assert.match(
+    css,
+    /\.cmsg-text \.message-link \{[\s\S]{0,260}overflow-wrap: anywhere;/u,
   );
 });
 
