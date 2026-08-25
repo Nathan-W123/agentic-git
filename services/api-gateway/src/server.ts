@@ -87,6 +87,7 @@ import {
   WebhookSignatureError,
   isoFromUnixSeconds,
   readSubscription,
+  StripeError,
   subscriptionStatusFrom,
   verifyWebhookSignature,
   type StripeClient,
@@ -5096,6 +5097,12 @@ export class ApiGateway {
           secretKey: this.stripe !== undefined,
           webhookSecret: this.stripeWebhookSecret !== undefined,
           priceId: this.stripePriceId !== undefined,
+          // Where Stripe is told to send a browser back to. Not a secret —
+          // it is the address people type — and it is the one billing
+          // setting whose absence fails somewhere else entirely: an empty
+          // value makes a relative `success_url`, which Stripe refuses, so
+          // the symptom is a 500 on sign-up rather than anything naming this.
+          appUrl: this.appBaseUrl === "" ? null : this.appBaseUrl,
         },
         webSocketConnections: this.webSockets.connections,
         ...(docker === undefined ? {} : { docker }),
@@ -5215,6 +5222,18 @@ export class ApiGateway {
           501,
           "billing_not_configured",
           "No price is configured for this deployment",
+        );
+      }
+      if (this.appBaseUrl === "") {
+        // Stripe needs somewhere absolute to send them back to. Without this
+        // the return address would be `/#welcome/...`, which Stripe refuses —
+        // and it refuses it as a parameter error, so the deployment answers
+        // 500 to somebody trying to buy something and nothing anywhere names
+        // the missing variable.
+        throw new HttpError(
+          501,
+          "billing_not_configured",
+          "This deployment has no public address configured (KUMI_APP_URL)",
         );
       }
       const body = objectBody(await this.readJson(request));
@@ -20972,11 +20991,23 @@ export class ApiGateway {
               code: error.code,
               message: error.message,
             }
-          : {
-              status: 500,
-              code: "internal_error",
-              message: "The request could not be completed",
-            };
+          : error instanceof StripeError
+            ? {
+                // Stripe's own words, because they are about the request this
+                // deployment sent rather than about anybody's data — "Invalid
+                // URL" or "No such price" names the misconfiguration exactly.
+                // Folded into an opaque 500 they left an operator with a
+                // failing checkout and nothing to go on, which is precisely
+                // the position this was found in.
+                status: 502,
+                code: "stripe_refused",
+                message: `Stripe refused the request: ${error.message}`,
+              }
+            : {
+                status: 500,
+                code: "internal_error",
+                message: "The request could not be completed",
+              };
     this.sendJson(response, normalized.status, {
       error: {
         code: normalized.code,
