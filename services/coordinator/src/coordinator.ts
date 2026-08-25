@@ -410,6 +410,36 @@ function emptyAdvance(): CanonicalAdvance {
 }
 
 /**
+ * Whether two advances describe the same change.
+ *
+ * Order is not part of the answer — the same holder edits read back in a
+ * different order are the same edits — so each list is compared as a set.
+ * Used to decide whether a waiter has anything new to plan against, where a
+ * false "different" costs a full agent replan and a false "same" only costs
+ * the waiter a head start it would have got on the next wave anyway.
+ */
+function sameAdvance(a: CanonicalAdvance, b: CanonicalAdvance): boolean {
+  const keys = [
+    "changedFiles",
+    "changedSymbols",
+    "changedApis",
+    "changedSchemas",
+    "changedConfigKeys",
+    "changedTests",
+    "changedServices",
+  ] as const;
+  return keys.every((key) => {
+    const left = a[key];
+    const right = b[key];
+    if (left.length !== right.length) {
+      return false;
+    }
+    const seen = new Set(left);
+    return right.every((value) => seen.has(value));
+  });
+}
+
+/**
  * Every resource a plan claims, as the plan itself spells it.
  *
  * Two jobs at once. It holds a release to what the plan actually names —
@@ -2804,6 +2834,28 @@ export class Coordinator {
             holderReads,
           );
           if (overlay.changes.length === 0) {
+            return;
+          }
+          // Nothing new to plan against.
+          //
+          // `outstanding` deduplicates within one call, and this is called
+          // once per deferred wave — so a waiter behind a holder that is
+          // thinking rather than typing was re-selected every wave and paid
+          // for a fresh agent round trip each time. At `DEFAULT_PLAN_RETRY_MS`
+          // that is one replan every fifteen seconds, up to
+          // `MAX_CONSECUTIVE_DEFERRED_WAVES` of them for a single waiting
+          // task, each re-planning against a holder edit set identical to the
+          // one it already has. A replan is priced at roughly 145k tokens.
+          //
+          // The first speculation is the one worth paying for; the repeats
+          // buy nothing. Judged on the whole advance rather than the file
+          // list alone, so a holder that renames a symbol inside files it had
+          // already touched still earns the waiter a fresh look.
+          if (
+            entry.speculatedAdvance !== undefined &&
+            sameAdvance(entry.speculatedAdvance, overlay.advance)
+          ) {
+            outstanding.delete(entry);
             return;
           }
           await this.replanTask(
