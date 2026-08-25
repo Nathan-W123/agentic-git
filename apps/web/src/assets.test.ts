@@ -2642,7 +2642,7 @@ test("the standalone logo uses the supplied artwork without changing the wordmar
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  assert.doesNotMatch(app, /brandMark/u);
+  assert.match(app, /brandMark/u);
   assert.match(app, /brandWordmark\(\d+\)/u);
 
   const markStart = ui.indexOf("export function brandMark");
@@ -2670,7 +2670,22 @@ test("the standalone logo uses the supplied artwork without changing the wordmar
   assert.match(letters, /M42 11 13\.5 24 42 37/u);
 
   const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);
-  assert.ok(width > 0 && width <= 160, `the sign-in wordmark is ${width}px wide`);
+  assert.ok(width > 0 && width <= 160, `the auth wordmark is ${width}px wide`);
+});
+
+test("sign-in uses the standalone Kumi mark without the live-codebase punchline while other authentication modes retain their branding and copy", async () => {
+  const app = await publicFile("app.js");
+  const start = app.indexOf("function renderAuth");
+  const auth = app.slice(start, app.indexOf("\nfunction renderPasswordReset", start));
+
+  assert.notEqual(start, -1, "the auth renderer was not found in app.js");
+  assert.match(
+    auth,
+    /bootstrap \|\| register \? brandWordmark\(120\) : brandMark\(54\)/u,
+  );
+  assert.doesNotMatch(auth, /One live codebase/u);
+  assert.match(auth, /Create the first owner for this control plane\./u);
+  assert.match(auth, /You get your own team and project to start building in\./u);
 });
 
 /* ------------------------------------------------------------ controls ---- */

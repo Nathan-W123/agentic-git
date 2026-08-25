@@ -125,6 +125,7 @@ import {
   hslToHex,
   agentLabelOf,
   avatar,
+  brandMark,
   brandWordmark,
   esc,
   icon,
@@ -608,7 +609,7 @@ function renderAuth() {
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
-        ${brandWordmark(120)}
+        ${bootstrap || register ? brandWordmark(120) : brandMark(54)}
         <div>
           <h1>${
             bootstrap
@@ -617,13 +618,13 @@ function renderAuth() {
                 ? "Create your account"
                 : "Sign in to Kumi"
           }</h1>
-          <p>${
+          ${
             bootstrap
-              ? "Create the first owner for this control plane."
+              ? "<p>Create the first owner for this control plane.</p>"
               : register
-                ? "You get your own team and project to start building in."
-                : "One live codebase, coordinated across your team and their agents."
-          }</p>
+                ? "<p>You get your own team and project to start building in.</p>"
+                : ""
+          }
         </div>
       </div>
 
