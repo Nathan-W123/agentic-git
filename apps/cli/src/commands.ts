@@ -55,6 +55,8 @@ import type { AgentConfig, CoordinatorProject } from "./project.js";
 import {
   configuredBlanketClaims,
   configuredRepositoryParallelism,
+  legacyAdmissionLoop,
+  tasksWaitingOnActiveWork,
   WORK_LEASE_TTL_MS,
 } from "./worker-operations.js";
 
@@ -162,7 +164,32 @@ async function localRunnerWorkerId(
  * Returns `undefined` when no worker identity is available, which tells the
  * caller to fall back to claiming without leases.
  */
-async function leaseQueuedWork(
+/**
+ * Leases what this repository can run now, taking work that can actually
+ * proceed ahead of work that is known to be stuck.
+ *
+ * The ordering is the whole point, and it was missing here. Planning happens
+ * *before* the plan authority is ever consulted: a task is leased, a CLI
+ * session is started, the repository is seeded, an agent writes a plan — and
+ * only then does admission say "wait for task X, which is still running", at
+ * which point the task returns to the queue and the entire planning round is
+ * thrown away. On the next dispatch it is picked up first all over again,
+ * because `leaseNextTask` with no task named hands out the oldest queued row,
+ * which is exactly the row that has been failing to admit.
+ *
+ * The remote worker path fixed this in `nextWorkAssignment` and measured it:
+ * deferrals fell from 74% of planning calls to 29%, at roughly 23,000 tokens
+ * a call. This is the same fix on the path a control-plane deployment
+ * actually runs, which never had it — every channel dispatch goes through
+ * here, and none of them had ever seen the ordering.
+ *
+ * A preference and never an exclusion. If every queued task is waiting, the
+ * fallback below still takes whatever the store will give: a task cannot be
+ * starved by this, only put behind work that can run today. And the answer is
+ * recomputed from the live lease table each time, so a task sequenced behind
+ * something that has since finished is ready again immediately.
+ */
+export async function leaseQueuedWork(
   store: CoordinationStore,
   input: {
     workerId: string;
@@ -172,18 +199,56 @@ async function leaseQueuedWork(
   },
 ): Promise<Array<{ task: SubmittedTask; lease: WorkLease }>> {
   const leased: Array<{ task: SubmittedTask; lease: WorkLease }> = [];
+  const parallelism = configuredRepositoryParallelism();
+  const request = {
+    workerId: input.workerId,
+    repositoryId: input.repositoryId,
+    projectId: input.projectId,
+    baseRevision: input.baseRevision,
+    ttlMs: WORK_LEASE_TTL_MS,
+    repositoryParallelism: parallelism,
+  };
+
+  const pending = legacyAdmissionLoop()
+    ? []
+    : await store.listSubmittedTasks({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        status: "submitted",
+      });
+  const waiting =
+    pending.length === 0
+      ? new Set<string>()
+      : await tasksWaitingOnActiveWork(store, pending);
+  const ordered = [
+    ...pending.filter((task) => !waiting.has(task.id)),
+    ...pending.filter((task) => waiting.has(task.id)),
+  ];
+
   // One at a time, because each lease changes what the next call may take:
   // the repository parallelism bound is counted across active leases, so
   // asking for everything at once would ignore it.
+  //
+  // Every candidate is tried rather than stopping at the first refusal: a
+  // named task may have been claimed by another run between the listing and
+  // now, which says nothing about the next one. The cap is enforced inside
+  // `leaseNextTask`, so a repository at its limit simply stops being granted
+  // anything.
+  for (const task of ordered) {
+    const next = await store.leaseNextTask({ ...request, taskId: task.id });
+    if (next === undefined) {
+      continue;
+    }
+    leased.push({ task: next.task, lease: next.lease });
+  }
+
+  // Then whatever the pass above could not name: rows that arrived while it
+  // ran, and every row at all when the legacy flag is set. This is the
+  // original drain, unchanged, which is what keeps the reordering above a
+  // reordering — the same work is leased either way, and only the sequence
+  // moves.
   for (;;) {
-    const next = await store.leaseNextTask({
-      workerId: input.workerId,
-      repositoryId: input.repositoryId,
-      projectId: input.projectId,
-      baseRevision: input.baseRevision,
-      ttlMs: WORK_LEASE_TTL_MS,
-      repositoryParallelism: configuredRepositoryParallelism(),
-    });
+    const next = await store.leaseNextTask(request);
     if (next === undefined) {
       return leased;
     }
