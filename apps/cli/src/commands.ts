@@ -55,6 +55,8 @@ import type { AgentConfig, CoordinatorProject } from "./project.js";
 import {
   configuredBlanketClaims,
   configuredRepositoryParallelism,
+  legacyAdmissionLoop,
+  tasksWaitingOnActiveWork,
   WORK_LEASE_TTL_MS,
 } from "./worker-operations.js";
 
@@ -162,7 +164,32 @@ async function localRunnerWorkerId(
  * Returns `undefined` when no worker identity is available, which tells the
  * caller to fall back to claiming without leases.
  */
-async function leaseQueuedWork(
+/**
+ * Leases what this repository can run now, taking work that can actually
+ * proceed ahead of work that is known to be stuck.
+ *
+ * The ordering is the whole point, and it was missing here. Planning happens
+ * *before* the plan authority is ever consulted: a task is leased, a CLI
+ * session is started, the repository is seeded, an agent writes a plan — and
+ * only then does admission say "wait for task X, which is still running", at
+ * which point the task returns to the queue and the entire planning round is
+ * thrown away. On the next dispatch it is picked up first all over again,
+ * because `leaseNextTask` with no task named hands out the oldest queued row,
+ * which is exactly the row that has been failing to admit.
+ *
+ * The remote worker path fixed this in `nextWorkAssignment` and measured it:
+ * deferrals fell from 74% of planning calls to 29%, at roughly 23,000 tokens
+ * a call. This is the same fix on the path a control-plane deployment
+ * actually runs, which never had it — every channel dispatch goes through
+ * here, and none of them had ever seen the ordering.
+ *
+ * A preference and never an exclusion. If every queued task is waiting, the
+ * fallback below still takes whatever the store will give: a task cannot be
+ * starved by this, only put behind work that can run today. And the answer is
+ * recomputed from the live lease table each time, so a task sequenced behind
+ * something that has since finished is ready again immediately.
+ */
+export async function leaseQueuedWork(
   store: CoordinationStore,
   input: {
     workerId: string;
@@ -172,18 +199,56 @@ async function leaseQueuedWork(
   },
 ): Promise<Array<{ task: SubmittedTask; lease: WorkLease }>> {
   const leased: Array<{ task: SubmittedTask; lease: WorkLease }> = [];
+  const parallelism = configuredRepositoryParallelism();
+  const request = {
+    workerId: input.workerId,
+    repositoryId: input.repositoryId,
+    projectId: input.projectId,
+    baseRevision: input.baseRevision,
+    ttlMs: WORK_LEASE_TTL_MS,
+    repositoryParallelism: parallelism,
+  };
+
+  const pending = legacyAdmissionLoop()
+    ? []
+    : await store.listSubmittedTasks({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        status: "submitted",
+      });
+  const waiting =
+    pending.length === 0
+      ? new Set<string>()
+      : await tasksWaitingOnActiveWork(store, pending);
+  const ordered = [
+    ...pending.filter((task) => !waiting.has(task.id)),
+    ...pending.filter((task) => waiting.has(task.id)),
+  ];
+
   // One at a time, because each lease changes what the next call may take:
   // the repository parallelism bound is counted across active leases, so
   // asking for everything at once would ignore it.
+  //
+  // Every candidate is tried rather than stopping at the first refusal: a
+  // named task may have been claimed by another run between the listing and
+  // now, which says nothing about the next one. The cap is enforced inside
+  // `leaseNextTask`, so a repository at its limit simply stops being granted
+  // anything.
+  for (const task of ordered) {
+    const next = await store.leaseNextTask({ ...request, taskId: task.id });
+    if (next === undefined) {
+      continue;
+    }
+    leased.push({ task: next.task, lease: next.lease });
+  }
+
+  // Then whatever the pass above could not name: rows that arrived while it
+  // ran, and every row at all when the legacy flag is set. This is the
+  // original drain, unchanged, which is what keeps the reordering above a
+  // reordering — the same work is leased either way, and only the sequence
+  // moves.
   for (;;) {
-    const next = await store.leaseNextTask({
-      workerId: input.workerId,
-      repositoryId: input.repositoryId,
-      projectId: input.projectId,
-      baseRevision: input.baseRevision,
-      ttlMs: WORK_LEASE_TTL_MS,
-      repositoryParallelism: configuredRepositoryParallelism(),
-    });
+    const next = await store.leaseNextTask(request);
     if (next === undefined) {
       return leased;
     }
@@ -732,7 +797,23 @@ export async function taskCancel(
   if (taskId.trim().length === 0) {
     throw new Error("A task id is required");
   }
-  return await store.cancelSubmittedTask(taskId);
+  const cancelled = await store.cancelSubmittedTask(taskId);
+  // Announced the way the gateway's own cancel route announces it. A stop is
+  // a real ending — it is how a task most often finishes when somebody
+  // changes their mind — and a stop that writes no event is a task that
+  // simply vanishes from the accounting between submission and nothing.
+  await store
+    .appendAudit(undefined, {
+      type: "task_cancelled",
+      taskId,
+      data: {
+        projectId: cancelled.projectId,
+        repositoryId: cancelled.repositoryId,
+        reason: "Cancelled from the command line",
+      },
+    })
+    .catch(() => undefined);
+  return cancelled;
 }
 
 export interface CancelTasksInput {
@@ -1551,9 +1632,27 @@ export async function runPendingTasks(
       })
     ).filter((task) => claimedIds.has(task.id));
     const cleanup = await Promise.allSettled(
-      unresolved.map((task) =>
-        store.completeSubmittedTask(task.id, "failed"),
-      ),
+      unresolved.map(async (task) => {
+        await store.completeSubmittedTask(task.id, "failed");
+        // The row going terminal is not the ending; the audit event is. Every
+        // other failure path in this codebase writes one, and this one — the
+        // whole of what happens when a run cannot even get started — did not,
+        // so a batch killed by a bad workspace or an unreachable adapter left
+        // no trace at all. Nothing counted it, and `tasksFailed` read zero
+        // while the tasks were plainly gone.
+        await store
+          .appendAudit(undefined, {
+            type: "task_failed",
+            taskId: task.id,
+            data: {
+              projectId: task.projectId,
+              repositoryId: task.repositoryId,
+              stage: "dispatch_setup",
+              error: error instanceof Error ? error.message : String(error),
+            },
+          })
+          .catch(() => undefined);
+      }),
     );
     const cleanupFailures = cleanup
       .filter(

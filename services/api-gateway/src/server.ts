@@ -11411,6 +11411,14 @@ export class ApiGateway {
       ).flat();
       const tasks = await this.options.store.listSubmittedTasks();
       const approvals = await this.options.store.listApprovals();
+      // Every status, not just the queued one. A deployment's health is the
+      // shape of this distribution rather than any single number in it: the
+      // gap between what was submitted and what integrated is where work goes
+      // missing, and a count of "pending" alone cannot show it.
+      const tasksByStatus: Record<string, number> = {};
+      for (const task of tasks) {
+        tasksByStatus[task.status] = (tasksByStatus[task.status] ?? 0) + 1;
+      }
       this.sendJson(response, 200, {
         counts: {
           users: await this.options.store.countUsers(),
@@ -11425,6 +11433,35 @@ export class ApiGateway {
           activeRuns: this.activeRuns.size,
           webSocketConnections: this.webSockets.connections,
         },
+        tasksByStatus,
+        // Named, so the dashboard can ask each one for its own coordination
+        // metrics rather than guessing at a project id.
+        projects: projects.map((project) => ({
+          id: project.id,
+          name: project.name,
+          organizationId: project.organizationId,
+        })),
+        // Named rather than counted. A pending approval is a run stopped on a
+        // person, and a bare count tells that person there is something to do
+        // without telling them where — which is how three of them sat unread
+        // long enough for the process holding them to be redeployed away.
+        // Repository and task are what turn the number into somewhere to go.
+        pendingApprovals: approvals
+          .filter((approval) => approval.status === "pending")
+          .slice(0, 20)
+          .map((approval) => ({
+            id: approval.id,
+            repositoryId: approval.repositoryId,
+            taskId: approval.taskId,
+            kind: approval.kind,
+            reasons: approval.reasons,
+            requestedAt: approval.requestedAt,
+            expiresAt: approval.expiresAt,
+            // Whether anything is still listening. An approval past its own
+            // deadline that is somehow still pending had nobody watching it:
+            // the waiter would have ended it otherwise.
+            stale: approval.expiresAt <= new Date().toISOString(),
+          })),
         recentRuns: await this.options.store.listRuns(20),
       });
       return;
@@ -15672,6 +15709,20 @@ export class ApiGateway {
           // Store-only deployments keep the old shape: the row flips, and a
           // run that happens to hold the task fights it out at settle time.
           await this.options.store.cancelSubmittedTask(task.id);
+          // The event too, not only the row. Without it this deployment shape
+          // stops tasks that the trail never records ending, which is one of
+          // the ways a task can leave the accounting silently.
+          await this.options.store
+            .appendAudit(undefined, {
+              type: "task_cancelled",
+              taskId: task.id,
+              data: {
+                projectId: input.projectId,
+                repositoryId: input.repositoryId,
+                actorId: input.viewerId,
+              },
+            })
+            .catch(() => undefined);
           await say("Cancelled.");
           this.watchedChannelTasks.delete(task.id);
           await this.withdrawArbitrationNotice({
@@ -17216,6 +17267,21 @@ export class ApiGateway {
         if (cancelled === undefined) {
           continue;
         }
+        // A held plan nobody approved before the deadline is still a task
+        // that ended, and the sweep that ends it is the only thing that
+        // knows. Left untraced, every expired hold was a submission with no
+        // recorded outcome.
+        await this.options.store
+          .appendAudit(undefined, {
+            type: "task_cancelled",
+            taskId: task.id,
+            data: {
+              projectId: cancelled.projectId,
+              repositoryId: cancelled.repositoryId,
+              reason: "The plan was never approved before it went stale",
+            },
+          })
+          .catch(() => undefined);
         // The hold is over however it ends, so the marker goes with it: a
         // later release must not find one still standing and answer it.
         this.announcedChannelHolds.delete(task.id);

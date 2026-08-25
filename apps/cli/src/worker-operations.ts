@@ -86,7 +86,7 @@ import type { CoordinatorProject } from "./project.js";
  * what a control arm has to be — the same shape as COORD_COLD_REPLAN and
  * COORD_UNGROUNDED_REPLAN, and the rollback if the bound misbehaves.
  */
-function legacyAdmissionLoop(): boolean {
+export function legacyAdmissionLoop(): boolean {
   return process.env["COORD_LEGACY_ADMISSION_LOOP"] === "1";
 }
 
@@ -1047,7 +1047,7 @@ const MAX_ADMISSION_ATTEMPTS = 4;
  * table every time, and a task only counts as waiting while at least one of
  * the tasks named in its last refusal still holds an active lease.
  */
-async function tasksWaitingOnActiveWork(
+export async function tasksWaitingOnActiveWork(
   store: CoordinationStore,
   pending: readonly SubmittedTask[],
 ): Promise<Set<TaskId>> {

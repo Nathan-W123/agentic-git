@@ -105,6 +105,8 @@ import {
   openBillingPortal,
   startCheckout,
   ensureBilling,
+  decideApproval,
+  ensureDeployment,
   loadBilling,
   setSystemAdmin,
   removeMember,
@@ -1422,6 +1424,13 @@ const SETTINGS_SECTIONS = [
     description: "Your plan, what it covers, and who is counted as a seat.",
   },
   {
+    id: "deployment",
+    label: "Deployment",
+    iconName: "database",
+    description: "How this control plane is doing, for whoever runs it.",
+    adminOnly: true,
+  },
+  {
     id: "advanced",
     label: "Advanced",
     iconName: "sliders",
@@ -1570,6 +1579,8 @@ function settingsSectionMarkup(section) {
       return `${invitationsCard()}${channelStatsCard()}`;
     case "billing":
       return billingCard();
+    case "deployment":
+      return deploymentCard();
     case "advanced":
       return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
     default:
@@ -1584,7 +1595,13 @@ function settingsSectionMarkup(section) {
  * that were visible underneath.
  */
 function settingsDialog() {
-  const selected = SETTINGS_SECTIONS.some(
+  // A section nobody may open is not offered. `adminOnly` is read here rather
+  // than inside each card so the rail, the default selection and the deep link
+  // all agree about what exists.
+  const sections = SETTINGS_SECTIONS.filter(
+    (section) => section.adminOnly !== true || iAmSystemAdmin(),
+  );
+  const selected = sections.some(
     (section) => section.id === state.settingsSection,
   )
     ? state.settingsSection
@@ -1617,7 +1634,7 @@ function settingsDialog() {
       <aside class="settings-sidebar">
         <div class="settings-brand">${icon("gear")}<span>Settings</span></div>
         <nav class="settings-nav" aria-label="Settings categories">
-          ${SETTINGS_SECTIONS.map(
+          ${sections.map(
             (item) => `<button type="button" class="settings-nav-item${
               item.id === selected ? " active" : ""
             }" data-act="settings-section" data-value="${esc(item.id)}"
@@ -2823,6 +2840,29 @@ async function memberRoleAction(repositoryId, userId) {
  * can lock the last administrator out of exactly the screens that would fix
  * it. Neither belongs behind a single click in a context menu.
  */
+/**
+ * Answers one waiting approval from the deployment screen.
+ *
+ * Deliberately the same route the channel thread uses, so a decision made
+ * here is a decision by the same rules — it is refused if the person cannot
+ * review, and it releases the waiting run if that run is still there.
+ */
+async function decideApprovalAction(approvalId, status) {
+  try {
+    await decideApproval(approvalId, status, "Decided from the deployment screen");
+  } catch (error) {
+    await showModal({
+      title: "That approval could not be decided",
+      body: `<p class="muted">${esc(
+        error instanceof Error ? error.message : String(error),
+      )}</p>`,
+      confirm: "Close",
+    });
+    return;
+  }
+  render();
+}
+
 async function systemAdminAction(userId, grant) {
   const confirmed = await showModal({
     title: grant ? "Make deployment admin?" : "Remove deployment admin?",
@@ -2992,6 +3032,227 @@ async function revokeRepositoryGrantAction(repositoryId, userId) {
     render();
     refreshChannelInfoPopover();
   }
+}
+
+/* --------------------------------------------------------- deployment ---- */
+
+/** Milliseconds as the coarsest unit that still reads as a duration. */
+function humanDuration(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) {
+    return "—";
+  }
+  const minutes = ms / 60000;
+  if (minutes < 90) {
+    return `${minutes.toFixed(1)} min`;
+  }
+  const hours = minutes / 60;
+  return hours < 48
+    ? `${hours.toFixed(1)} hr`
+    : `${(hours / 24).toFixed(1)} days`;
+}
+
+/** One number with a caption, for the tiles across the top. */
+function statTile(value, label, tone = "") {
+  return `<div class="dep-stat${tone === "" ? "" : ` dep-stat-${tone}`}">
+    <b>${esc(String(value))}</b><span>${esc(label)}</span></div>`;
+}
+
+/** Sums one metrics field across every project on this deployment. */
+function metricsTotal(metrics, group, field) {
+  return metrics.reduce(
+    (total, entry) => total + (entry?.[group]?.[field] ?? 0),
+    0,
+  );
+}
+
+/**
+ * How this control plane is actually doing.
+ *
+ * Written around one number that no single endpoint reports: the difference
+ * between what was submitted and what integrated. Everything else here is a
+ * count somebody could have read off the API; that gap is the one that says
+ * whether the deployment is healthy, and it is invisible unless the two
+ * figures are put beside each other and subtracted.
+ */
+/**
+ * The approvals nobody has answered, with somewhere to answer them.
+ *
+ * A count told an administrator there was something waiting and nothing about
+ * where it was waiting, which is how approvals came to sit unread until the
+ * process holding them was redeployed away. Each row names its repository and
+ * task and carries the two answers, so the number can actually be cleared
+ * from the screen that reports it.
+ *
+ * `stale` marks one past its own deadline. Those had nobody listening — the
+ * run that requested the approval would have ended it otherwise — so deciding
+ * one releases nothing; it only clears the row. Said plainly on the row
+ * rather than left for somebody to discover by pressing the button.
+ */
+function pendingApprovalRows(approvals, counts) {
+  const waiting = counts.pendingApprovals ?? 0;
+  if (waiting === 0) {
+    return "";
+  }
+  if (approvals.length === 0) {
+    return `<div class="set-row"><span class="sr-body">
+      <div class="sr-title">${String(waiting)} approvals waiting</div>
+      <div class="sr-sub">Each one is a run stopped on a person, not on a
+        machine. Nothing moves until somebody answers.</div>
+    </span></div>`;
+  }
+  return `<div class="set-row"><span class="sr-body">
+      <div class="sr-title">${String(waiting)} approvals waiting</div>
+      <div class="sr-sub">Each one is a run stopped on a person, not on a
+        machine. Nothing moves until somebody answers.</div>
+    </span></div>
+    ${approvals
+      .map(
+        (approval) => `<div class="set-row"><span class="sr-body">
+          <div class="sr-title">#${esc(approval.repositoryId ?? "")} —
+            ${esc(approval.kind ?? "review")}</div>
+          <div class="sr-sub">${esc(
+            (approval.reasons ?? []).join("; ") || "No reason recorded.",
+          )}${
+            approval.stale === true
+              ? " · Past its deadline — the run that asked is gone, so this only clears the row."
+              : ""
+          }</div>
+        </span>
+        <span class="sr-ctl">
+          <button type="button" class="btn" data-act="approval-decide"
+            data-value="${esc(approval.id ?? "")}:approved">Approve</button>
+          <button type="button" class="btn" data-act="approval-decide"
+            data-value="${esc(approval.id ?? "")}:rejected">Reject</button>
+        </span></div>`,
+      )
+      .join("")}`;
+}
+
+function deploymentCard() {
+  void ensureDeployment(render);
+  const deployment = state.deployment;
+  if (deployment === undefined || deployment === null) {
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Deployment</div>
+      <div class="sr-sub">Loading…</div></span></div></section>`;
+  }
+  const counts = deployment.counts ?? {};
+  const metrics = deployment.metrics ?? [];
+  const submitted = metricsTotal(metrics, "throughput", "tasksSubmitted");
+  const integrated = metricsTotal(metrics, "throughput", "tasksIntegrated");
+  const failed = metricsTotal(metrics, "throughput", "tasksFailed");
+  // Answered without changing a file — a question, a read-out, an
+  // explanation. These succeeded, and until the trail learned to say so they
+  // were the largest part of what this card called "unaccounted".
+  const reported = metricsTotal(metrics, "throughput", "tasksReported");
+  const cancelled = metricsTotal(metrics, "throughput", "tasksCancelled");
+  // Read, not derived. Subtracting the buckets assumed a task carries exactly
+  // one ending and that every ending was counted, and neither was true: the
+  // difference silently absorbed every success this page could not name.
+  const unaccounted = metricsTotal(metrics, "throughput", "tasksUnaccounted");
+  const deferrals = metricsTotal(metrics, "rework", "planTimeDeferrals");
+  const replans = metricsTotal(metrics, "rework", "replansRequested");
+  const restarts = metricsTotal(metrics, "rework", "taskRestarts");
+  const blocked = metrics.reduce(
+    (total, entry) =>
+      total + (entry?.conflicts?.predictionsByDisposition?.block ?? 0),
+    0,
+  );
+  const byContention = metricsTotal(metrics, "conflicts", "confirmedByContention");
+  const leaseMs = metricsTotal(metrics, "cost", "leaseRuntimeMs");
+  const settled = metricsTotal(metrics, "cost", "settledLeases");
+  const timeToIntegration =
+    metrics.length === 0
+      ? 0
+      : metricsTotal(metrics, "throughput", "averageTimeToIntegrationMs") /
+        metrics.length;
+  const answered = integrated + reported;
+  const landed =
+    submitted === 0 ? 0 : Math.round((answered / submitted) * 100);
+
+  return `<section class="card">
+    <div class="dep-stats">
+      ${statTile(counts.users ?? 0, counts.users === 1 ? "person" : "people")}
+      ${statTile(counts.organizations ?? 0, "teams")}
+      ${statTile(counts.repositories ?? 0, "repositories")}
+      ${statTile(counts.activeRuns ?? 0, "running now")}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="set-row"><span class="sr-body">
+      <div class="sr-title">Work</div>
+      <div class="sr-sub">Of ${String(submitted)} tasks submitted,
+        ${String(answered)} were answered — ${String(landed)}%.
+        ${String(integrated)} changed the code and ${String(reported)} did
+        not need to.</div>
+    </span></div>
+    <div class="dep-stats">
+      ${statTile(submitted, "submitted")}
+      ${statTile(integrated, "landed", "good")}
+      ${statTile(reported, "answered", "good")}
+      ${statTile(failed, "failed", failed > 0 ? "bad" : "")}
+      ${statTile(cancelled, "stopped")}
+      ${statTile(unaccounted, "unaccounted", unaccounted > 0 ? "warn" : "")}
+    </div>
+    ${
+      unaccounted === 0
+        ? ""
+        : `<div class="set-row"><span class="sr-body">
+             <!-- The point of this screen. A task that neither landed nor
+                  failed is not a statistic, it is work somebody asked for and
+                  never got, and no other view puts it in front of anyone. -->
+             <div class="sr-title">${String(unaccounted)} tasks have no ending on record</div>
+             <div class="sr-sub">Running right now, waiting on a person, or
+               abandoned when a run died mid-flight. Answering a question
+               counts as an ending now, so what is left here is genuinely
+               unfinished rather than merely unnamed.</div>
+           </span></div>`
+    }
+    ${pendingApprovalRows(deployment.pendingApprovals ?? [], counts)}
+  </section>
+
+  <section class="card">
+    <div class="set-row"><span class="sr-body">
+      <div class="sr-title">Rework</div>
+      <div class="sr-sub">Work paid for twice. A deferral is a planning round
+        trip that was thrown away, and it is counted nowhere else.</div>
+    </span></div>
+    <div class="dep-stats">
+      ${statTile(deferrals, "deferrals", deferrals > integrated / 4 ? "warn" : "")}
+      ${statTile(replans, "replans")}
+      ${statTile(restarts, "restarts")}
+      ${statTile(humanDuration(timeToIntegration), "avg to land")}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="set-row"><span class="sr-body">
+      <div class="sr-title">Coordination</div>
+      <div class="sr-sub">${
+        blocked === 0
+          ? "Nothing has been held back yet."
+          : `${String(blocked)} tasks were held back to avoid a collision.
+             ${String(byContention)} of those are confirmed by two tasks
+             actually contending — a hold that works leaves no evidence it was
+             needed, so this number stays low even when it is earning its
+             keep.`
+      }</div>
+    </span></div>
+    <div class="dep-stats">
+      ${statTile(blocked, "held back")}
+      ${statTile(byContention, "confirmed")}
+      ${statTile(humanDuration(leaseMs), "agent runtime")}
+      ${statTile(settled, "leases")}
+    </div>
+  </section>
+
+  <section class="card"><div class="set-row"><span class="sr-body">
+    <div class="sr-title">Revenue</div>
+    <div class="sr-sub">Nothing yet — no payments have been taken on this
+      deployment. This fills in once Stripe is configured and a subscription
+      is active.</div>
+  </span></div></section>`;
 }
 
 /* ------------------------------------------------------------ billing ---- */
@@ -7674,6 +7935,14 @@ document.addEventListener("click", (event) => {
     case "billing-checkout":
     case "billing-portal": {
       void billingAction(act === "billing-portal" ? "portal" : "checkout");
+      return;
+    }
+    case "approval-decide": {
+      const separatorIndex = value.lastIndexOf(":");
+      void decideApprovalAction(
+        value.slice(0, separatorIndex),
+        value.slice(separatorIndex + 1),
+      );
       return;
     }
     case "system-admin-grant":
