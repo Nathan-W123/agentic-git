@@ -6212,7 +6212,6 @@ button.chip.lg:hover {
    gutter, minus the row padding it already sits inside. */
 .cmsg-row.cmsg-compact .cmsg-body {
   margin-left: calc(var(--cmsg-body-x) - 8px);
-  border-radius: 12px;
 }
 
 .cmsg-row.cmsg-compact .cmsg-text {
@@ -6358,11 +6357,9 @@ button.chip.lg:hover {
 
 .cmsg-row .cmsg-body {
   min-width: 0;
-  /* One restrained surface around the message metadata and its content. The
-     earlier full-width body made short messages read as loose text while the
-     action bar floated at the edge of the room. Fit-content keeps every
-     message in the shared left transcript without stretching its bubble or
-     inventing a separate right-hand lane for the current user. */
+  /* Fit-content keeps each message's hover tools anchored to its content
+     without drawing a separate surface around the message or inventing a
+     right-hand lane for the current user. */
   position: relative;
   flex: 0 1 auto;
   width: fit-content;
@@ -6370,21 +6367,6 @@ button.chip.lg:hover {
     calc(100% - var(--cmsg-body-x)),
     calc(var(--message-max) + 26px)
   );
-  padding: 9px 12px 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: 5px 12px 12px 12px;
-  background: var(--bg-card);
-  box-shadow: 0 1px 1px rgb(0 0 0 / 7%);
-  transition:
-    background 0.13s ease,
-    border-color 0.13s ease;
-}
-
-@media (hover: hover) {
-  .cmsg-row:not(.cmsg-system):hover .cmsg-body {
-    border-color: var(--border);
-    background: var(--bg-card-2);
-  }
 }
 
 .cmsg-row .cmsg-top {
