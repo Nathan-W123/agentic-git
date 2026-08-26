@@ -5788,6 +5788,14 @@ test("a roster row offers rename and delete only for the viewer's agent", async 
   );
 
   assert.equal(row.match(/act: "roster-agent-menu"/gu)?.length, 1);
+  // A teammate's agent has nothing in that menu, so the "…" is not drawn at
+  // all — the same rule `personRow` follows. Offering a button that opens an
+  // empty popover is worse than offering nothing.
+  assert.match(
+    row,
+    /const hasMenu = rosterMenuItems\(agent\.id\)\.length > 0;/u,
+  );
+  assert.match(row, /hasMenu\s*\? `<span class="rr-more">/u);
   assert.match(
     row,
     /const settingsOpen =\s*agent\.mine === true && state\.chatSettingsOpenId === agent\.id;/u,

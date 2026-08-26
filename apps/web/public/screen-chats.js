@@ -1347,6 +1347,11 @@ function rosterRow(agent) {
     agent.mine === true && state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
+  // Same rule `personRow` follows: draw the "…" only when it has something to
+  // offer. A teammate's agent has no row edits for this account, and the
+  // button opened an empty grey popover — a control that answers nothing is
+  // worse than no control.
+  const hasMenu = rosterMenuItems(agent.id).length > 0;
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
@@ -1394,12 +1399,16 @@ function rosterRow(agent) {
             : ""
         }
       </span>
-      <span class="rr-more">${iconButton("dots", {
-        act: "roster-agent-menu",
-        value: agent.id,
-        title: `More for ${agent.name}`,
-        small: true,
-      })}</span>
+      ${
+        hasMenu
+          ? `<span class="rr-more">${iconButton("dots", {
+              act: "roster-agent-menu",
+              value: agent.id,
+              title: `More for ${agent.name}`,
+              small: true,
+            })}</span>`
+          : ""
+      }
     </div>
   </div>`;
 }
