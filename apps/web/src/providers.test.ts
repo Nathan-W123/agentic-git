@@ -581,7 +581,7 @@ test("anthropic model options come only from what the CLI itself reports", async
   );
   // The cache entry keeps the label the CLI wrote for it.
   assert.equal(options.models[0]?.label, "Fable");
-  assert.match(options.modelListSource ?? "", /model cache.*aliases documented/u);
+  assert.equal(options.modelListSource, undefined);
   // A value from a different --help paragraph must not become a model.
   assert.ok(!options.models.some((model) => model.id === "file"));
 

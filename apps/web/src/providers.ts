@@ -4638,12 +4638,8 @@ export class ProviderChatService {
    * aliases its own --help documents. Both are read here; nothing is invented,
    * and free text stays available for anything neither source mentions.
    */
-  private async claudeModels(): Promise<{
-    models: ProviderModelOption[];
-    sources: string[];
-  }> {
+  private async claudeModels(): Promise<ProviderModelOption[]> {
     const models = new Map<string, ProviderModelOption>();
-    const sources: string[] = [];
     try {
       const config = JSON.parse(
         await readFile(path.join(this.homeDirectory, ".claude.json"), "utf8"),
@@ -4668,9 +4664,6 @@ export class ProviderChatService {
             ? {}
             : { description: option.description }),
         });
-      }
-      if (models.size > 0) {
-        sources.push("Claude Code's own model cache (~/.claude.json)");
       }
     } catch {
       // No cache on this machine yet; the aliases below still apply.
@@ -4697,14 +4690,11 @@ export class ProviderChatService {
             });
           }
         }
-        if (quoted.length > 0) {
-          sources.push("aliases documented by `claude --help`");
-        }
       }
     } catch {
       // Help unavailable; whatever the cache provided still stands.
     }
-    return { models: [...models.values()], sources };
+    return [...models.values()];
   }
 
   public async options(input: {
@@ -4765,17 +4755,12 @@ export class ProviderChatService {
       };
     }
     if (input.provider === "anthropic") {
-      const claude = await this.claudeModels();
+      const models = await this.claudeModels();
       return {
-        models: claude.models.length > 0 ? claude.models : null,
-        ...(claude.sources.length > 0
-          ? {
-              modelListSource: `Models read from ${claude.sources.join(" and ")}. Claude Code has no model-list command, so this is what it actually reports here.`,
-            }
-          : {}),
+        models: models.length > 0 ? models : null,
         efforts: [...CLAUDE_EFFORTS],
         allowCustomModel: true,
-        ...(claude.models.length > 0
+        ...(models.length > 0
           ? {}
           : { suggestedModels: [...SUGGESTED_MODELS.anthropic] }),
         notes: [],
