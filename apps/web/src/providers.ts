@@ -4818,12 +4818,6 @@ export class ProviderChatService {
                   "model accepts overrides in brackets, such as " +
                   "claude-opus-4-8[context=1m,effort=high,fast=false].",
               ],
-        ...(models === undefined
-          ? {}
-          : {
-              modelListSource:
-                "Models reported by the Cursor CLI for the connected account.",
-            }),
       };
     }
     return {
