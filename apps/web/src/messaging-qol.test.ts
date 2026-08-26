@@ -188,6 +188,12 @@ test("quiet transcript metadata uses an outlined label on a straight separator",
   // their words.
   assert.match(css, /\.transcript-separator::before,[\s\S]{0,80}\.transcript-separator::after/u);
   assert.match(css, /\.transcript-separator > span \{[\s\S]{0,260}border: 1px solid/u);
+
+  // Channel rows use the whole chat panel rather than a fixed desktop column.
+  // That gives ordinary messages the available line length and also centers
+  // the full-width coordinator separator in the room.
+  assert.match(css, /--room-column: 100%/u);
+  assert.match(css, /\.cmsg-row \{[\s\S]{0,180}max-width: var\(--room-column\)/u);
 });
 
 test("a reader who has scrolled up is offered the way back down", async () => {
