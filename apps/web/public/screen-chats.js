@@ -384,7 +384,12 @@ function usageBlock(agent) {
           ? ""
           : `<span class="rr-usage-plan">${esc(usageAccountLine(report))}</span>`
       }
-      ${report.source === undefined ? "" : `<span class="rr-usage-src">${esc(report.source)}</span>`}`;
+      ${
+        report.source === undefined ||
+        report.source === "Codex CLI session records (~/.codex/sessions)"
+          ? ""
+          : `<span class="rr-usage-src">${esc(report.source)}</span>`
+      }`;
   }
   return `<span class="pcard-section">
     <span class="pcard-section-label">Usage</span>
@@ -5218,7 +5223,8 @@ function agentUsage(agent) {
         : `<div class="aspec-usage-plan">${esc(usageAccountLine(report))}</div>`
     }
     ${
-      report.source === undefined
+      report.source === undefined ||
+      report.source === "Codex CLI session records (~/.codex/sessions)"
         ? ""
         : `<div class="aspec-usage-source">${esc(report.source)}</div>`
     }

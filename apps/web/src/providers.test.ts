@@ -17,6 +17,7 @@ import {
   ProviderChatError,
   ProviderChatService,
   parseClaudeStreamJson,
+  parseClaudeUsage,
   parseCursorModelList,
   saysSignedIn,
   parseCodexAppServerRateLimits,
@@ -580,7 +581,7 @@ test("anthropic model options come only from what the CLI itself reports", async
   );
   // The cache entry keeps the label the CLI wrote for it.
   assert.equal(options.models[0]?.label, "Fable");
-  assert.match(options.modelListSource ?? "", /model cache.*aliases documented/u);
+  assert.equal(options.modelListSource, undefined);
   // A value from a different --help paragraph must not become a model.
   assert.ok(!options.models.some((model) => model.id === "file"));
 
@@ -649,6 +650,33 @@ test("claude usage percentages are read from the CLI's own /usage report", async
   const codex = await service.usage({ provider: "openai" });
   assert.deepEqual(codex.windows, []);
   assert.match(codex.unavailableReason ?? "", /could not be asked|not signed in|no Codex session/iu);
+});
+
+test("parseClaudeUsage reports windows without a source line", () => {
+  // The card is already the account's own usage card, so naming the command
+  // it came from told the reader nothing they did not already know.
+  const report = parseClaudeUsage(
+    JSON.stringify({
+      result: [
+        "You are currently using your subscription",
+        "Current session: 36% used \u00b7 resets Jul 29, 10:59am (America/Los_Angeles)",
+      ].join("\n"),
+    }),
+  );
+  assert.equal(report.source, undefined);
+  assert.deepEqual(
+    report.windows.map((window) => [window.label, window.percentUsed]),
+    [["session", 36]],
+  );
+});
+
+test("unavailable Claude usage reports carry no source line", () => {
+  const report = parseClaudeUsage(
+    JSON.stringify({ result: "This account uses an API key." }),
+  );
+  assert.equal(report.source, undefined);
+  assert.deepEqual(report.windows, []);
+  assert.match(report.unavailableReason ?? "", /API key/iu);
 });
 
 test("codex usage comes from the rate limits its own session records", async () => {

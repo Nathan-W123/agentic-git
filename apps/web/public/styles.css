@@ -103,17 +103,12 @@
   --rail-w: 60px;
   --chan-sidebar-w: 256px;
 
-  /* And how wide the conversation itself is allowed to get.
-
-     A transcript that fills whatever width the window happens to have is a
-     transcript nobody can read: on a wide screen the eye leaves the end of
-     one line with no idea where the next one starts, and every message became
-     a full-width band of hover ground with a sentence in the corner of it.
-     `--room-column` caps each message row; day rules and other room furniture
-     still span the chat panel so a "Today" bar is not left hanging short.
+  /* Let the conversation use the room it owns. `--room-column` sizes message
+     rows to the chat panel, so long posts do not wrap beside a large empty
+     area and centered coordinator notices span the same width as day rules.
      `--message-max` lets the words use the row they sit in rather than a
      tighter character measure that stopped copy short of the available width. */
-  --room-column: 940px;
+  --room-column: 100%;
   --message-max: 100%;
 
   --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
