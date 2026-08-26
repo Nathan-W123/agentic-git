@@ -1083,6 +1083,34 @@ const EMPTY_PLAN_CORRECTION = [
     "question to answer — return an empty list again and say so in `intent`.",
 ].join("\n");
 
+/**
+ * The sibling correction, for a plan that named files but no symbols.
+ *
+ * An empty `expectedSymbols` is quieter than an empty file list and costs
+ * almost as much: it claims every named file whole, so nobody else can be
+ * admitted into any of them while this task runs — and this is the miss that
+ * actually happens. Watched live, a task declared two files and no symbols,
+ * arbitration read the files as claimed whole, and a one-line change queued
+ * behind it for the whole run when symbol-level splitting would have admitted
+ * both. The planning prompt already asks, with a worked example; nothing
+ * enforced it, and the field where ignoring the prompt costs nothing is the
+ * field that gets ignored.
+ *
+ * One round, like the files correction above, and an honest second empty is
+ * taken at its word: a change that belongs to no declaration — a config
+ * value, a bare data file, a mechanical sweep — legitimately names none.
+ */
+const EMPTY_SYMBOLS_CORRECTION = [
+  "Your previous answer listed files but no expectedSymbols, which claims " +
+    "every file you named whole: nobody else can be admitted into any of " +
+    "them until you finish. Open the files you named and read out the " +
+    "functions, classes or methods you will add, change or remove — " +
+    "including ones that do not exist yet.",
+  "If your edits genuinely belong to no declaration — a config value, a " +
+    "bare data file, comments — return an empty list again and say so in " +
+    "`intent`.",
+].join("\n");
+
 const PLAN_SHAPE_INSTRUCTIONS = [
   "Answer with exactly one JSON object and nothing else. No prose, no code fence.",
   "The object must have exactly these keys (use empty arrays where nothing applies):",
@@ -1632,6 +1660,27 @@ export class PromptCliAdapter implements AgentAdapter {
           workspace.path,
           [this.planPrompt(record.input), EMPTY_PLAN_CORRECTION].join("\n"),
         );
+      } else if (
+        plan.expectedFiles.length > 0 &&
+        plan.expectedSymbols.length === 0
+      ) {
+        // `else if`, not a second gate: one correction round per planning,
+        // whichever correction applies. A files re-ask that comes back with
+        // files and no symbols is not asked a third time — the bound on what
+        // planning may cost is part of the contract, and two corrections
+        // chained would double it for the least cooperative models exactly.
+        this.emit(record, {
+          event: "progress",
+          message:
+            `${this.profile.name} named files but no symbols; asking once ` +
+            "more so others can share those files",
+          occurredAt: new Date().toISOString(),
+        });
+        plan = await this.runPlanning(
+          record,
+          workspace.path,
+          [this.planPrompt(record.input), EMPTY_SYMBOLS_CORRECTION].join("\n"),
+        );
       }
       record.plan = plan;
       this.emit(record, {
@@ -1644,7 +1693,9 @@ export class PromptCliAdapter implements AgentAdapter {
         message:
           plan.expectedFiles.length === 0
             ? `${this.profile.name} named no files to change; it will ask for each file as it goes, and may have to wait for other work`
-            : `${this.profile.name} planned ${plan.expectedFiles.length} file(s)`,
+            : plan.expectedSymbols.length === 0
+              ? `${this.profile.name} planned ${plan.expectedFiles.length} file(s), claimed whole — no symbols named, so nobody can share them while it works`
+              : `${this.profile.name} planned ${plan.expectedFiles.length} file(s)`,
         occurredAt: new Date().toISOString(),
       });
       return structuredClone(plan);

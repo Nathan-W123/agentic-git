@@ -2138,3 +2138,92 @@ test("a second empty plan is narrated as the condition it is, not failed", async
     false,
   );
 });
+test("a plan with files but no symbols is asked for again, once", async (t) => {
+  // The quieter sibling of the empty file list, and the miss that actually
+  // happens live: files declared, symbols skipped, so every named file is
+  // claimed whole and a one-line change queues behind the whole run when
+  // symbol-level splitting would have admitted both. The planning prompt has
+  // always asked, with a worked example; this is the first thing that checks
+  // the answer.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(options.input ?? "");
+      return output(
+        JSON.stringify(
+          prompts.length === 1 ? { ...PLAN, expectedSymbols: [] } : PLAN,
+        ),
+      );
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.equal(prompts.length, 2);
+  // The whole prompt again, and the correction names the cost rather than
+  // just asking harder — plus the honest way out, so a config-only change is
+  // not badgered into inventing a function name.
+  assert.match(prompts[1] ?? "", /Inspect the repository and prepare a coordination plan\./u);
+  assert.match(prompts[1] ?? "", /listed files but no expectedSymbols/u);
+  assert.match(prompts[1] ?? "", /belong to no declaration/u);
+  assert.deepEqual(plan.expectedSymbols, ["value"]);
+});
+
+test("a second symbol-less plan stands, narrated as claiming its files whole", async (t) => {
+  // One correction round, and an honest empty is taken at its word: a config
+  // value or a bare data file belongs to no declaration. What changes is the
+  // narration — a bare file count reads as routine, and "claimed whole" is
+  // the condition anybody sharing the repository actually needs to know.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const events: AgentEvent[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(options.input ?? "");
+      return output(JSON.stringify({ ...PLAN, expectedSymbols: [] }));
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.streamEvents(session.id, (event) => events.push(event));
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.equal(prompts.length, 2, "asked again exactly once, never in a loop");
+  assert.deepEqual(plan.expectedSymbols, []);
+  assert.deepEqual(plan.expectedFiles, ["src/value.js"]);
+  const messages = events
+    .filter((event) => event.event === "progress")
+    .map((event) => event.message);
+  assert.ok(
+    messages.some((message) => /asking once more/u.test(message)),
+    JSON.stringify(messages),
+  );
+  assert.ok(
+    messages.some((message) => /claimed whole — no symbols named/u.test(message)),
+    JSON.stringify(messages),
+  );
+});
