@@ -15,6 +15,7 @@ import {
   blanketPlan,
   freezePlanFromWorkingChanges,
   frozenTouchedRanges,
+  releaseFromBlanketClaim,
 } from "./blanket-claim.js";
 import { PlanAdmissionController } from "./plan-admission.js";
 import {
@@ -401,4 +402,65 @@ test("a waiter is not let into the rest of a file the holder is inside", () => {
     ),
     [],
   );
+});
+
+test("a repository-wide holder can hand back a file it never named", () => {
+  // The half of the mechanism that was missing. A blanket claim declares only
+  // the lexical estimate its objective produced, while it holds every file in
+  // the repository — so the release path, which resolves against declarations,
+  // answered "nothing to release" for everything the estimator had not
+  // guessed. The holder was being told somebody was queued behind it and
+  // asked to hand files back, and refused when it tried.
+  const claim = blanketPlan(TASK, undefined, ["src/estimated.ts"]);
+  assert.equal(claimCoversPath(claim, "src/never-guessed.ts"), true);
+
+  const after = releaseFromBlanketClaim(claim, ["src/never-guessed.ts"]);
+
+  // Given back, and only that one.
+  assert.equal(claimCoversPath(after, "src/never-guessed.ts"), false);
+  assert.equal(claimOccupiesPath(after, "src/never-guessed.ts"), false);
+  // The claim still covers the repository. This holder has not finished, and
+  // narrowing it wholesale on the strength of one release would take away
+  // everything it has not yet been seen in.
+  assert.equal(claimCoversPath(after, "src/estimated.ts"), true);
+  assert.equal(claimCoversPath(after, "src/anything-else.ts"), true);
+  assert.ok(isBlanketClaim(after));
+});
+
+test("releases accumulate, and say nothing about a plan that was written", () => {
+  const claim = blanketPlan(TASK, undefined, []);
+  const once = releaseFromBlanketClaim(claim, ["src/a.ts"]);
+  const twice = releaseFromBlanketClaim(once, ["src/b.ts", "src/a.ts"]);
+  assert.deepEqual(
+    (twice.claim as { released?: string[] }).released,
+    ["src/a.ts", "src/b.ts"],
+  );
+
+  // A plan somebody wrote gives files back by having them removed from its
+  // declarations, which is `reducePlanScope`'s job. Recording them here as
+  // well would say the same thing twice in two vocabularies.
+  const frozen = freezePlanFromWorkingChanges(blanketPlan(TASK, undefined, []), [
+    { path: "src/a.ts", status: "modified" },
+  ]);
+  assert.equal(releaseFromBlanketClaim(frozen, ["src/a.ts"]), frozen);
+});
+
+test("a released file survives being read back out of storage", () => {
+  // The claim is persisted on the lease and parsed again by whichever process
+  // picks it up, so these paths decide what another task may have.
+  const released = releaseFromBlanketClaim(
+    blanketPlan(TASK, undefined, []),
+    ["src/a.ts"],
+  );
+  const roundTripped = JSON.parse(JSON.stringify(released)) as typeof released;
+  assertAgentPlan(roundTripped);
+  assert.equal(claimCoversPath(roundTripped, "src/a.ts"), false);
+
+  // And a claim written before releases existed still parses, still covering
+  // everything.
+  const older = JSON.parse(
+    JSON.stringify(blanketPlan(TASK, undefined, [])),
+  ) as ReturnType<typeof blanketPlan>;
+  assertAgentPlan(older);
+  assert.equal(claimCoversPath(older, "src/a.ts"), true);
 });

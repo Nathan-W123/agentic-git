@@ -62,10 +62,12 @@ import {
   type ScopeReleaseRequest,
   type TaskDefinition,
   type TaskExecutionResult,
+  claimCoversPath,
   isBlanketClaim,
   planAdmissionApproved,
   planAdmissionPartial,
 } from "@coord/shared-types";
+import { releaseFromBlanketClaim } from "./blanket-claim.js";
 import {
   GitWorktreeWorkspaceManager,
   type AdvanceWorkspaceInput,
@@ -4244,12 +4246,29 @@ export class Coordinator {
       // Only what this plan actually claims. A resource the plan never named
       // cannot be given back, and quietly "releasing" it would answer granted
       // to a request that changed nothing.
+      //
+      // A repository-wide claim is the exception, and the reason this branch
+      // exists. It declares only the lexical estimate its objective produced,
+      // while it *holds* every file in the repository — so resolving against
+      // declarations alone answered "nothing to release" for everything the
+      // estimator had not guessed. The holder was being told a task was
+      // queued behind it and asked to hand files back, and then refused when
+      // it tried: the prompt shipped without the ability. What a blanket
+      // holder may give back is what it covers.
       const claimed = planClaimedResources(entry.plan);
       const resources = asked
-        .map((resource) =>
-          claimed.get(
-            planResourceKey(resource.resourceType, resource.resourceId),
-          ),
+        .map(
+          (resource) =>
+            claimed.get(
+              planResourceKey(resource.resourceType, resource.resourceId),
+            ) ??
+            (resource.resourceType === "file" &&
+            claimCoversPath(entry.plan, resource.resourceId)
+              ? {
+                  resourceType: "file" as const,
+                  resourceId: resource.resourceId,
+                }
+              : undefined),
         )
         .filter(
           (resource): resource is PlanResourceRef => resource !== undefined,
@@ -4292,7 +4311,13 @@ export class Coordinator {
         }
       }
 
-      const revisedPlan = reducePlanScope(entry.plan, resources);
+      // Two vocabularies, because a blanket holder holds files two ways. What
+      // it declared comes off its `expected*` lists; what it merely covers is
+      // punched out of the claim, which goes on covering everything else.
+      const revisedPlan = releaseFromBlanketClaim(
+        reducePlanScope(entry.plan, resources),
+        [...releasedFiles],
+      );
       // The durable record of what this task is executing, rewritten the same
       // way a widening rewrites it. Without this the control plane still
       // shows the wide plan, and a task in another run keeps being refused

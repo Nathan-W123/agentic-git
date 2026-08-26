@@ -187,6 +187,26 @@ export interface AgentPlan {
 export interface BlanketPlanClaim {
   kind: "blanket";
   grantedAt: string;
+  /**
+   * Files this holder has given back, having finished with them.
+   *
+   * A blanket claim covers the repository, which left its holder unable to do
+   * the one thing it is asked to do when somebody queues behind it: hand over
+   * what it is done with. The release path resolves a named resource against
+   * the plan's declarations, and a blanket plan declares only the lexical
+   * estimate its objective produced — so every other file it held answered
+   * "not in the approved plan, so there is nothing to release". The prompt
+   * telling it to release shipped; the ability did not.
+   *
+   * Recorded here rather than by narrowing the claim, because narrowing is a
+   * statement about everything at once and this is a statement about one file.
+   * The claim goes on covering the repository; these are the holes in it.
+   *
+   * Every file named here was checked against the holder's worktree and found
+   * clean before it was added, which is what makes a release safe where a
+   * forecast would not be: it is a fact about what has already happened.
+   */
+  released?: string[];
 }
 
 /**
@@ -216,17 +236,19 @@ export interface FrozenPlanClaim {
    * The lines this holder has been seen editing, per file, when the freeze
    * could read them.
    *
-   * A frozen plan is the one kind of plan nobody wrote: it is assembled from
-   * a worktree, so it declares no symbols and never can. Arbitration reads a
-   * holder's declarations to work out which part of a file it occupies, found
-   * none here, and had no choice but to hand over the whole file — which meant
-   * a holder that came through the blanket freeze could never be split around,
-   * whatever the waiter declared. These are what it has instead of
-   * declarations: not a claim about intent, an observation about lines.
+   * A record, and no longer an input to any grant.
    *
-   * Absent where the freeze had nothing to observe — a claim narrowed from an
-   * objective estimate rather than from writes — and the whole file stands, as
-   * it did before.
+   * Arbitration used to read these to split a waiter around the functions a
+   * frozen holder had been seen in. That was withdrawn: a plan assembled from
+   * a worktree is the one kind nobody wrote, so these lines bound where its
+   * holder has *been* and say nothing about where it goes next — and the rest
+   * of the file includes the function it is about to open. The ranges are
+   * new-side hunk numbers besides, matched against spans from a base-revision
+   * index, so an insertion above a function attributes the edit to its
+   * neighbour. Every file a frozen claim names now stands whole.
+   *
+   * Kept because leases written before that change carry it and must go on
+   * parsing, and because it remains an honest record of what was observed.
    */
   touched?: TouchedFileRanges[];
 }
@@ -1753,7 +1775,7 @@ export function claimCoversPath(
     return false;
   }
   if (plan.claim.kind === "blanket") {
-    return true;
+    return !(plan.claim.released ?? []).includes(file);
   }
   return plan.claim.directories.some((directory) =>
     file.startsWith(directory),
@@ -1785,7 +1807,7 @@ export function claimOccupiesPath(
     return false;
   }
   if (plan.claim.kind === "blanket") {
-    return true;
+    return !(plan.claim.released ?? []).includes(file);
   }
   return plan.expectedFiles.includes(file);
 }
@@ -1829,9 +1851,16 @@ function isPlanClaim(value: unknown): value is PlanClaim {
     frozenAt?: unknown;
     directories?: unknown;
     touched?: unknown;
+    released?: unknown;
   };
   if (claim.kind === "blanket") {
-    return typeof claim.grantedAt === "string";
+    return (
+      typeof claim.grantedAt === "string" &&
+      // Checked rather than trusted, for the reason the frozen branch below
+      // gives about its own lines: a plan is read back out of storage, and
+      // these paths decide which files another task is allowed to have.
+      (claim.released === undefined || isStringArray(claim.released))
+    );
   }
   return (
     claim.kind === "frozen" &&

@@ -70,6 +70,43 @@ export function blanketPlan(
  * on the chance that it will be. See `claimOccupiesPath`, which is where that
  * distinction lives.
  */
+/**
+ * Records that a repository-wide holder has handed some files back.
+ *
+ * The claim still covers the repository — this holder has not finished, and
+ * narrowing it wholesale on the strength of one release would take away
+ * everything it has not yet been seen in. What changes is that the named
+ * files stop being covered, so the task waiting on them can be granted them
+ * while this one carries on with the rest.
+ *
+ * Only files. A symbol cannot be handed back out of a claim that never named
+ * one: there is nothing recorded to subtract it from, and a claim that
+ * covered "the repository except one function" would be a statement about
+ * where its holder is going, which is exactly what a plan nobody wrote cannot
+ * make.
+ *
+ * The caller has already proved each file clean in the holder's worktree. A
+ * plan that is not a blanket claim comes back untouched — a frozen or ordinary
+ * plan gives files back by having them removed from its declarations, which
+ * `reducePlanScope` does, and recording them here as well would say the same
+ * thing twice in two vocabularies.
+ */
+export function releaseFromBlanketClaim(
+  plan: AgentPlan,
+  files: readonly string[],
+): AgentPlan {
+  if (plan.claim?.kind !== "blanket" || files.length === 0) {
+    return plan;
+  }
+  const released = [
+    ...new Set([...(plan.claim.released ?? []), ...files]),
+  ].sort();
+  return {
+    ...structuredClone(plan),
+    claim: { ...plan.claim, released },
+  };
+}
+
 export function freezePlanFromWorkingChanges(
   plan: AgentPlan,
   changes: ReadonlyArray<{
