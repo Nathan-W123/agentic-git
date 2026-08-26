@@ -2614,7 +2614,8 @@ const APP_AUTHORIZATION_TTL_MS = 120_000;
 /**
  * What an app approved through the browser may do.
  *
- * Everything needed to do the work, and nothing that changes who may do it.
+ * Everything needed to do the work, and nothing that changes who may do it
+ * across the whole organization.
  *
  * The first cut of this was `view` and `run_task`, on the reasoning that a
  * token living on a laptop should carry the smallest set that still makes it
@@ -2624,10 +2625,9 @@ const APP_AUTHORIZATION_TTL_MS = 120_000;
  * of Kumi. Answering a question and reviewing an agent's findings would have
  * been the next two walls.
  *
- * The line is drawn at access instead: `manage_members` and
- * `manage_organization` are the two absences, and they are the two that decide
- * who may use this Kumi at all. A laptop that is lost or borrowed cannot add
- * somebody, remove somebody, or change what anybody may do.
+ * The line is drawn at organization-wide access: `manage_organization` is the
+ * one absence. A laptop that is lost or borrowed cannot change roles, billing,
+ * or anything else that decides what anybody may do across the whole Kumi.
  *
  * `manage_project` was on the wrong side of that line at first and cost a
  * third round of the same discovery. It reads like administration and is not:
@@ -2635,9 +2635,15 @@ const APP_AUTHORIZATION_TTL_MS = 120_000;
  * deleting messages — housekeeping its owner does constantly. Nothing it
  * covers changes who has access to anything.
  *
+ * `manage_members` was the fourth. Inviting somebody into a channel is
+ * ordinary work the owner does from the app, and without it the invite button
+ * answered "This token does not carry the manage_members scope". It still
+ * cannot widen past the approver's own role — only `manage_organization`
+ * stays off the ceiling.
+ *
  * `app-token-scopes.test.ts` now checks this list against every permission
  * that exists, so a permission added later fails the build until somebody
- * decides which side it belongs on. The first three walls were each found in
+ * decides which side it belongs on. The first four walls were each found in
  * production by somebody clicking a button.
  *
  * This is a ceiling, not a grant. `assertTokenScope` only ever narrows — a
@@ -2652,6 +2658,7 @@ export const APP_TOKEN_SCOPES = [
   "import_repository",
   "review",
   "manage_project",
+  "manage_members",
 ] as const;
 
 /**

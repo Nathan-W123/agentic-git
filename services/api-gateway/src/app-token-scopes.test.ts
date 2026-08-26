@@ -7,10 +7,10 @@ import { APP_TOKEN_SCOPES } from "./server.js";
 /**
  * What a desktop app may do, checked against everything there is to do.
  *
- * This grant was wrong three times, and each time the same way: a permission
+ * This grant was wrong four times, and each time the same way: a permission
  * nobody thought about stayed off the list, and the wall was found by somebody
  * clicking a button in production. First pushing to GitHub, then answering a
- * question, then deleting a channel.
+ * question, then deleting a channel, then inviting somebody into one.
  *
  * The shape of the mistake is what matters. A list of what to *include* fails
  * silently the moment a permission exists that nobody considered — the app
@@ -21,12 +21,14 @@ import { APP_TOKEN_SCOPES } from "./server.js";
  */
 
 /**
- * The two the app is not trusted with, and the reason they are the only two.
+ * The one the app is not trusted with, and the reason it is the only one.
  *
- * Both decide who may use this Kumi at all. Everything else is work — and a
- * token that cannot do the work is not a smaller risk, it is a broken app.
+ * `manage_organization` decides who may use this Kumi at all across the whole
+ * organization. Everything else is work — and a token that cannot do the work
+ * is not a smaller risk, it is a broken app. Inviting into a channel needs
+ * `manage_members`, so that sits on the granted side.
  */
-const WITHHELD = ["manage_members", "manage_organization"] as const;
+const WITHHELD = ["manage_organization"] as const;
 
 test("every permission is either granted to an app or deliberately withheld", () => {
   const granted = new Set<string>(APP_TOKEN_SCOPES);
@@ -49,10 +51,10 @@ test("nothing is both granted and withheld", () => {
   assert.deepEqual(both, [], `granted and withheld at once: ${both.join(", ")}`);
 });
 
-test("the two withheld permissions are the ones that govern access", () => {
-  // Stated as a test so that quietly withholding a third — which is how the
-  // last three walls were built — has to be a deliberate edit here.
-  assert.deepEqual([...WITHHELD], ["manage_members", "manage_organization"]);
+test("the withheld permission is the one that governs organization-wide access", () => {
+  // Stated as a test so that quietly withholding another — which is how the
+  // last four walls were built — has to be a deliberate edit here.
+  assert.deepEqual([...WITHHELD], ["manage_organization"]);
 });
 
 test("an app can do the work its owner does", () => {
@@ -65,6 +67,7 @@ test("an app can do the work its owner does", () => {
     "import_repository",
     "review",
     "manage_project",
+    "manage_members",
   ]) {
     assert.ok(
       (APP_TOKEN_SCOPES as readonly string[]).includes(permission),
