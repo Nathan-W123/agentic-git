@@ -1220,6 +1220,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
+  // The panel never borrows the channel's avatar-to-thread path classes —
+  // those belong to the room transcript only. Kept from the test this one
+  // replaced, which is the only thing in it that was not already covered here.
+  assert.doesNotMatch(renderer, /cmsg-thread-path/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-route/u);
   const channelStem =
     /\n\.cmsg-row\.cmsg-thread-path-through::before \{([\s\S]*?)\n\}/u.exec(
       css,
