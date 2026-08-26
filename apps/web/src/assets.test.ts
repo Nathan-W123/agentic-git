@@ -1378,6 +1378,37 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
+test("a thread says what it is without a connector drawn to it", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const rendererStart = chats.indexOf("function threadReplies");
+  const rendererEnd = chats.indexOf("\n/**\n * How much summary", rendererStart);
+  const renderer = chats.slice(rendererStart, rendererEnd);
+
+  // Inside the open thread panel the conversation names itself with a head and
+  // a flow of replies. That panel never borrows the channel's avatar-to-thread
+  // path classes — those belong to the room transcript only.
+  assert.match(renderer, /class="thread-replies"/u);
+  assert.match(renderer, /class="thread-replies-head"/u);
+  assert.match(renderer, /class="thread-replies-flow"/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-path/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-route/u);
+
+  // The panel keeps its own single branch. It crosses nothing, joins nothing,
+  // and is drawn once — it was never the channel bracket.
+  const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
+  assert.match(panelBranch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
+  assert.match(panelBranch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
+  assert.match(panelBranch ?? "", /border-bottom-left-radius: 11px;/u);
+  assert.match(panelBranch ?? "", /left: 15px;/u);
+  assert.match(panelBranch ?? "", /top: 48px;/u);
+  assert.match(panelBranch ?? "", /width: 11px;/u);
+  assert.match(css, /\.thread-replies-head::after \{/u);
+});
+
 test("user-rooted tasks promote when their first reply arrives", async () => {
   const chats = await publicFile("screen-chats.js");
   const row = chats.slice(
