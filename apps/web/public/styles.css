@@ -109,7 +109,7 @@
      transcript nobody can read: on a wide screen the eye leaves the end of
      one line with no idea where the next one starts, and every message became
      a full-width band of hover ground with a sentence in the corner of it.
-     `--room-column` is the column the messages are centred in, and
+     `--room-column` is the column the messages read down, and
      `--message-max` caps the words themselves at roughly the line length
      prose is set at — measured in characters, so it follows the reader's own
      text size rather than a pixel count taken at one of them. */
@@ -5992,11 +5992,12 @@ button.chip.lg:hover {
 .chan-messages {
   overflow-y: auto;
   min-height: 0;
-  /* Centred in its own column rather than run edge to edge. The side padding
-     is the larger of the 24px a narrow room needs and whatever is left over
-     once the column has taken its share, so nothing moves until the window is
-     wider than the conversation wants to be. */
-  padding: 12px max(24px, (100% - var(--room-column)) / 2) 20px;
+  /* Left-aligned in its own column, not centred and not edge to edge: the
+     messages start where the header and composer do. The right padding is
+     the larger of the 24px a narrow room needs and what is left once the
+     column has taken its share, so nothing moves until the window is wider
+     than the conversation wants to be. */
+  padding: 12px max(24px, 100% - var(--room-column)) 20px 18px;
   position: relative;
   isolation: isolate;
 }

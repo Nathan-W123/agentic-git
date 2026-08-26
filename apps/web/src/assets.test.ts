@@ -6608,8 +6608,8 @@ test("the transcript reads in a column rather than across the window", async () 
   assert.match(css, /--message-max: 72ch;/u);
   assert.match(
     css,
-    /\.chan-messages \{[\s\S]{0,400}padding: 12px max\(24px, \(100% - var\(--room-column\)\) \/ 2\) 20px;/u,
-    "the column should centre without moving anything in a narrow room",
+    /\.chan-messages \{[\s\S]{0,400}padding: 12px max\(24px, 100% - var\(--room-column\)\) 20px 18px;/u,
+    "the column should start at the left without moving anything in a narrow room",
   );
   assert.match(
     css,
