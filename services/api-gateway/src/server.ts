@@ -5364,7 +5364,7 @@ export class ApiGateway {
       }
       if (this.appBaseUrl === "") {
         // Stripe needs somewhere absolute to send them back to. Without this
-        // the return address would be `/#welcome/...`, which Stripe refuses —
+        // the return address would be `/app#welcome/...`, which Stripe refuses —
         // and it refuses it as a parameter error, so the deployment answers
         // 500 to somebody trying to buy something and nothing anywhere names
         // the missing variable.
@@ -5407,8 +5407,8 @@ export class ApiGateway {
         quantity: 1,
         customerEmail: email,
         trialPeriodDays: TRIAL_DAYS,
-        successUrl: `${this.appBaseUrl}/#welcome/${intentId}.${secret}`,
-        cancelUrl: `${this.appBaseUrl}/#signup`,
+        successUrl: `${this.appBaseUrl}/app#welcome/${intentId}.${secret}`,
+        cancelUrl: `${this.appBaseUrl}/app#signup`,
       });
       await this.options.store.createSignupIntent({
         id: intentId,
@@ -5434,7 +5434,7 @@ export class ApiGateway {
       // Safe to send before the money clears, because the link cannot build
       // an account until it has: the completion route refuses while the
       // sign-up is unpaid, and says so.
-      const link = `${this.appBaseUrl}/#welcome/${intentId}.${secret}`;
+      const link = `${this.appBaseUrl}/app#welcome/${intentId}.${secret}`;
       try {
         await this.mailer({
           to: email,
@@ -5577,7 +5577,7 @@ export class ApiGateway {
       const email = emailField(body["email"]) ?? "";
       const issued = await this.auth.requestPasswordReset(email);
       if (issued !== undefined) {
-        const link = `${this.originFor(request, context.secure)}/#reset/${issued.token}`;
+        const link = `${this.originFor(request, context.secure)}/app#reset/${issued.token}`;
         try {
           await this.mailer({
             to: issued.user.email,
@@ -11698,8 +11698,8 @@ export class ApiGateway {
         // somebody would pay and be shown the room they started in. The
         // fragment is also never sent to the server, which is why the rest of
         // this app's deep links use one.
-        successUrl: `${this.appBaseUrl}/#billing-done`,
-        cancelUrl: `${this.appBaseUrl}/#billing-cancelled`,
+        successUrl: `${this.appBaseUrl}/app#billing-done`,
+        cancelUrl: `${this.appBaseUrl}/app#billing-cancelled`,
         ...(existing?.stripeCustomerId === undefined
           ? { customerEmail: principal.user.email }
           : { customerId: existing.stripeCustomerId }),
@@ -11734,7 +11734,7 @@ export class ApiGateway {
       }
       const session = await stripe.createPortalSession({
         customerId: subscription.stripeCustomerId,
-        returnUrl: `${this.appBaseUrl}/#billing`,
+        returnUrl: `${this.appBaseUrl}/app#billing`,
       });
       this.sendJson(response, 200, { url: session.url });
       return;
@@ -20678,7 +20678,7 @@ export class ApiGateway {
             `or cancel, open Kumi and go to Settings — Billing:
 
 ` +
-            `${this.appBaseUrl}/#settings
+            `${this.appBaseUrl}/app#settings
 `,
         });
       } catch (error) {
@@ -21018,10 +21018,18 @@ export class ApiGateway {
     if (request.method !== "GET" && request.method !== "HEAD") {
       throw new HttpError(404, "not_found", "Route was not found");
     }
-    const requested = url.pathname === "/" ? "/index.html" : url.pathname;
+    // The path is looked up exactly as it arrived — including "/". A
+    // deployment with the marketing site registers its front page under the
+    // bare "/" key, so the old rewrite of "/" to "/index.html" would have
+    // served the dashboard over the advertisement; without the site there is
+    // no "/" key, "/" contains no dot, and the fallback below answers with
+    // the dashboard document exactly as it always has. The dot test is what
+    // separates "a client-side route" from "a file that does not exist":
+    // /app and /some/client/route fall back to the document, /app.js and a
+    // typoed /app.jss stay honest 404s.
     const asset =
-      this.options.staticAssets?.get(requested) ??
-      (requested.includes(".")
+      this.options.staticAssets?.get(url.pathname) ??
+      (url.pathname.includes(".")
         ? undefined
         : this.options.staticAssets?.get("/index.html"));
     if (asset === undefined) {

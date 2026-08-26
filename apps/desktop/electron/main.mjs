@@ -250,7 +250,13 @@ async function openDashboard() {
   });
   running = true;
   try {
-    await window.loadURL(session.server);
+    // The dashboard's address, not the bare origin: the deployment serves its
+    // marketing site at "/" now, and a chromeless window showing a sales page
+    // with no way to sign in is what this line would otherwise open.
+    // Installers built before this change still load "/" — the marketing
+    // page detects the preload's KUMI_SERVER global and forwards itself to
+    // /app, so old installs land in the dashboard too, one redirect later.
+    await window.loadURL(new URL("/app", session.server).toString());
   } catch (error) {
     // The window is left open on purpose. It is blank, but its menu is how
     // somebody points the app somewhere else or reloads once the server is

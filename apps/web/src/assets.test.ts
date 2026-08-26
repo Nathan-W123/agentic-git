@@ -6935,6 +6935,155 @@ test("Codex offers its documented ids when the account reports none", async () =
   );
 });
 
+/* -------------------------------------------------------- marketing site -- */
+
+async function siteFile(name: string): Promise<string> {
+  return await readFile(path.join(packageRoot, "public", "site", name), "utf8");
+}
+
+test("the marketing site is served at its own addresses, beside the dashboard", async () => {
+  const assets = await loadStaticAssets();
+
+  // Page keys are extensionless addresses, on the `/authorize` precedent.
+  // `/download` is deliberately absent: the dashboard's own functional page
+  // owns that address, and the marketing nav links into it.
+  for (const page of ["/", "/pricing"]) {
+    assert.equal(
+      assets.get(page)?.contentType,
+      "text/html; charset=utf-8",
+      `${page} should serve a marketing page`,
+    );
+  }
+  assert.equal(assets.get("/site.css")?.contentType, "text/css; charset=utf-8");
+  for (const script of ["/site.js", "/site-boot.js", "/vendor/motion/motion.js"]) {
+    assert.equal(
+      assets.get(script)?.contentType,
+      "text/javascript; charset=utf-8",
+      `${script} should be served`,
+    );
+  }
+  // MIT: the notice travels with the vendored code, same-origin like the code.
+  const licence = assets.get("/vendor/motion/LICENSE.md")?.body.toString("utf8") ?? "";
+  assert.match(licence, /The MIT License/u);
+  assert.match(licence, /Motion\]\(https:\/\/motion\.dev\) B\.V\./u);
+
+  // The front page is the site; the dashboard document keeps `/index.html`,
+  // which is what the gateway's extensionless fallback serves for `/app`.
+  const front = assets.get("/")?.body.toString("utf8") ?? "";
+  assert.match(front, /coordination layer/iu);
+  const dashboard = assets.get("/index.html")?.body.toString("utf8") ?? "";
+  assert.match(dashboard, /id="app-root"/u);
+  assert.doesNotMatch(front, /id="app-root"/u);
+
+  // Marketing pages are editable, so none may promise immutability — that is
+  // reserved for names that carry their own digest.
+  for (const key of ["/", "/pricing", "/site.css", "/site.js"]) {
+    assert.equal(assets.get(key)?.immutable, undefined, `${key} must revalidate`);
+  }
+});
+
+test("every marketing script parses before it is served", async () => {
+  const dir = path.join(packageRoot, "public", "site");
+  const scripts = (await readdir(dir)).filter((name) => name.endsWith(".js"));
+  assert.ok(scripts.length >= 3, `expected the site scripts, saw ${scripts.length}`);
+  for (const name of scripts) {
+    const checked = spawnSync(
+      process.execPath,
+      ["--check", path.join(dir, name)],
+      { encoding: "utf8" },
+    );
+    assert.equal(checked.status, 0, `${name} does not parse:\n${checked.stderr}`);
+  }
+});
+
+test("the marketing front page forwards legacy deep links to /app", async () => {
+  // Mailed links predate the move of the dashboard to /app — claim links,
+  // password resets, the trial-warning mail's settings pointer — and inboxes
+  // cannot be re-sent. The front page therefore forwards any hash that names
+  // a dashboard screen, before paint, with the fragment intact. The gateway's
+  // CSP forbids inline scripts, so the forwarder is the first external script
+  // in <head>, parser-blocking on purpose.
+  const html = await siteFile("index.html");
+  const headEnd = html.indexOf("</head>");
+  assert.ok(headEnd > 0);
+  assert.match(html.slice(0, headEnd), /<script src="\/site-boot\.js"><\/script>/u);
+
+  const boot = await siteFile("site-boot.js");
+  assert.match(boot, /window\.location\.replace\("\/app" \+ hash\)/u);
+  // Every screen name AUTH_HASHES routes (app.js), plus the billing and
+  // settings returns the server mails out and hands to Stripe. An allowlist,
+  // not "any hash": the page's own anchors must keep scrolling.
+  for (const screen of [
+    "signin",
+    "register",
+    "signup",
+    "welcome",
+    "setup",
+    "forgot",
+    "reset",
+    "billing",
+    "billing-done",
+    "billing-cancelled",
+    "settings",
+  ]) {
+    assert.match(boot, new RegExp(`"${screen}"`, "u"), `${screen} should forward`);
+  }
+  // Installed desktop shells load the bare origin forever (main.mjs ships in
+  // installers); the preload's KUMI_SERVER global is the tell that sends them
+  // to the dashboard.
+  assert.match(boot, /window\.KUMI_SERVER/u);
+});
+
+test("marketing motion is an enhancement behind the reduced-motion gate", async () => {
+  const boot = await siteFile("site-boot.js");
+  const site = await siteFile("site.js");
+  const css = await siteFile("site.css");
+
+  // The class that arms hidden reveal states exists only when JavaScript ran
+  // AND motion is welcome — so no-JS visitors and reduced-motion visitors
+  // never have content hidden from them.
+  assert.match(
+    boot,
+    /matchMedia\("\(prefers-reduced-motion: no-preference\)"\)\.matches/u,
+  );
+  assert.match(site, /matchMedia\("\(prefers-reduced-motion: reduce\)"\)/u);
+  // And the module strips the class rather than animating when the gate is
+  // closed or the vendored library failed to load.
+  assert.match(site, /classList\.remove\("anim"\)/u);
+
+  // Hidden starting states are all scoped to the armed class...
+  assert.match(css, /html\.anim \.reveal \{/u);
+  assert.doesNotMatch(css, /(?<!html\.anim )\.reveal \{/u);
+  // ...and the CSS-only animations die under the media kill switch.
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*animation: none/u,
+  );
+
+  // Both pages load the gate before the library and the module.
+  for (const page of ["index.html", "pricing.html"]) {
+    const html = await siteFile(page);
+    assert.match(html, /<script src="\/site-boot\.js"><\/script>/u);
+    assert.match(html, /<script src="\/vendor\/motion\/motion\.js"><\/script>/u);
+    assert.match(html, /<script type="module" src="\/site\.js"><\/script>/u);
+  }
+});
+
+test("the seat price is written exactly once, on the pricing page", async () => {
+  // The product code carries no amount at all — only a STRIPE_PRICE_ID — so
+  // the site is the single place a human reads the number. Keeping it to one
+  // marked line is what makes a Stripe price change a one-line site edit.
+  const pricing = await siteFile("pricing.html");
+  const amounts = pricing.match(/\$\d+/gu) ?? [];
+  assert.equal(amounts.length, 1, `expected one price, saw: ${amounts.join(", ")}`);
+  assert.match(pricing, /PRICE — the only place/u);
+  const home = await siteFile("index.html");
+  assert.equal(
+    (home.match(/\$\d+/gu) ?? []).length,
+    0,
+    "index.html must not repeat the price",
+  );
+});
 /* ------------------------------------------------- room presentation ---- */
 
 test("the channel rail is drawn only when there is a channel to switch to", async () => {
