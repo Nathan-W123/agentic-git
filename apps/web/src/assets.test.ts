@@ -6890,13 +6890,24 @@ test("the transcript reads in a column rather than across the window", async () 
   const css = await publicFile("styles.css");
 
   // A message run edge to edge on a wide screen is a message read twice: the
-  // eye leaves the end of one line with nowhere to land on the next.
+  // eye leaves the end of one line with nowhere to land on the next. Day
+  // separators still span the panel so "Today" is not left-shifted short.
   assert.match(css, /--room-column: 940px;/u);
-  assert.match(css, /--message-max: 72ch;/u);
+  assert.match(css, /--message-max: 100%;/u);
   assert.match(
     css,
-    /\.chan-messages \{[\s\S]{0,400}padding: 12px max\(24px, 100% - var\(--room-column\)\) 20px 18px;/u,
-    "the column should start at the left without moving anything in a narrow room",
+    /\.chan-messages \{[\s\S]{0,400}padding: 12px 18px 20px;/u,
+    "the scroller matches the header inset so day rules span the panel",
+  );
+  assert.match(
+    css,
+    /\.chan-day \{[\s\S]{0,200}width: 100%;[\s\S]{0,80}max-width: none;/u,
+    "the Today bar spans the chat panel rather than the message column",
+  );
+  assert.match(
+    css,
+    /\.cmsg-row \{[\s\S]{0,500}max-width: var\(--room-column\);/u,
+    "message rows keep the conversation column",
   );
   assert.match(
     css,
