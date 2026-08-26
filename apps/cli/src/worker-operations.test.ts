@@ -4278,15 +4278,24 @@ test("a hosting process shares one repository index across admissions", async ()
     project.config.defaultAgent = "generic-cli";
     await project.save();
 
+    // Counted at the tree listing an index build cannot skip. This is the
+    // call the builder makes once per revision and never again while the
+    // entry is cached, so it is the honest measure of how many indexes were
+    // actually built. `listFiles` is a separate listing the builder stopped
+    // using, and counting there reports nought builds however many happen.
     let builds = 0;
-    const listFiles = harness.repositories.listFiles.bind(
+    const listFileEntries = harness.repositories.listFileEntries.bind(
       harness.repositories,
     );
     (
-      harness.repositories as unknown as { listFiles: typeof listFiles }
-    ).listFiles = async (...args: Parameters<typeof listFiles>) => {
+      harness.repositories as unknown as {
+        listFileEntries: typeof listFileEntries;
+      }
+    ).listFileEntries = async (
+      ...args: Parameters<typeof listFileEntries>
+    ) => {
       builds += 1;
-      return await listFiles(...args);
+      return await listFileEntries(...args);
     };
 
     const intelligence = new CodeIntelligenceService(harness.repositories);
