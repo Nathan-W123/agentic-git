@@ -5908,8 +5908,12 @@ test("a question answer that proposes a repository change starts one scoped task
 
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   const [task] = runtime.submittedTasks;
+  // The request, out of the objective the worker is sent. Every task now
+  // carries the answer-not-a-status-report directive behind what was asked,
+  // which is coordinator plumbing rather than part of the scope this test is
+  // about — and `requestFromObjective` is how every other reader takes it off.
   assert.equal(
-    task?.objective,
+    requestFromObjective(task?.objective ?? ""),
     "Add a three-attempt cap to retry routes and cover it with API gateway tests",
   );
   assert.equal(task?.conversationId, posted.data.message.id);
@@ -12083,16 +12087,24 @@ test("a quick task keeps its outcome inline after acknowledging the handoff", as
   const root = messages.find(
     (message) => message.kind === "user" && message.taskId === task.id,
   );
+  // Two immediate lines, and nothing from the run.
+  //
+  // The handoff reply is posted as a canned sentence and then contextualised
+  // in place by the agent's own opening — `chatAnswer.text` here — so its
+  // final wording is the agent's, not the placeholder's. The `Task:` line is
+  // the thread's name, which every surface reads a title off. Neither is run
+  // ceremony, which is what this test is about: no `plan_received`, no
+  // `plan_admitted`, no `task_started`, no changeset narration. Comparing the
+  // whole list is what keeps that true — a ceremony line leaking in fails
+  // here.
   assert.deepEqual(
     (root?.replies ?? []).map((reply) => ({
       kind: reply.kind,
       content: reply.content,
     })),
     [
-      {
-        kind: "agent",
-        content: "I've taken this task and I'm working on it.",
-      },
+      { kind: "agent", content: "On it." },
+      { kind: "progress", content: "Task: change the retry count to 2" },
     ],
     JSON.stringify(root),
   );
@@ -13017,12 +13029,14 @@ test("the sweep leaves a quiet task alone, and closes a thread its watcher aband
 
   const swept = await runtime.store.listChannelMessages(repo, ownerId);
   const quietRoot = swept.find((message) => message.taskId === task.id);
-  // Only the handoff acknowledgement remains under the root. The sweep must
-  // not paste a canned ending beneath work whose ending is already in the
-  // room.
+  // Only what the handoff put there remains under the root: the
+  // acknowledgement — carrying the agent's own opening, which replaces the
+  // canned sentence in place once it arrives — and the thread's name. The
+  // sweep must not paste a canned ending beneath work whose ending is already
+  // in the room, and comparing the whole list is what proves it did not.
   assert.deepEqual(
     (quietRoot?.replies ?? []).map((reply) => reply.content),
-    ["I've taken this task and I'm working on it."],
+    ["On it.", "Task: fix the typo in the README"],
     "the sweep added narration to a quick task that had already ended flat",
   );
   assert.equal(
