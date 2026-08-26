@@ -2655,6 +2655,7 @@ function messageRow(
     inlineReplyTo = undefined,
     actions = "",
     compact = false,
+    threadPath = undefined,
   } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
@@ -2717,10 +2718,20 @@ function messageRow(
     channelThread && threadIsWorking(entry)
       ? (threadProgress(entry) ?? 0)
       : undefined;
+  // The path is assigned by `messageThreadPaths`, which can start it on an
+  // earlier compact-group message than the one that owns the task. A direct
+  // channel render still gets a complete standalone path as a safe fallback.
+  const path =
+    threadPath ??
+    (channelThread ? { start: true, through: false, end: true } : undefined);
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
-  }${channelThread ? " cmsg-threaded" : ""}${deleted ? " cmsg-deleted" : ""}${
+  }${channelThread ? " cmsg-threaded" : ""}${
+    path?.start === true ? " cmsg-thread-path-start" : ""
+  }${path?.through === true ? " cmsg-thread-path-through" : ""}${
+    path?.end === true ? " cmsg-thread-path-end" : ""
+  }${deleted ? " cmsg-deleted" : ""}${
     // A post whose write never reached the server. `sendChannelMessage` and
     // `postChannelReply` have set this flag all along and no renderer read
     // it, so a message that failed sat in the transcript looking exactly like
@@ -2777,6 +2788,7 @@ function messageRow(
           )}</span>`
     }
     <div class="cmsg-body">
+      ${channelThread ? `<div class="cmsg-thread-route">` : ""}
       ${
         compact
           ? ""
@@ -2857,7 +2869,7 @@ function messageRow(
           ? threadSummaryLink(entry, replies, repositoryId, progress)
           : changedBlock
       }
-      ${channelThread ? changedBlock : ""}
+      ${channelThread ? `</div>${changedBlock}` : ""}
       <!-- Keep the message tools on the message surface. When they were a
            sibling of the body, the absolute position was measured from the
            full transcript row and the toolbar floated at the far edge of a
@@ -2964,6 +2976,57 @@ export function channelMessageHasTaskThread(entry) {
     replies.length > 0 &&
     (entry.kind !== "user" || entry.taskId !== undefined)
   );
+}
+
+/**
+ * Assigns one connector path to every visible run of consecutive prompts.
+ *
+ * The path begins on the run's one visible avatar, crosses otherwise ordinary
+ * compact messages when necessary, branches at every task, and ends at the
+ * final task. Search results opt out because they are independent hits rather
+ * than a trustworthy uninterrupted run.
+ */
+function messageThreadPaths(timeline, groupConsecutive) {
+  const paths = timeline.map(() => undefined);
+  let groupStart = 0;
+  while (groupStart < timeline.length) {
+    let groupEnd = groupStart + 1;
+    if (groupConsecutive) {
+      while (groupEnd < timeline.length) {
+        const previous = timeline[groupEnd - 1];
+        const current = timeline[groupEnd];
+        const startsNewDay =
+          new Date(previous.at ?? 0).toDateString() !==
+          new Date(current.at ?? 0).toDateString();
+        if (!continuesUserMessageGroup(previous, current, startsNewDay)) {
+          break;
+        }
+        groupEnd += 1;
+      }
+    }
+
+    const branches = [];
+    for (let index = groupStart; index < groupEnd; index += 1) {
+      if (
+        timeline[index].inlineReplyTo === undefined &&
+        channelMessageHasTaskThread(timeline[index].entry)
+      ) {
+        branches.push(index);
+      }
+    }
+    if (branches.length > 0) {
+      const lastBranch = branches[branches.length - 1];
+      for (let index = groupStart; index <= lastBranch; index += 1) {
+        paths[index] = {
+          start: index === groupStart,
+          through: index < lastBranch,
+          end: index === lastBranch,
+        };
+      }
+    }
+    groupStart = groupEnd;
+  }
+  return paths;
 }
 
 /**
@@ -3168,6 +3231,7 @@ function messageList(repositoryId) {
   // every channel that had anything in it, the render died, and the room kept
   // whatever was painted before it. That was the loading skeleton, which is
   // why a working channel appeared to load forever.
+  const threadPaths = messageThreadPaths(timeline, true);
   let lastDay = "";
   // Where this visit found the room, as a timestamp — see `snapshotChannelRead`.
   const mark = channelUnreadMark(repositoryId);
@@ -3210,7 +3274,10 @@ function messageList(repositoryId) {
     );
     return (
       separator +
-      messageRow(entry, repositoryId, { compact })
+      messageRow(entry, repositoryId, {
+        compact,
+        threadPath: threadPaths[index],
+      })
     );
   });
   return `<div class="chan-messages" id="chan-messages" role="log"

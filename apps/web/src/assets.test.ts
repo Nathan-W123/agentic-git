@@ -1373,8 +1373,6 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
-test("user-rooted tasks promote when their first reply arrives", async () => {
-
 test("a thread says what it is without a connector drawn to it", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
@@ -4065,11 +4063,6 @@ test("channel task branches share the compact group's visible avatar", async () 
   assert.match(chats, /path\?\.through === true \? " cmsg-thread-path-through"/u);
   assert.match(chats, /path\?\.end === true \? " cmsg-thread-path-end"/u);
 });
-
-test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
-  const app = await browserSource();
-  const chat = await publicFile("chat.js");
-  const css = await publicFile("styles.css");
 
 test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
   const app = await browserSource();
