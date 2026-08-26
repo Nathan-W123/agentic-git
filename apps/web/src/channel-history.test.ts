@@ -130,6 +130,63 @@ test("opening a direct-message history starts at its newest messages", async () 
   }
 });
 
+test("a private message keeps its place when another panel is open", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  // The right-hand column holds several panels at once and every one of them
+  // wears `.thread-body`, so asking the document for one of those answered
+  // with whichever happened to be first. A direct message opens as the newest
+  // panel — last in the document — so with a thread or the file editor
+  // already beside it, its position was never taken and every render put the
+  // reader back at the top of the history.
+  const surfaces = slice(
+    chats,
+    "function scrollSurfaceNodes(selector) {",
+    "\nexport function restoreChannelAnchor(saved) {",
+  );
+  assert.match(surfaces, /document\.querySelectorAll\(selector\)/u);
+  assert.doesNotMatch(
+    surfaces,
+    /document\.querySelector\(/u,
+    "capture must not stop at the first panel wearing the class",
+  );
+  assert.match(surfaces, /SCROLL_SURFACES\.flatMap\(\(selector\) =>/u);
+  assert.match(surfaces, /scrollSurfaceNodes\(selector\)\.map\(\(scroller\) => \{/u);
+
+  // Which makes order meaningless, so the restore pairs a captured position
+  // with its panel by identity: the same kind of surface, showing the same
+  // conversation.
+  const restore = slice(
+    chats,
+    "export function restoreChannelAnchor(saved) {",
+    "\n/**\n * The anchor each surface is currently sitting on",
+  );
+  assert.match(restore, /for \(const scroller of scrollSurfaceNodes\(entry\.selector\)\)/u);
+  assert.match(restore, /scroller\.className !== entry\.shape/u);
+  assert.match(restore, /scroller\.dataset\.scrollKey !== entry\.key/u);
+  // And the hold is remembered per panel rather than per selector, or two
+  // open `.thread-body` panels would share — and overwrite — one anchor.
+  assert.match(
+    restore,
+    /heldAnchors\.set\(entry\.selector \+ "\|" \+ entry\.shape \+ "\|" \+ entry\.key/u,
+  );
+
+  // The late-decode hold reaches the same panels the same way.
+  const watch = slice(
+    chats,
+    "function watchImageSizes() {",
+    "\n/**\n * Puts the transcript back where the reader had it",
+  );
+  assert.match(watch, /scrollSurfaceNodes\(held\.entry\.selector\)/u);
+  assert.match(watch, /scroller\.dataset\.scrollKey !== held\.entry\.key/u);
+  assert.match(watch, /scroller\.scrollTop !== held\.applied/u);
+
+  // Every panel that can share the class carries an identity to be paired on.
+  for (const key of ["dm:", "thread:", "thread-list:", "file:", "tree:", "catch-up:"]) {
+    assert.match(chats, new RegExp(`data-scroll-key="${key}`, "u"), `${key} has an identity`);
+  }
+});
+
 test("earlier pages are read through the cursor, deduped, and survive a reconcile", async () => {
   const data = await publicFile("data.js");
   const loader = slice(

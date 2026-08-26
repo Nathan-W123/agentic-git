@@ -96,12 +96,17 @@ import {
   loadPreview,
   rollbackTask,
   setAuditorPaused,
+  setPreviewCommand,
   simplifySummary,
+  startPreview,
   uploadAttachment,
+  stopPreview,
   setRepositoryGrant,
   revokeRepositoryGrant,
   updateMemberRole,
   iAmSystemAdmin,
+  canManageOrganization,
+  resolveAttachmentImages,
   openBillingPortal,
   startCheckout,
   ensureBilling,
@@ -123,6 +128,9 @@ import {
   loadChannelMessage,
   resendChannelMessage,
   ensureChangeSetForTask,
+  CHANNEL_MESSAGE_MAX_CHARS,
+  DIRECT_MESSAGE_MAX_CHARS,
+  messageTooLong,
 } from "./data.js";
 import {
   $,
@@ -232,6 +240,7 @@ import {
   resizeComposers,
   rosterMenuItems,
   personMenuItems,
+  messageOverflowMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
   scrollDirectMessageToLatest,
@@ -243,6 +252,7 @@ import {
   updateThreadComposerInput,
   usageOwner,
   usageProviderId,
+  showsChannelRail,
 } from "./screen-chats.js";
 
 // A socket callback cannot unlock browser audio by itself. The first genuine
@@ -756,6 +766,12 @@ function renderAuth() {
                 // is retired in its own commit.
                 `New here? <a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
       }</p>
+      ${
+        bootstrap
+          ? ""
+          : `<p class="auth-foot">Prefer it in its own window? <a
+              class="link-muted" href="/download">Get Kumi for desktop</a>.</p>`
+      }
     </div>
   </main>`;
 }
@@ -1742,6 +1758,17 @@ function apiTokensCard() {
       <p>Sign in a Kumi app on your machine. It reads the room and starts
         work, the same as this browser does.</p></div>
     </div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Kumi for desktop</div>
+        <div class="sr-sub">Mac, Windows and Linux. It signs itself in through
+          your browser, so it needs none of the tokens below.</div>
+      </span>
+      <span class="sr-ctl">
+        <a class="btn btn-sm" href="/download" target="_blank"
+          rel="noopener">Download</a>
+      </span>
+    </div>
     ${
       minted === undefined
         ? ""
@@ -2571,7 +2598,7 @@ async function deleteDirectMessageAction(userId, messageId) {
 /** One compact editor shared by channel roots, replies, and direct messages. */
 async function messageEditValue(
   content,
-  { agentAware = false, maxLength = 10_000 } = {},
+  { agentAware = false, maxLength = CHANNEL_MESSAGE_MAX_CHARS } = {},
 ) {
   const values = await showModal({
     title: "Edit message",
@@ -2579,11 +2606,15 @@ async function messageEditValue(
       ? "You can correct it until somebody replies or an agent starts acting on it."
       : "The correction appears for everyone in this conversation.",
     confirm: "Save",
+    // The cap is said, not just enforced: `maxlength` stops typing dead at
+    // the limit and silently drops the tail of a long paste, which reads as
+    // the editor breaking rather than as a rule.
     body: `<label class="field">
         <span>Message</span>
         <textarea class="input" name="content" rows="6" maxlength="${String(maxLength)}"
           required autofocus>${esc(String(content ?? ""))}</textarea>
-      </label>`,
+      </label>
+      <p class="modal-hint">Up to ${maxLength.toLocaleString("en-US")} characters.</p>`,
   });
   const next = String(values?.content ?? "").trim();
   return values === undefined || next === "" ? undefined : next;
@@ -2637,7 +2668,9 @@ async function editDirectMessageAction(userId, messageId) {
   if (message === undefined) {
     return;
   }
-  const content = await messageEditValue(message.content, { maxLength: 8_000 });
+  const content = await messageEditValue(message.content, {
+    maxLength: DIRECT_MESSAGE_MAX_CHARS,
+  });
   if (content === undefined || content === String(message.content ?? "").trim()) {
     return;
   }
@@ -2830,6 +2863,186 @@ async function attachChannelImages(files, target = "channel") {
     }
   }
   $(`[data-act='${where.input}']`)?.focus();
+}
+
+/**
+ * Repositories whose preview is being followed up, so two presses — or a
+ * press and a reload — cannot leave two pollers reading the same status.
+ */
+const previewsWatched = new Set();
+
+/**
+ * Repositories whose app is being started right now.
+ *
+ * Starting is not instant and is sometimes not close to it: a checkout of
+ * canonical has no dependencies, so the first press installs them and then
+ * builds, and a minute of nothing is a normal thing to be looking at. Nothing
+ * said so, so the obvious move was to press play again — which asked the
+ * control plane to replace a preview that had not finished starting, killed
+ * the build, and reported its death as "exited immediately". A diagnosis of
+ * the repository, for something the second press did.
+ *
+ * So the second press is refused here, and the control says why it is being
+ * refused: shared through `state` because the button that has to look busy is
+ * drawn in `screen-chats.js`, which cannot import this file back.
+ */
+const previewsStarting = new Set();
+state.previewsStarting = previewsStarting;
+
+/**
+ * Follows a preview that is up but not answering yet.
+ *
+ * Starting waits a bounded time for the port and then answers with whatever
+ * is true, so an app that builds before it serves comes back running and not
+ * ready — honestly, and for minutes at a time. The status is otherwise read
+ * once per channel, so without this the header would say "starting…" until
+ * somebody navigated away and back, long after the app came up.
+ *
+ * Stops on the first settled answer, and on nothing at all: an app that never
+ * binds its port is a broken app, and a page that asks about it forever is a
+ * second broken thing.
+ */
+async function watchPreviewReady(repositoryId) {
+  if (previewsWatched.has(repositoryId)) {
+    return;
+  }
+  previewsWatched.add(repositoryId);
+  try {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 3000);
+      });
+      const preview = await loadPreview(repositoryId);
+      if (
+        preview === null ||
+        preview.ready !== false ||
+        preview.exited !== undefined
+      ) {
+        return;
+      }
+    }
+  } finally {
+    previewsWatched.delete(repositoryId);
+    render();
+  }
+}
+
+/**
+ * Asks how this repository starts, in the one case where nothing else can
+ * know.
+ *
+ * Detection reads the checkout and covers what a repository can say about
+ * itself — a Procfile line, every package.json script that might start it,
+ * the apps inside a monorepo, a Django or Flask entry point, go.mod,
+ * Cargo.toml, config.ru, index.php, or a page it can serve as static files —
+ * and each of those is *tried* before this is reached. What is left over is
+ * not a guessable case: it is a question with exactly one right answer, held
+ * by whoever built the repository.
+ *
+ * So it is asked, plainly, and the answer is stored against this channel —
+ * asked once, not once per press, and not once per person.
+ */
+async function askPreviewCommand(repositoryId, why) {
+  const values = await showModal({
+    title: `How does ${repositoryLabel(repositoryId)} start?`,
+    subtitle: why,
+    confirm: "Start it",
+    body: `<label class="field">
+        <span>Start command</span>
+        <input class="input" name="command" autocomplete="off" spellcheck="false"
+          autocapitalize="none" autocorrect="off" maxlength="500"
+          placeholder="npm run dev" required autofocus>
+      </label>
+      <p class="modal-sub">Whatever serves it on a port — <code>npm run dev</code>,
+        <code>python3 -m flask run</code>, <code>go run .</code>,
+        <code>bundle exec rails server</code>. It is remembered for this
+        channel, so this is asked once.</p>`,
+  });
+  const command = String(values?.command ?? "").trim();
+  return command === "" ? undefined : command;
+}
+
+async function startPreviewAction(repositoryId, asked = false) {
+  if (previewsStarting.has(repositoryId)) {
+    toast(
+      "Already starting — installing and building can take a minute.",
+      "ok",
+    );
+    return;
+  }
+  previewsStarting.add(repositoryId);
+  render();
+  toast("Starting…", "ok");
+  let preview;
+  let failure;
+  try {
+    preview = await startPreview(repositoryId);
+  } catch (error) {
+    failure = error;
+  }
+  // Cleared before anything below, so the question this may ask can start the
+  // answer it is given rather than refusing itself as a second press.
+  previewsStarting.delete(repositoryId);
+  render();
+  if (failure === undefined) {
+    // What it took to get here, when it took more than one attempt: the
+    // control plane works down a list of candidates and the reader is
+    // otherwise told nothing about the ones that were ruled out.
+    const after = (preview?.tried ?? []).length;
+    toast(
+      preview === null
+        ? "Started"
+        : `Running at ${preview.url} — ${preview.label}${
+            after === 0
+              ? ""
+              : ` (after ${after} other command${after === 1 ? "" : "s"} did not start)`
+          }`,
+      "ok",
+    );
+    // Up, but still building. The header says so, and this is what eventually
+    // takes the word back.
+    if (preview !== null && preview.ready === false) {
+      void watchPreviewReady(repositoryId);
+    }
+    return;
+  }
+  const message = failure.message ?? "";
+  // Two ways for a repository to be unstartable, and one question answers
+  // both: nothing in it names a way to start ("could be started"), or every
+  // command that could be detected for it died on its first second ("could
+  // not be started"). Either way what is missing is the same sentence, and
+  // the only place it exists is in the head of whoever built the app — which
+  // is why it is worth asking for, and why it is only asked once the
+  // repository has run out of ways of answering for itself.
+  //
+  // `asked` stops the loop: a command that was just supplied and still did
+  // not work is reported, not re-requested.
+  if (!asked && /could(?: not)? be started/u.test(message)) {
+    const command = await askPreviewCommand(repositoryId, message);
+    if (command !== undefined) {
+      try {
+        await setPreviewCommand(repositoryId, command);
+      } catch (saveError) {
+        // Remembering it is a project setting, which not everybody who may
+        // run one is allowed to write. The server says so; this repeats it
+        // rather than reporting a failure to start.
+        toast(saveError.message, "error");
+        return;
+      }
+      await startPreviewAction(repositoryId, true);
+      return;
+    }
+  }
+  toast(message, "error");
+}
+
+async function stopPreviewAction(repositoryId) {
+  try {
+    await stopPreview(repositoryId);
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 async function revertTaskAction(repositoryId, taskId) {
@@ -5086,6 +5299,12 @@ function sidePanelOpen() {
  * first one's thread is still up moves on to the newer work.
  */
 function openPromptedThread(repositoryId) {
+  // Only the room on screen. A reconcile for another channel still notices
+  // the thread (so a later visit can open it), but must not steal the panel
+  // while the reader is somewhere else.
+  if (activeChannelId() !== repositoryId) {
+    return;
+  }
   const messageId = takePromptedThread(repositoryId);
   if (
     messageId === undefined ||
@@ -5117,6 +5336,9 @@ function openPromptedThread(repositoryId) {
  * which for a `/plan` is exactly the thread this plan belongs to.
  */
 function openReadyPlan(repositoryId) {
+  if (activeChannelId() !== repositoryId) {
+    return;
+  }
   const messageId = takeReadyPlan(repositoryId);
   if (
     messageId === undefined ||
@@ -6434,6 +6656,22 @@ function renderNow() {
         render();
       }
     });
+    // The rail's unread badge counts from each room's local transcript. Only
+    // the open channel used to be loaded, so every other icon stayed blank
+    // until somebody opened it — including while messages were arriving.
+    // `showsChannelRail` is the same gate the icons themselves use.
+    if (showsChannelRail()) {
+      for (const repo of state.repositories) {
+        if (repo.id === activeChannelId()) {
+          continue;
+        }
+        void ensureChannelMessages(repo.id, () => {
+          if (state.route === "chats") {
+            render();
+          }
+        });
+      }
+    }
     void ensureChannelRoster(activeChannelId(), () => {
       if (state.route === "chats") {
         render();
@@ -6461,15 +6699,22 @@ function renderNow() {
       });
     }
     // Asked once per channel, not on every render: the preview outlives the
-    // page, so a reload has to find the address of the one already running.
-    // `undefined` is "not asked yet"; `null` is "asked, there is none", which
-    // is why this tests for the former.
+    // page, so a reload has to find the one already running rather than offer
+    // to start a second. `undefined` is "not asked yet"; `null` is "asked,
+    // there is none", which is why this tests for the former.
     if (state.previews[activeChannelId()] === undefined) {
       const channel = activeChannelId();
       // Claimed before the request so a second render in the same tick does
       // not fire it again.
       state.previews[channel] = null;
-      void loadPreview(channel).then(() => {
+      void loadPreview(channel).then((preview) => {
+        // Found mid-build, which a reload during a slow first start is the
+        // ordinary way to arrive at. The same follow-up a fresh start gets,
+        // because the header is otherwise stuck on "starting…" for a channel
+        // nobody is about to leave and come back to.
+        if (preview !== null && preview.ready === false) {
+          void watchPreviewReady(channel);
+        }
         if (state.route === "chats") {
           render();
         }
@@ -6506,6 +6751,9 @@ function renderNow() {
       });
     }
   }
+  // Images that could not carry a credential in their tag. A no-op in a
+  // browser, where the cookie went with them.
+  void resolveAttachmentImages(root);
   if (state.settingsOpen === true) {
     const repositoryId = activeChannelId();
     // Once per repository, same claim pattern as previews: `undefined` is
@@ -7339,6 +7587,11 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "channel-message-copy":
+      // Every message action can now be reached from the row's overflow menu
+      // as well as from the row itself, and a menu that stays up after its
+      // item has been taken reads as a click that did nothing. Harmless from
+      // the row, where there is no open popover to close.
+      closePopover();
       void copyMessageText(activeChannelId(), value);
       return;
     case "channel-jump-latest":
@@ -7348,6 +7601,7 @@ document.addEventListener("click", (event) => {
       requestAnimationFrame(paintJumpToLatest);
       return;
     case "channel-pin":
+      closePopover();
       // `render` travels with it so a refusal can put the banner back: the
       // POST resolves long after this turn's render has run.
       toggleChannelMessagePin(activeChannelId(), value, render);
@@ -7594,17 +7848,21 @@ document.addEventListener("click", (event) => {
       void deleteThreadAction(activeChannelId(), value);
       return;
     case "channel-message-delete":
+      closePopover();
       void deleteChannelMessageAction(activeChannelId(), value);
       return;
     case "channel-message-edit":
+      closePopover();
       void editChannelMessageAction(activeChannelId(), value);
       return;
     case "thread-reply-edit": {
+      closePopover();
       const [rootId = "", replyId = ""] = value.split("|");
       void editChannelReplyAction(activeChannelId(), rootId, replyId);
       return;
     }
     case "thread-reply-delete": {
+      closePopover();
       // `rootId|replyId`: deleting a reply is a write against the thread it
       // lives in, and the row only ever carries one value.
       const [rootId = "", replyId = ""] = value.split("|");
@@ -7889,6 +8147,12 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
+    case "preview-start":
+      void startPreviewAction(value);
+      return;
+    case "preview-stop":
+      void stopPreviewAction(value);
+      return;
     case "agent-panel-open":
       // Any agent in the room, not only your own, and its specification first. The
       // private-chat entry above stays as it was: that one is a deliberate
@@ -8082,6 +8346,16 @@ document.addEventListener("click", (event) => {
     case "roster-person-menu":
       showMenu(node, personMenuItems(value));
       return;
+    /**
+     * The rest of what can be done to a message — copy, pin, edit, revert,
+     * delete. They were seven permanent icons floating over every row the
+     * pointer crossed; react and reply stayed out here because they are what
+     * a reader actually does, and the items come from `messageRow`'s own
+     * conditions rather than being rebuilt at the click.
+     */
+    case "channel-message-menu":
+      showMenu(node, messageOverflowMenuItems(value));
+      return;
     /** Replaces the rendered name with its inline editor. */
     case "channel-settings-toggle": {
       closePopover();
@@ -8112,6 +8386,7 @@ document.addEventListener("click", (event) => {
       }
       return;
     case "chan-revert-task":
+      closePopover();
       void revertTaskAction(activeChannelId(), value);
       return;
     case "auditor-toggle":
@@ -8924,6 +9199,14 @@ document.addEventListener("submit", (event) => {
       if (text.trim() === "" || state.sending[agent.id] === true) {
         return;
       }
+      // Checked before the box is emptied below. Sending is the one moment
+      // this draft exists in only one place, so a refusal that came after it
+      // would take the message with it.
+      const chatTooLong = messageTooLong(text, "chat");
+      if (chatTooLong !== undefined) {
+        toast(chatTooLong, "error");
+        return;
+      }
       const conversationLength = (state.conversations[agent.id] ?? []).length;
       input.value = "";
       delete state.agentChatDrafts[agent.id];
@@ -8953,15 +9236,28 @@ document.addEventListener("submit", (event) => {
       if (other === undefined || draft.length === 0) {
         return;
       }
+      // Same reason as the private chat above: the draft is cleared on the
+      // next line, so anything that would refuse the message has to be known
+      // now. `sendDirectMessage` throws for length as well — this is what
+      // keeps the words on screen to shorten.
+      const dmTooLong = messageTooLong(draft, "dm");
+      if (dmTooLong !== undefined) {
+        toast(dmTooLong, "error");
+        return;
+      }
       state.dmDraft = "";
       const referencedMessageId = state.dmReplyMessageId;
       state.dmReplyMessageId = undefined;
       closeComposerAutocomplete("dm");
       render();
+      scrollDirectMessageToLatest();
       void sendDirectMessage(other, draft, referencedMessageId)
         .then(() => {
           chime("sent");
           render();
+          if (state.activeDm === other) {
+            scrollDirectMessageToLatest();
+          }
         })
         .catch((error) => toast(`Could not send: ${error.message}`, "error"));
       return;
@@ -9704,7 +10000,8 @@ const CONTEXT_REFRESH_MS = 400;
  */
 const BACKLOG_SETTLE_MS = 1_200;
 
-let channelFrameTimer;
+/** Pending coalesce timers for channel reconciles, keyed by repository id. */
+const channelFrameTimers = new Map();
 let catchUpTimer;
 
 /**
@@ -9740,6 +10037,62 @@ function audibleChannelEntryKeys(repositoryId) {
     }
   }
   return keys;
+}
+
+/**
+ * Coalesces a channel transcript re-read for one repository.
+ *
+ * Every room with a `channel_*` event gets this, not only the one on screen:
+ * the rail's unread badge is counted from the local cache, and a cache that
+ * never updates never raises a number. Watching side-effects (auto-open,
+ * mark-read) stay gated inside the helpers they call, so an inactive room
+ * grows a badge without being marked read.
+ */
+function scheduleChannelReconcile(channelRepositoryId) {
+  if (!channelRepositoryId) {
+    return;
+  }
+  // Taken before the reconcile replaces local state. Comparing ids after
+  // the read distinguishes a genuinely new reply from an edit, delete,
+  // reaction, old reconnect history, or this browser's own server echo.
+  const canSound = !catchingUp;
+  const audibleBefore = canSound
+    ? audibleChannelEntryKeys(channelRepositoryId)
+    : undefined;
+  // Coalesced because a reconnect delivers every channel event this
+  // browser missed, and each one used
+  // to re-read the channel and rebuild the whole app — a backlog of forty
+  // meant forty full renders back to back, which is the few seconds the
+  // screen spent refusing to respond to a tap. The reconcile is
+  // idempotent, so the last one in a burst produces the same answer as
+  // all of them. Per repository, so a burst that names two rooms still
+  // refreshes both.
+  window.clearTimeout(channelFrameTimers.get(channelRepositoryId));
+  channelFrameTimers.set(
+    channelRepositoryId,
+    window.setTimeout(() => {
+      channelFrameTimers.delete(channelRepositoryId);
+      void refreshChannelMessages(channelRepositoryId).then(() => {
+        openPromptedThread(channelRepositoryId);
+        openReadyPlan(channelRepositoryId);
+        markChannelReadIfWatching(channelRepositoryId);
+        const received =
+          audibleBefore !== undefined &&
+          [...audibleChannelEntryKeys(channelRepositoryId)].some(
+            (key) => !audibleBefore.has(key),
+          );
+        if (!renameFieldFocused()) {
+          render();
+        }
+        // A muted room makes no sound. The message still arrived and the
+        // transcript still shows it; what the mute switches off is being
+        // interrupted about it.
+        if (received && !isChannelMuted(channelRepositoryId)) {
+          chime("received");
+        }
+      });
+    }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS)),
+  );
 }
 
 /** Only live, user-relevant audit outcomes warrant a sound of their own. */
@@ -10143,60 +10496,17 @@ async function boot() {
       }
       return;
     }
-    // A channel event for the repository currently open gets its own
-    // immediate reconcile, including the echo of this browser's own posts —
-    // see `refreshChannelMessages` in data.js. This is what makes a second
-    // tab watching the same channel see a message appear without a refresh.
+    // A channel event for any repository gets an immediate reconcile,
+    // including the echo of this browser's own posts — see
+    // `refreshChannelMessages` in data.js. Restricting this to the open
+    // room left every other rail icon stuck at zero: the badge counts from
+    // the local cache, and a cache that never re-reads never raises.
     const channelRepositoryId =
       frame?.type === "audit" && String(frame.event?.type ?? "").startsWith("channel_")
         ? frame.event?.data?.repositoryId
         : undefined;
-    if (
-      channelRepositoryId !== undefined &&
-      // `activeChannelId`, for the third time and the same reason: the screen
-      // falls back to the first repository, so a channel can be open and
-      // addressed while this field is still empty. Comparing against the raw
-      // field meant an event for the channel on screen matched nothing, the
-      // reconcile never ran, and anything the server appended after the
-      // sender's own message — an agent's reply, or the system message
-      // explaining why it could not dispatch — simply never arrived.
-      channelRepositoryId === activeChannelId() &&
-      state.route === "chats"
-    ) {
-      // Taken before the reconcile replaces local state. Comparing ids after
-      // the read distinguishes a genuinely new reply from an edit, delete,
-      // reaction, old reconnect history, or this browser's own server echo.
-      const canSound = !catchingUp;
-      const audibleBefore = canSound
-        ? audibleChannelEntryKeys(channelRepositoryId)
-        : undefined;
-      // Coalesced because a reconnect delivers every channel event this
-      // browser missed, and each one used
-      // to re-read the channel and rebuild the whole app — a backlog of forty
-      // meant forty full renders back to back, which is the few seconds the
-      // screen spent refusing to respond to a tap. The reconcile is
-      // idempotent, so the last one in a burst produces the same answer as
-      // all of them.
-      window.clearTimeout(channelFrameTimer);
-      channelFrameTimer = window.setTimeout(() => {
-        void refreshChannelMessages(channelRepositoryId).then(() => {
-          openPromptedThread(channelRepositoryId);
-          openReadyPlan(channelRepositoryId);
-          markChannelReadIfWatching(channelRepositoryId);
-          const received =
-            audibleBefore !== undefined &&
-            [...audibleChannelEntryKeys(channelRepositoryId)].some(
-              (key) => !audibleBefore.has(key),
-            );
-          render();
-          // A muted room makes no sound. The message still arrived and the
-          // transcript still shows it; what the mute switches off is being
-          // interrupted about it.
-          if (received && !isChannelMuted(channelRepositoryId)) {
-            chime("received");
-          }
-        });
-      }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS));
+    if (channelRepositoryId !== undefined) {
+      scheduleChannelReconcile(channelRepositoryId);
     }
     // The audit half of the same news. The transient frame above is what
     // arrives while somebody is watching; this is what a browser coming back

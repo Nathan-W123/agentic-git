@@ -65,6 +65,16 @@ test("loads every control-room asset with an explicit content type", async () =>
   }
 });
 
+test("uses the Kumi logo as the browser favicon", async () => {
+  const assets = await loadStaticAssets();
+  const html = assets.get("/index.html")?.body.toString("utf8") ?? "";
+
+  assert.match(
+    html,
+    /<link rel="icon" type="image\/png" href="\/kumi-logo\.png">/u,
+  );
+});
+
 test("every dashboard file also has a name that carries its own digest", async () => {
   const assets = await loadStaticAssets();
   // A stable name costs a phone one revalidation round trip per file on every
@@ -411,6 +421,112 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   // Fresh sessions start with the banner folded; readers unfold it when they
   // want to see pins, and the toggle remembers only for this visit.
   assert.match(data, /pinsOpen: false/u);
+});
+
+test("one play control beside the pin runs whatever the channel's app is", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const css = await publicFile("styles.css");
+
+  // Beside the pin, in the header line the counts live on — and drawn like
+  // them, because the tool tray it used to sit in no longer exists.
+  const headerStart = chats.indexOf("function chanHeader(repositoryId)");
+  const header = chats.slice(
+    headerStart,
+    chats.indexOf('<span class="spacer">', headerStart),
+  );
+  assert.notEqual(headerStart, -1, "the channel header should exist");
+  assert.match(header, /\$\{previewControl\(repositoryId\)\}/u);
+  assert.match(
+    header,
+    /icon\("robotBust"\)[\s\S]*?<span aria-hidden="true">\|<\/span>[\s\S]*?\$\{previewControl\(repositoryId\)\}/u,
+  );
+  const control = chats.slice(
+    chats.indexOf("function previewControl(repositoryId)"),
+    chats.indexOf("function previewLink(repositoryId)"),
+  );
+  assert.match(control, /class="ch-count ch-preview-toggle on"/u);
+  assert.match(control, /data-act="preview-stop"/u);
+  assert.match(control, /data-act="preview-start"/u);
+  assert.match(control, /icon\("play"\)/u);
+  assert.doesNotMatch(control, /icon-btn/u);
+  assert.match(css, /\.ch-preview-toggle \{/u);
+  assert.match(css, /\.ch-preview-toggle\.on \{/u);
+
+  // A preview that died on its own is not the same as one that was never
+  // started, and the control is the only place that difference is reported.
+  const stopped = chats.slice(
+    chats.indexOf("function previewStopped(repositoryId)"),
+    chats.indexOf("function previewControl(repositoryId)"),
+  );
+  assert.match(stopped, /preview\.exited !== undefined/u);
+  assert.match(control, /stopped\.recentOutput/u);
+  assert.match(control, /stopped === undefined \? "" : " warn"/u);
+  assert.match(css, /\.ch-preview-toggle\.warn \{/u);
+
+  // Nothing in the page decides how an app boots: it asks the control plane,
+  // which reads the checkout. The one case detection cannot cover is asked
+  // about and remembered, so a repository in any language starts from the
+  // same button.
+  assert.match(data, /export async function startPreview\(repositoryId\)/u);
+  assert.match(data, /export async function stopPreview\(repositoryId\)/u);
+  assert.match(
+    data,
+    /export async function setPreviewCommand\(repositoryId, command\)[\s\S]{0,200}method: "PUT"/u,
+  );
+  const start = app.slice(
+    app.indexOf("async function startPreviewAction"),
+    app.indexOf("async function stopPreviewAction"),
+  );
+  // Both refusals — nothing detectable, and something detected that died —
+  // reach the same question. Matching only the second left every repository
+  // the detector has never heard of with no way in at all.
+  assert.match(start, /could\(\?: not\)\? be started/u);
+  assert.match(start, /askPreviewCommand\(repositoryId, message\)/u);
+  assert.match(start, /await setPreviewCommand\(repositoryId, command\)/u);
+  assert.match(start, /startPreviewAction\(repositoryId, true\)/u);
+
+  // A cold start installs dependencies and then builds, which is a minute of
+  // a button that looks untouched — so it was pressed again, and the second
+  // press replaced the attempt in flight: the build was killed and its death
+  // reported as the repository exiting immediately. The second press is
+  // refused, the control says it is busy, and the flag is cleared before the
+  // question is asked so the answer can still be started.
+  assert.match(start, /previewsStarting\.has\(repositoryId\)/u);
+  assert.match(start, /previewsStarting\.add\(repositoryId\)/u);
+  assert.match(start, /previewsStarting\.delete\(repositoryId\)/u);
+  assert.ok(
+    app.indexOf("previewsStarting.delete(repositoryId)") <
+      app.indexOf("askPreviewCommand(repositoryId, message)"),
+    "the in-flight flag must be cleared before the question is asked",
+  );
+  // Shared through `state`, because the control is drawn in screen-chats.js
+  // and that file cannot import app.js back.
+  assert.match(app, /state\.previewsStarting = previewsStarting/u);
+  assert.match(control, /state\.previewsStarting\?\.has\(repositoryId\)/u);
+  assert.match(control, /ch-preview-toggle starting/u);
+  assert.match(control, /disabled/u);
+  assert.match(css, /\.ch-preview-toggle\.starting \{/u);
+  const ask = app.slice(
+    app.indexOf("async function askPreviewCommand"),
+    app.indexOf("async function startPreviewAction"),
+  );
+  assert.match(ask, /name="command"/u);
+  assert.match(ask, /maxlength="500"/u);
+
+  // Running but not answering yet is a real state and it settles by itself,
+  // so the header stops saying "starting…" without anyone navigating away.
+  const watch = app.slice(
+    app.indexOf("async function watchPreviewReady"),
+    app.indexOf("async function askPreviewCommand"),
+  );
+  assert.match(watch, /previewsWatched\.has\(repositoryId\)/u);
+  assert.match(watch, /await loadPreview\(repositoryId\)/u);
+  assert.match(watch, /preview\.ready !== false/u);
+  assert.match(watch, /preview\.exited !== undefined/u);
+  assert.match(app, /case "preview-start":\s*void startPreviewAction\(value\);/u);
+  assert.match(app, /case "preview-stop":\s*void stopPreviewAction\(value\);/u);
 });
 
 test("serves the vendored Monaco build same-origin under /vendor", async () => {
@@ -898,7 +1014,7 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.match(chats, /function channelRail/u);
   assert.match(chats, /class="channel-rail" aria-label="Channels"/u);
   assert.match(chats, /data-act="channel-picture-pick"/u);
-  assert.match(chats, /\$\{channelRail\(repositoryId\)\}/u);
+  assert.match(chats, /\$\{rail \? channelRail\(repositoryId\) : ""\}/u);
   assert.match(
     css,
     /\.chats-shell\.chan-collapsed > \.chan-sidebar \{\s*width: 0;/u,
@@ -1231,6 +1347,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
+  // The panel never borrows the channel's avatar-to-thread path classes —
+  // those belong to the room transcript only. Kept from the test this one
+  // replaced, which is the only thing in it that was not already covered here.
+  assert.doesNotMatch(renderer, /cmsg-thread-path/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-route/u);
   const channelStem =
     /\n\.cmsg-row\.cmsg-thread-path-through::before \{([\s\S]*?)\n\}/u.exec(
       css,
@@ -1378,6 +1499,37 @@ test("a reply carries a quiet visual path back to its root", async () => {
     "the round cap should close the run on that same centre line",
   );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
+  assert.match(panelBranch ?? "", /left: 15px;/u);
+  assert.match(panelBranch ?? "", /top: 48px;/u);
+  assert.match(panelBranch ?? "", /width: 11px;/u);
+  assert.match(css, /\.thread-replies-head::after \{/u);
+});
+
+test("a thread says what it is without a connector drawn to it", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const rendererStart = chats.indexOf("function threadReplies");
+  const rendererEnd = chats.indexOf("\n/**\n * How much summary", rendererStart);
+  const renderer = chats.slice(rendererStart, rendererEnd);
+
+  // Inside the open thread panel the conversation names itself with a head and
+  // a flow of replies. That panel never borrows the channel's avatar-to-thread
+  // path classes — those belong to the room transcript only.
+  assert.match(renderer, /class="thread-replies"/u);
+  assert.match(renderer, /class="thread-replies-head"/u);
+  assert.match(renderer, /class="thread-replies-flow"/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-path/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-route/u);
+
+  // The panel keeps its own single branch. It crosses nothing, joins nothing,
+  // and is drawn once — it was never the channel bracket.
+  const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
+  assert.match(panelBranch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
+  assert.match(panelBranch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
+  assert.match(panelBranch ?? "", /border-bottom-left-radius: 11px;/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /top: 48px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
@@ -3544,7 +3696,7 @@ test(
     const app = await browserSource();
     const attachStart = app.indexOf("async function attachChannelImages");
     const attachEnd = app.indexOf(
-      "\nasync function revertTaskAction",
+      "\nconst previewsWatched",
       attachStart,
     );
     const attach = app.slice(attachStart, attachEnd);
@@ -3822,6 +3974,51 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   );
 });
 
+test("pasted web addresses are safe clickable message links", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const start = chats.indexOf("function mentionMarkup");
+  const end = chats.indexOf("\nfunction messageBody", start);
+  assert.notEqual(start, -1, "screen-chats.js declares inline message markup");
+  assert.notEqual(end, -1, "inline message markup has a testable boundary");
+
+  const entities: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+  const richText = new Function(
+    "esc",
+    `${chats.slice(start, end)}\nreturn richText;`,
+  )((value: unknown) =>
+    String(value ?? "").replace(
+      /[&<>"']/gu,
+      (character) => entities[character] ?? character,
+    ),
+  ) as (value: string, mentions: Array<{ name: string }>) => string;
+
+  assert.equal(
+    richText("Visit https://kokonutui.com/.", []),
+    '<p>Visit <a class="message-link" href="https://kokonutui.com/" target="_blank" rel="noopener noreferrer">https://kokonutui.com/</a>.</p>',
+  );
+  assert.equal(
+    richText("(https://example.com/docs?q=a&lang=en)", []),
+    '<p>(<a class="message-link" href="https://example.com/docs?q=a&amp;lang=en" target="_blank" rel="noopener noreferrer">https://example.com/docs?q=a&amp;lang=en</a>)</p>',
+  );
+  assert.equal(
+    richText('https://example.com/path") <script>alert(1)</script>', []),
+    '<p><a class="message-link" href="https://example.com/path" target="_blank" rel="noopener noreferrer">https://example.com/path</a>&quot;) &lt;script&gt;alert(1)&lt;/script&gt;</p>',
+  );
+  assert.equal(richText("javascript:alert(1)", []), "<p>javascript:alert(1)</p>");
+  assert.match(css, /\.cmsg-text \.message-link \{/u);
+  assert.match(
+    css,
+    /\.cmsg-text \.message-link \{[\s\S]{0,260}overflow-wrap: anywhere;/u,
+  );
+});
+
 test("channel messages compact only an uninterrupted run from one person", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
@@ -3895,6 +4092,53 @@ test("desktop channel messages use the sidebar's ordinary row hover", async () =
   assert.match(
     css,
     /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.cmsg-row \{\s*transition: none;/u,
+  );
+});
+
+test("a grouped run of prompts keeps one avatar and no connector", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function continuesUserMessageGroup");
+  const end = chats.indexOf("\n/**\n * The three dots", start);
+  const createPaths = new Function(
+    `${chats.slice(start, end).replace(/^export /gmu, "")}\nreturn messageThreadPaths;`,
+  );
+  const paths = createPaths() as (
+    timeline: unknown[],
+    groupConsecutive: boolean,
+  ) => Array<
+    { start: boolean; through: boolean; end: boolean } | undefined
+  >;
+  const item = (
+    authorId: string,
+    options: {
+      at?: string;
+      kind?: string;
+      reply?: boolean;
+      task?: boolean;
+    } = {},
+  ) => ({
+    entry: {
+      kind: options.kind ?? "user",
+      authorId,
+      taskId: options.task === true ? `task-${authorId}` : undefined,
+      replies: options.task === true ? [{}, {}] : [],
+    },
+    inlineReplyTo: options.reply === true ? { id: "root" } : undefined,
+    at: options.at ?? "2026-08-19T10:00:00.000Z",
+  });
+
+  // An uninterrupted run from one person still shares one face. With no task
+  // in the group there is nothing for a connector to point at, so the path
+  // table leaves every row unmarked.
+  assert.deepEqual(
+    paths([item("alice"), item("alice"), item("alice")], true),
+    [undefined, undefined, undefined],
+    "a plain grouped run keeps one avatar and draws no connector",
+  );
+  assert.match(
+    chats,
+    /compact \? " cmsg-compact" : ""/u,
+    "grouped continuations stay compact under the first face",
   );
 });
 
@@ -4511,6 +4755,62 @@ test("the progress bar restarts for each task turn in a thread", async () => {
     progress(thread),
     undefined,
     "the bar should still disappear when the current turn ends",
+  );
+});
+
+test("thread progress uses live task progress when the current turn has no recognized narration markers", async () => {
+  const source = await publicFile("screen-chats.js");
+  const progressStart = source.indexOf("function threadProgress(entry)");
+  const progressEnd = source.indexOf("\n/*", progressStart);
+  const turnsStart = source.indexOf("function threadReplyTurns(replies)");
+  const turnsEnd = source.indexOf(
+    "\n/** One turn's narration",
+    turnsStart,
+  );
+  assert.notEqual(progressStart, -1, "thread progress should still be derived");
+  assert.notEqual(progressEnd, -1, "thread progress should have a boundary");
+  assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
+  assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
+
+  const progress = Function(
+    "state",
+    "THREAD_FINISHED_RE",
+    "STAGE_PROGRESS",
+    "taskProgress",
+    `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
+      progressStart,
+      progressEnd,
+    )}\nreturn threadProgress;`,
+  )(
+    { tasks: [{ id: "task-1", status: "claimed" }] },
+    /^(Done —|I could not|This was cancelled)/u,
+    { submitted: 4, planning: 18, planned: 30, claimed: 44, validating: 88 },
+    () => 53,
+  ) as (entry: {
+    taskId: string;
+    replies: Array<{ kind: string; content: string }>;
+  }) => number | undefined;
+
+  assert.equal(
+    progress({ taskId: "task-1", replies: [] }),
+    53,
+    "a live task should supply progress before its turn says anything",
+  );
+  assert.equal(
+    progress({
+      taskId: "task-1",
+      replies: [{ kind: "progress", content: "Reading the repository" }],
+    }),
+    53,
+    "unrecognized narration should keep the live task's progress",
+  );
+  assert.equal(
+    progress({
+      taskId: "missing",
+      replies: [{ kind: "progress", content: "Reading the repository" }],
+    }),
+    undefined,
+    "an ordinary thread without run narration should not gain a progress bar",
   );
 });
 
@@ -5222,8 +5522,11 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
 
   // Reconnecting delivers everything that happened while the browser was
   // closed. One reconcile per event used to cause a full app rebuild each.
-  assert.match(app, /clearTimeout\(channelFrameTimer\)/u);
+  // Timers are per repository so a burst that names two rooms still refreshes
+  // both — a single shared timer dropped every room but the last.
+  assert.match(app, /clearTimeout\(channelFrameTimers\.get\(channelRepositoryId\)\)/u);
   assert.match(app, /CHANNEL_FRAME_COALESCE_MS/u);
+  assert.match(app, /function scheduleChannelReconcile\(channelRepositoryId\)/u);
 });
 
 test("a channel transcript reads down one side at every width", async () => {
@@ -5666,6 +5969,14 @@ test("a roster row offers rename and delete only for the viewer's agent", async 
   );
 
   assert.equal(row.match(/act: "roster-agent-menu"/gu)?.length, 1);
+  // A teammate's agent has nothing in that menu, so the "…" is not drawn at
+  // all — the same rule `personRow` follows. Offering a button that opens an
+  // empty popover is worse than offering nothing.
+  assert.match(
+    row,
+    /const hasMenu = rosterMenuItems\(agent\.id\)\.length > 0;/u,
+  );
+  assert.match(row, /hasMenu\s*\? `<span class="rr-more">/u);
   assert.match(
     row,
     /const settingsOpen =\s*agent\.mine === true && state\.chatSettingsOpenId === agent\.id;/u,
@@ -6634,7 +6945,9 @@ test("the marketing site is served at its own addresses, beside the dashboard", 
   const assets = await loadStaticAssets();
 
   // Page keys are extensionless addresses, on the `/authorize` precedent.
-  for (const page of ["/", "/pricing", "/download"]) {
+  // `/download` is deliberately absent: the dashboard's own functional page
+  // owns that address, and the marketing nav links into it.
+  for (const page of ["/", "/pricing"]) {
     assert.equal(
       assets.get(page)?.contentType,
       "text/html; charset=utf-8",
@@ -6664,7 +6977,7 @@ test("the marketing site is served at its own addresses, beside the dashboard", 
 
   // Marketing pages are editable, so none may promise immutability — that is
   // reserved for names that carry their own digest.
-  for (const key of ["/", "/pricing", "/download", "/site.css", "/site.js"]) {
+  for (const key of ["/", "/pricing", "/site.css", "/site.js"]) {
     assert.equal(assets.get(key)?.immutable, undefined, `${key} must revalidate`);
   }
 });
@@ -6747,8 +7060,8 @@ test("marketing motion is an enhancement behind the reduced-motion gate", async 
     /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*animation: none/u,
   );
 
-  // The three pages all load the gate before the library and the module.
-  for (const page of ["index.html", "pricing.html", "download.html"]) {
+  // Both pages load the gate before the library and the module.
+  for (const page of ["index.html", "pricing.html"]) {
     const html = await siteFile(page);
     assert.match(html, /<script src="\/site-boot\.js"><\/script>/u);
     assert.match(html, /<script src="\/vendor\/motion\/motion\.js"><\/script>/u);
@@ -6764,12 +7077,184 @@ test("the seat price is written exactly once, on the pricing page", async () => 
   const amounts = pricing.match(/\$\d+/gu) ?? [];
   assert.equal(amounts.length, 1, `expected one price, saw: ${amounts.join(", ")}`);
   assert.match(pricing, /PRICE — the only place/u);
-  for (const page of ["index.html", "download.html"]) {
-    const html = await siteFile(page);
-    assert.equal(
-      (html.match(/\$\d+/gu) ?? []).length,
-      0,
-      `${page} must not repeat the price`,
+  const home = await siteFile("index.html");
+  assert.equal(
+    (home.match(/\$\d+/gu) ?? []).length,
+    0,
+    "index.html must not repeat the price",
+  );
+});
+/* ------------------------------------------------- room presentation ---- */
+
+test("the channel rail is drawn only when there is a channel to switch to", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // A switcher between one thing is furniture. It held sixty pixels of the
+  // window permanently, and it held them from the conversation.
+  assert.match(
+    chats,
+    /function showsChannelRail\(\) \{\s*return state\.repositories\.length > 1;/u,
+  );
+  assert.match(chats, /const rail = showsChannelRail\(\);/u);
+  assert.match(chats, /\$\{rail \? "" : " no-rail"\}/u);
+  assert.match(css, /--rail-w: 60px;/u);
+  assert.match(css, /--chan-sidebar-w: 256px;/u);
+  assert.match(css, /\.channel-rail \{\s*width: var\(--rail-w\);/u);
+  assert.match(css, /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);/u);
+
+  // Nothing may only be reachable from a surface that can be absent. The rail
+  // owned two controls of its own, so the sidebar's crown carries them while
+  // the rail is away.
+  assert.match(
+    chats,
+    /showsChannelRail\(\)\s*\?\s*""\s*:\s*`<label class="icon-btn chan-crown-picture"/u,
+  );
+  assert.match(chats, /act: "channel-new",[\s\S]{0,120}cls: "chan-crown-new"/u);
+  assert.doesNotMatch(
+    chats,
+    /chan-crown-picture[\s\S]{0,400}desk-only/u,
+    "the stand-in controls must survive the phone, where the rail also would not be drawn",
+  );
+
+  // And the sidebar cannot fold to nothing when it is the only column left:
+  // the control that brings it back is inside it.
+  assert.match(
+    css,
+    /\.chats-shell\.no-rail\.chan-collapsed > \.chan-sidebar \{\s*width: var\(--rail-w\);/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed :is\(\.chan-crown-picture, \.chan-crown-new\) \{\s*display: none;/u,
+  );
+});
+
+test("inactive channel rail icons show a live unread count", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+
+  // The badge is already drawn from `channelUnreadCount`. What was missing was
+  // a transcript to count: only the open room was loaded, and only its
+  // `channel_*` events were reconciled, so every other icon stayed blank.
+  assert.match(chats, /class="channel-rail-unread"/u);
+  assert.match(chats, /const unread = channelUnreadCount\(repo\.id\)/u);
+  assert.match(app, /function scheduleChannelReconcile\(channelRepositoryId\)/u);
+  assert.match(
+    app,
+    /channelRepositoryId !== undefined\) \{\s*scheduleChannelReconcile\(channelRepositoryId\);/u,
+  );
+  assert.doesNotMatch(
+    app,
+    /channelRepositoryId === activeChannelId\(\)\s*&&\s*state\.route === "chats"/u,
+    "every room with a channel event must reconcile, not only the open one",
+  );
+  assert.match(
+    app,
+    /if \(showsChannelRail\(\)\) \{\s*for \(const repo of state\.repositories\)/u,
+  );
+  assert.match(
+    data,
+    /channelLoading: new Set\(\)/u,
+    "several rooms load at once for the rail, so loading cannot be a single id",
+  );
+  // Watching still clears the open room; inactive reconciles must not.
+  assert.match(
+    app,
+    /function markChannelReadIfWatching[\s\S]{0,400}activeChannelId\(\) !== repositoryId/u,
+  );
+});
+
+test("a message keeps react and reply, and puts the rest behind one menu", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await browserSource();
+
+  const actions = chats.slice(
+    chats.indexOf('    <span class="cmsg-actions">'),
+    chats.indexOf("function continuesUserMessageGroup"),
+  );
+  // Seven icons over every row the pointer crossed made a toolbar out of a
+  // message, and gave "delete" the same weight as "react".
+  for (const gone of ["copy", "pin", "trash", "history", "pencil"]) {
+    assert.doesNotMatch(
+      actions,
+      new RegExp(`iconButton\\("${gone}"`, "u"),
+      `${gone} belongs in the overflow menu, not on the row`,
     );
   }
+  assert.match(actions, /iconButton\("smile"/u);
+  assert.match(actions, /iconButton\("reply"/u);
+  assert.match(actions, /act: "channel-message-menu"/u);
+  assert.match(actions, /iconButton\("dotsHorizontal"/u);
+  // A button that opens an empty menu is a button that does nothing.
+  assert.match(actions, /messageOverflowMenuItems\([\s\S]{0,80}\.length === 0/u);
+
+  // The items come from the row's own conditions rather than being rebuilt at
+  // the click: split across two files is how a menu ends up offering what the
+  // row would not.
+  assert.match(chats, /export function messageOverflowMenuItems\(/u);
+  const menu = chats.slice(
+    chats.indexOf("export function messageOverflowMenuItems("),
+    chats.indexOf("function messageRow("),
+  );
+  assert.match(menu, /entry === undefined \|\| entry\.deletedAt !== undefined/u);
+  assert.match(menu, /const isReplyRow = entry\.messageId !== undefined;/u);
+  assert.match(menu, /act: "channel-message-copy"/u);
+  // A pin lives on `channel_messages`; a reply is a row in another table, so
+  // offering it there sends a POST that can only 404.
+  assert.match(menu, /if \(!isReplyRow\) \{[\s\S]{0,200}act: "channel-pin"/u);
+  assert.match(menu, /canEditChannelEntry\(repositoryId, entry\)/u);
+  assert.match(menu, /canDeleteChannelEntry\(repositoryId, entry\)/u);
+  assert.match(menu, /canManageRepository\(repositoryId\)/u);
+  assert.match(menu, /danger: true,/u);
+
+  assert.match(app, /case "channel-message-menu":\s*\n\s*showMenu\(node, messageOverflowMenuItems\(value\)\);/u);
+  // Every one of those actions can now be taken from inside a popover, and a
+  // menu still standing after its item was taken reads as a click that did
+  // nothing.
+  for (const act of [
+    "channel-message-copy",
+    "channel-pin",
+    "channel-message-edit",
+    "channel-message-delete",
+    "chan-revert-task",
+  ]) {
+    assert.match(
+      app,
+      new RegExp(`case "${act}":(?:\\s*//[^\\n]*\\n)*\\s*closePopover\\(\\);`, "u"),
+      `${act} should dismiss the menu it can be taken from`,
+    );
+  }
+});
+
+test("the transcript reads in a column rather than across the window", async () => {
+  const css = await publicFile("styles.css");
+
+  // A message run edge to edge on a wide screen is a message read twice: the
+  // eye leaves the end of one line with nowhere to land on the next. Day
+  // separators still span the panel so "Today" is not left-shifted short.
+  assert.match(css, /--room-column: 940px;/u);
+  assert.match(css, /--message-max: 100%;/u);
+  assert.match(
+    css,
+    /\.chan-messages \{[\s\S]{0,400}padding: 12px 18px 20px;/u,
+    "the scroller matches the header inset so day rules span the panel",
+  );
+  assert.match(
+    css,
+    /\.chan-day \{[\s\S]{0,200}width: 100%;[\s\S]{0,80}max-width: none;/u,
+    "the Today bar spans the chat panel rather than the message column",
+  );
+  assert.match(
+    css,
+    /\.cmsg-row \{[\s\S]{0,500}max-width: var\(--room-column\);/u,
+    "message rows keep the conversation column",
+  );
+  assert.match(
+    css,
+    /\.cmsg-row \.cmsg-text \{[\s\S]{0,320}max-width: var\(--message-max\);/u,
+  );
+  // The phone tier keeps its own tighter padding rather than inheriting a
+  // desktop measure.
+  assert.match(css, /\.chan-messages \{\s*padding: 6px 12px 14px;/u);
 });

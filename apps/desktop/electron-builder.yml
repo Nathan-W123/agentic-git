@@ -1,0 +1,114 @@
+# How the window becomes something you can double-click.
+#
+# Kept out of `package.json` on purpose. Everything in that file is read by
+# `npm ci` at the repository root — which the control plane's Docker build
+# runs — and packaging settings have no business being parsed there. This file
+# is read only by `electron-builder`, which is installed only in the job that
+# builds installers.
+#
+# Publishing is deliberately absent: `.github/workflows/desktop-release.yml`
+# uploads the finished installers itself, to the repository named once in
+# `package.json` under `kumi.releasesRepo`. The address a shipped copy sends
+# people to for a newer one is baked into every copy, so there is exactly one
+# place it can be wrong.
+
+appId: dev.kumi.desktop
+productName: Kumi
+copyright: Kumi
+
+directories:
+  output: release
+  buildResources: build
+
+# Predictable, spaces-free, and — deliberately — without the version in it.
+#
+# GitHub serves `releases/latest/download/<name>`, which redirects to whatever
+# the newest release calls that exact file. A version in the name would defeat
+# that: every release would mint new URLs, and the download page would have to
+# be edited to match or would quietly go on offering the old one. Without it
+# the links on the website are written once and stay correct forever.
+#
+# The version is not lost. It is on the release, in the installer, and in the
+# app. It is only absent from the filename, which is the one place it was
+# costing something.
+artifactName: ${productName}-${os}-${arch}.${ext}
+
+# What goes in the package, and nothing else. The dashboard is not here: it is
+# served by the control plane and loaded at runtime, which is what keeps a UI
+# change a deploy rather than a release. `dist` carries the sign-in flow, which
+# is the only compiled code the app itself runs — its tests and its build
+# by-products are not part of a product.
+files:
+  - electron/**/*
+  - dist/**/*
+  - package.json
+  - "!dist/**/*.test.*"
+  - "!dist/**/*.map"
+  - "!dist/**/*.d.ts"
+  - "!dist/.tsbuildinfo"
+
+# Nothing in the package depends on anything, so there is no native module to
+# rebuild and no reason to let the packager run an install of its own.
+npmRebuild: false
+
+# Stated rather than merely omitted. Without it the packager goes looking for a
+# repository to infer an update feed from and warns on every build that it
+# found none — a permanent warning that would only ever hide a real one.
+publish: null
+
+# A source of truth for what the app is allowed to reach on macOS. Nothing
+# unusual: it opens a browser and talks to a server over the network.
+mac:
+  category: public.app-category.developer-tools
+  # Both architectures, explicitly. The runner that builds these is Apple
+  # silicon, and taking its default would quietly ship nothing an Intel Mac
+  # can open.
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  # Ad-hoc signed rather than not signed at all. There is no certificate here
+  # and the absence is deliberate — see the README — but `null` would mean
+  # skipping signing entirely, and Apple silicon refuses to launch a binary
+  # carrying no signature at all. Ad-hoc gives the binary one without claiming
+  # it came from anybody: still a Gatekeeper warning on first open, which
+  # System Settings can wave through, rather than an app that simply dies.
+  identity: "-"
+  # Off because ad-hoc signing turns hardened runtime into library validation,
+  # which rejects the very frameworks Electron ships. It buys nothing until
+  # there is a real certificate to notarize with, and turns back on with one.
+  hardenedRuntime: false
+
+win:
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  # Per-user, so installing never asks for an administrator. An unsigned
+  # installer that also demands elevation is two warnings instead of one.
+  perMachine: false
+
+linux:
+  category: Development
+  # Named explicitly because the default is derived from the npm package name,
+  # and `@coord/desktop` flattens to something Linux will not accept as a
+  # filename. Without this the AppImage build fails outright.
+  executableName: kumi
+  # Required by `.deb`, and it travels inside every copy anybody downloads —
+  # which is why it is the account's GitHub no-reply address rather than a
+  # personal one.
+  maintainer: Kumi <Nathan-W123@users.noreply.github.com>
+  # So a running window is matched to its launcher entry rather than appearing
+  # as an unnamed second icon in the dock.
+  syncDesktopName: true
+  synopsis: A window onto your Kumi deployment
+  target:
+    - AppImage
+    - deb

@@ -16,6 +16,16 @@ const PUBLIC_FILES = [
   // Its own document, reached from outside the dashboard: a desktop app
   // sends somebody here to approve it.
   ["authorize.html", "text/html; charset=utf-8"],
+  // Likewise its own document, and likewise reached by somebody who is not
+  // signed in — a link to it is the thing people send each other to get the
+  // desktop app at all.
+  ["download.html", "text/html; charset=utf-8"],
+  // The two standalone pages' behaviour. Separate files rather than inline
+  // scripts because `script-src 'self'` carries no `'unsafe-inline'`: inline,
+  // the browser silently declines to run them and both pages come up looking
+  // right and doing nothing.
+  ["authorize.js", "text/javascript; charset=utf-8"],
+  ["download.js", "text/javascript; charset=utf-8"],
   ["styles.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
   ["boot-plan.js", "text/javascript; charset=utf-8"],
@@ -53,7 +63,12 @@ const PUBLIC_FILES = [
 const SITE_FILES = [
   ["index.html", "/", "text/html; charset=utf-8"],
   ["pricing.html", "/pricing", "text/html; charset=utf-8"],
-  ["download.html", "/download", "text/html; charset=utf-8"],
+  // No marketing download page, deliberately. The dashboard already serves a
+  // functional one at /download — real per-OS installer links that a test
+  // holds in agreement with the release workflow — and the marketing draft
+  // duplicated that address with placeholders. The site's nav links to
+  // /download and gets the page that actually downloads things; the two
+  // colliding here is exactly what the shadow check below exists to catch.
   ["site.css", "/site.css", "text/css; charset=utf-8"],
   ["site.js", "/site.js", "text/javascript; charset=utf-8"],
   ["site-boot.js", "/site-boot.js", "text/javascript; charset=utf-8"],
@@ -238,6 +253,11 @@ function withDigestedNames(
       // the dashboard for anything without a dot, so `/authorize` would
       // otherwise render the control room instead of the question.
       assets.set("/authorize", { body, contentType: source.contentType });
+    }
+    if (name === "download.html") {
+      // Same reason, and this one is the address people paste into messages:
+      // `https://your-kumi/download` has to be a link, not a filename.
+      assets.set("/download", { body, contentType: source.contentType });
     }
     const alias = digested.get(name);
     if (alias !== undefined) {

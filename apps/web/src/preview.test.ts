@@ -11,6 +11,7 @@ import { RepositoryService } from "@coord/repository-service";
 import {
   describeUndetectable,
   detectPreviewCommand,
+  detectPreviewCommands,
   isStaticSite,
   PreviewService,
   startStaticServer,
@@ -180,6 +181,11 @@ test("a preview whose command exits immediately is reported, not called running"
       sourcePath,
       id: "unbuilt",
     });
+    // Renamed, because an id is taken by the first repository to want it and
+    // the second is stored under a suffixed one — so the name on the channel
+    // and the name in the failure were routinely different things. The dialog
+    // asked how KUMI starts and the sentence inside it was about LATTICE.
+    await store.renameRepository(repository.id, "KUMI");
     const previews = new PreviewService(project, store);
     try {
       await assert.rejects(
@@ -190,6 +196,10 @@ test("a preview whose command exits immediately is reported, not called running"
           // fails here rather than in front of somebody.
           assert.match(error.message, /could not be started/u);
           assert.match(error.message, /exited immediately/u);
+          // Called what the reader calls it, and pointing at the id only
+          // where the id is what has to be typed: the config is keyed by it.
+          assert.match(error.message, /"KUMI" could not be started/u);
+          assert.match(error.message, /for "unbuilt"/u);
           // The diagnosis travels with it. This is the only copy: the process
           // output is not rendered anywhere else in the page.
           assert.match(error.message, /Cannot find module|MODULE_NOT_FOUND/u);
@@ -545,6 +555,194 @@ test("a repository that cannot be started says what was looked for", async () =>
     assert.match(scripted, /no dev\/start\/serve\/preview script/u);
     assert.match(scripted, /build, test/u);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The two shapes detection used to answer "nothing here looks like an app"
+ * for, and both of them are ordinary.
+ *
+ * A workspace root starts nothing anybody wants to look at — its `build`
+ * builds every package and there is no root `dev` — while the app that serves
+ * a page sits one directory down with a perfectly good `dev` script of its
+ * own. And a repository with several start scripts had exactly one of them
+ * tried: the best guess, which for a fresh checkout of canonical is often the
+ * one pointing at a build output that is not there.
+ */
+test("a monorepo's own apps are candidates, ranked ahead of its libraries", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cpreview-mono-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        private: true,
+        workspaces: ["apps/*", "packages/*"],
+        scripts: { build: "turbo run build" },
+      }),
+      "utf8",
+    );
+    for (const [where, scripts] of [
+      ["apps/web", { dev: "vite" }],
+      ["packages/shared", { dev: "tsc --watch" }],
+    ] as const) {
+      await mkdir(path.join(root, where), { recursive: true });
+      await writeFile(
+        path.join(root, where, "package.json"),
+        JSON.stringify({ scripts }),
+        "utf8",
+      );
+    }
+
+    const candidates = await detectPreviewCommands(root);
+    assert.equal(candidates.length, 2);
+    // The app first: a library's `dev` script watches and builds and serves
+    // nothing, so it is a candidate and it is not the first one.
+    assert.match(candidates[0]?.label ?? "", /run dev in apps\/web/u);
+    assert.equal(candidates[0]?.cwd, "apps/web");
+    assert.match(candidates[1]?.label ?? "", /run dev in packages\/shared/u);
+
+    // And a root that declares workspaces says so when none of them starts
+    // either, rather than reporting only on its own scripts.
+    await rm(path.join(root, "apps"), { recursive: true, force: true });
+    await rm(path.join(root, "packages"), { recursive: true, force: true });
+    assert.match(await describeUndetectable(root), /No workspace it declares/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("every start script is a candidate, and a page is the last resort", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cpreview-order-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      '{"scripts":{"start":"node dist/index.js","dev":"vite"}}',
+      "utf8",
+    );
+    await writeFile(path.join(root, "index.html"), "<!doctype html>", "utf8");
+
+    // `dev` is still the best guess; `start` is no longer discarded for
+    // losing to it, which is the difference between "the first guess was
+    // wrong" and "this app cannot be started".
+    assert.deepEqual(
+      (await detectPreviewCommands(root)).map((candidate) => candidate.args),
+      [
+        ["run", "dev"],
+        ["run", "start"],
+      ],
+    );
+    // A page *and* an app is an app: serving the folder would hand somebody
+    // the source of their site instead of their site, so the static server is
+    // reached only once every command has been tried and has died.
+    assert.equal(await isStaticSite(root), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** A repository whose best candidate dies and whose second one serves. */
+async function fallthroughRepository(): Promise<{
+  root: string;
+  sourcePath: string;
+  project: CoordinatorProject;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "preview-fallthrough-"));
+  const sourcePath = path.join(root, "src-repo");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await writeFile(
+    path.join(sourcePath, "package.json"),
+    `${JSON.stringify({
+      name: "fallthrough",
+      private: true,
+      type: "module",
+      // `dev` is preferred and cannot work here: it runs a build output, and
+      // a fresh checkout of canonical does not contain one.
+      scripts: { dev: "node dist/index.js", start: "node server.mjs" },
+    })}\n`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(sourcePath, "server.mjs"),
+    [
+      'import { createServer } from "node:http";',
+      'createServer((_, response) => response.end("ok")).listen(',
+      '  Number(process.env["PORT"]), "127.0.0.1");',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await repositories.commitAll(sourcePath, "seed fallthrough app");
+
+  const projectRoot = path.join(root, "proj");
+  await mkdir(projectRoot, { recursive: true });
+  const project = await CoordinatorProject.init(projectRoot);
+  return { root, sourcePath, project };
+}
+
+test("a candidate that dies is ruled out rather than reported", async () => {
+  const { root, sourcePath, project } = await fallthroughRepository();
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "fallthrough",
+    });
+    const previews = new PreviewService(project, store);
+    try {
+      const status = await previews.start({ repositoryId: repository.id });
+      // The second candidate, reached without anybody being asked anything.
+      assert.match(status.label, /run start$/u);
+      // And what was ruled out on the way, which is the only record of it:
+      // the failed attempt leaves nothing else behind.
+      assert.equal((status.tried ?? []).length, 1);
+      assert.match(status.tried?.[0] ?? "", /run dev/u);
+      assert.match(status.tried?.[0] ?? "", /exited immediately/u);
+
+      const response = await fetch(status.url);
+      assert.equal(await response.text(), "ok");
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a second press joins the start in flight instead of killing it", async () => {
+  const { root, sourcePath, project } = await environmentReportingRepository({
+    dev: "node server.mjs",
+  });
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "reporter",
+    });
+    const previews = new PreviewService(project, store);
+    try {
+      // Both presses land while the first is still installing and building —
+      // which is a minute of a button that looks like it did nothing, so
+      // pressing it again is the obvious move. Replacing the attempt in
+      // flight killed that build and reported its death as the repository
+      // exiting immediately.
+      const [first, second] = await Promise.all([
+        previews.start({ repositoryId: repository.id }),
+        previews.start({ repositoryId: repository.id }),
+      ]);
+      assert.equal(first.port, second.port);
+      assert.equal(first.exited, undefined);
+
+      const running = await previews.status(repository.id);
+      assert.equal(running?.exited, undefined);
+      assert.equal((await fetch(first.url)).status, 200);
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -141,8 +141,12 @@ export interface ProviderUsageWindow {
 }
 
 export interface ProviderUsageReport {
-  /** Where these numbers came from, shown to the user verbatim-ish. */
-  source: string;
+  /**
+   * Where these numbers came from, shown to the user verbatim-ish. Absent
+   * when the provenance would say nothing the reader did not already know:
+   * Claude's own `/usage` is read for the account the card is already about.
+   */
+  source?: string;
   windows: ProviderUsageWindow[];
   /** Set when the CLI publishes no consumption figure at all. */
   unavailableReason?: string;
@@ -983,7 +987,6 @@ function findRateLimits(value: unknown): unknown {
  * rather than guessed at.
  */
 export function parseClaudeUsage(stdout: string): ProviderUsageReport {
-  const source = "claude /usage, as reported by the signed-in account";
   let text: string;
   try {
     const envelope = JSON.parse(stdout) as { result?: unknown };
@@ -1006,9 +1009,8 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
     });
   }
   return windows.length > 0
-    ? { source, windows }
+    ? { windows }
     : {
-        source,
         windows: [],
         // Percentages exist because a *subscription* has limits to be a
         // percentage of; `/usage` opens with "You are currently using your
@@ -2656,7 +2658,6 @@ export class ProviderChatService {
       report = parseClaudeUsage(result.stdout);
     } catch (error) {
       report = {
-        source: "claude /usage",
         windows: [],
         unavailableReason:
           error instanceof Error ? error.message : String(error),
@@ -4637,12 +4638,8 @@ export class ProviderChatService {
    * aliases its own --help documents. Both are read here; nothing is invented,
    * and free text stays available for anything neither source mentions.
    */
-  private async claudeModels(): Promise<{
-    models: ProviderModelOption[];
-    sources: string[];
-  }> {
+  private async claudeModels(): Promise<ProviderModelOption[]> {
     const models = new Map<string, ProviderModelOption>();
-    const sources: string[] = [];
     try {
       const config = JSON.parse(
         await readFile(path.join(this.homeDirectory, ".claude.json"), "utf8"),
@@ -4667,9 +4664,6 @@ export class ProviderChatService {
             ? {}
             : { description: option.description }),
         });
-      }
-      if (models.size > 0) {
-        sources.push("Claude Code's own model cache (~/.claude.json)");
       }
     } catch {
       // No cache on this machine yet; the aliases below still apply.
@@ -4696,14 +4690,11 @@ export class ProviderChatService {
             });
           }
         }
-        if (quoted.length > 0) {
-          sources.push("aliases documented by `claude --help`");
-        }
       }
     } catch {
       // Help unavailable; whatever the cache provided still stands.
     }
-    return { models: [...models.values()], sources };
+    return [...models.values()];
   }
 
   public async options(input: {
@@ -4764,17 +4755,12 @@ export class ProviderChatService {
       };
     }
     if (input.provider === "anthropic") {
-      const claude = await this.claudeModels();
+      const models = await this.claudeModels();
       return {
-        models: claude.models.length > 0 ? claude.models : null,
-        ...(claude.sources.length > 0
-          ? {
-              modelListSource: `Models read from ${claude.sources.join(" and ")}. Claude Code has no model-list command, so this is what it actually reports here.`,
-            }
-          : {}),
+        models: models.length > 0 ? models : null,
         efforts: [...CLAUDE_EFFORTS],
         allowCustomModel: true,
-        ...(claude.models.length > 0
+        ...(models.length > 0
           ? {}
           : { suggestedModels: [...SUGGESTED_MODELS.anthropic] }),
         notes: [],
@@ -4817,12 +4803,6 @@ export class ProviderChatService {
                   "model accepts overrides in brackets, such as " +
                   "claude-opus-4-8[context=1m,effort=high,fast=false].",
               ],
-        ...(models === undefined
-          ? {}
-          : {
-              modelListSource:
-                "Models reported by the Cursor CLI for the connected account.",
-            }),
       };
     }
     return {

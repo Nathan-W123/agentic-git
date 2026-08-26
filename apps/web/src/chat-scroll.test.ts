@@ -104,6 +104,64 @@ test("the open thread is restored too, not only the channel", async () => {
   assert.match(chats, /scroller\.className !== entry\.shape/u);
 });
 
+test("sending in every composer lands on the latest message", async () => {
+  const [app, chats, chat] = await Promise.all([
+    publicFile("app.js"),
+    publicFile("screen-chats.js"),
+    publicFile("chat.js"),
+  ]);
+  const channelSubmit = chats.slice(
+    chats.indexOf("export function submitComposerMessage("),
+    chats.indexOf("function pinnedBanner("),
+  );
+  const threadSubmit = chats.slice(
+    chats.indexOf("export function submitThreadReply("),
+    chats.indexOf("export function closeComposerAutocomplete("),
+  );
+  const threadScroll = chats.slice(
+    chats.indexOf("function scrollChannelThreadToLatest("),
+    chats.indexOf("export function jumpToUnreadOrLatest("),
+  );
+  const dmSubmit = app.slice(
+    app.indexOf('case "dm-submit":'),
+    app.indexOf('case "channel-submit":'),
+  );
+  const privateSend = chat.slice(
+    chat.indexOf("export async function sendChat("),
+    chat.indexOf("async function streamChat("),
+  );
+
+  const channelRenders = [...channelSubmit.matchAll(/rerender\(\);/gu)];
+  const channelScrolls = [...channelSubmit.matchAll(/scrollChannel\(\);/gu)];
+  assert.equal(channelRenders.length, 2);
+  assert.equal(channelScrolls.length, 2);
+  assert.deepEqual(
+    channelScrolls.map((scroll, index) =>
+      Boolean(
+        (scroll.index ?? -1) > (channelRenders[index]?.index ?? Infinity),
+      ),
+    ),
+    [true, true],
+    "channel messages and thread-targeted continuations scroll after rendering",
+  );
+  assert.match(
+    threadSubmit,
+    /rerender\(\);\s*scrollChannelThreadToLatest\(\);/u,
+  );
+  assert.match(threadScroll, /\.thread-panel\[data-thread-id\]/u);
+  assert.match(threadScroll, /requestAnimationFrame\(\(\) => \{/u);
+  assert.equal(
+    [...dmSubmit.matchAll(/scrollDirectMessageToLatest\(\);/gu)].length,
+    2,
+    "direct messages stay at the latest line before and after the send settles",
+  );
+  assert.match(
+    dmSubmit,
+    /render\(\);\s*scrollDirectMessageToLatest\(\);[\s\S]*\.then\(\(\) => \{[\s\S]*render\(\);\s*if \(state\.activeDm === other\) \{\s*scrollDirectMessageToLatest\(\);/u,
+  );
+  assert.match(privateSend, /rerender\(\);\s*scrollThread\(\);/u);
+});
+
 test("a keyboard opening is not the reader scrolling away", async () => {
   const chats = await publicFile("screen-chats.js");
   // The follow flag is recomputed from `scrollHeight - scrollTop -

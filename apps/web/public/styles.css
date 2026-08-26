@@ -88,10 +88,28 @@
   --radius-sm: 10px;
   --radius: 10px;
   --radius-lg: 12px;
-  --radius-xl: 12px;
+  /* Major surfaces should read as distinct cards rather than straight slices
+     of the viewport. Keep their curve a step above controls and small cards. */
+  --radius-xl: 16px;
 
   --tree-w: 232px;
   --chat-w: 380px;
+
+  /* The chat screen's three columns, named so the rules that hide one and the
+     rules that size the rest cannot disagree about how wide it was. The rail
+     is only drawn when there is more than one channel to switch between — see
+     `showsChannelRail` — so on a single-channel account those sixty pixels go
+     back to the conversation. */
+  --rail-w: 60px;
+  --chan-sidebar-w: 256px;
+
+  /* Let the conversation use the room it owns. `--room-column` sizes message
+     rows to the chat panel, so long posts do not wrap beside a large empty
+     area and centered coordinator notices span the same width as day rules.
+     `--message-max` lets the words use the row they sit in rather than a
+     tighter character measure that stopped copy short of the available width. */
+  --room-column: 100%;
+  --message-max: 100%;
 
   --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
   --shadow-card: 0 1px 0 rgb(255 255 255 / 2%), 0 8px 24px rgb(0 0 0 / 12%);
@@ -621,11 +639,27 @@ svg.ui-icon {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 10px 6px;
+  min-height: 52px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
   overflow: hidden;
   transition:
     gap 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
     padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* The picture control that stands in for the rail's own when there is no
+   rail. A label rather than a button, because the thing it opens is a file
+   picker, and `.icon-btn` styles a control rather than an element — the two
+   only need to agree about the cursor. */
+.chan-crown-picture {
+  flex: none;
+  cursor: pointer;
+}
+
+.chan-crown-picture svg {
+  width: 15px;
+  height: 15px;
 }
 
 .chan-brand {
@@ -654,7 +688,9 @@ svg.ui-icon {
   align-items: center;
   gap: 4px;
   align-self: end;
-  padding: 10px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-panel);
 }
 
 .chan-sidebar-foot > .sys-line {
@@ -767,16 +803,18 @@ svg.ui-icon {
   display: flex;
   align-items: center;
   gap: 11px;
+  margin: 8px 8px 0;
   padding: 9px 20px;
   background: var(--orange-wash);
-  border-bottom: 1px solid rgba(251, 191, 36, 0.24);
+  border: 1px solid rgba(251, 191, 36, 0.24);
+  border-radius: var(--radius-xl);
   color: var(--orange);
   font-size: 12.5px;
 }
 
 .banner-busy {
   background: var(--accent-wash);
-  border-bottom-color: var(--accent-line);
+  border-color: var(--accent-line);
   color: var(--accent-bright);
 }
 
@@ -3044,6 +3082,34 @@ svg.ui-icon {
   cursor: not-allowed;
 }
 
+/* How much of the allowance is left, said only when it is nearly gone.
+   Quiet while it is a countdown, and in the warning tone once the message is
+   over the cap — the number then is how much has to come out, which is the
+   only thing anybody can do about it. */
+.composer-count {
+  order: 2;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.composer-count[hidden] {
+  display: none;
+}
+
+.composer-count.is-over {
+  color: var(--danger, #d9534f);
+  font-weight: 600;
+}
+
+/* Over the limit the arrow goes quiet: the refusal is on screen before the
+   button is pressed, rather than only as a toast afterwards. */
+.composer.is-over-limit .send-btn {
+  background: transparent;
+  color: var(--danger, #d9534f);
+}
+
 /* Nothing written yet, so nothing to send. The arrow keeps its place but waits
    in the shared muted tone. `.is-expanded` covers an image-only send. */
 .composer:not(.is-expanded):has(textarea:placeholder-shown) .send-btn {
@@ -4686,8 +4752,10 @@ button.chip.lg:hover {
  */
 .chats-shell {
   display: flex;
+  gap: 8px;
   height: 100%;
   min-height: 0;
+  padding: 8px;
   overflow: hidden;
   background: var(--bg);
   /* The ground a closing side panel is pinned against while it leaves — see
@@ -4701,15 +4769,16 @@ button.chip.lg:hover {
 /* A dedicated channel switcher stays narrow while the adjacent sidebar is
    free to hold tools and the active channel's roster. */
 .channel-rail {
-  width: 60px;
+  width: var(--rail-w);
   flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 9px;
   padding: 12px 7px;
-  background: var(--bg);
-  border-right: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
 }
 
 .channel-rail-toggle,
@@ -4865,7 +4934,7 @@ button.chip.lg:hover {
 }
 
 .chan-sidebar {
-  width: 256px;
+  width: var(--chan-sidebar-w);
   flex: none;
   display: grid;
   /* Crown, search, everything else in one scroller, then the account footer.
@@ -4877,7 +4946,8 @@ button.chip.lg:hover {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
   overflow-x: hidden;
   transition: width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
   /* The quiet edge matches the reference's nested panes and remains subtle
@@ -4899,20 +4969,29 @@ button.chip.lg:hover {
 
 .chan-sidebar-head.chan-quick-links {
   display: grid;
-  gap: 4px;
-  padding: 10px;
+  gap: 2px;
+  margin: 7px 8px 5px;
+  padding: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-inset) 58%, transparent);
 }
 
 .chan-quick-link {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 36px;
-  padding: 7px 10px;
-  border-radius: var(--radius-sm);
+  gap: 9px;
+  min-height: 34px;
+  padding: 6px 8px;
+  border-radius: 7px;
   color: var(--text-2);
   font-size: 13px;
+  font-weight: 500;
   text-align: left;
+  transition:
+    background 0.13s ease,
+    color 0.13s ease,
+    box-shadow 0.13s ease;
 }
 
 .chan-quick-link:hover,
@@ -4924,12 +5003,17 @@ button.chip.lg:hover {
 .chan-quick-link.on {
   background: color-mix(in srgb, var(--salmon) 9%, transparent);
   color: var(--text);
+  box-shadow: inset 2px 0 0 var(--salmon);
 }
 
 .chan-quick-link svg {
   width: 15px;
   height: 15px;
   color: var(--text-3);
+}
+
+.chan-quick-link.on svg {
+  color: var(--salmon);
 }
 
 /* The one thing that scrolls in this column. Horizontal overflow is clipped
@@ -4957,7 +5041,7 @@ button.chip.lg:hover {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 18px 12px 7px;
+  padding: 14px 12px 6px;
   background: var(--bg-panel);
   font-size: 10px;
   /* Headings rather than captions: they name the three lists in the panel,
@@ -5066,8 +5150,9 @@ button.chip.lg:hover {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
+  min-height: 34px;
+  padding: 7px 9px;
+  border-radius: 7px;
   text-align: left;
   color: var(--text-2);
   transition: background 0.13s ease, color 0.13s ease;
@@ -5125,8 +5210,8 @@ button.chip.lg:hover {
     position: static !important;
     opacity: 1 !important;
     pointer-events: auto !important;
-    align-self: center;
-    margin-left: 6px;
+    width: max-content;
+    margin: 8px 0 0 auto;
   }
 
   /* The platform's tap flash is a grey-blue rectangle in somebody else's
@@ -5697,7 +5782,9 @@ button.chip.lg:hover {
      conversation too, instead of the transcript reading as a panel floating
      inside a darker frame. */
   background: var(--room-tint);
+  border-radius: var(--radius-xl);
   box-shadow: inset 0 0 0 1px var(--border-soft);
+  overflow: hidden;
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
      stay reachable while it is open. */
@@ -5917,7 +6004,11 @@ button.chip.lg:hover {
 .chan-messages {
   overflow-y: auto;
   min-height: 0;
-  padding: 12px 24px 20px;
+  /* Match the header's side inset so day separators span and centre across
+     the chat panel. Message rows keep to `--room-column` themselves; putting
+     that cap on the scroller instead left the "Today" rule short and pushed
+     left against a wide empty panel. */
+  padding: 12px 18px 20px;
   position: relative;
   isolation: isolate;
 }
@@ -5970,6 +6061,11 @@ button.chip.lg:hover {
 }
 
 .chan-day {
+  /* Full panel width (see `.chan-messages` padding); the shared separator
+     flex centres the label on the hairline. */
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
   padding: 14px 0 10px;
 }
 
@@ -6070,6 +6166,10 @@ button.chip.lg:hover {
 }
 
 .cmsg-row {
+  /* The scroller is panel-wide so day rules can centre; each row still reads
+     in the conversation column rather than stretching with the window. */
+  max-width: var(--room-column);
+  width: 100%;
   /* One column for the whole connector, named once. `--cmsg-body-x` is the
      distance from the row's left edge to the body's text — 8px of row
      padding, the 32px face, the 12px column gap — and `--cmsg-stem-x` is
@@ -6361,7 +6461,16 @@ button.chip.lg:hover {
 
 .cmsg-row .cmsg-body {
   min-width: 0;
-  flex: 1;
+  /* Fit-content keeps each message's hover tools anchored to its content
+     without drawing a separate surface around the message or inventing a
+     right-hand lane for the current user. */
+  position: relative;
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: min(
+    calc(100% - var(--cmsg-body-x)),
+    calc(var(--message-max) + 26px)
+  );
 }
 
 .cmsg-row .cmsg-top {
@@ -6691,6 +6800,10 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   line-height: 1.6;
   color: var(--text);
   margin-top: 3px;
+  /* Follow the row: `--room-column` already bounds the line length, so a
+     tighter character cap only made long posts wrap short of the space they
+     already had. */
+  max-width: var(--message-max);
   word-break: break-word;
   white-space: pre-wrap;
 }
@@ -6699,6 +6812,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   position: absolute;
   top: -14px;
   right: 8px;
+  z-index: 3;
   display: flex;
   gap: 2px;
   background: var(--bg-card-2);
@@ -6800,16 +6914,61 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   height: 13px;
 }
 
-/* The picker itself. A single row of choices at a size a finger can hit,
-   wrapping only if a theme's font makes them wider than the popover. */
-.react-grid {
+/* Search and choices share one compact surface. The field comes first in the
+   popover's focus order, so opening the picker is already enough to type. */
+.react-picker {
+  display: grid;
+  gap: 10px;
+}
+
+.react-search {
+  position: relative;
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+}
+
+.react-search > .ui-icon {
+  position: absolute;
+  left: 10px;
+  width: 15px;
+  height: 15px;
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+.react-search input {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px 7px 32px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  outline: none;
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.react-search input::placeholder {
+  color: var(--text-4);
+}
+
+.react-search input:focus {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 2px var(--accent-wash);
+}
+
+.react-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 4px;
+  max-height: 188px;
+  padding-right: 2px;
+  overflow-y: auto;
 }
 
 .react-choice {
-  width: 36px;
+  width: 100%;
   height: 36px;
   border-radius: 9px;
   font-size: 19px;
@@ -6827,6 +6986,14 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .react-choice.mine {
   background: var(--accent-wash);
   border-color: var(--accent-line);
+}
+
+.react-empty {
+  margin: 2px 0 0;
+  padding: 12px 8px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
 }
 
 /* What the work under a thread changed. Closed by default: the answer most
@@ -7536,6 +7703,18 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   background: var(--bg-inset);
   border-radius: 3px;
   padding: 0 3px;
+}
+
+.cmsg-text .message-link {
+  color: var(--lavender);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.cmsg-text .message-link:hover {
+  text-decoration-color: currentColor;
 }
 
 /* A ping is a quiet, static label in the reader's primary accent. The wash is
@@ -8832,7 +9011,8 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
   box-shadow: -14px 0 30px -24px rgb(0 0 0 / 60%);
   z-index: 4;
 }
@@ -8956,9 +9136,9 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 @media (min-width: 601px) {
   .thread-panel.panel-leaving {
     position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
   }
 }
 
@@ -10265,6 +10445,22 @@ dialog.modal[open]::backdrop {
     width: 0;
   }
 
+  /* Except when it is the last column standing. The control that expands the
+     sidebar again lives in the rail, and with one channel there is no rail —
+     so a sidebar folded to nothing would have taken the only way back with
+     it. Folded to an icon column instead, which is what the crown is already
+     laid out as while collapsed. */
+  .chats-shell.no-rail.chan-collapsed > .chan-sidebar {
+    width: var(--rail-w);
+  }
+
+  /* The crown's two stand-in controls fold away with the rest of it: sixty
+     pixels holds the one button that brings the panel back, and nothing
+     else. */
+  .chats-shell.chan-collapsed :is(.chan-crown-picture, .chan-crown-new) {
+    display: none;
+  }
+
   .chats-shell.chan-collapsed .chan-sidebar-top {
     gap: 0;
     justify-content: center;
@@ -10777,6 +10973,7 @@ dialog.modal[open]::backdrop {
        same 0.28s reads as slower, because it saves half the travel for the
        second half of the time and the panel appears to hesitate. */
     transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
     box-shadow: var(--shadow-pop);
     /* Declared here rather than added with `.chan-dragging`, even though it is
        only earning its keep while the panel moves: promoting a layer at the
@@ -10873,6 +11070,7 @@ dialog.modal[open]::backdrop {
     flex-wrap: nowrap;
     gap: 8px;
     padding: var(--safe-top) 8px 0 10px;
+    border-radius: 0 0 var(--radius-xl) var(--radius-xl);
   }
 
   .chan-head .spacer {
@@ -10945,6 +11143,8 @@ dialog.modal[open]::backdrop {
     width: 100vw;
     max-width: 100vw;
     min-width: 0;
+    border: 0;
+    border-radius: 0;
     z-index: 72;
   }
 
@@ -11453,6 +11653,60 @@ dialog.modal[open]::backdrop {
 .ch-count svg {
   width: 13px;
   height: 13px;
+}
+
+/* Run this channel's app, beside the pin. A button that borrows the counts'
+   type and colour rather than the tool button's box: it sits inside a line of
+   small grey glyphs, and a bordered control among them would read as having
+   arrived from somewhere else. The pin toggle strips its own chrome inline for
+   the same reason. */
+.ch-preview-toggle {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-xs, 4px);
+}
+
+/* Brightness rather than a colour, so the same feedback works in all three
+   states. A hover rule that names a colour would either lose to the running
+   and stopped rules or overwrite what they are saying. */
+.ch-preview-toggle:hover {
+  opacity: 0.7;
+}
+
+/* Running. The accent is the only thing on this line that is not grey, which
+   is the point — "your app is up" is worth finding without reading. */
+.ch-preview-toggle.on {
+  color: var(--accent-bright);
+}
+
+/* Ready to run again, but the last attempt stopped on its own. Colour only —
+   the control does the same thing either way, and the reason is in its title. */
+.ch-preview-toggle.warn {
+  color: var(--warn, #f59e0b);
+}
+
+/* Starting, which is a state and not an instant. A cold start installs and
+   builds before anything listens, and a button that reads as untouched for a
+   minute gets pressed again — which used to kill the start it was waiting
+   for. Breathing rather than spinning: it belongs to a line of small grey
+   glyphs, and it is saying "still working", not "wait for me". */
+.ch-preview-toggle.starting {
+  color: var(--accent-bright);
+  cursor: progress;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+/* Motion is the only thing carrying "still working" here, so what is left
+   without it is the accent and the title. */
+@media (prefers-reduced-motion: reduce) {
+  .ch-preview-toggle.starting {
+    animation: none;
+    opacity: 0.7;
+  }
 }
 
 /* Quieter than the two counts beside it. It reports a setting rather than a

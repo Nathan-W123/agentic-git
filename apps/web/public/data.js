@@ -42,6 +42,93 @@ const stored = (key, fallback = "") =>
   window.localStorage.getItem(key) ?? fallback;
 
 /**
+ * How long a message may be, in each place one is written.
+ *
+ * The same three numbers the gateway validates against — see
+ * `CHANNEL_MESSAGE_MAX_CHARS` and its neighbours in `server.ts`. They are
+ * repeated here rather than fetched because a limit is only useful to
+ * somebody while they are typing: reaching it as a rejected send tells them
+ * the message failed and nothing about why, which is exactly what this pair
+ * of numbers exists to stop.
+ */
+export const CHANNEL_MESSAGE_MAX_CHARS = 10_000;
+export const DIRECT_MESSAGE_MAX_CHARS = 8_000;
+export const AGENT_CHAT_MAX_CHARS = 10_000;
+
+/**
+ * The cap that applies to one composer.
+ *
+ * `channel` and `thread` write into the same room and share its limit; `dm`
+ * is the private conversation with a person, `chat` the private one with an
+ * agent.
+ */
+export function messageLimitFor(target) {
+  return target === "dm"
+    ? DIRECT_MESSAGE_MAX_CHARS
+    : target === "chat"
+      ? AGENT_CHAT_MAX_CHARS
+      : CHANNEL_MESSAGE_MAX_CHARS;
+}
+
+/** A count with thousands separators, so a limit reads as a number. */
+function countedChars(count) {
+  return count.toLocaleString("en-US");
+}
+
+/**
+ * What a composer has to say about its own length, or nothing at all.
+ *
+ * Silent until the last tenth of the allowance, because a counter shown over
+ * an empty box is noise about a limit nobody is near. From there it counts
+ * down, and past the limit it says how much has to come out — the one number
+ * that turns "this will not send" into something to act on.
+ *
+ * Measured on the trimmed string, which is what the server measures.
+ */
+export function messageLengthNotice(text, target = "channel") {
+  const limit = messageLimitFor(target);
+  const length = String(text ?? "").trim().length;
+  const remaining = limit - length;
+  if (remaining < 0) {
+    return {
+      over: true,
+      length,
+      limit,
+      remaining,
+      text: `${countedChars(-remaining)} over the ${countedChars(limit)}-character limit`,
+    };
+  }
+  if (remaining <= Math.round(limit / 10)) {
+    return {
+      over: false,
+      length,
+      limit,
+      remaining,
+      text: `${countedChars(remaining)} characters left`,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * The sentence shown when a send is refused for length, or `undefined` when
+ * the message fits. One wording for every composer, so the toast, the counter
+ * and the server all name the same cap.
+ */
+export function messageTooLong(text, target = "channel") {
+  const notice = messageLengthNotice(text, target);
+  if (notice?.over !== true) {
+    return undefined;
+  }
+  // Spelled out here, where there is room for a sentence; the counter on the
+  // bar says the same thing in the space it has.
+  return (
+    `This message is ${countedChars(-notice.remaining)} characters over the ` +
+    `${countedChars(notice.limit)}-character limit — shorten it to send.`
+  );
+}
+
+/**
  * Which of the sidebar's two rosters this browser last left unrolled.
  *
  * Absent, or unreadable, means both: a first visit should show the room, and
@@ -237,7 +324,14 @@ export const state = {
   chanNewMessages: {},
   /** Repository ids whose channel has been read from the server at least once. */
   channelLoaded: new Set(),
-  channelLoadingId: undefined,
+  /**
+   * Repository ids whose first channel read is in flight.
+   *
+   * A Set rather than a single id so the channel rail can load every room's
+   * transcript at once — a lone slot meant starting the second room cancelled
+   * the first, and unread badges on inactive icons never got a cache to count.
+   */
+  channelLoading: new Set(),
   /**
    * Why a channel's first read failed, by repository id.
    *
@@ -692,6 +786,79 @@ export function authorizeRequest(headers, method = "GET") {
     headers.set("X-CSRF-Token", csrfToken());
   }
   return "same-origin";
+}
+
+/**
+ * Whether images have to be fetched rather than simply pointed at.
+ *
+ * A browser sends its session cookie with every `<img src>` without being
+ * asked, so an attachment behind authentication just loads. A desktop shell
+ * has no cookie — it carries a bearer token — and an `<img>` tag cannot send a
+ * header. The request goes out bare, the gateway answers 401, and the reader
+ * gets a broken-image glyph with no clue why.
+ *
+ * So in a shell the images are fetched the same way every other request is,
+ * and handed to the element as object URLs.
+ */
+export function imagesNeedFetching() {
+  return bearerToken() !== undefined;
+}
+
+/** Attachment path to object URL, so re-rendering does not re-download. */
+const attachmentObjectUrls = new Map();
+
+/** Beyond this, the oldest are released — a long channel is not a reason to
+ * hold every image it ever showed. */
+const MAX_HELD_IMAGES = 120;
+
+/**
+ * Gives every `data-src` image on the page a source it can actually load.
+ *
+ * Called after each render. Images already resolved keep their object URL, so
+ * this costs one request per attachment for the lifetime of the window rather
+ * than one per render.
+ *
+ * A failure deliberately leaves the element without a source: the alt text is
+ * what a reader gets, which says more than a broken-image glyph does.
+ */
+export async function resolveAttachmentImages(root = document) {
+  if (!imagesNeedFetching()) {
+    return;
+  }
+  await Promise.all(
+    [...root.querySelectorAll("img[data-src]")].map(async (image) => {
+      const source = image.getAttribute("data-src");
+      if (source === null) {
+        return;
+      }
+      // Removed first: a second render must not queue the same fetch again.
+      image.removeAttribute("data-src");
+      let resolved = attachmentObjectUrls.get(source);
+      if (resolved === undefined) {
+        try {
+          const headers = new Headers();
+          const credentials = authorizeRequest(headers);
+          const response = await fetch(`${SERVER_ORIGIN}${source}`, {
+            headers,
+            credentials,
+          });
+          if (!response.ok) {
+            throw new Error(String(response.status));
+          }
+          resolved = URL.createObjectURL(await response.blob());
+          attachmentObjectUrls.set(source, resolved);
+          while (attachmentObjectUrls.size > MAX_HELD_IMAGES) {
+            const [oldest] = attachmentObjectUrls.keys();
+            URL.revokeObjectURL(attachmentObjectUrls.get(oldest));
+            attachmentObjectUrls.delete(oldest);
+          }
+        } catch {
+          return;
+        }
+      }
+      image.src = resolved;
+    }),
+  );
 }
 
 export async function api(path, options = {}) {
@@ -1639,30 +1806,40 @@ export function agentsThinkingIn(repositoryId) {
 }
 
 /**
- * Is an agent working on this thread's task right now?
+ * The task currently represented by a thread.
  *
- * The same question `agentsThinkingIn` answers for a whole channel, asked of
- * one thread — so the threads pullout can mark the live work rather than
- * making somebody open each row to find out which one is still moving.
- *
- * The task's own status is the truth where the task is known, and it is the
- * same `WORKING_STATUS` the typing dots use, so a thread stays marked for
- * exactly as long as its agent is shown as thinking. A busy frame is the
- * fallback for the window before the task list has caught up with it, which
- * is precisely when a reader is most likely to be watching.
- *
- * Unlike `agentsThinkingIn` this reads without retiring anything: it runs
- * once per row of a render, and a selector that mutates state while a list is
- * being built would make the answer depend on the order the rows were drawn.
+ * The root keeps the id of the first task it created. Follow-up work gets a
+ * new task id, but keeps the root message id as its `conversationId`, so an
+ * active follow-up must win over that historical id. The original lookup is
+ * retained for first turns and records written before conversations existed.
  */
-export function threadIsWorking(entry) {
+export function threadTask(entry) {
+  const conversationId = entry?.id;
+  const current = state.tasks.find(
+    (candidate) =>
+      conversationId !== undefined &&
+      candidate.conversationId === conversationId &&
+      taskIsWorking(candidate),
+  );
+  if (current !== undefined) {
+    return current;
+  }
   const taskId = entry?.taskId;
+  return taskId === undefined || taskId === null || taskId === ""
+    ? undefined
+    : state.tasks.find((candidate) => candidate.id === taskId);
+}
+
+/** Is an agent working on the task currently represented by this thread? */
+export function threadIsWorking(entry) {
+  const task = threadTask(entry);
+  const taskId = task?.id ?? entry?.taskId;
   if (taskId === undefined || taskId === null || taskId === "") {
     return false;
   }
   return (
     busyIsLive(taskId, state.agentBusy[taskId], Date.now()) ||
-    taskIsWorking(state.tasks.find((candidate) => candidate.id === taskId))
+    taskIsWorking(task)
   );
 }
 
@@ -3504,6 +3681,13 @@ export async function sendDirectMessage(userId, content, referencedMessageId) {
   if (body.length === 0 || !userId) {
     return;
   }
+  // Thrown rather than toasted, because this one is awaited: the caller holds
+  // the draft and has to know not to clear it. The sentence names the cap, so
+  // whichever surface reports it says the same thing the counter does.
+  const tooLong = messageTooLong(body, "dm");
+  if (tooLong !== undefined) {
+    throw new Error(tooLong);
+  }
   const response = await api(directPath(`/${encodeURIComponent(userId)}`), {
     method: "POST",
     body: {
@@ -4224,9 +4408,9 @@ export async function ensureChannelMessages(repositoryId, rerender, retry = fals
     !repositoryId ||
     !state.projectId ||
     state.channelLoaded.has(repositoryId) ||
-    state.channelLoadingId === repositoryId ||
+    state.channelLoading.has(repositoryId) ||
     // A read that already failed is not attempted again on every render.
-    // `channelLoadingId` is cleared in the `finally` below, so without this
+    // `channelLoading` is cleared in the `finally` below, so without this
     // the shell re-asked for a channel it had just been refused, once per
     // repaint, for as long as the room was open. The retry button is how a
     // person asks for another go.
@@ -4234,13 +4418,13 @@ export async function ensureChannelMessages(repositoryId, rerender, retry = fals
   ) {
     return;
   }
-  state.channelLoadingId = repositoryId;
+  state.channelLoading.add(repositoryId);
   try {
     if (await loadChannel(repositoryId)) {
       state.channelLoaded.add(repositoryId);
     }
   } finally {
-    state.channelLoadingId = undefined;
+    state.channelLoading.delete(repositoryId);
   }
   rerender();
 }
@@ -4492,17 +4676,37 @@ export async function ensureChangeSetForTask(taskId, rerender) {
 }
 
 /**
- * Re-reads a channel that has already loaded once.
+ * Re-reads a channel, loading it first when this browser has never held it.
  *
  * This is the reconcile half of every channel write below: `connectSocket`'s
  * handler in app.js calls it whenever the event socket reports a
- * `channel_*` audit event for the open repository, including the echo of
- * this browser's own posts. The store stays the source of truth, so a
- * fresh-and-correct read replaces local guesses rather than patching them.
+ * `channel_*` audit event for any repository, including the echo of this
+ * browser's own posts. Inactive rooms are included on purpose — without a
+ * cache, `channelUnreadCount` has nothing to paint on the rail. The store
+ * stays the source of truth, so a fresh-and-correct read replaces local
+ * guesses rather than patching them.
  */
 export async function refreshChannelMessages(repositoryId) {
-  if (!repositoryId || !state.channelLoaded.has(repositoryId)) {
+  if (!repositoryId || !state.projectId) {
     return false;
+  }
+  if (!state.channelLoaded.has(repositoryId)) {
+    if (
+      state.channelLoading.has(repositoryId) ||
+      state.channelFailed[repositoryId] !== undefined
+    ) {
+      return false;
+    }
+    state.channelLoading.add(repositoryId);
+    try {
+      if (await loadChannel(repositoryId)) {
+        state.channelLoaded.add(repositoryId);
+        return true;
+      }
+      return false;
+    } finally {
+      state.channelLoading.delete(repositoryId);
+    }
   }
   return await loadChannel(repositoryId);
 }
@@ -4534,6 +4738,14 @@ export function sendChannelMessage(
 ) {
   const trimmed = String(text ?? "").trim();
   if (!repositoryId || trimmed === "") {
+    return undefined;
+  }
+  // Refused here rather than optimistically drawn and failed a round trip
+  // later: returning `undefined` is what leaves the words in the composer,
+  // beside the counter saying how many of them have to go.
+  const tooLong = messageTooLong(trimmed, "channel");
+  if (tooLong !== undefined) {
+    toast(tooLong, "error");
     return undefined;
   }
   // `@everyone` names every person in the channel, exactly as the server
@@ -4602,6 +4814,14 @@ export function resendChannelMessage(repositoryId, entryId, rerender) {
   const parentId = entry.messageId;
   if (parentId !== undefined && !isServerChannelId(repositoryId, parentId)) {
     toast("The thread this answers has not been saved yet.", "error");
+    return;
+  }
+  // A row that failed because it is too long will fail again unedited, and
+  // the second attempt is where somebody is owed the reason: say the cap and
+  // leave the row where it is, with its words still recoverable from screen.
+  const tooLong = messageTooLong(entry.content, "channel");
+  if (tooLong !== undefined) {
+    toast(tooLong, "error");
     return;
   }
   entry.failed = undefined;
@@ -4709,6 +4929,13 @@ export function postChannelReply(
   const trimmed = String(text ?? "").trim();
   const message = findChannelMessage(repositoryId, messageId);
   if (message === undefined || trimmed === "") {
+    return undefined;
+  }
+  // Same cap as a root message, and the same refusal: the reply stays in the
+  // box it was typed in rather than becoming a failed row in the thread.
+  const tooLong = messageTooLong(trimmed, "channel");
+  if (tooLong !== undefined) {
+    toast(tooLong, "error");
     return undefined;
   }
   message.replies ??= [];
@@ -5267,9 +5494,9 @@ export async function setAuditorPaused(repositoryId, paused) {
 /**
  * Whether this repository's app is running, and where.
  *
- * Read-only: nothing in the page starts or stops one any more. It is fetched
- * rather than assumed because a preview outlives the page, so a reload, or a
- * second tab, still has to find the one that is already up.
+ * Fetched rather than assumed, because the preview outlives the page: a
+ * reload, or a second tab, must find the one that is already up instead of
+ * offering to start a second.
  */
 export async function loadPreview(repositoryId) {
   try {
@@ -5278,7 +5505,7 @@ export async function loadPreview(repositoryId) {
   } catch {
     // A deployment that cannot run previews answers 501, and a reader who
     // never asked for one should not see an error about it. Absent is the
-    // same as "nothing running", which is the right outcome either way.
+    // same as "no button", which is the right outcome either way.
     state.previews[repositoryId] = null;
   }
   return state.previews[repositoryId];
@@ -5304,6 +5531,36 @@ export async function uploadAttachment(repositoryId, file) {
     throw new Error("The image was not stored");
   }
   return id;
+}
+
+/**
+ * Runs this repository's app, whatever the repository turns out to be.
+ *
+ * Nothing about the language or the framework is decided here. The control
+ * plane reads the checkout and works out how it boots — see
+ * `detectPreviewCommand` — and the answer to a repository it cannot read is a
+ * message saying what it looked for, which is what the caller turns into the
+ * one question worth asking.
+ */
+export async function startPreview(repositoryId) {
+  const response = await api(repositoryPath(repositoryId, "/preview"), {
+    method: "POST",
+  });
+  state.previews[repositoryId] = response?.preview ?? null;
+  return state.previews[repositoryId];
+}
+
+/** Remembers how this repository starts, so it is asked once and not again. */
+export async function setPreviewCommand(repositoryId, command) {
+  await api(repositoryPath(repositoryId, "/preview"), {
+    method: "PUT",
+    body: { command },
+  });
+}
+
+export async function stopPreview(repositoryId) {
+  await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
+  state.previews[repositoryId] = null;
 }
 
 /**

@@ -24,7 +24,11 @@ import {
 } from "@coord/cli/commands";
 import { repoSync } from "@coord/cli/repo-export";
 import { CoordinatorProject } from "@coord/cli/project";
-import { recoverCoordinationState } from "@coord/cli/recovery";
+import {
+  drainInFlightWork,
+  reapStrandedWork,
+  recoverCoordinationState,
+} from "@coord/cli/recovery";
 import { rollbackCanonical } from "@coord/cli/rollback";
 import { workerOperations } from "@coord/cli/worker-operations";
 import type { CoordinationStore } from "@coord/persistence";
@@ -717,20 +721,32 @@ async function serve(
     async previewConfigure(input) {
       // One string rather than an executable and an argument list, because the
       // person answering is reading a prompt and knows the command they type
-      // in a terminal. Split on whitespace: a start command is a program and
-      // some flags, and anything needing shell quoting needs a script anyway.
-      const parts = input.command.trim().split(/\s+/u);
-      const [executable, ...args] = parts;
-      if (executable === undefined) {
+      // in a terminal.
+      const command = input.command.trim();
+      if (command === "") {
         throw new Error("A start command is required");
       }
+      // Split on whitespace where that is the whole of it — a program and some
+      // flags — and handed to a shell where it is not. Somebody asked how an
+      // app starts answers with what they type in a terminal, and a fair share
+      // of those are `cd apps/web && npm run dev` or `PORT=3000 rails s`:
+      // splitting those on spaces produces an executable called `cd` with an
+      // argument called `&&`, which fails in a way that reads as the answer
+      // having been wrong. `sh -c` is what the Procfile rung already does with
+      // a line of the same kind.
+      const parts = command.split(/\s+/u);
+      const [executable, ...args] = parts;
+      const shellish =
+        /[|&;<>()$`"'\\*?~\n]/u.test(command) ||
+        // A leading `NAME=value` is an assignment, which only a shell knows
+        // how to apply. `--flag=value` is never the first word, so this does
+        // not catch an ordinary command carrying one.
+        /^[A-Za-z_][A-Za-z0-9_]*=/u.test(executable ?? "");
       project.config.previewCommands = {
         ...project.config.previewCommands,
-        [input.repositoryId]: {
-          executable,
-          args,
-          label: input.command.trim(),
-        },
+        [input.repositoryId]: shellish
+          ? { executable: "sh", args: ["-c", command], label: command }
+          : { executable: executable ?? command, args, label: command },
       };
       await project.save();
     },
@@ -1000,6 +1016,25 @@ async function serve(
     }
     closing = true;
     try {
+      // Before anything else stops: this process is holding leases on work it
+      // is no longer going to do, and a lease nobody renews still reads as a
+      // live agent for the five minutes it takes to expire. Handing it back
+      // now is what lets the container that replaces this one find the task
+      // queued and resume it in seconds — the difference between a redeploy
+      // costing a restart and a redeploy stranding whatever was mid-flight.
+      //
+      // Before the gateway rather than after it, and best effort. Closing the
+      // gateway takes as long as its slowest connection; the drain is two
+      // indexed writes and is the one thing here that must not be missed. The
+      // cost of that order is a dispatch landing in the milliseconds between
+      // the two, whose lease then expires the old way.
+      await drainInFlightWork(store).catch((error: unknown) => {
+        console.error(
+          `Could not release in-flight work: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
       await runningGateway.close();
     } finally {
       // Previews are child processes holding ports and checkouts. Nothing else

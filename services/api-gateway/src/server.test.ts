@@ -1288,6 +1288,14 @@ test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", as
   assert.equal(staticPage.status, 200);
   assert.equal(staticPage.headers.get("cache-control"), "no-cache");
   assert.equal(staticPage.headers.get("content-security-policy")?.includes("object-src 'none'"), true);
+  // A desktop shell cannot put a token on an `<img>` tag, so it fetches
+  // attachments the way it fetches everything else and hands the element an
+  // object URL. Tightening this back to `img-src 'self' data:` would leave
+  // every image in the app broken, and nothing would say why.
+  assert.equal(
+    staticPage.headers.get("content-security-policy")?.includes("img-src 'self' data: blob:"),
+    true,
+  );
   const etag = staticPage.headers.get("etag");
   assert.ok(etag);
   const unchangedPage = await client.request("/some/client/route", {
@@ -6381,15 +6389,15 @@ test("a finished task says what it did, not that the pipeline worked", () => {
     paragraph,
   );
 
-  // The guard that is left is for a runaway model only: nobody wants a novel
-  // pasted into a channel everybody is reading.
+  // A runaway wall of text used to be cut at a char bound mid-thought. Agent
+  // endings are left whole now — the channel gets what the agent wrote.
+  const novelBody = `${"word ".repeat(1200)}end`;
+  assert.ok(novelBody.length > 4_100, String(novelBody.length));
   const novel = narrateTaskEvent("canonical_promoted", {
-    agentExplanation: `${"word ".repeat(1200)}end`,
+    agentExplanation: novelBody,
   });
-  assert.ok((novel ?? "").length < 4_100, String(novel?.length));
-  // Nothing to cut back to in an unpunctuated wall of text, so it ends on a
-  // whole word and says it was shortened — never halfway through one.
-  assert.match(novel ?? "", /word…$/u);
+  assert.equal(novel, novelBody);
+  assert.doesNotMatch(novel ?? "", /…/u);
 
   // Newlines collapse: the ending is one line in a channel, and a multi-line
   // explanation would otherwise read as several messages.
@@ -6398,6 +6406,27 @@ test("a finished task says what it did, not that the pipeline worked", () => {
       agentExplanation: "Fixed the loop.\n\nAlso tidied the imports.",
     }),
     "Fixed the loop. Also tidied the imports.",
+  );
+});
+
+test("agent progress reaches the channel whole, never cut mid-word", () => {
+  // Progress used to be sliced at 300 characters with no ellipsis — the exact
+  // cut that left answers ending on "what tech s" while the agent was still
+  // thinking. The full message is the progress line.
+  const message =
+    "I don't see any project files in the current directory. Could you share " +
+    "the app code (as a file, zip, or by pointing me to a repository) so I " +
+    "can investigate the latency issues? Alternatively, if you'd like me to " +
+    "set up a sample project to demonstrate latency troubleshooting, let me " +
+    "know what tech stack you prefer.";
+  assert.ok(message.length > 300, String(message.length));
+  assert.equal(
+    narrateTaskEvent("agent_progress", { message }),
+    message,
+  );
+  assert.doesNotMatch(
+    narrateTaskEvent("agent_progress", { message }) ?? "",
+    /what tech s$/u,
   );
 });
 
@@ -11378,6 +11407,7 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const session = await bootstrap(owner);
+  await invitableRepository(owner, "dm-shared");
   const organizationId = (await owner.request("/api/v1/organizations")).data
     .organizations[0].id as string;
 
@@ -11546,6 +11576,71 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
     ),
     false,
   );
+});
+
+test("direct messages require a shared repository channel", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const sharedRepository = await invitableRepository(owner, "dm-room-shared");
+  const isolatedRepository = await invitableRepository(
+    owner,
+    "dm-room-isolated",
+  );
+  const first = await joinRepository(
+    runtime,
+    owner,
+    "dm-first@example.com",
+    sharedRepository,
+  );
+  const shared = await joinRepository(
+    runtime,
+    owner,
+    "dm-shared@example.com",
+    sharedRepository,
+  );
+  const isolated = await joinRepository(
+    runtime,
+    owner,
+    "dm-isolated@example.com",
+    isolatedRepository,
+  );
+  const sharedId = (await shared.request("/api/v1/auth/me")).data.user.id;
+  const isolatedId = (await isolated.request("/api/v1/auth/me")).data.user.id;
+
+  const inbox = await first.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`,
+  );
+  assert.equal(inbox.status, 200, JSON.stringify(inbox.data));
+  const reachable = new Set(
+    (inbox.data.people as { id: string }[]).map((person) => person.id),
+  );
+  assert.equal(reachable.has(sharedId), true);
+  assert.equal(reachable.has(isolatedId), false);
+
+  const sent = await first.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${sharedId}`,
+    { method: "POST", body: { content: "We share this room." } },
+  );
+  assert.equal(sent.status, 201, JSON.stringify(sent.data));
+  assert.equal(
+    (
+      await first.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${sharedId}`,
+      )
+    ).status,
+    200,
+  );
+
+  for (const method of ["GET", "POST"] as const) {
+    const refused = await first.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${isolatedId}`,
+      method === "POST"
+        ? { method, body: { content: "We do not share a room." } }
+        : { method },
+    );
+    assert.equal(refused.status, 404, JSON.stringify(refused.data));
+  }
 });
 
 test("channel stats count every root and reply, past the read page", async (t) => {
@@ -18074,6 +18169,51 @@ test("approving an app hands the browser a code, and the code buys one token", a
   );
   assert.equal(me.status, 200);
   assert.equal(me.data.credential, "api_token");
+
+  // What the token may do, asked of the gateway rather than of a constant.
+  //
+  // The first version of this grant was `view` and `run_task`, and nothing
+  // here noticed, because the only thing asserted was that the token worked
+  // *somewhere*. It did — and then answered "This token does not carry the
+  // import_repository scope" the first time somebody pushed to GitHub, which
+  // is the ordinary way work leaves Kumi.
+  //
+  // Both directions are checked, and against a project that exists: the scope
+  // check runs *after* the lookup, so aiming this at a made-up id would 404
+  // before reaching the gate and pass no matter what the token carried.
+  const imported = await bearer(
+    runtime.origin,
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+    exchanged.data.token as string,
+    { method: "POST", body: {} },
+  );
+  assert.notEqual(
+    imported.data?.error?.code,
+    "token_scope_missing",
+    "the app cannot import, sync, or push without import_repository",
+  );
+
+  // And a scope it must not have has to be refused by the scope check itself,
+  // not merely by whatever role the approver happened to hold — the approver
+  // here is the owner, so a role check alone would let this through.
+  const organizations = await bearer(
+    runtime.origin,
+    "/api/v1/organizations",
+    exchanged.data.token as string,
+  );
+  assert.equal(organizations.status, 200);
+  const organizationId = (organizations.data.organizations ?? organizations.data)[0]
+    ?.id as string;
+  assert.ok(organizationId, "the bootstrap made no organization to rename");
+
+  const renamed = await bearer(
+    runtime.origin,
+    `/api/v1/organizations/${organizationId}`,
+    exchanged.data.token as string,
+    { method: "PATCH", body: { name: "Somewhere else" } },
+  );
+  assert.equal(renamed.status, 403);
+  assert.equal(renamed.data.error.code, "token_scope_missing");
 });
 
 test("an app cannot be approved for somewhere else, or by another app", async (t) => {

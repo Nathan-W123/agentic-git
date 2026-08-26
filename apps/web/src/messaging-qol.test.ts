@@ -56,6 +56,76 @@ test("a reaction can be any emoji, not only the one the client could send", asyn
   assert.match(chats, /reactions\[emoji\]\?\.mine === true \? " mine" : ""/u);
   assert.match(css, /\.react-choice\.mine \{/u);
   assert.match(css, /\.cmsg-react-add \{/u);
+
+  // The common quick reactions remain first, while the larger catalogue can
+  // be reached by a word such as "party", "warning" or "thanks". Filtering
+  // happens inside the open popover so typing does not rebuild the channel.
+  assert.match(chats, /const REACTION_SEARCH_TERMS = \{/u);
+  assert.match(
+    chats,
+    /type="search" data-reaction-search placeholder="Search emoji"/u,
+  );
+  assert.match(chats, /data-search="\$\{esc\(`/u);
+  assert.match(
+    chats,
+    /const choices = \[\.\.\.popover\.querySelectorAll\("\.react-choice"\)\]/u,
+  );
+  assert.match(
+    chats,
+    /choice\.hidden = query !== "" && !terms\.includes\(query\)/u,
+  );
+  assert.match(chats, /empty\.hidden = matches !== 0/u);
+  assert.match(chats, /data-reaction-empty role="status" hidden>No emoji found/u);
+  assert.match(css, /\.react-search input \{/u);
+  assert.match(css, /\.react-empty \{/u);
+});
+
+test("channel messages and workspace links use compact, bounded surfaces", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // Threads and Files are one semantic navigation group with matching rows,
+  // instead of two loose controls occupying their own unrelated spacing.
+  assert.match(
+    chats,
+    /<nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">/u,
+  );
+  assert.match(
+    css,
+    /\.chan-sidebar-head\.chan-quick-links \{[\s\S]{0,320}margin: 7px 8px 5px;[\s\S]{0,180}border: 1px solid var\(--border-soft\);/u,
+  );
+  assert.match(
+    css,
+    /\.chan-quick-link \{[\s\S]{0,220}min-height: 34px;[\s\S]{0,100}padding: 6px 8px;/u,
+  );
+
+  // Channel messages stay fitted so their hover tools remain nearby, but the
+  // transcript itself is unboxed. Private conversations keep their bubbles.
+  const channelBodyRule =
+    css.match(/\.cmsg-row \.cmsg-body \{(?<rule>[^}]*)\}/u)?.groups?.rule ?? "";
+  assert.match(channelBodyRule, /width: fit-content;/u);
+  assert.doesNotMatch(
+    channelBodyRule,
+    /(?:^|\s)(?:padding|border|border-radius|background|box-shadow):/u,
+  );
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-compact \.cmsg-body \{\s*margin-left: calc\(var\(--cmsg-body-x\) - 8px\);\s*\}/u,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.cmsg-row:not\(\.cmsg-system\):hover \.cmsg-body/u,
+  );
+  assert.match(
+    css,
+    /\.dm-bubble \{[^}]*border-radius: var\(--radius-sm\);[^}]*background: var\(--surface-2\);/u,
+  );
+  assert.match(
+    chats,
+    /<div class="cmsg-body">[\s\S]*<span class="cmsg-actions">[\s\S]*<\/span>\s*<\/div>\s*<\/div>`;/u,
+  );
+  assert.doesNotMatch(chats, /cmsg-mine/u);
+  assert.doesNotMatch(css, /cmsg-mine/u);
 });
 
 test("the unread line is taken before opening the room marks it read", async () => {
@@ -118,6 +188,12 @@ test("quiet transcript metadata uses an outlined label on a straight separator",
   // their words.
   assert.match(css, /\.transcript-separator::before,[\s\S]{0,80}\.transcript-separator::after/u);
   assert.match(css, /\.transcript-separator > span \{[\s\S]{0,260}border: 1px solid/u);
+
+  // Channel rows use the whole chat panel rather than a fixed desktop column.
+  // That gives ordinary messages the available line length and also centers
+  // the full-width coordinator separator in the room.
+  assert.match(css, /--room-column: 100%/u);
+  assert.match(css, /\.cmsg-row \{[\s\S]{0,180}max-width: var\(--room-column\)/u);
 });
 
 test("a reader who has scrolled up is offered the way back down", async () => {

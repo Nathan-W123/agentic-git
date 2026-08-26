@@ -1495,22 +1495,6 @@ const CHANNEL_CEREMONIAL_EVENTS = new Set([
   "validation_completed",
 ]);
 
-/**
- * The runaway guard on an agent's own account of its work, and nothing more.
- *
- * It was 200, and before that 400, on the theory that an ending belongs on one
- * line — but a bound low enough to shape the writing is a bound the writing
- * keeps hitting, and every account that hit it reached the reader with its
- * last sentence missing or an ellipsis where the point was. There is nowhere
- * in the channel to read the rest, so the shortening was pure loss.
- *
- * The account is now shown whole. This bound is set where {@link
- * FAILURE_ACCOUNT_MAX} is, for the reason that one is: a model that ignores
- * "one or two plain sentences" entirely must not be able to paste a novel into
- * a room full of people. Ordinary summaries — a paragraph at the very worst —
- * never come near it, so in practice nothing is cut.
- */
-const TERMINAL_SUMMARY_MAX = 4_000;
 
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   // The fallback, for a run whose agent explained nothing — see the
@@ -1813,54 +1797,35 @@ function clipToBoundary(text: string, max: number): string {
 }
 
 /**
+ * Formerly a hard cap on task endings. Kept as Infinity so the agent's own
+ * words reach the channel whole — never cut mid-sentence or mid-word.
+ */
+const TERMINAL_SUMMARY_MAX = Number.POSITIVE_INFINITY;
+
+/**
  * An ending the reader gets all of.
  *
- * Nothing an agent writes about its own work is shortened here any more. A cut
- * ending — "…adds a cmsg-mine cl…" — tells the reader the account was
- * truncated and not what it said, and dropping the sentences past a bound is
- * the same loss without the ellipsis to admit it: the detail after the first
- * sentence is often the part somebody asked for. There is nowhere in the
- * channel to go for the rest, so there is no shortening worth doing.
- *
- * What is left is the runaway guard at {@link TERMINAL_SUMMARY_MAX}, which an
- * account of a page or two never reaches. Past it, whole sentences are kept in
- * preference to a clipped word, and text with no sentence end at all inside
- * the bound falls back to a clipped word — something has to give when a model
- * writes four thousand characters instead of two.
+ * Nothing an agent writes about its own work is shortened here. A cut ending
+ * — mid-word or mid-sentence — tells the reader the account was truncated and
+ * not what it said. There is nowhere in the channel to go for the rest, so
+ * there is no shortening worth doing. Whitespace is collapsed so a multi-line
+ * explanation still reads as one channel reply.
  */
 function shortenEnding(written: string): string {
-  if (written.length <= TERMINAL_SUMMARY_MAX) {
-    return written;
-  }
-  const head = written.slice(0, TERMINAL_SUMMARY_MAX);
-  const stop = Math.max(
-    head.lastIndexOf(". "),
-    head.lastIndexOf("! "),
-    head.lastIndexOf("? "),
-  );
-  // Only when a whole sentence is most of what the bound allows; one short
-  // opener followed by a long second sentence would otherwise leave a line
-  // saying almost nothing.
-  return stop > TERMINAL_SUMMARY_MAX * 0.4
-    ? head.slice(0, stop + 1)
-    : clipToBoundary(written, TERMINAL_SUMMARY_MAX);
+  const collapsed = collapseWhitespace(written);
+  return collapsed.length <= TERMINAL_SUMMARY_MAX
+    ? collapsed
+    : clipToBoundary(collapsed, TERMINAL_SUMMARY_MAX);
 }
+
+/**
+ * Formerly a hard cap on agent failure accounts. Kept as Infinity so a
+ * failure that *is* the answer is never shortened to fit a channel budget.
+ */
+const FAILURE_ACCOUNT_MAX = Number.POSITIVE_INFINITY;
 
 /** How much of the machinery's own error text a failure line may quote. */
 const FAILURE_DETAIL_MAX = 240;
-
-/**
- * How much of the agent's own account a failure may carry: effectively all of
- * it.
- *
- * The alarm above it is boilerplate and worth shortening; the account is the
- * thing the reader actually asked for. A read-only request that reached this
- * path — a diagnosis, an explanation — has its entire answer in that field, and
- * clipping it to a couple of sentences threw the answer away and left a
- * half-finished one in the room. The bound stays only so a runaway model
- * cannot paste a novel into a channel.
- */
-const FAILURE_ACCOUNT_MAX = 4_000;
 
 /**
  * Splits a failure into the alarm and the agent's own words, if it carries
@@ -1904,12 +1869,15 @@ function explainTaskFailure(error: string, status?: string): string {
   // Its own paragraph, so the answer is not read as a continuation of the
   // alarm's sentence — and so the ending is long enough and shaped enough to
   // open a thread rather than land as one clipped line in the room.
+  // Agent-authored account text is never clipped: the reader asked for that
+  // answer, and a char bound only throws the end of it away.
   return account === undefined
     ? opening
-    : `${opening}\n\n${AGENT_ACCOUNT_PREFIX} ${clipToBoundary(
-        account.trim(),
-        FAILURE_ACCOUNT_MAX,
-      )}`;
+    : `${opening}\n\n${AGENT_ACCOUNT_PREFIX} ${
+        account.trim().length <= FAILURE_ACCOUNT_MAX
+          ? account.trim()
+          : clipToBoundary(account.trim(), FAILURE_ACCOUNT_MAX)
+      }`;
 }
 
 /**
@@ -2008,8 +1976,10 @@ export function narrateTaskEvent(
     case "replan_requested":
       return "Something moved underneath me; re-planning against the latest code.";
     case "agent_progress":
+      // Full message, never a char bound: a slice here cut mid-word with no
+      // ellipsis and left answers looking like the model stopped mid-thought.
       return typeof data["message"] === "string" && data["message"].length > 0
-        ? String(data["message"]).slice(0, 300)
+        ? String(data["message"])
         : undefined;
     case "workspace_changed": {
       // Read off the worktree while the agent is still editing. This is the
@@ -2068,9 +2038,8 @@ export function narrateTaskEvent(
       if (written.length === 0 || isAdapterFallback) {
         return CHANNEL_TERMINAL_EVENTS[type];
       }
-      // Whole, save for the runaway guard: this is the one line most people
-      // read of a task, and a bound low enough to shape it was a bound it kept
-      // being cut at.
+      // Whole: this is the one line most people read of a task, and a bound
+      // low enough to shape it was a bound it kept being cut at mid-word.
       const summary = shortenEnding(written);
       // The count, not the names — the reader who wants those is one click
       // Named while there are few enough to name. "(1 file changed)" is the
@@ -2554,13 +2523,52 @@ const APP_AUTHORIZATION_TTL_MS = 120_000;
 /**
  * What an app approved through the browser may do.
  *
- * Read the room and start work — the two a client needs to be the dashboard,
- * and deliberately not everything its owner can do. The token lives on a
- * laptop rather than in a session that expires, so it gets the smallest set
- * that still makes it useful; `issueApiToken` refuses anything above the
- * owner's role regardless.
+ * Everything needed to do the work, and nothing that changes who may do it
+ * across the whole organization.
+ *
+ * The first cut of this was `view` and `run_task`, on the reasoning that a
+ * token living on a laptop should carry the smallest set that still makes it
+ * useful. It was too small to be useful: pushing to GitHub and syncing from it
+ * both need `import_repository`, so the app answered "This token does not
+ * carry the import_repository scope" on the ordinary path of getting work out
+ * of Kumi. Answering a question and reviewing an agent's findings would have
+ * been the next two walls.
+ *
+ * The line is drawn at organization-wide access: `manage_organization` is the
+ * one absence. A laptop that is lost or borrowed cannot change roles, billing,
+ * or anything else that decides what anybody may do across the whole Kumi.
+ *
+ * `manage_project` was on the wrong side of that line at first and cost a
+ * third round of the same discovery. It reads like administration and is not:
+ * it gates renaming and deleting a channel, rolling a repository back, and
+ * deleting messages — housekeeping its owner does constantly. Nothing it
+ * covers changes who has access to anything.
+ *
+ * `manage_members` was the fourth. Inviting somebody into a channel is
+ * ordinary work the owner does from the app, and without it the invite button
+ * answered "This token does not carry the manage_members scope". It still
+ * cannot widen past the approver's own role — only `manage_organization`
+ * stays off the ceiling.
+ *
+ * `app-token-scopes.test.ts` now checks this list against every permission
+ * that exists, so a permission added later fails the build until somebody
+ * decides which side it belongs on. The first four walls were each found in
+ * production by somebody clicking a button.
+ *
+ * This is a ceiling, not a grant. `assertTokenScope` only ever narrows — a
+ * session cookie carries no token and skips it entirely — so widening this
+ * cannot let anybody past what their own role already permits, and
+ * `issueApiToken` refuses anything above that role regardless.
  */
-const APP_TOKEN_SCOPES = ["view", "run_task"] as const;
+export const APP_TOKEN_SCOPES = [
+  "view",
+  "submit_task",
+  "run_task",
+  "import_repository",
+  "review",
+  "manage_project",
+  "manage_members",
+] as const;
 
 /**
  * Whether a desktop app's callback is somewhere only that app can hear.
@@ -3858,6 +3866,82 @@ function hexColorField(value: unknown, field: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * How long one message may be, per place a person writes one.
+ *
+ * Named rather than repeated at each route, because these numbers are also
+ * what the composer counts down to: the dashboard carries the same three
+ * figures, and a limit only one side knows is a limit somebody meets as a
+ * failed send. See `messageLimitFor` in the browser's `data.js`.
+ */
+const CHANNEL_MESSAGE_MAX_CHARS = 10_000;
+const DIRECT_MESSAGE_MAX_CHARS = 8_000;
+/** One turn typed to a provider, in the private agent panel. */
+const AGENT_CHAT_MAX_CHARS = 10_000;
+/**
+ * How many turns of that conversation may be replayed with a request.
+ *
+ * The panel posts the whole conversation each time, so this is a ceiling on
+ * the transcript rather than on what was just typed. Far above any real
+ * session: it is here so a runaway client cannot post an unbounded array,
+ * not to end a long conversation.
+ */
+const AGENT_CHAT_MAX_MESSAGES = 500;
+
+/** `1234` as `1,234`, so a limit in a sentence reads as a number. */
+function countedChars(count: number): string {
+  return count.toLocaleString("en-US");
+}
+
+/**
+ * The conversation posted with one private-chat turn.
+ *
+ * Only two things are checked here, and both of them are things a person can
+ * do something about: how long the turn they just typed is, and how much
+ * transcript is being replayed with it. Everything else about a message —
+ * roles, ordering, provider-specific shapes — belongs to the adapter that
+ * speaks to the provider, and is left to it.
+ */
+function chatMessagesField(value: unknown): unknown {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  const entries = value as readonly unknown[];
+  if (entries.length > AGENT_CHAT_MAX_MESSAGES) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `This conversation is ${countedChars(
+        entries.length - AGENT_CHAT_MAX_MESSAGES,
+      )} messages over the ${countedChars(
+        AGENT_CHAT_MAX_MESSAGES,
+      )}-message limit — start a new chat to carry on`,
+    );
+  }
+  for (const entry of entries) {
+    const content: unknown =
+      typeof entry === "object" && entry !== null
+        ? (entry as { content?: unknown }).content
+        : undefined;
+    if (typeof content !== "string") {
+      continue;
+    }
+    const length = content.trim().length;
+    if (length > AGENT_CHAT_MAX_CHARS) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `A message is ${countedChars(
+          length - AGENT_CHAT_MAX_CHARS,
+        )} characters over the ${countedChars(
+          AGENT_CHAT_MAX_CHARS,
+        )}-character limit (this one is ${countedChars(length)})`,
+      );
+    }
+  }
+  return value;
+}
+
 function stringField(
   value: unknown,
   field: string,
@@ -3870,14 +3954,27 @@ function stringField(
     throw new HttpError(400, "invalid_request", `${field} must be a string`);
   }
   const trimmed = value.trim();
-  if (
-    trimmed.length < (options.min ?? 1) ||
-    trimmed.length > (options.max ?? 10_000)
-  ) {
+  const min = options.min ?? 1;
+  const max = options.max ?? 10_000;
+  if (trimmed.length < min) {
     throw new HttpError(
       400,
       "invalid_request",
-      `${field} has an invalid length`,
+      min === 1
+        ? `${field} cannot be empty`
+        : `${field} must be at least ${countedChars(min)} characters`,
+    );
+  }
+  // The number, and how far over it this is. The old wording named neither,
+  // and reached the sender as "could not send" with nothing to act on: no cap
+  // to write to, and no idea how much had to come out.
+  if (trimmed.length > max) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `${field} is ${countedChars(trimmed.length - max)} characters over the ` +
+        `${countedChars(max)}-character limit ` +
+        `(this one is ${countedChars(trimmed.length)})`,
     );
   }
   return trimmed;
@@ -9057,7 +9154,7 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const content = stringField(body["content"], "content", {
           min: 1,
-          max: 8_000,
+          max: DIRECT_MESSAGE_MAX_CHARS,
         }) ?? "";
         const message = await this.options.store.updateDirectMessage(
           projectId,
@@ -9141,7 +9238,12 @@ export class ApiGateway {
       // the people you have not written to yet.
       const [conversations, reachable] = await Promise.all([
         this.options.store.listDirectConversations(projectId, principal.user.id),
-        this.projectPeople(projectId, project.project.organizationId),
+        this.directMessagePeople(
+          projectId,
+          project.project.organizationId,
+          principal.user.id,
+          principal.user.systemAdmin,
+        ),
       ]);
       const present = new Set(this.webSockets.connectedUserIds(projectId));
       this.sendJson(response, 200, {
@@ -9155,11 +9257,10 @@ export class ApiGateway {
         conversations: conversations.filter((conversation) =>
           reachable.has(conversation.userId),
         ),
-        // Everyone who could be written to, with whether they are here now —
-        // and "everyone" is the project's whole room, grants included. A
-        // repository-scoped invite made somebody a colleague in every channel
-        // of the project and a stranger to the DM list; the same person you
-        // could read could not be written to.
+        // Everyone who could be written to, with whether they are here now.
+        // Reachability is limited to people who share at least one repository
+        // channel with the viewer; belonging somewhere else in the project is
+        // not enough to open a private conversation.
         people: [...reachable.values()]
           .filter((person) => person.userId !== principal.user.id)
           .map((person) => ({
@@ -9196,9 +9297,9 @@ export class ApiGateway {
         projectId,
         "view",
       );
-      // Both ends have to be real people in this organization. Without this a
+      // Both ends have to be real people who share a channel. Without this a
       // signed-in person could open a conversation against any id at all —
-      // writing to somebody in another organization, or filling the table with
+      // writing to somebody elsewhere in KUMI, or filling the table with
       // messages addressed to nobody.
       if (otherId === principal.user.id) {
         throw new HttpError(
@@ -9207,12 +9308,14 @@ export class ApiGateway {
           "A direct message needs two people",
         );
       }
-      // Reachability is the project's whole room — memberships and grants —
-      // the same set the channel roster shows. An org check alone made a
-      // repo-invited teammate unwritable.
-      const reachable = await this.projectPeople(
+      // Reachability is the union of the repository channels both people can
+      // enter. An org check alone made a repo-invited teammate unwritable,
+      // while a project-wide union let guests from unrelated channels DM.
+      const reachable = await this.directMessagePeople(
         projectId,
         project.project.organizationId,
+        principal.user.id,
+        principal.user.systemAdmin,
       );
       if (!reachable.has(otherId)) {
         throw new HttpError(404, "not_found", "That person was not found");
@@ -9239,7 +9342,10 @@ export class ApiGateway {
       // min:1 so an empty message is a 400 here rather than a throw from the
       // store, which would surface as a 500.
       const content =
-        stringField(body["content"], "content", { min: 1, max: 8000 }) ?? "";
+        stringField(body["content"], "content", {
+          min: 1,
+          max: DIRECT_MESSAGE_MAX_CHARS,
+        }) ?? "";
       const referencedMessageId = stringField(
         body["referencedMessageId"],
         "referencedMessageId",
@@ -9393,7 +9499,10 @@ export class ApiGateway {
       }
       if (method === "POST") {
         const body = objectBody(await this.readJson(request));
-        const content = stringField(body["content"], "content", { max: 10_000 }) ?? "";
+        const content =
+          stringField(body["content"], "content", {
+            max: CHANNEL_MESSAGE_MAX_CHARS,
+          }) ?? "";
         const message = await this.options.store.appendChannelMessage({
           repositoryId,
           projectId,
@@ -9472,7 +9581,10 @@ export class ApiGateway {
         throw new HttpError(404, "not_found", "Repository was not found");
       }
       const body = objectBody(await this.readJson(request));
-      const content = stringField(body["content"], "content", { max: 10_000 }) ?? "";
+      const content =
+        stringField(body["content"], "content", {
+          max: CHANNEL_MESSAGE_MAX_CHARS,
+        }) ?? "";
       const referencedMessageId = stringField(
         body["referencedMessageId"],
         "referencedMessageId",
@@ -9949,7 +10061,7 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const content = stringField(body["content"], "content", {
           min: 1,
-          max: 10_000,
+          max: CHANNEL_MESSAGE_MAX_CHARS,
         }) ?? "";
         await this.options.store.setChannelReplyContent(
           repositoryId,
@@ -10098,7 +10210,7 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const content = stringField(body["content"], "content", {
           min: 1,
-          max: 10_000,
+          max: CHANNEL_MESSAGE_MAX_CHARS,
         }) ?? "";
         await this.options.store.setChannelMessageContent(
           repositoryId,
@@ -10939,6 +11051,11 @@ export class ApiGateway {
           "cliSessionId",
           { max: 64, optional: true },
         );
+        // Checked before the stream is opened, so an over-long turn comes
+        // back as an ordinary 400 the composer can read out. Once the 200
+        // headers are written the only place left to say it is inside the
+        // event stream, where the panel shows it as a failed turn.
+        const messages = chatMessagesField(body["messages"]);
         // Newline-delimited JSON: one event per line, flushed immediately so
         // the browser sees progress rather than a buffered reply.
         response.setHeader("Content-Type", "application/x-ndjson");
@@ -10956,7 +11073,7 @@ export class ApiGateway {
               {
                 ...identity,
                 provider,
-                messages: body["messages"],
+                messages,
                 ...(cliSessionId === undefined ? {} : { cliSessionId }),
               },
               write,
@@ -12468,9 +12585,9 @@ export class ApiGateway {
    *
    * This intentionally uses the same two access paths as the channel roster:
    * an organization membership reaches every repository, while a repository
-   * grant reaches this repository only. `projectPeople` is broader because it
-   * powers the project-wide DM roster, so using it here would let a guest from
-   * a different repository suppress an unknown-mention warning.
+   * grant reaches this repository only. `directMessagePeople` can span every
+   * channel the viewer can reach, so using it here would let a guest from a
+   * different repository suppress an unknown-mention warning.
    */
   private async resolveChannelPeople(
     projectId: string,
@@ -14227,10 +14344,10 @@ export class ApiGateway {
       .split("\n")
       .map((line) => line.replace(/^[-*\d.\s]+/u, "").trim())
       .filter((line) => line.length > 0)
-      // Bounded: a model that ignores "one or two lines" must not turn the
-      // thread into an essay before the work has even started.
-      .slice(0, 4)
-      .map((line) => line.slice(0, 300));
+      // Bounded by line count only: a model that ignores "one or two lines"
+      // must not turn the thread into an essay before the work has even
+      // started. Each line itself is left whole — no char bound on responses.
+      .slice(0, 4);
   }
 
   /**
@@ -15149,7 +15266,8 @@ export class ApiGateway {
     // write must not poison the rest of the turn; the final answer is still
     // worth delivering.
     const announceProgress = (value: string): void => {
-      const content = value.trim().slice(0, 4_000);
+      // Full progress text — a char bound here cut agent speech mid-word.
+      const content = value.trim();
       if (content.length === 0 || progressSeen.has(content)) {
         return;
       }
@@ -18415,42 +18533,55 @@ export class ApiGateway {
   }
 
   /**
-   * Everyone in this project's room: organization members plus anyone holding
-   * a grant on any of the project's repositories. The one answer for the
-   * channel roster, the DM list and DM reachability, so a person the room
-   * shows is always a person the room can write to.
+   * Everyone who shares at least one repository channel with the viewer.
+   *
+   * Organization membership reaches every repository, while a grant reaches
+   * only the repository it names. Building the set repository by repository
+   * preserves both rules and prevents two guests with disjoint grants from
+   * becoming DM contacts merely because their channels share a project.
    */
-  private async projectPeople(
+  private async directMessagePeople(
     projectId: string,
     organizationId: string,
+    viewerId: string,
+    viewerIsSystemAdmin: boolean,
   ): Promise<Map<string, { userId: string; name: string; role: string }>> {
     const [memberships, repositories, users] = await Promise.all([
       this.options.store.listMemberships(organizationId),
       this.options.store.listProjectRepositories(projectId),
       this.options.store.listUsers(),
     ]);
-    const grants = (
-      await Promise.all(
-        repositories.map((repository) =>
-          this.options.store
-            .listRepositoryGrants(repository.id)
-            .catch(() => []),
-        ),
-      )
-    ).flat();
+    const grantsByRepository = await Promise.all(
+      repositories.map((repository) =>
+        this.options.store.listRepositoryGrants(repository.id).catch(() => []),
+      ),
+    );
     const byId = new Map(users.map((user) => [user.id, user]));
-    const people = new Map<string, { userId: string; name: string; role: string }>();
-    for (const entry of [...memberships, ...grants]) {
-      if (people.has(entry.userId)) {
+    const organizationRoles = new Map(
+      memberships.map((membership) => [membership.userId, membership.role]),
+    );
+    const viewerIsMember = organizationRoles.has(viewerId);
+    const people = new Map<
+      string,
+      { userId: string; name: string; role: string }
+    >();
+    for (const grants of grantsByRepository) {
+      const viewerHasGrant = grants.some((grant) => grant.userId === viewerId);
+      if (!viewerIsSystemAdmin && !viewerIsMember && !viewerHasGrant) {
         continue;
       }
-      const user = byId.get(entry.userId);
-      if (user !== undefined) {
-        people.set(entry.userId, {
-          userId: entry.userId,
-          name: user.displayName,
-          role: entry.role,
-        });
+      for (const entry of [...memberships, ...grants]) {
+        if (people.has(entry.userId)) {
+          continue;
+        }
+        const user = byId.get(entry.userId);
+        if (user !== undefined) {
+          people.set(entry.userId, {
+            userId: entry.userId,
+            name: user.displayName,
+            role: organizationRoles.get(entry.userId) ?? entry.role,
+          });
+        }
       }
     }
     return people;
@@ -21101,7 +21232,7 @@ export class ApiGateway {
     response.setHeader(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-        "img-src 'self' data:; connect-src 'self' ws: wss:; " +
+        "img-src 'self' data: blob:; connect-src 'self' ws: wss:; " +
         "font-src 'self'; worker-src 'self'; object-src 'none'; " +
         "base-uri 'none'; frame-ancestors 'none'",
     );

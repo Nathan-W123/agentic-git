@@ -29,6 +29,7 @@ api,
   canDeleteRepository,
   canLeaveRepository,
   canManageOrganization,
+  imagesNeedFetching,
   canManageRepository,
   iAmSystemAdmin,
   channelAgentsFor,
@@ -81,7 +82,13 @@ api,
   typingOn,
   waitingTasks,
 } from "./data.js";
-import { chatComposer, chatProgress, chatThread } from "./chat.js";
+import {
+  chatComposer,
+  chatProgress,
+  chatThread,
+  composerCount,
+  paintComposerCount,
+} from "./chat.js";
 import { handleChannelCommandResult } from "./screen-repos.js";
 import {
   FLAG_FOR_STATUS,
@@ -139,7 +146,21 @@ function channelPictureMarkup(repositoryId, size = 34) {
   return `<span class="channel-picture channel-picture-fallback" style="width:${size}px;height:${size}px">${esc(initials)}</span>`;
 }
 
-/** The compact, always-visible channel switcher. */
+/**
+ * Whether the channel switcher earns the column it stands in.
+ *
+ * A rail is a way of choosing between things. With one channel there is
+ * nothing to choose, so it was sixty pixels of permanent furniture holding a
+ * single picture of the room the reader is already in — and it took those
+ * pixels from the conversation, which is the part of this screen anybody came
+ * for. The two controls that were only ever in the rail move into the
+ * sidebar's crown while it is away; see `chanSidebar`.
+ */
+export function showsChannelRail() {
+  return state.repositories.length > 1;
+}
+
+/** The compact channel switcher, drawn when there is a choice to make. */
 function channelRail(activeRepositoryId) {
   const repositories = [...state.repositories].sort((left, right) =>
     left.id.localeCompare(right.id),
@@ -363,7 +384,12 @@ function usageBlock(agent) {
           ? ""
           : `<span class="rr-usage-plan">${esc(usageAccountLine(report))}</span>`
       }
-      ${report.source === undefined ? "" : `<span class="rr-usage-src">${esc(report.source)}</span>`}`;
+      ${
+        report.source === undefined ||
+        report.source === "Codex CLI session records (~/.codex/sessions)"
+          ? ""
+          : `<span class="rr-usage-src">${esc(report.source)}</span>`
+      }`;
   }
   return `<span class="pcard-section">
     <span class="pcard-section-label">Usage</span>
@@ -765,8 +791,12 @@ function rememberImageSize(node) {
  */
 function attachmentImage(base, image) {
   const ratio = imageSizes.get(image.id);
+  // `data-src` in a shell, `src` in a browser — see `imagesNeedFetching`. The
+  // link is left alone either way: it opens in the real browser, where the
+  // session cookie is, so full size still works from the app.
+  const source = imagesNeedFetching() ? "data-src" : "src";
   return `<a class="cmsg-image" href="${esc(base + image.id)}" target="_blank"
-             rel="noopener noreferrer"><img src="${esc(base + image.id)}"
+             rel="noopener noreferrer"><img ${source}="${esc(base + image.id)}"
              alt="${esc(image.alt)}" data-attachment="${esc(image.id)}"
              decoding="async"${ratio === undefined ? ' loading="lazy"' : ""}
              ${ratio === undefined ? "" : `style="aspect-ratio: ${esc(ratio)}"`}></a>`;
@@ -825,7 +855,8 @@ function draftAttachmentPreviews(
   return `<div class="composer-attachments" aria-label="Attached images">${attachments
     .map(
       (attachment) => `<div class="composer-attachment">
-        <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}"
+        <img ${imagesNeedFetching() ? "data-src" : "src"}="${esc(attachment.src)}"
+          alt="${esc(attachment.alt)}"
           data-attachment="${esc(attachment.id)}" decoding="async">
         <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
         <button type="button" class="composer-attachment-remove"
@@ -888,6 +919,61 @@ function slashMarkup(value) {
     /(^|[\s([])\/([a-z0-9-]+)(?=$|[\s,.:;!?()[\]{}])/giu,
     (_match, before, name) => `${before}<span class="slash-ping">/${name}</span>`,
   );
+}
+
+/** Makes pasted web addresses clickable after the message has been escaped. */
+function linkMarkup(value) {
+  return value.replace(/\bhttps?:\/\/[^\s<>"'`*]+/giu, (match) => {
+    let href = match;
+    let suffix = "";
+
+    // Sentence punctuation and escaped closing quotes are prose around the
+    // address, not part of it. A closing bracket is kept only when the URL
+    // contains its matching opener, which preserves balanced URL paths while
+    // still handling a link pasted inside parentheses.
+    const moveSuffix = (length) => {
+      suffix = href.slice(-length) + suffix;
+      href = href.slice(0, -length);
+    };
+    let trimming = true;
+    while (trimming) {
+      trimming = false;
+      for (const entity of ["&quot;", "&#39;", "&gt;"]) {
+        if (href.endsWith(entity)) {
+          moveSuffix(entity.length);
+          trimming = true;
+          break;
+        }
+      }
+      if (trimming) {
+        continue;
+      }
+      if (
+        /[.,!?;:]$/u.test(href) &&
+        !/&(?:amp|lt|gt|quot|#39);$/u.test(href)
+      ) {
+        moveSuffix(1);
+        trimming = true;
+        continue;
+      }
+      for (const [open, close] of [
+        ["(", ")"],
+        ["[", "]"],
+        ["{", "}"],
+      ]) {
+        if (
+          href.endsWith(close) &&
+          href.split(close).length > href.split(open).length
+        ) {
+          moveSuffix(1);
+          trimming = true;
+          break;
+        }
+      }
+    }
+
+    return `<a class="message-link" href="${href}" target="_blank" rel="noopener noreferrer">${href}</a>${suffix}`;
+  });
 }
 
 /**
@@ -972,9 +1058,9 @@ function paintComposerMirror(node) {
  * author wrote is already an entity, so the only tags in the output are the
  * ones constructed below. Nothing an agent writes can become an element.
  *
- * Deliberately small. Headings, bold, bullets and paragraphs are what a
- * summary is actually made of; links, images, tables and raw HTML are not,
- * and every one of them is a way for text to do something other than be read.
+ * Deliberately small. Headings, bold, bullets, paragraphs and pasted web
+ * addresses are what a summary is actually made of; images, tables and raw
+ * HTML are not.
  */
 function richText(text, mentions) {
   const mentionNames = [
@@ -995,7 +1081,7 @@ function richText(text, mentions) {
   const inline = (value) =>
     slashMarkup(
       mentionMarkup(
-        value
+        linkMarkup(value)
           .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
           .replace(/`([^`]+)`/gu, "<code>$1</code>"),
         mentionNames,
@@ -1286,6 +1372,11 @@ function rosterRow(agent) {
     agent.mine === true && state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
+  // Same rule `personRow` follows: draw the "…" only when it has something to
+  // offer. A teammate's agent has no row edits for this account, and the
+  // button opened an empty grey popover — a control that answers nothing is
+  // worse than no control.
+  const hasMenu = rosterMenuItems(agent.id).length > 0;
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
@@ -1333,12 +1424,16 @@ function rosterRow(agent) {
             : ""
         }
       </span>
-      <span class="rr-more">${iconButton("dots", {
-        act: "roster-agent-menu",
-        value: agent.id,
-        title: `More for ${agent.name}`,
-        small: true,
-      })}</span>
+      ${
+        hasMenu
+          ? `<span class="rr-more">${iconButton("dots", {
+              act: "roster-agent-menu",
+              value: agent.id,
+              title: `More for ${agent.name}`,
+              small: true,
+            })}</span>`
+          : ""
+      }
     </div>
   </div>`;
 }
@@ -1487,22 +1582,45 @@ function chanSidebar(activeRepositoryId) {
         aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}">${icon(
           "columns",
         )}</button>
+      ${
+        // The two controls the rail used to own, for the case where there is
+        // no rail. Making a second channel is the only way out of the
+        // single-channel case, and the picture beside the name is the only
+        // place that picture can be set — neither may go away with the
+        // switcher they happened to be standing next to.
+        showsChannelRail()
+          ? ""
+          : `<label class="icon-btn chan-crown-picture"
+               title="Change picture for ${esc(repositoryLabel(activeRepositoryId ?? ""))}"
+               aria-label="Change picture for ${esc(repositoryLabel(activeRepositoryId ?? ""))}">${icon("pencil")}
+               <input type="file" accept="image/*" data-act="channel-picture-pick"
+                 data-repository="${channel}" hidden>
+             </label>
+             ${iconButton("plus", {
+               act: "channel-new",
+               value: activeRepositoryId ?? "",
+               title: "New channel",
+               cls: "chan-crown-new",
+             })}`
+      }
       ${iconButton("close", {
         act: "chan-sidebar-close",
         title: "Close",
         cls: "drawer-close",
       })}
     </div>
-    <div class="chan-sidebar-head chan-quick-links">
+    <nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">
       <button type="button" class="chan-quick-link${state.chanThreadList === true ? " on" : ""}"
-        data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}">
+        data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}"
+        title="Browse channel threads">
         ${icon("reply")}<span>Threads</span>
       </button>
       <button type="button" class="chan-quick-link${state.chanTree === true ? " on" : ""}"
-        data-act="chan-tree-toggle" aria-pressed="${state.chanTree === true}">
+        data-act="chan-tree-toggle" aria-pressed="${state.chanTree === true}"
+        title="Browse repository files">
         ${icon("folder")}<span>Files</span>
       </button>
-    </div>
+    </nav>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
          its own scrollbar capped at 38vh and the roster had a second one
@@ -1580,19 +1698,88 @@ function chanSidebar(activeRepositoryId) {
 /* ---------------------------------------------------------- chan main ---- */
 
 /**
- * The repository's running app, if one is up.
+ * This repository's app while it is up, for the control and the address that
+ * both report on it.
  *
- * Nothing in the page starts one any more: the play control that used to sit
- * in the tool tray launched a server on the machine running the control plane,
- * which is a loopback address only that machine can reach. What is left is
- * read-only — an address for a preview started outside the page, and nothing
- * at all when there is none.
+ * A preview that exited is deliberately not "running": it has a URL and a
+ * port still recorded against it, and treating that as live would offer a
+ * link to nothing. {@link previewStopped} is the other half of the same
+ * answer.
  */
 function previewRunning(repositoryId) {
   const preview = state.previews[repositoryId];
   return preview !== null && preview !== undefined && preview.exited === undefined
     ? preview
     : undefined;
+}
+
+/**
+ * Why the last preview of this repository stopped, if it stopped on its own.
+ *
+ * A preview that fails to come up at all is reported as an error the moment it
+ * is asked for. This is the other case: one that ran, was watched, and then
+ * died — which the control cannot show by flipping back to "play", because that
+ * is also what it looks like before anything was ever started.
+ */
+function previewStopped(repositoryId) {
+  const preview = state.previews[repositoryId];
+  return preview !== null && preview !== undefined && preview.exited !== undefined
+    ? preview
+    : undefined;
+}
+
+/**
+ * The control, beside the pin in the channel's own header line.
+ *
+ * One button for a repository in any language. Nothing here knows what the
+ * app is: pressing it asks the control plane to read the checkout and work
+ * out how it boots, and a repository it cannot read is answered with a
+ * question rather than a shrug — see `startPreviewAction`, which asks how the
+ * app starts and has the answer remembered against this channel. So the same
+ * button serves a Node dev server, a Django app, a Go binary, a page of
+ * static HTML, and the one thing nobody has thought of yet.
+ *
+ * Drawn as a count rather than a tool button because of where it sits: the
+ * counts and the pin are this line's vocabulary, and a boxed icon among them
+ * reads as a different control that arrived by accident.
+ */
+function previewControl(repositoryId) {
+  if (!repositoryId) {
+    return "";
+  }
+  // Starting, and saying so. A cold start installs dependencies and then
+  // builds, which is a minute of a button that looked like it had done
+  // nothing — so it was pressed again, and the second press killed the first.
+  // Disabled rather than merely marked: the refusal is in `app.js`, and a
+  // control that still looks pressable is an invitation to find that out.
+  if (state.previewsStarting?.has(repositoryId) === true) {
+    const busy = "Starting — installing and building can take a minute";
+    return `<button type="button" class="ch-count ch-preview-toggle starting"
+        data-act="preview-start" data-value="${esc(repositoryId)}" disabled
+        title="${esc(busy)}" aria-label="${esc(busy)}" aria-busy="true">
+        ${icon("play")}</button>`;
+  }
+  if (previewRunning(repositoryId) !== undefined) {
+    return `<button type="button" class="ch-count ch-preview-toggle on"
+        data-act="preview-stop" data-value="${esc(repositoryId)}"
+        title="Stop the running app" aria-label="Stop the running app">
+        ${icon("close")}</button>`;
+  }
+  const stopped = previewStopped(repositoryId);
+  // The output is the diagnosis and it is the only copy: nothing else in the
+  // page renders it, so a dead preview used to be indistinguishable from one
+  // that was never started.
+  const why =
+    stopped === undefined
+      ? "Run this app and open it"
+      : `${stopped.label} stopped — ${
+          (stopped.recentOutput ?? []).slice(-3).join(" ").trim() ||
+          "it printed nothing"
+        }. Press to run it again.`;
+  return `<button type="button" class="ch-count ch-preview-toggle${
+    stopped === undefined ? "" : " warn"
+  }" data-act="preview-start" data-value="${esc(repositoryId)}"
+      title="${esc(why)}" aria-label="${esc(why)}">${icon("play")}</button>`;
 }
 
 /** The address, which stays in the header because it is state, not a control. */
@@ -1622,7 +1809,9 @@ function previewLink(repositoryId) {
   const proxied =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`;
-  // No stop control beside it: stopping is a tool and lives with the tools.
+  // No stop control beside it: the address is state, and the control that
+  // starts and stops it is one control, on the channel's own line beside the
+  // pin — see `previewControl`.
   return `<span class="preview-live">
     <a class="preview-link" href="${esc(proxied)}" target="_blank"
       rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
@@ -1690,6 +1879,17 @@ function chanHeader(repositoryId) {
               )}Muted</span>`
             : ""
         }
+        <!-- Last of the statically rendered pieces, because the pin toggle
+             is appended here after the fact (see \`S.showPinnedMessages\` in
+             ui.js) and lands immediately after this. The two belong together:
+             both are one-press channel controls that say something about this
+             room rather than about the message in front of you.
+
+             The backticks are escaped for the reason the sidebar button's
+             comment above gives: a bare one ends this template literal, and
+             what follows parses as code. -->
+        <span aria-hidden="true">|</span>
+        ${previewControl(repositoryId)}
       </div>
     </div>
     <span class="spacer"></span>
@@ -2206,12 +2406,13 @@ function threadActivityLabel(entry) {
 }
 
 /**
- * Where a thread's run has got to, read from what it already said.
+ * Where a thread's run has got to, read from its narration and live task.
  *
  * The narration is the progress record: planning, "planned N file(s)",
  * execution, one "Working on…" line per stretch of files, validation, the
  * ending. Parsing those beats new plumbing — it works for every thread ever
- * written, and the bar can never disagree with the words directly above it.
+ * written. The live task is the fallback and floor, so every place showing
+ * the same run agrees even before the current turn has narrated a milestone.
  *
  * Milestones sit on the same lifecycle floors as `STAGE_PROGRESS`. The
  * executing span interpolates inside the coding band (claimed → validating)
@@ -2228,16 +2429,27 @@ function threadProgress(entry) {
   // the bar and the transcript now agree about which run is current.
   const turns = threadReplyTurns(entry.replies ?? []);
   const replies = turns[turns.length - 1]?.replies ?? [];
-  if (replies.length === 0) {
-    return undefined;
-  }
   // Finished is finished however it was said. The regex catches the fixed
   // endings; an agent's own summary does not match it, and a bar stuck at 90%
   // under a task that landed an hour ago reads as a hang. The task's status
   // and the `outcome` reply kind both survive rewording.
-  const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+  // A follow-up submitted inside this thread is a new task whose
+  // `conversationId` is the root message id. The root's `taskId` remains the
+  // completed first turn, so prefer the live conversation turn before using
+  // that historical fallback. Kept self-contained because the progress
+  // renderer is also exercised independently by the asset tests.
+  const task =
+    state.tasks.find(
+      (candidate) =>
+        candidate.conversationId === entry.id &&
+        ["submitted", "claimed"].includes(candidate.status),
+    ) ?? state.tasks.find((candidate) => candidate.id === entry.taskId);
   if (task !== undefined && !["submitted", "claimed"].includes(task.status)) {
     return undefined;
+  }
+  const taskRunProgress = task === undefined ? undefined : taskProgress(task);
+  if (replies.length === 0) {
+    return taskRunProgress;
   }
   if (replies.some((reply) => reply.kind === "outcome")) {
     return undefined;
@@ -2245,10 +2457,9 @@ function threadProgress(entry) {
   let planned = 0;
   const touched = new Set();
   let progress = STAGE_PROGRESS.submitted;
-  // A bar only means something over a run the narration can recognise. The
-  // audit thread — and any other thread whose replies carry none of the run
-  // markers below — sat at the floor forever, reading as a task stuck at
-  // the beginning rather than a thread that simply is not a task.
+  // Without a live task, a bar only means something over narration that can
+  // be recognised as a run. A live task still owns progress before its newest
+  // turn has emitted one of the markers below.
   let sawRunMarker = false;
   const codingFloor = STAGE_PROGRESS.claimed;
   const codingCeiling = STAGE_PROGRESS.validating;
@@ -2293,12 +2504,12 @@ function threadProgress(entry) {
     }
   }
   if (!sawRunMarker) {
-    return undefined;
+    return taskRunProgress;
   }
   // Within-stage task progress (files / time) is the same source the agent
   // face reads — lift the narration to it so the two cannot disagree.
-  if (task !== undefined) {
-    progress = Math.max(progress, taskProgress(task));
+  if (taskRunProgress !== undefined) {
+    progress = Math.max(progress, taskRunProgress);
   }
   return progress;
 }
@@ -2454,6 +2665,114 @@ function authorFace(author, size, repositoryId) {
       );
 }
 
+/**
+ * How a row names itself to its own overflow menu.
+ *
+ * A reply is a row in another table, so deleting or editing one is a write
+ * against the thread holding it: both ids travel, the way every reply-scoped
+ * action in this file already sends them.
+ */
+function overflowValue(entry) {
+  return entry.messageId === undefined
+    ? String(entry.id)
+    : `${entry.messageId}|${entry.id}`;
+}
+
+/** The message an {@link overflowValue} names, or nothing. */
+function channelEntryByOverflowValue(repositoryId, value) {
+  const [first, second] = String(value).split("|");
+  const messages = channelMessagesFor(repositoryId);
+  if (second === undefined) {
+    return messages.find((message) => message.id === first);
+  }
+  const root = messages.find((message) => message.id === first);
+  return (root?.replies ?? []).find((reply) => reply.id === second);
+}
+
+/**
+ * Everything a message can have done to it that is not "react" or "reply".
+ *
+ * Built here rather than at the click, and from the same conditions the row
+ * itself is drawn from: split across two files is how a menu ends up offering
+ * what the row would not — an edit somebody is not allowed to make, a pin
+ * whose POST can only 404. The row passes the entry it already holds; the
+ * delegated handler in app.js has only the value, and looks it up.
+ */
+export function messageOverflowMenuItems(
+  value,
+  known = undefined,
+  repository = undefined,
+) {
+  const repositoryId = repository ?? activeChannelId();
+  const entry = known ?? channelEntryByOverflowValue(repositoryId, value);
+  // A message somebody unsaid keeps its row, because the replies under it are
+  // still answering something — but everything the row could do went with the
+  // words.
+  if (entry === undefined || entry.deletedAt !== undefined) {
+    return [];
+  }
+  // What a row *is*, not how it is drawn: the thread panel renders its own
+  // root in the reply style, and that root is a channel message that can be
+  // pinned perfectly well.
+  const isReplyRow = entry.messageId !== undefined;
+  const items = [
+    {
+      // The words, not the row: what somebody wants off a message is the text
+      // they can paste somewhere else, without the attachment references the
+      // composer wrote into it or the mention markup.
+      act: "channel-message-copy",
+      value: String(entry.id),
+      label: "Copy text",
+      iconName: "copy",
+    },
+  ];
+  // Roots only. A pin lives on `channel_messages`; a reply is a row in
+  // another table, so offering it there sent a POST that could only 404 while
+  // the optimistic local pin stayed in the banner. The thread's own header
+  // carries the pin for everything inside it.
+  if (!isReplyRow) {
+    items.push({
+      act: "channel-pin",
+      value: String(entry.id),
+      label: entry.pinnedAt === undefined ? "Pin" : "Unpin",
+      iconName: "pin",
+    });
+  }
+  if (canEditChannelEntry(repositoryId, entry)) {
+    items.push({
+      act: isReplyRow ? "thread-reply-edit" : "channel-message-edit",
+      value: overflowValue(entry),
+      label: "Edit message",
+      iconName: "pencil",
+    });
+  }
+  // Undoing the work, not the message. Quiet enough to belong in this list:
+  // it was a labelled button under the file list, which gave "undo this task"
+  // more weight than the task itself had.
+  if (entry.taskId !== undefined && canManageRepository(repositoryId)) {
+    items.push({
+      act: "chan-revert-task",
+      value: String(entry.taskId),
+      label: "Revert this task",
+      hint: "Returns the repository to the state before this task",
+      iconName: "history",
+    });
+  }
+  // Its own words or a manager's reach — `canDeleteChannelEntry` is the
+  // client's copy of the rule the gateway holds, so the item is absent rather
+  // than present-and-refused.
+  if (canDeleteChannelEntry(repositoryId, entry)) {
+    items.push({
+      act: isReplyRow ? "thread-reply-delete" : "channel-message-delete",
+      value: overflowValue(entry),
+      label: isReplyRow ? "Delete this reply" : "Delete this message",
+      iconName: "trash",
+      danger: true,
+    });
+  }
+  return items;
+}
+
 function messageRow(
   entry,
   repositoryId,
@@ -2513,12 +2832,6 @@ function messageRow(
   // somebody and the name beside it does nothing is a worse answer than
   // neither being pressable.
   const identity = authorIdentity(repositoryId, entry, author);
-  // The path is assigned by `messageThreadPaths`, which can start it on an
-  // earlier compact-group message than the one that owns the task. A direct
-  // channel render still gets a complete standalone path as a safe fallback.
-  const path =
-    threadPath ??
-    (channelThread ? { start: true, through: false, end: true } : undefined);
   // Changed-file summaries belong to the focused thread, where the work they
   // describe can be reviewed in context. Keep the room's timeline to the
   // conversation itself, including for task roots and inline replies.
@@ -2531,6 +2844,12 @@ function messageRow(
     channelThread && threadIsWorking(entry)
       ? (threadProgress(entry) ?? 0)
       : undefined;
+  // The path is assigned by `messageThreadPaths`, which can start it on an
+  // earlier compact-group message than the one that owns the task. A direct
+  // channel render still gets a complete standalone path as a safe fallback.
+  const path =
+    threadPath ??
+    (channelThread ? { start: true, through: false, end: true } : undefined);
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
@@ -2672,31 +2991,16 @@ function messageRow(
                     title="Add a reaction" aria-label="Add a reaction">${icon("smile")}</button></div>`
       }
       ${
-        // The route ends at the thread link. The changed files are deliberately
-        // outside it, so opening them can never pull the grey connector down
-        // past the thing it identifies.
         channelThread
           ? threadSummaryLink(entry, replies, repositoryId, progress)
           : changedBlock
       }
       ${channelThread ? `</div>${changedBlock}` : ""}
-    </div>
+      <!-- Keep the message tools on the message surface. When they were a
+           sibling of the body, the absolute position was measured from the
+           full transcript row and the toolbar floated at the far edge of a
+           wide room, detached from the words it acted on. -->
     <span class="cmsg-actions">
-      ${
-        // Revert, as quiet as the actions beside it. It was a labelled button
-        // under the file list, which gave "undo this task" more visual weight
-        // than the task itself had.
-        deleted ||
-        entry.taskId === undefined ||
-        !canManageRepository(repositoryId)
-          ? ""
-          : iconButton("history", {
-              act: "chan-revert-task",
-              value: entry.taskId,
-              title: "Return the repository to the state before this task",
-              small: true,
-            })
-      }
       ${
         // Behind the same guard as the tally above, for the reason given
         // there: an affordance whose write can only 404 is worse than none.
@@ -2708,76 +3012,6 @@ function messageRow(
               title: "React",
               small: true,
             })
-      }
-      ${
-        // Copy the words, not the row: what somebody wants off a message is
-        // the text they can paste somewhere else, without the attachment
-        // references the composer wrote into it or the mention markup.
-        deleted
-          ? ""
-          : iconButton("copy", {
-              act: "channel-message-copy",
-              value: entry.id,
-              title: "Copy text",
-              small: true,
-            })
-      }
-      ${
-        // Roots only. A pin lives on `channel_messages`, and a reply is a row
-        // in another table entirely — offering the button on one sent a POST
-        // that could only ever 404, and the optimistic local pin it had
-        // already drawn stayed in the banner afterwards, advertising a pin the
-        // server had no record of. The thread's own header carries the pin for
-        // everything inside it, which is the affordance a reader wants anyway:
-        // you pin the conversation, not one line of it.
-        isReply || inlineReply || deleted
-          ? ""
-          : iconButton("pin", {
-              act: "channel-pin",
-              value: entry.id,
-              title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
-              small: true,
-            })
-      }
-      ${
-        canEditChannelEntry(repositoryId, entry)
-          ? iconButton("pencil", {
-              act:
-                entry.messageId === undefined
-                  ? "channel-message-edit"
-                  : "thread-reply-edit",
-              value:
-                entry.messageId === undefined
-                  ? entry.id
-                  : `${entry.messageId}|${entry.id}`,
-              title: "Edit message",
-              small: true,
-            })
-          : ""
-      }
-      ${
-        // Delete, in the same quiet set as the rest. Its own words or a
-        // manager's reach — `canDeleteChannelEntry` is the client's copy of
-        // the rule the gateway holds, so the button is absent rather than
-        // present-and-refused.
-        //
-        // Reply or root is decided by `messageId` rather than by `isReply`:
-        // the thread panel draws its own root in the compact reply style, so
-        // the flag says how a row looks and only the field says what it is.
-        // A reply carries its root's id too, because deleting one is a write
-        // against the thread it lives in.
-        (() => {
-          if (deleted || !canDeleteChannelEntry(repositoryId, entry)) {
-            return "";
-          }
-          const parentId = entry.messageId;
-          return iconButton("trash", {
-            act: parentId ? "thread-reply-delete" : "channel-message-delete",
-            value: parentId ? `${parentId}|${entry.id}` : entry.id,
-            title: parentId ? "Delete this reply" : "Delete this message",
-            small: true,
-          });
-        })()
       }
       ${
         // Anything the caller wants sitting beside the reply button — the
@@ -2811,7 +3045,27 @@ function messageRow(
                 small: true,
               })
       }
+      ${
+        // Everything else — copy, pin, edit, revert, delete — behind one
+        // button. Seven icons appeared over every message the pointer crossed,
+        // which is a toolbar rather than an affordance: the two things
+        // somebody does to a message they are reading (react to it, answer it)
+        // were the same size and the same shade as the one that deletes it.
+        // The menu is built from the row's own conditions — see
+        // `messageOverflowMenuItems` — so it offers exactly what the row would
+        // have drawn, and nothing is offered where its write could only fail.
+        messageOverflowMenuItems(overflowValue(entry), entry, repositoryId)
+          .length === 0
+          ? ""
+          : iconButton("dotsHorizontal", {
+              act: "channel-message-menu",
+              value: overflowValue(entry),
+              title: "More actions",
+              small: true,
+            })
+      }
     </span>
+    </div>
   </div>`;
 }
 
@@ -3162,11 +3416,9 @@ function messageList(repositoryId) {
 /**
  * The emoji the picker offers, in the order every chat offers them.
  *
- * A short fixed set rather than a full emoji keyboard: the picker is for
- * answering a message without typing, and the long tail of emoji is a
- * different feature with a search box in it. These are the six or so that
- * carry an actual reply — yes, done, thanks, funny, watching, thinking — plus
- * the two that stand in for applause and disagreement.
+ * The first row stays the familiar quick reactions. The rest are common
+ * reactions somebody can now reach by name instead of already having to know
+ * which eight the interface happened to choose for them.
  */
 const REACTION_CHOICES = [
   "\u{1F44D}",
@@ -3177,7 +3429,61 @@ const REACTION_CHOICES = [
   "\u{1F602}",
   "\u{1F914}",
   "\u{1F44E}",
+  "\u2764\uFE0F",
+  "\u{1F525}",
+  "\u{1F680}",
+  "\u{1F4AF}",
+  "\u{1F44F}",
+  "\u{1F64C}",
+  "\u{1F91D}",
+  "\u{1F4AA}",
+  "\u{1F4A1}",
+  "\u{1F62E}",
+  "\u{1F622}",
+  "\u{1F620}",
+  "\u{1F615}",
+  "\u{1F973}",
+  "\u{1F91E}",
+  "\u{1F923}",
+  "\u{1F60D}",
+  "\u{1F6A8}",
+  "\u26A0\uFE0F",
+  "\u270B",
+  "\u{1F44B}",
 ];
+
+/** Search words for the reaction catalogue, kept out of the visible picker. */
+const REACTION_SEARCH_TERMS = {
+  "\u{1F44D}": "thumbs up like approve yes good",
+  "\u{1F389}": "party celebrate celebration tada congrats",
+  "\u2705": "check done complete approved yes",
+  "\u{1F440}": "eyes watching look review",
+  "\u{1F64F}": "pray please thanks thank you",
+  "\u{1F602}": "laugh laughing funny joy tears",
+  "\u{1F914}": "thinking think question unsure",
+  "\u{1F44E}": "thumbs down dislike reject no",
+  "\u2764\uFE0F": "heart love appreciate",
+  "\u{1F525}": "fire hot great",
+  "\u{1F680}": "rocket launch ship fast",
+  "\u{1F4AF}": "hundred perfect agree",
+  "\u{1F44F}": "clap applause well done",
+  "\u{1F64C}": "raised hands hooray celebrate",
+  "\u{1F91D}": "handshake deal agree partnership",
+  "\u{1F4AA}": "strong muscle effort",
+  "\u{1F4A1}": "idea light bulb insight",
+  "\u{1F62E}": "wow surprised open mouth",
+  "\u{1F622}": "sad cry tear",
+  "\u{1F620}": "angry mad",
+  "\u{1F615}": "confused unsure",
+  "\u{1F973}": "party face celebrate",
+  "\u{1F91E}": "fingers crossed hope luck",
+  "\u{1F923}": "rolling laugh hilarious",
+  "\u{1F60D}": "heart eyes love amazing",
+  "\u{1F6A8}": "alert siren urgent",
+  "\u26A0\uFE0F": "warning caution",
+  "\u270B": "raised hand stop question",
+  "\u{1F44B}": "wave hello goodbye",
+};
 
 /**
  * The emoji choices, anchored to the button that asked for them.
@@ -3207,10 +3513,41 @@ export function reactionPicker(anchor, repositoryId, messageId) {
         reactions[emoji]?.mine === true ? " mine" : ""
       }" data-act="channel-react-choose"
         data-value="${esc(messageId)}" data-emoji="${esc(emoji)}"
+        data-search="${esc(`${emoji} ${REACTION_SEARCH_TERMS[emoji] ?? ""}`)}"
         title="${esc(emoji)}" aria-label="React with ${esc(emoji)}"
         aria-pressed="${reactions[emoji]?.mine === true ? "true" : "false"}">${emoji}</button>`,
   ).join("");
-  showPopover(anchor, `<div class="react-grid">${body}</div>`, { width: 236 });
+  const popover = showPopover(
+    anchor,
+    `<div class="react-picker">
+      <label class="react-search">
+        ${icon("search")}
+        <span class="sr-only">Search reactions</span>
+        <input type="search" data-reaction-search placeholder="Search emoji"
+          aria-label="Search reactions" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="react-grid" data-reaction-grid>${body}</div>
+      <p class="react-empty" data-reaction-empty role="status" hidden>No emoji found</p>
+    </div>`,
+    { width: 288 },
+  );
+  const search = popover.querySelector("[data-reaction-search]");
+  const choices = [...popover.querySelectorAll(".react-choice")];
+  const empty = popover.querySelector("[data-reaction-empty]");
+  search?.addEventListener("input", () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    let matches = 0;
+    for (const choice of choices) {
+      const terms = (choice.dataset.search ?? "").toLocaleLowerCase();
+      choice.hidden = query !== "" && !terms.includes(query);
+      if (!choice.hidden) {
+        matches += 1;
+      }
+    }
+    if (empty !== null) {
+      empty.hidden = matches !== 0;
+    }
+  });
 }
 
 /**
@@ -3775,6 +4112,7 @@ function composer(repositoryId) {
           ? `<span class="composer-note">attaching ${esc(String(state.attaching))} image(s)…</span>`
           : ""}
         <span class="spacer"></span>
+        ${composerCount("channel", state.chatDraft)}
         <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
       </div>
     </form>
@@ -4967,7 +5305,8 @@ function agentUsage(agent) {
         : `<div class="aspec-usage-plan">${esc(usageAccountLine(report))}</div>`
     }
     ${
-      report.source === undefined
+      report.source === undefined ||
+      report.source === "Codex CLI session records (~/.codex/sessions)"
         ? ""
         : `<div class="aspec-usage-source">${esc(report.source)}</div>`
     }
@@ -5568,6 +5907,7 @@ function dmPanel() {
             ? `<span class="composer-note">attaching ${esc(String(state.dmAttaching))} image(s)…</span>`
             : ""}
           <span class="spacer"></span>
+          ${composerCount("dm", state.dmDraft)}
           <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
         </div>
       </form>
@@ -5689,6 +6029,7 @@ function threadPanel(repositoryId, selectedMessageId) {
             ? `<span class="composer-note">attaching ${esc(String(state.threadAttaching))} image(s)…</span>`
             : ""}
           <span class="spacer"></span>
+          ${composerCount("thread", state.threadDraft)}
           <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
         </div>
       </form>
@@ -6548,8 +6889,10 @@ export function renderChats() {
   // out of its own screen. A phone draws one however many are being held.
   const columns = phoneLayout() ? 1 : keptRightPanels().length;
 
-  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${columns > 1 ? ` panels-${columns}` : ""}">
-    ${channelRail(repositoryId)}
+  const rail = showsChannelRail();
+
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}${columns > 1 ? ` panels-${columns}` : ""}">
+    ${rail ? channelRail(repositoryId) : ""}
     ${chanSidebar(repositoryId)}
     ${
       // Phone-only scrim over the off-canvas `.chan-sidebar` — see the toggle
@@ -6627,6 +6970,29 @@ export function scrollDirectMessageToLatest() {
   });
 }
 
+/** Shows the newest reply after sending from the open thread composer. */
+function scrollChannelThreadToLatest() {
+  const list = [
+    ...document.querySelectorAll(".thread-panel[data-thread-id]"),
+  ]
+    .find((panel) => panel.dataset.threadId === state.activeChannelThread)
+    ?.querySelector(".thread-body");
+  if (list === undefined || list === null) {
+    return;
+  }
+  list.scrollTop = list.scrollHeight;
+  requestAnimationFrame(() => {
+    const settled = [
+      ...document.querySelectorAll(".thread-panel[data-thread-id]"),
+    ]
+      .find((panel) => panel.dataset.threadId === state.activeChannelThread)
+      ?.querySelector(".thread-body");
+    if (settled === list) {
+      settled.scrollTop = settled.scrollHeight;
+    }
+  });
+}
+
 /**
  * The first message this visit had not seen, or the bottom when there is none.
  *
@@ -6653,40 +7019,54 @@ export function jumpToUnreadOrLatest() {
  */
 const SCROLL_SURFACES = ["#chan-messages", ".thread-body"];
 
+/**
+ * Every surface a selector finds, not just the first one.
+ *
+ * The right-hand column holds up to three panels at once and they all wear
+ * `.thread-body`, so `querySelector` answered for whichever one happened to
+ * be earliest in the document and left the rest uncaptured. A direct message
+ * opens as the newest panel, which puts it last: with a thread, the file
+ * editor or the tree already open beside it, nobody ever took its position,
+ * so every render — a poll tick, a keystroke elsewhere — dropped it back at
+ * the top of the history. Capture and restore both walk the whole list, and
+ * pair up by identity rather than by order.
+ */
+function scrollSurfaceNodes(selector) {
+  return [...document.querySelectorAll(selector)];
+}
+
 export function captureChannelScroll() {
-  return SCROLL_SURFACES.map((selector) => {
-    const scroller = document.querySelector(selector);
-    if (scroller === null) {
-      return undefined;
-    }
-    const edge = scroller.getBoundingClientRect().top;
-    // The first row still on screen: what the reader is looking at, as
-    // opposed to the rows that have scrolled off above it.
-    const anchor = [...scroller.querySelectorAll("[id]")].find(
-      (node) => node.getBoundingClientRect().bottom > edge,
-    );
-    return {
-      selector,
-      // Panels share `.thread-body` — a thread, a direct message, the file
-      // editor. Restoring one panel's offset into the next would be a
-      // position the reader never had, so the shape has to match too.
-      shape: scroller.className,
-      key: scroller.dataset.scrollKey,
-      top: scroller.scrollTop,
-      // Read this from the node now, not from the last scroll event. Browsers
-      // may deliver that event after a live update has already started its
-      // render, and a stale `followingChannel` is exactly how a reader who had
-      // just moved up got snapped back to the latest message.
-      following:
-        selector === "#chan-messages"
-          ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
-            FOLLOW_SLACK_PX
-          : undefined,
-      id: anchor?.id,
-      offset:
-        anchor === undefined ? 0 : anchor.getBoundingClientRect().top - edge,
-    };
-  }).filter((saved) => saved !== undefined);
+  return SCROLL_SURFACES.flatMap((selector) =>
+    scrollSurfaceNodes(selector).map((scroller) => {
+      const edge = scroller.getBoundingClientRect().top;
+      // The first row still on screen: what the reader is looking at, as
+      // opposed to the rows that have scrolled off above it.
+      const anchor = [...scroller.querySelectorAll("[id]")].find(
+        (node) => node.getBoundingClientRect().bottom > edge,
+      );
+      return {
+        selector,
+        // Panels share `.thread-body` — a thread, a direct message, the file
+        // editor. Restoring one panel's offset into the next would be a
+        // position the reader never had, so the shape has to match too.
+        shape: scroller.className,
+        key: scroller.dataset.scrollKey,
+        top: scroller.scrollTop,
+        // Read this from the node now, not from the last scroll event.
+        // Browsers may deliver that event after a live update has already
+        // started its render, and a stale `followingChannel` is exactly how a
+        // reader who had just moved up got snapped back to the latest message.
+        following:
+          selector === "#chan-messages"
+            ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
+              FOLLOW_SLACK_PX
+            : undefined,
+        id: anchor?.id,
+        offset:
+          anchor === undefined ? 0 : anchor.getBoundingClientRect().top - edge,
+      };
+    }),
+  );
 }
 
 /**
@@ -6702,28 +7082,34 @@ export function captureChannelScroll() {
 export function restoreChannelAnchor(saved) {
   watchImageSizes();
   for (const entry of saved ?? []) {
-    const scroller = document.querySelector(entry.selector);
-    if (
-      scroller === null ||
-      scroller.className !== entry.shape ||
-      scroller.dataset.scrollKey !== entry.key
-    ) {
-      continue;
+    // Its own panel, wherever the column has since put it: the same kind of
+    // surface showing the same conversation. Anything else is a position the
+    // reader never had.
+    for (const scroller of scrollSurfaceNodes(entry.selector)) {
+      if (
+        scroller.className !== entry.shape ||
+        scroller.dataset.scrollKey !== entry.key
+      ) {
+        continue;
+      }
+      const anchor =
+        entry.id === undefined ? null : document.getElementById(entry.id);
+      if (anchor === null) {
+        // The message is gone — filtered out by a search, or off the end of
+        // the loaded history. The raw offset is still closer than the top.
+        scroller.scrollTop = entry.top;
+      } else {
+        scroller.scrollTop =
+          anchor.getBoundingClientRect().top -
+          scroller.getBoundingClientRect().top +
+          scroller.scrollTop -
+          entry.offset;
+      }
+      heldAnchors.set(entry.selector + "|" + entry.shape + "|" + entry.key, {
+        entry,
+        applied: scroller.scrollTop,
+      });
     }
-    const anchor =
-      entry.id === undefined ? null : document.getElementById(entry.id);
-    if (anchor === null) {
-      // The message is gone — filtered out by a search, or off the end of the
-      // loaded history. The raw offset is still closer than the top.
-      scroller.scrollTop = entry.top;
-    } else {
-      scroller.scrollTop =
-        anchor.getBoundingClientRect().top -
-        scroller.getBoundingClientRect().top +
-        scroller.scrollTop -
-        entry.offset;
-    }
-    heldAnchors.set(entry.selector, { entry, applied: scroller.scrollTop });
   }
 }
 
@@ -6771,16 +7157,18 @@ function watchImageSizes() {
       }
       // A size nobody had measured means the box just changed from the
       // stylesheet's guess to the truth, which moved everything below it.
-      for (const [selector, held] of heldAnchors) {
-        const scroller = document.querySelector(selector);
-        if (
-          scroller === null ||
-          !scroller.contains(node) ||
-          scroller.scrollTop !== held.applied
-        ) {
-          continue;
+      for (const held of [...heldAnchors.values()]) {
+        for (const scroller of scrollSurfaceNodes(held.entry.selector)) {
+          if (
+            scroller.className !== held.entry.shape ||
+            scroller.dataset.scrollKey !== held.entry.key ||
+            !scroller.contains(node) ||
+            scroller.scrollTop !== held.applied
+          ) {
+            continue;
+          }
+          restoreChannelAnchor([held.entry]);
         }
-        restoreChannelAnchor([held.entry]);
       }
     },
     true,
@@ -7020,9 +7408,7 @@ export function submitComposerMessage(rerender) {
     // words that were just typed are. Jumping to the message being answered —
     // which is what this did while replies were drawn underneath it — sent
     // the reader back up into history the moment they hit send.
-    if (directReply) {
-      scrollChannel();
-    }
+    scrollChannel();
     return;
   }
   const sent = sendChannelMessage(
@@ -7199,6 +7585,7 @@ export function submitThreadReply(rerender) {
   state.threadReplyMessageId = undefined;
   closeComposerAutocomplete("thread");
   rerender();
+  scrollChannelThreadToLatest();
 }
 
 /**
@@ -7276,6 +7663,10 @@ export function updateComposerPresentation(node, target) {
   const before = autocompleteSnapshot();
   updateMentionState(node, target);
   resizeComposer(node);
+  // Counted off the stored draft rather than the textarea, because a staged
+  // image lives in the draft as reference lines the box does not show — and
+  // those lines are sent, so they count against the cap.
+  paintComposerCount(node, target, composerDraft(target, node));
 
   if (autocompleteSnapshot() !== before) {
     paintComposerSuggestions(activeChannelId());

@@ -216,9 +216,13 @@ test("the direct-reply composer names its target and resets after sending", asyn
     "task-bearing user roots keep the composer in task-continuation mode",
   );
   assert.match(submit, /state\.composerThreadId = undefined;/u);
-  // Sending a reply ends at the bottom of the chat, where the reply now is —
-  // not back at the message it answers.
-  assert.match(submit, /if \(directReply\) \{\s*scrollChannel\(\);/u);
+  // Every successful channel-composer send ends at the bottom, including a
+  // continuation aimed at an existing task thread.
+  assert.equal([...submit.matchAll(/scrollChannel\(\);/gu)].length, 2);
+  assert.doesNotMatch(
+    submit,
+    /if \(directReply\) \{\s*scrollChannel\(\);/u,
+  );
   assert.doesNotMatch(submit, /state\.scrollToMessage = continuing;/u);
 });
 
