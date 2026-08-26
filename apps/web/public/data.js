@@ -42,6 +42,93 @@ const stored = (key, fallback = "") =>
   window.localStorage.getItem(key) ?? fallback;
 
 /**
+ * How long a message may be, in each place one is written.
+ *
+ * The same three numbers the gateway validates against — see
+ * `CHANNEL_MESSAGE_MAX_CHARS` and its neighbours in `server.ts`. They are
+ * repeated here rather than fetched because a limit is only useful to
+ * somebody while they are typing: reaching it as a rejected send tells them
+ * the message failed and nothing about why, which is exactly what this pair
+ * of numbers exists to stop.
+ */
+export const CHANNEL_MESSAGE_MAX_CHARS = 10_000;
+export const DIRECT_MESSAGE_MAX_CHARS = 8_000;
+export const AGENT_CHAT_MAX_CHARS = 10_000;
+
+/**
+ * The cap that applies to one composer.
+ *
+ * `channel` and `thread` write into the same room and share its limit; `dm`
+ * is the private conversation with a person, `chat` the private one with an
+ * agent.
+ */
+export function messageLimitFor(target) {
+  return target === "dm"
+    ? DIRECT_MESSAGE_MAX_CHARS
+    : target === "chat"
+      ? AGENT_CHAT_MAX_CHARS
+      : CHANNEL_MESSAGE_MAX_CHARS;
+}
+
+/** A count with thousands separators, so a limit reads as a number. */
+function countedChars(count) {
+  return count.toLocaleString("en-US");
+}
+
+/**
+ * What a composer has to say about its own length, or nothing at all.
+ *
+ * Silent until the last tenth of the allowance, because a counter shown over
+ * an empty box is noise about a limit nobody is near. From there it counts
+ * down, and past the limit it says how much has to come out — the one number
+ * that turns "this will not send" into something to act on.
+ *
+ * Measured on the trimmed string, which is what the server measures.
+ */
+export function messageLengthNotice(text, target = "channel") {
+  const limit = messageLimitFor(target);
+  const length = String(text ?? "").trim().length;
+  const remaining = limit - length;
+  if (remaining < 0) {
+    return {
+      over: true,
+      length,
+      limit,
+      remaining,
+      text: `${countedChars(-remaining)} over the ${countedChars(limit)}-character limit`,
+    };
+  }
+  if (remaining <= Math.round(limit / 10)) {
+    return {
+      over: false,
+      length,
+      limit,
+      remaining,
+      text: `${countedChars(remaining)} characters left`,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * The sentence shown when a send is refused for length, or `undefined` when
+ * the message fits. One wording for every composer, so the toast, the counter
+ * and the server all name the same cap.
+ */
+export function messageTooLong(text, target = "channel") {
+  const notice = messageLengthNotice(text, target);
+  if (notice?.over !== true) {
+    return undefined;
+  }
+  // Spelled out here, where there is room for a sentence; the counter on the
+  // bar says the same thing in the space it has.
+  return (
+    `This message is ${countedChars(-notice.remaining)} characters over the ` +
+    `${countedChars(notice.limit)}-character limit — shorten it to send.`
+  );
+}
+
+/**
  * Which of the sidebar's two rosters this browser last left unrolled.
  *
  * Absent, or unreadable, means both: a first visit should show the room, and
@@ -3577,6 +3664,13 @@ export async function sendDirectMessage(userId, content, referencedMessageId) {
   if (body.length === 0 || !userId) {
     return;
   }
+  // Thrown rather than toasted, because this one is awaited: the caller holds
+  // the draft and has to know not to clear it. The sentence names the cap, so
+  // whichever surface reports it says the same thing the counter does.
+  const tooLong = messageTooLong(body, "dm");
+  if (tooLong !== undefined) {
+    throw new Error(tooLong);
+  }
   const response = await api(directPath(`/${encodeURIComponent(userId)}`), {
     method: "POST",
     body: {
@@ -4609,6 +4703,14 @@ export function sendChannelMessage(
   if (!repositoryId || trimmed === "") {
     return undefined;
   }
+  // Refused here rather than optimistically drawn and failed a round trip
+  // later: returning `undefined` is what leaves the words in the composer,
+  // beside the counter saying how many of them have to go.
+  const tooLong = messageTooLong(trimmed, "channel");
+  if (tooLong !== undefined) {
+    toast(tooLong, "error");
+    return undefined;
+  }
   // `@everyone` names every person in the channel, exactly as the server
   // expands it when it resolves the stored message. The optimistic copy has
   // to agree with that or the sender's own "@" badge flickers on for the
@@ -4675,6 +4777,14 @@ export function resendChannelMessage(repositoryId, entryId, rerender) {
   const parentId = entry.messageId;
   if (parentId !== undefined && !isServerChannelId(repositoryId, parentId)) {
     toast("The thread this answers has not been saved yet.", "error");
+    return;
+  }
+  // A row that failed because it is too long will fail again unedited, and
+  // the second attempt is where somebody is owed the reason: say the cap and
+  // leave the row where it is, with its words still recoverable from screen.
+  const tooLong = messageTooLong(entry.content, "channel");
+  if (tooLong !== undefined) {
+    toast(tooLong, "error");
     return;
   }
   entry.failed = undefined;
@@ -4782,6 +4892,13 @@ export function postChannelReply(
   const trimmed = String(text ?? "").trim();
   const message = findChannelMessage(repositoryId, messageId);
   if (message === undefined || trimmed === "") {
+    return undefined;
+  }
+  // Same cap as a root message, and the same refusal: the reply stays in the
+  // box it was typed in rather than becoming a failed row in the thread.
+  const tooLong = messageTooLong(trimmed, "channel");
+  if (tooLong !== undefined) {
+    toast(tooLong, "error");
     return undefined;
   }
   message.replies ??= [];

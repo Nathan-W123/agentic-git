@@ -3981,6 +3981,82 @@ function hexColorField(value: unknown, field: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * How long one message may be, per place a person writes one.
+ *
+ * Named rather than repeated at each route, because these numbers are also
+ * what the composer counts down to: the dashboard carries the same three
+ * figures, and a limit only one side knows is a limit somebody meets as a
+ * failed send. See `messageLimitFor` in the browser's `data.js`.
+ */
+const CHANNEL_MESSAGE_MAX_CHARS = 10_000;
+const DIRECT_MESSAGE_MAX_CHARS = 8_000;
+/** One turn typed to a provider, in the private agent panel. */
+const AGENT_CHAT_MAX_CHARS = 10_000;
+/**
+ * How many turns of that conversation may be replayed with a request.
+ *
+ * The panel posts the whole conversation each time, so this is a ceiling on
+ * the transcript rather than on what was just typed. Far above any real
+ * session: it is here so a runaway client cannot post an unbounded array,
+ * not to end a long conversation.
+ */
+const AGENT_CHAT_MAX_MESSAGES = 500;
+
+/** `1234` as `1,234`, so a limit in a sentence reads as a number. */
+function countedChars(count: number): string {
+  return count.toLocaleString("en-US");
+}
+
+/**
+ * The conversation posted with one private-chat turn.
+ *
+ * Only two things are checked here, and both of them are things a person can
+ * do something about: how long the turn they just typed is, and how much
+ * transcript is being replayed with it. Everything else about a message —
+ * roles, ordering, provider-specific shapes — belongs to the adapter that
+ * speaks to the provider, and is left to it.
+ */
+function chatMessagesField(value: unknown): unknown {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  const entries = value as readonly unknown[];
+  if (entries.length > AGENT_CHAT_MAX_MESSAGES) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `This conversation is ${countedChars(
+        entries.length - AGENT_CHAT_MAX_MESSAGES,
+      )} messages over the ${countedChars(
+        AGENT_CHAT_MAX_MESSAGES,
+      )}-message limit — start a new chat to carry on`,
+    );
+  }
+  for (const entry of entries) {
+    const content: unknown =
+      typeof entry === "object" && entry !== null
+        ? (entry as { content?: unknown }).content
+        : undefined;
+    if (typeof content !== "string") {
+      continue;
+    }
+    const length = content.trim().length;
+    if (length > AGENT_CHAT_MAX_CHARS) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `A message is ${countedChars(
+          length - AGENT_CHAT_MAX_CHARS,
+        )} characters over the ${countedChars(
+          AGENT_CHAT_MAX_CHARS,
+        )}-character limit (this one is ${countedChars(length)})`,
+      );
+    }
+  }
+  return value;
+}
+
 function stringField(
   value: unknown,
   field: string,
@@ -3993,14 +4069,27 @@ function stringField(
     throw new HttpError(400, "invalid_request", `${field} must be a string`);
   }
   const trimmed = value.trim();
-  if (
-    trimmed.length < (options.min ?? 1) ||
-    trimmed.length > (options.max ?? 10_000)
-  ) {
+  const min = options.min ?? 1;
+  const max = options.max ?? 10_000;
+  if (trimmed.length < min) {
     throw new HttpError(
       400,
       "invalid_request",
-      `${field} has an invalid length`,
+      min === 1
+        ? `${field} cannot be empty`
+        : `${field} must be at least ${countedChars(min)} characters`,
+    );
+  }
+  // The number, and how far over it this is. The old wording named neither,
+  // and reached the sender as "could not send" with nothing to act on: no cap
+  // to write to, and no idea how much had to come out.
+  if (trimmed.length > max) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `${field} is ${countedChars(trimmed.length - max)} characters over the ` +
+        `${countedChars(max)}-character limit ` +
+        `(this one is ${countedChars(trimmed.length)})`,
     );
   }
   return trimmed;
@@ -9180,7 +9269,7 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const content = stringField(body["content"], "content", {
           min: 1,
-          max: 8_000,
+          max: DIRECT_MESSAGE_MAX_CHARS,
         }) ?? "";
         const message = await this.options.store.updateDirectMessage(
           projectId,
@@ -9362,7 +9451,10 @@ export class ApiGateway {
       // min:1 so an empty message is a 400 here rather than a throw from the
       // store, which would surface as a 500.
       const content =
-        stringField(body["content"], "content", { min: 1, max: 8000 }) ?? "";
+        stringField(body["content"], "content", {
+          min: 1,
+          max: DIRECT_MESSAGE_MAX_CHARS,
+        }) ?? "";
       const referencedMessageId = stringField(
         body["referencedMessageId"],
         "referencedMessageId",
@@ -9516,7 +9608,10 @@ export class ApiGateway {
       }
       if (method === "POST") {
         const body = objectBody(await this.readJson(request));
-        const content = stringField(body["content"], "content", { max: 10_000 }) ?? "";
+        const content =
+          stringField(body["content"], "content", {
+            max: CHANNEL_MESSAGE_MAX_CHARS,
+          }) ?? "";
         const message = await this.options.store.appendChannelMessage({
           repositoryId,
           projectId,
@@ -9595,7 +9690,10 @@ export class ApiGateway {
         throw new HttpError(404, "not_found", "Repository was not found");
       }
       const body = objectBody(await this.readJson(request));
-      const content = stringField(body["content"], "content", { max: 10_000 }) ?? "";
+      const content =
+        stringField(body["content"], "content", {
+          max: CHANNEL_MESSAGE_MAX_CHARS,
+        }) ?? "";
       const referencedMessageId = stringField(
         body["referencedMessageId"],
         "referencedMessageId",
@@ -10072,7 +10170,7 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const content = stringField(body["content"], "content", {
           min: 1,
-          max: 10_000,
+          max: CHANNEL_MESSAGE_MAX_CHARS,
         }) ?? "";
         await this.options.store.setChannelReplyContent(
           repositoryId,
@@ -10221,7 +10319,7 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         const content = stringField(body["content"], "content", {
           min: 1,
-          max: 10_000,
+          max: CHANNEL_MESSAGE_MAX_CHARS,
         }) ?? "";
         await this.options.store.setChannelMessageContent(
           repositoryId,
@@ -11062,6 +11160,11 @@ export class ApiGateway {
           "cliSessionId",
           { max: 64, optional: true },
         );
+        // Checked before the stream is opened, so an over-long turn comes
+        // back as an ordinary 400 the composer can read out. Once the 200
+        // headers are written the only place left to say it is inside the
+        // event stream, where the panel shows it as a failed turn.
+        const messages = chatMessagesField(body["messages"]);
         // Newline-delimited JSON: one event per line, flushed immediately so
         // the browser sees progress rather than a buffered reply.
         response.setHeader("Content-Type", "application/x-ndjson");
@@ -11079,7 +11182,7 @@ export class ApiGateway {
               {
                 ...identity,
                 provider,
-                messages: body["messages"],
+                messages,
                 ...(cliSessionId === undefined ? {} : { cliSessionId }),
               },
               write,

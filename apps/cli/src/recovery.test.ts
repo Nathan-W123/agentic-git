@@ -6,13 +6,14 @@ import test from "node:test";
 
 import {
   DEFAULT_ORGANIZATION_ID,
+  DEFAULT_PROJECT_ID,
   InMemoryCoordinationStore,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
 import { CoordinatorProject } from "./project.js";
-import { recoverCoordinationState } from "./recovery.js";
+import { reapStrandedWork, recoverCoordinationState } from "./recovery.js";
 
 /**
  * Crash recovery is exercised the way a crash actually leaves things: state
@@ -432,4 +433,101 @@ test("an imported mirror keeps a reflog of its canonical branch", async () => {
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("the stranded sweep spares a fresh claim and requeues an abandoned one", async () => {
+  const store = new InMemoryCoordinationStore();
+  await store.saveRepository({
+    id: "repo_sweep",
+    path: "/tmp/repo_sweep.git",
+    branch: "main",
+  });
+  const task = await store.submitTask({
+    repositoryId: "repo_sweep",
+    objective: "work whose run died without settling it",
+    agentId: "generic-cli",
+    validationCommands: [],
+  });
+  const thread = await store.appendChannelMessage({
+    repositoryId: "repo_sweep",
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: "user_1",
+    content: "@claude do the thing",
+  });
+  await store.setChannelMessageTask("repo_sweep", thread.id, task.id);
+  await store.claimSubmittedTasks("repo_sweep");
+
+  // A claim made a moment ago is a run that has just started, not debris.
+  assert.deepEqual((await reapStrandedWork(store)).requeuedTasks, []);
+  assert.equal(
+    (await store.listSubmittedTasks()).at(0)?.status,
+    "claimed",
+  );
+
+  const report = await reapStrandedWork(store, {
+    claimedBefore: new Date(Date.now() + 1_000).toISOString(),
+  });
+  assert.deepEqual(report.requeuedTasks, [task.id]);
+  assert.deepEqual(report.warnings, []);
+  assert.equal((await store.listSubmittedTasks()).at(0)?.status, "submitted");
+
+  // The thread hears about it rather than sitting on its last progress line.
+  const [root] = await store.listChannelMessages("repo_sweep", "user_1");
+  const notices = (root?.replies ?? []).filter(
+    (reply) => reply.kind === "system",
+  );
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]?.content ?? "", /restarted/u);
+
+  // And is told once, not once per sweep.
+  await store.claimSubmittedTasks("repo_sweep");
+  await reapStrandedWork(store, {
+    claimedBefore: new Date(Date.now() + 1_000).toISOString(),
+  });
+  const [again] = await store.listChannelMessages("repo_sweep", "user_1");
+  assert.equal(
+    (again?.replies ?? []).filter((reply) => reply.kind === "system").length,
+    1,
+  );
+});
+
+test("the stranded sweep leaves a claim with a live lease behind it alone", async () => {
+  const store = new InMemoryCoordinationStore();
+  await store.saveRepository({
+    id: "repo_live",
+    path: "/tmp/repo_live.git",
+    branch: "main",
+  });
+  const user = await store.createUser({
+    email: "live@example.com",
+    displayName: "Live",
+    passwordDigest: "digest",
+  });
+  const worker = await store.registerWorker({
+    userId: user.id,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    name: "live-worker",
+    adapters: ["generic-cli"],
+    version: "1",
+  });
+  const task = await store.submitTask({
+    repositoryId: "repo_live",
+    objective: "a remote worker is on this right now",
+    agentId: "generic-cli",
+    validationCommands: [],
+  });
+  const leased = await store.leaseNextTask({
+    workerId: worker.id,
+    baseRevision: "0".repeat(40),
+    ttlMs: 60 * 60 * 1000,
+  });
+  assert.ok(leased, "the remote worker should have taken the task");
+  assert.equal(leased.task.id, task.id);
+
+  const report = await reapStrandedWork(store, {
+    claimedBefore: new Date(Date.now() + 1_000).toISOString(),
+  });
+  assert.deepEqual(report.requeuedTasks, []);
+  assert.equal((await store.listSubmittedTasks()).at(0)?.status, "claimed");
 });

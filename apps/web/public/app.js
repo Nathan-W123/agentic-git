@@ -125,6 +125,9 @@ import {
   loadChannelMessage,
   resendChannelMessage,
   ensureChangeSetForTask,
+  CHANNEL_MESSAGE_MAX_CHARS,
+  DIRECT_MESSAGE_MAX_CHARS,
+  messageTooLong,
 } from "./data.js";
 import {
   $,
@@ -2591,7 +2594,7 @@ async function deleteDirectMessageAction(userId, messageId) {
 /** One compact editor shared by channel roots, replies, and direct messages. */
 async function messageEditValue(
   content,
-  { agentAware = false, maxLength = 10_000 } = {},
+  { agentAware = false, maxLength = CHANNEL_MESSAGE_MAX_CHARS } = {},
 ) {
   const values = await showModal({
     title: "Edit message",
@@ -2599,11 +2602,15 @@ async function messageEditValue(
       ? "You can correct it until somebody replies or an agent starts acting on it."
       : "The correction appears for everyone in this conversation.",
     confirm: "Save",
+    // The cap is said, not just enforced: `maxlength` stops typing dead at
+    // the limit and silently drops the tail of a long paste, which reads as
+    // the editor breaking rather than as a rule.
     body: `<label class="field">
         <span>Message</span>
         <textarea class="input" name="content" rows="6" maxlength="${String(maxLength)}"
           required autofocus>${esc(String(content ?? ""))}</textarea>
-      </label>`,
+      </label>
+      <p class="modal-hint">Up to ${maxLength.toLocaleString("en-US")} characters.</p>`,
   });
   const next = String(values?.content ?? "").trim();
   return values === undefined || next === "" ? undefined : next;
@@ -2657,7 +2664,9 @@ async function editDirectMessageAction(userId, messageId) {
   if (message === undefined) {
     return;
   }
-  const content = await messageEditValue(message.content, { maxLength: 8_000 });
+  const content = await messageEditValue(message.content, {
+    maxLength: DIRECT_MESSAGE_MAX_CHARS,
+  });
   if (content === undefined || content === String(message.content ?? "").trim()) {
     return;
   }
@@ -8968,6 +8977,14 @@ document.addEventListener("submit", (event) => {
       if (text.trim() === "" || state.sending[agent.id] === true) {
         return;
       }
+      // Checked before the box is emptied below. Sending is the one moment
+      // this draft exists in only one place, so a refusal that came after it
+      // would take the message with it.
+      const chatTooLong = messageTooLong(text, "chat");
+      if (chatTooLong !== undefined) {
+        toast(chatTooLong, "error");
+        return;
+      }
       const conversationLength = (state.conversations[agent.id] ?? []).length;
       input.value = "";
       delete state.agentChatDrafts[agent.id];
@@ -8995,6 +9012,15 @@ document.addEventListener("submit", (event) => {
       const other = state.activeDm;
       const draft = state.dmDraft.trim();
       if (other === undefined || draft.length === 0) {
+        return;
+      }
+      // Same reason as the private chat above: the draft is cleared on the
+      // next line, so anything that would refuse the message has to be known
+      // now. `sendDirectMessage` throws for length as well — this is what
+      // keeps the words on screen to shorten.
+      const dmTooLong = messageTooLong(draft, "dm");
+      if (dmTooLong !== undefined) {
+        toast(dmTooLong, "error");
         return;
       }
       state.dmDraft = "";
