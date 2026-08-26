@@ -2290,12 +2290,13 @@ function threadActivityLabel(entry) {
 }
 
 /**
- * Where a thread's run has got to, read from what it already said.
+ * Where a thread's run has got to, read from its narration and live task.
  *
  * The narration is the progress record: planning, "planned N file(s)",
  * execution, one "Working on…" line per stretch of files, validation, the
  * ending. Parsing those beats new plumbing — it works for every thread ever
- * written, and the bar can never disagree with the words directly above it.
+ * written. The live task is the fallback and floor, so every place showing
+ * the same run agrees even before the current turn has narrated a milestone.
  *
  * Milestones sit on the same lifecycle floors as `STAGE_PROGRESS`. The
  * executing span interpolates inside the coding band (claimed → validating)
@@ -2312,9 +2313,6 @@ function threadProgress(entry) {
   // the bar and the transcript now agree about which run is current.
   const turns = threadReplyTurns(entry.replies ?? []);
   const replies = turns[turns.length - 1]?.replies ?? [];
-  if (replies.length === 0) {
-    return undefined;
-  }
   // Finished is finished however it was said. The regex catches the fixed
   // endings; an agent's own summary does not match it, and a bar stuck at 90%
   // under a task that landed an hour ago reads as a hang. The task's status
@@ -2323,16 +2321,19 @@ function threadProgress(entry) {
   if (task !== undefined && !["submitted", "claimed"].includes(task.status)) {
     return undefined;
   }
+  const taskRunProgress = task === undefined ? undefined : taskProgress(task);
+  if (replies.length === 0) {
+    return taskRunProgress;
+  }
   if (replies.some((reply) => reply.kind === "outcome")) {
     return undefined;
   }
   let planned = 0;
   const touched = new Set();
   let progress = STAGE_PROGRESS.submitted;
-  // A bar only means something over a run the narration can recognise. The
-  // audit thread — and any other thread whose replies carry none of the run
-  // markers below — sat at the floor forever, reading as a task stuck at
-  // the beginning rather than a thread that simply is not a task.
+  // Without a live task, a bar only means something over narration that can
+  // be recognised as a run. A live task still owns progress before its newest
+  // turn has emitted one of the markers below.
   let sawRunMarker = false;
   const codingFloor = STAGE_PROGRESS.claimed;
   const codingCeiling = STAGE_PROGRESS.validating;
@@ -2377,12 +2378,12 @@ function threadProgress(entry) {
     }
   }
   if (!sawRunMarker) {
-    return undefined;
+    return taskRunProgress;
   }
   // Within-stage task progress (files / time) is the same source the agent
   // face reads — lift the narration to it so the two cannot disagree.
-  if (task !== undefined) {
-    progress = Math.max(progress, taskProgress(task));
+  if (taskRunProgress !== undefined) {
+    progress = Math.max(progress, taskRunProgress);
   }
   return progress;
 }

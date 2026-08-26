@@ -4337,6 +4337,62 @@ test("the progress bar restarts for each task turn in a thread", async () => {
   );
 });
 
+test("thread progress uses live task progress when the current turn has no recognized narration markers", async () => {
+  const source = await publicFile("screen-chats.js");
+  const progressStart = source.indexOf("function threadProgress(entry)");
+  const progressEnd = source.indexOf("\n/*", progressStart);
+  const turnsStart = source.indexOf("function threadReplyTurns(replies)");
+  const turnsEnd = source.indexOf(
+    "\n/** One turn's narration",
+    turnsStart,
+  );
+  assert.notEqual(progressStart, -1, "thread progress should still be derived");
+  assert.notEqual(progressEnd, -1, "thread progress should have a boundary");
+  assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
+  assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
+
+  const progress = Function(
+    "state",
+    "THREAD_FINISHED_RE",
+    "STAGE_PROGRESS",
+    "taskProgress",
+    `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
+      progressStart,
+      progressEnd,
+    )}\nreturn threadProgress;`,
+  )(
+    { tasks: [{ id: "task-1", status: "claimed" }] },
+    /^(Done —|I could not|This was cancelled)/u,
+    { submitted: 4, planning: 18, planned: 30, claimed: 44, validating: 88 },
+    () => 53,
+  ) as (entry: {
+    taskId: string;
+    replies: Array<{ kind: string; content: string }>;
+  }) => number | undefined;
+
+  assert.equal(
+    progress({ taskId: "task-1", replies: [] }),
+    53,
+    "a live task should supply progress before its turn says anything",
+  );
+  assert.equal(
+    progress({
+      taskId: "task-1",
+      replies: [{ kind: "progress", content: "Reading the repository" }],
+    }),
+    53,
+    "unrecognized narration should keep the live task's progress",
+  );
+  assert.equal(
+    progress({
+      taskId: "missing",
+      replies: [{ kind: "progress", content: "Reading the repository" }],
+    }),
+    undefined,
+    "an ordinary thread without run narration should not gain a progress bar",
+  );
+});
+
 test("task progress is monotonic and progress bars animate between keyed values", async () => {
   const data = await publicFile("data.js");
   const ui = await publicFile("ui.js");
