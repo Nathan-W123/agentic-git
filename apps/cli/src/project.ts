@@ -170,6 +170,25 @@ export interface ProjectConfig {
   installCommand?: PreviewCommand;
   /** Per-repository overrides, keyed by repository id. */
   installCommands?: Record<string, PreviewCommand>;
+  /**
+   * How to build this repository, after its dependencies and before its app.
+   *
+   * A checkout of canonical has no build output in it, for exactly the reason
+   * it has no `node_modules`: build output is ignored by git, so it is not in
+   * the revision. The commonest start script in the world — `node
+   * dist/index.js` — therefore dies in milliseconds in a fresh checkout, and
+   * what somebody watching the play button sees is an app that "exited
+   * immediately" rather than one that was never built.
+   *
+   * Absent means detection decides: a repository whose manifest has a `build`
+   * script gets it run, and everything else is started as it is. A build
+   * named here is taken as the answer, and a failure in it stops the start
+   * and is reported as a build failure — somebody who wrote down how their
+   * app is built is owed the reason it did not build.
+   */
+  buildCommand?: PreviewCommand;
+  /** Per-repository overrides, keyed by repository id. */
+  buildCommands?: Record<string, PreviewCommand>;
 }
 
 /** A {@link ValidationCommand} that may also carry the app's configuration. */
@@ -687,6 +706,30 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
                 entry,
                 `installCommands["${repositoryId}"]`,
               ),
+            ]),
+          ),
+        }),
+    // A build is a preview command like the others: same shape, same
+    // mistakes available, and the same `env` an app's toolchain may need and
+    // a test run does not — a private registry token, or the API base a
+    // static site is compiled against.
+    ...(config.buildCommand === undefined
+      ? {}
+      : {
+          buildCommand: assertPreviewCommand(
+            config.buildCommand,
+            "buildCommand",
+          ),
+        }),
+    ...(config.buildCommands === undefined
+      ? {}
+      : {
+          buildCommands: Object.fromEntries(
+            Object.entries(
+              config.buildCommands as Record<string, unknown>,
+            ).map(([repositoryId, entry]) => [
+              repositoryId,
+              assertPreviewCommand(entry, `buildCommands["${repositoryId}"]`),
             ]),
           ),
         }),
