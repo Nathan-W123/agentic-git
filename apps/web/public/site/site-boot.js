@@ -37,6 +37,15 @@
     window.location.replace("/app" + hash);
     return;
   }
+  // The other kind of installed shell. A PWA pinned before the dashboard
+  // moved keeps its cached manifest, whose start_url is "/", and launches
+  // with no hash and no preload global — so neither tell above fires and the
+  // person's installed app opens on its own advertisement. Standalone
+  // display mode is the one thing such a launch cannot hide.
+  if (window.matchMedia("(display-mode: standalone)").matches) {
+    window.location.replace("/app" + hash);
+    return;
+  }
   if (hash.length > 1) {
     var screen = hash.slice(1).split(/[/?]/)[0];
     var legacy = [
