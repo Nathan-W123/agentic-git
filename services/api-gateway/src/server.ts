@@ -9329,7 +9329,12 @@ export class ApiGateway {
       // the people you have not written to yet.
       const [conversations, reachable] = await Promise.all([
         this.options.store.listDirectConversations(projectId, principal.user.id),
-        this.projectPeople(projectId, project.project.organizationId),
+        this.directMessagePeople(
+          projectId,
+          project.project.organizationId,
+          principal.user.id,
+          principal.user.systemAdmin,
+        ),
       ]);
       const present = new Set(this.webSockets.connectedUserIds(projectId));
       this.sendJson(response, 200, {
@@ -9343,11 +9348,10 @@ export class ApiGateway {
         conversations: conversations.filter((conversation) =>
           reachable.has(conversation.userId),
         ),
-        // Everyone who could be written to, with whether they are here now —
-        // and "everyone" is the project's whole room, grants included. A
-        // repository-scoped invite made somebody a colleague in every channel
-        // of the project and a stranger to the DM list; the same person you
-        // could read could not be written to.
+        // Everyone who could be written to, with whether they are here now.
+        // Reachability is limited to people who share at least one repository
+        // channel with the viewer; belonging somewhere else in the project is
+        // not enough to open a private conversation.
         people: [...reachable.values()]
           .filter((person) => person.userId !== principal.user.id)
           .map((person) => ({
@@ -9384,9 +9388,9 @@ export class ApiGateway {
         projectId,
         "view",
       );
-      // Both ends have to be real people in this organization. Without this a
+      // Both ends have to be real people who share a channel. Without this a
       // signed-in person could open a conversation against any id at all —
-      // writing to somebody in another organization, or filling the table with
+      // writing to somebody elsewhere in KUMI, or filling the table with
       // messages addressed to nobody.
       if (otherId === principal.user.id) {
         throw new HttpError(
@@ -9395,12 +9399,14 @@ export class ApiGateway {
           "A direct message needs two people",
         );
       }
-      // Reachability is the project's whole room — memberships and grants —
-      // the same set the channel roster shows. An org check alone made a
-      // repo-invited teammate unwritable.
-      const reachable = await this.projectPeople(
+      // Reachability is the union of the repository channels both people can
+      // enter. An org check alone made a repo-invited teammate unwritable,
+      // while a project-wide union let guests from unrelated channels DM.
+      const reachable = await this.directMessagePeople(
         projectId,
         project.project.organizationId,
+        principal.user.id,
+        principal.user.systemAdmin,
       );
       if (!reachable.has(otherId)) {
         throw new HttpError(404, "not_found", "That person was not found");
@@ -12670,9 +12676,9 @@ export class ApiGateway {
    *
    * This intentionally uses the same two access paths as the channel roster:
    * an organization membership reaches every repository, while a repository
-   * grant reaches this repository only. `projectPeople` is broader because it
-   * powers the project-wide DM roster, so using it here would let a guest from
-   * a different repository suppress an unknown-mention warning.
+   * grant reaches this repository only. `directMessagePeople` can span every
+   * channel the viewer can reach, so using it here would let a guest from a
+   * different repository suppress an unknown-mention warning.
    */
   private async resolveChannelPeople(
     projectId: string,
@@ -18610,42 +18616,55 @@ export class ApiGateway {
   }
 
   /**
-   * Everyone in this project's room: organization members plus anyone holding
-   * a grant on any of the project's repositories. The one answer for the
-   * channel roster, the DM list and DM reachability, so a person the room
-   * shows is always a person the room can write to.
+   * Everyone who shares at least one repository channel with the viewer.
+   *
+   * Organization membership reaches every repository, while a grant reaches
+   * only the repository it names. Building the set repository by repository
+   * preserves both rules and prevents two guests with disjoint grants from
+   * becoming DM contacts merely because their channels share a project.
    */
-  private async projectPeople(
+  private async directMessagePeople(
     projectId: string,
     organizationId: string,
+    viewerId: string,
+    viewerIsSystemAdmin: boolean,
   ): Promise<Map<string, { userId: string; name: string; role: string }>> {
     const [memberships, repositories, users] = await Promise.all([
       this.options.store.listMemberships(organizationId),
       this.options.store.listProjectRepositories(projectId),
       this.options.store.listUsers(),
     ]);
-    const grants = (
-      await Promise.all(
-        repositories.map((repository) =>
-          this.options.store
-            .listRepositoryGrants(repository.id)
-            .catch(() => []),
-        ),
-      )
-    ).flat();
+    const grantsByRepository = await Promise.all(
+      repositories.map((repository) =>
+        this.options.store.listRepositoryGrants(repository.id).catch(() => []),
+      ),
+    );
     const byId = new Map(users.map((user) => [user.id, user]));
-    const people = new Map<string, { userId: string; name: string; role: string }>();
-    for (const entry of [...memberships, ...grants]) {
-      if (people.has(entry.userId)) {
+    const organizationRoles = new Map(
+      memberships.map((membership) => [membership.userId, membership.role]),
+    );
+    const viewerIsMember = organizationRoles.has(viewerId);
+    const people = new Map<
+      string,
+      { userId: string; name: string; role: string }
+    >();
+    for (const grants of grantsByRepository) {
+      const viewerHasGrant = grants.some((grant) => grant.userId === viewerId);
+      if (!viewerIsSystemAdmin && !viewerIsMember && !viewerHasGrant) {
         continue;
       }
-      const user = byId.get(entry.userId);
-      if (user !== undefined) {
-        people.set(entry.userId, {
-          userId: entry.userId,
-          name: user.displayName,
-          role: entry.role,
-        });
+      for (const entry of [...memberships, ...grants]) {
+        if (people.has(entry.userId)) {
+          continue;
+        }
+        const user = byId.get(entry.userId);
+        if (user !== undefined) {
+          people.set(entry.userId, {
+            userId: entry.userId,
+            name: user.displayName,
+            role: organizationRoles.get(entry.userId) ?? entry.role,
+          });
+        }
       }
     }
     return people;
