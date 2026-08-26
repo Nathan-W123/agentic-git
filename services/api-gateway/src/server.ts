@@ -1586,22 +1586,6 @@ const CHANNEL_CEREMONIAL_EVENTS = new Set([
   "validation_completed",
 ]);
 
-/**
- * The runaway guard on an agent's own account of its work, and nothing more.
- *
- * It was 200, and before that 400, on the theory that an ending belongs on one
- * line — but a bound low enough to shape the writing is a bound the writing
- * keeps hitting, and every account that hit it reached the reader with its
- * last sentence missing or an ellipsis where the point was. There is nowhere
- * in the channel to read the rest, so the shortening was pure loss.
- *
- * The account is now shown whole. This bound is set where {@link
- * FAILURE_ACCOUNT_MAX} is, for the reason that one is: a model that ignores
- * "one or two plain sentences" entirely must not be able to paste a novel into
- * a room full of people. Ordinary summaries — a paragraph at the very worst —
- * never come near it, so in practice nothing is cut.
- */
-const TERMINAL_SUMMARY_MAX = 4_000;
 
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   // The fallback, for a run whose agent explained nothing — see the
@@ -1904,54 +1888,35 @@ function clipToBoundary(text: string, max: number): string {
 }
 
 /**
+ * Formerly a hard cap on task endings. Kept as Infinity so the agent's own
+ * words reach the channel whole — never cut mid-sentence or mid-word.
+ */
+const TERMINAL_SUMMARY_MAX = Number.POSITIVE_INFINITY;
+
+/**
  * An ending the reader gets all of.
  *
- * Nothing an agent writes about its own work is shortened here any more. A cut
- * ending — "…adds a cmsg-mine cl…" — tells the reader the account was
- * truncated and not what it said, and dropping the sentences past a bound is
- * the same loss without the ellipsis to admit it: the detail after the first
- * sentence is often the part somebody asked for. There is nowhere in the
- * channel to go for the rest, so there is no shortening worth doing.
- *
- * What is left is the runaway guard at {@link TERMINAL_SUMMARY_MAX}, which an
- * account of a page or two never reaches. Past it, whole sentences are kept in
- * preference to a clipped word, and text with no sentence end at all inside
- * the bound falls back to a clipped word — something has to give when a model
- * writes four thousand characters instead of two.
+ * Nothing an agent writes about its own work is shortened here. A cut ending
+ * — mid-word or mid-sentence — tells the reader the account was truncated and
+ * not what it said. There is nowhere in the channel to go for the rest, so
+ * there is no shortening worth doing. Whitespace is collapsed so a multi-line
+ * explanation still reads as one channel reply.
  */
 function shortenEnding(written: string): string {
-  if (written.length <= TERMINAL_SUMMARY_MAX) {
-    return written;
-  }
-  const head = written.slice(0, TERMINAL_SUMMARY_MAX);
-  const stop = Math.max(
-    head.lastIndexOf(". "),
-    head.lastIndexOf("! "),
-    head.lastIndexOf("? "),
-  );
-  // Only when a whole sentence is most of what the bound allows; one short
-  // opener followed by a long second sentence would otherwise leave a line
-  // saying almost nothing.
-  return stop > TERMINAL_SUMMARY_MAX * 0.4
-    ? head.slice(0, stop + 1)
-    : clipToBoundary(written, TERMINAL_SUMMARY_MAX);
+  const collapsed = collapseWhitespace(written);
+  return collapsed.length <= TERMINAL_SUMMARY_MAX
+    ? collapsed
+    : clipToBoundary(collapsed, TERMINAL_SUMMARY_MAX);
 }
+
+/**
+ * Formerly a hard cap on agent failure accounts. Kept as Infinity so a
+ * failure that *is* the answer is never shortened to fit a channel budget.
+ */
+const FAILURE_ACCOUNT_MAX = Number.POSITIVE_INFINITY;
 
 /** How much of the machinery's own error text a failure line may quote. */
 const FAILURE_DETAIL_MAX = 240;
-
-/**
- * How much of the agent's own account a failure may carry: effectively all of
- * it.
- *
- * The alarm above it is boilerplate and worth shortening; the account is the
- * thing the reader actually asked for. A read-only request that reached this
- * path — a diagnosis, an explanation — has its entire answer in that field, and
- * clipping it to a couple of sentences threw the answer away and left a
- * half-finished one in the room. The bound stays only so a runaway model
- * cannot paste a novel into a channel.
- */
-const FAILURE_ACCOUNT_MAX = 4_000;
 
 /**
  * Splits a failure into the alarm and the agent's own words, if it carries
@@ -1995,12 +1960,15 @@ function explainTaskFailure(error: string, status?: string): string {
   // Its own paragraph, so the answer is not read as a continuation of the
   // alarm's sentence — and so the ending is long enough and shaped enough to
   // open a thread rather than land as one clipped line in the room.
+  // Agent-authored account text is never clipped: the reader asked for that
+  // answer, and a char bound only throws the end of it away.
   return account === undefined
     ? opening
-    : `${opening}\n\n${AGENT_ACCOUNT_PREFIX} ${clipToBoundary(
-        account.trim(),
-        FAILURE_ACCOUNT_MAX,
-      )}`;
+    : `${opening}\n\n${AGENT_ACCOUNT_PREFIX} ${
+        account.trim().length <= FAILURE_ACCOUNT_MAX
+          ? account.trim()
+          : clipToBoundary(account.trim(), FAILURE_ACCOUNT_MAX)
+      }`;
 }
 
 /**
@@ -2099,8 +2067,10 @@ export function narrateTaskEvent(
     case "replan_requested":
       return "Something moved underneath me; re-planning against the latest code.";
     case "agent_progress":
+      // Full message, never a char bound: a slice here cut mid-word with no
+      // ellipsis and left answers looking like the model stopped mid-thought.
       return typeof data["message"] === "string" && data["message"].length > 0
-        ? String(data["message"]).slice(0, 300)
+        ? String(data["message"])
         : undefined;
     case "workspace_changed": {
       // Read off the worktree while the agent is still editing. This is the
@@ -2159,9 +2129,8 @@ export function narrateTaskEvent(
       if (written.length === 0 || isAdapterFallback) {
         return CHANNEL_TERMINAL_EVENTS[type];
       }
-      // Whole, save for the runaway guard: this is the one line most people
-      // read of a task, and a bound low enough to shape it was a bound it kept
-      // being cut at.
+      // Whole: this is the one line most people read of a task, and a bound
+      // low enough to shape it was a bound it kept being cut at mid-word.
       const summary = shortenEnding(written);
       // The count, not the names — the reader who wants those is one click
       // Named while there are few enough to name. "(1 file changed)" is the
@@ -14445,10 +14414,10 @@ export class ApiGateway {
       .split("\n")
       .map((line) => line.replace(/^[-*\d.\s]+/u, "").trim())
       .filter((line) => line.length > 0)
-      // Bounded: a model that ignores "one or two lines" must not turn the
-      // thread into an essay before the work has even started.
-      .slice(0, 4)
-      .map((line) => line.slice(0, 300));
+      // Bounded by line count only: a model that ignores "one or two lines"
+      // must not turn the thread into an essay before the work has even
+      // started. Each line itself is left whole — no char bound on responses.
+      .slice(0, 4);
   }
 
   /**
@@ -15367,7 +15336,8 @@ export class ApiGateway {
     // write must not poison the rest of the turn; the final answer is still
     // worth delivering.
     const announceProgress = (value: string): void => {
-      const content = value.trim().slice(0, 4_000);
+      // Full progress text — a char bound here cut agent speech mid-word.
+      const content = value.trim();
       if (content.length === 0 || progressSeen.has(content)) {
         return;
       }

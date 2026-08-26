@@ -6384,15 +6384,15 @@ test("a finished task says what it did, not that the pipeline worked", () => {
     paragraph,
   );
 
-  // The guard that is left is for a runaway model only: nobody wants a novel
-  // pasted into a channel everybody is reading.
+  // A runaway wall of text used to be cut at a char bound mid-thought. Agent
+  // endings are left whole now — the channel gets what the agent wrote.
+  const novelBody = `${"word ".repeat(1200)}end`;
+  assert.ok(novelBody.length > 4_100, String(novelBody.length));
   const novel = narrateTaskEvent("canonical_promoted", {
-    agentExplanation: `${"word ".repeat(1200)}end`,
+    agentExplanation: novelBody,
   });
-  assert.ok((novel ?? "").length < 4_100, String(novel?.length));
-  // Nothing to cut back to in an unpunctuated wall of text, so it ends on a
-  // whole word and says it was shortened — never halfway through one.
-  assert.match(novel ?? "", /word…$/u);
+  assert.equal(novel, novelBody);
+  assert.doesNotMatch(novel ?? "", /…/u);
 
   // Newlines collapse: the ending is one line in a channel, and a multi-line
   // explanation would otherwise read as several messages.
@@ -6401,6 +6401,27 @@ test("a finished task says what it did, not that the pipeline worked", () => {
       agentExplanation: "Fixed the loop.\n\nAlso tidied the imports.",
     }),
     "Fixed the loop. Also tidied the imports.",
+  );
+});
+
+test("agent progress reaches the channel whole, never cut mid-word", () => {
+  // Progress used to be sliced at 300 characters with no ellipsis — the exact
+  // cut that left answers ending on "what tech s" while the agent was still
+  // thinking. The full message is the progress line.
+  const message =
+    "I don't see any project files in the current directory. Could you share " +
+    "the app code (as a file, zip, or by pointing me to a repository) so I " +
+    "can investigate the latency issues? Alternatively, if you'd like me to " +
+    "set up a sample project to demonstrate latency troubleshooting, let me " +
+    "know what tech stack you prefer.";
+  assert.ok(message.length > 300, String(message.length));
+  assert.equal(
+    narrateTaskEvent("agent_progress", { message }),
+    message,
+  );
+  assert.doesNotMatch(
+    narrateTaskEvent("agent_progress", { message }) ?? "",
+    /what tech s$/u,
   );
 });
 
