@@ -6758,6 +6758,29 @@ export function scrollDirectMessageToLatest() {
   });
 }
 
+/** Shows the newest reply after sending from the open thread composer. */
+function scrollChannelThreadToLatest() {
+  const list = [
+    ...document.querySelectorAll(".thread-panel[data-thread-id]"),
+  ]
+    .find((panel) => panel.dataset.threadId === state.activeChannelThread)
+    ?.querySelector(".thread-body");
+  if (list === undefined || list === null) {
+    return;
+  }
+  list.scrollTop = list.scrollHeight;
+  requestAnimationFrame(() => {
+    const settled = [
+      ...document.querySelectorAll(".thread-panel[data-thread-id]"),
+    ]
+      .find((panel) => panel.dataset.threadId === state.activeChannelThread)
+      ?.querySelector(".thread-body");
+    if (settled === list) {
+      settled.scrollTop = settled.scrollHeight;
+    }
+  });
+}
+
 /**
  * The first message this visit had not seen, or the bottom when there is none.
  *
@@ -7151,9 +7174,7 @@ export function submitComposerMessage(rerender) {
     // words that were just typed are. Jumping to the message being answered —
     // which is what this did while replies were drawn underneath it — sent
     // the reader back up into history the moment they hit send.
-    if (directReply) {
-      scrollChannel();
-    }
+    scrollChannel();
     return;
   }
   const sent = sendChannelMessage(
@@ -7330,6 +7351,7 @@ export function submitThreadReply(rerender) {
   state.threadReplyMessageId = undefined;
   closeComposerAutocomplete("thread");
   rerender();
+  scrollChannelThreadToLatest();
 }
 
 /**
