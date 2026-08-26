@@ -527,6 +527,21 @@ test("one play control beside the pin runs whatever the channel's app is", async
   assert.match(watch, /preview\.exited !== undefined/u);
   assert.match(app, /case "preview-start":\s*void startPreviewAction\(value\);/u);
   assert.match(app, /case "preview-stop":\s*void stopPreviewAction\(value\);/u);
+
+  // A build the control plane guessed at is allowed to fail without stopping
+  // the start, which is right and quietly produced the worst version of this:
+  // a server serving a stale or missing bundle, a link that opens, and a
+  // white page with nothing saying why. The reason is carried on the status,
+  // so all three places that report on a preview say it.
+  assert.match(start, /preview\?\.buildFailure/u);
+  assert.match(start, /build did not finish/u);
+  assert.match(control, /running\.buildFailure/u);
+  assert.match(control, /partial === undefined \? "" : " warn"/u);
+  const link = chats.slice(
+    chats.indexOf("function previewLink(repositoryId)"),
+    chats.indexOf("function chanHeader(repositoryId)"),
+  );
+  assert.match(link, /preview\.buildFailure/u);
 });
 
 test("serves the vendored Monaco build same-origin under /vendor", async () => {

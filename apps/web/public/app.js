@@ -2992,6 +2992,13 @@ async function startPreviewAction(repositoryId, asked = false) {
     // control plane works down a list of candidates and the reader is
     // otherwise told nothing about the ones that were ruled out.
     const after = (preview?.tried ?? []).length;
+    // A build that did not finish is the loudest thing that can be true about
+    // a preview that nonetheless started: the app serves whatever bundle was
+    // there before, which is usually nothing, and the page opens white. Said
+    // as a warning rather than folded into the success line, because it is
+    // the difference between "look at this" and "look at this, but it is not
+    // what you asked to see".
+    const buildFailure = preview?.buildFailure;
     toast(
       preview === null
         ? "Started"
@@ -3002,6 +3009,17 @@ async function startPreviewAction(repositoryId, asked = false) {
           }`,
       "ok",
     );
+    // Held until it is dismissed, like every other failure here. A partial
+    // build that cleared itself after four seconds would be a warning nobody
+    // could act on — and the page it explains stays blank for as long as
+    // somebody keeps looking at it.
+    if (buildFailure !== undefined) {
+      toast(
+        `Its build did not finish (${buildFailure}) — the page may be blank ` +
+          "or out of date.",
+        "error",
+      );
+    }
     // Up, but still building. The header says so, and this is what eventually
     // takes the word back.
     if (preview !== null && preview.ready === false) {

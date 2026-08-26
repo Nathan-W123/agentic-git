@@ -1759,10 +1759,24 @@ function previewControl(repositoryId) {
         title="${esc(busy)}" aria-label="${esc(busy)}" aria-busy="true">
         ${icon("play")}</button>`;
   }
-  if (previewRunning(repositoryId) !== undefined) {
-    return `<button type="button" class="ch-count ch-preview-toggle on"
-        data-act="preview-stop" data-value="${esc(repositoryId)}"
-        title="Stop the running app" aria-label="Stop the running app">
+  const running = previewRunning(repositoryId);
+  if (running !== undefined) {
+    // Up, and up on a build that did not finish. The control plane runs a
+    // detected build as a guess and is deliberately not stopped by one that
+    // fails — which is right, and quietly produced the worst version of this:
+    // a server serving a stale or missing bundle, a link that opens, and a
+    // white page with nothing anywhere saying why. Amber and the reason, so
+    // an empty page is read as a partial build rather than a broken app.
+    const partial = running.buildFailure;
+    const why =
+      partial === undefined
+        ? "Stop the running app"
+        : `Running, but its build did not finish — ${partial}. The page may ` +
+          `be blank or out of date. Press to stop it.`;
+    return `<button type="button" class="ch-count ch-preview-toggle on${
+      partial === undefined ? "" : " warn"
+    }" data-act="preview-stop" data-value="${esc(repositoryId)}"
+        title="${esc(why)}" aria-label="${esc(why)}">
         ${icon("close")}</button>`;
   }
   const stopped = previewStopped(repositoryId);
@@ -1809,12 +1823,19 @@ function previewLink(repositoryId) {
   const proxied =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`;
+  // The build is named in the address's own title, because that is what
+  // somebody hovers before they click — and clicking into a blank page is
+  // exactly the moment the reason is worth having.
+  const note =
+    preview.buildFailure === undefined
+      ? ""
+      : ` — build did not finish: ${preview.buildFailure}`;
   // No stop control beside it: the address is state, and the control that
   // starts and stops it is one control, on the channel's own line beside the
   // pin — see `previewControl`.
   return `<span class="preview-live">
     <a class="preview-link" href="${esc(proxied)}" target="_blank"
-      rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
+      rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}${esc(note)}">
       ${esc(preview.url.replace("http://", ""))}</a>
   </span>`;
 }

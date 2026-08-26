@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer, type Server } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,6 +16,8 @@ import {
   detectPreviewCommands,
   isStaticSite,
   PreviewService,
+  probePort,
+  probePreviewResponse,
   startStaticServer,
 } from "./preview.js";
 
@@ -1057,6 +1061,165 @@ test("an agent's task preview builds the same way the play button does", async (
       assert.equal(started.failed, false);
       assert.ok(started.url !== undefined, started.output.join("\n"));
       assert.equal((await (await fetch(started.url)).text()), "detected");
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** The port something bound, once it is listening. */
+async function listeningPort(server: Server): Promise<number> {
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Nothing bound a port");
+  }
+  // Unreferenced so a connection a probe left behind cannot hold this test
+  // file's process open once the assertions are done.
+  server.unref();
+  return address.port;
+}
+
+test("a port that connects is not the same as an app that answers", async () => {
+  // The bug behind the white page. Every dev server binds its port *before*
+  // it has anything to serve — Vite and webpack both do, and a container's
+  // server binds the moment the process starts — so a bare TCP connect says
+  // "ready" for the whole of a bundle it has not built. The reader was handed
+  // the address at that moment, opened it, and got an empty document with
+  // nothing anywhere saying the app was still working.
+  const silent = createNetServer(() => {
+    // Accepts the connection and says nothing, exactly as a server that is
+    // still building does.
+  });
+  const building = createHttpServer((_, response) => {
+    // What a proxy in front of an unfinished build answers with.
+    response.writeHead(503, { "Content-Type": "text/plain" });
+    response.end("still building");
+  });
+  const answering = createHttpServer((_, response) => {
+    // An app whose front page is a 404 is up: its real page is elsewhere, and
+    // refusing to offer the address would be refusing a working preview.
+    response.writeHead(404, { "Content-Type": "text/plain" });
+    response.end("not found");
+  });
+  try {
+    const silentPort = await listeningPort(silent);
+    const buildingPort = await listeningPort(building);
+    const answeringPort = await listeningPort(answering);
+
+    assert.equal(await probePort(silentPort), true);
+    assert.equal(await probePreviewResponse(silentPort, 400), false);
+
+    assert.equal(await probePreviewResponse(buildingPort, 2_000), false);
+    assert.equal(await probePreviewResponse(answeringPort, 2_000), true);
+
+    // Nothing listening at all is neither.
+    silent.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(await probePreviewResponse(silentPort, 400), false);
+  } finally {
+    silent.close();
+    building.close();
+    answering.close();
+  }
+});
+
+/**
+ * A repository whose build is broken and whose dev server does not need it.
+ *
+ * A detected build is a guess, so a failing one is deliberately not fatal —
+ * that is right, and it quietly produced the worst version of this: the app
+ * starts, serves whatever bundle was there before (usually none), and the
+ * page opens as an empty white rectangle. The reason existed the whole time,
+ * in a log nobody was shown.
+ */
+async function halfBuiltRepository(): Promise<{
+  root: string;
+  sourcePath: string;
+  project: CoordinatorProject;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "preview-half-"));
+  const sourcePath = path.join(root, "src-repo");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await writeFile(
+    path.join(sourcePath, "package.json"),
+    `${JSON.stringify({
+      name: "half-built",
+      private: true,
+      type: "module",
+      scripts: { build: "node build.mjs", dev: "node server.mjs" },
+    })}\n`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(sourcePath, "build.mjs"),
+    "console.error('tsc: cannot find name Widget');\nprocess.exit(2);\n",
+    "utf8",
+  );
+  await writeFile(path.join(sourcePath, "server.mjs"), serverSource("half"), "utf8");
+  await repositories.commitAll(sourcePath, "seed half-built app");
+
+  const projectRoot = path.join(root, "proj");
+  await mkdir(projectRoot, { recursive: true });
+  const project = await CoordinatorProject.init(projectRoot);
+  return { root, sourcePath, project };
+}
+
+test("an app started on a build that failed says so instead of just being blank", async () => {
+  const { root, sourcePath, project } = await halfBuiltRepository();
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "half-built",
+    });
+    // Nothing to install, and saying so beats paying for a registry round
+    // trip in a test that is about the build.
+    project.config.installCommands = {
+      [repository.id]: {
+        executable: process.execPath,
+        args: ["-e", "0"],
+        label: "nothing to install",
+      },
+    };
+    await project.save();
+
+    const previews = new PreviewService(project, store);
+    try {
+      const status = await previews.start({ repositoryId: repository.id });
+      // Still started: a guessed build that fails must not take a working dev
+      // server with it, which is what it did before the build step existed.
+      assert.equal(status.ready, true);
+      assert.match(status.label, /run dev$/u);
+      assert.equal(await (await fetch(status.url)).text(), "half");
+
+      // And the reader is told what they are looking at. Without this the
+      // only difference between a half-built app and a broken one was a line
+      // in a log nothing renders.
+      assert.ok(
+        status.buildFailure !== undefined,
+        `expected a build failure, got ${JSON.stringify(status)}`,
+      );
+      assert.match(status.buildFailure, /run build/u);
+      assert.match(status.buildFailure, /exited 2/u);
+      // The build's own words are in the output the reader can open, which is
+      // where a package manager's failure text ends up.
+      assert.ok(
+        status.recentOutput.some((line) =>
+          line.includes("cannot find name Widget"),
+        ),
+        status.recentOutput.join("\n"),
+      );
+      // It survives the poll the header reads, rather than only being in the
+      // answer to the press.
+      const later = await previews.status(repository.id);
+      assert.match(later?.buildFailure ?? "", /run build/u);
     } finally {
       await previews.close();
     }
