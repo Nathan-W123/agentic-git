@@ -298,7 +298,29 @@ export function groundPlan(plan: AgentPlan, index: RepositoryIndex): AgentPlan {
     fileReferents.length > 0 ||
     symbolReferents.length > 0;
   let confidence: PlanGroundingConfidence;
-  if (missingFiles.length === 0 && unresolvedSymbols.length === 0) {
+  // A plan that declares nothing is not a verified plan. The test below asks
+  // whether anything declared failed to resolve, and with nothing declared
+  // both lists are empty and it passes vacuously — so the system was strictly
+  // more suspicious of a plan naming one file that does not exist (which
+  // grades ungrounded) than of a plan naming nothing at all, and "verified"
+  // is exactly what skips the sequencing gate. Nothing about an empty plan
+  // has been checked against the repository, because there was nothing to
+  // check: its real footprint is whatever the agent turns out to touch.
+  //
+  // A coordinator-issued claim is exempt. A blanket claim is decided by the
+  // ownership rules rather than by what it declares — its scope is the whole
+  // repository by construction, and grading it ungrounded would set it
+  // sequencing against itself.
+  if (
+    plan.claim === undefined &&
+    declaredFiles.length === 0 &&
+    declaredSymbols.length === 0
+  ) {
+    confidence = "ungrounded";
+    notes.push(
+      "plan declares no files and no symbols; nothing about its real footprint is known",
+    );
+  } else if (missingFiles.length === 0 && unresolvedSymbols.length === 0) {
     confidence = "verified";
   } else if (anchored) {
     confidence = "grounded";

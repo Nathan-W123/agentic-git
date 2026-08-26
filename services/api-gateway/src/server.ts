@@ -61,11 +61,16 @@ import {
 } from "./auditor.js";
 import {
   AGENT_ACCOUNT_PREFIX,
+  ANSWER_NOT_STATUS_DIRECTIVE,
   assertProjectPolicy,
   createId,
   describeError,
+  DO_NOT_CODE_DIRECTIVE,
+  FORCE_QUESTION_MARKER,
+  KEEP_IT_SIMPLE_DIRECTIVE,
   projectBudgets,
   readsAsReportRequest,
+  requestFromObjective,
   ROLE_CONTEXT_PREFIX,
   withoutRoleContext,
   type ApprovalStatus,
@@ -1221,51 +1226,6 @@ const PLAN_SECTION_HEADING =
   /^(what this means|approach|files to change|steps|risks|how it gets checked)\b/iu;
 
 /**
- * What `/dnc` — "do not code" — adds to the answer prompt.
- *
- * The guarantee is structural: a `/dnc` message goes down the answer path,
- * which never submits a task, so nothing can be written. The prompt reinforces
- * that guarantee silently: the reply should read like an answer, not explain
- * the command or announce that the agent is obeying it.
- *
- * "Do not code" is not "do not look". It used to say "do not run anything",
- * which cost the command the thing it exists for: asked for a line count, the
- * agent answered that it had no permission to run a shell command, which is
- * not an answer about the code and not something the reader could grant.
- * Commands that only read — `git`, `wc`, `ls`, in bash or in PowerShell — are
- * how a question about a repository gets a true answer, so they are asked for
- * by name here and granted by the tools the answer runs with.
- */
-const DO_NOT_CODE_DIRECTIVE =
-  "Silently treat this as read-only. Answer the message itself without " +
-  "mentioning `/dnc`, calling it a do-not-code request, narrating that you " +
-  "are only looking, or pointing out that no changes are being made. Read " +
-  "the files and run whatever shell commands you need — bash or PowerShell, " +
-  "`git`, `wc`, `ls`, and the like — as long as they only read: nothing that " +
-  "writes, deletes, moves, installs, or commits. Do not write or change " +
-  "code, and do not start — or offer to start — any work. If the answer " +
-  "would need code changes, say what you would change, in words, and stop " +
-  "there.";
-
-/**
- * What every reply owes the room: an answer, not a progress note.
- *
- * Replies were ending on the work rather than on its result — "I'll wait for
- * the search agent to finish and report back" is posted verbatim as the chat
- * message, so the room reads a status line as the answer and then waits for a
- * follow-up that never comes. This travels with every task and every answer,
- * unconditionally: unlike `/simple` or `/dnc` there is no request it does not
- * apply to. Nothing filters the reply afterwards — the fix is that the turn
- * does not end until it has something to say.
- */
-const ANSWER_NOT_STATUS_DIRECTIVE =
-  "Your final message is the answer, not a status report. If you delegated " +
-  "to a subagent, wait for its result before finishing — never end a turn " +
-  "saying a search is running or that you will report back. Do not state a " +
-  "conclusion while work you started is still outstanding. If you cannot " +
-  "answer, say what you checked and what would settle it.";
-
-/**
  * The command word's directive, behind the one every reply carries.
  *
  * `/simple` reads last on purpose: brevity is the outer instruction, and the
@@ -1277,66 +1237,15 @@ const withAnswerDirective = (directive?: string): string =>
     : `${ANSWER_NOT_STATUS_DIRECTIVE}\n\n${directive}`;
 
 /**
- * Internal objective marker for an explicit `/ask` task.
+ * Re-exported from the shared package that now owns it.
  *
- * Task submission has no command metadata of its own. Carrying this exact
- * marker in the objective lets the execution adapter force the first round
- * into the existing question-demand flow without treating ordinary uses of
- * the word "ask" as commands.
+ * This gateway writes the directives into an objective; every adapter that
+ * builds a prompt has to take them back off again, and an adapter cannot
+ * import from a service. So the list and the function that reads it live in
+ * `@coord/shared-types`, where both ends can reach one copy, and this module
+ * keeps the name its callers already import.
  */
-const FORCE_QUESTION_MARKER =
-  "[Coordinator: force a question round before implementation.]";
-
-/**
- * What `/simple` adds: brevity above everything else.
- *
- * Worded for both places it travels — the answer prompt of a question, and
- * the objective string of a task — so one sentence serves wherever the reply
- * is written from.
- */
-const KEEP_IT_SIMPLE_DIRECTIVE =
-  "Keep every reply as short and simple as it can possibly be: the fewest, " +
-  "plainest words that still say it, one short sentence when one is enough " +
-  "— no preamble, no restating the request, nothing extra.";
-
-/**
- * What the person actually asked, out of the objective the worker was sent.
- *
- * A submitted objective is the request wrapped in instructions the coordinator
- * added: a role preamble in front, and behind it whichever directives applied
- * — the answer-not-a-status-report one on every task, `/simple`, `/dnc`, the
- * forced question marker. `withoutRoleContext` removes the front. Nothing
- * removed the back, and the back is now unconditional and long.
- *
- * That is not cosmetic. Six places read a stored objective as if it were the
- * request: some show it to people, and some compare it. The comparisons are
- * the ones that broke — `findThreadToContinue` scores a new request against a
- * thread's subject, and an objective that is four-fifths boilerplate drags
- * every score under the merge bar, so a follow-up asked in the same words as
- * the original opened its own thread instead of joining it. Measured at
- * 0.11 against a threshold of 0.42, for two identical requests.
- *
- * Dropped by exact paragraph match rather than by pattern, so a request that
- * happens to quote one of these sentences keeps it — and so a directive added
- * later has to be added here deliberately, which is the failure this is.
- */
-const COORDINATOR_DIRECTIVES: readonly string[] = [
-  ANSWER_NOT_STATUS_DIRECTIVE,
-  KEEP_IT_SIMPLE_DIRECTIVE,
-  DO_NOT_CODE_DIRECTIVE,
-  FORCE_QUESTION_MARKER,
-];
-
-export function requestFromObjective(objective: string): string {
-  const request = withoutRoleContext(objective);
-  const kept = request
-    .split(/\n[^\S\n]*\n/u)
-    .filter((paragraph) => !COORDINATOR_DIRECTIVES.includes(paragraph.trim()));
-  const joined = kept.join("\n\n").trim();
-  // Never nothing. A bare directive with no request behind it is still the
-  // only text a caller has to show.
-  return joined === "" ? request : joined;
-}
+export { requestFromObjective };
 
 /**
  * Politeness and preamble, which carry no information about the work.
@@ -13826,6 +13735,14 @@ export class ApiGateway {
         // The answer-not-a-status-report directive rides the same way and is
         // not opt-in: it goes ahead of `/simple` so brevity reads last and
         // still wins.
+        //
+        // Every paragraph joined in below is also listed in
+        // `COORDINATOR_DIRECTIVES`, in `@coord/shared-types`, which is what
+        // `requestFromObjective` takes back off before anybody reads a stored
+        // objective as the request — including the adapters, before they show
+        // it to a planning model. The match there is exact, so a directive
+        // added here and not added there stops being stripped and nothing
+        // reports it: add both together.
         objective: withRoleContext(
           candidate.role,
           [

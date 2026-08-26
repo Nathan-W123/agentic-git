@@ -14,6 +14,7 @@ import {
 } from "@coord/agent-protocol";
 import {
   createId,
+  requestFromObjective,
   scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
@@ -721,7 +722,12 @@ export class GenericCliAdapter implements AgentAdapter {
         riskAssessment: { level: plan?.riskLevel ?? "medium", reasons: [] },
         agentExplanation:
           record.completion.explanation ||
-          `Generic CLI agent completed ${record.input.task.objective}`,
+          // The request, not the stored objective: this line is posted into
+          // the channel when the agent returned no explanation of its own,
+          // and the stored objective would put the coordinator's own role
+          // preamble and reply directives in front of the room as if the
+          // agent had said them.
+          `Generic CLI agent completed ${requestFromObjective(record.input.task.objective)}`,
       },
     );
   }
@@ -765,6 +771,12 @@ export class GenericCliAdapter implements AgentAdapter {
       type: "start",
       sessionId: record.session.id,
       taskId: record.input.task.id,
+      // The stored objective, whole, deliberately. This is the wire
+      // contract's copy of the task record rather than a prompt: this adapter
+      // builds no prompt of its own, so there is no per-phase seam to strip
+      // at, and a third-party agent may echo the field straight back in its
+      // plan. If a clean request is wanted here it belongs in an additive
+      // sibling field on the protocol, not in a rewrite of this one.
       objective: record.input.task.objective,
       repositoryId: record.input.repositoryId,
       canonicalVersion: record.input.canonicalVersion,

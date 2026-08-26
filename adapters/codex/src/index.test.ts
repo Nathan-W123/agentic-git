@@ -13,7 +13,14 @@ import path from "node:path";
 import test from "node:test";
 
 import type { AgentEvent, CoordinatorContext } from "@coord/agent-protocol";
-import type { AgentPlan, TaskDefinition } from "@coord/shared-types";
+import {
+  ANSWER_NOT_STATUS_DIRECTIVE,
+  FORCE_QUESTION_MARKER as SHARED_FORCE_QUESTION_MARKER,
+  KEEP_IT_SIMPLE_DIRECTIVE,
+  ROLE_CONTEXT_PREFIX,
+  type AgentPlan,
+  type TaskDefinition,
+} from "@coord/shared-types";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -1890,4 +1897,241 @@ test("a released file is handed back and the narrowed plan reaches the next roun
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
+});
+
+/**
+ * A task objective exactly as the channel submits one: the role preamble in
+ * front, the request, and behind it the directives the coordinator adds.
+ */
+const WRAPPED_TASK: TaskDefinition = {
+  ...TASK,
+  objective: [
+    `${ROLE_CONTEXT_PREFIX} You are the implementation agent for this service.`,
+    "Update the fixture value",
+    ANSWER_NOT_STATUS_DIRECTIVE,
+    KEEP_IT_SIMPLE_DIRECTIVE,
+  ].join("\n\n"),
+};
+
+test("planning is shown the request, not the coordinator's reply script", async (t) => {
+  // A submitted objective is the request wrapped in instructions about how to
+  // end a chat turn. Handed to a planning turn whole, they are off-task at
+  // best and contradictory at worst: this turn must emit a JSON plan against
+  // a schema, and the objective was telling it its final message is the
+  // answer and not a status report. `/simple` is worse — "the fewest,
+  // plainest words" is pressure toward the short declaration list, and a
+  // short declaration list is what makes a task invisible to arbitration.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(options.input ?? "");
+      return output(JSON.stringify({ ...PLAN, objective: WRAPPED_TASK.objective }));
+    },
+  });
+  const baseVersion = await fixture.repositories.getCanonicalVersion(
+    fixture.repository,
+  );
+  const session = await adapter.startTask({
+    task: WRAPPED_TASK,
+    canonicalVersion: baseVersion,
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const planning = prompts[0] ?? "";
+  assert.match(planning, /Objective: Update the fixture value/u);
+  assert.doesNotMatch(planning, /not a status report/u);
+  assert.doesNotMatch(planning, /fewest, plainest words/u);
+  assert.doesNotMatch(planning, new RegExp(ROLE_CONTEXT_PREFIX, "u"));
+
+  // The replan prompt stripped nothing at all before this, so it is pinned
+  // separately rather than assumed to follow from the planning one.
+  await adapter.requestReplan(session.id, {
+    taskId: WRAPPED_TASK.id,
+    previousPlan: { ...PLAN, objective: WRAPPED_TASK.objective },
+    canonicalChange: {
+      previousVersion: baseVersion,
+      canonicalVersion: baseVersion,
+      changedFiles: ["src/value.js"],
+      changedSymbols: [],
+      changedApis: [],
+      changedSchemas: [],
+      changedConfigKeys: [],
+      changedTests: [],
+      changedServices: [],
+      reason: "another task integrated",
+    },
+    constraints: [],
+  });
+  // Asserted on the objective line alone. The serialised previous plan in the
+  // same prompt still carries the stored objective whole, and must: the
+  // control plane compares a submitted plan's objective to its task's
+  // byte-for-byte, so stripping that field would break the lease binding. The
+  // fix belongs in the prompt's own objective slot and nowhere else.
+  const replanning = prompts.at(-1) ?? "";
+  const replanObjective = replanning
+    .split("\n")
+    .find((line) => line.startsWith("Objective: "));
+  assert.equal(replanObjective, "Objective: Update the fixture value");
+});
+
+test("the forced question round is shown the request without the script that argues with it", async (t) => {
+  // The sharpest case. This round is told to ask questions and do nothing
+  // else, and the objective was telling the same turn never to end while work
+  // it started is outstanding — and carrying the routing marker that says
+  // this is a question round, which an agent shown it starts describing
+  // instead of doing the work the round was for.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const askTask: TaskDefinition = {
+    ...WRAPPED_TASK,
+    objective: `${WRAPPED_TASK.objective}\n\n${SHARED_FORCE_QUESTION_MARKER}`,
+  };
+  const prompts: string[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner: async (_executable, args, options = {}) => {
+      prompts.push(options.input ?? "");
+      // Planning answers with a plan; the forced round's own answer is not
+      // what this test is about, so it is left unparseable and the prompt is
+      // read off the call that carried it.
+      return output(
+        args.includes("read-only")
+          ? JSON.stringify({ ...PLAN, objective: askTask.objective })
+          : "{}",
+      );
+    },
+  });
+  const baseVersion = await fixture.repositories.getCanonicalVersion(
+    fixture.repository,
+  );
+  const session = await adapter.startTask({
+    task: askTask,
+    canonicalVersion: baseVersion,
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: askTask.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion,
+  });
+  await adapter.sendContext(session.id, contextFor(workspace)).catch(
+    () => undefined,
+  );
+  const asking = prompts.at(-1) ?? "";
+  assert.match(asking, /Task: Update the fixture value/u);
+  assert.doesNotMatch(asking, /not a status report/u);
+  assert.doesNotMatch(asking, /fewest, plainest words/u);
+  assert.doesNotMatch(asking, /Coordinator: force a question round/u);
+  await fixture.workspaces.destroy(workspace);
+});
+
+test("a plan that names no files is asked for again, once", async (t) => {
+  // An empty `expectedFiles` passes every check in the system and costs the
+  // task its place in arbitration: no leases, so nothing sees it and it sees
+  // nothing, and no partial admission can be computed because every split is
+  // derived from the file list. It announced itself as "planned 0 file(s)",
+  // which reads like a routine line, and carried on.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(options.input ?? "");
+      return output(
+        JSON.stringify(
+          prompts.length === 1
+            ? { ...PLAN, expectedFiles: [], expectedSymbols: [] }
+            : PLAN,
+        ),
+      );
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.equal(prompts.length, 2);
+  // The whole prompt again, not a bare "try again": the second process may be
+  // a cold start that has never seen the first answer.
+  assert.match(prompts[1] ?? "", /Inspect the repository and prepare a coordination plan\./u);
+  assert.match(prompts[1] ?? "", /listed no files in expectedFiles/u);
+  // And the legitimate answer is given somewhere to go, so the second attempt
+  // tells a report apart from a lazy plan rather than re-rolling the first.
+  assert.match(prompts[1] ?? "", /an audit, a summary/u);
+  assert.deepEqual(plan.expectedFiles, ["src/value.js"]);
+});
+
+test("a second empty plan is narrated as the condition it is, not failed", async (t) => {
+  // Asked once and only once. Failing the task instead would re-commit an
+  // error this adapter has already backed out of: an audit or a report
+  // genuinely plans no files, and the old empty-result guard failed ordinary
+  // requests with a message about a broken sandbox. So the empty plan stands
+  // — but it stops announcing itself as a count.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const events: AgentEvent[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(options.input ?? "");
+      return output(
+        JSON.stringify({ ...PLAN, expectedFiles: [], expectedSymbols: [] }),
+      );
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.streamEvents(session.id, (event) => events.push(event));
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.deepEqual(plan.expectedFiles, []);
+  assert.equal(prompts.length, 2, "asked again exactly once, never in a loop");
+  const messages = events
+    .filter((event) => event.event === "progress")
+    .map((event) => event.message);
+  assert.ok(messages.some((message) => /asking once more/u.test(message)));
+  assert.ok(
+    messages.some((message) =>
+      /named no files to change; it will ask for each file as it goes/u.test(
+        message,
+      ),
+    ),
+  );
+  assert.equal(
+    messages.some((message) => /planned 0 file\(s\)/u.test(message)),
+    false,
+  );
 });

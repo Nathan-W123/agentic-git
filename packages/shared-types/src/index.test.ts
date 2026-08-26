@@ -12,10 +12,16 @@ import {
   planAdmissionApproved,
   substituteGroundedNames,
   planAdmissionPartial,
+  ANSWER_NOT_STATUS_DIRECTIVE,
+  COORDINATOR_DIRECTIVES,
+  DO_NOT_CODE_DIRECTIVE,
+  FORCE_QUESTION_MARKER,
+  KEEP_IT_SIMPLE_DIRECTIVE,
   planGroundingConfidence,
   projectBudgets,
   readsAsReportRequest,
   reducePlanScope,
+  requestFromObjective,
   ROLE_CONTEXT_PREFIX,
   uniqueRepositoryPaths,
   withoutRoleContext,
@@ -641,5 +647,75 @@ test("a role preamble does not decide whether a request was a report", () => {
   assert.equal(
     withoutRoleContext(`${ROLE_CONTEXT_PREFIX} Auditor.\n\naudit the codebase`),
     "audit the codebase",
+  );
+});
+
+test("a stored objective reads back as the request the person wrote", () => {
+  // The gateway wraps a request front and back before it stores it: the role
+  // preamble in front, and behind it whichever directives applied. Six places
+  // read the result as if it were the request — some show it to people, some
+  // compare it, and the adapters hand it to a model that has been asked for a
+  // JSON plan. Everything the coordinator added has to come off first.
+  const wrapped = [
+    `${ROLE_CONTEXT_PREFIX} You are the implementation agent.`,
+    "Add a retry to the checkout call",
+    ANSWER_NOT_STATUS_DIRECTIVE,
+    KEEP_IT_SIMPLE_DIRECTIVE,
+  ].join("\n\n");
+  assert.equal(
+    requestFromObjective(wrapped),
+    "Add a retry to the checkout call",
+  );
+
+  // Each directive on its own, so a new one added to the list is covered by
+  // the list rather than by whichever combination this test happened to use.
+  for (const directive of COORDINATOR_DIRECTIVES) {
+    assert.equal(
+      requestFromObjective(`Add a retry to the checkout call\n\n${directive}`),
+      "Add a retry to the checkout call",
+    );
+  }
+
+  // Every paragraph of the request survives, not just the first: a request
+  // whose second paragraph says "and fix what you find" is still asking for
+  // both halves.
+  assert.equal(
+    requestFromObjective(
+      `${ROLE_CONTEXT_PREFIX} Auditor.\n\nfirst para\n\nsecond para\n\n` +
+        ANSWER_NOT_STATUS_DIRECTIVE,
+    ),
+    "first para\n\nsecond para",
+  );
+
+  // Matched as whole paragraphs rather than by pattern, so a request that
+  // happens to quote one of these sentences keeps its own words.
+  const quoting = `Explain why we tell agents "${KEEP_IT_SIMPLE_DIRECTIVE}"`;
+  assert.equal(requestFromObjective(quoting), quoting);
+
+  // Never nothing: a bare directive with no request behind it is still the
+  // only text a caller has to show.
+  assert.equal(requestFromObjective(DO_NOT_CODE_DIRECTIVE), DO_NOT_CODE_DIRECTIVE);
+  assert.equal(
+    requestFromObjective(`${ROLE_CONTEXT_PREFIX} Auditor.`),
+    `${ROLE_CONTEXT_PREFIX} Auditor.`,
+  );
+
+  // An objective that was never wrapped is untouched.
+  assert.equal(
+    requestFromObjective("audit the codebase"),
+    "audit the codebase",
+  );
+
+  // The `/ask` marker is one of the directives, so it comes off with them —
+  // but only as its own paragraph, which is how the gateway writes it. An
+  // inline one is routing text the adapters take out themselves, on top of
+  // this, because the exact-paragraph rule cannot see it.
+  assert.equal(
+    requestFromObjective(`Add an orchestrate command\n\n${FORCE_QUESTION_MARKER}`),
+    "Add an orchestrate command",
+  );
+  assert.equal(
+    requestFromObjective(`Add an orchestrate command ${FORCE_QUESTION_MARKER}`),
+    `Add an orchestrate command ${FORCE_QUESTION_MARKER}`,
   );
 });

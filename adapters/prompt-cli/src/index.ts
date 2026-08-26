@@ -19,8 +19,9 @@ import {
 import {
   assertAgentPlan,
   createId,
+  FORCE_QUESTION_MARKER,
   isBlanketClaim,
-  readsAsReportRequest,
+  requestFromObjective,
   scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
@@ -70,17 +71,6 @@ const DEFAULT_EXECUTION_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_REPLAY_EVENTS = 10_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SCOPE_ROUNDS = 8;
-
-/**
- * Internal objective marker written by the channel's explicit `/ask` command.
- *
- * The command has to survive task submission, planning and queueing before the
- * execution adapter can act on it. Keeping the marker in the existing
- * objective avoids a new persisted task field, while the exact, namespaced
- * text keeps ordinary requests containing the word "ask" out of this path.
- */
-const FORCE_QUESTION_MARKER =
-  "[Coordinator: force a question round before implementation.]";
 
 export type PromptCliProcessRunner = (
   executable: string,
@@ -1023,6 +1013,76 @@ function questionsAsked(execution: QuestionAsked): AskedQuestion[] {
   }));
 }
 
+/**
+ * The objective as the person wrote it, with everything the coordinator
+ * wrapped around it lifted out.
+ *
+ * A stored objective is not the request. In front of it is the role preamble;
+ * behind it are the coordinator's directives about how to end a chat turn —
+ * unconditionally the answer-not-a-status-report one, and `/simple` when the
+ * channel asked for brevity — and the `/ask` routing marker.
+ * `requestFromObjective` takes all of that off.
+ *
+ * Every one of those is written for a reply in a channel, and this adapter
+ * shows the objective to turns that write no reply. A planning turn is asked
+ * for a JSON plan and was being told in the same breath that its final
+ * message is the answer and not a status report; the forced question round is
+ * asked for questions and nothing else, and was told never to state a
+ * conclusion while work is outstanding. `/simple` reaching a planning turn is
+ * worse than off-task: "the fewest, plainest words" is pressure toward a
+ * short declaration list, and a short declaration list is how a task ends up
+ * claiming files whole or claiming nothing at all.
+ *
+ * The marker gets a substring removal of its own on top of the paragraph
+ * strip. The gateway writes it as its own paragraph, which the exact-match
+ * filter in `requestFromObjective` handles — but the marker is routing text
+ * and can reach us inline, mid-sentence, and an agent shown it in a prompt
+ * starts describing the question round instead of doing the work the round
+ * was for.
+ */
+function taskRequest(objective: string): string {
+  const request = requestFromObjective(objective);
+  return request.includes(FORCE_QUESTION_MARKER)
+    ? request.replace(FORCE_QUESTION_MARKER, "").trim()
+    : request;
+}
+
+/**
+ * What the second planning attempt adds when the first named no files.
+ *
+ * A plan with an empty `expectedFiles` passes every check in the system and
+ * costs the task its place in arbitration: it takes no leases, so nothing
+ * else can see it and it cannot see anything else, and no partial admission
+ * can be computed for it because every split is derived from the file list.
+ * The work still happens — the agent asks for each file as it reaches it —
+ * but that request is refused outright if somebody else holds the file by
+ * then, and the run dies after the work was done rather than before it
+ * started.
+ *
+ * Asked once and only once. A second empty answer is taken at its word and
+ * the task runs: the alternative is failing the task, and this adapter has
+ * been there — the old empty-changeset guard had to infer from a person's
+ * wording whether they wanted anything written, guessed wrong, and failed
+ * ordinary requests with a message about broken authentication. An audit or
+ * a report genuinely plans no files, so the correction says so out loud and
+ * gives that answer somewhere to go, which is what makes the second answer
+ * worth more than a re-roll of the first.
+ *
+ * Worded to send the model back to the workspace rather than to fill the
+ * field: a list of plausible-looking paths it never opened grades as
+ * ungrounded and sequences the task, which is safe but slower than the
+ * silence it replaced.
+ */
+const EMPTY_PLAN_CORRECTION = [
+  "Your previous answer listed no files in expectedFiles, so this plan " +
+    "claims nothing. Read the workspace and name the files you expect to " +
+    "change: naming none does not make you faster, it means you must stop " +
+    "and ask permission for each file as you reach it, and wait — or be " +
+    "refused — if another task has taken it by then.",
+  "If this task genuinely changes no files — an audit, a summary, a " +
+    "question to answer — return an empty list again and say so in `intent`.",
+].join("\n");
+
 const PLAN_SHAPE_INSTRUCTIONS = [
   "Answer with exactly one JSON object and nothing else. No prose, no code fence.",
   "The object must have exactly these keys (use empty arrays where nothing applies):",
@@ -1546,15 +1606,45 @@ export class PromptCliAdapter implements AgentAdapter {
       throw new Error(`Session ${sessionId} has no planning workspace`);
     }
     try {
-      const plan = await this.runPlanning(
+      let plan = await this.runPlanning(
         record,
         workspace.path,
         this.planPrompt(record.input),
       );
+      if (plan.expectedFiles.length === 0) {
+        this.emit(record, {
+          event: "progress",
+          message: `${this.profile.name} planned no files to change; asking once more before it starts`,
+          occurredAt: new Date().toISOString(),
+        });
+        // The whole prompt again, with the correction behind it, rather than a
+        // bare "try again". A profile that resumes carries its token into the
+        // second invocation and reads this as a follow-up; one that does not
+        // gets a cold start that has never seen the first answer. One
+        // self-contained prompt serves both.
+        //
+        // Here rather than inside `runPlanning`, so the replan caller is not
+        // silently changed with it: a replan's own prompt says that returning
+        // the previous plan unaltered is a correct answer, and it needs a
+        // correction written against that plan rather than this one.
+        plan = await this.runPlanning(
+          record,
+          workspace.path,
+          [this.planPrompt(record.input), EMPTY_PLAN_CORRECTION].join("\n"),
+        );
+      }
       record.plan = plan;
       this.emit(record, {
         event: "progress",
-        message: `${this.profile.name} planned ${plan.expectedFiles.length} file(s)`,
+        // A count of zero reads as a routine line, which is how this went
+        // unnoticed: a task that named nothing announced "planned 0 file(s)"
+        // and carried on. Named as the condition it is instead, with what it
+        // costs, in the register the other degraded-but-continuing lines here
+        // use.
+        message:
+          plan.expectedFiles.length === 0
+            ? `${this.profile.name} named no files to change; it will ask for each file as it goes, and may have to wait for other work`
+            : `${this.profile.name} planned ${plan.expectedFiles.length} file(s)`,
         occurredAt: new Date().toISOString(),
       });
       return structuredClone(plan);
@@ -2010,7 +2100,12 @@ export class PromptCliAdapter implements AgentAdapter {
         riskAssessment: { level: plan.riskLevel, reasons: [] },
         agentExplanation:
           completion.explanation ||
-          `${this.profile.name} completed ${record.input.task.objective}`,
+          // The request, not the stored objective: this line is posted into
+          // the channel when the model returned no explanation of its own,
+          // and the stored objective would put the coordinator's own role
+          // preamble and reply directives in front of the room as if the
+          // agent had said them.
+          `${this.profile.name} completed ${taskRequest(record.input.task.objective)}`,
       },
     );
     // An empty changeset is reported, never thrown.
@@ -2487,7 +2582,7 @@ export class PromptCliAdapter implements AgentAdapter {
       "Keep planning focused: inspect only enough files to establish an accurate scope.",
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${input.task.id}`,
-      `Objective: ${input.task.objective.replace(FORCE_QUESTION_MARKER, "").trim()}`,
+      `Objective: ${taskRequest(input.task.objective)}`,
       // An explicit `/ask` still ends in code, so the plan has to be a plan
       // for that code — otherwise the round after the answers arrive has an
       // empty scope to implement inside.
@@ -2556,7 +2651,7 @@ export class PromptCliAdapter implements AgentAdapter {
       "a correct answer when nothing it claimed was affected.",
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${record.input.task.id}`,
-      `Objective: ${record.input.task.objective}`,
+      `Objective: ${taskRequest(record.input.task.objective)}`,
       `Previous plan: ${JSON.stringify(request.previousPlan)}`,
       `Canonical change: ${JSON.stringify(request.canonicalChange)}`,
       ...(request.holderWorkingChanges === undefined ||
@@ -2578,6 +2673,14 @@ export class PromptCliAdapter implements AgentAdapter {
     record: PromptCliSession,
     context: CoordinatorContext,
   ): string {
+    // Execution is the one turn where the coordinator's directives have a
+    // real reader, so this deliberately does NOT go through `taskRequest`.
+    // The completion `explanation` is the line the room sees, so "your final
+    // message is the answer, not a status report" is about the very sentence
+    // this turn will write, and `/simple` rides in the objective and nowhere
+    // else — dropping it here would silently switch the command off for every
+    // task that produces code. Only the marker, which is routing rather than
+    // something anybody asked for, comes out.
     const taskObjective = this.isForcedQuestionTask(record)
       ? record.input.task.objective.replace(FORCE_QUESTION_MARKER, "").trim()
       : record.input.task.objective;
@@ -2767,8 +2870,7 @@ export class PromptCliAdapter implements AgentAdapter {
     record: PromptCliSession,
     context: CoordinatorContext,
   ): string {
-    const markerAt = record.input.task.objective.indexOf(FORCE_QUESTION_MARKER);
-    const objective = record.input.task.objective.slice(0, markerAt).trim();
+    const objective = taskRequest(record.input.task.objective);
     const approvedPlan =
       record.plan === undefined
         ? undefined
