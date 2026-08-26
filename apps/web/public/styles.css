@@ -88,7 +88,9 @@
   --radius-sm: 10px;
   --radius: 10px;
   --radius-lg: 12px;
-  --radius-xl: 12px;
+  /* Major surfaces should read as distinct cards rather than straight slices
+     of the viewport. Keep their curve a step above controls and small cards. */
+  --radius-xl: 16px;
 
   --tree-w: 232px;
   --chat-w: 380px;
@@ -107,7 +109,7 @@
      transcript nobody can read: on a wide screen the eye leaves the end of
      one line with no idea where the next one starts, and every message became
      a full-width band of hover ground with a sentence in the corner of it.
-     `--room-column` is the column the messages are centred in, and
+     `--room-column` is the column the messages read down, and
      `--message-max` caps the words themselves at roughly the line length
      prose is set at — measured in characters, so it follows the reader's own
      text size rather than a pixel count taken at one of them. */
@@ -806,16 +808,18 @@ svg.ui-icon {
   display: flex;
   align-items: center;
   gap: 11px;
+  margin: 8px 8px 0;
   padding: 9px 20px;
   background: var(--orange-wash);
-  border-bottom: 1px solid rgba(251, 191, 36, 0.24);
+  border: 1px solid rgba(251, 191, 36, 0.24);
+  border-radius: var(--radius-xl);
   color: var(--orange);
   font-size: 12.5px;
 }
 
 .banner-busy {
   background: var(--accent-wash);
-  border-bottom-color: var(--accent-line);
+  border-color: var(--accent-line);
   color: var(--accent-bright);
 }
 
@@ -4739,8 +4743,10 @@ button.chip.lg:hover {
  */
 .chats-shell {
   display: flex;
+  gap: 8px;
   height: 100%;
   min-height: 0;
+  padding: 8px;
   overflow: hidden;
   background: var(--bg);
   /* The ground a closing side panel is pinned against while it leaves — see
@@ -4761,8 +4767,9 @@ button.chip.lg:hover {
   align-items: center;
   gap: 9px;
   padding: 12px 7px;
-  background: var(--bg);
-  border-right: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
 }
 
 .channel-rail-toggle,
@@ -4930,7 +4937,8 @@ button.chip.lg:hover {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
   overflow-x: hidden;
   transition: width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
   /* The quiet edge matches the reference's nested panes and remains subtle
@@ -5762,7 +5770,9 @@ button.chip.lg:hover {
      conversation too, instead of the transcript reading as a panel floating
      inside a darker frame. */
   background: var(--room-tint);
+  border-radius: var(--radius-xl);
   box-shadow: inset 0 0 0 1px var(--border-soft);
+  overflow: hidden;
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
      stay reachable while it is open. */
@@ -5982,11 +5992,12 @@ button.chip.lg:hover {
 .chan-messages {
   overflow-y: auto;
   min-height: 0;
-  /* Centred in its own column rather than run edge to edge. The side padding
-     is the larger of the 24px a narrow room needs and whatever is left over
-     once the column has taken its share, so nothing moves until the window is
-     wider than the conversation wants to be. */
-  padding: 12px max(24px, (100% - var(--room-column)) / 2) 20px;
+  /* Left-aligned in its own column, not centred and not edge to edge: the
+     messages start where the header and composer do. The right padding is
+     the larger of the 24px a narrow room needs and what is left once the
+     column has taken its share, so nothing moves until the window is wider
+     than the conversation wants to be. */
+  padding: 12px max(24px, 100% - var(--room-column)) 20px 18px;
   position: relative;
   isolation: isolate;
 }
@@ -6202,7 +6213,6 @@ button.chip.lg:hover {
    gutter, minus the row padding it already sits inside. */
 .cmsg-row.cmsg-compact .cmsg-body {
   margin-left: calc(var(--cmsg-body-x) - 8px);
-  border-radius: 12px;
 }
 
 .cmsg-row.cmsg-compact .cmsg-text {
@@ -6348,11 +6358,9 @@ button.chip.lg:hover {
 
 .cmsg-row .cmsg-body {
   min-width: 0;
-  /* One restrained surface around the message metadata and its content. The
-     earlier full-width body made short messages read as loose text while the
-     action bar floated at the edge of the room. Fit-content keeps every
-     message in the shared left transcript without stretching its bubble or
-     inventing a separate right-hand lane for the current user. */
+  /* Fit-content keeps each message's hover tools anchored to its content
+     without drawing a separate surface around the message or inventing a
+     right-hand lane for the current user. */
   position: relative;
   flex: 0 1 auto;
   width: fit-content;
@@ -6360,21 +6368,6 @@ button.chip.lg:hover {
     calc(100% - var(--cmsg-body-x)),
     calc(var(--message-max) + 26px)
   );
-  padding: 9px 12px 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: 5px 12px 12px 12px;
-  background: var(--bg-card);
-  box-shadow: 0 1px 1px rgb(0 0 0 / 7%);
-  transition:
-    background 0.13s ease,
-    border-color 0.13s ease;
-}
-
-@media (hover: hover) {
-  .cmsg-row:not(.cmsg-system):hover .cmsg-body {
-    border-color: var(--border);
-    background: var(--bg-card-2);
-  }
 }
 
 .cmsg-row .cmsg-top {
@@ -8847,7 +8840,8 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
   box-shadow: -14px 0 30px -24px rgb(0 0 0 / 60%);
   z-index: 4;
 }
@@ -8971,9 +8965,9 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 @media (min-width: 601px) {
   .thread-panel.panel-leaving {
     position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
   }
 }
 
@@ -10818,6 +10812,7 @@ dialog.modal[open]::backdrop {
        same 0.28s reads as slower, because it saves half the travel for the
        second half of the time and the panel appears to hesitate. */
     transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
     box-shadow: var(--shadow-pop);
     /* Declared here rather than added with `.chan-dragging`, even though it is
        only earning its keep while the panel moves: promoting a layer at the
@@ -10914,6 +10909,7 @@ dialog.modal[open]::backdrop {
     flex-wrap: nowrap;
     gap: 8px;
     padding: var(--safe-top) 8px 0 10px;
+    border-radius: 0 0 var(--radius-xl) var(--radius-xl);
   }
 
   .chan-head .spacer {
@@ -10986,6 +10982,8 @@ dialog.modal[open]::backdrop {
     width: 100vw;
     max-width: 100vw;
     min-width: 0;
+    border: 0;
+    border-radius: 0;
     z-index: 72;
   }
 

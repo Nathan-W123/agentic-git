@@ -99,12 +99,26 @@ test("channel messages and workspace links use compact, bounded surfaces", async
     /\.chan-quick-link \{[\s\S]{0,220}min-height: 34px;[\s\S]{0,100}padding: 6px 8px;/u,
   );
 
-  // The body is the bubble and owns its hover tools. It remains a fitted item
-  // in the ordinary left-hand transcript; no sender-specific right lane is
-  // introduced.
+  // Channel messages stay fitted so their hover tools remain nearby, but the
+  // transcript itself is unboxed. Private conversations keep their bubbles.
+  const channelBodyRule =
+    css.match(/\.cmsg-row \.cmsg-body \{(?<rule>[^}]*)\}/u)?.groups?.rule ?? "";
+  assert.match(channelBodyRule, /width: fit-content;/u);
+  assert.doesNotMatch(
+    channelBodyRule,
+    /(?:^|\s)(?:padding|border|border-radius|background|box-shadow):/u,
+  );
   assert.match(
     css,
-    /\.cmsg-row \.cmsg-body \{[\s\S]{0,520}width: fit-content;[\s\S]{0,260}border: 1px solid var\(--border-soft\);[\s\S]{0,100}border-radius: 5px 12px 12px 12px;/u,
+    /\.cmsg-row\.cmsg-compact \.cmsg-body \{\s*margin-left: calc\(var\(--cmsg-body-x\) - 8px\);\s*\}/u,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.cmsg-row:not\(\.cmsg-system\):hover \.cmsg-body/u,
+  );
+  assert.match(
+    css,
+    /\.dm-bubble \{[^}]*border-radius: var\(--radius-sm\);[^}]*background: var\(--surface-2\);/u,
   );
   assert.match(
     chats,

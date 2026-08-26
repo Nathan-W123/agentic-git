@@ -1190,7 +1190,7 @@ test("the phone drawer closes when a sidebar destination opens", async () => {
   );
 });
 
-test("a thread says what it is without a connector drawn to it", async () => {
+test("a reply carries a quiet visual path back to its root", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const rendererStart = chats.indexOf("function threadReplies");
@@ -1200,39 +1200,199 @@ test("a thread says what it is without a connector drawn to it", async () => {
   assert.match(
     chats,
     /channelThread \? " cmsg-threaded" : ""/u,
-    "only channel roots with replies should carry the threaded mark",
+    "only channel roots with replies should grow a branch",
   );
   assert.match(
     chats,
     /channelThread\s*\? threadSummaryLink\(entry, replies, repositoryId, progress\)\s*: changedBlock/u,
     "the open thread root should not repeat the channel's reply link",
   );
+  assert.match(
+    chats,
+    /channelThread \? `<div class="cmsg-thread-route">` : ""/u,
+    "the route should wrap the message through its thread link",
+  );
+  assert.match(
+    chats,
+    /channelThread \? `<\/div>\$\{changedBlock\}` : ""/u,
+    "the changed files should sit after the route endpoint",
+  );
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
+  const channelStem =
+    /\n\.cmsg-row\.cmsg-thread-path-through::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const channelEnd =
+    /\n\.cmsg-row\.cmsg-thread-path-end \.cmsg-thread-route::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const channelElbow =
+    /\n\.cmsg-row\.cmsg-threaded \.cmsg-thread-link::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const channelEndCap =
+    /\n\.cmsg-row\.cmsg-thread-path-end \.cmsg-thread-link::after \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(channelStem, undefined, "the shared channel stem should exist");
+  assert.notEqual(channelEnd, undefined, "the channel stem should end at its route");
+  assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
+  assert.notEqual(channelEndCap, undefined, "the final branch should close the path");
+  assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
+  assert.match(channelElbow ?? "", /border-bottom-right-radius: 2px;/u);
+  assert.match(channelElbow ?? "", /border-bottom-left-radius: 12px;/u);
+  assert.match(panelBranch ?? "", /border-bottom-right-radius: 2px;/u);
+  assert.match(panelBranch ?? "", /border-bottom-left-radius: 11px;/u);
+  // The channel's line is drawn in pieces that overlap on purpose, so it can
+  // only be painted in an opaque colour: `--border-strong` is translucent, and
+  // every doubled pixel — each row join, each hook — showed as a darker patch
+  // in a line that is meant to read as one continuous stroke. The panel's
+  // branch is a single stroke that crosses nothing, so it keeps the token.
+  for (const piece of [channelStem, channelEnd, channelElbow]) {
+    assert.match(piece ?? "", /border-left: 2px solid var\(--cmsg-stem\);/u);
+    assert.doesNotMatch(piece ?? "", /--border-strong/u);
+  }
+  assert.match(channelElbow ?? "", /border-bottom: 2px solid var\(--cmsg-stem\);/u);
+  assert.match(panelBranch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
+  assert.match(panelBranch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
+  // Flattened against the surface the stroke is drawn on rather than given a
+  // translucent value of its own, so overlaps keep one shade and the line
+  // follows the row when hovering lightens it.
+  assert.match(
+    css,
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 18%, var\(--room-tint\)\);/u,
+  );
+  assert.match(
+    css,
+    /--cmsg-stem: color-mix\(in srgb, var\(--muted\) 18%, var\(--bg-hover\)\);/u,
+  );
+  assert.match(channelStem ?? "", /top: -1px;/u);
+  assert.match(channelStem ?? "", /bottom: -1px;/u);
+  assert.match(
+    channelEnd ?? "",
+    /bottom: calc\(var\(--cmsg-face\) \/ 2 \+ 2px \+ 11px\);/u,
+    "the stem's foot should be measured from the face it turns into",
+  );
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-through::before \{\n  top: 48px;/u,
+    "the connector should leave a small gap beneath the avatar",
+  );
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-thread-path-start\.cmsg-thread-path-end\s+\.cmsg-thread-route::before \{\n  top: 39px;/u,
+    "a single-task connector should use the same separated start",
+  );
+  // Written from the column variables rather than as the 12px they work out
+  // to, which is what keeps the stem, the elbow and the final segment from
+  // drifting apart when any of those three numbers moves.
+  assert.match(
+    channelElbow ?? "",
+    /right: calc\(100% \+ var\(--cmsg-body-x\) - var\(--cmsg-stem-x\) - 20px\);/u,
+  );
+  assert.match(channelElbow ?? "", /width: 20px;/u);
+  // The elbow turns out of the stem, so its own upright has to stand in the
+  // stem's column. It is placed from its right edge, which means the gap plus
+  // its width must land on the stem's offset — and it must be measured by the
+  // border box, or the stroke hangs outside that width and the
+  // turn steps sideways where it should read as one line.
+  assert.match(channelElbow ?? "", /box-sizing: border-box;/u);
+  const bodyX = Number(/--cmsg-body-x: (\d+)px;/u.exec(css)?.[1]);
+  const stemX = Number(/--cmsg-stem-x: (\d+)px;/u.exec(css)?.[1]);
+  const elbowWidth = Number(/width: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  assert.equal(bodyX, 52, "the body column stays the avatar gutter");
+  assert.equal(stemX, 20, "the stem sits a little further left for spacing");
+  assert.equal(
+    bodyX - stemX - elbowWidth,
+    12,
+    "the elbow should leave twelve pixels between the stem and the link",
+  );
+  assert.equal(
+    bodyX - stemX,
+    elbowWidth + 12,
+    "the elbow's upright should sit in the stem's own column",
+  );
+  assert.match(channelEndCap ?? "", /width: 2px;/u);
+  assert.match(channelEndCap ?? "", /height: 2px;/u);
+  assert.match(channelEndCap ?? "", /border-radius: 50%;/u);
+  assert.match(channelEndCap ?? "", /background: var\(--cmsg-stem\);/u);
+  assert.match(channelEndCap ?? "", /right: calc\(100% \+ 10px\);/u);
+  // The hook is only the quarter turn: a straight upright here would be
+  // painted on top of the shared stem and make every branch visibly thicker.
+  // Every piece of the join is measured from the replier's face — the one
+  // part of the summary whose height never changes — rather than from a line
+  // box that gains a second line whenever an agent is working.
+  const faceSize = Number(/--cmsg-face: (\d+)px;/u.exec(css)?.[1]);
+  assert.equal(faceSize, 20, "the branch turns into the 20px replier face");
+  const stemEnd = Number(
+    /bottom: calc\(var\(--cmsg-face\) \/ 2 \+ 2px \+ (\d+)px\);/u.exec(
+      channelEnd ?? "",
+    )?.[1],
+  );
+  const elbowTop = Number(
+    /top: calc\(50% - (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
+  );
+  const elbowHeight = Number(/height: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  const elbowRadius = Number(
+    /border-bottom-left-radius: (\d+)px;/u.exec(channelElbow ?? "")?.[1],
+  );
+  assert.equal(elbowHeight, 12, "the hook should stay a compact turn");
+  assert.equal(
+    elbowHeight,
+    elbowRadius,
+    "the hook should be a circular corner like the open thread panel",
+  );
+  assert.equal(
+    stemEnd,
+    elbowTop,
+    "the final stem should stop at the hook's tangent",
+  );
+  // A two-pixel stroke whose lower pixel is the link's middle is a stroke
+  // centred on it, and the faces are the only thing that middle is measured
+  // from — so the line crosses the replier's face on its own centre rather
+  // than leaving the face hanging below it.
+  assert.equal(
+    elbowHeight - elbowTop,
+    1,
+    "the elbow's horizontal run should be centred on the replier's face",
+  );
+  assert.match(
+    channelEndCap ?? "",
+    /top: calc\(50% - 1px\);/u,
+    "the round cap should close the run on that same centre line",
+  );
+  assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
+  assert.match(panelBranch ?? "", /left: 15px;/u);
+  assert.match(panelBranch ?? "", /top: 48px;/u);
+  assert.match(panelBranch ?? "", /width: 11px;/u);
+  assert.match(css, /\.thread-replies-head::after \{/u);
+});
 
-  // The room used to draw a two-pixel stroke from a prompt's avatar, through
-  // every grouped line beneath it, and around a quarter turn into each thread
-  // link it passed. Five pieces of one line, each placed from the others so
-  // the joins would not show, all of it saying something the thread link says
-  // in words directly under the message it belongs to. None of the pieces —
-  // nor the wrapper and path classes that existed only to position them — may
-  // come back.
-  assert.doesNotMatch(css, /--cmsg-stem/u);
-  assert.doesNotMatch(css, /--cmsg-face/u);
-  assert.doesNotMatch(css, /cmsg-thread-route/u);
-  assert.doesNotMatch(css, /cmsg-thread-path/u);
-  assert.doesNotMatch(css, /\.cmsg-thread-link::(?:before|after)/u);
-  assert.doesNotMatch(chats, /cmsg-thread-route/u);
-  assert.doesNotMatch(chats, /cmsg-thread-path/u);
-  assert.doesNotMatch(chats, /messageThreadPaths|threadPath/u);
+test("user-rooted tasks promote when their first reply arrives", async () => {
 
-  // The gutter the connector was measured in stays: a grouped line has no
-  // face of its own and still has to pay for the space one would have taken.
-  assert.match(css, /--cmsg-body-x: 52px;/u);
+test("a thread says what it is without a connector drawn to it", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const rendererStart = chats.indexOf("function threadReplies");
+  const rendererEnd = chats.indexOf("\n/**\n * How much summary", rendererStart);
+  const renderer = chats.slice(rendererStart, rendererEnd);
 
-  // The open thread panel keeps its own single branch. It crosses nothing,
-  // joins nothing, and is drawn once — it was never the bracket.
+  // Inside the open thread panel the conversation names itself with a head and
+  // a flow of replies. That panel never borrows the channel's avatar-to-thread
+  // path classes — those belong to the room transcript only.
+  assert.match(renderer, /class="thread-replies"/u);
+  assert.match(renderer, /class="thread-replies-head"/u);
+  assert.match(renderer, /class="thread-replies-flow"/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-path/u);
+  assert.doesNotMatch(renderer, /cmsg-thread-route/u);
+
+  // The panel keeps its own single branch. It crosses nothing, joins nothing,
+  // and is drawn once — it was never the channel bracket.
   const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
     css,
   )?.[1];
@@ -3794,32 +3954,122 @@ test("a grouped run of prompts keeps one avatar and no connector", async () => {
     inlineReplyTo: options.reply === true ? { id: "root" } : undefined,
     at: options.at ?? "2026-08-19T10:00:00.000Z",
   });
+
+  // An uninterrupted run from one person still shares one face. With no task
+  // in the group there is nothing for a connector to point at, so the path
+  // table leaves every row unmarked.
+  assert.deepEqual(
+    paths([item("alice"), item("alice"), item("alice")], true),
+    [undefined, undefined, undefined],
+    "a plain grouped run keeps one avatar and draws no connector",
+  );
+  assert.match(
+    chats,
+    /compact \? " cmsg-compact" : ""/u,
+    "grouped continuations stay compact under the first face",
+  );
+});
+
+test("channel task branches share the compact group's visible avatar", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function continuesUserMessageGroup");
+  const end = chats.indexOf("\n/**\n * The three dots", start);
+  const createPaths = new Function(
+    `${chats.slice(start, end).replace(/^export /gmu, "")}\nreturn messageThreadPaths;`,
+  );
+  const paths = createPaths() as (
+    timeline: unknown[],
+    groupConsecutive: boolean,
+  ) => Array<
+    { start: boolean; through: boolean; end: boolean } | undefined
+  >;
+  const item = (
+    authorId: string,
+    options: {
+      at?: string;
+      kind?: string;
+      reply?: boolean;
+      task?: boolean;
+    } = {},
+  ) => ({
+    entry: {
+      kind: options.kind ?? "user",
+      authorId,
+      taskId: options.task === true ? `task-${authorId}` : undefined,
+      replies: options.task === true ? [{}, {}] : [],
+    },
+    inlineReplyTo: options.reply === true ? { id: "root" } : undefined,
+    at: options.at ?? "2026-08-19T10:00:00.000Z",
+  });
   const shared = [
     { start: true, through: true, end: false },
     { start: false, through: false, end: true },
   ];
 
-  // The grouping itself is unchanged — one face and one clock for an
-  // uninterrupted run from one person, every line still its own row. What
-  // went with the brackets is the second pass over that run which worked out
-  // where a stroke would have to start, cross and stop; nothing was drawing
-  // it any more.
-  assert.doesNotMatch(
-    chats,
-    /messageThreadPaths/u,
-    "the connector's path table has no reader left",
+  // A task on the compact second prompt starts at the first prompt's avatar.
+  assert.deepEqual(
+    paths([item("alice"), item("alice", { task: true })], true),
+    shared,
   );
-  assert.match(
-    chats,
-    /messageRow\(entry, repositoryId, \{ compact \}\)/u,
-    "a grouped row needs only to know that it is grouped",
+  // Two task prompts use that same stem; each threaded row supplies an elbow.
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("alice", { task: true })],
+      true,
+    ),
+    shared,
   );
-  assert.doesNotMatch(
-    chats,
-    /cmsg-thread-path-(?:start|through|end)/u,
-    "no row should still be marked for a stroke nothing draws",
+
+  const standalone = { start: true, through: false, end: true };
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("bob", { task: true })],
+      true,
+    ),
+    [standalone, standalone],
+    "another author starts another path",
   );
+  assert.deepEqual(
+    paths(
+      [
+        item("alice", { task: true }),
+        item("alice", { at: "2026-08-20T10:00:00.000Z", task: true }),
+      ],
+      true,
+    ),
+    [standalone, standalone],
+    "a new day starts another path",
+  );
+  assert.deepEqual(
+    paths(
+      [
+        item("alice", { task: true }),
+        item("alice", { reply: true }),
+        item("alice", { task: true }),
+      ],
+      true,
+    ),
+    [standalone, undefined, standalone],
+    "an inline reply breaks the prompt group",
+  );
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("alice", { task: true })],
+      false,
+    ),
+    [standalone, standalone],
+    "search hits never invent a shared path",
+  );
+
+  assert.match(chats, /threadPath: threadPaths\[index\]/u);
+  assert.match(chats, /path\?\.through === true \? " cmsg-thread-path-through"/u);
+  assert.match(chats, /path\?\.end === true \? " cmsg-thread-path-end"/u);
 });
+
+test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
+  const app = await browserSource();
+  const chat = await publicFile("chat.js");
+  const css = await publicFile("styles.css");
 
 test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
   const app = await browserSource();
@@ -4334,6 +4584,62 @@ test("the progress bar restarts for each task turn in a thread", async () => {
     progress(thread),
     undefined,
     "the bar should still disappear when the current turn ends",
+  );
+});
+
+test("thread progress uses live task progress when the current turn has no recognized narration markers", async () => {
+  const source = await publicFile("screen-chats.js");
+  const progressStart = source.indexOf("function threadProgress(entry)");
+  const progressEnd = source.indexOf("\n/*", progressStart);
+  const turnsStart = source.indexOf("function threadReplyTurns(replies)");
+  const turnsEnd = source.indexOf(
+    "\n/** One turn's narration",
+    turnsStart,
+  );
+  assert.notEqual(progressStart, -1, "thread progress should still be derived");
+  assert.notEqual(progressEnd, -1, "thread progress should have a boundary");
+  assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
+  assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
+
+  const progress = Function(
+    "state",
+    "THREAD_FINISHED_RE",
+    "STAGE_PROGRESS",
+    "taskProgress",
+    `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
+      progressStart,
+      progressEnd,
+    )}\nreturn threadProgress;`,
+  )(
+    { tasks: [{ id: "task-1", status: "claimed" }] },
+    /^(Done —|I could not|This was cancelled)/u,
+    { submitted: 4, planning: 18, planned: 30, claimed: 44, validating: 88 },
+    () => 53,
+  ) as (entry: {
+    taskId: string;
+    replies: Array<{ kind: string; content: string }>;
+  }) => number | undefined;
+
+  assert.equal(
+    progress({ taskId: "task-1", replies: [] }),
+    53,
+    "a live task should supply progress before its turn says anything",
+  );
+  assert.equal(
+    progress({
+      taskId: "task-1",
+      replies: [{ kind: "progress", content: "Reading the repository" }],
+    }),
+    53,
+    "unrecognized narration should keep the live task's progress",
+  );
+  assert.equal(
+    progress({
+      taskId: "missing",
+      replies: [{ kind: "progress", content: "Reading the repository" }],
+    }),
+    undefined,
+    "an ordinary thread without run narration should not gain a progress bar",
   );
 });
 
@@ -6552,8 +6858,8 @@ test("the transcript reads in a column rather than across the window", async () 
   assert.match(css, /--message-max: 72ch;/u);
   assert.match(
     css,
-    /\.chan-messages \{[\s\S]{0,400}padding: 12px max\(24px, \(100% - var\(--room-column\)\) \/ 2\) 20px;/u,
-    "the column should centre without moving anything in a narrow room",
+    /\.chan-messages \{[\s\S]{0,400}padding: 12px max\(24px, 100% - var\(--room-column\)\) 20px 18px;/u,
+    "the column should start at the left without moving anything in a narrow room",
   );
   assert.match(
     css,

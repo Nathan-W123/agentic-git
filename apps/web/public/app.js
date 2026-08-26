@@ -9028,10 +9028,14 @@ document.addEventListener("submit", (event) => {
       state.dmReplyMessageId = undefined;
       closeComposerAutocomplete("dm");
       render();
+      scrollDirectMessageToLatest();
       void sendDirectMessage(other, draft, referencedMessageId)
         .then(() => {
           chime("sent");
           render();
+          if (state.activeDm === other) {
+            scrollDirectMessageToLatest();
+          }
         })
         .catch((error) => toast(`Could not send: ${error.message}`, "error"));
       return;
