@@ -44,9 +44,10 @@ configure. It opens your browser, you approve the app while signed in as
 yourself, and the window loads. Nothing is copied or pasted, and no token is
 ever shown.
 
-The app is granted `view` and `run_task` — enough to read the room and start
-work, deliberately not everything you can do. Revoke it any time in
-**Settings → Advanced → App tokens**.
+The app can do what you do in a working day — read the room, start and answer
+work, manage channels, and push to or sync from GitHub. It cannot add or
+remove people, or change what they may do. Revoke it any time in **Settings → Advanced →
+App tokens**.
 
 If you ever need to start over, **Help → Sign Out and Restart** or **Help →
 Change Server…**.

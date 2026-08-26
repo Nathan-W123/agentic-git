@@ -3269,6 +3269,101 @@ test("a deferred waiter plans against the holder's in-progress edits", async () 
   }
 });
 
+test("a waiter speculates once against an unchanged holder, not once a wave", async () => {
+  // The de-duplication set is rebuilt inside each call, and speculation runs
+  // once per deferred wave — so a waiter behind a holder that is thinking
+  // rather than typing was re-selected every wave and paid for a fresh agent
+  // round trip each time, against a holder edit set identical to the one it
+  // already had. At the default retry that is one replan every fifteen
+  // seconds, up to two hundred and forty for a single waiting task, and this
+  // codebase prices a replan at roughly 145k tokens.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-speculate-once-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const version = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const holderWorkspace = await fixture.workspaces.create({
+      taskId: "task_holder",
+      rootPath: path.join(root, "holder-workspaces"),
+      repository: fixture.repository,
+      baseVersion: version,
+    });
+    // Written once and never touched again: the holder is thinking, which is
+    // most of what an agent spends its time doing.
+    await writeFile(
+      path.join(holderWorkspace.path, "src", "a.txt"),
+      "holder wip\n",
+      "utf8",
+    );
+    const holderRun = await store.createRun({
+      repository: fixture.repository,
+      mode: "coordinated",
+      baseVersion: version,
+    });
+    await store.saveWorkspace(holderRun.id, {
+      id: holderWorkspace.id,
+      runId: holderRun.id,
+      taskId: "task_holder",
+      path: holderWorkspace.path,
+      isolation: holderWorkspace.isolation,
+      baseRevision: version.revision,
+      createdAt: holderWorkspace.createdAt,
+    });
+
+    const agent = new TestAgent(
+      "agent_waiter",
+      plan("task_waiter", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    const DEFERRALS = 8;
+    let admits = 0;
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+      planAuthority: {
+        async admit(request) {
+          admits += 1;
+          if (admits <= DEFERRALS) {
+            return {
+              outcome: "deferred",
+              retryAfterMs: 5,
+              blockedBy: ["task_holder"],
+              explanation: "src/a.txt is leased to task_holder",
+            };
+          }
+          return { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_waiter"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.ok(admits > DEFERRALS, "the waiter did wait through every wave");
+    const speculative = agent.replanRequests.filter((request) =>
+      request.canonicalChange.reason.includes("in progress"),
+    );
+    // One. The first speculation is the one worth paying for; the repeats buy
+    // nothing, because there is nothing new to plan against.
+    assert.equal(
+      speculative.length,
+      1,
+      `paid for ${String(speculative.length)} replans across ${String(DEFERRALS)} deferred waves`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("waiters speculate concurrently, not one agent call at a time", async () => {
   // Each speculative replan is a full round trip to an agent. Issued one at a
   // time they dominate the wait they exist to remove: eight tasks deferred

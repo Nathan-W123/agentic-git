@@ -35,6 +35,17 @@ export interface StripeSubscription {
   customerId: string;
   /** Unix seconds; Stripe's own field name is `current_period_end`. */
   currentPeriodEnd: number | undefined;
+  /**
+   * When a trial Stripe is running ends. Unix seconds, `trial_end` on the
+   * wire, absent on a subscription that never had one.
+   *
+   * Read because the trial becomes Stripe's to run rather than ours to
+   * compute. Once a card is captured at sign-up the fourteen days belong to
+   * the subscription, and the deployment's own `trialEndsAt` has to be told
+   * what Stripe decided or the two drift — with the store's copy being the
+   * one every entitlement check actually reads.
+   */
+  trialEnd: number | undefined;
   quantity: number | undefined;
   /**
    * Whatever was attached at checkout — this deployment puts `organizationId`
@@ -52,6 +63,8 @@ export interface StripeClient {
     cancelUrl: string;
     customerId?: string;
     customerEmail?: string;
+    /** Days of trial Stripe should run before it takes the first payment. */
+    trialPeriodDays?: number;
   }): Promise<StripeCheckoutSession>;
   createPortalSession(input: {
     customerId: string;
@@ -143,6 +156,7 @@ export class HttpStripeClient implements StripeClient {
     cancelUrl: string;
     customerId?: string;
     customerEmail?: string;
+    trialPeriodDays?: number;
   }): Promise<StripeCheckoutSession> {
     const payload = await this.call("POST", "/checkout/sessions", {
       mode: "subscription",
@@ -157,6 +171,30 @@ export class HttpStripeClient implements StripeClient {
       // table nobody has been maintaining.
       "metadata[organizationId]": input.organizationId,
       "subscription_data[metadata][organizationId]": input.organizationId,
+      // Said out loud rather than left to the default, because the whole
+      // model rests on it: there is no account without a card. `always` is
+      // Stripe's default today, but it is silently defeated the moment a
+      // first invoice comes to zero — a full-discount promotion code, a price
+      // set to nothing while testing — and an unstated assumption is not
+      // where that belongs. Written down, somebody has to delete a line.
+      payment_method_collection: "always",
+      ...(input.trialPeriodDays === undefined
+        ? {}
+        : {
+            // Stripe runs the trial, and the card is taken today. There is no
+            // top-level `trial_period_days` on a Checkout Session — that
+            // spelling belongs to the Subscriptions API, and sending it here
+            // earns a 400 naming the unknown parameter, which this client
+            // surfaces verbatim.
+            "subscription_data[trial_period_days]": input.trialPeriodDays,
+            // If the card goes missing before the trial ends — removed
+            // through the portal — cancel rather than raise an invoice
+            // nobody can pay. `cancel` reaches the entitlement gate as a
+            // status it understands; the default leaves a live subscription
+            // attached to an unpayable invoice.
+            "subscription_data[trial_settings][end_behavior][missing_payment_method]":
+              "cancel",
+          }),
       ...(input.customerId === undefined ? {} : { customer: input.customerId }),
       ...(input.customerEmail === undefined || input.customerId !== undefined
         ? {}
@@ -231,6 +269,7 @@ export function readSubscription(
 ): StripeSubscription {
   const customer = payload["customer"];
   const periodEnd = payload["current_period_end"];
+  const trialEnd = payload["trial_end"];
   return {
     id: String(payload["id"] ?? ""),
     status: String(payload["status"] ?? ""),
@@ -244,6 +283,7 @@ export function readSubscription(
             (customer as { id?: unknown } | null)?.id ?? "",
           ),
     currentPeriodEnd: typeof periodEnd === "number" ? periodEnd : undefined,
+    trialEnd: typeof trialEnd === "number" ? trialEnd : undefined,
     quantity: firstSubscriptionQuantity(payload),
     metadata: readMetadata(payload["metadata"]),
   };
@@ -363,8 +403,6 @@ export function verifyWebhookSignature(input: {
   }
 }
 
-/** Stripe statuses that mean the subscription is worth honouring. */
-const STRIPE_ACTIVE = new Set(["active", "trialing"]);
 const STRIPE_PAST_DUE = new Set(["past_due", "unpaid"]);
 
 /**
@@ -374,11 +412,23 @@ const STRIPE_PAST_DUE = new Set(["past_due", "unpaid"]);
  * rather than a translation: `incomplete` — a subscription whose first payment
  * never completed — becomes `canceled` here, because nothing was ever paid and
  * treating it as entitlement would let an abandoned checkout buy access.
+ *
+ * `trialing` is kept as itself. It used to fold into `active`, which was true
+ * of what the gate needed to know — a trial is honoured — and false of
+ * everything a customer is shown. Every account now arrives through a paid
+ * sign-up with fourteen days of trial on it, so under the collapse a person on
+ * day two was told "Active — Your subscription is running", the countdown
+ * banner never appeared for anyone, and the first charge arrived with no
+ * in-product warning at all. The store has held `trialing` and `trial_ends_at`
+ * throughout; nothing was ever written into them from here.
  */
 export function subscriptionStatusFrom(
   stripeStatus: string,
-): "active" | "past_due" | "canceled" {
-  if (STRIPE_ACTIVE.has(stripeStatus)) {
+): "trialing" | "active" | "past_due" | "canceled" {
+  if (stripeStatus === "trialing") {
+    return "trialing";
+  }
+  if (stripeStatus === "active") {
     return "active";
   }
   if (STRIPE_PAST_DUE.has(stripeStatus)) {

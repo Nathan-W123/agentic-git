@@ -158,6 +158,72 @@ test("unconfirmed registration creates the account, its team and its project at 
   assert.equal(await store.countUsers(), 1);
 });
 
+test("a sign-up that fails partway leaves no account behind", async () => {
+  // The state a real account reached in production: a user row with a working
+  // password and nothing else — able to sign in, belonging to nothing, unable
+  // to create a repository, and holding the only claim on that address so
+  // signing up again was refused as a duplicate.
+  //
+  // Provisioning is five writes and the store has no transaction, so the
+  // ordering is the only defence: everything that does not need a user comes
+  // first, and the user is written second to last. A failure before then must
+  // leave the address free.
+  const store = new InMemoryCoordinationStore();
+  const auth = new AuthService(store, { mailer: async () => undefined });
+
+  // Fail the last write that precedes the account. Whatever went wrong in
+  // production, this is the shape of it: something durable landed, then a
+  // later call threw.
+  const realSaveSubscription = store.saveSubscription.bind(store);
+  let failNext = true;
+  store.saveSubscription = async (input) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error("the database went away");
+    }
+    return await realSaveSubscription(input);
+  };
+
+  await assert.rejects(
+    async () =>
+      await auth.registerUnconfirmed({
+        email: "Interrupted@Example.com",
+        displayName: "Interrupted",
+        password: "InterruptedSignup123!",
+      }),
+    /database went away/u,
+  );
+
+  // No account, so the address is still free and they can simply try again —
+  // which is the whole point. Previously this left an account that could sign
+  // in to nothing and could never be created properly.
+  assert.equal(await store.countUsers(), 0);
+  assert.equal(
+    await store.getUserByEmail("interrupted@example.com"),
+    undefined,
+  );
+
+  const user = await auth.registerUnconfirmed({
+    email: "Interrupted@Example.com",
+    displayName: "Interrupted",
+    password: "InterruptedSignup123!",
+  });
+  const organizations = await store.listOrganizations(user.id);
+  assert.equal(organizations.length, 1);
+  assert.equal(
+    (await store.getMembership(organizations[0]?.id ?? "", user.id))?.role,
+    "owner",
+  );
+  assert.deepEqual(
+    (await store.listProjects(organizations[0]?.id ?? "")).map((p) => p.slug),
+    ["default"],
+  );
+  assert.equal(
+    (await store.getSubscription(organizations[0]?.id ?? ""))?.status,
+    "trialing",
+  );
+});
+
 test("registration rejects wrong, expired, exhausted, reused, and unknown challenges", async () => {
   let clock = new Date("2026-01-01T00:00:00.000Z");
   const store = new InMemoryCoordinationStore();

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rename, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -354,8 +354,32 @@ async function availableRepositoryId(
   store: CoordinationStore,
   requested: string,
   projectId: string,
+  /**
+   * Where canonical mirrors live, so a name can be checked against the disk
+   * and not only against the store.
+   *
+   * The store was treated as a complete description of what exists, and it is
+   * not: a mirror directory outlives a database that was reset beneath it, a
+   * creation that failed after `git init` leaves one behind, and a removal
+   * that renamed the mirror and then died leaves the row instead. Any of
+   * those makes a name the store says is free and the filesystem refuses —
+   * and the person meets it as "Canonical repository already exists", naming
+   * a path they cannot see, for a repository no account owns.
+   */
+  repositoriesPath: string,
 ): Promise<string> {
-  if ((await store.getRepository(requested)) === undefined) {
+  const takenOnDisk = async (candidate: string): Promise<boolean> => {
+    try {
+      await access(path.join(repositoriesPath, `${candidate}.git`));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (
+    (await store.getRepository(requested)) === undefined &&
+    !(await takenOnDisk(requested))
+  ) {
     return requested;
   }
   const variants = new RegExp(
@@ -375,7 +399,10 @@ async function availableRepositoryId(
       0,
       MAX_REPOSITORY_ID_LENGTH - marker.length,
     )}${marker}`;
-    if ((await store.getRepository(candidate)) === undefined) {
+    if (
+      (await store.getRepository(candidate)) === undefined &&
+      !(await takenOnDisk(candidate))
+    ) {
       return candidate;
     }
   }
@@ -538,10 +565,14 @@ export async function repoAdd(
 ): Promise<StoredRepository> {
   const sourcePath = path.resolve(options.sourcePath);
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
+  const requested = assertRepositoryId(
+    options.id ?? path.basename(sourcePath).toLowerCase(),
+  );
   const id = await availableRepositoryId(
     store,
-    assertRepositoryId(options.id ?? path.basename(sourcePath).toLowerCase()),
+    requested,
     projectId,
+    project.repositoriesPath,
   );
 
   const branch = options.branch ?? "main";
@@ -572,6 +603,23 @@ export async function repoAdd(
     const version = await repositories.getCanonicalVersion(canonical);
     await store.saveRepository(stored);
     registered = true;
+    if (id !== requested) {
+      // The name they asked for, kept as the name they see.
+      //
+      // Ids are one flat namespace across the deployment — an id keys every
+      // row that references a repository and names its mirror directory — so
+      // the second tenant to want `api` is given `api-2` and there is no way
+      // around that short of a migration. What there is no reason for is that
+      // suffix being what they read. It is an implementation detail of where
+      // the mirror lives, and it was showing up as the channel's name for no
+      // reason anybody could see.
+      //
+      // Set only when the id was taken, so an uncontested name keeps meaning
+      // "no display name recorded, call it by its id" and a later rename is
+      // still recognisable as a rename.
+      await store.renameRepository(stored.id, requested);
+      stored.displayName = requested;
+    }
     await store.linkRepository(projectId, stored.id);
     await store.saveCanonicalVersion(stored.id, version);
 
@@ -648,6 +696,7 @@ export async function repoImportGitHub(
     store,
     assertRepositoryId(options.id ?? inferred.toLowerCase()),
     projectId,
+    project.repositoriesPath,
   );
 
   const destination = path.join(project.repositoriesPath, `${id}.git`);

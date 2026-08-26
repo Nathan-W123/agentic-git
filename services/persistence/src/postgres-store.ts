@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import pg from "pg";
 
 import {
@@ -100,6 +102,7 @@ import type {
   SubmittedTaskStatus,
   InvitationRecord,
   PasswordResetRecord,
+  SignupIntentRecord,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -205,6 +208,8 @@ const MIGRATE_LOCK_KEY = 810275;
  */
 export class PostgresCoordinationStore implements CoordinationStore {
   private readonly pool: pg.Pool;
+  /** The connection a `runInTransaction` body must use, while one is open. */
+  private readonly ambientClient = new AsyncLocalStorage<PoolClient>();
   /** Migrations run lazily; every public method awaits this first. */
   private readonly ready: Promise<void>;
 
@@ -285,12 +290,44 @@ export class PostgresCoordinationStore implements CoordinationStore {
     }
   }
 
+  public async runInTransaction<T>(
+    body: (store: CoordinationStore) => Promise<T>,
+  ): Promise<T> {
+    if (this.ambientClient.getStore() !== undefined) {
+      return await body(this);
+    }
+    await this.ready;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await this.ambientClient.run(
+        client,
+        async () => await body(this),
+      );
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original failure matters more than a rollback on a dead socket.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private async query(
     statement: string,
     values: unknown[] = [],
   ): Promise<QueryResult> {
     await this.ready;
-    return await this.pool.query(statement, values);
+    // Inside `runInTransaction` every statement has to travel the one
+    // connection holding the transaction, or it commits independently of it
+    // — which is the bug this exists to remove, reintroduced one level down.
+    const client = this.ambientClient.getStore();
+    return await (client ?? this.pool).query(statement, values);
   }
 
   private async row(
@@ -311,6 +348,17 @@ export class PostgresCoordinationStore implements CoordinationStore {
     body: (client: PoolClient) => Promise<T>,
     options: { serialize?: boolean } = {},
   ): Promise<T> {
+    // Already inside one: join it rather than opening a second on a different
+    // connection, which would deadlock against the lock the outer one holds.
+    // Rollback stays with the outermost caller, the only one that can honour
+    // it.
+    const ambient = this.ambientClient.getStore();
+    if (ambient !== undefined) {
+      if (options.serialize === true) {
+        await ambient.query(WRITE_LOCK);
+      }
+      return await body(ambient);
+    }
     await this.ready;
     const client = await this.pool.connect();
     try {
@@ -360,11 +408,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
   }
 
   public async createOrganization(input: {
+    id?: string;
     slug: string;
     name: string;
   }): Promise<Organization> {
     const organization: Organization = {
-      id: createId("org"),
+      id: input.id ?? createId("org"),
       slug: input.slug.trim().toLowerCase(),
       name: input.name.trim(),
       createdAt: new Date().toISOString(),
@@ -1481,6 +1530,81 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : this.toPasswordReset(row);
   }
 
+  public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {
+    await this.query(
+      `INSERT INTO signup_intents
+         (id, organization_id, email, organization_name, secret_hash,
+          stripe_session_id, user_id, created_at, expires_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        intent.id,
+        intent.organizationId,
+        intent.email,
+        intent.organizationName ?? null,
+        intent.secretHash,
+        intent.stripeSessionId ?? null,
+        intent.userId ?? null,
+        intent.createdAt,
+        intent.expiresAt,
+        intent.completedAt ?? null,
+      ],
+    );
+  }
+
+  public async getSignupIntent(
+    id: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    const row = await this.row("SELECT * FROM signup_intents WHERE id = $1", [
+      id,
+    ]);
+    return row === undefined ? undefined : this.toSignupIntent(row);
+  }
+
+  public async completeSignupIntent(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still being open, so a Stripe redelivery — or the second
+    // of two events that both name this intent — provisions nothing twice.
+    const rows = await this.rows(
+      `UPDATE signup_intents SET completed_at = $1
+       WHERE id = $2 AND completed_at IS NULL
+       RETURNING id`,
+      [at, id],
+    );
+    return rows.length === 1;
+  }
+
+  public async getSignupIntentByOrganization(
+    organizationId: string,
+  ): Promise<SignupIntentRecord | undefined> {
+    const row = await this.row(
+      "SELECT * FROM signup_intents WHERE organization_id = $1",
+      [organizationId],
+    );
+    return row === undefined ? undefined : this.toSignupIntent(row);
+  }
+
+  public async attachSignupIntentUser(
+    id: string,
+    userId: string,
+  ): Promise<boolean> {
+    // Conditional, so two requests racing one claim link cannot both build an
+    // account against the same paid organization.
+    const rows = await this.rows(
+      "UPDATE signup_intents SET user_id = $1 WHERE id = $2 AND user_id IS NULL RETURNING id",
+      [userId, id],
+    );
+    return rows.length === 1;
+  }
+
+  public async deleteExpiredSignupIntents(before: string): Promise<void> {
+    await this.query(
+      "DELETE FROM signup_intents WHERE completed_at IS NULL AND expires_at < $1",
+      [before],
+    );
+  }
+
   public async consumePasswordReset(id: string, at: string): Promise<boolean> {
     const rows = await this.rows(
       `UPDATE password_resets SET consumed_at = $1
@@ -1493,6 +1617,21 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   public async deletePasswordResetsForUser(userId: string): Promise<void> {
     await this.query("DELETE FROM password_resets WHERE user_id = $1", [userId]);
+  }
+
+  private toSignupIntent(row: Row): SignupIntentRecord {
+    return {
+      id: text(row, "id"),
+      organizationId: text(row, "organization_id"),
+      email: text(row, "email"),
+      organizationName: optionalText(row, "organization_name"),
+      secretHash: text(row, "secret_hash"),
+      stripeSessionId: optionalText(row, "stripe_session_id"),
+      userId: optionalText(row, "user_id"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      completedAt: optionalText(row, "completed_at"),
+    };
   }
 
   private toPasswordReset(row: Row): PasswordResetRecord {

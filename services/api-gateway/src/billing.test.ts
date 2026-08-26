@@ -132,20 +132,60 @@ test("a trial with no end date, or an unreadable one, is spent", () => {
   );
 });
 
-test("no recorded subscription is read as the organization's first trial", () => {
-  // Self-healing rather than fail-closed, and the reasoning is in `billing.ts`:
-  // refusing outright would make every future organization-creating path
-  // silently load-bearing for billing. Bounded to the same fourteen days.
-  const young = new Date("2026-01-10T00:00:00.000Z");
-  assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, young), true);
-  // And spent for anything older, so it is a grace period rather than a hole.
-  assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, NOW), false);
+test("a trial Stripe is running is honoured on Stripe's word, not our date", () => {
+  // Who is running the trial decides who is believed about it. Ours has no
+  // authority behind it, so it is judged against its own end date and the two
+  // tests above still hold. Stripe's has Stripe: at conversion the
+  // subscription moves to `active` and we are told afterwards, so between the
+  // trial's last second and that webhook landing a date-based answer locks
+  // out a team that has just paid — for a delivery delay, on the one day of
+  // the fortnight where the money actually moves.
+  const stripeRun = subscription({
+    status: "trialing",
+    trialEndsAt: "2026-05-31T00:00:00.000Z",
+    stripeSubscriptionId: "sub_live",
+  });
+  assert.equal(subscriptionAllowsWork(stripeRun, ORG_CREATED, NOW), true);
+  // And a cancellation still stops it, because that arrives as a status
+  // rather than as a date.
+  assert.equal(
+    subscriptionAllowsWork(
+      { ...stripeRun, status: "canceled" },
+      ORG_CREATED,
+      NOW,
+    ),
+    false,
+  );
 });
 
-test("an organization with no creation date to measure from is refused", () => {
-  // Nothing to date the grace from is not evidence of entitlement.
+test("no recorded subscription is no entitlement, however new the organization", () => {
+  // This used to read a missing row as a fresh fourteen days from
+  // `createdAt`, on the reasoning that it was self-healing and could not be
+  // farmed "because the only way to get a new organization is to sign up".
+  // That stopped being true: `POST /organizations` wrote no row, so anybody
+  // signed in could mint another fortnight whenever the last ran out.
+  //
+  // Migration 47 backfilled a real row for every organization that lacked
+  // one, computing exactly what this fallback was granting, so inverting it
+  // changes no existing organization's answer — and every path that creates
+  // an organization is now load-bearing for billing on purpose.
+  const young = new Date("2026-01-10T00:00:00.000Z");
+  assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, young), false);
+  assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, NOW), false);
   assert.equal(subscriptionAllowsWork(undefined, undefined, NOW), false);
-  assert.equal(effectiveRole("owner", undefined, undefined, NOW), "viewer");
+  assert.equal(effectiveRole("owner", undefined, ORG_CREATED, young), "viewer");
+});
+
+test("a trial is honoured only when a row records it", () => {
+  // The replacement for the fallback: the entitlement comes from the row the
+  // sign-up wrote, not from the organization's age.
+  const young = new Date("2026-01-10T00:00:00.000Z");
+  const trialing = subscription({
+    status: "trialing",
+    trialEndsAt: "2026-01-15T00:00:00.000Z",
+  });
+  assert.equal(subscriptionAllowsWork(trialing, ORG_CREATED, young), true);
+  assert.equal(subscriptionAllowsWork(trialing, ORG_CREATED, NOW), false);
 });
 
 test("a trial runs for fourteen days from when it starts", () => {
@@ -155,6 +195,56 @@ test("a trial runs for fourteen days from when it starts", () => {
 });
 
 /* ----------------------------------------------------- effective role --- */
+
+test("a seat is a person, and a repository grant is a way to be one", () => {
+  // A grant lets somebody work without being a member of the organization at
+  // all, so counting only memberships billed nothing for them however much
+  // work they did — and a team could put its whole staff on grants and pay
+  // for one owner.
+  const member = {
+    organizationId: "org_1",
+    userId: "user_1",
+    role: "developer" as const,
+    comped: false,
+    createdAt: NOW.toISOString(),
+  };
+  const grantee = {
+    repositoryId: "repo_1",
+    userId: "user_2",
+    role: "developer" as const,
+    grantedBy: undefined,
+    comped: false,
+    createdAt: NOW.toISOString(),
+  };
+  assert.equal(billableSeats([member]), 1, "a grant nobody counted is free work");
+  assert.equal(billableSeats([member], [grantee]), 2);
+
+  // A comped grant stays free. That is what the operators hand out on
+  // purpose, one person and one repository at a time.
+  assert.equal(
+    billableSeats([member], [{ ...grantee, comped: true }]),
+    1,
+  );
+
+  // And a seat is a person, not a row: one human with a membership and two
+  // grants is one seat, not three.
+  assert.equal(
+    billableSeats(
+      [member],
+      [
+        { ...grantee, userId: "user_1" },
+        { ...grantee, repositoryId: "repo_2", userId: "user_1" },
+      ],
+    ),
+    1,
+  );
+
+  // A viewer grant is free for the same reason a viewer membership is.
+  assert.equal(
+    billableSeats([member], [{ ...grantee, role: "viewer" as const }]),
+    1,
+  );
+});
 
 test("a lapsed organization goes read-only rather than dark", () => {
   const canceled = subscription({ status: "canceled" });

@@ -52,6 +52,7 @@ import {
   type ConflictAssessment,
   type CoordinationRunResult,
   type CoordinatorDecision,
+  type FilePatch,
   type FilePatchStatus,
   type HolderWorkingChange,
   type ReplanRequest,
@@ -84,6 +85,7 @@ import { OwnershipService } from "./ownership-service.js";
 import {
   type ChangeSetSplit,
   splitChangeSet,
+  withheldPatchRecord,
 } from "./partial-admission.js";
 import {
   approvedSchemaResources,
@@ -405,6 +407,36 @@ function emptyAdvance(): CanonicalAdvance {
     changedTests: [],
     changedServices: [],
   };
+}
+
+/**
+ * Whether two advances describe the same change.
+ *
+ * Order is not part of the answer — the same holder edits read back in a
+ * different order are the same edits — so each list is compared as a set.
+ * Used to decide whether a waiter has anything new to plan against, where a
+ * false "different" costs a full agent replan and a false "same" only costs
+ * the waiter a head start it would have got on the next wave anyway.
+ */
+function sameAdvance(a: CanonicalAdvance, b: CanonicalAdvance): boolean {
+  const keys = [
+    "changedFiles",
+    "changedSymbols",
+    "changedApis",
+    "changedSchemas",
+    "changedConfigKeys",
+    "changedTests",
+    "changedServices",
+  ] as const;
+  return keys.every((key) => {
+    const left = a[key];
+    const right = b[key];
+    if (left.length !== right.length) {
+      return false;
+    }
+    const seen = new Set(left);
+    return right.every((value) => seen.has(value));
+  });
 }
 
 /**
@@ -835,6 +867,28 @@ export interface PlanAuthority {
    */
   deferRemainder?(request: DeferredScopeRequest): Promise<void>;
   /**
+   * Turns the half a *conflict* withheld into work of its own.
+   *
+   * The sibling of {@link deferRemainder}, for the other way a changeset can
+   * be admitted in part. `integrate` is called with `salvageConflicts` set,
+   * which promotes every patch that still applies and hands back the ones
+   * that collided; the coordinator then asks the agent that is still open to
+   * redo exactly those files, and that is usually the end of it. It is not
+   * the end of it when the repair cannot be attempted or its own integration
+   * fails — and then the promoted half stands, the task reports success, and
+   * the collided files are written by nobody.
+   *
+   * Answers the follow-up's id, so the withholding can be recorded against
+   * the task that will carry it, or `undefined` when there was nothing to
+   * queue. Optional for the same reason as `deferRemainder`: it needs durable
+   * state the coordinator has no reach into, and an authority without it
+   * simply never queues one — which the coordinator reports rather than
+   * hides.
+   */
+  deferSalvagedConflict?(
+    request: SalvagedConflictRequest,
+  ): Promise<string | undefined>;
+  /**
    * Who is queued behind this task right now, and on what.
    *
    * The mirror of `admit`: that one tells an arriving task it must wait, this
@@ -946,6 +1000,24 @@ export interface DeferredScopeRequest {
   projectId?: string;
   admission: PlanAdmission;
   split: ChangeSetSplit;
+}
+
+/**
+ * The remainder a conflict held back, once the rest of it is in canonical.
+ *
+ * The patches are carried for context and never replayed: they conflicted
+ * precisely because the base they were written against moved, so applying
+ * them later would apply a diff to a revision that no longer exists. Whoever
+ * picks the follow-up up plans fresh against canonical as it now stands.
+ */
+export interface SalvagedConflictRequest {
+  task: TaskDefinition;
+  repository: CanonicalRepository;
+  projectId?: string;
+  /** The patches salvage could not promote. */
+  deferred: readonly FilePatch[];
+  /** The changeset the promoted half came from. */
+  reported: ChangeSet;
 }
 
 /**
@@ -2762,6 +2834,28 @@ export class Coordinator {
             holderReads,
           );
           if (overlay.changes.length === 0) {
+            return;
+          }
+          // Nothing new to plan against.
+          //
+          // `outstanding` deduplicates within one call, and this is called
+          // once per deferred wave — so a waiter behind a holder that is
+          // thinking rather than typing was re-selected every wave and paid
+          // for a fresh agent round trip each time. At `DEFAULT_PLAN_RETRY_MS`
+          // that is one replan every fifteen seconds, up to
+          // `MAX_CONSECUTIVE_DEFERRED_WAVES` of them for a single waiting
+          // task, each re-planning against a holder edit set identical to the
+          // one it already has. A replan is priced at roughly 145k tokens.
+          //
+          // The first speculation is the one worth paying for; the repeats
+          // buy nothing. Judged on the whole advance rather than the file
+          // list alone, so a holder that renames a symbol inside files it had
+          // already touched still earns the waiter a fresh look.
+          if (
+            entry.speculatedAdvance !== undefined &&
+            sameAdvance(entry.speculatedAdvance, overlay.advance)
+          ) {
+            outstanding.delete(entry);
             return;
           }
           await this.replanTask(
@@ -4685,7 +4779,7 @@ export class Coordinator {
         );
       }
       const agentAccount = result.changeSet.agentExplanation.trim();
-      const explanation = reported
+      let explanation = reported
         ? // The agent's own words are the deliverable here — there is no diff
           // to read instead, and the generic line says nothing a reader can
           // use.
@@ -4748,6 +4842,77 @@ export class Coordinator {
             admission: result.admission,
             split: result.split,
           });
+        }
+        // And the other half a changeset can be admitted in part.
+        //
+        // `integrate` was called with `salvageConflicts` set, which promotes
+        // every patch that still applies and hands back the ones that
+        // collided. The repair above asks the agent that is still open to
+        // redo exactly those files, and that is usually the end of it — the
+        // comment at the call site says salvage is safe here for precisely
+        // that reason. It is not the end of it when the repair cannot be
+        // attempted or its own integration fails: `integration` is then still
+        // the first result, status `integrated`, carrying a remainder that
+        // nothing downstream reads. The task reported success, and the files
+        // it planned and could not land were written by nobody — the same
+        // silence `deferRemainder` above exists to end, one branch over.
+        //
+        // The remote worker path has queued this since salvage was built
+        // (`queueSalvagedConflict`); the in-process path, which is every
+        // dispatch a channel makes, never did.
+        const withheld = integration.salvagedDeferred ?? [];
+        if (withheld.length > 0) {
+          const outstanding = [
+            ...new Set(withheld.map((patch) => patch.path)),
+          ].sort();
+          const followUpId = await this.planAuthority?.deferSalvagedConflict?.({
+            task: result.task,
+            repository: input.repository,
+            ...(input.projectId === undefined
+              ? {}
+              : { projectId: input.projectId }),
+            deferred: withheld,
+            reported: result.changeSet,
+          });
+          const record = withheldPatchRecord([...withheld]);
+          await this.trace(
+            recorder,
+            runAudit,
+            "changeset_withheld",
+            followUpId ?? result.task.id,
+            {
+              repositoryId: input.repository.id,
+              ...(input.projectId === undefined
+                ? {}
+                : { projectId: input.projectId }),
+              deferredFrom: result.task.id,
+              reportedChangeSetId: result.changeSet.id,
+              baseRevision: result.changeSet.baseRevision,
+              baseVersion: result.changeSet.baseVersion,
+              patches: record.patches,
+              truncated: record.truncated,
+              bytes: record.bytes,
+              queued: followUpId !== undefined,
+              explanation:
+                "Patches that conflicted with canonical while the rest of " +
+                "the same changeset was promoted, and which the repair pass " +
+                "did not land. Kept as context; never replayed, because the " +
+                "base they were written against is exactly what moved " +
+                "underneath them",
+            },
+          );
+          // An authority with nowhere to queue it leaves the remainder
+          // genuinely outstanding, and a task that says "done" about half a
+          // job is the failure this whole branch is about. The advance
+          // stands — it is in canonical, and failing the task would send a
+          // replan back over work already landed — so what changes is what
+          // the task says about itself.
+          if (followUpId === undefined) {
+            explanation =
+              `${explanation.trim()} Still outstanding: ` +
+              `${outstanding.join(", ")} — these conflicted with canonical ` +
+              "and were not re-done.";
+          }
         }
       } else if (reported) {
         await this.trace(

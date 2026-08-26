@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { Coordinator } from "@coord/coordinator";
+import {
+  Coordinator,
+  type SalvagedConflictRequest,
+} from "@coord/coordinator";
 import { RepositoryService } from "@coord/repository-service";
 import { assertAgentPlan, type AgentPlan } from "@coord/shared-types";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
@@ -331,6 +334,158 @@ test("with repair switched off, a collision costs the whole result", async () =>
       ),
       "own\n",
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a remainder the repair could not land becomes work of its own", async () => {
+  // The hole this closes. Salvage promotes what still applies and hands back
+  // what collided, which is safe precisely because the agent is still open
+  // and is asked to redo the remainder. When that repair cannot be attempted
+  // — the case directly above — the first result stands: status `integrated`,
+  // carrying a remainder that nothing downstream read. The task reported
+  // success, and the file it planned and could not land was written by
+  // nobody. The remote worker path has queued this since salvage was built;
+  // the in-process path, which is every dispatch a channel makes, never did.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-repair-"));
+  try {
+    const context = await fixture(root);
+    const collide = async (workspacePath: string) => {
+      await landExternalChange(context, root, "line 1 THEIRS");
+      const target = path.join(workspacePath, "src", "shared.txt");
+      const lines = (await readFile(target, "utf8")).split("\n");
+      lines[0] = "line 1 MINE";
+      await writeFile(target, lines.join("\n"), "utf8");
+      await writeFile(
+        path.join(workspacePath, "src", "own.txt"),
+        "own edited\n",
+        "utf8",
+      );
+    };
+
+    const deferred: SalvagedConflictRequest[] = [];
+    const result = await new Coordinator({
+      repositories: context.repositories,
+      workspaces: context.workspaces,
+      planAuthority: {
+        async admit(request) {
+          return { outcome: "admitted", plan: request.plan };
+        },
+        async deferSalvagedConflict(request) {
+          deferred.push(request);
+          return "task_followup";
+        },
+      },
+    }).run({
+      repository: context.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: {
+            id: "task_deferred",
+            objective: "edit the shared and own files",
+            agentId: "scripted",
+            validationCommands: [],
+          },
+          adapter: new ScriptedAgentAdapter({
+            agentId: "scripted",
+            repository: context.repository,
+            workspaces: context.workspaces,
+            // No repair behaviour: the scripted agent throws when asked, which
+            // is what leaves the remainder outstanding.
+            behavior: { plan: plan("task_deferred"), execute: collide },
+          }),
+        },
+      ],
+    });
+
+    // Still integrated — the promoted half is in canonical and failing the
+    // task would send a replan back over work that already landed.
+    assert.equal(result.tasks[0]?.status, "integrated");
+    // And the half that did not land is queued rather than dropped.
+    assert.equal(deferred.length, 1);
+    assert.deepEqual(
+      [...new Set(deferred[0]?.deferred.map((patch) => patch.path) ?? [])],
+      ["src/shared.txt"],
+      "only the contested file, not the one that promoted",
+    );
+    assert.equal(deferred[0]?.task.id, "task_deferred");
+    assert.equal(deferred[0]?.repository.id, context.repository.id);
+
+    // The withholding is on the run's audit log too, against the follow-up
+    // that will carry it, with the patches kept as context.
+    const withheld = result.audit.filter(
+      (entry) => entry.type === "changeset_withheld",
+    );
+    assert.equal(withheld.length, 1);
+    assert.equal(withheld[0]?.taskId, "task_followup");
+    assert.equal(withheld[0]?.data["deferredFrom"], "task_deferred");
+    assert.equal(withheld[0]?.data["queued"], true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("with nowhere to queue the remainder, the task says so rather than done", async () => {
+  // An authority that cannot take a remainder — or no authority at all, which
+  // is a benchmark or a bare CLI run — leaves the contested file genuinely
+  // outstanding. Canonical still advanced, so the task is not failed; what
+  // changes is that it stops claiming the whole job.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-repair-"));
+  try {
+    const context = await fixture(root);
+    const result = await new Coordinator({
+      repositories: context.repositories,
+      workspaces: context.workspaces,
+    }).run({
+      repository: context.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: {
+            id: "task_unqueued",
+            objective: "edit the shared and own files",
+            agentId: "scripted",
+            validationCommands: [],
+          },
+          adapter: new ScriptedAgentAdapter({
+            agentId: "scripted",
+            repository: context.repository,
+            workspaces: context.workspaces,
+            behavior: {
+              plan: plan("task_unqueued"),
+              execute: async (workspacePath) => {
+                await landExternalChange(context, root, "line 1 THEIRS");
+                const target = path.join(workspacePath, "src", "shared.txt");
+                const lines = (await readFile(target, "utf8")).split("\n");
+                lines[0] = "line 1 MINE";
+                await writeFile(target, lines.join("\n"), "utf8");
+                await writeFile(
+                  path.join(workspacePath, "src", "own.txt"),
+                  "own edited\n",
+                  "utf8",
+                );
+              },
+            },
+          }),
+        },
+      ],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.match(
+      result.tasks[0]?.explanation ?? "",
+      /Still outstanding: src\/shared\.txt/u,
+      "a task that did half the job must not report the whole one",
+    );
+    const withheld = result.audit.filter(
+      (entry) => entry.type === "changeset_withheld",
+    );
+    assert.equal(withheld.length, 1);
+    assert.equal(withheld[0]?.data["queued"], false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

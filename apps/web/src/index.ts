@@ -71,11 +71,41 @@ function trimmedEnv(name: string): string | undefined {
  */
 function appBaseUrl(): string {
   return (
-    trimmedEnv("KUMI_APP_URL") ??
-    trimmedEnv("COORD_PUBLIC_URL") ??
+    absoluteUrl(trimmedEnv("KUMI_APP_URL"), "KUMI_APP_URL") ??
+    absoluteUrl(trimmedEnv("COORD_PUBLIC_URL"), "COORD_PUBLIC_URL") ??
     configuredOrigins()[0] ??
     ""
   );
+}
+
+/**
+ * A value that is actually an address, or nothing and a word about why.
+ *
+ * Pasting a whole `NAME=value` line into a value field is an easy mistake to
+ * make and an expensive one to find: the variable is set, every check that
+ * asks whether it is set says yes, and the failure surfaces hours later as
+ * Stripe refusing a checkout for a reason that names none of this. Better to
+ * refuse the value here, say which variable it was, and fall through to the
+ * next candidate.
+ */
+function absoluteUrl(value: string | undefined, name: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("not http");
+    }
+    return value;
+  } catch {
+    process.emitWarning(
+      `${name} is not an absolute http(s) URL and was ignored: ${JSON.stringify(value)}. ` +
+        `A value like "${name}=https://example.com" means the variable's name ` +
+        `was pasted into its own value.`,
+    );
+    return undefined;
+  }
 }
 
 /**

@@ -1257,6 +1257,57 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "runs-by-project",
     statements: [`CREATE INDEX runs_by_project ON runs(project_id, id)`],
   },
+  {
+    // Sign-up is paywalled, and both halves of that live here.
+    //
+    // `signup_intents` is the row that exists between somebody entering their
+    // details and Stripe confirming their card. It holds no account — a
+    // digest and a pre-minted organization id, nothing that can be signed in
+    // to — and the organization id is the point: it is stamped into Stripe
+    // metadata at checkout, so the webhook can create the organization with
+    // the id every later event already names, and a retried delivery lands
+    // against a primary key rather than against a flag we remembered.
+    //
+    // No `REFERENCES organizations(id)`: the organization deliberately does
+    // not exist yet, and will not until somebody has actually paid.
+    //
+    // The backfill exists because the gate stops reading a missing
+    // subscription row as a fresh fourteen-day trial in the same release.
+    // Every organization lacking a row gets exactly the entitlement the
+    // fallback was granting it — fourteen days from its own `created_at`,
+    // already expired for anything older than a fortnight — so no
+    // organization's answer changes on the day this lands. `strftime` rather
+    // than `datetime` because the column holds ISO-8601 with a `T` and a `Z`,
+    // and "YYYY-MM-DD HH:MM:SS" is parsed as local time by `Date.parse`.
+    version: 47,
+    name: "paywalled-signup",
+    statements: [
+      `CREATE TABLE signup_intents (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        organization_name TEXT,
+        secret_hash TEXT NOT NULL,
+        stripe_session_id TEXT,
+        user_id TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT
+      )`,
+      `CREATE INDEX signup_intents_by_organization
+         ON signup_intents(organization_id)`,
+      `INSERT INTO subscriptions (
+         organization_id, status, trial_ends_at, created_at, updated_at
+       )
+       SELECT o.id,
+              'trialing',
+              strftime('%Y-%m-%dT%H:%M:%SZ', o.created_at, '+14 days'),
+              o.created_at,
+              o.created_at
+         FROM organizations o
+        WHERE o.id NOT IN (SELECT organization_id FROM subscriptions)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

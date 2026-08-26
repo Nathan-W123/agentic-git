@@ -11,6 +11,7 @@ import type {
   OrganizationMembership,
   OrganizationRole,
   PasswordResetRecord,
+  SignupIntentRecord,
   UserAccount,
 } from "@coord/persistence";
 import { createId } from "@coord/shared-types";
@@ -474,6 +475,18 @@ export class AuthService {
         userId: user.id,
         role: "owner",
       });
+      // Said outright rather than inherited from a migration. A missing
+      // subscription row is no entitlement now, and this organization's row
+      // only ever existed because a backfill happened to reach it — which is
+      // true of a store that runs migrations and false of one that does not.
+      // The deployment's own organization is not something anybody invoices,
+      // so it is comped, and now it says so.
+      if ((await this.store.getSubscription(local.id)) === undefined) {
+        await this.store.saveSubscription({
+          organizationId: local.id,
+          status: "comped",
+        });
+      }
     }
     return user;
   }
@@ -502,31 +515,47 @@ export class AuthService {
     passwordDigest: string;
     organizationName?: string;
   }): Promise<UserAccount> {
-    const user = await this.store.createUser({
-      email: input.email,
-      displayName: input.displayName,
-      passwordDigest: input.passwordDigest,
-      systemAdmin: false,
-    });
-    // Slugs have to be unique across the deployment, and a display name is
-    // neither unique nor URL-safe, so the user's own id is the only thing to
-    // hand that is guaranteed both.
-    const slug = `team-${user.id.replace(/^user_/u, "").slice(0, 12)}`;
-    const organization = await this.store.createOrganization({
+    // One transaction, so the five writes below land together or not at all.
+    //
+    // The ordering underneath it is kept rather than reverted: it is what
+    // makes the failure survivable on a backend where the transaction is a
+    // snapshot rather than a write-ahead log, and it costs nothing to keep.
+    return await this.store.runInTransaction(async (store) => {
+    // The account is built back to front, and that is the second half of the
+    // safety property here.
+    //
+    // These are five separate writes and the store has no transaction to put
+    // them in, so any one can fail with the earlier ones already durable.
+    // Done in the obvious order — user first — a failure left a user row with
+    // a working password and nothing else: able to sign in forever, belonging
+    // to nothing, unable to create a repository, and holding the only claim
+    // on that email address, so signing up again was refused too. No path in
+    // the product finished the job and none undid it. That is not
+    // hypothetical; it happened, and the account it happened to could still
+    // log in.
+    //
+    // So everything that does not need a user is written first, and the user
+    // second to last. A failure before the account exists leaves an
+    // organization nobody belongs to — invisible, unreachable, costing
+    // nothing — while the person sees an error and can try again with the
+    // same address, which is the outcome they can actually act on. Only the
+    // final membership write can still strand somebody, and it is the
+    // smallest of the five: an upsert into a two-column table whose foreign
+    // keys were both satisfied by the writes immediately before it.
+    //
+    // The slug is random rather than derived from the user id, because the
+    // user id does not exist yet. It is not shown anywhere a person reads.
+    const slug = `team-${randomBytes(8).toString("hex")}`;
+    const organization = await store.createOrganization({
       slug,
       name:
         input.organizationName !== undefined && input.organizationName !== ""
           ? input.organizationName
           : `${input.displayName}'s team`,
     });
-    await this.store.saveMembership({
-      organizationId: organization.id,
-      userId: user.id,
-      role: "owner",
-    });
     // A repository has to live in a project, so a brand new account with no
     // project could not do the first thing it came to do.
-    await this.store.createProject({
+    await store.createProject({
       organizationId: organization.id,
       slug: "default",
       name: "My Project",
@@ -536,12 +565,24 @@ export class AuthService {
     // dispatch would mean an account that signed up, looked around, and came
     // back a month later still had its whole trial — which sounds generous and
     // is really just an unbounded free tier wearing a trial's name.
-    await this.store.saveSubscription({
+    await store.saveSubscription({
       organizationId: organization.id,
       status: "trialing",
       trialEndsAt: trialEndsAtFrom(),
     });
+    const user = await store.createUser({
+      email: input.email,
+      displayName: input.displayName,
+      passwordDigest: input.passwordDigest,
+      systemAdmin: false,
+    });
+    await store.saveMembership({
+      organizationId: organization.id,
+      userId: user.id,
+      role: "owner",
+    });
     return user;
+    });
   }
 
   /**
@@ -553,6 +594,83 @@ export class AuthService {
    * path below is untouched and comes back the moment a deployment asks for
    * it, so nothing here has to be rebuilt to turn confirmation on.
    */
+  /**
+   * Builds the account a cleared payment has already paid for.
+   *
+   * The organization, its project and its subscription were created by the
+   * webhook when the money confirmed; what is missing is the person. So this
+   * is the ordinary provisioning sequence with its expensive half already
+   * done, and it runs in the same order for the same reason: the user is
+   * written before the membership because the membership points at it, and
+   * nothing before that point can strand anybody.
+   *
+   * Claiming twice builds one account. `attachSignupIntentUser` is
+   * conditional, so of two requests racing the same link exactly one may
+   * proceed — the loser is handed the account the winner made rather than an
+   * error, because both of them are the same person pressing the same button.
+   */
+  public async completePaidSignup(input: {
+    intent: SignupIntentRecord;
+    displayName: string;
+    password: string;
+  }): Promise<UserAccount> {
+    const existing = input.intent.userId;
+    if (existing !== undefined) {
+      const already = await this.store.getUser(existing);
+      if (already !== undefined) {
+        return already;
+      }
+    }
+    assertPassword(input.password);
+    const displayName = input.displayName.trim();
+    if (displayName === "") {
+      throw new AuthenticationError(
+        "A name is required",
+        400,
+        "invalid_request",
+      );
+    }
+    // Between paying and arriving here somebody could have registered this
+    // address by another route. Refusing is right — the money is not lost,
+    // it bought a subscription that the existing account can be moved onto —
+    // but it must not be silently attached to a stranger's account.
+    if ((await this.store.getUserByEmail(input.intent.email)) !== undefined) {
+      throw new AuthenticationError(
+        "An account already uses that email address",
+        409,
+        "account_exists",
+      );
+    }
+    const passwordDigest = await hashPassword(input.password);
+    // Hashing first, outside the transaction: scrypt is deliberately slow and
+    // holding a write lock across it would serialise every other writer
+    // behind somebody's password.
+    return await this.store.runInTransaction(async (store) => {
+    const user = await store.createUser({
+      email: input.intent.email,
+      displayName,
+      passwordDigest,
+      systemAdmin: false,
+    });
+    if (!(await store.attachSignupIntentUser(input.intent.id, user.id))) {
+      // Somebody else won the race between the two reads above. Their account
+      // is the real one; hand it back rather than leaving this caller with a
+      // second.
+      const winner = (await store.getSignupIntent(input.intent.id))?.userId;
+      const account = winner === undefined ? undefined : await store.getUser(winner);
+      if (account !== undefined) {
+        return account;
+      }
+    }
+    await store.saveMembership({
+      organizationId: input.intent.organizationId,
+      userId: user.id,
+      role: "owner",
+    });
+    return user;
+    });
+  }
+
   public async registerUnconfirmed(input: {
     email: string;
     displayName: string;

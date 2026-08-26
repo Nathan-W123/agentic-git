@@ -1,5 +1,6 @@
 import type {
   OrganizationMembership,
+  RepositoryGrant,
   OrganizationRole,
   Subscription,
 } from "@coord/persistence";
@@ -44,24 +45,60 @@ export function roleIsBillable(role: OrganizationRole): boolean {
  */
 export function billableSeats(
   memberships: readonly OrganizationMembership[],
+  /**
+   * Repository grants held by people in this organization's repositories.
+   *
+   * Counted because a grant is a way to work without being a member. Somebody
+   * invited to a single repository holds no organization role at all, so a
+   * seat count that read only memberships billed nothing for them however
+   * much work they did — and a team could put its whole staff on grants and
+   * pay for one owner.
+   *
+   * A comped grant is still free: that is what the operators hand out
+   * deliberately, one person and one repository at a time, and it is the
+   * whole point of the mechanism. What is counted is the ordinary grant
+   * nobody comped.
+   */
+  grants: readonly RepositoryGrant[] = [],
 ): number {
-  return memberships.filter(
-    (membership) => roleIsBillable(membership.role) && !membership.comped,
-  ).length;
+  // By person, not by row. One human with a billable membership and three
+  // grants is one seat, and three grants on three repositories is one seat
+  // too — they are one person, and a seat is a person.
+  const billable = new Set<string>();
+  for (const membership of memberships) {
+    if (roleIsBillable(membership.role) && !membership.comped) {
+      billable.add(membership.userId);
+    }
+  }
+  for (const grant of grants) {
+    if (roleIsBillable(grant.role) && grant.comped !== true) {
+      billable.add(grant.userId);
+    }
+  }
+  return billable.size;
 }
 
 /**
  * Whether an organization may do work right now.
  *
- * A missing row is read as the organization's initial trial, measured from
- * when the organization itself was created. Refusing outright was the first
- * instinct and it is the wrong one: it makes every future path that creates an
- * organization silently load-bearing for billing, so the one that forgets to
- * write the row takes that whole organization offline rather than costing a
- * little money. Reading it as a trial from `createdAt` is self-healing, is
- * still bounded — the same fourteen days, and expired for anything older —
- * and cannot be farmed, because the only way to get a new organization is to
- * sign up, which writes a real row anyway.
+ * A missing row is no entitlement. It used to be read as the organization's
+ * initial trial, measured from `createdAt`, on the reasoning that this was
+ * self-healing and "cannot be farmed, because the only way to get a new
+ * organization is to sign up, which writes a real row anyway".
+ *
+ * That reasoning stopped being true. `POST /organizations` creates an
+ * organization and writes no subscription row, so anybody signed in could
+ * mint themselves another fourteen days as often as they liked — and once a
+ * webhook creates organizations too, a fallback that hands out a fortnight to
+ * any row it has never seen is a vending machine rather than a safety net.
+ *
+ * Migration 47 backfilled a real row for every organization that lacked one,
+ * computing exactly the entitlement this fallback was granting it, so
+ * inverting it changes no existing organization's answer. It does mean every
+ * path that creates an organization is now load-bearing for billing — which
+ * is the point: writing the row is the thing that must not be forgotten, and
+ * an organization that appears without one should stop rather than quietly
+ * become free.
  *
  * A trial is judged against its own end date rather than against its status,
  * so an expired trial nobody has swept stops working on time instead of when
@@ -75,11 +112,7 @@ export function subscriptionAllowsWork(
   now: Date = new Date(),
 ): boolean {
   if (subscription === undefined) {
-    return (
-      organizationCreatedAt !== undefined &&
-      Date.parse(trialEndsAtFrom(new Date(organizationCreatedAt))) >
-        now.getTime()
-    );
+    return false;
   }
   switch (subscription.status) {
     case "comped":
@@ -87,7 +120,22 @@ export function subscriptionAllowsWork(
     case "past_due":
       return true;
     case "trialing":
-      return trialRemainsOn(subscription, now);
+      // Whose trial it is decides who is believed about it.
+      //
+      // A subscription Stripe is running says `trialing` for exactly as long
+      // as Stripe honours it, and its status is more current than our mirror
+      // of the end date: at conversion Stripe moves the subscription to
+      // `active` and tells us afterwards, so between the trial's last second
+      // and that webhook landing, a date-based answer locks out a team that
+      // has just paid. `past_due` already resolves the same tension the same
+      // way — Stripe's retries are a better answer than a locked repository.
+      //
+      // A trial this deployment runs itself has no such authority behind it,
+      // and is judged against its own end date so an expired one stops on
+      // time rather than when some sweep next runs.
+      return subscription.stripeSubscriptionId !== undefined
+        ? true
+        : trialRemainsOn(subscription, now);
     case "canceled":
       return false;
   }

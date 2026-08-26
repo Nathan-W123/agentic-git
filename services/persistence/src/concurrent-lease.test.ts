@@ -38,8 +38,10 @@ const run = promisify(execFile);
 const WORKER_SOURCE = `
 import { SqliteCoordinationStore } from ${JSON.stringify(`file:///${STORE_ENTRY}`)};
 
-const [databasePath, workerId, baseRevision, startAtRaw] = process.argv.slice(2);
+const [databasePath, workerId, baseRevision, startAtRaw, parallelismRaw] =
+  process.argv.slice(2);
 const startAt = Number(startAtRaw);
+const repositoryParallelism = Number(parallelismRaw);
 
 const store = SqliteCoordinationStore.open(databasePath);
 const leased = [];
@@ -54,6 +56,7 @@ try {
       workerId,
       baseRevision,
       ttlMs: 60000,
+      repositoryParallelism,
     });
     if (work === undefined) {
       break;
@@ -146,6 +149,17 @@ async function createHarness(taskCount: number): Promise<Harness> {
 async function raceWorkers(
   harness: Harness,
   workerCount: number,
+  /**
+   * How many leases the repository may hold at once.
+   *
+   * Passed rather than left at the default, which is one. That default is the
+   * throughput valve — a deliberate cap on concurrent work per repository —
+   * and with it in force a race for twelve tasks ends after the first, which
+   * says nothing at all about whether two workers can be handed the same one.
+   * Raising it is what puts the tasks in contention, which is the thing these
+   * tests are about.
+   */
+  repositoryParallelism = workerCount,
 ): Promise<WorkerResult[]> {
   const workerPath = path.join(harness.root, "worker.mjs");
   await writeFile(workerPath, WORKER_SOURCE, "utf8");
@@ -167,6 +181,7 @@ async function raceWorkers(
           workerId,
           BASE_REVISION,
           String(startAt),
+          String(repositoryParallelism),
         ],
         { timeout: 60_000 },
       );
@@ -180,7 +195,9 @@ test("concurrent workers never receive the same queued task twice", async () => 
   const taskCount = 12;
   const harness = await createHarness(taskCount);
   try {
-    const results = await raceWorkers(harness, 4);
+    // Room for every task at once, so the race is a race. The valve has its
+    // own coverage; this test is about the claim being exclusive.
+    const results = await raceWorkers(harness, 4, taskCount);
 
     for (const result of results) {
       assert.equal(
@@ -222,10 +239,15 @@ test("an expired lease returns its task to exactly one other worker", async () =
   const harness = await createHarness(1);
   try {
     // A worker on one device takes the task, then its machine dies.
+    //
+    // A real TTL, not a millisecond: `leaseNextTask` sweeps lapsed leases at
+    // the top of its own transaction, so a lease that has already expired is
+    // not a lease anybody is holding — and the next assertion would be
+    // testing the sweep rather than the hold.
     const first = await harness.store.leaseNextTask({
       workerId: await harness.addWorker("lost"),
       baseRevision: BASE_REVISION,
-      ttlMs: 1,
+      ttlMs: 60_000,
     });
     assert.ok(first !== undefined);
 
@@ -238,7 +260,7 @@ test("an expired lease returns its task to exactly one other worker", async () =
     assert.equal(blocked, undefined);
 
     const expired = await harness.store.expireWorkLeases(
-      new Date(Date.now() + 60_000).toISOString(),
+      new Date(Date.now() + 120_000).toISOString(),
     );
     assert.equal(expired.length, 1);
     assert.equal(expired[0]?.status, "expired");
