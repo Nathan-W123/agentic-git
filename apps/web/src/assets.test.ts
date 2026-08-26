@@ -7006,7 +7006,7 @@ test("the marketing front page forwards legacy deep links to /app", async () => 
   const html = await siteFile("index.html");
   const headEnd = html.indexOf("</head>");
   assert.ok(headEnd > 0);
-  assert.match(html.slice(0, headEnd), /<script src="\/site-boot\.js"><\/script>/u);
+  assert.match(html.slice(0, headEnd), /<script src="site-boot\.js"><\/script>/u);
 
   const boot = await siteFile("site-boot.js");
   assert.match(boot, /window\.location\.replace\("\/app" \+ hash\)/u);
@@ -7032,6 +7032,65 @@ test("the marketing front page forwards legacy deep links to /app", async () => 
   // installers); the preload's KUMI_SERVER global is the tell that sends them
   // to the dashboard.
   assert.match(boot, /window\.KUMI_SERVER/u);
+});
+
+test("the marketing pages survive being served under a path prefix", async () => {
+  /*
+   * The site is served at three depths, not one.
+   *
+   * Production gives it "/" and "/pricing" off the origin root. The control
+   * plane's preview proxy gives the same pages a deep path —
+   * `/api/v1/projects/<id>/repositories/<id>/preview/app/` — so somebody can
+   * look at the site an agent just changed, from a phone, without a port
+   * being opened. A root-absolute `href="/site.css"` resolves to the
+   * deployment's own stylesheet in that second case, not the preview's, and
+   * every link in the nav walks straight out of the preview into production.
+   * The page looks right and is not the page being previewed, which is the
+   * worst way for a preview to fail.
+   *
+   * Relative references are correct at both depths: "/" and "/pricing" share
+   * a base directory, and so do the proxied forms of each.
+   *
+   * `/app` is the deliberate exception. The dashboard really is at the
+   * origin's root, and from inside a preview "open the product" should reach
+   * the deployment rather than something inside the preview.
+   */
+  for (const page of ["index.html", "pricing.html"]) {
+    const html = await siteFile(page);
+    const absolute = [...html.matchAll(/(?:href|src)="(\/[^"]*)"/gu)]
+      .map((match) => match[1] as string)
+      .filter((target) => !target.startsWith("/app"));
+    assert.deepEqual(
+      absolute,
+      [],
+      `${page} would resolve these against the deployment root, not the ` +
+        `page's own directory: ${absolute.join(", ")}`,
+    );
+  }
+});
+
+test("the marketing forwards only from the origin's front door", async () => {
+  /*
+   * Each forward in the boot script rescues somebody who asked for "/" —
+   * a mailed dashboard link, a desktop shell built before the move, a PWA
+   * whose cached start_url still says "/". Served through the preview proxy
+   * instead, the standalone tell fires for any reader who has Kumi
+   * installed, and the preview replaced itself with the real dashboard: the
+   * play button appeared to start the product rather than the page.
+   */
+  const boot = await siteFile("site-boot.js");
+  assert.match(boot, /window\.location\.pathname === "\/"/u);
+  // Every forward sits inside that guard, and the motion class does not —
+  // animations belong to the page wherever it is served from.
+  const guard = boot.indexOf('window.location.pathname === "/"');
+  const armed = boot.indexOf('className += " anim"');
+  assert.ok(guard > 0 && armed > guard, "the motion gate must survive the guard");
+  for (const forward of [...boot.matchAll(/location\.replace\("\/app"/gu)]) {
+    assert.ok(
+      (forward.index ?? 0) > guard,
+      "a forward to /app sits outside the front-door guard",
+    );
+  }
 });
 
 test("marketing motion is an enhancement behind the reduced-motion gate", async () => {
@@ -7063,9 +7122,9 @@ test("marketing motion is an enhancement behind the reduced-motion gate", async 
   // Both pages load the gate before the library and the module.
   for (const page of ["index.html", "pricing.html"]) {
     const html = await siteFile(page);
-    assert.match(html, /<script src="\/site-boot\.js"><\/script>/u);
-    assert.match(html, /<script src="\/vendor\/motion\/motion\.js"><\/script>/u);
-    assert.match(html, /<script type="module" src="\/site\.js"><\/script>/u);
+    assert.match(html, /<script src="site-boot\.js"><\/script>/u);
+    assert.match(html, /<script src="vendor\/motion\/motion\.js"><\/script>/u);
+    assert.match(html, /<script type="module" src="site\.js"><\/script>/u);
   }
 });
 

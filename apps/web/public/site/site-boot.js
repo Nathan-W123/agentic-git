@@ -33,39 +33,63 @@
 (function () {
   "use strict";
   var hash = window.location.hash;
-  if (window.KUMI_SERVER) {
-    window.location.replace("/app" + hash);
-    return;
-  }
-  // The other kind of installed shell. A PWA pinned before the dashboard
-  // moved keeps its cached manifest, whose start_url is "/", and launches
-  // with no hash and no preload global — so neither tell above fires and the
-  // person's installed app opens on its own advertisement. Standalone
-  // display mode is the one thing such a launch cannot hide.
-  if (window.matchMedia("(display-mode: standalone)").matches) {
-    window.location.replace("/app" + hash);
-    return;
-  }
-  if (hash.length > 1) {
-    var screen = hash.slice(1).split(/[/?]/)[0];
-    var legacy = [
-      "signin",
-      "register",
-      "signup",
-      "welcome",
-      "setup",
-      "forgot",
-      "reset",
-      "billing",
-      "billing-done",
-      "billing-cancelled",
-      "settings",
-    ];
-    if (legacy.indexOf(screen) !== -1) {
+
+  /**
+   * Whether this page is the origin's front door.
+   *
+   * Every forward below rescues somebody who asked for "/" and got an
+   * advertisement: a mailed dashboard link, a desktop shell built before the
+   * move, a pinned PWA whose cached start_url still says "/". None of them
+   * can land anywhere else, so none of them are a reason to forward a page
+   * served from anywhere else.
+   *
+   * The guard is not pedantry — it is a bug that shipped. This same page is
+   * also served through the control plane's own preview proxy, at a deep
+   * path under `/api/v1/.../preview/app/`, so that somebody can look at the
+   * site an agent just changed. There the standalone tell fires for any
+   * reader who has Kumi installed, and previewing the marketing site threw
+   * them straight out of the preview and into the real dashboard: the play
+   * button appeared to start the product rather than the page. A document
+   * that is not at "/" is not the document these rules are about.
+   */
+  var atFrontDoor = window.location.pathname === "/";
+
+  if (atFrontDoor) {
+    if (window.KUMI_SERVER) {
       window.location.replace("/app" + hash);
       return;
     }
+    // The other kind of installed shell. A PWA pinned before the dashboard
+    // moved keeps its cached manifest, whose start_url is "/", and launches
+    // with no hash and no preload global — so neither tell above fires and
+    // the person's installed app opens on its own advertisement. Standalone
+    // display mode is the one thing such a launch cannot hide.
+    if (window.matchMedia("(display-mode: standalone)").matches) {
+      window.location.replace("/app" + hash);
+      return;
+    }
+    if (hash.length > 1) {
+      var screen = hash.slice(1).split(/[/?]/)[0];
+      var legacy = [
+        "signin",
+        "register",
+        "signup",
+        "welcome",
+        "setup",
+        "forgot",
+        "reset",
+        "billing",
+        "billing-done",
+        "billing-cancelled",
+        "settings",
+      ];
+      if (legacy.indexOf(screen) !== -1) {
+        window.location.replace("/app" + hash);
+        return;
+      }
+    }
   }
+
   if (window.matchMedia("(prefers-reduced-motion: no-preference)").matches) {
     document.documentElement.className += " anim";
   }
