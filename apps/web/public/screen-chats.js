@@ -1888,6 +1888,7 @@ function chanHeader(repositoryId) {
              The backticks are escaped for the reason the sidebar button's
              comment above gives: a bare one ends this template literal, and
              what follows parses as code. -->
+        <span aria-hidden="true">|</span>
         ${previewControl(repositoryId)}
       </div>
     </div>

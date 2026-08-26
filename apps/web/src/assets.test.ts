@@ -438,6 +438,10 @@ test("one play control beside the pin runs whatever the channel's app is", async
   );
   assert.notEqual(headerStart, -1, "the channel header should exist");
   assert.match(header, /\$\{previewControl\(repositoryId\)\}/u);
+  assert.match(
+    header,
+    /icon\("robotBust"\)[\s\S]*?<span aria-hidden="true">\|<\/span>[\s\S]*?\$\{previewControl\(repositoryId\)\}/u,
+  );
   const control = chats.slice(
     chats.indexOf("function previewControl(repositoryId)"),
     chats.indexOf("function previewLink(repositoryId)"),
