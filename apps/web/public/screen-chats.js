@@ -6807,40 +6807,54 @@ export function jumpToUnreadOrLatest() {
  */
 const SCROLL_SURFACES = ["#chan-messages", ".thread-body"];
 
+/**
+ * Every surface a selector finds, not just the first one.
+ *
+ * The right-hand column holds up to three panels at once and they all wear
+ * `.thread-body`, so `querySelector` answered for whichever one happened to
+ * be earliest in the document and left the rest uncaptured. A direct message
+ * opens as the newest panel, which puts it last: with a thread, the file
+ * editor or the tree already open beside it, nobody ever took its position,
+ * so every render — a poll tick, a keystroke elsewhere — dropped it back at
+ * the top of the history. Capture and restore both walk the whole list, and
+ * pair up by identity rather than by order.
+ */
+function scrollSurfaceNodes(selector) {
+  return [...document.querySelectorAll(selector)];
+}
+
 export function captureChannelScroll() {
-  return SCROLL_SURFACES.map((selector) => {
-    const scroller = document.querySelector(selector);
-    if (scroller === null) {
-      return undefined;
-    }
-    const edge = scroller.getBoundingClientRect().top;
-    // The first row still on screen: what the reader is looking at, as
-    // opposed to the rows that have scrolled off above it.
-    const anchor = [...scroller.querySelectorAll("[id]")].find(
-      (node) => node.getBoundingClientRect().bottom > edge,
-    );
-    return {
-      selector,
-      // Panels share `.thread-body` — a thread, a direct message, the file
-      // editor. Restoring one panel's offset into the next would be a
-      // position the reader never had, so the shape has to match too.
-      shape: scroller.className,
-      key: scroller.dataset.scrollKey,
-      top: scroller.scrollTop,
-      // Read this from the node now, not from the last scroll event. Browsers
-      // may deliver that event after a live update has already started its
-      // render, and a stale `followingChannel` is exactly how a reader who had
-      // just moved up got snapped back to the latest message.
-      following:
-        selector === "#chan-messages"
-          ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
-            FOLLOW_SLACK_PX
-          : undefined,
-      id: anchor?.id,
-      offset:
-        anchor === undefined ? 0 : anchor.getBoundingClientRect().top - edge,
-    };
-  }).filter((saved) => saved !== undefined);
+  return SCROLL_SURFACES.flatMap((selector) =>
+    scrollSurfaceNodes(selector).map((scroller) => {
+      const edge = scroller.getBoundingClientRect().top;
+      // The first row still on screen: what the reader is looking at, as
+      // opposed to the rows that have scrolled off above it.
+      const anchor = [...scroller.querySelectorAll("[id]")].find(
+        (node) => node.getBoundingClientRect().bottom > edge,
+      );
+      return {
+        selector,
+        // Panels share `.thread-body` — a thread, a direct message, the file
+        // editor. Restoring one panel's offset into the next would be a
+        // position the reader never had, so the shape has to match too.
+        shape: scroller.className,
+        key: scroller.dataset.scrollKey,
+        top: scroller.scrollTop,
+        // Read this from the node now, not from the last scroll event.
+        // Browsers may deliver that event after a live update has already
+        // started its render, and a stale `followingChannel` is exactly how a
+        // reader who had just moved up got snapped back to the latest message.
+        following:
+          selector === "#chan-messages"
+            ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
+              FOLLOW_SLACK_PX
+            : undefined,
+        id: anchor?.id,
+        offset:
+          anchor === undefined ? 0 : anchor.getBoundingClientRect().top - edge,
+      };
+    }),
+  );
 }
 
 /**
@@ -6856,28 +6870,34 @@ export function captureChannelScroll() {
 export function restoreChannelAnchor(saved) {
   watchImageSizes();
   for (const entry of saved ?? []) {
-    const scroller = document.querySelector(entry.selector);
-    if (
-      scroller === null ||
-      scroller.className !== entry.shape ||
-      scroller.dataset.scrollKey !== entry.key
-    ) {
-      continue;
+    // Its own panel, wherever the column has since put it: the same kind of
+    // surface showing the same conversation. Anything else is a position the
+    // reader never had.
+    for (const scroller of scrollSurfaceNodes(entry.selector)) {
+      if (
+        scroller.className !== entry.shape ||
+        scroller.dataset.scrollKey !== entry.key
+      ) {
+        continue;
+      }
+      const anchor =
+        entry.id === undefined ? null : document.getElementById(entry.id);
+      if (anchor === null) {
+        // The message is gone — filtered out by a search, or off the end of
+        // the loaded history. The raw offset is still closer than the top.
+        scroller.scrollTop = entry.top;
+      } else {
+        scroller.scrollTop =
+          anchor.getBoundingClientRect().top -
+          scroller.getBoundingClientRect().top +
+          scroller.scrollTop -
+          entry.offset;
+      }
+      heldAnchors.set(entry.selector + "|" + entry.shape + "|" + entry.key, {
+        entry,
+        applied: scroller.scrollTop,
+      });
     }
-    const anchor =
-      entry.id === undefined ? null : document.getElementById(entry.id);
-    if (anchor === null) {
-      // The message is gone — filtered out by a search, or off the end of the
-      // loaded history. The raw offset is still closer than the top.
-      scroller.scrollTop = entry.top;
-    } else {
-      scroller.scrollTop =
-        anchor.getBoundingClientRect().top -
-        scroller.getBoundingClientRect().top +
-        scroller.scrollTop -
-        entry.offset;
-    }
-    heldAnchors.set(entry.selector, { entry, applied: scroller.scrollTop });
   }
 }
 
@@ -6925,16 +6945,18 @@ function watchImageSizes() {
       }
       // A size nobody had measured means the box just changed from the
       // stylesheet's guess to the truth, which moved everything below it.
-      for (const [selector, held] of heldAnchors) {
-        const scroller = document.querySelector(selector);
-        if (
-          scroller === null ||
-          !scroller.contains(node) ||
-          scroller.scrollTop !== held.applied
-        ) {
-          continue;
+      for (const held of [...heldAnchors.values()]) {
+        for (const scroller of scrollSurfaceNodes(held.entry.selector)) {
+          if (
+            scroller.className !== held.entry.shape ||
+            scroller.dataset.scrollKey !== held.entry.key ||
+            !scroller.contains(node) ||
+            scroller.scrollTop !== held.applied
+          ) {
+            continue;
+          }
+          restoreChannelAnchor([held.entry]);
         }
-        restoreChannelAnchor([held.entry]);
       }
     },
     true,
