@@ -136,6 +136,11 @@ export interface AgentPlan {
    * that treats a list as a claim reads these. Absent means the plan was
    * never enriched and the `expected*` lists are already the agent's own; an
    * empty list inside means it named none of that kind.
+   *
+   * The agent's own words as far as admission granted them, to be exact:
+   * {@link reducePlanScope} narrows this record alongside the `expected*`
+   * lists, so a plan admitted with constraints stops claiming whatever was
+   * withheld from it here as well as there.
    */
   declared?: PlanDeclarations;
   /** Public routes, commands, events, or other externally consumed APIs. */
@@ -1944,6 +1949,12 @@ export function mergePlanScope(
  *
  * `dependencies` are untouched too: a dependency is something the plan reads,
  * not something it claims, so removing a claim never removes a dependency.
+ *
+ * Everything that does record a claim narrows: the widened `expected*` lists,
+ * the grounding that stands in for them, and the `declared` record of the
+ * agent's own words. `declared` is what arbitration reads, so a plan that
+ * kept it whole would go on being refused for a resource this very call took
+ * away from it.
  */
 export function reducePlanScope(
   plan: AgentPlan,
@@ -1981,6 +1992,58 @@ export function reducePlanScope(
     ...(plan.expectedServices === undefined
       ? {}
       : { expectedServices: plan.expectedServices.filter(keep("service")) }),
+    // The agent's own words narrow with the plan. Everything that reads a
+    // list as a claim rather than as a comparison reads `declared` and not
+    // the widened `expected*` lists — arbitration scoring most of all — so a
+    // record left whole here hands the re-decide a reduced plan that still
+    // claims the resource partial admission just withheld. Measured, that is
+    // how a contested symbol survives its own withholding: the reduced plan
+    // scores the same symbol overlap a second time, is refused for asking
+    // after something it no longer asks after, and an admission that should
+    // have come back approved with constraints collapses to sequencing the
+    // whole task behind a function it had already given up.
+    //
+    // Nothing is left unguarded by dropping it. A resource only reaches this
+    // function by way of `deferred`, and every deferred resource travels on
+    // with its line locations and is enforced hunk by hunk when a patch is
+    // accepted, so the claim removed here is one the admission is already
+    // holding elsewhere and by stricter means.
+    //
+    // `dependencies` is untouched for the reason the whole plan's is: it
+    // names what the plan reads, not what it claims. An absent record stays
+    // absent, and a list that was undefined stays undefined rather than
+    // becoming empty — absent means the plan was never enriched and its
+    // `expected*` lists are already the agent's own words, and readers tell
+    // that apart from a plan that named none of a kind.
+    ...(plan.declared === undefined
+      ? {}
+      : {
+          declared: {
+            ...structuredClone(plan.declared),
+            ...(plan.declared.symbols === undefined
+              ? {}
+              : { symbols: plan.declared.symbols.filter(keep("symbol")) }),
+            ...(plan.declared.apis === undefined
+              ? {}
+              : { apis: plan.declared.apis.filter(keep("api")) }),
+            ...(plan.declared.schemas === undefined
+              ? {}
+              : { schemas: plan.declared.schemas.filter(keep("schema")) }),
+            ...(plan.declared.configKeys === undefined
+              ? {}
+              : {
+                  configKeys: plan.declared.configKeys.filter(
+                    keep("configuration"),
+                  ),
+                }),
+            ...(plan.declared.tests === undefined
+              ? {}
+              : { tests: plan.declared.tests.filter(keep("test")) }),
+            ...(plan.declared.services === undefined
+              ? {}
+              : { services: plan.declared.services.filter(keep("service")) }),
+          },
+        }),
     // A withheld declaration takes its grounding with it: the referent only
     // ever stood in for that declaration, and keeping it would leave the
     // reduced plan claiming code it no longer names.
