@@ -11689,6 +11689,26 @@ dialog.modal[open]::backdrop {
   color: var(--warn, #f59e0b);
 }
 
+/* Starting, which is a state and not an instant. A cold start installs and
+   builds before anything listens, and a button that reads as untouched for a
+   minute gets pressed again — which used to kill the start it was waiting
+   for. Breathing rather than spinning: it belongs to a line of small grey
+   glyphs, and it is saying "still working", not "wait for me". */
+.ch-preview-toggle.starting {
+  color: var(--accent-bright);
+  cursor: progress;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+/* Motion is the only thing carrying "still working" here, so what is left
+   without it is the accent and the title. */
+@media (prefers-reduced-motion: reduce) {
+  .ch-preview-toggle.starting {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 /* Quieter than the two counts beside it. It reports a setting rather than a
    fact about the room, so it must not compete with how many people are in it. */
 .ch-muted {

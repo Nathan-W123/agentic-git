@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect, createServer } from "node:net";
 import { createServer as createHttpServer, type Server } from "node:http";
-import { access, mkdir, readFile, rm } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import type { CoordinationStore } from "@coord/persistence";
@@ -72,6 +72,28 @@ export interface PreviewStatus {
   /** Set once the process has exited, with however it went. */
   exited?: { code: number | null; signal: string | null; at: string };
   recentOutput: string[];
+  /**
+   * The commands that were tried and did not survive, before this one.
+   *
+   * Present only when something was ruled out on the way. A repository is
+   * started by working down a list of candidates, and which of them were
+   * tried is the difference between "this app cannot be started" and "the
+   * first guess was wrong" — a distinction the reader has no other way to
+   * make, because the failed attempts leave nothing behind.
+   */
+  tried?: string[];
+}
+
+/**
+ * One way a repository might start, and where it is run from.
+ *
+ * `cwd` is what a monorepo needs. The thing that serves a page is `apps/web`
+ * and the root has no script that starts it, so the candidate is the app's own
+ * `dev` script run in the app's own directory. Relative to the checkout, and
+ * absent for the ordinary case of a command run at the root.
+ */
+export interface PreviewCandidate extends PreviewCommand {
+  cwd?: string;
 }
 
 interface Running {
@@ -149,7 +171,173 @@ async function nodeRunner(workspacePath: string): Promise<string[]> {
 }
 
 /**
- * Works out how to start a repository nobody has configured.
+ * A manifest's scripts, or nothing when there is no readable one there.
+ *
+ * `relativeDir` is for a monorepo: the same reading, done on one workspace's
+ * own package.json rather than the root's.
+ */
+export async function readManifestScripts(
+  workspacePath: string,
+  relativeDir = ".",
+): Promise<Record<string, string> | undefined> {
+  const manifest = await textOf(
+    workspacePath,
+    path.join(relativeDir, "package.json"),
+  );
+  if (manifest === undefined) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(manifest) as { scripts?: Record<string, unknown> };
+    const scripts: Record<string, string> = {};
+    for (const [name, body] of Object.entries(parsed.scripts ?? {})) {
+      if (typeof body === "string") {
+        scripts[name] = body;
+      }
+    }
+    return scripts;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The start scripts a manifest actually has, in the order worth trying them.
+ *
+ * `dev` first: where a repository has several, that is the one meant to be
+ * watched. `start` is often the production entry point — which in a fresh
+ * checkout is frequently a build output that is not there — and the last two
+ * are what static-site tooling tends to call it. All of them are offered
+ * rather than only the first, because "the best guess was wrong" is not the
+ * same as "this app cannot be started" and only trying the rest tells them
+ * apart.
+ */
+function nodeScriptCandidates(
+  scripts: Record<string, string>,
+  runner: readonly string[],
+  where?: string,
+): PreviewCandidate[] {
+  const executable = runner[0] ?? "npm";
+  const run = runner[1] ?? "run";
+  return PREVIEW_SCRIPTS.filter((name) => scripts[name] !== undefined).map(
+    (name) => ({
+      executable,
+      args: [run, name],
+      label: `${executable} ${run} ${name}${
+        where === undefined ? "" : ` in ${where}`
+      }`,
+      ...(where === undefined ? {} : { cwd: where }),
+    }),
+  );
+}
+
+/** How many workspace apps are worth trying before giving up on the shape. */
+const WORKSPACE_APP_LIMIT = 6;
+
+/**
+ * The apps inside a monorepo, for a root that does not start one of them.
+ *
+ * A workspace root is the commonest repository shape this could not previously
+ * start. Its own `dev` script builds every package and then runs a server, or
+ * there is no root `dev` at all — and either way the thing somebody wants to
+ * look at is one app in `apps/`, whose own `dev` script starts in seconds.
+ *
+ * Read from the workspace declaration rather than by walking the tree: a
+ * directory that is listed as a workspace is the project saying it is one,
+ * which is the same standard of evidence every other rung here holds to.
+ * Apps before packages, because a library's `dev` script watches and builds
+ * and serves nothing.
+ */
+export async function workspaceAppCandidates(
+  workspacePath: string,
+  runner: readonly string[],
+): Promise<PreviewCandidate[]> {
+  const patterns: string[] = [];
+  const manifest = await textOf(workspacePath, "package.json");
+  try {
+    const declared = (
+      JSON.parse(manifest ?? "{}") as {
+        workspaces?: string[] | { packages?: string[] };
+      }
+    ).workspaces;
+    patterns.push(
+      ...(Array.isArray(declared) ? declared : (declared?.packages ?? [])).filter(
+        (entry): entry is string => typeof entry === "string",
+      ),
+    );
+  } catch {
+    // A manifest that will not parse declares nothing this can read.
+  }
+  // pnpm keeps the same list in a file of its own. Read as lines rather than
+  // as YAML: it is a list of strings, and a parser would be a dependency.
+  for (const line of (
+    (await textOf(workspacePath, "pnpm-workspace.yaml")) ?? ""
+  ).split(/\r?\n/u)) {
+    const entry = /^\s*-\s*["']?([^"'#]+?)["']?\s*$/u.exec(line)?.[1];
+    if (entry !== undefined) {
+      patterns.push(entry);
+    }
+  }
+  if (patterns.length === 0) {
+    return [];
+  }
+
+  // Only the one glob shape a workspace list actually uses. `apps/*` is a
+  // directory listing; a literal path is itself; anything else is skipped
+  // rather than guessed at, on the same principle as the rungs above.
+  const directories: string[] = [];
+  for (const pattern of patterns) {
+    const clean = pattern.replace(/\/+$/u, "");
+    if (clean.endsWith("/*")) {
+      const parent = clean.slice(0, -2);
+      let entries: string[] = [];
+      try {
+        entries = (
+          await readdir(path.join(workspacePath, parent), {
+            withFileTypes: true,
+          })
+        )
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name);
+      } catch {
+        continue;
+      }
+      directories.push(...entries.map((name) => `${parent}/${name}`));
+    } else if (!clean.includes("*")) {
+      directories.push(clean);
+    }
+  }
+
+  const apps = (directory: string): boolean =>
+    /^apps?\//u.test(directory) || /^(?:apps?|web|site|frontend)$/u.test(directory);
+  const ordered = [...new Set(directories)].sort((left, right) => {
+    if (apps(left) !== apps(right)) {
+      return apps(left) ? -1 : 1;
+    }
+    return left.localeCompare(right);
+  });
+
+  const candidates: PreviewCandidate[] = [];
+  for (const directory of ordered) {
+    if (candidates.length >= WORKSPACE_APP_LIMIT) {
+      break;
+    }
+    const scripts = await readManifestScripts(workspacePath, directory);
+    if (scripts === undefined) {
+      continue;
+    }
+    // One per app, not one per script: a second script in the same package is
+    // a worse guess than the first script in the next app.
+    const [best] = nodeScriptCandidates(scripts, runner, directory);
+    if (best !== undefined) {
+      candidates.push(best);
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Every way this repository might start, best first.
  *
  * Every rung wants a *named file* that says what the project is — a
  * `manage.py`, a `Cargo.toml`, a `web:` line in a Procfile — rather than a
@@ -157,68 +345,71 @@ async function nodeRunner(workspacePath: string): Promise<string[]> {
  * guessing: a wrong answer here spawns something that fails in a way nobody
  * can read, so a rung that cannot point at its evidence does not exist.
  *
- * `undefined` still means "say so". A repository with no app in it — a
+ * A *list* rather than an answer, because the evidence ranks candidates and
+ * does not pick one. The commonest failure this had was a repository whose
+ * best guess was right about the ecosystem and wrong about the command — a
+ * `start` script pointing at a build output that a fresh checkout does not
+ * contain — and the reader was then asked to type a start command for an app
+ * that had a perfectly good one a rung further down. The caller runs down the
+ * list and asks only when all of it is spent.
+ *
+ * An empty list still means "say so". A repository with no app in it — a
  * library, a CLI — has no localhost to boot, and {@link describeUndetectable}
  * tells the reader what was looked for.
- *
- * Ordered by how explicit the evidence is, not by popularity. A Procfile is
- * the project stating its own start command and wins over anything inferred
- * from a manifest.
  */
-export async function detectPreviewCommand(
+export async function detectPreviewCommands(
   workspacePath: string,
-): Promise<PreviewCommand | undefined> {
+): Promise<PreviewCandidate[]> {
+  const candidates: PreviewCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (...found: PreviewCandidate[]): void => {
+    for (const candidate of found) {
+      const key = [
+        candidate.cwd ?? ".",
+        candidate.executable,
+        ...candidate.args,
+      ].join(" ");
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push(candidate);
+      }
+    }
+  };
+
   // 1. The project saying it outright. A Procfile's `web:` line is a start
   //    command by definition, in every language that uses one.
   const procfile = await textOf(workspacePath, "Procfile");
   const web = /^web:\s*(.+)$/mu.exec(procfile ?? "")?.[1]?.trim();
   if (web !== undefined && web.length > 0) {
-    return {
+    add({
       // Through a shell because a Procfile line is a shell line — it may
       // carry `&&`, quotes or a `$PORT` of its own, and splitting it on
       // spaces would mangle all three.
       executable: "sh",
       args: ["-c", web],
       label: `Procfile: ${web}`,
-    };
+    });
   }
 
   // 2. Node, and the package manager the repository actually pinned. Running
   //    `npm` in a pnpm workspace fails on the lockfile, so the lockfile picks.
-  const manifest = await textOf(workspacePath, "package.json");
-  if (manifest !== undefined) {
-    let scripts: Record<string, unknown> = {};
-    try {
-      scripts =
-        ((JSON.parse(manifest) as { scripts?: Record<string, unknown> })
-          .scripts ?? {});
-    } catch {
-      scripts = {};
-    }
-    // `dev` first: where a repository has several, that is the one meant to
-    // be watched. `start` is often the production entry point, and the last
-    // two are what static-site tooling tends to call it.
-    const script = PREVIEW_SCRIPTS.find(
-      (name) => typeof scripts[name] === "string",
-    );
-    if (script !== undefined) {
-      const [executable, run] = await nodeRunner(workspacePath);
-      return {
-        executable: executable ?? "npm",
-        args: [run ?? "run", script],
-        label: `${executable ?? "npm"} ${run ?? "run"} ${script}`,
-      };
-    }
+  const runner = await nodeRunner(workspacePath);
+  const scripts = await readManifestScripts(workspacePath);
+  if (scripts !== undefined) {
+    add(...nodeScriptCandidates(scripts, runner));
+    // 3. And the apps inside it, for the monorepo whose root starts nothing
+    //    that serves a page.
+    add(...(await workspaceAppCandidates(workspacePath, runner)));
   }
 
-  // 3. Python, where the framework names itself in a file.
+  // 4. Python, where the framework names itself in a file.
   if ((await anyOf(workspacePath, "manage.py")) !== undefined) {
     // Django's runserver takes the address as an argument rather than PORT.
-    return {
+    add({
       executable: "python3",
       args: ["manage.py", "runserver", "0.0.0.0:${PORT}"],
       label: "python3 manage.py runserver",
-    };
+    });
   }
   const pythonDeps =
     (await textOf(workspacePath, "requirements.txt", "pyproject.toml")) ?? "";
@@ -231,57 +422,64 @@ export async function detectPreviewCommand(
   );
   if (/\bfastapi\b|\buvicorn\b/iu.test(pythonDeps) && appModule !== undefined) {
     const module = appModule.replace(/\.py$/u, "");
-    return {
+    add({
       executable: "uvicorn",
       args: [`${module}:app`, "--host", "0.0.0.0", "--port", "${PORT}"],
       label: `uvicorn ${module}:app`,
-    };
+    });
   }
   if (/\bflask\b/iu.test(pythonDeps) && appModule !== undefined) {
-    return {
+    add({
       executable: "python3",
       args: ["-m", "flask", "--app", appModule, "run", "--host", "0.0.0.0", "--port", "${PORT}"],
       label: `flask run --app ${appModule}`,
-    };
+    });
   }
 
-  // 4. Compiled languages, where the manifest is the evidence and the
+  // 5. Compiled languages, where the manifest is the evidence and the
   //    toolchain resolves its own dependencies on the way.
   if ((await anyOf(workspacePath, "go.mod")) !== undefined) {
-    return { executable: "go", args: ["run", "."], label: "go run ." };
+    add({ executable: "go", args: ["run", "."], label: "go run ." });
   }
   if ((await anyOf(workspacePath, "Cargo.toml")) !== undefined) {
-    return { executable: "cargo", args: ["run"], label: "cargo run" };
+    add({ executable: "cargo", args: ["run"], label: "cargo run" });
   }
 
-  // 5. Ruby. `bin/rails` before `config.ru`: a Rails app has both, and its
+  // 6. Ruby. `bin/rails` before `config.ru`: a Rails app has both, and its
   //    own binstub is the one that loads the framework.
   if ((await anyOf(workspacePath, "bin/rails")) !== undefined) {
-    return {
+    add({
       executable: "bin/rails",
       args: ["server", "-b", "0.0.0.0", "-p", "${PORT}"],
       label: "bin/rails server",
-    };
+    });
   }
   if ((await anyOf(workspacePath, "config.ru")) !== undefined) {
-    return {
+    add({
       executable: "bundle",
       args: ["exec", "rackup", "--host", "0.0.0.0", "--port", "${PORT}"],
       label: "rackup",
-    };
+    });
   }
 
-  // 6. PHP's own server, which needs no framework and no install.
+  // 7. PHP's own server, which needs no framework and no install.
   const phpRoot = await anyOf(workspacePath, "public/index.php", "index.php");
   if (phpRoot !== undefined) {
     const docroot = phpRoot.startsWith("public/") ? "public" : ".";
-    return {
+    add({
       executable: "php",
       args: ["-S", "0.0.0.0:${PORT}", "-t", docroot],
       label: `php -S -t ${docroot}`,
-    };
+    });
   }
-  return undefined;
+  return candidates;
+}
+
+/** The best of {@link detectPreviewCommands}, for callers wanting one answer. */
+export async function detectPreviewCommand(
+  workspacePath: string,
+): Promise<PreviewCandidate | undefined> {
+  return (await detectPreviewCommands(workspacePath))[0];
 }
 
 const PREVIEW_SCRIPTS = ["dev", "start", "serve", "preview"];
@@ -391,19 +589,25 @@ export function startStaticServer(root: string, port: number): Server {
 export async function describeUndetectable(workspacePath: string): Promise<string> {
   const manifest = await textOf(workspacePath, "package.json");
   if (manifest !== undefined) {
-    let names: string[] = [];
-    try {
-      names = Object.keys(
-        (JSON.parse(manifest) as { scripts?: Record<string, unknown> })
-          .scripts ?? {},
-      );
-    } catch {
+    const scripts = await readManifestScripts(workspacePath);
+    if (scripts === undefined) {
       return "Its package.json could not be parsed, so no script could be read.";
     }
-    return names.length === 0
-      ? "Its package.json has no scripts at all."
-      : `Its package.json has no ${PREVIEW_SCRIPTS.join("/")} script — ` +
-          `only ${names.slice(0, 8).join(", ")}.`;
+    const names = Object.keys(scripts);
+    // A workspace root with no start script of its own is only undetectable
+    // once its apps have been looked at too, so say that they were.
+    const workspaces = (await workspaceAppCandidates(workspacePath, ["npm", "run"]))
+      .length;
+    const alsoWorkspaces =
+      workspaces === 0 && /"workspaces"/u.test(manifest)
+        ? " No workspace it declares has one either."
+        : "";
+    return (
+      (names.length === 0
+        ? "Its package.json has no scripts at all."
+        : `Its package.json has no ${PREVIEW_SCRIPTS.join("/")} script — ` +
+          `only ${names.slice(0, 8).join(", ")}.`) + alsoWorkspaces
+    );
   }
   // Named individually rather than as "nothing matched": the reader can add
   // whichever one their project should have had, or set the command outright.
@@ -413,6 +617,24 @@ export async function describeUndetectable(workspacePath: string): Promise<strin
     "no Cargo.toml, no config.ru or bin/rails, no index.php, and no " +
     "index.html to serve as a static site."
   );
+}
+
+/**
+ * What to call a repository when telling somebody it would not start.
+ *
+ * Its display name, which is what the channel is called on screen, and its id
+ * otherwise. The two are not always the same — an id is taken by the first
+ * repository to want it, so the second is stored under a suffixed one and
+ * renamed for display — and a failure that named the id was reporting on a
+ * repository the reader has never seen that name for: the dialog asked how
+ * KUMI starts and the sentence inside it was about LATTICE.
+ */
+export function displayNameOf(repository: {
+  id: string;
+  displayName?: string;
+}): string {
+  const name = (repository.displayName ?? "").trim();
+  return name === "" ? repository.id : name;
 }
 
 /**
@@ -631,6 +853,18 @@ export class PreviewService {
   private readonly repositories: RepositoryService;
   private readonly worktrees: GitWorktreeWorkspaceManager;
   private readonly running = new Map<string, Running>();
+  /**
+   * Starts that have not finished yet, so a second press joins the first.
+   *
+   * Starting replaces whatever is already running, which is right for a
+   * preview that is *up* and wrong for one that is still coming up: a build
+   * that takes a minute has nothing to show and no way to say so, so the
+   * obvious thing to do is press play again — and that killed the build,
+   * which then arrived as "npm run dev exited immediately", which is a
+   * diagnosis of the repository for something the second press did. Joining
+   * the attempt in flight is what both presses meant.
+   */
+  private readonly previewsStarting = new Map<string, Promise<PreviewStatus>>();
   /** Task-scoped previews: an agent looking at its own unlanded work. */
   private readonly taskPreviews = new Map<
     string,
@@ -659,15 +893,42 @@ export class PreviewService {
    * Replacing rather than refusing, because the reason somebody asks twice is
    * that canonical has moved and they want to see the new state. Refusing
    * would make them stop it first to do the obvious thing.
+   *
+   * A start that has not finished yet is the exception: that one is *joined*
+   * rather than replaced, because replacing it means killing a build nobody
+   * asked to cancel and reporting its death as the repository's fault. See
+   * {@link previewsStarting}.
    */
   public async start(input: {
     repositoryId: string;
   }): Promise<PreviewStatus> {
-    const stored = await this.store.getRepository(input.repositoryId);
-    if (stored === undefined) {
-      throw new Error(`Unknown repository: ${input.repositoryId}`);
+    const already = this.previewsStarting.get(input.repositoryId);
+    if (already !== undefined) {
+      return await already;
     }
-    await this.stop(input.repositoryId);
+    const attempt = this.startOnce(input.repositoryId);
+    this.previewsStarting.set(input.repositoryId, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (this.previewsStarting.get(input.repositoryId) === attempt) {
+        this.previewsStarting.delete(input.repositoryId);
+      }
+    }
+  }
+
+  /**
+   * One start, from the checkout to a process that is still alive.
+   *
+   * Separate from {@link start} only so that the guard around it has one
+   * thing to hold: everything below runs once per press that reaches it.
+   */
+  private async startOnce(repositoryId: string): Promise<PreviewStatus> {
+    const stored = await this.store.getRepository(repositoryId);
+    if (stored === undefined) {
+      throw new Error(`Unknown repository: ${repositoryId}`);
+    }
+    await this.stop(repositoryId);
 
     const canonical = {
       id: stored.id,
@@ -681,28 +942,37 @@ export class PreviewService {
     // created and destroyed around a run, and a preview has to outlive every
     // run so it can be watched while the next task changes things.
     const workspace = await this.worktrees.create({
-      taskId: `preview-${input.repositoryId}`,
+      taskId: `preview-${repositoryId}`,
       rootPath: root,
       repository: canonical,
       baseVersion: version,
     });
 
     // Resolved after the checkout exists, because detection reads the
-    // repository's own files. A repository nobody has configured and nothing
-    // can be detected for is told so plainly rather than being handed a
-    // command that exits immediately.
-    const command =
-      this.project.config.previewCommands?.[input.repositoryId] ??
-      this.project.config.previewCommand ??
-      (await detectPreviewCommand(workspace.path));
+    // repository's own files. Configuration is one command and is taken as
+    // the answer; detection is a ranked list, because the evidence in a
+    // repository ranks candidates and does not pick one of them.
+    const configured =
+      this.project.config.previewCommands?.[repositoryId] ??
+      this.project.config.previewCommand;
+    const candidates: PreviewCandidate[] =
+      configured === undefined
+        ? await detectPreviewCommands(workspace.path)
+        : [configured];
+    const name = displayNameOf(stored);
+
     // A page with nothing that builds it needs no command at all, and this
     // process can serve it without assuming a runtime the machine may not
-    // have.
-    if (command === undefined && (await isStaticSite(workspace.path))) {
-      const port = await freePort();
+    // have. Last, though, and not first: a repository with both an index.html
+    // and an app that serves it wants the app, and serving the folder hands
+    // somebody the source of their site instead of their site.
+    const serveStaticallyAt = (
+      port: number,
+      tried: readonly string[],
+    ): PreviewStatus => {
       const server = startStaticServer(workspace.path, port);
       const status: PreviewStatus = {
-        repositoryId: input.repositoryId,
+        repositoryId,
         url: `http://127.0.0.1:${String(port)}`,
         port,
         revision: version.revision,
@@ -711,6 +981,7 @@ export class PreviewService {
         ready: true,
         startedAt: new Date().toISOString(),
         recentOutput: [`serving ${workspace.path}`],
+        ...(tried.length === 0 ? {} : { tried: [...tried] }),
       };
       // The port was free when it was asked for and may not be by now. Recorded
       // the same way a spawned server's failure is, so the reader is told the
@@ -723,46 +994,50 @@ export class PreviewService {
           at: new Date().toISOString(),
         };
       });
-      this.running.set(input.repositoryId, {
+      this.running.set(repositoryId, {
         server,
         status,
         workspacePath: workspace.path,
         lastAskedAt: Date.now(),
       });
       return { ...status, recentOutput: [...status.recentOutput] };
-    }
-    if (command === undefined) {
+    };
+
+    if (candidates.length === 0) {
+      if (await isStaticSite(workspace.path)) {
+        const staticPort = await freePort();
+        return serveStaticallyAt(staticPort, []);
+      }
       const why = await describeUndetectable(workspace.path);
       await rm(workspace.path, { recursive: true, force: true });
       throw new Error(
-        `Nothing in "${input.repositoryId}" could be started. ${why} ` +
-          `Add a "previewCommands" entry for "${input.repositoryId}" in ` +
+        `Nothing in "${name}" could be started. ${why} ` +
+          `Add a "previewCommands" entry for "${repositoryId}" in ` +
           `.coordinator/config.json — for example ` +
           `{"executable":"npm","args":["run","dev"],"label":"dev server"}.`,
       );
     }
-
-    const port = await freePort();
 
     // Dependencies first. A checkout of canonical has none — they are ignored
     // by git, which is exactly why they are not in the revision — so a Node
     // app started here fails on its first import and looks like a broken
     // preview rather than an uninstalled one.
     const install =
-      this.project.config.installCommands?.[input.repositoryId] ??
+      this.project.config.installCommands?.[repositoryId] ??
       this.project.config.installCommand ??
       (await detectInstallCommand(workspace.path));
     // Resolved before the install, because an install can need configuration
     // just as much as the server can — a private registry token is the usual
-    // one — and because it is what creates the preview's own project.
-    const environment = await this.previewEnvironment(input.repositoryId, port);
+    // one — and because it is what creates the preview's own project. The port
+    // it is given is a throwaway: each attempt below asks for one of its own,
+    // because a port is claimed by whatever was tried before it.
     const installOutput: string[] = [];
     if (install !== undefined) {
       const failure = await runToCompletion(
         install,
         workspace.path,
         installOutput,
-        environment,
+        await this.previewEnvironment(repositoryId, await freePort()),
       );
       if (failure !== undefined) {
         await rm(workspace.path, { recursive: true, force: true });
@@ -772,8 +1047,86 @@ export class PreviewService {
       }
     }
 
+    // Down the list until something survives. A candidate that exits is ruled
+    // out rather than reported: the reader is asked how the app starts only
+    // once the repository has run out of ways of saying it itself.
+    const tried: string[] = [];
+    for (const candidate of candidates) {
+      const attempt = await this.attemptCommand({
+        repositoryId,
+        command: candidate,
+        workspacePath: workspace.path,
+        revision: version.revision,
+        leadingOutput: installOutput,
+        timeoutMs: START_READY_TIMEOUT_MS,
+      });
+      if ("failure" in attempt) {
+        tried.push(`${candidate.label} ${attempt.failure}`);
+        continue;
+      }
+      if (tried.length > 0) {
+        attempt.entry.status.tried = [...tried];
+      }
+      this.running.set(repositoryId, attempt.entry);
+      return {
+        ...attempt.entry.status,
+        recentOutput: [...attempt.entry.status.recentOutput],
+      };
+    }
+
+    // Nothing that runs, and a page to serve. Reached only here, after every
+    // command has been tried, so an app is never passed over for its own
+    // source — and never where a command was configured: somebody who wrote
+    // down how this app starts is owed the reason it did not, rather than a
+    // directory listing reported as a success.
+    if (configured === undefined && (await isStaticSite(workspace.path))) {
+      return serveStaticallyAt(await freePort(), tried);
+    }
+
+    await rm(workspace.path, { recursive: true, force: true });
+    throw new Error(
+      `"${name}" could not be started. Tried ${
+        tried.length === 1 ? "one command" : `${String(tried.length)} commands`
+      }: ${tried.join("; ")}. If that is not how this app runs, name the ` +
+        `command in "previewCommands" for "${repositoryId}" in ` +
+        `.coordinator/config.json.`,
+    );
+  }
+
+  /**
+   * Runs one candidate, and waits long enough to see whether it survives.
+   *
+   * The whole of what makes a list of candidates work. A command that dies is
+   * a candidate ruled out and answers with a sentence saying how; a command
+   * still running answers with the preview, whether or not it is serving
+   * anything yet.
+   *
+   * Exiting is a failure; being slow is not. A dev server that builds before
+   * it serves can take minutes, and calling that broken would be worse than
+   * the bug being fixed — so the wait ends the instant the child dies, and
+   * otherwise gives up quietly and reports the preview as started. Which also
+   * means a healthy slow candidate costs the timeout and a dead one costs how
+   * long it took to die, so working down a list is cheap in the case that
+   * matters: `node dist/index.js` in a checkout with no `dist` is over in
+   * milliseconds.
+   */
+  private async attemptCommand(input: {
+    repositoryId: string;
+    command: PreviewCandidate;
+    workspacePath: string;
+    revision: string;
+    /** The install's output, which leads whichever attempt succeeds. */
+    leadingOutput: readonly string[];
+    timeoutMs: number;
+  }): Promise<{ entry: Running } | { failure: string }> {
+    const { command } = input;
+    const port = await freePort();
+    const environment = await this.previewEnvironment(input.repositoryId, port);
     const child = spawn(command.executable, withPort(command.args, port), {
-      cwd: workspace.path,
+      // A monorepo's app is started in its own directory: there is no root
+      // script that runs it, and every package manager walks up from here for
+      // the binaries and the modules that were hoisted to the root.
+      cwd: path.join(input.workspacePath, command.cwd ?? "."),
       // The command's own `env` is applied last, so a repository that needs
       // something specific always wins over what is inferred for it.
       env: { ...environment, ...command.env },
@@ -786,19 +1139,19 @@ export class PreviewService {
       repositoryId: input.repositoryId,
       url: `http://127.0.0.1:${String(port)}`,
       port,
-      revision: version.revision,
+      revision: input.revision,
       label: command.label,
       ready: false,
       startedAt: new Date().toISOString(),
       // The install's output leads the log. When a server fails to come up the
       // reason is often in the install that preceded it, and separating the
       // two would mean the reader finds only the half that says nothing.
-      recentOutput: [...installOutput],
+      recentOutput: [...input.leadingOutput],
     };
     const entry: Running = {
       child,
       status,
-      workspacePath: workspace.path,
+      workspacePath: input.workspacePath,
       lastAskedAt: Date.now(),
     };
     const record = (chunk: Buffer): void => {
@@ -827,53 +1180,30 @@ export class PreviewService {
       status.exited = { code: null, signal: null, at: new Date().toISOString() };
     });
 
-    this.running.set(input.repositoryId, entry);
-
     // Whether it actually came up. Without this the status was returned the
     // moment the child was spawned, so a command that dies on its first line
     // was reported as running: a success toast naming a URL, the control
     // flipped to "stop", and a link that answers nothing. The reason was
     // written to `recentOutput` and read by nobody.
-    //
-    // The commonest way to reach that is not an exotic failure. Detection
-    // prefers a `dev` script and falls back to `start`, and a `start` script
-    // very often points at a build output — which a fresh checkout of canonical
-    // does not contain, because build outputs are what `.gitignore` is for.
-    // `node dist/index.js` then exits in milliseconds with a module it cannot
-    // find.
-    //
-    // Exiting is a failure; being slow is not. A dev server that builds before
-    // it serves can take minutes, and calling that broken would be worse than
-    // the bug being fixed — so the wait ends the instant the child dies, and
-    // otherwise gives up quietly and reports the preview as started. This is
-    // the same reading `startForTask` has always taken.
-    // Longer than the agent path below, because the waits are different
-    // things. This one is a person who pressed play, and a repository whose
-    // dev server builds before it listens — a turbo or vite pipeline from a
-    // cold cache — routinely needs more than twenty seconds to reach a port.
-    // Timing out here does not stop it; the status simply reads "starting"
-    // when it is in fact starting. The agent path stays short because it is
-    // holding a workspace and its leases while it waits.
     status.ready = await waitForPort(
       port,
       () => status.exited !== undefined,
-      START_READY_TIMEOUT_MS,
+      input.timeoutMs,
     );
     const exit = status.exited;
-    if (exit !== undefined) {
-      const said = status.recentOutput.slice(-4).join(" ").trim();
-      await this.stop(input.repositoryId);
-      throw new Error(
-        `"${input.repositoryId}" could not be started: ${command.label} ` +
-          `exited immediately${
-            exit.code === null ? "" : ` (code ${String(exit.code)})`
-          }. ${said === "" ? "It printed nothing." : said} ` +
-          `If that is not how this app runs, name the command in ` +
-          `"previewCommands" for "${input.repositoryId}" in ` +
-          `.coordinator/config.json.`,
-      );
+    if (exit === undefined) {
+      return { entry };
     }
-    return { ...status, recentOutput: [...status.recentOutput] };
+    // Whatever it started before it died goes with it, so the next candidate
+    // is not competing with a half-built one for the same files.
+    terminate(child);
+    const said = status.recentOutput.slice(-4).join(" ").trim();
+    return {
+      failure:
+        `exited immediately${
+          exit.code === null ? "" : ` (code ${String(exit.code)})`
+        }: ${said === "" ? "it printed nothing" : said}`,
+    };
   }
 
   /**
@@ -900,11 +1230,14 @@ export class PreviewService {
     workspacePath: string;
   }): Promise<{ url?: string; output: string[]; failed: boolean }> {
     await this.stopForTask(input.taskId);
-    const command =
+    const configured =
       this.project.config.previewCommands?.[input.repositoryId] ??
-      this.project.config.previewCommand ??
-      (await detectPreviewCommand(input.workspacePath));
-    if (command === undefined && (await isStaticSite(input.workspacePath))) {
+      this.project.config.previewCommand;
+    const candidates: PreviewCandidate[] =
+      configured === undefined
+        ? await detectPreviewCommands(input.workspacePath)
+        : [configured];
+    if (candidates.length === 0 && (await isStaticSite(input.workspacePath))) {
       const port = await freePort();
       const server = startStaticServer(input.workspacePath, port);
       this.taskPreviews.set(input.taskId, { server, port });
@@ -914,7 +1247,7 @@ export class PreviewService {
         failed: false,
       };
     }
-    if (command === undefined) {
+    if (candidates.length === 0) {
       return {
         output: [await describeUndetectable(input.workspacePath)],
         failed: true,
@@ -925,63 +1258,85 @@ export class PreviewService {
       this.project.config.installCommands?.[input.repositoryId] ??
       this.project.config.installCommand ??
       (await detectInstallCommand(input.workspacePath));
-    const port = await freePort();
     // The same environment the repository preview gets, and for the same
     // reason: an agent looking at its own work is running the app, not the
     // control plane, and must not be handed the control plane's project.
-    const environment = await this.previewEnvironment(input.repositoryId, port);
     if (install !== undefined) {
       const failure = await runToCompletion(
         install,
         input.workspacePath,
         output,
-        environment,
+        await this.previewEnvironment(input.repositoryId, await freePort()),
       );
       if (failure !== undefined) {
         return { output, failed: true };
       }
     }
 
-    const child = spawn(command.executable, [...command.args], {
-      cwd: input.workspacePath,
-      env: { ...environment, ...command.env },
-      stdio: ["ignore", "pipe", "pipe"],
-      // Its own process group, so `terminate` can take the whole tree.
-      detached: process.platform !== "win32",
-    });
-    let exited = false;
-    const record = (chunk: Buffer): void => {
-      for (const line of chunk.toString("utf8").split(/\r?\n/u)) {
-        if (line.trim().length > 0) {
-          output.push(line);
+    // The same walk down the list the play button does, so an agent and a
+    // person previewing the same repository start the same thing.
+    for (const candidate of candidates) {
+      const port = await freePort();
+      const environment = await this.previewEnvironment(
+        input.repositoryId,
+        port,
+      );
+      const child = spawn(candidate.executable, withPort(candidate.args, port), {
+        cwd: path.join(input.workspacePath, candidate.cwd ?? "."),
+        env: { ...environment, ...candidate.env },
+        stdio: ["ignore", "pipe", "pipe"],
+        // Its own process group, so `terminate` can take the whole tree.
+        detached: process.platform !== "win32",
+      });
+      let exited = false;
+      const record = (chunk: Buffer): void => {
+        for (const line of chunk.toString("utf8").split(/\r?\n/u)) {
+          if (line.trim().length > 0) {
+            output.push(line);
+          }
         }
-      }
-      if (output.length > LOG_LINES) {
-        output.splice(0, output.length - LOG_LINES);
-      }
-    };
-    child.stdout?.on("data", record);
-    child.stderr?.on("data", record);
-    child.on("exit", () => {
-      exited = true;
-    });
-    child.on("error", (error) => {
-      exited = true;
-      output.push(`could not start: ${error.message}`);
-    });
-    this.taskPreviews.set(input.taskId, { child, port });
+        if (output.length > LOG_LINES) {
+          output.splice(0, output.length - LOG_LINES);
+        }
+      };
+      child.stdout?.on("data", record);
+      child.stderr?.on("data", record);
+      child.on("exit", () => {
+        exited = true;
+      });
+      child.on("error", (error) => {
+        exited = true;
+        output.push(`could not start: ${error.message}`);
+      });
+      this.taskPreviews.set(input.taskId, { child, port });
 
-    const url = `http://127.0.0.1:${String(port)}`;
-    const ready = await waitForPort(port, () => exited);
-    if (exited) {
-      this.taskPreviews.delete(input.taskId);
-      return { output, failed: true };
+      const ready = await waitForPort(port, () => exited);
+      if (exited) {
+        this.taskPreviews.delete(input.taskId);
+        terminate(child);
+        output.push(`${candidate.label} exited immediately`);
+        continue;
+      }
+      // Slow is not failed. A server that has not answered yet but is still
+      // running gets its URL and its output so far, and the agent decides for
+      // itself whether to keep waiting — `ready` is reported so it can.
+      void ready;
+      return { url: `http://127.0.0.1:${String(port)}`, output, failed: false };
     }
-    // Slow is not failed. A server that has not answered yet but is still
-    // running gets its URL and its output so far, and the agent decides for
-    // itself whether to keep waiting — `ready` is reported so it can.
-    void ready;
-    return { url, output, failed: false };
+    // Nothing ran, and there is a page. Last here too, for the same reason:
+    // an app is never passed over in favour of serving its own source.
+    if (configured === undefined && (await isStaticSite(input.workspacePath))) {
+      const port = await freePort();
+      const server = startStaticServer(input.workspacePath, port);
+      this.taskPreviews.set(input.taskId, { server, port });
+      output.push(`serving ${input.workspacePath} as static files`);
+      return {
+        url: `http://127.0.0.1:${String(port)}`,
+        output,
+        failed: false,
+      };
+    }
+    return { output, failed: true };
   }
 
   /** Stops a task's preview. Called on request and again at teardown. */
@@ -1047,6 +1402,9 @@ export class PreviewService {
   /** Stops everything. Called when the process serving these is going away. */
   public async close(): Promise<void> {
     clearInterval(this.sweeper);
+    // A start still in flight would otherwise register its preview after
+    // everything had been stopped, leaving a process nobody is holding.
+    await Promise.allSettled([...this.previewsStarting.values()]);
     await Promise.allSettled([
       ...[...this.running.keys()].map((repositoryId) => this.stop(repositoryId)),
       ...[...this.taskPreviews.keys()].map((taskId) => this.stopForTask(taskId)),

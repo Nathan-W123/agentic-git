@@ -482,6 +482,28 @@ test("one play control beside the pin runs whatever the channel's app is", async
   assert.match(start, /askPreviewCommand\(repositoryId, message\)/u);
   assert.match(start, /await setPreviewCommand\(repositoryId, command\)/u);
   assert.match(start, /startPreviewAction\(repositoryId, true\)/u);
+
+  // A cold start installs dependencies and then builds, which is a minute of
+  // a button that looks untouched — so it was pressed again, and the second
+  // press replaced the attempt in flight: the build was killed and its death
+  // reported as the repository exiting immediately. The second press is
+  // refused, the control says it is busy, and the flag is cleared before the
+  // question is asked so the answer can still be started.
+  assert.match(start, /previewsStarting\.has\(repositoryId\)/u);
+  assert.match(start, /previewsStarting\.add\(repositoryId\)/u);
+  assert.match(start, /previewsStarting\.delete\(repositoryId\)/u);
+  assert.ok(
+    app.indexOf("previewsStarting.delete(repositoryId)") <
+      app.indexOf("askPreviewCommand(repositoryId, message)"),
+    "the in-flight flag must be cleared before the question is asked",
+  );
+  // Shared through `state`, because the control is drawn in screen-chats.js
+  // and that file cannot import app.js back.
+  assert.match(app, /state\.previewsStarting = previewsStarting/u);
+  assert.match(control, /state\.previewsStarting\?\.has\(repositoryId\)/u);
+  assert.match(control, /ch-preview-toggle starting/u);
+  assert.match(control, /disabled/u);
+  assert.match(css, /\.ch-preview-toggle\.starting \{/u);
   const ask = app.slice(
     app.indexOf("async function askPreviewCommand"),
     app.indexOf("async function startPreviewAction"),
