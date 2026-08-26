@@ -49,6 +49,7 @@ import {
   withRoleContext,
   type ApiOperations,
   type ChannelMemoThread,
+  type StaticAsset,
 } from "./server.js";
 import { hashPassword, hashSecret } from "./auth.js";
 import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
@@ -10338,6 +10339,79 @@ test("a gateway configured with a padded token still starts and accepts it", asy
   assert.equal(response.status, 201, JSON.stringify(response.data));
 });
 
+test("the marketing front page owns \"/\" exactly, and its absence falls back to the dashboard", async (t) => {
+  // One lookup change carries the whole marketing site: `serveStatic` reads
+  // `url.pathname` as it arrived instead of rewriting "/" to "/index.html".
+  // Both sides of that change matter. A deployment carrying the site holds a
+  // literal "/" key and must serve the marketing page there while /app and
+  // every other dotless path still falls back to the dashboard document — a
+  // mailed /app#welcome link routes on the fragment, so the document is all
+  // /app needs. And a deployment without the site (every one that predates
+  // it, and every other fixture in this file) has no "/" key, so "/" must
+  // ride the same fallback it always has instead of turning into a 404.
+  const serve = async (
+    staticAssets: ReadonlyMap<string, StaticAsset>,
+  ): Promise<TestClient> => {
+    const store = new InMemoryCoordinationStore();
+    const gateway = new ApiGateway({
+      store,
+      operations: {} as unknown as ApiOperations,
+      staticAssets,
+    });
+    t.after(async () => {
+      await gateway.close();
+      await store.close();
+    });
+    await new Promise<void>((resolve, reject) => {
+      gateway.server.once("error", reject);
+      gateway.server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = gateway.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("Test gateway did not bind a TCP port");
+    }
+    return new TestClient(`http://127.0.0.1:${address.port}`);
+  };
+
+  const dashboard = {
+    body: "<!doctype html><title>App</title>",
+    contentType: "text/html",
+  };
+  const withSite = await serve(
+    new Map([
+      ["/", { body: "<!doctype html><title>Site</title>", contentType: "text/html" }],
+      ["/pricing", { body: "<!doctype html><title>Pricing</title>", contentType: "text/html" }],
+      ["/index.html", dashboard],
+    ]),
+  );
+
+  const front = await withSite.request("/");
+  assert.equal(front.status, 200);
+  assert.equal(front.data, "<!doctype html><title>Site</title>");
+  // Editable pages revalidate; only digested names may promise immutability.
+  assert.equal(front.headers.get("cache-control"), "no-cache");
+
+  const pricing = await withSite.request("/pricing");
+  assert.equal(pricing.status, 200);
+  assert.equal(pricing.data, "<!doctype html><title>Pricing</title>");
+
+  // The dashboard moved to /app without gaining a key: it is the fallback,
+  // and the fallback is what every dotless client route resolves to.
+  for (const path of ["/app", "/some/client/route", "/index.html"]) {
+    const page = await withSite.request(path);
+    assert.equal(page.status, 200, path);
+    assert.equal(page.data, dashboard.body, path);
+  }
+  // A dotted path that names nothing stays an honest 404 — the fallback is
+  // for client routes, not for typoed asset names.
+  assert.equal((await withSite.request("/app.jss")).status, 404);
+
+  const withoutSite = await serve(new Map([["/index.html", dashboard]]));
+  const legacyFront = await withoutSite.request("/");
+  assert.equal(legacyFront.status, 200);
+  assert.equal(legacyFront.data, dashboard.body);
+});
+
 /** A gateway with whatever bootstrap configuration a test wants. */
 async function startBareGateway(
   t: TestContext,
@@ -10507,11 +10581,11 @@ test("a paid sign-up takes the card first and builds the account last", async (t
   // The claim link is the checkout's return address — and it is also mailed,
   // so the browser tab is not the only copy. Somebody who pays and closes the
   // tab has otherwise bought an organization they can never reach.
-  const token = String(checkout?.["successUrl"] ?? "").split("#welcome/")[1] ?? "";
+  const token = String(checkout?.["successUrl"] ?? "").split("/app#welcome/")[1] ?? "";
   assert.notEqual(token, "");
   assert.equal(sent.length, 1, "the link is mailed as well as redirected to");
   assert.equal(sent[0]?.to, "buyer@example.com");
-  assert.match(sent[0]?.text ?? "", /#welcome\//u);
+  assert.match(sent[0]?.text ?? "", /\/app#welcome\//u);
   assert.match(
     sent[0]?.text ?? "",
     new RegExp(token.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"),
@@ -16181,7 +16255,7 @@ function recordingMailer(): { sent: MailMessage[]; mailer: Mailer } {
 }
 
 function resetLink(message: MailMessage | undefined): string {
-  const match = /#reset\/(\S+)/u.exec(message?.text ?? "");
+  const match = /\/app#reset\/(\S+)/u.exec(message?.text ?? "");
   return match?.[1] ?? "";
 }
 
