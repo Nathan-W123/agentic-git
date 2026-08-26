@@ -2872,6 +2872,24 @@ async function attachChannelImages(files, target = "channel") {
 const previewsWatched = new Set();
 
 /**
+ * Repositories whose app is being started right now.
+ *
+ * Starting is not instant and is sometimes not close to it: a checkout of
+ * canonical has no dependencies, so the first press installs them and then
+ * builds, and a minute of nothing is a normal thing to be looking at. Nothing
+ * said so, so the obvious move was to press play again — which asked the
+ * control plane to replace a preview that had not finished starting, killed
+ * the build, and reported its death as "exited immediately". A diagnosis of
+ * the repository, for something the second press did.
+ *
+ * So the second press is refused here, and the control says why it is being
+ * refused: shared through `state` because the button that has to look busy is
+ * drawn in `screen-chats.js`, which cannot import this file back.
+ */
+const previewsStarting = new Set();
+state.previewsStarting = previewsStarting;
+
+/**
  * Follows a preview that is up but not answering yet.
  *
  * Starting waits a bounded time for the port and then answers with whatever
@@ -2914,10 +2932,12 @@ async function watchPreviewReady(repositoryId) {
  * know.
  *
  * Detection reads the checkout and covers what a repository can say about
- * itself — a Procfile line, a package.json script, a Django or Flask entry
- * point, go.mod, Cargo.toml, config.ru, index.php, or a page it can serve as
- * static files. What is left over is not a guessable case: it is a question
- * with exactly one right answer, held by whoever built the repository.
+ * itself — a Procfile line, every package.json script that might start it,
+ * the apps inside a monorepo, a Django or Flask entry point, go.mod,
+ * Cargo.toml, config.ru, index.php, or a page it can serve as static files —
+ * and each of those is *tried* before this is reached. What is left over is
+ * not a guessable case: it is a question with exactly one right answer, held
+ * by whoever built the repository.
  *
  * So it is asked, plainly, and the answer is stored against this channel —
  * asked once, not once per press, and not once per person.
@@ -2943,49 +2963,77 @@ async function askPreviewCommand(repositoryId, why) {
 }
 
 async function startPreviewAction(repositoryId, asked = false) {
+  if (previewsStarting.has(repositoryId)) {
+    toast(
+      "Already starting — installing and building can take a minute.",
+      "ok",
+    );
+    return;
+  }
+  previewsStarting.add(repositoryId);
+  render();
   toast("Starting…", "ok");
+  let preview;
+  let failure;
   try {
-    const preview = await startPreview(repositoryId);
+    preview = await startPreview(repositoryId);
+  } catch (error) {
+    failure = error;
+  }
+  // Cleared before anything below, so the question this may ask can start the
+  // answer it is given rather than refusing itself as a second press.
+  previewsStarting.delete(repositoryId);
+  render();
+  if (failure === undefined) {
+    // What it took to get here, when it took more than one attempt: the
+    // control plane works down a list of candidates and the reader is
+    // otherwise told nothing about the ones that were ruled out.
+    const after = (preview?.tried ?? []).length;
     toast(
       preview === null
         ? "Started"
-        : `Running at ${preview.url} — ${preview.label}`,
+        : `Running at ${preview.url} — ${preview.label}${
+            after === 0
+              ? ""
+              : ` (after ${after} other command${after === 1 ? "" : "s"} did not start)`
+          }`,
       "ok",
     );
-    render();
     // Up, but still building. The header says so, and this is what eventually
     // takes the word back.
     if (preview !== null && preview.ready === false) {
       void watchPreviewReady(repositoryId);
     }
-  } catch (error) {
-    const message = error.message ?? "";
-    // Two ways for a repository to be unstartable, and one question answers
-    // both: nothing in it names a way to start ("could be started"), or the
-    // command that was inferred did not survive its first second ("could not
-    // be started"). Either way what is missing is the same sentence, and the
-    // only place it exists is in the head of whoever built the app.
-    //
-    // `asked` stops the loop: a command that was just supplied and still did
-    // not work is reported, not re-requested.
-    if (!asked && /could(?: not)? be started/u.test(message)) {
-      const command = await askPreviewCommand(repositoryId, message);
-      if (command !== undefined) {
-        try {
-          await setPreviewCommand(repositoryId, command);
-        } catch (saveError) {
-          // Remembering it is a project setting, which not everybody who may
-          // run one is allowed to write. The server says so; this repeats it
-          // rather than reporting a failure to start.
-          toast(saveError.message, "error");
-          return;
-        }
-        await startPreviewAction(repositoryId, true);
+    return;
+  }
+  const message = failure.message ?? "";
+  // Two ways for a repository to be unstartable, and one question answers
+  // both: nothing in it names a way to start ("could be started"), or every
+  // command that could be detected for it died on its first second ("could
+  // not be started"). Either way what is missing is the same sentence, and
+  // the only place it exists is in the head of whoever built the app — which
+  // is why it is worth asking for, and why it is only asked once the
+  // repository has run out of ways of answering for itself.
+  //
+  // `asked` stops the loop: a command that was just supplied and still did
+  // not work is reported, not re-requested.
+  if (!asked && /could(?: not)? be started/u.test(message)) {
+    const command = await askPreviewCommand(repositoryId, message);
+    if (command !== undefined) {
+      try {
+        await setPreviewCommand(repositoryId, command);
+      } catch (saveError) {
+        // Remembering it is a project setting, which not everybody who may
+        // run one is allowed to write. The server says so; this repeats it
+        // rather than reporting a failure to start.
+        toast(saveError.message, "error");
         return;
       }
+      await startPreviewAction(repositoryId, true);
+      return;
     }
-    toast(message, "error");
   }
+  toast(message, "error");
 }
 
 async function stopPreviewAction(repositoryId) {

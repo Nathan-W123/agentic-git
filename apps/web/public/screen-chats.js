@@ -1747,6 +1747,18 @@ function previewControl(repositoryId) {
   if (!repositoryId) {
     return "";
   }
+  // Starting, and saying so. A cold start installs dependencies and then
+  // builds, which is a minute of a button that looked like it had done
+  // nothing — so it was pressed again, and the second press killed the first.
+  // Disabled rather than merely marked: the refusal is in `app.js`, and a
+  // control that still looks pressable is an invitation to find that out.
+  if (state.previewsStarting?.has(repositoryId) === true) {
+    const busy = "Starting — installing and building can take a minute";
+    return `<button type="button" class="ch-count ch-preview-toggle starting"
+        data-act="preview-start" data-value="${esc(repositoryId)}" disabled
+        title="${esc(busy)}" aria-label="${esc(busy)}" aria-busy="true">
+        ${icon("play")}</button>`;
+  }
   if (previewRunning(repositoryId) !== undefined) {
     return `<button type="button" class="ch-count ch-preview-toggle on"
         data-act="preview-stop" data-value="${esc(repositoryId)}"
@@ -1876,6 +1888,7 @@ function chanHeader(repositoryId) {
              The backticks are escaped for the reason the sidebar button's
              comment above gives: a bare one ends this template literal, and
              what follows parses as code. -->
+        <span aria-hidden="true">|</span>
         ${previewControl(repositoryId)}
       </div>
     </div>
