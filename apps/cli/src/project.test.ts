@@ -363,3 +363,57 @@ test("a project running only its own commands is left as it was", () => {
   // It does not have opinions about one that never ran vendors at all.
   assert.deepEqual(Object.keys(curated.agents), ["local"]);
 });
+
+test("buildCommand and buildCommands are validated like preview commands", () => {
+  // A preview that installs and never builds starts a checkout with no build
+  // output in it, which is how `node dist/index.js` came to be reported as an
+  // app that exits immediately. The build is configurable for the same reason
+  // the start command is — detection can find a script, and nothing can guess
+  // the value a compiled app is built against — so it is checked the same way.
+  const built: ProjectConfig = {
+    ...VALID,
+    buildCommand: { executable: "npm", args: ["run", "build"], label: "build" },
+    buildCommands: {
+      web: {
+        executable: "npm",
+        args: ["run", "build"],
+        label: "build web",
+        env: { API_BASE: "http://127.0.0.1:8080" },
+      },
+    },
+  };
+  assert.deepEqual(assertProjectConfig(built), built);
+
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        buildCommand: { executable: "npm", label: "build" },
+      }),
+    /buildCommand needs "args"/u,
+  );
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        buildCommands: {
+          web: { executable: "npm", args: ["run", "build"], label: "" },
+        },
+      }),
+    /buildCommands\["web"\] needs a non-empty "label"/u,
+  );
+  // The half a build command has that a validation command does not.
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        buildCommand: {
+          executable: "npm",
+          args: ["run", "build"],
+          label: "build",
+          env: { API_BASE: 8080 },
+        },
+      }),
+    /buildCommand needs "env.API_BASE" to be a string/u,
+  );
+});

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -738,6 +738,325 @@ test("a second press joins the start in flight instead of killing it", async () 
       const running = await previews.status(repository.id);
       assert.equal(running?.exited, undefined);
       assert.equal((await fetch(first.url)).status, 200);
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A repository that ships a container, which is the shape the play button
+ * could do nothing at all with.
+ *
+ * Its Dockerfile is the whole of what it says about how it runs — the start
+ * command lives in the image's CMD, which no manifest mentions — so detection
+ * found nothing, and somebody was asked to type a command they had already
+ * written down.
+ */
+test("a repository with a Dockerfile is started by building its image", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cpreview-docker-"));
+  try {
+    await writeFile(
+      path.join(root, "Dockerfile"),
+      ["FROM node:24-alpine", "COPY . .", "EXPOSE 8080", 'CMD ["node", "server.js"]', ""].join(
+        "\n",
+      ),
+      "utf8",
+    );
+
+    const candidates = await detectPreviewCommands(root);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]?.executable, "sh");
+    const line = candidates[0]?.args[1] ?? "";
+    // Built *and* run, in one line: an image with nothing running it serves
+    // no page, so half of this would not be a preview.
+    assert.match(line, /docker build -t coord-preview-/u);
+    assert.match(line, /docker run --rm/u);
+    // The port the Dockerfile says the app listens on, published to loopback
+    // on the port the preview allocated. Spelled out rather than left to the
+    // environment, because spawn performs no expansion and a container reads
+    // its own env, not this one's.
+    assert.match(line, /-p 127\.0\.0\.1:\$\{PORT\}:8080/u);
+    // A container left behind by the last press must not be what fails the
+    // next one: the name is reused deliberately, so it is removed first.
+    assert.match(line, /docker rm -f coord-preview-/u);
+
+    // And it ranks last, not first. A repository with a dev server and a
+    // Dockerfile wants the dev server — seconds rather than minutes, and it
+    // reloads — so the image is what is reached when nothing else is there.
+    await writeFile(
+      path.join(root, "package.json"),
+      '{"scripts":{"dev":"vite"}}',
+      "utf8",
+    );
+    const both = await detectPreviewCommands(root);
+    assert.match(both[0]?.label ?? "", /run dev/u);
+    assert.match(both.at(-1)?.label ?? "", /docker build/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a repository with a compose file is started by building and running it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cpreview-compose-"));
+  try {
+    await writeFile(
+      path.join(root, "compose.yaml"),
+      [
+        "services:",
+        "  web:",
+        "    build: .",
+        "    ports:",
+        '      - "${PORT:-3000}:3000"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const candidates = await detectPreviewCommands(root);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]?.executable, "docker");
+    // `--build`, because a compose stack started from a stale image is a
+    // preview of the last time somebody built it.
+    assert.deepEqual(candidates[0]?.args, [
+      "compose",
+      "-f",
+      "compose.yaml",
+      "up",
+      "--build",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a repository that cannot be started says a Dockerfile was looked for", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cpreview-docker-why-"));
+  try {
+    // The list is what the reader acts on: it says which of these to add, and
+    // a container is now one of the answers.
+    const bare = await describeUndetectable(root);
+    assert.match(bare, /Dockerfile/u);
+    assert.match(bare, /compose file/u);
+
+    // Including for a Node repository with nothing that serves, where "no dev
+    // script" alone leaves somebody who has a Dockerfile wondering whether it
+    // was even looked at.
+    await writeFile(
+      path.join(root, "package.json"),
+      '{"scripts":{"build":"tsc"}}',
+      "utf8",
+    );
+    assert.match(await describeUndetectable(root), /Dockerfile/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** What a built app serves, so the test can tell which build produced it. */
+function serverSource(says: string): string {
+  return [
+    'import { createServer } from "node:http";',
+    `createServer((_, response) => response.end(${JSON.stringify(says)})).listen(`,
+    '  Number(process.env["PORT"]), "127.0.0.1");',
+    "",
+  ].join("\n");
+}
+
+/**
+ * A repository whose app exists only once it has been built.
+ *
+ * The commonest shape there is, and the one the preview could not start.
+ * Installed is not built: build output is ignored by git — which is exactly
+ * why it is not in the revision — so a checkout of canonical has no `dist` in
+ * it, and `node dist/server.mjs` dies on its first line. What the reader was
+ * shown for that was "exited immediately", which reads as the start command
+ * being wrong, so the obvious thing to try is a different one and none of
+ * them can work.
+ *
+ * Two builds are committed, serving different words, so a test can tell which
+ * of them ran.
+ */
+async function unbuiltAppRepository(): Promise<{
+  root: string;
+  sourcePath: string;
+  project: CoordinatorProject;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "preview-build-"));
+  const sourcePath = path.join(root, "src-repo");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await writeFile(
+    path.join(sourcePath, "package.json"),
+    `${JSON.stringify({
+      name: "needs-building",
+      private: true,
+      type: "module",
+      scripts: { build: "node build.mjs", start: "node dist/server.mjs" },
+    })}\n`,
+    "utf8",
+  );
+  for (const [name, says] of [
+    ["build.mjs", "detected"],
+    ["build-configured.mjs", "configured"],
+  ] as const) {
+    await writeFile(
+      path.join(sourcePath, name),
+      [
+        'import { mkdir, writeFile } from "node:fs/promises";',
+        'await mkdir("dist", { recursive: true });',
+        `await writeFile("dist/server.mjs", ${JSON.stringify(serverSource(says))});`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  }
+  await repositories.commitAll(sourcePath, "seed unbuilt app");
+
+  const projectRoot = path.join(root, "proj");
+  await mkdir(projectRoot, { recursive: true });
+  const project = await CoordinatorProject.init(projectRoot);
+  return { root, sourcePath, project };
+}
+
+test("a build runs to completion before the start command is spawned", async () => {
+  const { root, sourcePath, project } = await unbuiltAppRepository();
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "needs-building",
+    });
+    const previews = new PreviewService(project, store);
+    try {
+      const status = await previews.start({ repositoryId: repository.id });
+      // The proof of the ordering is that anything answers at all: the start
+      // script runs a file that does not exist until the build has written
+      // it, so a start spawned first could only have died.
+      assert.equal(status.ready, true);
+      assert.match(status.label, /run start$/u);
+      assert.equal((await (await fetch(status.url)).text()), "detected");
+      // And nothing was ruled out on the way — the first candidate worked,
+      // which it never could before.
+      assert.equal(status.tried, undefined);
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a configured buildCommand wins over the detected one", async () => {
+  const { root, sourcePath, project } = await unbuiltAppRepository();
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "needs-building",
+    });
+    // Detection finds the `build` script; a project that says how this
+    // repository is built is answering the question rather than guessing at
+    // it, so it is the one that runs.
+    project.config.buildCommands = {
+      [repository.id]: {
+        executable: process.execPath,
+        args: ["build-configured.mjs"],
+        label: "configured build",
+      },
+    };
+    await project.save();
+
+    const previews = new PreviewService(project, store);
+    try {
+      const status = await previews.start({ repositoryId: repository.id });
+      assert.equal((await (await fetch(status.url)).text()), "configured");
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a build that fails is reported as a build failure, not a dead server", async () => {
+  const { root, sourcePath, project } = await unbuiltAppRepository();
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "needs-building",
+    });
+    project.config.buildCommands = {
+      [repository.id]: {
+        executable: process.execPath,
+        args: ["-e", "console.error('tsc: cannot find name X'); process.exit(2)"],
+        label: "configured build",
+      },
+    };
+    await project.save();
+
+    const previews = new PreviewService(project, store);
+    try {
+      await assert.rejects(
+        async () => await previews.start({ repositoryId: repository.id }),
+        (error: Error) => {
+          // Said where it happened. Everything after a failed build is a
+          // consequence of it, and reporting only the corpse of the start
+          // command sends the reader looking for a start command that was
+          // never wrong.
+          assert.match(error.message, /Building "needs-building" failed/u);
+          assert.match(error.message, /configured build/u);
+          assert.match(error.message, /cannot find name X/u);
+          assert.doesNotMatch(error.message, /exited immediately/u);
+          // And it is not the question about how the app starts: the app
+          // says how it starts, and the answer would change nothing.
+          assert.doesNotMatch(error.message, /could not be started/u);
+          return true;
+        },
+      );
+      assert.equal(await previews.status(repository.id), undefined);
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an agent's task preview builds the same way the play button does", async () => {
+  const { root, sourcePath, project } = await unbuiltAppRepository();
+  const store = project.openStore();
+  try {
+    // An agent's workspace is a worktree plus its own edits, so it is exactly
+    // as unbuilt as the play button's checkout — and an agent that cannot
+    // start what it just changed is back to guessing whether it works.
+    const workspacePath = path.join(root, "task-workspace");
+    await mkdir(workspacePath, { recursive: true });
+    for (const name of ["package.json", "build.mjs", "build-configured.mjs"]) {
+      await writeFile(
+        path.join(workspacePath, name),
+        await readFile(path.join(sourcePath, name), "utf8"),
+        "utf8",
+      );
+    }
+
+    const previews = new PreviewService(project, store);
+    try {
+      const started = await previews.startForTask({
+        taskId: "task-1",
+        repositoryId: "needs-building",
+        workspacePath,
+      });
+      assert.equal(started.failed, false);
+      assert.ok(started.url !== undefined, started.output.join("\n"));
+      assert.equal((await (await fetch(started.url)).text()), "detected");
     } finally {
       await previews.close();
     }

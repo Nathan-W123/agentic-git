@@ -2934,10 +2934,12 @@ async function watchPreviewReady(repositoryId) {
  * Detection reads the checkout and covers what a repository can say about
  * itself — a Procfile line, every package.json script that might start it,
  * the apps inside a monorepo, a Django or Flask entry point, go.mod,
- * Cargo.toml, config.ru, index.php, or a page it can serve as static files —
- * and each of those is *tried* before this is reached. What is left over is
- * not a guessable case: it is a question with exactly one right answer, held
- * by whoever built the repository.
+ * Cargo.toml, config.ru, index.php, a Dockerfile or compose file it builds
+ * and runs, or a page it can serve as static files — and each of those is
+ * *tried* before this is reached, after its dependencies are installed and
+ * its build has been run. What is left over is not a guessable case: it is a
+ * question with exactly one right answer, held by whoever built the
+ * repository.
  *
  * So it is asked, plainly, and the answer is stored against this channel —
  * asked once, not once per press, and not once per person.
@@ -2965,7 +2967,8 @@ async function askPreviewCommand(repositoryId, why) {
 async function startPreviewAction(repositoryId, asked = false) {
   if (previewsStarting.has(repositoryId)) {
     toast(
-      "Already starting — installing and building can take a minute.",
+      "Already starting — installing, building and, where a repository ships " +
+        "one, building its image can take a few minutes.",
       "ok",
     );
     return;

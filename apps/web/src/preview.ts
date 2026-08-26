@@ -336,6 +336,96 @@ export async function workspaceAppCandidates(
   return candidates;
 }
 
+/** The compose files a project may have written its stack into. */
+const COMPOSE_FILES = [
+  "compose.yaml",
+  "compose.yml",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+];
+
+/**
+ * What to call the image built for a repository's preview.
+ *
+ * Derived from the checkout's own directory, which is one preview and not one
+ * repository: an agent previewing its unlanded work and somebody pressing
+ * play on canonical are two different builds of the same project, and a tag
+ * they shared would mean whichever finished last is what both of them run.
+ * Squeezed into what a tag may contain — lowercase, and only letters, digits,
+ * dot, dash and underscore — and a name that survives none of that becomes
+ * `app`, which is wrong about nothing: the tag identifies the image, and the
+ * label the reader sees is written separately.
+ */
+function previewImageTag(workspacePath: string): string {
+  const base = path
+    .basename(workspacePath)
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/gu, "-")
+    .replace(/^[-._]+/u, "")
+    .slice(0, 40);
+  return `coord-preview-${base === "" ? "app" : base}`;
+}
+
+/**
+ * How a repository that ships a container starts: by building it.
+ *
+ * The rung that was missing. A repository whose only statement about how it
+ * runs is a Dockerfile had *nothing* detected for it — no Procfile, often no
+ * start script, because the image's `CMD` is where that lives — so the play
+ * button asked the reader to type a command for an app that had already
+ * written one down. And a repository with both got its dev server, which is
+ * usually what is wanted and is never what "it does not build the image"
+ * means.
+ *
+ * Built and run in one shell line rather than as two candidates, because half
+ * of it is not a preview: an image with nothing running it serves no page.
+ * `sh -c` for the same reason the Procfile rung uses it — this is a sequence,
+ * and `spawn` does not run sequences.
+ *
+ * The container's port is read from `EXPOSE` where the Dockerfile says it,
+ * and is the preview's own port where it does not; `PORT` goes in either way,
+ * for an image that reads it. A stale container of the same name is removed
+ * first, because the second press of play would otherwise fail on the name
+ * rather than on anything about the repository.
+ *
+ * Compose is its own case: the ports are declared in the file, so the mapping
+ * is not this code's to make. `PORT` reaches it through the environment,
+ * which is what a compose file publishing `${PORT}` needs, and a file that
+ * publishes a fixed port is reachable there rather than at the preview's URL.
+ */
+export async function dockerCandidates(
+  workspacePath: string,
+): Promise<PreviewCandidate[]> {
+  const candidates: PreviewCandidate[] = [];
+  const compose = await anyOf(workspacePath, ...COMPOSE_FILES);
+  if (compose !== undefined) {
+    candidates.push({
+      executable: "docker",
+      args: ["compose", "-f", compose, "up", "--build"],
+      label: `docker compose up --build (${compose})`,
+    });
+  }
+  if ((await anyOf(workspacePath, "Dockerfile")) !== undefined) {
+    const tag = previewImageTag(workspacePath);
+    const exposed = /^\s*EXPOSE\s+(\d{2,5})/mu.exec(
+      (await textOf(workspacePath, "Dockerfile")) ?? "",
+    )?.[1];
+    const inner = exposed ?? "${PORT}";
+    candidates.push({
+      executable: "sh",
+      args: [
+        "-c",
+        `docker rm -f ${tag} >/dev/null 2>&1; ` +
+          `docker build -t ${tag} . && ` +
+          `exec docker run --rm --name ${tag} ` +
+          `-p 127.0.0.1:\${PORT}:${inner} -e PORT=${inner} ${tag}`,
+      ],
+      label: `docker build && docker run (${tag})`,
+    });
+  }
+  return candidates;
+}
+
 /**
  * Every way this repository might start, best first.
  *
@@ -472,6 +562,19 @@ export async function detectPreviewCommands(
       label: `php -S -t ${docroot}`,
     });
   }
+
+  // 8. The container the repository ships, built and run. Last of the
+  //    commands, and not first: an image takes minutes to build where a dev
+  //    server takes seconds to start, and a repository that has both wants
+  //    the one it can watch reload. Where it is the only statement about how
+  //    the app runs — which is every repository whose CMD is the start
+  //    command — it is the difference between a preview and a dialog asking
+  //    somebody to type what they already wrote in the Dockerfile.
+  //
+  //    A machine with no docker on it fails this candidate the way every
+  //    other missing runtime fails one: the spawn errors, the candidate is
+  //    ruled out, and the walk continues.
+  add(...(await dockerCandidates(workspacePath)));
   return candidates;
 }
 
@@ -606,7 +709,15 @@ export async function describeUndetectable(workspacePath: string): Promise<strin
       (names.length === 0
         ? "Its package.json has no scripts at all."
         : `Its package.json has no ${PREVIEW_SCRIPTS.join("/")} script — ` +
-          `only ${names.slice(0, 8).join(", ")}.`) + alsoWorkspaces
+          `only ${names.slice(0, 8).join(", ")}.`) +
+      alsoWorkspaces +
+      // A container is a way of starting too, and one a Node repository
+      // plausibly has — so a reader who has one is told it was looked at
+      // rather than left wondering whether only scripts were.
+      ((await anyOf(workspacePath, "Dockerfile", ...COMPOSE_FILES)) ===
+      undefined
+        ? " There is no Dockerfile or compose file to build and run either."
+        : "")
     );
   }
   // Named individually rather than as "nothing matched": the reader can add
@@ -614,8 +725,9 @@ export async function describeUndetectable(workspacePath: string): Promise<strin
   return (
     "Nothing in it names a way to start: no Procfile web: line, no " +
     "package.json, no manage.py or FastAPI/Flask entry point, no go.mod, " +
-    "no Cargo.toml, no config.ru or bin/rails, no index.php, and no " +
-    "index.html to serve as a static site."
+    "no Cargo.toml, no config.ru or bin/rails, no index.php, no Dockerfile " +
+    "or compose file to build and run, and no index.html to serve as a " +
+    "static site."
   );
 }
 
@@ -667,6 +779,41 @@ async function detectInstallCommand(
     executable: process.platform === "win32" ? "npm.cmd" : "npm",
     args: locked ? ["ci"] : ["install"],
     label: locked ? "npm ci" : "npm install",
+  };
+}
+
+/**
+ * How to build a repository nobody has configured.
+ *
+ * The other half of what a fresh checkout is missing. `node_modules` is the
+ * famous one and build output is the same story: ignored by git, so not in
+ * the revision, so absent from a checkout of canonical — and a repository
+ * whose start script is `node dist/index.js`, or whose dev server imports a
+ * sibling package that is compiled before it is importable, dies on its first
+ * line without one. Which is reported as the app exiting immediately, so the
+ * obvious thing to try is a different start command, and none of them can
+ * work: the command was never the problem.
+ *
+ * A `build` script is the evidence, held to the same standard as every
+ * detection rung here — a script the repository named itself, run with the
+ * package manager it pinned. Nothing is inferred for a repository without
+ * one, and a build that is only a guess is not allowed to be fatal: see the
+ * caller.
+ */
+async function detectBuildCommand(
+  workspacePath: string,
+): Promise<PreviewCommand | undefined> {
+  const scripts = await readManifestScripts(workspacePath);
+  if (scripts?.["build"] === undefined) {
+    return undefined;
+  }
+  const runner = await nodeRunner(workspacePath);
+  const executable = runner[0] ?? "npm";
+  const run = runner[1] ?? "run";
+  return {
+    executable,
+    args: [run, "build"],
+    label: `${executable} ${run} build`,
   };
 }
 
@@ -1047,6 +1194,42 @@ export class PreviewService {
       }
     }
 
+    // Then the build, which is the step this never had. Installed is not
+    // built: a checkout of canonical has no `dist`, no compiled sibling
+    // package and no bundled asset in it, because build output is ignored by
+    // git for the same reason `node_modules` is. Every start script that
+    // expects one therefore died here, and said so as "exited immediately".
+    const configuredBuild =
+      this.project.config.buildCommands?.[repositoryId] ??
+      this.project.config.buildCommand;
+    const build =
+      configuredBuild ?? (await detectBuildCommand(workspace.path));
+    // Kept, because a build that failed is nearly always the reason nothing
+    // starts afterwards, and the reader is otherwise shown only the corpse.
+    let buildFailure: string | undefined;
+    if (build !== undefined) {
+      buildFailure = await runToCompletion(
+        build,
+        workspace.path,
+        installOutput,
+        await this.previewEnvironment(repositoryId, await freePort()),
+      );
+      if (buildFailure !== undefined) {
+        // A configured build is an answer and is fatal; a detected one is a
+        // guess and is not. A repository whose `build` script is broken and
+        // whose `dev` server has never needed it still previews — it did
+        // before this step existed, and taking that away would be a worse
+        // bug than the one being fixed.
+        if (configuredBuild !== undefined) {
+          await rm(workspace.path, { recursive: true, force: true });
+          throw new Error(
+            `Building "${name}" failed (${build.label}): ${buildFailure}`,
+          );
+        }
+        installOutput.push(`build failed (${build.label}): ${buildFailure}`);
+      }
+    }
+
     // Down the list until something survives. A candidate that exits is ruled
     // out rather than reported: the reader is asked how the app starts only
     // once the repository has run out of ways of saying it itself.
@@ -1085,7 +1268,15 @@ export class PreviewService {
 
     await rm(workspace.path, { recursive: true, force: true });
     throw new Error(
-      `"${name}" could not be started. Tried ${
+      `"${name}" could not be started. ${
+        // Said first where it happened, because everything below it is a
+        // consequence: a start script that runs build output cannot survive a
+        // build that did not produce any, and reporting only its death sends
+        // the reader looking for a start command that does not exist.
+        buildFailure === undefined || build === undefined
+          ? ""
+          : `Its build (${build.label}) failed: ${buildFailure}. `
+      }Tried ${
         tried.length === 1 ? "one command" : `${String(tried.length)} commands`
       }: ${tried.join("; ")}. If that is not how this app runs, name the ` +
         `command in "previewCommands" for "${repositoryId}" in ` +
@@ -1270,6 +1461,34 @@ export class PreviewService {
       );
       if (failure !== undefined) {
         return { output, failed: true };
+      }
+    }
+
+    // And the same build, for the same reason and in the same order. An
+    // agent's workspace is a worktree of canonical plus its own edits, so it
+    // is exactly as unbuilt as the play button's checkout — and an agent that
+    // cannot start the app it just changed goes back to guessing at whether
+    // the change works.
+    const configuredBuild =
+      this.project.config.buildCommands?.[input.repositoryId] ??
+      this.project.config.buildCommand;
+    const build =
+      configuredBuild ?? (await detectBuildCommand(input.workspacePath));
+    if (build !== undefined) {
+      const failure = await runToCompletion(
+        build,
+        input.workspacePath,
+        output,
+        await this.previewEnvironment(input.repositoryId, await freePort()),
+      );
+      // Configured is an answer and detected is a guess, the same way the
+      // play button treats them: the first stops the start, the second is
+      // written down and the candidates are tried anyway.
+      if (failure !== undefined) {
+        output.push(`build failed (${build.label}): ${failure}`);
+        if (configuredBuild !== undefined) {
+          return { output, failed: true };
+        }
       }
     }
 
