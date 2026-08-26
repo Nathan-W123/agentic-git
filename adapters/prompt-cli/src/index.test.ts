@@ -862,7 +862,13 @@ test("cursor: large prompts are split below the per-argument spawn limit", async
     ),
   );
   assert.match(promptArguments.join(" "), /a large context a large context/u);
-  assert.ok(promptArguments.join(" ").includes(objective));
+  // Trimmed, because that is what reaches a planner now: the prompt is built
+  // from `requestFromObjective`, which takes the coordinator's wrapping off
+  // and trims what is left — and this objective is built by repetition, so it
+  // ends in a space. What the assertion is about is that a prompt far past the
+  // per-argument limit survives being split and rejoined whole, which the
+  // trimmed form proves exactly as well.
+  assert.ok(promptArguments.join(" ").includes(objective.trim()));
 });
 
 test("an error envelope fails planning instead of being parsed as a plan", async () => {
@@ -1428,7 +1434,13 @@ test("claude: a task queued behind this one is named in the prompt it reads", as
   await adapter.noteScopeContention?.("session_gone", notice);
   await adapter.sendContext(session.id, contextFor(workspace));
 
-  assert.equal(executionInput.split("task_waiting").length - 1, 1);
+  // Counted on the notice, not on the task id: the id also appears inside the
+  // notice's own `reason` sentence, so counting it measured the rendering
+  // rather than the de-duplication this line is about.
+  assert.equal(
+    executionInput.split('"taskId":"task_waiting"').length - 1,
+    1,
+  );
   assert.match(executionInput, /queued behind resources you hold/u);
   assert.match(executionInput, /src\/value\.js/u);
   // The standing instruction stands whether or not anybody is waiting.

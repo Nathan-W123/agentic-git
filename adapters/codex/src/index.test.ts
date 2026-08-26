@@ -1556,7 +1556,10 @@ test("a task queued behind this one is named in the prompt it reads", async () =
     await adapter.collectChanges(session.id);
 
     const prompt = executionInputs[0] ?? "";
-    assert.equal(prompt.split("task_waiting").length - 1, 1);
+    // Counted on the notice, not on the task id: the id also appears inside
+    // the notice's own `reason` sentence, so counting it measured the
+    // rendering rather than the de-duplication this line is about.
+    assert.equal(prompt.split('"taskId":"task_waiting"').length - 1, 1);
     assert.match(prompt, /queued behind resources you hold/u);
     assert.match(prompt, /src\/value\.js/u);
     // The standing instruction stands whether or not anybody is waiting.
