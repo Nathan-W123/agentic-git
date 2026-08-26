@@ -5344,8 +5344,11 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
 
   // Reconnecting delivers everything that happened while the browser was
   // closed. One reconcile per event used to cause a full app rebuild each.
-  assert.match(app, /clearTimeout\(channelFrameTimer\)/u);
+  // Timers are per repository so a burst that names two rooms still refreshes
+  // both — a single shared timer dropped every room but the last.
+  assert.match(app, /clearTimeout\(channelFrameTimers\.get\(channelRepositoryId\)\)/u);
   assert.match(app, /CHANNEL_FRAME_COALESCE_MS/u);
+  assert.match(app, /function scheduleChannelReconcile\(channelRepositoryId\)/u);
 });
 
 test("a channel transcript reads down one side at every width", async () => {
@@ -6782,6 +6785,42 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   assert.match(
     css,
     /\.chats-shell\.chan-collapsed :is\(\.chan-crown-picture, \.chan-crown-new\) \{\s*display: none;/u,
+  );
+});
+
+test("inactive channel rail icons show a live unread count", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+
+  // The badge is already drawn from `channelUnreadCount`. What was missing was
+  // a transcript to count: only the open room was loaded, and only its
+  // `channel_*` events were reconciled, so every other icon stayed blank.
+  assert.match(chats, /class="channel-rail-unread"/u);
+  assert.match(chats, /const unread = channelUnreadCount\(repo\.id\)/u);
+  assert.match(app, /function scheduleChannelReconcile\(channelRepositoryId\)/u);
+  assert.match(
+    app,
+    /channelRepositoryId !== undefined\) \{\s*scheduleChannelReconcile\(channelRepositoryId\);/u,
+  );
+  assert.doesNotMatch(
+    app,
+    /channelRepositoryId === activeChannelId\(\)\s*&&\s*state\.route === "chats"/u,
+    "every room with a channel event must reconcile, not only the open one",
+  );
+  assert.match(
+    app,
+    /if \(showsChannelRail\(\)\) \{\s*for \(const repo of state\.repositories\)/u,
+  );
+  assert.match(
+    data,
+    /channelLoading: new Set\(\)/u,
+    "several rooms load at once for the rail, so loading cannot be a single id",
+  );
+  // Watching still clears the open room; inactive reconciles must not.
+  assert.match(
+    app,
+    /function markChannelReadIfWatching[\s\S]{0,400}activeChannelId\(\) !== repositoryId/u,
   );
 });
 

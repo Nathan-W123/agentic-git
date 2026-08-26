@@ -324,7 +324,14 @@ export const state = {
   chanNewMessages: {},
   /** Repository ids whose channel has been read from the server at least once. */
   channelLoaded: new Set(),
-  channelLoadingId: undefined,
+  /**
+   * Repository ids whose first channel read is in flight.
+   *
+   * A Set rather than a single id so the channel rail can load every room's
+   * transcript at once — a lone slot meant starting the second room cancelled
+   * the first, and unread badges on inactive icons never got a cache to count.
+   */
+  channelLoading: new Set(),
   /**
    * Why a channel's first read failed, by repository id.
    *
@@ -4391,9 +4398,9 @@ export async function ensureChannelMessages(repositoryId, rerender, retry = fals
     !repositoryId ||
     !state.projectId ||
     state.channelLoaded.has(repositoryId) ||
-    state.channelLoadingId === repositoryId ||
+    state.channelLoading.has(repositoryId) ||
     // A read that already failed is not attempted again on every render.
-    // `channelLoadingId` is cleared in the `finally` below, so without this
+    // `channelLoading` is cleared in the `finally` below, so without this
     // the shell re-asked for a channel it had just been refused, once per
     // repaint, for as long as the room was open. The retry button is how a
     // person asks for another go.
@@ -4401,13 +4408,13 @@ export async function ensureChannelMessages(repositoryId, rerender, retry = fals
   ) {
     return;
   }
-  state.channelLoadingId = repositoryId;
+  state.channelLoading.add(repositoryId);
   try {
     if (await loadChannel(repositoryId)) {
       state.channelLoaded.add(repositoryId);
     }
   } finally {
-    state.channelLoadingId = undefined;
+    state.channelLoading.delete(repositoryId);
   }
   rerender();
 }
@@ -4659,17 +4666,37 @@ export async function ensureChangeSetForTask(taskId, rerender) {
 }
 
 /**
- * Re-reads a channel that has already loaded once.
+ * Re-reads a channel, loading it first when this browser has never held it.
  *
  * This is the reconcile half of every channel write below: `connectSocket`'s
  * handler in app.js calls it whenever the event socket reports a
- * `channel_*` audit event for the open repository, including the echo of
- * this browser's own posts. The store stays the source of truth, so a
- * fresh-and-correct read replaces local guesses rather than patching them.
+ * `channel_*` audit event for any repository, including the echo of this
+ * browser's own posts. Inactive rooms are included on purpose — without a
+ * cache, `channelUnreadCount` has nothing to paint on the rail. The store
+ * stays the source of truth, so a fresh-and-correct read replaces local
+ * guesses rather than patching them.
  */
 export async function refreshChannelMessages(repositoryId) {
-  if (!repositoryId || !state.channelLoaded.has(repositoryId)) {
+  if (!repositoryId || !state.projectId) {
     return false;
+  }
+  if (!state.channelLoaded.has(repositoryId)) {
+    if (
+      state.channelLoading.has(repositoryId) ||
+      state.channelFailed[repositoryId] !== undefined
+    ) {
+      return false;
+    }
+    state.channelLoading.add(repositoryId);
+    try {
+      if (await loadChannel(repositoryId)) {
+        state.channelLoaded.add(repositoryId);
+        return true;
+      }
+      return false;
+    } finally {
+      state.channelLoading.delete(repositoryId);
+    }
   }
   return await loadChannel(repositoryId);
 }

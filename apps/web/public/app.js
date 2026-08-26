@@ -249,6 +249,7 @@ import {
   updateThreadComposerInput,
   usageOwner,
   usageProviderId,
+  showsChannelRail,
 } from "./screen-chats.js";
 
 // A socket callback cannot unlock browser audio by itself. The first genuine
@@ -5115,6 +5116,12 @@ function sidePanelOpen() {
  * first one's thread is still up moves on to the newer work.
  */
 function openPromptedThread(repositoryId) {
+  // Only the room on screen. A reconcile for another channel still notices
+  // the thread (so a later visit can open it), but must not steal the panel
+  // while the reader is somewhere else.
+  if (activeChannelId() !== repositoryId) {
+    return;
+  }
   const messageId = takePromptedThread(repositoryId);
   if (
     messageId === undefined ||
@@ -5146,6 +5153,9 @@ function openPromptedThread(repositoryId) {
  * which for a `/plan` is exactly the thread this plan belongs to.
  */
 function openReadyPlan(repositoryId) {
+  if (activeChannelId() !== repositoryId) {
+    return;
+  }
   const messageId = takeReadyPlan(repositoryId);
   if (
     messageId === undefined ||
@@ -6463,6 +6473,22 @@ function renderNow() {
         render();
       }
     });
+    // The rail's unread badge counts from each room's local transcript. Only
+    // the open channel used to be loaded, so every other icon stayed blank
+    // until somebody opened it — including while messages were arriving.
+    // `showsChannelRail` is the same gate the icons themselves use.
+    if (showsChannelRail()) {
+      for (const repo of state.repositories) {
+        if (repo.id === activeChannelId()) {
+          continue;
+        }
+        void ensureChannelMessages(repo.id, () => {
+          if (state.route === "chats") {
+            render();
+          }
+        });
+      }
+    }
     void ensureChannelRoster(activeChannelId(), () => {
       if (state.route === "chats") {
         render();
@@ -9778,7 +9804,8 @@ const CONTEXT_REFRESH_MS = 400;
  */
 const BACKLOG_SETTLE_MS = 1_200;
 
-let channelFrameTimer;
+/** Pending coalesce timers for channel reconciles, keyed by repository id. */
+const channelFrameTimers = new Map();
 let catchUpTimer;
 
 /**
@@ -9814,6 +9841,62 @@ function audibleChannelEntryKeys(repositoryId) {
     }
   }
   return keys;
+}
+
+/**
+ * Coalesces a channel transcript re-read for one repository.
+ *
+ * Every room with a `channel_*` event gets this, not only the one on screen:
+ * the rail's unread badge is counted from the local cache, and a cache that
+ * never updates never raises a number. Watching side-effects (auto-open,
+ * mark-read) stay gated inside the helpers they call, so an inactive room
+ * grows a badge without being marked read.
+ */
+function scheduleChannelReconcile(channelRepositoryId) {
+  if (!channelRepositoryId) {
+    return;
+  }
+  // Taken before the reconcile replaces local state. Comparing ids after
+  // the read distinguishes a genuinely new reply from an edit, delete,
+  // reaction, old reconnect history, or this browser's own server echo.
+  const canSound = !catchingUp;
+  const audibleBefore = canSound
+    ? audibleChannelEntryKeys(channelRepositoryId)
+    : undefined;
+  // Coalesced because a reconnect delivers every channel event this
+  // browser missed, and each one used
+  // to re-read the channel and rebuild the whole app — a backlog of forty
+  // meant forty full renders back to back, which is the few seconds the
+  // screen spent refusing to respond to a tap. The reconcile is
+  // idempotent, so the last one in a burst produces the same answer as
+  // all of them. Per repository, so a burst that names two rooms still
+  // refreshes both.
+  window.clearTimeout(channelFrameTimers.get(channelRepositoryId));
+  channelFrameTimers.set(
+    channelRepositoryId,
+    window.setTimeout(() => {
+      channelFrameTimers.delete(channelRepositoryId);
+      void refreshChannelMessages(channelRepositoryId).then(() => {
+        openPromptedThread(channelRepositoryId);
+        openReadyPlan(channelRepositoryId);
+        markChannelReadIfWatching(channelRepositoryId);
+        const received =
+          audibleBefore !== undefined &&
+          [...audibleChannelEntryKeys(channelRepositoryId)].some(
+            (key) => !audibleBefore.has(key),
+          );
+        if (!renameFieldFocused()) {
+          render();
+        }
+        // A muted room makes no sound. The message still arrived and the
+        // transcript still shows it; what the mute switches off is being
+        // interrupted about it.
+        if (received && !isChannelMuted(channelRepositoryId)) {
+          chime("received");
+        }
+      });
+    }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS)),
+  );
 }
 
 /** Only live, user-relevant audit outcomes warrant a sound of their own. */
@@ -10217,60 +10300,17 @@ async function boot() {
       }
       return;
     }
-    // A channel event for the repository currently open gets its own
-    // immediate reconcile, including the echo of this browser's own posts —
-    // see `refreshChannelMessages` in data.js. This is what makes a second
-    // tab watching the same channel see a message appear without a refresh.
+    // A channel event for any repository gets an immediate reconcile,
+    // including the echo of this browser's own posts — see
+    // `refreshChannelMessages` in data.js. Restricting this to the open
+    // room left every other rail icon stuck at zero: the badge counts from
+    // the local cache, and a cache that never re-reads never raises.
     const channelRepositoryId =
       frame?.type === "audit" && String(frame.event?.type ?? "").startsWith("channel_")
         ? frame.event?.data?.repositoryId
         : undefined;
-    if (
-      channelRepositoryId !== undefined &&
-      // `activeChannelId`, for the third time and the same reason: the screen
-      // falls back to the first repository, so a channel can be open and
-      // addressed while this field is still empty. Comparing against the raw
-      // field meant an event for the channel on screen matched nothing, the
-      // reconcile never ran, and anything the server appended after the
-      // sender's own message — an agent's reply, or the system message
-      // explaining why it could not dispatch — simply never arrived.
-      channelRepositoryId === activeChannelId() &&
-      state.route === "chats"
-    ) {
-      // Taken before the reconcile replaces local state. Comparing ids after
-      // the read distinguishes a genuinely new reply from an edit, delete,
-      // reaction, old reconnect history, or this browser's own server echo.
-      const canSound = !catchingUp;
-      const audibleBefore = canSound
-        ? audibleChannelEntryKeys(channelRepositoryId)
-        : undefined;
-      // Coalesced because a reconnect delivers every channel event this
-      // browser missed, and each one used
-      // to re-read the channel and rebuild the whole app — a backlog of forty
-      // meant forty full renders back to back, which is the few seconds the
-      // screen spent refusing to respond to a tap. The reconcile is
-      // idempotent, so the last one in a burst produces the same answer as
-      // all of them.
-      window.clearTimeout(channelFrameTimer);
-      channelFrameTimer = window.setTimeout(() => {
-        void refreshChannelMessages(channelRepositoryId).then(() => {
-          openPromptedThread(channelRepositoryId);
-          openReadyPlan(channelRepositoryId);
-          markChannelReadIfWatching(channelRepositoryId);
-          const received =
-            audibleBefore !== undefined &&
-            [...audibleChannelEntryKeys(channelRepositoryId)].some(
-              (key) => !audibleBefore.has(key),
-            );
-          render();
-          // A muted room makes no sound. The message still arrived and the
-          // transcript still shows it; what the mute switches off is being
-          // interrupted about it.
-          if (received && !isChannelMuted(channelRepositoryId)) {
-            chime("received");
-          }
-        });
-      }, replayAwareDelay(CHANNEL_FRAME_COALESCE_MS));
+    if (channelRepositoryId !== undefined) {
+      scheduleChannelReconcile(channelRepositoryId);
     }
     // The audit half of the same news. The transient frame above is what
     // arrives while somebody is watching; this is what a browser coming back

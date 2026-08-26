@@ -155,7 +155,7 @@ function channelPictureMarkup(repositoryId, size = 34) {
  * for. The two controls that were only ever in the rail move into the
  * sidebar's crown while it is away; see `chanSidebar`.
  */
-function showsChannelRail() {
+export function showsChannelRail() {
   return state.repositories.length > 1;
 }
 
