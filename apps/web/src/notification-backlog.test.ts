@@ -55,7 +55,15 @@ test("every audit frame advances the replay cursor", async () => {
   assert.notEqual(audit, -1, "the audit branch should still exist");
   const record = app.indexOf("noteEventSequence(frame.sequence)", audit);
   assert.notEqual(record, -1, "the arriving sequence should be recorded");
-  assert.match(app.slice(record, record + 100), /extendCatchUp\(\)/u);
+  // Sliced to the branch rather than to a character budget: the audit-chime
+  // suppression landed between the sequence record and the cursor extension,
+  // and a window that has to be widened whenever something lands in the gap
+  // is not pinning what it means to. The claim is that both run on *every*
+  // audit frame — a cursor advanced only on some of them replays a backlog
+  // the reader has already been shown.
+  const branchEnd = app.indexOf("\n    // Canonical moved", record);
+  assert.notEqual(branchEnd, -1, "the audit branch should still have a boundary");
+  assert.match(app.slice(record, branchEnd), /\n      extendCatchUp\(\);/u);
 });
 
 test("a replay settles before it redraws the screen", async () => {

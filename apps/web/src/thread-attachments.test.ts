@@ -96,9 +96,21 @@ test("a thread reply carries its images to the server", async () => {
   // `submitThreadReply` posts the whole draft, references included, through
   // the same reply endpoint as any other reply — the gateway rewrites those
   // references into a path an agent can open, and `messageBody` draws them.
+  // The call moved inside `submitThreadReply` and grew two arguments — a
+  // reply address, and a callback for a command result — so the channel and
+  // the thread hoist their ids the same way. Matched on the hoisted locals
+  // rather than loosened to a bare `postChannelReply`: what is being pinned
+  // is that `state.threadDraft` reaches the reply endpoint *whole*, since a
+  // draft trimmed of its reference lines would drop the images with them.
+  const submit = chats.slice(chats.indexOf("export function submitThreadReply("));
+  const body = submit.slice(0, submit.indexOf("\n}\n"));
   assert.match(
-    chats,
-    /postChannelReply\(activeChannelId\(\), state\.activeChannelThread, state\.threadDraft\)/u,
+    body,
+    /const repositoryId = activeChannelId\(\);\s*const threadId = state\.activeChannelThread;/u,
+  );
+  assert.match(
+    body,
+    /postChannelReply\(\s*repositoryId,\s*threadId,\s*state\.threadDraft,/u,
   );
   assert.match(data, /threadAttaching: 0,/u);
 });

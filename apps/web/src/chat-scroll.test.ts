@@ -60,7 +60,12 @@ test("settings interactions keep their place without carrying it to another scre
   // A Settings click re-renders the whole app, so its ordinary `.scroll`
   // element needs an identity that exists on both sides of a same-screen
   // render and on only one side of navigation to or from Settings.
-  assert.match(app, /class="scroll" data-scroll-key="settings"/u);
+  // Settings became a centred dialog rather than a page, which prepended a
+  // `settings-content` class to that element. The surface and its key are
+  // unchanged, so this matches on the class list — a further cosmetic class
+  // will not break it again — while still requiring `scroll` and the
+  // Settings-only key on one and the same element.
+  assert.match(app, /class="[^"]*\bscroll\b[^"]*" data-scroll-key="settings"/u);
 
   const capture = app.indexOf(
     "const savedSettingsScroll = captureSettingsScroll();",

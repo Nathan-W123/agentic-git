@@ -63,12 +63,20 @@ test("the account menu carries account destinations", async () => {
   assert.doesNotMatch(menu, /value: "settings"|label: "Settings"/u);
   assert.match(menu, /act: "logout"/u);
 
-  // Empty Agents-plus: connect goes to Settings, where agent credentials live.
-  // Offered only while this account has connected nothing — that is still an
-  // empty-state affordance, not a second door into a roster screen.
+  // Agents-plus: connecting opens the Add Agent modal in place rather than
+  // hopping to Settings, and the row is offered unconditionally — one agent
+  // already in the room used to fill this menu with a single disabled row, so
+  // the plus could no longer start a second connection. The action is pinned
+  // as well as the row, because a label that reaches no handler is the same
+  // dead end by another name.
   const agentMenu = slice(app, 'case "channel-agent-menu":', 'case "channel-agent-pick":');
-  assert.match(agentMenu, /label: "Connect agents"/u);
-  assert.match(agentMenu, /value: "settings"/u);
+  assert.match(agentMenu, /act: "agent-add"/u);
+  assert.match(agentMenu, /"Connect another agent"[\s\S]{0,80}"View agent connections"/u);
+  assert.match(
+    app,
+    /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
+  );
+  // Still not a second door into the My Agents roster screen.
   assert.doesNotMatch(agentMenu, /value: "agents"/u);
 });
 
@@ -76,9 +84,9 @@ test("the Chats sidebar has no notification shortcut", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  // Notifications remain reachable from the topbar on secondary screens and
-  // by name in the quick switcher.
-  assert.match(app, /function notificationBell\(\)/u);
+  // The topbar bell was deliberately removed; its absence is pinned in
+  // assets.test.ts, on the topbar itself. Notifications keeps its route and is
+  // reached by name in the quick switcher.
   assert.match(app, /case "go-notifications":/u);
 
   // The always-visible control at the lower left is deliberately gone.
@@ -242,9 +250,11 @@ test("direct messages are offered with people and with nobody else", async () =>
   const destinations = slice(app, "function accountDestinations() {", "\n/**");
   assert.match(destinations, /act: "dm-list"/u);
   assert.match(app, /case "dm-list": \{\s*\n\s*showDirectMessageMenu\(node\);/u);
+  // Per-message selection is reset between conversations, so the previous
+  // conversation's selected message does not stay chosen in the next one.
   assert.match(
     app,
-    /case "dm-open":\s*\n\s*state\.activeDm = value;\s*\n\s*state\.dmDraft = "";\s*\n\s*openUserDirectMessage\(value\);/u,
+    /case "dm-open":\s*\n\s*state\.activeDm = value;\s*\n\s*state\.dmDraft = "";\s*\n\s*clearDirectMessageSelection\(\);\s*\n\s*openUserDirectMessage\(value\);/u,
   );
 });
 
@@ -259,13 +269,18 @@ test("settings dialog enter animation only plays when the dialog opens", async (
   // The overlay is a new node on every render, so an animation on the bare
   // class would replay from opacity 0 whenever a settings control called
   // render — the panel going away and coming back while it was still open.
+  // Anchored to the start of a rule. `.settings-layer.settings-entering
+  // .settings-dialog{` contains `.settings-dialog{` as a substring, so an
+  // unanchored negative fires on the very scoped rule the positives below
+  // demand — it would fail whether or not the bare rule carried an animation,
+  // which is to say it was never testing anything.
   assert.doesNotMatch(
     dialog,
-    /\.settings-layer\{[^}]*animation:scrim-in/u,
+    /\n\s*\.settings-layer\{[^}]*animation:scrim-in/u,
   );
   assert.doesNotMatch(
     dialog,
-    /\.settings-dialog\{[^}]*animation:settings-in/u,
+    /\n\s*\.settings-dialog\{[^}]*animation:settings-in/u,
   );
   assert.match(
     dialog,
@@ -295,7 +310,12 @@ test("Advanced is a category in the settings dialog", async () => {
 
   const dialog = slice(app, "const SETTINGS_SECTIONS = [", "\n/**\n * The user's own GitHub");
   assert.match(dialog, /id: "advanced"/u);
-  assert.match(dialog, /case "advanced":\s*\n\s*return `\$\{repositoryCard\(\)\}\$\{admissionsCard\(\)\}`/u);
+  // The API tokens card was added beside the other things a person configures
+  // once; the two original cards are still there and still in this section.
+  assert.match(
+    dialog,
+    /case "advanced":\s*\n\s*return `\$\{repositoryCard\(\)\}\$\{admissionsCard\(\)\}\$\{apiTokensCard\(\)\}`/u,
+  );
   assert.match(dialog, /data-act="settings-close"/u);
   assert.match(dialog, /data-act="settings-section"/u);
   assert.doesNotMatch(app, /function advancedScreen|function settingsScreen/u);

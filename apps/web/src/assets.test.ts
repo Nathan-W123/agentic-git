@@ -765,7 +765,17 @@ test("settings exposes theme and sound effect preferences", async () => {
   assert.match(app, /data-act="settings-sounds"/u);
   assert.match(app, /Quiet cues for sent and incoming messages/u);
   assert.match(app, /localStorage\.setItem\("ag\.messageSounds"/u);
-  assert.match(ui, /localStorage\.getItem\("ag\.messageSounds"\) === "false"/u);
+  // The inline `=== "false"` early return inside `chime` became the
+  // `soundEffectsEnabled()` predicate behind `contextForChime`, so arming and
+  // playing both go through one reading of the preference. Opposite polarity,
+  // same fact: sounds are on unless the browser was told otherwise. Both
+  // halves are pinned, because a predicate nothing consults would still read
+  // the preference while playing over a reader who asked for silence.
+  assert.match(
+    ui,
+    /function soundEffectsEnabled\(\) \{\s*return window\.localStorage\.getItem\("ag\.messageSounds"\) !== "false";/u,
+  );
+  assert.match(ui, /function contextForChime\(\) \{\s*if \(!soundEffectsEnabled\(\)\)/u);
 });
 
 test("sound effects confirm real sends and reserve interruptions for live arrivals", async () => {
@@ -1169,7 +1179,18 @@ test("the phone drawer closes when a sidebar destination opens", async () => {
   assert.match(channel, /state\.chanSidebarOpen = false;[\s\S]*?rerender\(\);/u);
 
   const dm = action("dm-open", "mention-agents-insert");
-  assert.match(dm, /state\.dmReplyMessageId = undefined;\s*setChanDrawer\(false\);\s*render\(\);/u);
+  // Both statements moved out of the case and into `openUserDirectMessage`,
+  // which the case now delegates to so an agent panel is cleared on the same
+  // path. Pinned in two halves rather than loosened: the case must still go
+  // through the helper before it renders, and the helper must still forget the
+  // reply target and shut the drawer — a shell that stayed open over the
+  // conversation it just opened is the failure this guards.
+  assert.match(dm, /openUserDirectMessage\(value\);\s*render\(\);/u);
+  const openDm = app.slice(
+    app.indexOf("function openUserDirectMessage"),
+    app.indexOf("function showDirectMessageMenu"),
+  );
+  assert.match(openDm, /state\.dmReplyMessageId = undefined;[\s\S]{0,80}setChanDrawer\(false\);/u);
   assert.match(
     action("agent-chat-open", "summary-toggle"),
     /setChanDrawer\(false\);\s*render\(\);/u,
@@ -1391,9 +1412,15 @@ test("user-rooted tasks promote when their first reply arrives", async () => {
     /inlineReply \|\| \(entry\.kind === "user" && !hasTaskThread\)/u,
     "a task stays inline until the agent acknowledges it",
   );
+  // The old anchor was a `threadedTasks` Set at the top of `messageList`,
+  // which was about drawing one changed-file summary per task rather than
+  // about the timeline; it went with the room's changed-files bar. The rule
+  // this line has always meant lives in the loop that folds replies into the
+  // flat transcript: a user root that has been promoted to a thread does not
+  // spill its replies back into the room.
   assert.match(
     list,
-    /entry\.taskId !== undefined &&\s*channelMessageHasTaskThread\(entry\)/u,
+    /entry\.kind !== "user" \|\|\s*\(entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 0\)/u,
     "a promoted task keeps its replies out of the flat room timeline",
   );
   assert.match(
@@ -3525,7 +3552,11 @@ test(
     const removeEnd = app.indexOf('case "thread-attach"', removeStart);
     const remove = app.slice(removeStart, removeEnd);
     const submitStart = app.indexOf('case "dm-submit"');
-    const submitEnd = app.indexOf("\n    // Expanding a file", submitStart);
+    // The old boundary comment sits *above* this case, so `indexOf` returned
+    // -1 and the slice was silently the whole rest of the file — every
+    // assertion below would have passed on a match anywhere in the bundle.
+    // The next case is a real end.
+    const submitEnd = app.indexOf('\n    case "channel-submit"', submitStart);
     const submit = app.slice(submitStart, submitEnd);
 
     assert.match(remove, /case "dm-attachment-remove"/u);
@@ -3533,7 +3564,16 @@ test(
     assert.match(remove, /state\[where\.draft\]/u);
     assert.match(attach, /const dmUserId = target === "dm" \? state\.activeDm/u);
     assert.match(attach, /target === "dm" && state\.activeDm !== dmUserId/u);
-    assert.match(submit, /state\.dmDraft = "";[\s\S]{0,80}render\(\)/u);
+    // Still the same block: the draft is cleared and the screen repainted
+    // before the send is even attempted, so the composer empties immediately
+    // rather than after the round trip. Capturing the reply address and
+    // closing the autocomplete moved in between, which is why the two are no
+    // longer 80 characters apart; the autocomplete close is named so the
+    // window cannot quietly swallow something else later.
+    assert.match(
+      submit,
+      /state\.dmDraft = "";[\s\S]{0,200}closeComposerAutocomplete\("dm"\);\s*render\(\);/u,
+    );
     assert.match(
       app,
       /case "dm-open":[\s\S]{0,120}state\.activeDm = value;[\s\S]{0,120}state\.dmDraft = "";/u,
@@ -3600,7 +3640,7 @@ test("thread composer paints pings and commands and opens their suggestion lists
   );
 });
 
-test("the thread slash picker surfaces its thread commands before the six-row limit", async () => {
+test("the thread slash picker orders its thread commands first and truncates nothing", async () => {
   const chats = await publicFile("screen-chats.js");
   const start = chats.indexOf("function channelSlashCandidates");
   const end = chats.indexOf("\nfunction slashPopover", start);
@@ -3634,17 +3674,27 @@ test("the thread slash picker surfaces its thread commands before the six-row li
     ["plan", "queue", "ask", "dnc", "simple", "push", "retry", "cancel", "stop", "help"],
     "the channel keeps the server's general command order",
   );
+  // Was the first six only. The cut is gone: an empty query is what the picker
+  // opens on, and ten commands behind a six-row cut hid `stop` and `help` —
+  // including the one command whose entire job is to list the others. The
+  // ordering is what remains under test, and the cut is asserted absent below
+  // so it cannot come back unnoticed.
   assert.deepEqual(
     candidates("repo", "thread").map((entry) => entry.name),
-    ["retry", "cancel", "push", "ask", "dnc", "simple"],
-    "thread actions remain visible instead of being truncated",
+    ["retry", "cancel", "push", "ask", "dnc", "simple", "plan", "queue", "stop", "help"],
+    "thread actions are ordered first and nothing is truncated away",
+  );
+  assert.doesNotMatch(
+    chats.slice(start, end),
+    /\.slice\(0, ?\d+\)/u,
+    "the candidate builder keeps no fixed row cap",
   );
 
   state.slashQuery = "pl";
   assert.deepEqual(
     candidates("repo", "thread").map((entry) => entry.name),
     ["plan"],
-    "typing a specific command still finds commands outside the first six",
+    "typing a specific command still narrows to it",
   );
 
   const suggestions = chats.slice(
@@ -3709,10 +3759,23 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   );
   assert.equal(wrap("see docs/@notes", ["notes"]), "see docs/@notes");
   assert.equal(wrap("<code>@agent</code>", ["agent"]), "<code>@agent</code>");
-  assert.match(
-    chats,
-    /messageBody\(\s*entry\.content,\s*repositoryId,\s*entry\.mentions,/u,
+  // The transcript's inline `messageBody(entry.content, repositoryId,
+  // entry.mentions)` became `messageBodyWithIcons`, a wrapper that draws the
+  // icon for a protocol notice. What has to survive that indirection is the
+  // server-resolved `entry.mentions` reaching `messageBody` on *both* of its
+  // branches — a branch that let the argument fall away would highlight
+  // against the live roster instead, so a ping would stop being highlighted
+  // the moment the person it named left the room.
+  const bodyWithIcons = chats.slice(
+    chats.indexOf("function messageBodyWithIcons"),
+    chats.indexOf("const AGENT_AUTHORED_ROOT_KINDS"),
   );
+  assert.match(bodyWithIcons, /messageBody\(content, repositoryId, entry\.mentions\)/u);
+  assert.match(
+    bodyWithIcons,
+    /messageBody\(\s*content\.slice\([^)]*\),\s*repositoryId,\s*entry\.mentions,/u,
+  );
+  assert.match(chats, /messageBodyWithIcons\(entry, repositoryId\)/u);
 
   // One readable accent on its light wash, shared with the live composer and
   // with no changing gradient. The rules are separate because posted tokens
@@ -3977,9 +4040,13 @@ test("private-chat messages compact only an uninterrupted run from one speaker",
   assert.match(chat, /mine \? "user" : "agent"/u);
   assert.match(css, /\.msg\.user \{\s*align-self: flex-end;/u);
   assert.match(css, /\.msg\.agent \{\s*align-self: flex-start;/u);
+  // Was `color: #fff`. The one-off white was retired in favour of
+  // `--accent-ink`, which is what keeps text legible on the yellows and limes
+  // the accent wheel allows; the claim — your own bubble is filled with the
+  // accent, not with the greys around it — is the same one.
   assert.match(
     css,
-    /\.msg\.user \.msg-text \{[^}]*background: var\(--accent\);[^}]*color: #fff;/su,
+    /\.msg\.user \.msg-text \{[^}]*background: var\(--accent\);[^}]*color: var\(--accent-ink\);/su,
   );
   // A short outgoing bubble hugs the right edge below the speaker name. As
   // the words get longer, the bubble grows back into the available space
@@ -4851,8 +4918,13 @@ test("compact thread summaries keep accessible thread navigation", async () => {
     1,
     "active and ended rows share one open control that opens their thread",
   );
-  assert.match(list, /aria-label="\$\{esc\(`Open completed thread:/u);
-  assert.match(list, /aria-label="\$\{esc\(`Open thread:/u);
+  // The separate active and ended row renderers were merged into one, so the
+  // two labels are now the two arms of a single `esc(finished ? ... : ...)`
+  // rather than two `esc()` calls. Both are still pinned: a merged row that
+  // announced every thread as "Open thread" would take from a screen reader
+  // the one fact the grey styling gives everybody else.
+  assert.match(list, /aria-label="\$\{esc\(\s*finished\s*\?\s*`Open completed thread: /u);
+  assert.match(list, /: `Open thread: \$\{title\}\. \$\{status\}\./u);
   assert.match(openCase, /openThreadPanel\(value\);/u);
 });
 
@@ -5415,7 +5487,10 @@ test("agent details use the reference profile with supported controls", async ()
   // pairs cost two lines and a column to state one word.
   assert.match(spec, /class="aspec-identity-head"/u);
   assert.match(spec, /class="aspec-pills"/u);
-  assert.match(spec, /specPill\(`#\$\{repositoryId\}`/u);
+  // The pill shows `repositoryLabel(repositoryId)` rather than the raw id, so
+  // a repository that has been renamed is named correctly here instead of
+  // still announcing whatever it was called when it was created.
+  assert.match(spec, /specPill\(`#\$\{repositoryLabel\(repositoryId\)\}`/u);
   assert.match(spec, /specPill\(statusText, \{ dot: status \}\)/u);
   assert.doesNotMatch(spec, /class="aspec-(?:status|profile-facts)"/u);
   assert.doesNotMatch(css, /\.agent-spec \.aspec-profile-facts/u);
@@ -6501,9 +6576,12 @@ test("a provider with no model list still lets a model be named", async () => {
 
   // Both places a model is picked fall back to typing it, rather than to a
   // dead control: the channel roster's chip and the agent composer.
+  // The agent panel's chips became labelled fields in the profile redesign, so
+  // the slice is anchored on `field("Model", ...)` now. Same control, same
+  // action, same question: what happens on a provider that lists nothing.
   const chip = chats.slice(
-    chats.indexOf('configurationChip(\n        "Model"'),
-    chats.indexOf('configurationChip(\n        "Reasoning"'),
+    chats.indexOf('field(\n      "Model"'),
+    chats.indexOf('field(\n      "Reasoning"'),
   );
   assert.match(chip, /customModel/u);
   assert.match(chip, /miniEditable\(\s*"channel-agent-model"/u);

@@ -125,7 +125,11 @@ test("both channel reconciles get the chance, and a chosen thread is never taken
   // Opening a thread by hand — from the transcript or from a pin — hands the
   // panel to the reader, and this is what stops the app taking it back.
   const byHand = app.split("state.activeChannelThread = value;").slice(1);
-  assert.equal(byHand.length, 2, "there are two deliberate ways into a thread");
+  // Was two. Opening a pinned message and jumping from a pin, and opening or
+  // approving a plan, are three more deliberate ways in. The count is here so
+  // a *new* doorway cannot be added without somebody visiting the loop below,
+  // which is the assertion that carries the meaning.
+  assert.equal(byHand.length, 5, "every deliberate way into a thread is checked");
   for (const after of byHand) {
     assert.match(after.slice(0, 200), /state\.autoOpenedThread = undefined;/u);
   }
