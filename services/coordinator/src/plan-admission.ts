@@ -1,4 +1,3 @@
-import { frozenTouchedRanges } from "./blanket-claim.js";
 import {
   arbitrationFiles,
   claimOccupiesPath,
@@ -290,50 +289,6 @@ function occupiedSpans(
  * nobody can predict, and a footprint with an unplaced symbol in it is not
  * known to be smaller than the file.
  */
-/**
- * The named spans a frozen holder occupies in one file, read from where it has
- * been observed writing rather than from anything it declared.
- *
- * A plan frozen from a worktree declares no symbols and never will — nobody
- * wrote it. Before this, that meant every such holder took each of its files
- * whole and no waiter could ever be split around one, which for a repository
- * whose largest file is most of its backend is the difference between two
- * agents working and one waiting.
- *
- * Reluctant in the two places it has to be. A file the index cannot parse, or
- * an edit that lands where no symbol does — between functions, in imports, at
- * the top level — gives `undefined` and the whole file back: an edit outside
- * every name is an edit this cannot bound, and a claim narrower than the truth
- * hands another task lines this holder will overwrite.
- */
-function observedSpans(
-  plan: AgentPlan,
-  file: string,
-  locate: (file: string) => readonly NamedRange[] | undefined,
-): readonly NamedRange[] | undefined {
-  const touched = frozenTouchedRanges(plan, file);
-  if (touched === undefined) {
-    return undefined;
-  }
-  const placed = locate(file);
-  if (placed === undefined || placed.length === 0) {
-    return undefined;
-  }
-  const spans = new Map<string, NamedRange>();
-  for (const range of touched) {
-    const covering = placed.filter(
-      (span) => span.startLine <= range.endLine && span.endLine >= range.startLine,
-    );
-    if (covering.length === 0) {
-      return undefined;
-    }
-    for (const span of covering) {
-      spans.set(`${span.name}\0${String(span.startLine)}`, span);
-    }
-  }
-  return spans.size === 0 ? undefined : [...spans.values()];
-}
-
 function declaredSpans(
   plan: AgentPlan,
   file: string,
@@ -958,20 +913,41 @@ export class PlanAdmissionController {
         const active = input.active.find((plan) => plan.taskId === holder);
         // A claim that occupies this path is a statement about what a task is
         // allowed to reach rather than about what it declared, so it has no
-        // lines to withhold and takes the file whole — unless the freeze was
-        // able to watch where it was writing, which is the one thing a plan
-        // nobody wrote can offer in place of declarations.
-        const observed =
-          active === undefined
-            ? undefined
-            : observedSpans(active.plan, file, locate);
+        // lines to withhold and takes the file whole.
+        //
+        // It used to be able to offer one thing in place of declarations:
+        // where the freeze had watched it writing. That is withdrawn, for two
+        // reasons that point the same way.
+        //
+        // Presence is evidence of presence and never of absence. A holder that
+        // never planned has told nobody where it is going, so the lines it has
+        // written so far are a lower bound on its footprint and nothing more —
+        // and withholding only those hands the waiter every other function in
+        // the file, including the one the holder is about to open. Neither
+        // side notices: the file is already in the holder's claim, so it needs
+        // no widening and fires no scope request, and hunks divide on old-side
+        // lines, so two agents editing different lines of one function apply
+        // cleanly over each other.
+        //
+        // And the coordinates disagree. A watched range is a *new*-side hunk
+        // number, deliberately, because the old side describes a file that no
+        // longer exists; the spans it was matched against come from an index
+        // built at the base revision. A holder that has inserted lines above a
+        // function therefore has its edit attributed to the wrong span — which
+        // withholds a function it is not in and grants away the one it is.
+        // That is the failure `hunks.ts` reads the old side to avoid, and it
+        // is a wrong grant on the evidence's own terms rather than merely an
+        // optimistic one.
+        //
+        // A waiter behind a claim nobody wrote therefore waits. That is the
+        // safe direction: over-sequencing costs time, and the alternative
+        // costs correctness silently.
         const held =
           active === undefined
             ? undefined
-            : (observed ??
-              (claimOccupiesPath(active.plan, file)
+            : (claimOccupiesPath(active.plan, file)
                 ? undefined
-                : declaredSpans(active.plan, file, locate)));
+                : declaredSpans(active.plan, file, locate));
         if (held === undefined || held.length === 0) {
           return undefined;
         }

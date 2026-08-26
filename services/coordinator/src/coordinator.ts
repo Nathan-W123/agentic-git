@@ -487,50 +487,6 @@ function planClaimedResources(plan: AgentPlan): Map<string, PlanResourceRef> {
  * only what its plan names — the directories it carries are room for files
  * nobody has written yet, so a waiter is not refused for those.
  */
-/**
- * What a freeze is shown: the changed files, and where in each of them the
- * agent has been writing when that could be read.
- *
- * The two reads are separate calls to git and cannot be atomic, so they can
- * disagree — a file changed between them appears in one and not the other.
- * That resolves the safe way by construction: a file with no ranges attached
- * is a file the holder keeps whole, which is the answer this had before either
- * read existed.
- */
-async function observeWithRanges(
-  list: (
-    workspace: TaskWorkspace,
-  ) => Promise<Array<{ path: string; status: FilePatchStatus }>>,
-  locate:
-    | ((
-        workspace: TaskWorkspace,
-      ) => Promise<Array<{ path: string; ranges: LineRange[] }>>)
-    | undefined,
-  workspace: TaskWorkspace,
-): Promise<
-  Array<{ path: string; status: FilePatchStatus; ranges?: LineRange[] }>
-> {
-  const changes = await list(workspace);
-  if (locate === undefined) {
-    return changes;
-  }
-  let ranges: Array<{ path: string; ranges: LineRange[] }>;
-  try {
-    ranges = await locate(workspace);
-  } catch {
-    // Placing the edits is the improvement, not the point. A diff that fails
-    // to read leaves the freeze exactly as capable as it was before.
-    return changes;
-  }
-  const byPath = new Map(ranges.map((entry) => [entry.path, entry.ranges]));
-  return changes.map((change) => {
-    const located = byPath.get(change.path);
-    return located === undefined || located.length === 0
-      ? change
-      : { ...change, ranges: located };
-  });
-}
-
 export function contestedPlanResources(
   holder: AgentPlan,
   waiter: AgentPlan,
@@ -5059,10 +5015,20 @@ export class Coordinator {
       this.planAuthority,
     );
     const list = this.workspaces.listWorkingChanges?.bind(this.workspaces);
-    // Optional beside an optional. A manager that can name the changed files
-    // but not place the edits inside them freezes as it always did, holding
-    // each file whole.
-    const locate = this.workspaces.listWorkingRanges?.bind(this.workspaces);
+    // Files, and deliberately not the lines inside them.
+    //
+    // The freeze used to place each edit as well as name its file, so a
+    // waiter could be split around the functions a holder had been watched
+    // writing. That is withdrawn — see `admitWithinFiles`, which no longer
+    // reads the record: a holder that never planned has told nobody where it
+    // is going next, so the lines it has written are a lower bound on its
+    // footprint, and the ranges are new-side numbers matched against base-side
+    // spans, which can attribute an edit to the wrong function and give away
+    // the one it is inside. Naming the file and holding it whole is the
+    // answer that cannot be wrong in that direction.
+    //
+    // It also stops running a `-U0` diff over a live agent's worktree every
+    // ten seconds to produce a record nothing reads.
     if (
       freeze === undefined ||
       list === undefined ||
@@ -5088,7 +5054,7 @@ export class Coordinator {
             ? {}
             : { projectId: input.projectId }),
           baseVersion: waveVersion,
-          observe: async () => await observeWithRanges(list, locate, workspace),
+          observe: async () => await list(workspace),
           estimatedFiles: entry.blanketEstimate ?? [],
         });
       } catch {

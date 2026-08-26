@@ -327,30 +327,32 @@ test("a freeze keeps the lines it was shown, and says nothing where it saw none"
   assert.equal(frozenTouchedRanges(unwatched, BIG_FILE), undefined);
 });
 
-test("a frozen holder that was watched can be split around", () => {
-  // The thing that could not happen before. A plan frozen from a worktree
-  // declares no symbols and never will, so arbitration had nothing to bound
-  // it with and handed over every file whole — which for a repository whose
-  // largest file is most of its backend meant one holder stopped everybody.
+test("a watched holder is not split around, however well it was watched", () => {
+  // This asserted the opposite, and the opposite was the bug.
+  //
+  // Splitting a waiter around the function a holder had been *seen* in reads
+  // presence as absence. A plan frozen from a worktree declares no symbols and
+  // never will — nobody wrote it — so the lines it has produced so far bound
+  // where it has been and say nothing about where it goes next. Granting the
+  // rest of the file hands over every function it has not opened yet,
+  // including the one it is about to, and nothing catches the overlap: the
+  // file is already inside the claim so no scope request fires, and hunks
+  // divide on old-side lines so both agents' edits apply cleanly over each
+  // other.
+  //
+  // The evidence is also in the wrong coordinate system to be trusted even
+  // about presence. A watched range is a new-side hunk number; the spans it
+  // was matched against come from an index at the base revision. Insert lines
+  // above a function and the edit is attributed to its neighbour — withholding
+  // a function the holder is not in and granting the one it is.
   const decided = askAgainstFrozen(
     freezePlanFromWorkingChanges(blanketPlan(TASK), [
       { path: BIG_FILE, status: "modified", ranges: [{ startLine: 120, endLine: 140 }] },
     ]),
   );
 
-  assert.equal(decided.status, "approved_with_constraints");
-  assert.deepEqual(
-    decided.deferredResources?.map((resource) => resource.resourceId),
-    ["renderChannel"],
-  );
-  // And the waiter really gets the file: what it is told to avoid is the one
-  // function the holder is inside.
-  assert.deepEqual(
-    decided.ownershipGrants
-      .filter((grant) => grant.resourceType === "file")
-      .map((grant) => grant.resourceId),
-    [BIG_FILE],
-  );
+  assert.equal(decided.status, "sequenced");
+  assert.deepEqual(decided.blockedBy, [TASK.id]);
 });
 
 test("an edit that lands outside every symbol still takes the whole file", () => {
@@ -378,18 +380,25 @@ test("a freeze nobody watched behaves exactly as it did before", () => {
   assert.deepEqual(decided.blockedBy, [TASK.id]);
 });
 
-test("a holder watched inside a function the waiter wants keeps that function", () => {
+test("a waiter is not let into the rest of a file the holder is inside", () => {
+  // The same inversion, from the waiter's side. It declared two symbols and
+  // the holder was watched inside one of them; the old answer granted it the
+  // other and the file with it. What that actually bought was two agents in
+  // one file, one of which had never said where it was working.
   const decided = askAgainstFrozen(
     freezePlanFromWorkingChanges(blanketPlan(TASK), [
       { path: BIG_FILE, status: "modified", ranges: [{ startLine: 310, endLine: 320 }] },
     ]),
   );
 
-  // Still a split, not a stop: the waiter declared two symbols and only one of
-  // them is spoken for.
-  assert.equal(decided.status, "approved_with_constraints");
+  assert.equal(decided.status, "sequenced");
+  assert.deepEqual(decided.blockedBy, [TASK.id]);
+  // Nothing at all is granted in that file — not the symbol the holder was
+  // never seen in, and not the file itself.
   assert.deepEqual(
-    decided.deferredResources?.map((resource) => resource.resourceId),
-    ["renameAgent"],
+    decided.ownershipGrants.filter(
+      (grant) => grant.resourceId === BIG_FILE,
+    ),
+    [],
   );
 });

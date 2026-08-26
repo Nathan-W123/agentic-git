@@ -25,13 +25,23 @@ import {
   type WaitingWorkRequest,
 } from "@coord/coordinator";
 import type { CoordinationStore, WorkLease } from "@coord/persistence";
-import { RepositoryService } from "@coord/repository-service";
+import {
+  RepositoryService,
+  type CanonicalRepository,
+} from "@coord/repository-service";
+import {
+  GitWorktreeWorkspaceManager,
+  type TaskWorkspace,
+  type WorkspaceManager,
+} from "@coord/workspace-manager";
 import {
   isBlanketClaim,
   planAdmissionApproved,
   planAdmissionPartial,
   reducePlanScope,
   type AgentPlan,
+  type CanonicalVersion,
+  type FilePatchStatus,
   type PlanAdmission,
   type TaskId,
 } from "@coord/shared-types";
@@ -102,6 +112,8 @@ export class LeasePlanAuthority implements PlanAuthority {
   private readonly maxWaitMs: number;
   /** See the constructor option of the same name. */
   private readonly blanketClaims: boolean;
+  /** Reads a holder's worktree, to narrow its claim to what it is editing. */
+  private readonly workspaces: WorkspaceManager;
   /** When each task was first told to wait, for the bound below. */
   private readonly waitingSince = new Map<TaskId, number>();
 
@@ -129,6 +141,15 @@ export class LeasePlanAuthority implements PlanAuthority {
      * describing itself sets COORD_BLANKET_CLAIM=0.
      */
     blanketClaims?: boolean;
+    /**
+     * How a holder's in-progress edits are read when its repository-wide claim
+     * has to be narrowed for somebody else.
+     *
+     * Injectable so a test can hand over a stub, and so a host that already
+     * has one does not build a second. The default reads worktrees through the
+     * same git client every other caller uses.
+     */
+    workspaces?: WorkspaceManager;
   }) {
     this.store = options.store;
     this.leaseIdForTask = options.leaseIdForTask;
@@ -138,6 +159,9 @@ export class LeasePlanAuthority implements PlanAuthority {
     this.admissions = options.admissions ?? new PlanAdmissionController();
     this.maxWaitMs = options.maxWaitMs ?? 30 * 60 * 1000;
     this.blanketClaims = options.blanketClaims ?? true;
+    this.workspaces =
+      options.workspaces ??
+      new GitWorktreeWorkspaceManager(this.repositories.getGitClient());
   }
 
   public async admit(
@@ -199,7 +223,8 @@ export class LeasePlanAuthority implements PlanAuthority {
       // and the claim stands — the refusal below is still the answer.
       const narrowed = await this.narrowBlanketHolder(
         blanket,
-        request.baseVersion.sequence,
+        request.baseVersion,
+        request.repository,
       );
       if (narrowed !== undefined) {
         active = active.map((entry) =>
@@ -981,9 +1006,65 @@ export class LeasePlanAuthority implements PlanAuthority {
    * Returns the narrowed plan to arbitrate against, or nothing when the claim
    * still stands.
    */
+  /**
+   * A holder's in-progress edits, read from the worktree it is working in.
+   *
+   * The holder is another process — a worker daemon, or an earlier run of this
+   * one — so there is no live workspace handle to borrow. The row written when
+   * its task started is the way across: `findWorkspaceByTaskId` is recorded
+   * for exactly this, and the worktree it names is a directory on this host
+   * whether the agent runs there or inside a container, because a docker
+   * workspace masks only the container's own `.git` pointer.
+   *
+   * The base revision must be the one the workspace was created against, never
+   * the arriving plan's. A diff taken against the wrong base is not a weaker
+   * observation, it is a fictional one.
+   *
+   * Answers `undefined` for every way the reading can fail — no recorded
+   * workspace, a manager that cannot list, a `git` call that throws — because
+   * the caller has to tell "this holder has written nothing" apart from "we
+   * could not find out", and only one of those is safe to narrow on.
+   */
+  private async observeHolder(
+    holderTaskId: TaskId,
+    repository: CanonicalRepository,
+  ): Promise<Array<{ path: string; status: FilePatchStatus }> | undefined> {
+    const list = this.workspaces.listWorkingChanges?.bind(this.workspaces);
+    if (list === undefined) {
+      return undefined;
+    }
+    const stored = await this.store
+      .findWorkspaceByTaskId(holderTaskId)
+      .catch(() => undefined);
+    if (stored === undefined) {
+      return undefined;
+    }
+    const workspace: TaskWorkspace = {
+      id: stored.id,
+      taskId: stored.taskId,
+      path: stored.path,
+      rootPath: stored.path,
+      repository,
+      baseVersion: {
+        sequence: 0,
+        revision: stored.baseRevision,
+        branch: repository.branch,
+        createdAt: stored.createdAt,
+      },
+      isolation: stored.isolation === "docker" ? "docker" : "git-worktree",
+      createdAt: stored.createdAt,
+    };
+    try {
+      return await list(workspace);
+    } catch {
+      return undefined;
+    }
+  }
+
   private async narrowBlanketHolder(
     holder: ActivePlan,
-    baseVersion: number,
+    baseVersion: CanonicalVersion,
+    repository: CanonicalRepository,
   ): Promise<ActivePlan | undefined> {
     const leases = await this.store.listWorkLeases({ status: "active" });
     const held = leases.find(
@@ -992,18 +1073,50 @@ export class LeasePlanAuthority implements PlanAuthority {
     if (held === undefined || held.plan === undefined) {
       return undefined;
     }
-    const frozen = freezePlanFromWorkingChanges(
-      holder.plan,
-      holder.plan.expectedFiles.map((path) => ({
+    // What the holder is provably editing, not what its objective read like.
+    //
+    // This fed `expectedFiles` — the lexical scope estimate a blanket claim
+    // carries — back in as though it were an observation. That is a guess
+    // about a task that never planned, and narrowing to a guess is how an
+    // arrival came to be granted a file the holder already had open: a
+    // modified-but-unestimated path is not in `expectedFiles`, and for a
+    // frozen claim `claimOccupiesPath` reads `expectedFiles` alone, so the
+    // file was simply free.
+    //
+    // Reading the worktree is monotone beside it rather than instead of it:
+    // `freezePlanFromWorkingChanges` unions the observed paths with the
+    // estimate, so no path an arrival could be granted before this change is
+    // withheld by it — only paths the holder is demonstrably in are added.
+    const observed = await this.observeHolder(holder.taskId, repository);
+    if (observed === undefined) {
+      // A holder whose edits cannot be read is a holder whose claim cannot be
+      // narrowed honestly, and every `catch` in this path would otherwise
+      // spell "has written nothing" — which is exactly the hole above,
+      // reopened by an unrelated `git` failure. The arrival is not stranded:
+      // it takes the sequenced answer below, the force-admit bound still
+      // applies, and the holder's own poll narrows the claim from a live
+      // workspace handle within its next tick.
+      return undefined;
+    }
+    const frozen = freezePlanFromWorkingChanges(holder.plan, [
+      ...holder.plan.expectedFiles.map((path) => ({
         path,
         status: "modified" as const,
       })),
-    );
+      // Field by field, so no `ranges` this manager may learn to report can
+      // reach the freeze. A claim frozen on somebody else's arrival holds its
+      // files whole — see `admitWithinFiles`, which no longer reads a watched
+      // range for a grant.
+      ...observed.map((change) => ({
+        path: change.path,
+        status: change.status,
+      })),
+    ]);
     const admission = this.admissions.admit({
       plan: frozen,
       agentId: holder.agentId,
       baseRevision: held.baseRevision,
-      baseVersion,
+      baseVersion: baseVersion.sequence,
       // A narrowing of a claim that covered the repository cannot collide
       // with anything: everything it keeps, it already held.
       active: [],
@@ -1046,6 +1159,11 @@ export class LeasePlanAuthority implements PlanAuthority {
         // Says who asked, because this narrowing is not the holder noticing
         // anything — somebody else needed the room and took it.
         narrowedOnArrival: true,
+        // How much of the freeze came from the worktree rather than from the
+        // objective's estimate. Zero is a real answer — a holder that has not
+        // written yet — and worth telling apart on the record from a read
+        // that failed, which does not reach here at all.
+        observedFiles: observed.length,
       },
     });
     return { ...holder, plan: frozen };
