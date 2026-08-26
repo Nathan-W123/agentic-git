@@ -5344,8 +5344,11 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
 
   // Reconnecting delivers everything that happened while the browser was
   // closed. One reconcile per event used to cause a full app rebuild each.
-  assert.match(app, /clearTimeout\(channelFrameTimer\)/u);
+  // Timers are per repository so a burst that names two rooms still refreshes
+  // both — a single shared timer dropped every room but the last.
+  assert.match(app, /clearTimeout\(channelFrameTimers\.get\(channelRepositoryId\)\)/u);
   assert.match(app, /CHANNEL_FRAME_COALESCE_MS/u);
+  assert.match(app, /function scheduleChannelReconcile\(channelRepositoryId\)/u);
 });
 
 test("a channel transcript reads down one side at every width", async () => {
@@ -5785,6 +5788,14 @@ test("a roster row offers rename and delete only for the viewer's agent", async 
   );
 
   assert.equal(row.match(/act: "roster-agent-menu"/gu)?.length, 1);
+  // A teammate's agent has nothing in that menu, so the "…" is not drawn at
+  // all — the same rule `personRow` follows. Offering a button that opens an
+  // empty popover is worse than offering nothing.
+  assert.match(
+    row,
+    /const hasMenu = rosterMenuItems\(agent\.id\)\.length > 0;/u,
+  );
+  assert.match(row, /hasMenu\s*\? `<span class="rr-more">/u);
   assert.match(
     row,
     /const settingsOpen =\s*agent\.mine === true && state\.chatSettingsOpenId === agent\.id;/u,
@@ -6785,6 +6796,42 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   );
 });
 
+test("inactive channel rail icons show a live unread count", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+
+  // The badge is already drawn from `channelUnreadCount`. What was missing was
+  // a transcript to count: only the open room was loaded, and only its
+  // `channel_*` events were reconciled, so every other icon stayed blank.
+  assert.match(chats, /class="channel-rail-unread"/u);
+  assert.match(chats, /const unread = channelUnreadCount\(repo\.id\)/u);
+  assert.match(app, /function scheduleChannelReconcile\(channelRepositoryId\)/u);
+  assert.match(
+    app,
+    /channelRepositoryId !== undefined\) \{\s*scheduleChannelReconcile\(channelRepositoryId\);/u,
+  );
+  assert.doesNotMatch(
+    app,
+    /channelRepositoryId === activeChannelId\(\)\s*&&\s*state\.route === "chats"/u,
+    "every room with a channel event must reconcile, not only the open one",
+  );
+  assert.match(
+    app,
+    /if \(showsChannelRail\(\)\) \{\s*for \(const repo of state\.repositories\)/u,
+  );
+  assert.match(
+    data,
+    /channelLoading: new Set\(\)/u,
+    "several rooms load at once for the rail, so loading cannot be a single id",
+  );
+  // Watching still clears the open room; inactive reconciles must not.
+  assert.match(
+    app,
+    /function markChannelReadIfWatching[\s\S]{0,400}activeChannelId\(\) !== repositoryId/u,
+  );
+});
+
 test("a message keeps react and reply, and puts the rest behind one menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await browserSource();
@@ -6851,13 +6898,24 @@ test("the transcript reads in a column rather than across the window", async () 
   const css = await publicFile("styles.css");
 
   // A message run edge to edge on a wide screen is a message read twice: the
-  // eye leaves the end of one line with nowhere to land on the next.
+  // eye leaves the end of one line with nowhere to land on the next. Day
+  // separators still span the panel so "Today" is not left-shifted short.
   assert.match(css, /--room-column: 940px;/u);
-  assert.match(css, /--message-max: 72ch;/u);
+  assert.match(css, /--message-max: 100%;/u);
   assert.match(
     css,
-    /\.chan-messages \{[\s\S]{0,400}padding: 12px max\(24px, 100% - var\(--room-column\)\) 20px 18px;/u,
-    "the column should start at the left without moving anything in a narrow room",
+    /\.chan-messages \{[\s\S]{0,400}padding: 12px 18px 20px;/u,
+    "the scroller matches the header inset so day rules span the panel",
+  );
+  assert.match(
+    css,
+    /\.chan-day \{[\s\S]{0,200}width: 100%;[\s\S]{0,80}max-width: none;/u,
+    "the Today bar spans the chat panel rather than the message column",
+  );
+  assert.match(
+    css,
+    /\.cmsg-row \{[\s\S]{0,500}max-width: var\(--room-column\);/u,
+    "message rows keep the conversation column",
   );
   assert.match(
     css,

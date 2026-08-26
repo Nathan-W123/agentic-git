@@ -109,12 +109,12 @@
      transcript nobody can read: on a wide screen the eye leaves the end of
      one line with no idea where the next one starts, and every message became
      a full-width band of hover ground with a sentence in the corner of it.
-     `--room-column` is the column the messages read down, and
-     `--message-max` caps the words themselves at roughly the line length
-     prose is set at — measured in characters, so it follows the reader's own
-     text size rather than a pixel count taken at one of them. */
+     `--room-column` caps each message row; day rules and other room furniture
+     still span the chat panel so a "Today" bar is not left hanging short.
+     `--message-max` lets the words use the row they sit in rather than a
+     tighter character measure that stopped copy short of the available width. */
   --room-column: 940px;
-  --message-max: 72ch;
+  --message-max: 100%;
 
   --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
   --shadow-card: 0 1px 0 rgb(255 255 255 / 2%), 0 8px 24px rgb(0 0 0 / 12%);
@@ -5992,12 +5992,11 @@ button.chip.lg:hover {
 .chan-messages {
   overflow-y: auto;
   min-height: 0;
-  /* Left-aligned in its own column, not centred and not edge to edge: the
-     messages start where the header and composer do. The right padding is
-     the larger of the 24px a narrow room needs and what is left once the
-     column has taken its share, so nothing moves until the window is wider
-     than the conversation wants to be. */
-  padding: 12px max(24px, 100% - var(--room-column)) 20px 18px;
+  /* Match the header's side inset so day separators span and centre across
+     the chat panel. Message rows keep to `--room-column` themselves; putting
+     that cap on the scroller instead left the "Today" rule short and pushed
+     left against a wide empty panel. */
+  padding: 12px 18px 20px;
   position: relative;
   isolation: isolate;
 }
@@ -6050,6 +6049,11 @@ button.chip.lg:hover {
 }
 
 .chan-day {
+  /* Full panel width (see `.chan-messages` padding); the shared separator
+     flex centres the label on the hairline. */
+  box-sizing: border-box;
+  width: 100%;
+  max-width: none;
   padding: 14px 0 10px;
 }
 
@@ -6150,6 +6154,10 @@ button.chip.lg:hover {
 }
 
 .cmsg-row {
+  /* The scroller is panel-wide so day rules can centre; each row still reads
+     in the conversation column rather than stretching with the window. */
+  max-width: var(--room-column);
+  width: 100%;
   /* One column for the whole connector, named once. `--cmsg-body-x` is the
      distance from the row's left edge to the body's text — 8px of row
      padding, the 32px face, the 12px column gap — and `--cmsg-stem-x` is
@@ -6780,9 +6788,9 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   line-height: 1.6;
   color: var(--text);
   margin-top: 3px;
-  /* The words stop before the column does. A paragraph set across the whole
-     room is a paragraph read twice, and the room is wider than any comfortable
-     measure on a desktop. */
+  /* Follow the row: `--room-column` already bounds the line length, so a
+     tighter character cap only made long posts wrap short of the space they
+     already had. */
   max-width: var(--message-max);
   word-break: break-word;
   white-space: pre-wrap;

@@ -155,7 +155,7 @@ function channelPictureMarkup(repositoryId, size = 34) {
  * for. The two controls that were only ever in the rail move into the
  * sidebar's crown while it is away; see `chanSidebar`.
  */
-function showsChannelRail() {
+export function showsChannelRail() {
   return state.repositories.length > 1;
 }
 
@@ -1347,6 +1347,11 @@ function rosterRow(agent) {
     agent.mine === true && state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
+  // Same rule `personRow` follows: draw the "…" only when it has something to
+  // offer. A teammate's agent has no row edits for this account, and the
+  // button opened an empty grey popover — a control that answers nothing is
+  // worse than no control.
+  const hasMenu = rosterMenuItems(agent.id).length > 0;
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
@@ -1394,12 +1399,16 @@ function rosterRow(agent) {
             : ""
         }
       </span>
-      <span class="rr-more">${iconButton("dots", {
-        act: "roster-agent-menu",
-        value: agent.id,
-        title: `More for ${agent.name}`,
-        small: true,
-      })}</span>
+      ${
+        hasMenu
+          ? `<span class="rr-more">${iconButton("dots", {
+              act: "roster-agent-menu",
+              value: agent.id,
+              title: `More for ${agent.name}`,
+              small: true,
+            })}</span>`
+          : ""
+      }
     </div>
   </div>`;
 }
@@ -2317,7 +2326,17 @@ function threadProgress(entry) {
   // endings; an agent's own summary does not match it, and a bar stuck at 90%
   // under a task that landed an hour ago reads as a hang. The task's status
   // and the `outcome` reply kind both survive rewording.
-  const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+  // A follow-up submitted inside this thread is a new task whose
+  // `conversationId` is the root message id. The root's `taskId` remains the
+  // completed first turn, so prefer the live conversation turn before using
+  // that historical fallback. Kept self-contained because the progress
+  // renderer is also exercised independently by the asset tests.
+  const task =
+    state.tasks.find(
+      (candidate) =>
+        candidate.conversationId === entry.id &&
+        ["submitted", "claimed"].includes(candidate.status),
+    ) ?? state.tasks.find((candidate) => candidate.id === entry.taskId);
   if (task !== undefined && !["submitted", "claimed"].includes(task.status)) {
     return undefined;
   }

@@ -11329,6 +11329,7 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const session = await bootstrap(owner);
+  await invitableRepository(owner, "dm-shared");
   const organizationId = (await owner.request("/api/v1/organizations")).data
     .organizations[0].id as string;
 
@@ -11497,6 +11498,71 @@ test("a direct message reaches its recipient and nobody else", async (t) => {
     ),
     false,
   );
+});
+
+test("direct messages require a shared repository channel", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const sharedRepository = await invitableRepository(owner, "dm-room-shared");
+  const isolatedRepository = await invitableRepository(
+    owner,
+    "dm-room-isolated",
+  );
+  const first = await joinRepository(
+    runtime,
+    owner,
+    "dm-first@example.com",
+    sharedRepository,
+  );
+  const shared = await joinRepository(
+    runtime,
+    owner,
+    "dm-shared@example.com",
+    sharedRepository,
+  );
+  const isolated = await joinRepository(
+    runtime,
+    owner,
+    "dm-isolated@example.com",
+    isolatedRepository,
+  );
+  const sharedId = (await shared.request("/api/v1/auth/me")).data.user.id;
+  const isolatedId = (await isolated.request("/api/v1/auth/me")).data.user.id;
+
+  const inbox = await first.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`,
+  );
+  assert.equal(inbox.status, 200, JSON.stringify(inbox.data));
+  const reachable = new Set(
+    (inbox.data.people as { id: string }[]).map((person) => person.id),
+  );
+  assert.equal(reachable.has(sharedId), true);
+  assert.equal(reachable.has(isolatedId), false);
+
+  const sent = await first.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${sharedId}`,
+    { method: "POST", body: { content: "We share this room." } },
+  );
+  assert.equal(sent.status, 201, JSON.stringify(sent.data));
+  assert.equal(
+    (
+      await first.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${sharedId}`,
+      )
+    ).status,
+    200,
+  );
+
+  for (const method of ["GET", "POST"] as const) {
+    const refused = await first.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${isolatedId}`,
+      method === "POST"
+        ? { method, body: { content: "We do not share a room." } }
+        : { method },
+    );
+    assert.equal(refused.status, 404, JSON.stringify(refused.data));
+  }
 });
 
 test("channel stats count every root and reply, past the read page", async (t) => {

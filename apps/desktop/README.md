@@ -63,15 +63,15 @@ written in the clear would be worse than one that has to be re-issued.
 ## What the app may do
 
 Everything its owner does in a working day — read the room, start and answer
-work, review an agent's findings, push to and sync from GitHub, and manage
-channels. Two permissions are withheld, and only two: `manage_members` and
-`manage_organization`, the pair that decides who may use this Kumi at all. A
-laptop that is lost or borrowed cannot add somebody, remove somebody, or
-change what anybody may do.
+work, review an agent's findings, push to and sync from GitHub, manage
+channels, and invite people into them. One permission is withheld:
+`manage_organization`, which decides who may use this Kumi at all across the
+whole organization. A laptop that is lost or borrowed cannot change roles or
+anything else that decides what anybody may do organization-wide.
 
-That line took three attempts. `import_repository`, `review` and
-`manage_project` were each withheld at first and each turned out to be
-ordinary work — found, all three times, by somebody clicking a button and
+That line took four attempts. `import_repository`, `review`, `manage_project`
+and `manage_members` were each withheld at first and each turned out to be
+ordinary work — found, all four times, by somebody clicking a button and
 being told their token lacked a scope. `app-token-scopes.test.ts` now checks
 the grant against every permission that exists, so a permission added later
 fails the build until somebody decides which side it belongs on.

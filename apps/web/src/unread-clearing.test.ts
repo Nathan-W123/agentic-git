@@ -70,6 +70,28 @@ test("a message arriving in the room on screen arrives read", async () => {
   );
 });
 
+test("a message arriving in another channel raises a badge, not a read stamp", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+
+  // Live `channel_*` frames used to reconcile only the open repository, so a
+  // message in a room the reader was not looking at never reached the cache
+  // the rail counts from. Every repository reconciles now; marking read stays
+  // behind `markChannelReadIfWatching`, which still requires that room to be
+  // the one on screen.
+  assert.match(app, /function scheduleChannelReconcile\(channelRepositoryId\)/u);
+  assert.match(app, /scheduleChannelReconcile\(channelRepositoryId\)/u);
+  assert.match(
+    app,
+    /function markChannelReadIfWatching[\s\S]{0,300}activeChannelId\(\) !== repositoryId/u,
+  );
+  assert.match(
+    data,
+    /export async function refreshChannelMessages\(repositoryId\)[\s\S]{0,500}!state\.channelLoaded\.has\(repositoryId\)/u,
+    "an inactive room can be loaded on first reconcile so the badge has a count",
+  );
+});
+
 test("a private message is read where it landed, not wherever the reader is", async () => {
   const data = await publicFile("data.js");
   const app = await publicFile("app.js");
