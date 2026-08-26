@@ -1806,30 +1806,40 @@ export function agentsThinkingIn(repositoryId) {
 }
 
 /**
- * Is an agent working on this thread's task right now?
+ * The task currently represented by a thread.
  *
- * The same question `agentsThinkingIn` answers for a whole channel, asked of
- * one thread — so the threads pullout can mark the live work rather than
- * making somebody open each row to find out which one is still moving.
- *
- * The task's own status is the truth where the task is known, and it is the
- * same `WORKING_STATUS` the typing dots use, so a thread stays marked for
- * exactly as long as its agent is shown as thinking. A busy frame is the
- * fallback for the window before the task list has caught up with it, which
- * is precisely when a reader is most likely to be watching.
- *
- * Unlike `agentsThinkingIn` this reads without retiring anything: it runs
- * once per row of a render, and a selector that mutates state while a list is
- * being built would make the answer depend on the order the rows were drawn.
+ * The root keeps the id of the first task it created. Follow-up work gets a
+ * new task id, but keeps the root message id as its `conversationId`, so an
+ * active follow-up must win over that historical id. The original lookup is
+ * retained for first turns and records written before conversations existed.
  */
-export function threadIsWorking(entry) {
+export function threadTask(entry) {
+  const conversationId = entry?.id;
+  const current = state.tasks.find(
+    (candidate) =>
+      conversationId !== undefined &&
+      candidate.conversationId === conversationId &&
+      taskIsWorking(candidate),
+  );
+  if (current !== undefined) {
+    return current;
+  }
   const taskId = entry?.taskId;
+  return taskId === undefined || taskId === null || taskId === ""
+    ? undefined
+    : state.tasks.find((candidate) => candidate.id === taskId);
+}
+
+/** Is an agent working on the task currently represented by this thread? */
+export function threadIsWorking(entry) {
+  const task = threadTask(entry);
+  const taskId = task?.id ?? entry?.taskId;
   if (taskId === undefined || taskId === null || taskId === "") {
     return false;
   }
   return (
     busyIsLive(taskId, state.agentBusy[taskId], Date.now()) ||
-    taskIsWorking(state.tasks.find((candidate) => candidate.id === taskId))
+    taskIsWorking(task)
   );
 }
 

@@ -2326,7 +2326,17 @@ function threadProgress(entry) {
   // endings; an agent's own summary does not match it, and a bar stuck at 90%
   // under a task that landed an hour ago reads as a hang. The task's status
   // and the `outcome` reply kind both survive rewording.
-  const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+  // A follow-up submitted inside this thread is a new task whose
+  // `conversationId` is the root message id. The root's `taskId` remains the
+  // completed first turn, so prefer the live conversation turn before using
+  // that historical fallback. Kept self-contained because the progress
+  // renderer is also exercised independently by the asset tests.
+  const task =
+    state.tasks.find(
+      (candidate) =>
+        candidate.conversationId === entry.id &&
+        ["submitted", "claimed"].includes(candidate.status),
+    ) ?? state.tasks.find((candidate) => candidate.id === entry.taskId);
   if (task !== undefined && !["submitted", "claimed"].includes(task.status)) {
     return undefined;
   }
