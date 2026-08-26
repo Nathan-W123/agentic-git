@@ -141,8 +141,12 @@ export interface ProviderUsageWindow {
 }
 
 export interface ProviderUsageReport {
-  /** Where these numbers came from, shown to the user verbatim-ish. */
-  source: string;
+  /**
+   * Where these numbers came from, shown to the user verbatim-ish. Absent
+   * when the provenance would say nothing the reader did not already know:
+   * Claude's own `/usage` is read for the account the card is already about.
+   */
+  source?: string;
   windows: ProviderUsageWindow[];
   /** Set when the CLI publishes no consumption figure at all. */
   unavailableReason?: string;
@@ -983,7 +987,6 @@ function findRateLimits(value: unknown): unknown {
  * rather than guessed at.
  */
 export function parseClaudeUsage(stdout: string): ProviderUsageReport {
-  const source = "claude /usage, as reported by the signed-in account";
   let text: string;
   try {
     const envelope = JSON.parse(stdout) as { result?: unknown };
@@ -1006,9 +1009,8 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
     });
   }
   return windows.length > 0
-    ? { source, windows }
+    ? { windows }
     : {
-        source,
         windows: [],
         // Percentages exist because a *subscription* has limits to be a
         // percentage of; `/usage` opens with "You are currently using your
@@ -2656,7 +2658,6 @@ export class ProviderChatService {
       report = parseClaudeUsage(result.stdout);
     } catch (error) {
       report = {
-        source: "claude /usage",
         windows: [],
         unavailableReason:
           error instanceof Error ? error.message : String(error),
