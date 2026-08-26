@@ -1,6 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect, createServer } from "node:net";
-import { createServer as createHttpServer, type Server } from "node:http";
+import {
+  createServer as createHttpServer,
+  request as httpRequest,
+  type Server,
+} from "node:http";
 import { access, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -69,6 +73,19 @@ export interface PreviewStatus {
    */
   ready: boolean;
   startedAt: string;
+  /**
+   * The repository's own build, where it was run and did not succeed.
+   *
+   * A detected build is a guess, so a failing one is not allowed to stop the
+   * start — a repository whose `build` script is broken and whose dev server
+   * never needed it still previews. What that quietly produced was a half-
+   * built app: the server comes up, the bundle it serves is stale or missing,
+   * and the page renders as an empty white rectangle with nothing anywhere
+   * saying why. The reason exists; it was in a log nobody was shown. This is
+   * where it is said out loud, so the reader is told they are looking at a
+   * partial build rather than at a broken app.
+   */
+  buildFailure?: string;
   /** Set once the process has exited, with however it went. */
   exited?: { code: number | null; signal: string | null; at: string };
   recentOutput: string[];
@@ -800,7 +817,7 @@ async function detectInstallCommand(
  * one, and a build that is only a guess is not allowed to be fatal: see the
  * caller.
  */
-async function detectBuildCommand(
+export async function detectBuildCommand(
   workspacePath: string,
 ): Promise<PreviewCommand | undefined> {
   const scripts = await readManifestScripts(workspacePath);
@@ -872,7 +889,9 @@ async function waitForPort(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && !exited()) {
-    if (await probePort(port)) {
+    // The socket first, because it is the cheap half: nothing listening means
+    // there is no point in spending a request to find that out.
+    if ((await probePort(port)) && (await probePreviewResponse(port))) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -881,7 +900,7 @@ async function waitForPort(
 }
 
 /** Whether anything is listening on a loopback port, asked once. */
-async function probePort(port: number): Promise<boolean> {
+export async function probePort(port: number): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
     const probe = connect({ port, host: "127.0.0.1" });
     const settle = (answer: boolean): void => {
@@ -891,6 +910,73 @@ async function probePort(port: number): Promise<boolean> {
     probe.once("connect", () => settle(true));
     probe.once("error", () => settle(false));
     probe.setTimeout(1_000, () => settle(false));
+  });
+}
+
+/**
+ * How long a readiness probe waits for the app to answer it.
+ *
+ * Generous, because the thing being waited for is precisely a server that is
+ * busy: a bundler holds the first request open until the build it is doing
+ * finishes, and that is the healthy case rather than the broken one.
+ */
+const READY_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Whether the app is actually serving pages yet, not merely holding a port.
+ *
+ * This is the difference between the link working and the link being a white
+ * rectangle. Every dev server binds its port *before* it has anything to
+ * serve — Vite and webpack both do, and a container's server binds the moment
+ * the process starts — so a bare TCP connect answers "yes" during the whole
+ * of the bundle it has not built. The reader was handed the address at that
+ * moment, opened it, and got an empty document: the app was still working and
+ * the page said nothing at all.
+ *
+ * An HTTP response is the honest evidence. A 4xx is one — an app whose root
+ * is a 404 and whose real page is elsewhere is up and answering. A 5xx is
+ * not: that is the shape a proxy in front of a build that has not finished
+ * takes, and calling it ready puts the reader back where they started.
+ *
+ * `HEAD` would be tidier and is not used: enough small servers answer it with
+ * 501, or not at all, that it would report a working app as unready.
+ */
+export async function probePreviewResponse(
+  port: number,
+  timeoutMs = READY_PROBE_TIMEOUT_MS,
+): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (answer: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(answer);
+    };
+    const probe = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/",
+        method: "GET",
+        headers: { Connection: "close" },
+      },
+      (answer) => {
+        const status = answer.statusCode ?? 0;
+        // Nothing is read: the question is whether an answer exists, and
+        // draining a dev server's whole bundle to find that out every few
+        // seconds would be a cost paid for no information.
+        answer.destroy();
+        settle(status > 0 && status < 500);
+      },
+    );
+    probe.on("error", () => settle(false));
+    probe.setTimeout(timeoutMs, () => {
+      probe.destroy();
+      settle(false);
+    });
+    probe.end();
   });
 }
 
@@ -1241,6 +1327,13 @@ export class PreviewService {
         workspacePath: workspace.path,
         revision: version.revision,
         leadingOutput: installOutput,
+        // Only a build that was *survived*: a configured one that failed has
+        // already thrown, and this is the guessed one that was allowed to
+        // fail. The app starts, and the reader is told what it started
+        // without.
+        ...(buildFailure === undefined || build === undefined
+          ? {}
+          : { buildFailure: `${build.label}: ${buildFailure}` }),
         timeoutMs: START_READY_TIMEOUT_MS,
       });
       if ("failure" in attempt) {
@@ -1308,6 +1401,15 @@ export class PreviewService {
     revision: string;
     /** The install's output, which leads whichever attempt succeeds. */
     leadingOutput: readonly string[];
+    /**
+     * The build that was tried and did not work, where one was.
+     *
+     * Carried onto the status rather than only into the log, because a
+     * repository that starts anyway after a failed build serves a stale or
+     * missing bundle — which renders as an empty page, and looks exactly like
+     * a preview that is simply broken.
+     */
+    buildFailure?: string;
     timeoutMs: number;
   }): Promise<{ entry: Running } | { failure: string }> {
     const { command } = input;
@@ -1334,6 +1436,9 @@ export class PreviewService {
       label: command.label,
       ready: false,
       startedAt: new Date().toISOString(),
+      ...(input.buildFailure === undefined
+        ? {}
+        : { buildFailure: input.buildFailure }),
       // The install's output leads the log. When a server fails to come up the
       // reason is often in the install that preceded it, and separating the
       // two would mean the reader finds only the half that says nothing.
@@ -1419,7 +1524,13 @@ export class PreviewService {
     taskId: string;
     repositoryId: string;
     workspacePath: string;
-  }): Promise<{ url?: string; output: string[]; failed: boolean }> {
+  }): Promise<{
+    url?: string;
+    output: string[];
+    failed: boolean;
+    /** A guessed build that did not work, where the start went ahead anyway. */
+    buildFailure?: string;
+  }> {
     await this.stopForTask(input.taskId);
     const configured =
       this.project.config.previewCommands?.[input.repositoryId] ??
@@ -1474,6 +1585,11 @@ export class PreviewService {
       this.project.config.buildCommand;
     const build =
       configuredBuild ?? (await detectBuildCommand(input.workspacePath));
+    // Reported back rather than only logged: an agent that starts an app whose
+    // build did not finish is looking at a stale bundle, and it has no other
+    // way to know that the blank page it screenshots is not the change it
+    // just made.
+    let buildFailure: string | undefined;
     if (build !== undefined) {
       const failure = await runToCompletion(
         build,
@@ -1489,6 +1605,7 @@ export class PreviewService {
         if (configuredBuild !== undefined) {
           return { output, failed: true };
         }
+        buildFailure = `${build.label}: ${failure}`;
       }
     }
 
@@ -1540,7 +1657,12 @@ export class PreviewService {
       // running gets its URL and its output so far, and the agent decides for
       // itself whether to keep waiting — `ready` is reported so it can.
       void ready;
-      return { url: `http://127.0.0.1:${String(port)}`, output, failed: false };
+      return {
+        url: `http://127.0.0.1:${String(port)}`,
+        output,
+        failed: false,
+        ...(buildFailure === undefined ? {} : { buildFailure }),
+      };
     }
     // Nothing ran, and there is a page. Last here too, for the same reason:
     // an app is never passed over in favour of serving its own source.
@@ -1588,7 +1710,11 @@ export class PreviewService {
     // be building, which is indistinguishable from a process that will not
     // exit. One connect per poll costs nothing and nobody has to own it.
     if (!entry.status.ready && entry.status.exited === undefined) {
-      entry.status.ready = await probePort(entry.status.port);
+      // The same evidence the start waited for, for the same reason: a port
+      // that connects while the bundle is still building is not a page.
+      entry.status.ready =
+        (await probePort(entry.status.port)) &&
+        (await probePreviewResponse(entry.status.port));
     }
     return { ...entry.status, recentOutput: [...entry.status.recentOutput] };
   }
