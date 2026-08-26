@@ -423,6 +423,86 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.match(data, /pinsOpen: false/u);
 });
 
+test("one play control beside the pin runs whatever the channel's app is", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const css = await publicFile("styles.css");
+
+  // Beside the pin, in the header line the counts live on — and drawn like
+  // them, because the tool tray it used to sit in no longer exists.
+  const headerStart = chats.indexOf("function chanHeader(repositoryId)");
+  const header = chats.slice(
+    headerStart,
+    chats.indexOf('<span class="spacer">', headerStart),
+  );
+  assert.notEqual(headerStart, -1, "the channel header should exist");
+  assert.match(header, /\$\{previewControl\(repositoryId\)\}/u);
+  const control = chats.slice(
+    chats.indexOf("function previewControl(repositoryId)"),
+    chats.indexOf("function previewLink(repositoryId)"),
+  );
+  assert.match(control, /class="ch-count ch-preview-toggle on"/u);
+  assert.match(control, /data-act="preview-stop"/u);
+  assert.match(control, /data-act="preview-start"/u);
+  assert.match(control, /icon\("play"\)/u);
+  assert.doesNotMatch(control, /icon-btn/u);
+  assert.match(css, /\.ch-preview-toggle \{/u);
+  assert.match(css, /\.ch-preview-toggle\.on \{/u);
+
+  // A preview that died on its own is not the same as one that was never
+  // started, and the control is the only place that difference is reported.
+  const stopped = chats.slice(
+    chats.indexOf("function previewStopped(repositoryId)"),
+    chats.indexOf("function previewControl(repositoryId)"),
+  );
+  assert.match(stopped, /preview\.exited !== undefined/u);
+  assert.match(control, /stopped\.recentOutput/u);
+  assert.match(control, /stopped === undefined \? "" : " warn"/u);
+  assert.match(css, /\.ch-preview-toggle\.warn \{/u);
+
+  // Nothing in the page decides how an app boots: it asks the control plane,
+  // which reads the checkout. The one case detection cannot cover is asked
+  // about and remembered, so a repository in any language starts from the
+  // same button.
+  assert.match(data, /export async function startPreview\(repositoryId\)/u);
+  assert.match(data, /export async function stopPreview\(repositoryId\)/u);
+  assert.match(
+    data,
+    /export async function setPreviewCommand\(repositoryId, command\)[\s\S]{0,200}method: "PUT"/u,
+  );
+  const start = app.slice(
+    app.indexOf("async function startPreviewAction"),
+    app.indexOf("async function stopPreviewAction"),
+  );
+  // Both refusals — nothing detectable, and something detected that died —
+  // reach the same question. Matching only the second left every repository
+  // the detector has never heard of with no way in at all.
+  assert.match(start, /could\(\?: not\)\? be started/u);
+  assert.match(start, /askPreviewCommand\(repositoryId, message\)/u);
+  assert.match(start, /await setPreviewCommand\(repositoryId, command\)/u);
+  assert.match(start, /startPreviewAction\(repositoryId, true\)/u);
+  const ask = app.slice(
+    app.indexOf("async function askPreviewCommand"),
+    app.indexOf("async function startPreviewAction"),
+  );
+  assert.match(ask, /name="command"/u);
+  assert.match(ask, /maxlength="500"/u);
+
+  // Running but not answering yet is a real state and it settles by itself,
+  // so the header stops saying "starting…" without anyone navigating away.
+  const watch = app.slice(
+    app.indexOf("async function watchPreviewReady"),
+    app.indexOf("async function askPreviewCommand"),
+  );
+  assert.match(watch, /previewsWatched\.has\(repositoryId\)/u);
+  assert.match(watch, /await loadPreview\(repositoryId\)/u);
+  assert.match(watch, /preview\.ready !== false/u);
+  assert.match(watch, /preview\.exited !== undefined/u);
+  assert.match(app, /case "preview-start":\s*void startPreviewAction\(value\);/u);
+  assert.match(app, /case "preview-stop":\s*void stopPreviewAction\(value\);/u);
+});
+
 test("serves the vendored Monaco build same-origin under /vendor", async () => {
   const assets = await loadStaticAssets();
   // CSP allows no CDN, so a deployment that wants a full editor must have
@@ -3590,7 +3670,7 @@ test(
     const app = await browserSource();
     const attachStart = app.indexOf("async function attachChannelImages");
     const attachEnd = app.indexOf(
-      "\nasync function revertTaskAction",
+      "\nconst previewsWatched",
       attachStart,
     );
     const attach = app.slice(attachStart, attachEnd);

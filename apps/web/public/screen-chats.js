@@ -1698,19 +1698,76 @@ function chanSidebar(activeRepositoryId) {
 /* ---------------------------------------------------------- chan main ---- */
 
 /**
- * The repository's running app, if one is up.
+ * This repository's app while it is up, for the control and the address that
+ * both report on it.
  *
- * Nothing in the page starts one any more: the play control that used to sit
- * in the tool tray launched a server on the machine running the control plane,
- * which is a loopback address only that machine can reach. What is left is
- * read-only — an address for a preview started outside the page, and nothing
- * at all when there is none.
+ * A preview that exited is deliberately not "running": it has a URL and a
+ * port still recorded against it, and treating that as live would offer a
+ * link to nothing. {@link previewStopped} is the other half of the same
+ * answer.
  */
 function previewRunning(repositoryId) {
   const preview = state.previews[repositoryId];
   return preview !== null && preview !== undefined && preview.exited === undefined
     ? preview
     : undefined;
+}
+
+/**
+ * Why the last preview of this repository stopped, if it stopped on its own.
+ *
+ * A preview that fails to come up at all is reported as an error the moment it
+ * is asked for. This is the other case: one that ran, was watched, and then
+ * died — which the control cannot show by flipping back to "play", because that
+ * is also what it looks like before anything was ever started.
+ */
+function previewStopped(repositoryId) {
+  const preview = state.previews[repositoryId];
+  return preview !== null && preview !== undefined && preview.exited !== undefined
+    ? preview
+    : undefined;
+}
+
+/**
+ * The control, beside the pin in the channel's own header line.
+ *
+ * One button for a repository in any language. Nothing here knows what the
+ * app is: pressing it asks the control plane to read the checkout and work
+ * out how it boots, and a repository it cannot read is answered with a
+ * question rather than a shrug — see `startPreviewAction`, which asks how the
+ * app starts and has the answer remembered against this channel. So the same
+ * button serves a Node dev server, a Django app, a Go binary, a page of
+ * static HTML, and the one thing nobody has thought of yet.
+ *
+ * Drawn as a count rather than a tool button because of where it sits: the
+ * counts and the pin are this line's vocabulary, and a boxed icon among them
+ * reads as a different control that arrived by accident.
+ */
+function previewControl(repositoryId) {
+  if (!repositoryId) {
+    return "";
+  }
+  if (previewRunning(repositoryId) !== undefined) {
+    return `<button type="button" class="ch-count ch-preview-toggle on"
+        data-act="preview-stop" data-value="${esc(repositoryId)}"
+        title="Stop the running app" aria-label="Stop the running app">
+        ${icon("close")}</button>`;
+  }
+  const stopped = previewStopped(repositoryId);
+  // The output is the diagnosis and it is the only copy: nothing else in the
+  // page renders it, so a dead preview used to be indistinguishable from one
+  // that was never started.
+  const why =
+    stopped === undefined
+      ? "Run this app and open it"
+      : `${stopped.label} stopped — ${
+          (stopped.recentOutput ?? []).slice(-3).join(" ").trim() ||
+          "it printed nothing"
+        }. Press to run it again.`;
+  return `<button type="button" class="ch-count ch-preview-toggle${
+    stopped === undefined ? "" : " warn"
+  }" data-act="preview-start" data-value="${esc(repositoryId)}"
+      title="${esc(why)}" aria-label="${esc(why)}">${icon("play")}</button>`;
 }
 
 /** The address, which stays in the header because it is state, not a control. */
@@ -1740,7 +1797,9 @@ function previewLink(repositoryId) {
   const proxied =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`;
-  // No stop control beside it: stopping is a tool and lives with the tools.
+  // No stop control beside it: the address is state, and the control that
+  // starts and stops it is one control, on the channel's own line beside the
+  // pin — see `previewControl`.
   return `<span class="preview-live">
     <a class="preview-link" href="${esc(proxied)}" target="_blank"
       rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
@@ -1808,6 +1867,16 @@ function chanHeader(repositoryId) {
               )}Muted</span>`
             : ""
         }
+        <!-- Last of the statically rendered pieces, because the pin toggle
+             is appended here after the fact (see \`S.showPinnedMessages\` in
+             ui.js) and lands immediately after this. The two belong together:
+             both are one-press channel controls that say something about this
+             room rather than about the message in front of you.
+
+             The backticks are escaped for the reason the sidebar button's
+             comment above gives: a bare one ends this template literal, and
+             what follows parses as code. -->
+        ${previewControl(repositoryId)}
       </div>
     </div>
     <span class="spacer"></span>

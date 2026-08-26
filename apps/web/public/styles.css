@@ -11655,6 +11655,40 @@ dialog.modal[open]::backdrop {
   height: 13px;
 }
 
+/* Run this channel's app, beside the pin. A button that borrows the counts'
+   type and colour rather than the tool button's box: it sits inside a line of
+   small grey glyphs, and a bordered control among them would read as having
+   arrived from somewhere else. The pin toggle strips its own chrome inline for
+   the same reason. */
+.ch-preview-toggle {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-xs, 4px);
+}
+
+/* Brightness rather than a colour, so the same feedback works in all three
+   states. A hover rule that names a colour would either lose to the running
+   and stopped rules or overwrite what they are saying. */
+.ch-preview-toggle:hover {
+  opacity: 0.7;
+}
+
+/* Running. The accent is the only thing on this line that is not grey, which
+   is the point — "your app is up" is worth finding without reading. */
+.ch-preview-toggle.on {
+  color: var(--accent-bright);
+}
+
+/* Ready to run again, but the last attempt stopped on its own. Colour only —
+   the control does the same thing either way, and the reason is in its title. */
+.ch-preview-toggle.warn {
+  color: var(--warn, #f59e0b);
+}
+
 /* Quieter than the two counts beside it. It reports a setting rather than a
    fact about the room, so it must not compete with how many people are in it. */
 .ch-muted {

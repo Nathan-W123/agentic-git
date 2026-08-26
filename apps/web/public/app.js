@@ -96,8 +96,11 @@ import {
   loadPreview,
   rollbackTask,
   setAuditorPaused,
+  setPreviewCommand,
   simplifySummary,
+  startPreview,
   uploadAttachment,
+  stopPreview,
   setRepositoryGrant,
   revokeRepositoryGrant,
   updateMemberRole,
@@ -2860,6 +2863,138 @@ async function attachChannelImages(files, target = "channel") {
     }
   }
   $(`[data-act='${where.input}']`)?.focus();
+}
+
+/**
+ * Repositories whose preview is being followed up, so two presses — or a
+ * press and a reload — cannot leave two pollers reading the same status.
+ */
+const previewsWatched = new Set();
+
+/**
+ * Follows a preview that is up but not answering yet.
+ *
+ * Starting waits a bounded time for the port and then answers with whatever
+ * is true, so an app that builds before it serves comes back running and not
+ * ready — honestly, and for minutes at a time. The status is otherwise read
+ * once per channel, so without this the header would say "starting…" until
+ * somebody navigated away and back, long after the app came up.
+ *
+ * Stops on the first settled answer, and on nothing at all: an app that never
+ * binds its port is a broken app, and a page that asks about it forever is a
+ * second broken thing.
+ */
+async function watchPreviewReady(repositoryId) {
+  if (previewsWatched.has(repositoryId)) {
+    return;
+  }
+  previewsWatched.add(repositoryId);
+  try {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 3000);
+      });
+      const preview = await loadPreview(repositoryId);
+      if (
+        preview === null ||
+        preview.ready !== false ||
+        preview.exited !== undefined
+      ) {
+        return;
+      }
+    }
+  } finally {
+    previewsWatched.delete(repositoryId);
+    render();
+  }
+}
+
+/**
+ * Asks how this repository starts, in the one case where nothing else can
+ * know.
+ *
+ * Detection reads the checkout and covers what a repository can say about
+ * itself — a Procfile line, a package.json script, a Django or Flask entry
+ * point, go.mod, Cargo.toml, config.ru, index.php, or a page it can serve as
+ * static files. What is left over is not a guessable case: it is a question
+ * with exactly one right answer, held by whoever built the repository.
+ *
+ * So it is asked, plainly, and the answer is stored against this channel —
+ * asked once, not once per press, and not once per person.
+ */
+async function askPreviewCommand(repositoryId, why) {
+  const values = await showModal({
+    title: `How does ${repositoryLabel(repositoryId)} start?`,
+    subtitle: why,
+    confirm: "Start it",
+    body: `<label class="field">
+        <span>Start command</span>
+        <input class="input" name="command" autocomplete="off" spellcheck="false"
+          autocapitalize="none" autocorrect="off" maxlength="500"
+          placeholder="npm run dev" required autofocus>
+      </label>
+      <p class="modal-sub">Whatever serves it on a port — <code>npm run dev</code>,
+        <code>python3 -m flask run</code>, <code>go run .</code>,
+        <code>bundle exec rails server</code>. It is remembered for this
+        channel, so this is asked once.</p>`,
+  });
+  const command = String(values?.command ?? "").trim();
+  return command === "" ? undefined : command;
+}
+
+async function startPreviewAction(repositoryId, asked = false) {
+  toast("Starting…", "ok");
+  try {
+    const preview = await startPreview(repositoryId);
+    toast(
+      preview === null
+        ? "Started"
+        : `Running at ${preview.url} — ${preview.label}`,
+      "ok",
+    );
+    render();
+    // Up, but still building. The header says so, and this is what eventually
+    // takes the word back.
+    if (preview !== null && preview.ready === false) {
+      void watchPreviewReady(repositoryId);
+    }
+  } catch (error) {
+    const message = error.message ?? "";
+    // Two ways for a repository to be unstartable, and one question answers
+    // both: nothing in it names a way to start ("could be started"), or the
+    // command that was inferred did not survive its first second ("could not
+    // be started"). Either way what is missing is the same sentence, and the
+    // only place it exists is in the head of whoever built the app.
+    //
+    // `asked` stops the loop: a command that was just supplied and still did
+    // not work is reported, not re-requested.
+    if (!asked && /could(?: not)? be started/u.test(message)) {
+      const command = await askPreviewCommand(repositoryId, message);
+      if (command !== undefined) {
+        try {
+          await setPreviewCommand(repositoryId, command);
+        } catch (saveError) {
+          // Remembering it is a project setting, which not everybody who may
+          // run one is allowed to write. The server says so; this repeats it
+          // rather than reporting a failure to start.
+          toast(saveError.message, "error");
+          return;
+        }
+        await startPreviewAction(repositoryId, true);
+        return;
+      }
+    }
+    toast(message, "error");
+  }
+}
+
+async function stopPreviewAction(repositoryId) {
+  try {
+    await stopPreview(repositoryId);
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 async function revertTaskAction(repositoryId, taskId) {
@@ -6516,15 +6651,22 @@ function renderNow() {
       });
     }
     // Asked once per channel, not on every render: the preview outlives the
-    // page, so a reload has to find the address of the one already running.
-    // `undefined` is "not asked yet"; `null` is "asked, there is none", which
-    // is why this tests for the former.
+    // page, so a reload has to find the one already running rather than offer
+    // to start a second. `undefined` is "not asked yet"; `null` is "asked,
+    // there is none", which is why this tests for the former.
     if (state.previews[activeChannelId()] === undefined) {
       const channel = activeChannelId();
       // Claimed before the request so a second render in the same tick does
       // not fire it again.
       state.previews[channel] = null;
-      void loadPreview(channel).then(() => {
+      void loadPreview(channel).then((preview) => {
+        // Found mid-build, which a reload during a slow first start is the
+        // ordinary way to arrive at. The same follow-up a fresh start gets,
+        // because the header is otherwise stuck on "starting…" for a channel
+        // nobody is about to leave and come back to.
+        if (preview !== null && preview.ready === false) {
+          void watchPreviewReady(channel);
+        }
         if (state.route === "chats") {
           render();
         }
@@ -7956,6 +8098,12 @@ document.addEventListener("click", (event) => {
     case "summary-simplify-toggle":
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
+      return;
+    case "preview-start":
+      void startPreviewAction(value);
+      return;
+    case "preview-stop":
+      void stopPreviewAction(value);
       return;
     case "agent-panel-open":
       // Any agent in the room, not only your own, and its specification first. The
