@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#121110">
+    <meta
+      name="description"
+      content="Kumi pricing: one price per seat, and seats are people. Developers, admins, and owners pay; watching is free. 14 free days first."
+    >
+    <link rel="icon" href="/kumi-logo.png">
+    <script src="/site-boot.js"></script>
+    <link rel="stylesheet" href="/site.css">
+    <title>Kumi — pricing</title>
+  </head>
+  <body>
+    <nav class="site-nav">
+      <div class="wrap">
+        <a class="nav-brand" href="/">
+          <img src="/kumi-logo.png" alt="" width="24" height="24">
+          Kumi
+        </a>
+        <a class="nav-link" href="/pricing" aria-current="page">Pricing</a>
+        <a class="nav-link" href="/download">Download</a>
+        <a class="nav-link optional" href="/app#signin">Sign in</a>
+        <a class="btn btn-primary btn-small" href="/app#signup">Start free trial</a>
+      </div>
+    </nav>
+
+    <header class="hero">
+      <div class="wrap">
+        <p class="eyebrow">Pricing</p>
+        <h1>
+          <span class="w"><span>One</span></span>
+          <span class="w"><span>price.</span></span>
+          <span class="w"><span>Seats</span></span>
+          <span class="w"><span>are</span></span>
+          <span class="w"><span class="shimmer">people.</span></span>
+        </h1>
+        <p class="sub">
+          A seat is a person who can start work — developers, admins, owners.
+          Watching is free: <strong>viewers never count</strong>. One person
+          with three roles is still one seat.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section" style="padding-top: 0">
+        <div class="wrap">
+          <div class="price-card reveal">
+            <p class="eyebrow">Every seat, every feature</p>
+            <!-- PRICE — the only place on this site the dollar amount is
+                 written. The product code carries no amount at all (only a
+                 STRIPE_PRICE_ID; the number lives in Stripe), so when the
+                 Stripe price changes, this one line is the whole site edit.
+                 Every other sentence says "per seat" without the figure. -->
+            <p class="price-line">$40<span class="per"> per seat / month</span></p>
+            <a class="btn btn-primary" href="/app#signup">Start your free trial</a>
+          </div>
+
+          <div class="price-notes" data-reveal-group>
+            <div class="reveal">
+              <h3>Start with 14 free days</h3>
+              <p>You enter a card up front, and nothing is charged during the
+                trial. Your first bill comes on day 15 — cancel before then
+                and you pay nothing.</p>
+            </div>
+            <div class="reveal">
+              <h3>Seats are people, not rows</h3>
+              <p>A seat is a person who can start work — developers, admins,
+                owners. Watching is free: viewers never count. Approving is
+                work — reviewers hold admin or owner roles, which are seats.
+                One person with three roles is still one seat.</p>
+            </div>
+            <div class="reveal">
+              <h3>If you stop paying</h3>
+              <p>Your organization becomes read-only. Your repositories,
+                threads, and history stay yours and stay legible; what stops
+                is starting new work.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <span class="tagline">Kumi — the coordination layer between your
+          agents and your codebase.</span>
+        <a href="/app">Product</a>
+        <a href="/pricing">Pricing</a>
+        <a href="/download">Download</a>
+        <span class="legal">© 2026 Kumi. Every promotion is a Git commit.</span>
+      </div>
+    </footer>
+
+    <script src="/vendor/motion/motion.js"></script>
+    <script type="module" src="/site.js"></script>
+  </body>
+</html>

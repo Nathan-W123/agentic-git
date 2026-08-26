@@ -38,24 +38,37 @@ const scratch = mkdtempSync(path.join(tmpdir(), "coord-public-syntax-"));
 const failures = [];
 let checked = 0;
 
+// The marketing site's scripts live one level down in `public/site` and ship
+// just as verbatim, so they get the same parse. The vendored Motion bundle is
+// included on purpose: it is served to browsers like everything else, and it
+// parses cleanly as a module even though it runs as a classic script.
+const roots = [publicDir, path.join(publicDir, "site")];
+
 try {
-  for (const entry of readdirSync(publicDir)) {
-    if (!entry.endsWith(".js")) {
-      continue;
-    }
-    const copy = path.join(scratch, `${entry.slice(0, -3)}.mjs`);
-    copyFileSync(path.join(publicDir, entry), copy);
-    try {
-      execFileSync(process.execPath, ["--check", copy], { stdio: "pipe" });
-      checked += 1;
-    } catch (error) {
-      failures.push(
-        `${entry}: ${String(error.stderr ?? error.message)
-          .split("\n")
-          .filter((line) => line.trim().length > 0)
-          .slice(0, 3)
-          .join(" | ")}`,
+  for (const dir of roots) {
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith(".js")) {
+        continue;
+      }
+      const label =
+        dir === publicDir ? entry : `${path.basename(dir)}/${entry}`;
+      const copy = path.join(
+        scratch,
+        `${label.replaceAll("/", "__").slice(0, -3)}.mjs`,
       );
+      copyFileSync(path.join(dir, entry), copy);
+      try {
+        execFileSync(process.execPath, ["--check", copy], { stdio: "pipe" });
+        checked += 1;
+      } catch (error) {
+        failures.push(
+          `${label}: ${String(error.stderr ?? error.message)
+            .split("\n")
+            .filter((line) => line.trim().length > 0)
+            .slice(0, 3)
+            .join(" | ")}`,
+        );
+      }
     }
   }
 } finally {
@@ -79,24 +92,27 @@ try {
  * quoting; ordinary quotes are the fix when it is not.
  */
 const commentBackticks = [];
-for (const entry of readdirSync(publicDir)) {
-  if (!entry.endsWith(".js")) {
-    continue;
+for (const dir of roots) {
+  for (const entry of readdirSync(dir)) {
+    if (!entry.endsWith(".js")) {
+      continue;
+    }
+    const label = dir === publicDir ? entry : `${path.basename(dir)}/${entry}`;
+    const lines = readFileSync(path.join(dir, entry), "utf8").split(/\r?\n/u);
+    let open = false;
+    lines.forEach((line, index) => {
+      const started = line.includes("<!--");
+      if (started) {
+        open = true;
+      }
+      if (open && /(^|[^\\])`/u.test(line)) {
+        commentBackticks.push(`${label}:${String(index + 1)}: ${line.trim()}`);
+      }
+      if (open && line.includes("-->")) {
+        open = false;
+      }
+    });
   }
-  const lines = readFileSync(path.join(publicDir, entry), "utf8").split(/\r?\n/u);
-  let open = false;
-  lines.forEach((line, index) => {
-    const started = line.includes("<!--");
-    if (started) {
-      open = true;
-    }
-    if (open && /(^|[^\\])`/u.test(line)) {
-      commentBackticks.push(`${entry}:${String(index + 1)}: ${line.trim()}`);
-    }
-    if (open && line.includes("-->")) {
-      open = false;
-    }
-  });
 }
 
 if (failures.length > 0) {
