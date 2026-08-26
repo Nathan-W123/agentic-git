@@ -271,7 +271,26 @@ test("a half-written message stays in the channel it was meant for", async () =>
   // Typing writes the in-memory copy; the disk mirror is held behind a timer
   // so the composer stays cheap, and flushed when the tab goes away.
   assert.match(data, /window\.setTimeout\(flushChannelDrafts, 500\)/u);
-  assert.match(app, /document\.visibilityState === "visible"[\s\S]{0,360}flushChannelDrafts\(\)/u);
+  // Sliced to the handler rather than matched across a character budget: the
+  // catch-up mark was added between the two, and a budget that has to be
+  // raised every time something lands in between is not pinning the order it
+  // means to. What matters is that the flush is on the going-away path and
+  // not on the coming-back one.
+  const visibility = slice(
+    app,
+    'document.addEventListener("visibilitychange", () => {',
+    "\n});",
+  );
+  assert.match(
+    visibility,
+    /if \(document\.visibilityState === "visible"\) \{\s*resumeLiveUpdates\(\);\s*return;/u,
+  );
+  assert.match(visibility, /flushChannelDrafts\(\);/u);
+  assert.equal(
+    visibility.indexOf("return;") < visibility.indexOf("flushChannelDrafts()"),
+    true,
+    "the draft is flushed after the visible early return, so only leaving triggers it",
+  );
 });
 
 test("a message's words can be taken off the screen", async () => {
@@ -325,9 +344,12 @@ test("the Thread label opens the thread library as the visible side panel", asyn
 
   // The category in the screenshot is a real control, not inert header text.
   assert.match(kind, /<button type="button" class="panel-kind" data-act=/u);
+  // `panelKind` gained a third `panelId` argument so several open thread
+  // panels can be told apart for drag and keep; the label is still the same
+  // `channel-threads-toggle` breadcrumb button, and both are still pinned.
   assert.match(
     panel,
-    /panelKind\("Thread", "channel-threads-toggle"\)/u,
+    /panelKind\(\s*"Thread",\s*"channel-threads-toggle",\s*`thread:\$\{messageId\}`/u,
   );
 
   // A list marked open with no room left to draw it — or, on a phone, with a
@@ -509,9 +531,22 @@ test("mobile message actions surface only for the selected message", async () =>
     select,
     /row !== null && event\.target\.closest\?\.\("\.cmsg-actions"\) !== null/u,
   );
-  assert.match(
-    app,
-    /document\.addEventListener\("click", \(event\) => \{[\s\S]{0,360}selectMobileChannelMessage\(event\);\s*const found = actionOf\(event\);/u,
+  // The two calls are no longer adjacent — a `data-thread-id` lookup was
+  // inserted between them — so this pins the order directly instead of
+  // requiring nothing ever sit in the gap. The order is the whole claim: a
+  // press on plain message text has no `data-act`, so a selector running
+  // after the no-action early return would never see it.
+  const click = app.slice(
+    app.indexOf('document.addEventListener("click", (event) => {'),
+    app.indexOf("const { node, act, value } = found;"),
+  );
+  assert.notEqual(click.indexOf("selectMobileChannelMessage(event);"), -1);
+  assert.notEqual(click.indexOf("const found = actionOf(event);"), -1);
+  assert.equal(
+    click.indexOf("selectMobileChannelMessage(event);") <
+      click.indexOf("const found = actionOf(event);"),
+    true,
+    "the selector runs before the no-action early return",
   );
 
   // Touch overrides both the later desktop hover rule and mobile browsers'

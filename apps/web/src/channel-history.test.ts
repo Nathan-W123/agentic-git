@@ -11,9 +11,7 @@ import { defaultPublicDirectory } from "./assets.js";
  * The GET route has read `limit` (1–200, default 50) and a `before` cursor
  * since it was written, and both store implementations honour the cursor
  * against `bumpedAt ?? createdAt`. The client sent neither, so a channel was
- * permanently the newest fifty roots with no way to reach anything older —
- * and the in-channel search, which reads only what is loaded, reported that
- * limit as an answer: "nothing matches that search".
+ * permanently the newest fifty roots with no way to reach anything older.
  *
  * Pinned by the shape of the source, like the rest of the browser surface.
  */
@@ -57,7 +55,14 @@ test("channel history distinguishes loading, empty, and loaded transcripts", asy
   // Once the request settles, zero rows is a real empty state and non-zero
   // rows continue through the ordinary message renderer.
   assert.match(list, /entries\.length === 0/u);
-  assert.match(list, /query === "" \? "No messages yet"/u);
+  // The empty branch used to choose between "No messages yet" and "Nothing
+  // matches that search" off the search query. In-channel search was removed
+  // and the query went with it, so the empty state is unconditional now —
+  // same string, same branch, one fewer thing deciding it.
+  assert.match(
+    list,
+    /emptyState\(\s*"chatBubble",\s*"No messages yet",\s*"Say hello/u,
+  );
   assert.match(list, /messageRow\(entry, repositoryId/u);
   assert.match(list, /role="log"[\s\S]{0,120}aria-label="Channel messages"/u);
 
@@ -278,21 +283,4 @@ test("the control is offered only when there is more, and holds the reader's pla
     action,
     /next\.scrollTop = anchor\.top \+ \(next\.scrollHeight - anchor\.height\)/u,
   );
-});
-
-test("search reads the replies too, and says what it could not see", async () => {
-  const chats = await publicFile("screen-chats.js");
-
-  // Nearly everything an agent says lives in a thread, so searching only the
-  // roots was searching past the answers.
-  const matcher = slice(chats, "function matchesQuery(entry, query) {", "\nfunction messageList(");
-  assert.match(matcher, /entry\.content/u);
-  assert.match(matcher, /\(entry\.replies \?\? \[\]\)\.some/u);
-
-  // And the empty state names the boundary instead of reporting a limit as an
-  // answer — with the way past it offered in the same breath.
-  const list = slice(chats, "function messageList(repositoryId) {", "  // A person's reply is a message in the room");
-  assert.match(list, /Nothing in the messages loaded so far/u);
-  assert.match(list, /state\.channelHasMore\[repositoryId\] === true/u);
-  assert.match(list, /loadEarlierControl\(\s*repositoryId,?\s*\)/u);
 });

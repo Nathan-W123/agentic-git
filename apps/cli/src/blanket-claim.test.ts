@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { InMemoryCoordinationStore } from "@coord/persistence";
-import type { CanonicalRepository } from "@coord/repository-service";
+import {
+  RepositoryService,
+  type CanonicalRepository,
+} from "@coord/repository-service";
 import type { CanonicalVersion, TaskDefinition } from "@coord/shared-types";
 import { claimCoversPath, isBlanketClaim } from "@coord/shared-types";
+import type { AgentPlan } from "@coord/shared-types";
+import type { WorkspaceManager } from "@coord/workspace-manager";
 
 import { LeasePlanAuthority } from "./lease-admission.js";
 
@@ -24,17 +32,32 @@ const BASE: CanonicalVersion = {
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
-const REPOSITORY = { id: "repo_a" } as CanonicalRepository;
+// Named, with a directory behind it that nothing reads. The tests that stop
+// at the blanket refusal never open it; the ones that reach an index build
+// pass a real repository instead. Carrying the path anyway keeps every row
+// this is written into agreeing with every other.
+const REPOSITORY = {
+  id: "repo_a",
+  path: "/tmp/repo_a",
+  branch: "main",
+} as CanonicalRepository;
 
-async function seed(): Promise<{
+async function seed(
+  /**
+   * The canonical repository the store should record. Defaults to a name with
+   * no directory behind it, which is all the tests that stop at the blanket
+   * refusal ever need; the ones that reach an index build pass a real one.
+   */
+  repository: CanonicalRepository = REPOSITORY,
+): Promise<{
   store: InMemoryCoordinationStore;
   worker: string;
 }> {
   const store = new InMemoryCoordinationStore();
   await store.saveRepository({
-    id: "repo_a",
-    path: "/tmp/repo_a",
-    branch: "main",
+    id: repository.id,
+    path: repository.path,
+    branch: repository.branch,
   });
   const owner = await store.createUser({
     email: "nathan@example.com",
@@ -59,6 +82,7 @@ async function leaseFor(
   store: InMemoryCoordinationStore,
   worker: string,
   objective: string,
+  base: CanonicalVersion = BASE,
 ): Promise<{ leaseId: string; task: TaskDefinition }> {
   const submitted = await store.submitTask({
     repositoryId: "repo_a",
@@ -68,7 +92,7 @@ async function leaseFor(
   });
   const leased = await store.leaseNextTask({
     workerId: worker,
-    baseRevision: BASE.revision,
+    baseRevision: base.revision,
     ttlMs: 60_000,
     taskId: submitted.id,
     repositoryId: "repo_a",
@@ -487,4 +511,295 @@ test("a holder that has written nothing is narrowed to its estimate", async () =
     true,
     "and should still reach its own",
   );
+});
+
+/**
+ * The arrival-driven narrowing, which is the half a holder cannot do for
+ * itself.
+ *
+ * A blanket holder narrows its own claim on a timer, from a live workspace
+ * handle. The task that turns up behind it has neither — the holder is another
+ * process — so this path rebuilds the holder's worktree from the row recorded
+ * when its task started, and reads it. What it must never do is narrow from
+ * the claim's own lexical estimate, which is what it did: a guess about a task
+ * that never planned, and one that leaves every modified-but-unguessed file
+ * free for the arrival to take.
+ */
+/**
+ * A canonical repository with real files in it.
+ *
+ * The tests above stop at the blanket refusal and never need one. These go
+ * further — past the narrowing and into admission, which builds a repository
+ * index — so a stub with no path on disk fails inside `git ls-tree` rather
+ * than telling us anything about arbitration.
+ */
+async function realRepository(): Promise<{
+  repository: CanonicalRepository;
+  version: CanonicalVersion;
+  cleanup: () => Promise<void>;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-blanket-"));
+  const source = path.join(root, "source");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(source);
+  await mkdir(path.join(source, "src"), { recursive: true });
+  for (const name of ["a", "b", "c"]) {
+    await writeFile(
+      path.join(source, "src", `${name}.ts`),
+      `export function ${name}(): number {\n  return 1;\n}\n`,
+      "utf8",
+    );
+  }
+  await repositories.commitAll(source, "seed");
+  const repository = await repositories.importLocalRepository(
+    source,
+    path.join(root, "canonical.git"),
+    "repo_a",
+  );
+  return {
+    repository,
+    // The revision the index will actually be built against. `BASE` is a
+    // fabricated forty-character string, which is all a test that never
+    // touches git needs and is a tree that does not exist to one that does.
+    version: await repositories.getCanonicalVersion(repository),
+    cleanup: async () => {
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+function stubWorkspaces(
+  changes:
+    | Array<{ path: string; status: "modified" | "added" }>
+    | (() => never),
+): WorkspaceManager {
+  return {
+    listWorkingChanges: async () =>
+      typeof changes === "function" ? changes() : changes,
+  } as unknown as WorkspaceManager;
+}
+
+function arrivingPlan(taskId: string, files: string[]): AgentPlan {
+  return {
+    taskId,
+    objective: "work elsewhere",
+    intent: "work elsewhere",
+    expectedFiles: files,
+    expectedSymbols: [],
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+}
+
+async function holderWithWorktree(
+  store: InMemoryCoordinationStore,
+  worker: string,
+  estimatedFiles: string[],
+  repository: CanonicalRepository = REPOSITORY,
+  base: CanonicalVersion = BASE,
+): Promise<{ leaseId: string; task: TaskDefinition }> {
+  const first = await leaseFor(store, worker, "rewrite the renderer", base);
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[first.task.id, first.leaseId]]),
+  });
+  const claim = await authority.claimRepository({
+    task: first.task,
+    repository,
+    estimatedFiles,
+    baseVersion: base,
+  });
+  assert.notEqual(claim, undefined, "the holder should hold the repository");
+  // The row the arrival crosses processes on. Written at task start in the
+  // real coordinator, before any execution.
+  const run = await store.createRun({
+    repository,
+    mode: "coordinated",
+    baseVersion: base,
+  });
+  await store.saveWorkspace(run.id, {
+    id: "ws_holder",
+    runId: run.id,
+    taskId: first.task.id,
+    path: "/tmp/repo_a-holder",
+    isolation: "git-worktree",
+    baseRevision: base.revision,
+    createdAt: base.createdAt,
+  });
+  return first;
+}
+
+test("an arrival narrows the holder to the worktree, not to its guess", async () => {
+  const real = await realRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+  // The estimate named one file; the holder is actually editing another.
+  const first = await holderWithWorktree(
+    store,
+    worker,
+    ["src/a.ts"],
+    real.repository,
+    real.version,
+  );
+  const second = await leaseFor(
+    store,
+    worker,
+    "fix the audio mixer",
+    real.version,
+  );
+
+  const arriving = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+    workspaces: stubWorkspaces([
+      { path: "src/b.ts", status: "modified" },
+    ]),
+  });
+  const decision = await arriving.admit({
+    task: second.task,
+    plan: arrivingPlan(second.task.id, ["src/b.ts", "src/c.ts"]),
+    planRevision: 1,
+    baseVersion: real.version,
+    repository: real.repository,
+  });
+
+  // The file the holder is provably inside is not handed over, even though
+  // the holder never named it. That was the hole: for a frozen claim
+  // `claimOccupiesPath` reads `expectedFiles` alone, so a modified-but-
+  // unestimated path was simply free.
+  const granted =
+    decision.outcome === "admitted"
+      ? decision.plan.expectedFiles
+      : [];
+  assert.ok(
+    !granted.includes("src/b.ts"),
+    `the holder's open file was granted away: ${JSON.stringify(decision)}`,
+  );
+
+  // And the holder's lease now records both — the guess and the observation,
+  // unioned rather than substituted, so nothing it could already reach is
+  // taken away from it.
+  const lease = await store.getWorkLease(first.leaseId);
+  const held = lease?.plan?.plan.expectedFiles ?? [];
+  assert.ok(held.includes("src/a.ts"), JSON.stringify(held));
+  assert.ok(held.includes("src/b.ts"), JSON.stringify(held));
+  } finally {
+    await real.cleanup();
+  }
+});
+
+test("a claim frozen on arrival holds its files whole", async () => {
+  const real = await realRepository();
+  const { store, worker } = await seed(real.repository);
+  const first = await holderWithWorktree(
+    store,
+    worker,
+    ["src/a.ts"],
+    real.repository,
+    real.version,
+  );
+  await leaseFor(store, worker, "fix the audio mixer", real.version);
+  const second = await leaseFor(
+    store,
+    worker,
+    "and another thing",
+    real.version,
+  );
+
+  const arriving = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+    workspaces: stubWorkspaces([
+      { path: "src/b.ts", status: "modified" },
+    ]),
+  });
+  await arriving.admit({
+    task: second.task,
+    plan: arrivingPlan(second.task.id, ["src/c.ts"]),
+    planRevision: 1,
+    baseVersion: real.version,
+    repository: real.repository,
+  });
+  await real.cleanup();
+
+  // No line ranges reach the freeze from here, whatever a workspace manager
+  // learns to report later. A claim nobody planned is held whole: the lines
+  // its holder has written bound where it has been, never where it is going.
+  const lease = await store.getWorkLease(first.leaseId);
+  const claim = lease?.plan?.plan.claim;
+  assert.equal(claim?.kind, "frozen");
+  assert.equal(
+    (claim as { touched?: unknown } | undefined)?.touched,
+    undefined,
+  );
+});
+
+test("a holder whose edits cannot be read keeps the whole repository", async () => {
+  for (const [label, workspaces, seedWorkspace] of [
+    [
+      "the read throws",
+      stubWorkspaces(() => {
+        throw new Error("index.lock is held");
+      }),
+      true,
+    ],
+    ["no workspace was recorded", stubWorkspaces([]), false],
+  ] as const) {
+    const { store, worker } = await seed();
+    const first = seedWorkspace
+      ? await holderWithWorktree(store, worker, ["src/a.ts"])
+      : await (async () => {
+          const held = await leaseFor(store, worker, "rewrite the renderer");
+          const authority = new LeasePlanAuthority({
+            store,
+            leaseIdForTask: new Map([[held.task.id, held.leaseId]]),
+          });
+          assert.notEqual(
+            await authority.claimRepository({
+              task: held.task,
+              repository: REPOSITORY,
+              estimatedFiles: ["src/a.ts"],
+              baseVersion: BASE,
+            }),
+            undefined,
+          );
+          return held;
+        })();
+    const second = await leaseFor(store, worker, "fix the audio mixer");
+
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+      workspaces,
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: arrivingPlan(second.task.id, ["src/b.ts"]),
+      planRevision: 1,
+      baseVersion: BASE,
+      repository: REPOSITORY,
+    });
+
+    // Not narrowed at all. Every catch on this path would otherwise read as
+    // "the holder has written nothing", which is the hole reopened by an
+    // unrelated git failure — so a read that cannot be trusted declines, and
+    // the arrival waits instead.
+    assert.notEqual(decision.outcome, "admitted", `${label}: ${JSON.stringify(decision)}`);
+    const lease = await store.getWorkLease(first.leaseId);
+    assert.ok(
+      isBlanketClaim(lease!.plan!.plan),
+      `${label}: the claim should still cover the repository`,
+    );
+    const narrowings = (
+      await store.listAuditEvents({ types: ["blanket_claim_frozen"] })
+    ).filter(
+      (entry) =>
+        (entry as { data?: Record<string, unknown> }).data?.[
+          "narrowedOnArrival"
+        ] === true,
+    );
+    assert.deepEqual(narrowings, [], label);
+  }
 });

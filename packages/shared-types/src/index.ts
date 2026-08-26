@@ -187,6 +187,26 @@ export interface AgentPlan {
 export interface BlanketPlanClaim {
   kind: "blanket";
   grantedAt: string;
+  /**
+   * Files this holder has given back, having finished with them.
+   *
+   * A blanket claim covers the repository, which left its holder unable to do
+   * the one thing it is asked to do when somebody queues behind it: hand over
+   * what it is done with. The release path resolves a named resource against
+   * the plan's declarations, and a blanket plan declares only the lexical
+   * estimate its objective produced — so every other file it held answered
+   * "not in the approved plan, so there is nothing to release". The prompt
+   * telling it to release shipped; the ability did not.
+   *
+   * Recorded here rather than by narrowing the claim, because narrowing is a
+   * statement about everything at once and this is a statement about one file.
+   * The claim goes on covering the repository; these are the holes in it.
+   *
+   * Every file named here was checked against the holder's worktree and found
+   * clean before it was added, which is what makes a release safe where a
+   * forecast would not be: it is a fact about what has already happened.
+   */
+  released?: string[];
 }
 
 /**
@@ -216,17 +236,19 @@ export interface FrozenPlanClaim {
    * The lines this holder has been seen editing, per file, when the freeze
    * could read them.
    *
-   * A frozen plan is the one kind of plan nobody wrote: it is assembled from
-   * a worktree, so it declares no symbols and never can. Arbitration reads a
-   * holder's declarations to work out which part of a file it occupies, found
-   * none here, and had no choice but to hand over the whole file — which meant
-   * a holder that came through the blanket freeze could never be split around,
-   * whatever the waiter declared. These are what it has instead of
-   * declarations: not a claim about intent, an observation about lines.
+   * A record, and no longer an input to any grant.
    *
-   * Absent where the freeze had nothing to observe — a claim narrowed from an
-   * objective estimate rather than from writes — and the whole file stands, as
-   * it did before.
+   * Arbitration used to read these to split a waiter around the functions a
+   * frozen holder had been seen in. That was withdrawn: a plan assembled from
+   * a worktree is the one kind nobody wrote, so these lines bound where its
+   * holder has *been* and say nothing about where it goes next — and the rest
+   * of the file includes the function it is about to open. The ranges are
+   * new-side hunk numbers besides, matched against spans from a base-revision
+   * index, so an insertion above a function attributes the edit to its
+   * neighbour. Every file a frozen claim names now stands whole.
+   *
+   * Kept because leases written before that change carry it and must go on
+   * parsing, and because it remains an honest record of what was observed.
    */
   touched?: TouchedFileRanges[];
 }
@@ -903,6 +925,146 @@ export function withoutRoleContext(objective: string): string {
   // A preamble with nothing behind it is left alone rather than reduced to
   // nothing, so the caller still has something to read.
   return request.trim() === "" ? objective : request;
+}
+
+/**
+ * What `/dnc` — "do not code" — adds to the answer prompt.
+ *
+ * The guarantee is structural: a `/dnc` message goes down the answer path,
+ * which never submits a task, so nothing can be written. The prompt reinforces
+ * that guarantee silently: the reply should read like an answer, not explain
+ * the command or announce that the agent is obeying it.
+ *
+ * "Do not code" is not "do not look". It used to say "do not run anything",
+ * which cost the command the thing it exists for: asked for a line count, the
+ * agent answered that it had no permission to run a shell command, which is
+ * not an answer about the code and not something the reader could grant.
+ * Commands that only read — `git`, `wc`, `ls`, in bash or in PowerShell — are
+ * how a question about a repository gets a true answer, so they are asked for
+ * by name here and granted by the tools the answer runs with.
+ */
+export const DO_NOT_CODE_DIRECTIVE =
+  "Silently treat this as read-only. Answer the message itself without " +
+  "mentioning `/dnc`, calling it a do-not-code request, narrating that you " +
+  "are only looking, or pointing out that no changes are being made. Read " +
+  "the files and run whatever shell commands you need — bash or PowerShell, " +
+  "`git`, `wc`, `ls`, and the like — as long as they only read: nothing that " +
+  "writes, deletes, moves, installs, or commits. Do not write or change " +
+  "code, and do not start — or offer to start — any work. If the answer " +
+  "would need code changes, say what you would change, in words, and stop " +
+  "there.";
+
+/**
+ * What every reply owes the room: an answer, not a progress note.
+ *
+ * Replies were ending on the work rather than on its result — "I'll wait for
+ * the search agent to finish and report back" is posted verbatim as the chat
+ * message, so the room reads a status line as the answer and then waits for a
+ * follow-up that never comes. This travels with every task and every answer,
+ * unconditionally: unlike `/simple` or `/dnc` there is no request it does not
+ * apply to. Nothing filters the reply afterwards — the fix is that the turn
+ * does not end until it has something to say.
+ */
+export const ANSWER_NOT_STATUS_DIRECTIVE =
+  "Your final message is the answer, not a status report. If you delegated " +
+  "to a subagent, wait for its result before finishing — never end a turn " +
+  "saying a search is running or that you will report back. Do not state a " +
+  "conclusion while work you started is still outstanding. If you cannot " +
+  "answer, say what you checked and what would settle it.";
+
+/**
+ * Internal objective marker for an explicit `/ask` task.
+ *
+ * Task submission has no command metadata of its own. Carrying this exact
+ * marker in the objective lets the execution adapter force the first round
+ * into the existing question-demand flow without treating ordinary uses of
+ * the word "ask" as commands.
+ *
+ * Lives here, beside the directives it travels with, because the channel
+ * writes it and every adapter that builds a prompt has to take it back off
+ * again. It was spelled out three times — once at the gateway and once in
+ * each prompt-building adapter — and three spellings of one marker is three
+ * chances for a reader to stop recognising what the writer emits, which
+ * would fail open: `/ask` would quietly stop forcing a question round and
+ * the task would simply run.
+ */
+export const FORCE_QUESTION_MARKER =
+  "[Coordinator: force a question round before implementation.]";
+
+/**
+ * What `/simple` adds: brevity above everything else.
+ *
+ * Worded for both places it travels — the answer prompt of a question, and
+ * the objective string of a task — so one sentence serves wherever the reply
+ * is written from.
+ */
+export const KEEP_IT_SIMPLE_DIRECTIVE =
+  "Keep every reply as short and simple as it can possibly be: the fewest, " +
+  "plainest words that still say it, one short sentence when one is enough " +
+  "— no preamble, no restating the request, nothing extra.";
+
+/**
+ * Everything the coordinator adds behind a request, in one list.
+ *
+ * The list is the contract between the gateway that writes these paragraphs
+ * and {@link requestFromObjective}, which takes them off again. A directive
+ * added at the dispatch site and not added here silently stops being
+ * stripped, so both ends are declared together.
+ */
+export const COORDINATOR_DIRECTIVES: readonly string[] = [
+  ANSWER_NOT_STATUS_DIRECTIVE,
+  KEEP_IT_SIMPLE_DIRECTIVE,
+  DO_NOT_CODE_DIRECTIVE,
+  FORCE_QUESTION_MARKER,
+];
+
+/**
+ * What the person actually asked, out of the objective the worker was sent.
+ *
+ * A submitted objective is the request wrapped in instructions the coordinator
+ * added: a role preamble in front, and behind it whichever directives applied
+ * — the answer-not-a-status-report one on every task, `/simple`, `/dnc`, the
+ * forced question marker. `withoutRoleContext` removes the front. Nothing
+ * removed the back, and the back is now unconditional and long.
+ *
+ * That is not cosmetic. Six places read a stored objective as if it were the
+ * request: some show it to people, and some compare it. The comparisons are
+ * the ones that broke — `findThreadToContinue` scores a new request against a
+ * thread's subject, and an objective that is four-fifths boilerplate drags
+ * every score under the merge bar, so a follow-up asked in the same words as
+ * the original opened its own thread instead of joining it. Measured at
+ * 0.11 against a threshold of 0.42, for two identical requests.
+ *
+ * The same string is also handed to models, and a planning turn is where it
+ * does the most damage. That turn's whole job is to emit a JSON plan against
+ * a schema, and the objective arrives telling it its final message is the
+ * answer and not a status report, and never to end a turn while work is
+ * outstanding — instructions about a chat reply this turn will never write.
+ * `/simple` is worse there: "the fewest, plainest words" reaching a turn
+ * asked to enumerate every file and symbol it will touch is pressure toward
+ * the short answer, and the short answer is the empty `expectedSymbols` list
+ * that claims every file whole, or the empty `expectedFiles` list that makes
+ * the task invisible to arbitration altogether. So the prompt builders strip
+ * the objective through here before showing it to anybody.
+ *
+ * Lives here rather than at the gateway that writes the directives, because
+ * the adapters cannot import from a service and a second copy of the list
+ * would drift: the match below is exact, so a copy that is one word out
+ * silently stops stripping and nothing anywhere reports it.
+ *
+ * Dropped by exact paragraph match rather than by pattern, so a request that
+ * happens to quote one of these sentences keeps it — and so a directive added
+ * later has to be added here deliberately, which is the failure this is.
+ */
+export function requestFromObjective(objective: string): string {
+  const request = withoutRoleContext(objective);
+  const kept = request
+    .split(/\n[^\S\n]*\n/u)
+    .filter((paragraph) => !COORDINATOR_DIRECTIVES.includes(paragraph.trim()));
+  const joined = kept.join("\n\n").trim();
+  // Never nothing. A bare directive with no request behind it is still the
+  // only text a caller has to show.
+  return joined === "" ? request : joined;
 }
 
 /**
@@ -1613,7 +1775,7 @@ export function claimCoversPath(
     return false;
   }
   if (plan.claim.kind === "blanket") {
-    return true;
+    return !(plan.claim.released ?? []).includes(file);
   }
   return plan.claim.directories.some((directory) =>
     file.startsWith(directory),
@@ -1645,7 +1807,7 @@ export function claimOccupiesPath(
     return false;
   }
   if (plan.claim.kind === "blanket") {
-    return true;
+    return !(plan.claim.released ?? []).includes(file);
   }
   return plan.expectedFiles.includes(file);
 }
@@ -1689,9 +1851,16 @@ function isPlanClaim(value: unknown): value is PlanClaim {
     frozenAt?: unknown;
     directories?: unknown;
     touched?: unknown;
+    released?: unknown;
   };
   if (claim.kind === "blanket") {
-    return typeof claim.grantedAt === "string";
+    return (
+      typeof claim.grantedAt === "string" &&
+      // Checked rather than trusted, for the reason the frozen branch below
+      // gives about its own lines: a plan is read back out of storage, and
+      // these paths decide which files another task is allowed to have.
+      (claim.released === undefined || isStringArray(claim.released))
+    );
   }
   return (
     claim.kind === "frozen" &&
@@ -1704,6 +1873,27 @@ function isPlanClaim(value: unknown): value is PlanClaim {
   );
 }
 
+/**
+ * Shape only, deliberately — an empty `expectedFiles` is accepted here.
+ *
+ * A plan that declares no files is very likely a defect in one model's
+ * answer: it acquires no leases, so the task is invisible to arbitration in
+ * both directions, and it can only ever be admitted whole or sequenced,
+ * because every partial-admission route derives its split from
+ * `expectedFiles`. But that is a defect in an *answer*, and this is the
+ * assertion every plan in the system passes through, including plans no model
+ * wrote: the coordinator's own blanket claim when the lexical estimate
+ * anchored nothing, {@link reducePlanScope}'s output when a partial admission
+ * granted none of what was asked for — it re-asserts its own result below —
+ * and the failure placeholder the coordinator stores for a run that never
+ * planned. Refusing emptiness here would turn an orderly "no split available,
+ * sequence instead" into an exception thrown out of admission.
+ *
+ * So the refusal lives where a model's answer is received instead: each
+ * prompt-building adapter asks once more when a plan names no files, and
+ * says what it will cost if the second answer is the same. See `requestPlan`
+ * in the Codex and prompt-CLI adapters.
+ */
 export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
   if (typeof value !== "object" || value === null) {
     throw new TypeError("Agent plan must be an object");

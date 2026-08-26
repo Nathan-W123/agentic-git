@@ -2673,11 +2673,25 @@ svg.ui-icon {
   white-space: pre-wrap;
 }
 
+/* Yours in the colour you chose, the same ruling `.dm-mine .dm-bubble` got:
+   a neutral bubble on a neutral ground was the one thing in the conversation
+   that never said which side of it you were on, and the accent is already
+   what this interface means by "you". This surface was left grey when the DM
+   one was fixed, so the product's two private conversations disagreed about
+   which messages were the reader's own. `--accent-ink` rather than white,
+   because the wheel allows yellows and limes that white disappears into. */
 .msg.user .msg-text {
   padding: 8px 11px;
   border-radius: var(--radius-sm);
-  background: var(--surface-3);
-  color: var(--text);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* A link inside your own bubble sits on the accent, so it cannot also be the
+   accent. It carries the ink and keeps the underline to stay a link. */
+.msg.user .msg-text a {
+  color: var(--accent-ink);
+  text-decoration: underline;
 }
 
 .msg.agent {
@@ -5315,15 +5329,18 @@ button.chip.lg:hover {
    `/plan`, or a run gated on a review. Amber, because amber already means
    waiting everywhere else in this app, and a dot rather than a count because
    there is nothing to count: one held run is the whole message, and the room
-   is where the sentence saying so lives. Sits before the unread badge so the
-   two read as "this needs you" then "this much is new". */
-.chan-row .cr-held {
-  flex: none;
+   is where the sentence saying so lives. Opposite corner from the unread
+   count so the two never sit on top of each other: the count rides the top
+   right of the tile and the hold sits at its lower left. */
+.channel-rail-entry .cr-held {
+  position: absolute;
+  left: -1px;
+  bottom: -1px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--orange);
-  box-shadow: 0 0 0 3px var(--orange-wash);
+  box-shadow: 0 0 0 2px var(--bg);
 }
 
 .chan-row .cr-badge {
@@ -10632,16 +10649,6 @@ dialog.modal[open]::backdrop {
     padding: 0 4px;
     font-size: 9.5px;
     line-height: 16px;
-  }
-
-  /* The rail keeps both marks, in opposite corners: unread is a count and
-     rides the badge above, a hold is a dot and sits under it. Losing this one
-     to the collapse would hide the only signal that says a room has stopped
-     for a person — which is the state somebody scanning a rail most needs. */
-  .chats-shell.chan-collapsed .chan-row .cr-held {
-    position: absolute;
-    bottom: 0;
-    right: -1px;
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-foot {

@@ -108,6 +108,7 @@ import {
   iconButton,
   imeComposing,
   emptyState,
+  miniEditable,
   pillBar,
   relativeTime,
   searchBox,
@@ -174,6 +175,16 @@ function channelRail(activeRepositoryId) {
         .map((repo) => {
           const active = repo.id === activeRepositoryId;
           const unread = channelUnreadCount(repo.id);
+          // A ping addressed to you is not the same news as ten messages you
+          // were merely present for, so the badge says "@" rather than a count
+          // when any of what is waiting names you. Read separately from the
+          // total because the total cannot tell the two apart.
+          const mentions = channelUnreadCount(repo.id, { mentionsOnly: true });
+          // Answered from the tasks rather than the messages: only the open
+          // channel has its messages loaded, so a hold read from those would
+          // be right for the room already on screen and absent for every
+          // other — which is the one room the reader does not need telling.
+          const held = channelAwaitsGoAhead(repo.id);
           const label = repositoryLabel(repo.id);
           // A muted room stays in the list — it is still somewhere to go — but
           // it is dimmed and says so, because a channel that never raises a
@@ -187,7 +198,16 @@ function channelRail(activeRepositoryId) {
               ${channelPictureMarkup(repo.id, 36)}
               ${
                 unread > 0
-                  ? `<span class="channel-rail-unread">${unread > 99 ? "99+" : unread}</span>`
+                  ? `<span class="channel-rail-unread" title="${
+                      mentions > 0
+                        ? `${mentions} unread mention${mentions === 1 ? "" : "s"}`
+                        : `${unread} unread`
+                    }">${mentions > 0 ? "@" : unread > 99 ? "99+" : unread}</span>`
+                  : ""
+              }
+              ${
+                held
+                  ? `<span class="cr-held" title="An agent here is waiting for your go-ahead"><span class="sr-only">Waiting for you</span></span>`
                   : ""
               }
             </button>
@@ -5252,6 +5272,15 @@ function agentSpec(agent, repositoryId) {
       ? providerEffortOptions(providerId, currentAssignment.model ?? "")
       : [];
   const optionsNote = agent.mine === true ? providerOptionsNote(providerId) : "";
+  // No list is not the same as no choice. Codex reports models from a cache
+  // its CLI writes locally, and where that file is absent the server sends an
+  // empty list beside `allowCustomModel` — which this field used to answer
+  // with a read-only value, leaving the model unchangeable on exactly the
+  // provider that needed naming most. The composer in `chat.js` kept this
+  // third branch; the profile redesign dropped it here, so the product's two
+  // model pickers disagreed about whether a model could be named at all.
+  const customModel =
+    agent.mine === true && providerAllowsCustomModel(providerId);
   const visibility = agent.visibility === "org" ? "org" : "personal";
   // These are intentionally ordinary selects. Their option menu, keyboard
   // behaviour and focus treatment stay native; the field around each one
@@ -5300,7 +5329,16 @@ function agentSpec(agent, repositoryId) {
             modelValue,
             "Model in this channel",
           )
-        : readOnly(modelValue),
+        : customModel
+          ? miniEditable(
+              "channel-agent-model",
+              modelValue,
+              "Model",
+              "Nothing lists what this account may use, so a model id " +
+                "typed here is passed through as given; empty runs the " +
+                "CLI's own default.",
+            )
+          : readOnly(modelValue),
       "Used for work in this channel",
     )}
     ${field(

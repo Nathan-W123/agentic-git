@@ -373,13 +373,12 @@ test("browser-only agents use headless auth and store their isolated session", a
   assert.deepEqual(submitted, [
     { command: "agent", code: "cursor-code" },
   ]);
+  // Copilot was dropped from `PROVIDER_IDS` along with Gemini, and the same
+  // change removed it from the loop and the runner above but left it standing
+  // here. Nothing iterating the provider list can spawn it any more, so this
+  // was expecting a process that could never start.
   assert.deepEqual(spawned, [
     { command: "agent", args: ["login"], stdin: "pipe" },
-    {
-      command: "copilot",
-      args: ["login", "--device-code"],
-      stdin: undefined,
-    },
     {
       command: "kiro-cli",
       args: ["login", "--use-device-flow"],

@@ -102,10 +102,13 @@ test("arriving on a sign-in link opens sign-in, and clicking one moves the URL",
  */
 test("a signed-in visitor following an auth link lands on the form", async () => {
   const app = await publicFile("app.js");
-  const boot = app.slice(
-    app.indexOf("async function boot()"),
-    app.indexOf("async function boot()") + 2000,
-  );
+  // Sliced to the end of `boot()` rather than to a byte budget the function
+  // outgrew. The auth-link check sits further down than it used to, and a
+  // window that stops short of it reports the check missing while also making
+  // the "#chats" negative below vacuously true — the two failure modes that
+  // would let this exact bug back in unnoticed.
+  const bootStart = app.indexOf("async function boot()");
+  const boot = app.slice(bootStart, app.indexOf("\n}\n", bootStart));
   assert.equal(
     boot.includes('window.location.hash = "#chats"'),
     false,

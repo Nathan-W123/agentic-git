@@ -158,6 +158,42 @@ test("a plan naming nothing that exists or resolves is ungrounded", () => {
   assert.deepEqual(grounded.grounding?.symbolReferents, []);
 });
 
+test("a plan that declares nothing is ungrounded, not verified", () => {
+  // The asymmetry this closes: the verified branch asks whether anything
+  // declared failed to resolve, and with nothing declared both lists are
+  // empty and it passed vacuously. So the system was strictly more suspicious
+  // of a plan naming one file that does not exist than of a plan naming
+  // nothing at all — and "verified" is exactly what skips the sequencing
+  // gate, which is how a task that claimed nothing also arbitrated against
+  // nothing.
+  const grounded = groundPlan(
+    plan({ expectedFiles: [], expectedSymbols: [] }),
+    pricingIndex(),
+  );
+
+  assert.equal(grounded.grounding?.confidence, "ungrounded");
+  assert.match(
+    grounded.grounding?.notes.join(" ") ?? "",
+    /declares no files and no symbols/u,
+  );
+});
+
+test("a coordinator-issued claim is not condemned for declaring nothing", () => {
+  // A blanket claim's scope is the whole repository by construction and is
+  // decided by the ownership rules rather than by what it declares, so
+  // grading it ungrounded would set it sequencing against itself.
+  const grounded = groundPlan(
+    plan({
+      expectedFiles: [],
+      expectedSymbols: [],
+      claim: { kind: "blanket", grantedAt: new Date().toISOString() },
+    }),
+    pricingIndex(),
+  );
+
+  assert.equal(grounded.grounding?.confidence, "verified");
+});
+
 test("a truncated index never condemns a plan as ungrounded", () => {
   const grounded = groundPlan(
     plan({
