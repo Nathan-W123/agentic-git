@@ -435,6 +435,30 @@ strong {
 
 /* --------------------------------------------------------------- buttons -- */
 
+/*
+ * Antidote, in the same spirit as the boot script's no-op for the stray
+ * mountCoordinationShowcase call: one deployment's fork of this site
+ * carries an agent-added hover-shine on the primary buttons — a skewed
+ * white-gradient bar that sweeps the button on hover and parks beside it
+ * when idle, where it reads as a grey smudge pasted over the page. No
+ * button in this repository has ever had a pseudo-element or a shine
+ * child, so unconditionally forbidding both costs nothing here and
+ * unrenders the stray there, whichever way it was built. Delete once the
+ * fork's history is cleaned.
+ */
+.btn::before,
+.btn::after {
+  content: none !important;
+  animation: none !important;
+}
+
+.btn [class*="shine"],
+.btn [class*="sheen"],
+.btn [class*="glare"],
+.btn [class*="shimmer"] {
+  display: none !important;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
