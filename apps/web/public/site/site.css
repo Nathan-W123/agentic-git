@@ -407,14 +407,19 @@ strong {
   filter: brightness(0) invert(1);
 }
 
-/* `margin-left: auto` rather than a spacer: the middle group used to carry
-   the spring that held this against the right edge, and it went with the
-   links. */
+/* The middle group carries the spring that holds this against the right
+   edge, which is why it takes `margin-inline: auto` and this takes none. */
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline: auto;
+}
+
 .nav-end {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
 }
 
 .nav-link {

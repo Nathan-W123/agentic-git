@@ -57,7 +57,6 @@ uniform float uTime;
 /* Scroll progress, 0 at the hero and 1 by the last section. */
 uniform float uCalmIn;
 uniform vec2 uViewport;
-uniform vec2 uParallax;
 uniform vec2 uShift;
 uniform vec3 uWarm;
 uniform vec3 uCool;
@@ -152,7 +151,10 @@ void main() {
      rather than sitting behind whatever the section is saying. Carried on
      the same rise as the flight, so it is one movement and not two. */
   vec2 corner = vec2(-2.15, -0.88) * rise;
-  vec2 comp = uParallax * 0.08 + uShift + corner;
+  /* The pointer is not in here. It used to nudge the whole composition,
+     which read as the page sliding a little every time the mouse went down
+     the screen; the drips it leaves are the part worth keeping. */
+  vec2 comp = uShift + corner;
 
   /* The exact inverse of the point renderer's projection, compositional
      shift included: the ray's origin carries the shift, its direction
@@ -327,7 +329,6 @@ export function startField(canvas, options = {}) {
   const uTime = uniform("uTime");
   const uCalmIn = uniform("uCalmIn");
   const uViewport = uniform("uViewport");
-  const uParallax = uniform("uParallax");
   const uShift = uniform("uShift");
   const uDrops = uniform("uDrops");
 
@@ -417,10 +418,11 @@ export function startField(canvas, options = {}) {
   }
 
   /**
-   * A precise pointer drips where it moves. The screen position is cast
-   * back through the same camera the shader uses onto the resting surface —
-   * parallax and shift are ignored on the way, which costs less accuracy
-   * than a ripple is wide.
+   * A precise pointer drips where it moves, and that is now the whole of
+   * what the pointer does. The screen position is cast back through the same
+   * camera the shader uses onto the resting surface — the compositional
+   * shift is ignored on the way, which costs less accuracy than a ripple is
+   * wide.
    */
   let lastDrip = 0;
   function drip(event) {
@@ -459,8 +461,6 @@ export function startField(canvas, options = {}) {
   /* -------------------------------------------------------------- frame -- */
 
   let shown = 0;
-  let pointer = [0, 0];
-  let pointerTarget = [0, 0];
   let shift = [0, 0];
   let running = true;
   let frame = 0;
@@ -477,8 +477,6 @@ export function startField(canvas, options = {}) {
     // Damped rather than pinned to the scrollbar: a trackpad fling should
     // change the weather, not teleport it.
     shown += (readProgress() - shown) * 0.075;
-    pointer[0] += (pointerTarget[0] - pointer[0]) * 0.06;
-    pointer[1] += (pointerTarget[1] - pointer[1]) * 0.06;
     const wanted = readShift();
     shift[0] += (wanted[0] - shift[0]) * 0.05;
     shift[1] += (wanted[1] - shift[1]) * 0.05;
@@ -488,7 +486,6 @@ export function startField(canvas, options = {}) {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(uTime, time);
     gl.uniform1f(uCalmIn, shown);
-    gl.uniform2f(uParallax, pointer[0], pointer[1]);
     gl.uniform2f(uShift, shift[0], shift[1]);
     gl.uniform4fv(uDrops, drops);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -497,10 +494,6 @@ export function startField(canvas, options = {}) {
   trace("water-loop");
 
   function onPointer(event) {
-    pointerTarget = [
-      (event.clientX / window.innerWidth) * 2 - 1,
-      -((event.clientY / window.innerHeight) * 2 - 1),
-    ];
     drip(event);
   }
   const fine = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
