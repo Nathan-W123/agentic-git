@@ -231,17 +231,15 @@ function progress() {
 }
 
 /**
- * Where the form should sit on screen, section by section.
- *
- * Keyed to the same scroll progress that drives the morph, so the two never
- * disagree about which section is being read, and eased between stops so the
- * field reads as making room rather than jumping.
+ * The compositional shift is retired: the camera itself now flies from a
+ * side-on view of the rain to a top-down view of the still pool as the page
+ * is read, inside field.js, so the water never leaves the frame. The stops
+ * here are kept at zero rather than deleted because the uniform is part of
+ * the shader's contract and a future section may still want a nudge.
  */
 const SHIFTS = [
   [0.0, [0.0, 0.0]],
-  [0.34, [0.0, 0.88]],
-  [0.62, [0.0, 1.02]],
-  [1.0, [0.0, 0.78]],
+  [1.0, [0.0, 0.0]],
 ];
 
 function shift() {

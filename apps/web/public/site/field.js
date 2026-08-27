@@ -147,10 +147,15 @@ void main() {
   float calm = smoothstep(0.45, 0.95, uCalmIn);
   float energy = 1.0 - calm * 0.85;
 
-  /* The camera pulls up and tilts down as the page calms, trading the low
-     dusk view of rain for a higher look at a still mirror. */
-  vec3 eye = vec3(0.0, 0.6 + 0.28 * calm, 2.02 - 0.22 * calm);
-  float tilt = 0.2 + 0.16 * calm;
+  /* The scroll flies the camera, not the picture: a low side-on dusk view
+     of the rain at the hero, rising and pitching down as the page is read,
+     until the last section looks straight down at the pool and the rings
+     are perfect circles. The water never leaves the frame — the earlier
+     scheme translated the image between sections, and the surface visibly
+     left and re-entered the viewport on the way. */
+  float rise = smoothstep(0.0, 1.0, uCalmIn);
+  vec3 eye = vec3(0.0, mix(0.6, 2.4, rise), mix(2.02, 0.35, rise));
+  float tilt = mix(0.2, 1.32, rise);
   float ct = cos(tilt);
   float st = sin(tilt);
 
@@ -214,7 +219,7 @@ void main() {
           base * (0.10 + 0.22 * diffuse) +
           base * fresnel * 0.4 +
           vec3(1.0, 0.95, 0.9) * spec * 0.85 +
-          mix(uWarm, uCool, 0.5) * glowAt(q) * 1.2;
+          mix(uWarm, uCool, 0.5) * glowAt(q) * (1.2 + 1.6 * calm);
         /* The settled mirror's soft heart. */
         shade += uCool * exp(-r * r * 0.9) * 0.5 * calm;
         colour += shade * rim * haze;
@@ -400,7 +405,7 @@ export function startField(canvas, options = {}) {
    * a still pond waiting for weather.
    */
   let nextDrop = 0.4;
-  for (const age of [-2.6, -1.9, -1.2, -0.6, -0.15]) {
+  for (const age of [-3.2, -2.1, -1.0, -0.2]) {
     const angle = Math.random() * Math.PI * 2;
     const radius = Math.sqrt(Math.random()) * 1.3;
     spawnDrop(
@@ -418,9 +423,11 @@ export function startField(canvas, options = {}) {
       spawnDrop(
         (Math.random() - 0.5) * 0.2,
         (Math.random() - 0.5) * 0.2,
-        0.85,
+        1.15,
       );
-      nextDrop = time + 3.6 + Math.random() * 0.8;
+      // Just under the ring's own lifetime, so the still pool always has
+      // exactly one circle breathing outward — never none, never rain.
+      nextDrop = time + 3.2 + Math.random() * 0.4;
       return;
     }
     const angle = Math.random() * Math.PI * 2;
@@ -430,7 +437,7 @@ export function startField(canvas, options = {}) {
       x = 0.6 - (x - 0.6);
     }
     spawnDrop(x, Math.sin(angle) * radius, 0.75 + Math.random() * 0.55);
-    nextDrop = time + 0.3 + calm * 3.4 + Math.random() * 0.45;
+    nextDrop = time + 0.9 + calm * 4.5 + Math.random() * 0.9;
   }
 
   /**
@@ -442,14 +449,15 @@ export function startField(canvas, options = {}) {
   let lastDrip = 0;
   function drip(event) {
     const time = now();
-    if (time - lastDrip < 0.18) {
+    if (time - lastDrip < 0.32) {
       return;
     }
     const nx = (event.clientX / window.innerWidth) * 2 - 1;
     const ny = -((event.clientY / window.innerHeight) * 2 - 1);
-    const calm = Math.min(1, Math.max(0, (shown - 0.45) / 0.5));
-    const eye = [0, 0.6 + 0.28 * calm, 2.02 - 0.22 * calm];
-    const tilt = 0.2 + 0.16 * calm;
+    const c = Math.min(1, Math.max(0, shown));
+    const rise = c * c * (3 - 2 * c);
+    const eye = [0, 0.6 + 1.8 * rise, 2.02 - 1.67 * rise];
+    const tilt = 0.2 + 1.12 * rise;
     const aspect = window.innerWidth / window.innerHeight;
     const direction = [(nx * aspect) / 1.34, ny / 1.34, -1];
     const ct = Math.cos(-tilt);
