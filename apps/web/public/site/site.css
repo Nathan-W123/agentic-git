@@ -79,6 +79,16 @@
   --radius-pill: 999px;
   --shadow-card: 0 1px 0 rgb(255 255 255 / 3%), 0 18px 44px rgb(0 0 0 / 34%);
   --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
+  /* The sweep that crosses the headline. Declared once because two things
+     wear it: the word, which clips it to its letters, and the mark beside
+     it, which masks it to the cube. */
+  --sheen: linear-gradient(
+    100deg,
+    var(--text) 18%,
+    var(--salmon) 38%,
+    var(--lavender) 52%,
+    var(--text) 74%
+  );
   --display: "Bricolage Grotesque Variable", "Inter Variable", -apple-system,
     BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   --font: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -333,13 +343,7 @@ strong {
  * emphasis.
  */
 .shimmer {
-  background: linear-gradient(
-    100deg,
-    var(--text) 18%,
-    var(--salmon) 38%,
-    var(--lavender) 52%,
-    var(--text) 74%
-  );
+  background: var(--sheen);
   background-size: 260% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -402,7 +406,7 @@ strong {
 }
 
 .nav-brand img {
-  border-radius: 6px;
+  flex: none;
 }
 
 .nav-links {
@@ -569,6 +573,48 @@ strong {
    than on h1, because the pricing page's hero is still a sentence. */
 .hero-name {
   font-size: clamp(76px, 13vw, 172px);
+}
+
+/* The lockup is one object: the mark never wraps away from the word. */
+.hero-name .w {
+  white-space: nowrap;
+}
+
+/*
+ * The mark before the name, painted rather than drawn: the artwork is a mask,
+ * and what shows through it is the headline's own sheen — same gradient, same
+ * sweep, same clock — so the cube and the letters are lit by one light. It is
+ * also a `.w > span`, which is what makes it rise out of the line box with the
+ * word rather than after it.
+ */
+.hero-name .mark {
+  display: inline-block;
+  width: 0.84em;
+  height: 0.84em;
+  margin-right: 0.1em;
+  vertical-align: -0.084em;
+  background: var(--sheen);
+  background-size: 260% 100%;
+  -webkit-mask: url(kumi-mark.png) center / contain no-repeat;
+  mask: url(kumi-mark.png) center / contain no-repeat;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero-name .mark {
+    animation: sweep 7s var(--ease-motion) infinite;
+  }
+}
+
+/* Without masking there is no cube to paint, and a filled gradient square is
+   worse than no mark at all. Width is the lever rather than `display`, because
+   the motion gate sets that on every word in the line. */
+@supports not (
+  (mask-image: url(kumi-mark.png)) or (-webkit-mask-image: url(kumi-mark.png))
+) {
+  .hero-name .mark {
+    width: 0;
+    margin-right: 0;
+  }
 }
 
 .hero-aside {
@@ -1810,6 +1856,10 @@ html.anim .reveal {
     animation: none;
     background: none;
     color: var(--text);
+  }
+
+  .hero-name .mark {
+    background: var(--salmon);
   }
 
   html.anim .reveal,

@@ -69,6 +69,10 @@ const SITE_FILES = [
   // duplicated that address with placeholders. The site's nav links to
   // /download and gets the page that actually downloads things; the two
   // colliding here is exactly what the shadow check below exists to catch.
+  // The brand mark, salmon on transparency. One file does two jobs: the
+  // favicon and the nav lockup show it directly, and the hero paints the
+  // headline's own sheen gradient through it as a CSS mask.
+  ["kumi-mark.png", "/kumi-mark.png", "image/png"],
   ["site.css", "/site.css", "text/css; charset=utf-8"],
   ["site.js", "/site.js", "text/javascript; charset=utf-8"],
   ["site-boot.js", "/site-boot.js", "text/javascript; charset=utf-8"],
