@@ -1660,7 +1660,7 @@ function chanSidebar(activeRepositoryId) {
              button put it at the far edge, detached from the person it
              belongs to. -->
         <span class="chan-account-avatar" style="position:relative">
-          ${avatar(user, 32, user, myAvatar())}
+          ${avatar(user, 22, user, myAvatar())}
           ${countBadge(dmUnreadTotal())}
         </span>
         <span class="chan-account-copy"><b>${esc(user)}</b></span>

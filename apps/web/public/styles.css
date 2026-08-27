@@ -732,9 +732,9 @@ svg.ui-icon {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   align-self: end;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-top: 1px solid var(--border-soft);
   background: var(--bg-panel);
 }
@@ -746,11 +746,10 @@ svg.ui-icon {
 .chan-account {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  min-height: 40px;
-  padding: 5px 7px;
-  border-radius: 9px;
+  padding: 4px 8px;
+  border-radius: 8px;
   color: var(--text-2);
   text-align: left;
   transition: background 0.13s ease, color 0.13s ease;
@@ -774,15 +773,15 @@ svg.ui-icon {
 .chan-account-copy b {
   display: block;
   overflow: hidden;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .chan-settings {
-  width: 40px;
-  height: 40px;
+  width: 30px;
+  height: 30px;
   flex: none;
 }
 
@@ -10950,13 +10949,13 @@ dialog.modal[open]::backdrop {
   .chats-shell.chan-collapsed .chan-sidebar-foot {
     grid-template-columns: 40px;
     justify-items: center;
-    padding: 8px 0;
+    padding: 6px 0;
   }
 
   .chats-shell.chan-collapsed .chan-account {
     justify-content: center;
     width: 40px;
-    height: 40px;
+    height: 30px;
     padding: 0;
   }
 
