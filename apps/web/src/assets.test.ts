@@ -1107,7 +1107,10 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.match(css, /\.chan-collapse-btn \{\s*flex: none;\s*margin-left: auto;/u);
   const sidebarRule = /\.chan-sidebar \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(sidebarRule, undefined, "the sidebar has a base layout rule");
-  assert.match(sidebarRule ?? "", /transition: width 0\.18s cubic-bezier/u);
+  assert.match(
+    sidebarRule ?? "",
+    /transition: width var\(--motion-content\) var\(--ease-motion\);/u,
+  );
   assert.match(
     css,
     /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
@@ -1159,7 +1162,10 @@ test("people and agents only animate downward when the sidebar expands", async (
     css,
     /\.chats-shell\.chan-collapsed :is\(\.chan-sec-people, \.chan-sec-agents\),[\s\S]{0,120}transform: translateY\(-10px\);/u,
   );
-  assert.match(css, /\.chan-roster \{[\s\S]{0,320}grid-template-rows 0\.22s/u);
+  assert.match(
+    css,
+    /\.chan-roster \{[\s\S]{0,320}grid-template-rows var\(--motion-content\)/u,
+  );
 
   // The lists stagger on the way down, but closing suppresses their transitions
   // so people and agents do not visibly slide upward into the channels.
@@ -1312,7 +1318,7 @@ test("the phone drawer is dragged out under the finger, not toggled", async () =
   assert.doesNotMatch(setter, /\brender\(\)/u);
   assert.match(
     css,
-    /\.chan-sidebar \{[^}]*transition: transform 0\.28s cubic-bezier\(0\.32, 0\.72, 0, 1\);/u,
+    /\.chan-sidebar \{[^}]*transition: transform var\(--motion-panel\) var\(--ease-motion\);/u,
   );
 
   // The button is not the only route any more, and equally is not gone: a
@@ -5167,8 +5173,8 @@ test("the run fills the agent working, at the front of the stack", async () => {
   );
   assert.match(
     running,
-    /<span class="ctl-activity">Starting<\/span>/u,
-    "a live thread should say what the agent is doing",
+    /<span class="ctl-activity phase-slot"\s*data-phase-slot="thread-link:m1">Starting<\/span>/u,
+    "a live thread should say what the agent is doing, in a slot it keeps",
   );
   assert.match(
     running.slice(running.indexOf("ctl-faces")),
@@ -5241,7 +5247,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
   );
 });
 
-test("working thread summaries carry a concise sweeping activity", async () => {
+test("working thread summaries carry a concise activity that holds still", async () => {
   const source = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const start = source.indexOf("function threadActivityLabel(entry)");
@@ -5279,22 +5285,26 @@ test("working thread summaries carry a concise sweeping activity", async () => {
     listStart,
     source.indexOf("\n/**\n * Your own agent", listStart),
   );
-  assert.match(list, /class="ti-activity text-sweep"/u);
+  // A slot the render loop can recognise between redraws, so "this task now
+  // says something else" can be told from "a different task".
+  assert.match(list, /class="ti-activity phase-slot"/u);
+  assert.match(list, /data-phase-slot="thread-item:\$\{esc\(entry\.id\)\}"/u);
 
-  const sweep = /\n\.cmsg-thread-link \.ctl-activity \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(sweep ?? "", /animation: thread-activity-sweep/u);
-  assert.match(sweep ?? "", /background-clip: text;/u);
+  // And the phrase itself is still. What travels is the mark beside it: one
+  // running task carries one continuous signal, and a phrase sweeping next to
+  // a mark sweeping was the same fact said twice, in two rhythms, on one row.
+  const phrase = /\n\.cmsg-thread-link \.ctl-activity \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(phrase, undefined, "a live thread still says what it is doing");
+  assert.doesNotMatch(phrase ?? "", /animation/u);
+  assert.doesNotMatch(phrase ?? "", /background-clip: text;/u);
+  assert.doesNotMatch(
+    css,
+    /\n\.text-sweep \{/u,
+    "the second live-text treatment should be gone, not merely unused",
+  );
+  // Gone from the words, not from the app: the travelling highlight is what a
+  // running bar and a working agent's mark are still drawn with.
   assert.match(css, /@keyframes thread-activity-sweep/u);
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-activity \{\n {4}animation: none;/u,
-  );
-  const sharedSweep = /\n\.text-sweep \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(sharedSweep ?? "", /animation: thread-activity-sweep/u);
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.text-sweep \{\n {4}animation: none;/u,
-  );
 });
 
 test("ended threads stay compact without live activity motion", async () => {
@@ -6306,17 +6316,15 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   assert.match(held ?? "", /var\(--orange\)/u);
   assert.equal(/var\(--accent\)/u.test(held ?? ""), false);
 
-  // Same amber on the channel's dot, and the same clock every other live
-  // signal in the app breathes on — with the motion reducible, because the
-  // fade is the whole of what it says.
+  // Same amber on the channel's dot, and — unlike the live marker it is
+  // shaped like — completely still. A thread held for somebody's go-ahead is
+  // not working, it is stopped until they answer, and a stopped thing that
+  // keeps moving tells the reader something is happening when nothing is. The
+  // colour is the whole of the difference, so there is nothing to reduce.
   const dot = /\n\.cmsg-thread-link \.ctl-held \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(dot, undefined, "the channel's held mark has a shape rule");
   assert.match(dot ?? "", /var\(--orange\)/u);
-  assert.match(dot ?? "", /animation: status-breathe/u);
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-held \{\n {4}animation: none;/u,
-  );
+  assert.doesNotMatch(dot ?? "", /animation/u);
 });
 
 test("the room's hold line carries a way back to the thread it is about", async () => {

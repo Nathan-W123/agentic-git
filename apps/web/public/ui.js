@@ -8,6 +8,27 @@
  * delegated `data-act` handlers.
  */
 
+/* ------------------------------------------------------------- motion ---- */
+
+/**
+ * Whether this reader has asked the system for less movement.
+ *
+ * The one place the question is asked. The stylesheet answers it for
+ * everything CSS owns; this is for the two things it cannot — the render
+ * loop, which decides whether a message arriving is allowed to move at all
+ * (`playMessageEntrance`, `playTextReveal`, `playPhaseSlots` in app.js), and
+ * the transcript, which decides whether following the bottom eases or snaps
+ * (`settleFollowToBottom` in screen-chats.js). Neither may keep its own copy
+ * of the test: a reader who has turned motion off and still gets some of it
+ * is worse served than one who never had it.
+ */
+export function motionIsUnwanted() {
+  return (
+    window.matchMedia !== undefined &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 /* ---------------------------------------------------------------- dom ---- */
 
 export const $ = (selector, root = document) => root.querySelector(selector);
@@ -1908,7 +1929,15 @@ export function showMenu(anchor, items) {
   return showPopover(anchor, `<div class="menu">${body}</div>`, { width: 216 });
 }
 
-/** How long `.pop-closing` is given before the layer is dropped, in ms. */
+/**
+ * How long `.pop-closing` is given before the layer is dropped, in ms.
+ *
+ * `--motion-panel-out` plus a frame. The stylesheet owns the exit and this
+ * only owns the node, so it has to outlast the animation rather than match
+ * it: dropping the layer on the same number races the last frame, and a
+ * popover that disappears one frame early is the blink the exit exists to
+ * prevent. If the token moves, this moves with it.
+ */
 const POP_EXIT_MS = 200;
 
 export function closePopover() {

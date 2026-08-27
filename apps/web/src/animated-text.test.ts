@@ -71,7 +71,7 @@ test("text arrives once, and only in a surface already on screen", async () => {
   const key = Function(
     `"use strict";\n${app.slice(
       app.indexOf("function revealGroupOf(key)"),
-      app.indexOf("function motionIsUnwanted()"),
+      app.indexOf("function playTextReveal(root)"),
     )}\nreturn revealGroupOf;`,
   )() as (value: string) => string;
   assert.equal(key("chan:repo-1|msg-7"), "chan:repo-1");
@@ -95,15 +95,98 @@ test("every conversation surface names the words it is showing", async () => {
   assert.match(chats, /data-reveal="dm:\$\{esc\(userId\)\}\|msg-\$\{esc\(message\.id\)\}"/u);
 });
 
-test("live status copy keeps sweeping instead of arriving", async () => {
+test("live status copy is still, because the dots beside it are not", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
-  // "Zeus is thinking" is ongoing, not new, so it takes the travelling
-  // highlight the thread activity line already uses rather than the one-off.
-  assert.match(chats, /<span class="typing-who text-sweep">/u);
-  const sweep = /\n\.text-sweep \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(sweep ?? "", /animation: thread-activity-sweep/u);
-  assert.match(sweep ?? "", /background-clip: text;/u);
+  // "Zeus is thinking" is one thing happening, so it is said once. The dots
+  // are the motion; the words used to travel as well, which was the same fact
+  // announced twice on one line in two different rhythms.
+  assert.match(chats, /<span class="typing-who">/u);
+  assert.doesNotMatch(chats, /text-sweep/u);
+  assert.doesNotMatch(
+    css,
+    /\n\.text-sweep \{/u,
+    "the second live-text treatment should be gone, not merely unused",
+  );
+  // The dots keep their own clock, and it is the only one on that row.
+  const dots = /\n\.typing-dots i \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(dots ?? "", /animation: typing-bounce 1\.2s ease-in-out infinite;/u);
+});
+
+test("a message takes its place once, and the words in it own the fading", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The shell is keyed the same way the words in it are: surface, then
+  // message. A backlog being opened is a surface nobody was watching, and
+  // neither half may animate for it — so the key comes from one function and
+  // both halves call it. Two copies of a rule that must agree is how a thread
+  // ends up throwing its replies up the screen while their words sit still.
+  assert.match(
+    chats,
+    /function messageMotionKey\(entry, repositoryId, isReply\) \{[\s\S]*?`\$\{group\}\|msg-\$\{entry\.id\}`/u,
+    "one function should name the arrival a message belongs to",
+  );
+  assert.match(
+    chats,
+    /data-entrance="\$\{esc\(messageMotionKey\(entry, repositoryId, isReply\)\)\}"/u,
+  );
+  assert.match(
+    chats,
+    /data-reveal="\$\{esc\(\n[\s\S]*?messageMotionKey\(entry, repositoryId, isReply\),\n {6}\)\}"/u,
+    "the words take the key their shell takes",
+  );
+  assert.match(
+    chats,
+    /data-entrance="dm:\$\{esc\(userId\)\}\|msg-\$\{esc\(message\.id\)\}"/u,
+  );
+
+  const start = app.indexOf("function playMessageEntrance(root)");
+  assert.notEqual(start, -1, "the render loop should place arriving messages");
+  const body = app.slice(start, app.indexOf("\n}\n", start));
+  // The same three decisions the words go through: only a surface already on
+  // screen, remembered so a redraw does not replay it, and resumed rather
+  // than restarted when a redraw lands mid-arrival.
+  assert.match(body, /entranceGroups\.has\(group\)/u);
+  assert.match(body, /entranceSeen\.set\(key, arriving \? now : 0\)/u);
+  assert.match(body, /started === 0 \|\| quiet/u);
+  assert.match(body, /const elapsed = now - started;/u);
+  assert.match(body, /elapsed < ENTRANCE_MS/u);
+
+  // Position only. The word reveal owns opacity, and a parent fading over a
+  // hundred fading words is the same message arriving twice.
+  const shell = /\n\.msg-entering \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(shell ?? "", /animation: message-enter var\(--motion-content\) var\(--ease-motion\);/u);
+  assert.match(shell ?? "", /animation-delay: var\(--entrance-delay, 0ms\);/u);
+  const frames = /@keyframes message-enter \{([\s\S]*?)\n\}\n/u.exec(css)?.[1];
+  assert.match(frames ?? "", /transform: translateY\(6px\);/u);
+  assert.doesNotMatch(
+    frames ?? "",
+    /opacity/u,
+    "the shell moves; it does not fade, because its words already do",
+  );
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.msg-entering,\n {2}\.cmsg-final\.msg-entering \{\n {4}animation: none;/u,
+  );
+});
+
+test("the artifact at the end of a run is the one message given weight", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  assert.match(chats, /entry\.kind === "outcome" \? " cmsg-final" : ""/u);
+  const final = /\n\.cmsg-final\.msg-entering \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(final ?? "", /animation: message-enter-final var\(--motion-emphasis\)/u);
+  const frames = /@keyframes message-enter-final \{([\s\S]*?)\n\}\n/u.exec(css)?.[1];
+  assert.match(frames ?? "", /transform: translateY\(5px\) scale\(0\.98\);/u);
+  // Reserved: an ordinary remark, a progress line and a system notice all
+  // take the plain content entrance. If everything is emphasised, nothing is.
+  assert.equal(
+    (chats.match(/" cmsg-final"/gu) ?? []).length,
+    1,
+    "only one kind of message should claim the emphasis",
+  );
 });
 
 test("a word settles from faint and low, and holds still under reduced motion", async () => {
@@ -268,7 +351,10 @@ test("an image arrives on the same schedule as the words around it", async () =>
   const css = await publicFile("styles.css");
   const media = /\n\.text-reveal-media \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(media, undefined, "a picture should have its own rule");
-  assert.match(media ?? "", /animation: text-reveal-in 220ms/u);
+  assert.match(
+    media ?? "",
+    /animation: text-reveal-in var\(--motion-content\) var\(--ease-motion\) both;/u,
+  );
   assert.match(media ?? "", /animation-delay: var\(--reveal-delay, 0ms\);/u);
   assert.doesNotMatch(media ?? "", /display:/u);
   assert.match(
