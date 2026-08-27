@@ -244,7 +244,7 @@ function gate() {
  * the footer, where nobody is looking.
  */
 function progress() {
-  const end = document.querySelector("#room");
+  const end = document.querySelector("#demo");
   const last =
     end === null
       ? document.body.scrollHeight - window.innerHeight

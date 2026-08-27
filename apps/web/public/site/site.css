@@ -256,7 +256,7 @@ main,
 }
 
 .section-tight {
-  padding-top: 40px;
+  padding-top: 124px;
 }
 
 /* --------------------------------------------------------------- typography */
@@ -554,9 +554,7 @@ strong {
 
 .hero-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
-  gap: 40px 56px;
-  align-items: center;
+  gap: 40px;
 }
 
 .hero-lede {
@@ -717,9 +715,20 @@ strong {
  * beside a mark that is nothing but facets. The rest of the page's headings
  * stay at h1's own width; this is the wordmark, not the prose. */
 .hero-name {
-  font-size: clamp(64px, 8.6vw, 132px);
+  font-size: clamp(76px, 12.4vw, 166px);
   font-variation-settings: "wght" 300, "wdth" 75;
   letter-spacing: -0.035em;
+}
+
+/* The line under the name, in the name's own cut so the two read as one
+   lockup rather than a heading with a caption stuck beneath it. */
+.hero-tag {
+  margin-top: -8px;
+  font-family: var(--display);
+  font-variation-settings: "wght" 380, "wdth" 82;
+  font-size: clamp(19px, 1.7vw, 25px);
+  letter-spacing: -0.015em;
+  color: var(--muted);
 }
 
 /* The lockup is one object: the mark never wraps away from the word. */
@@ -819,7 +828,9 @@ strong {
   grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
   column-gap: 72px;
   row-gap: 18px;
-  align-items: end;
+  /* One line, shared: the lede sits on the heading's own first baseline
+     rather than hovering somewhere above it. */
+  align-items: baseline;
 }
 
 .section-title {
@@ -828,13 +839,7 @@ strong {
   justify-items: start;
 }
 
-/* Top-aligned with the label rather than bottom-aligned with the heading.
-   The form's own top edge lands where the bottom of this row is, so a lede
-   sitting there is a paragraph printed over a picture. */
-.section-head .section-lede {
-  align-self: start;
-  padding-top: 7px;
-}
+
 
 .field-band {
   height: clamp(180px, 30vh, 340px);
@@ -945,17 +950,40 @@ strong {
   }
 }
 
+/* ------------------------------------------------------------ manifesto -- */
+
+/* One measure, centred, set larger than body copy and looser than it: this
+   is the only place on the page that asks to be read rather than scanned.
+   The closing claim is the one thing in it at full strength. */
+
+.manifesto {
+  max-width: 58ch;
+  margin-inline: auto;
+  font-size: clamp(18px, 1.55vw, 22px);
+  line-height: 1.72;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.manifesto strong {
+  font-weight: inherit;
+  color: var(--text);
+}
+
 /* ----------------------------------------------------------------- belt -- */
 
 /*
- * The names you already pay for, running past.
+ * The names you already pay for, one at a time.
  *
- * The list is short and true, so the belt repeats it rather than padding it
- * out with vendors nobody here has signed into. Eight passes make the run
- * wider than any viewport twice over, and it translates by exactly half its
- * own width — which lands the second half of the run precisely where the
- * first began, so the loop has no seam to find. Masked at both ends so names
- * arrive and leave rather than appearing at an edge.
+ * A name flies in from the right, decelerates to a stop in the middle, holds
+ * long enough to be read, then accelerates away to the left as the next one
+ * arrives. Three names on one twelve-second clock, each started four seconds
+ * behind the last, and the easing is per-keyframe rather than per-animation:
+ * a single curve over the whole pass would have it drifting in and drifting
+ * out at the same rate, where what makes this read as an arrival is that the
+ * entry slows and the exit does not.
+ *
+ * At rest — no motion wanted — the first name simply stands in the middle.
  */
 
 .belt-defs {
@@ -965,73 +993,84 @@ strong {
 }
 
 .belt {
-  margin-top: 38px;
+  display: grid;
+  justify-items: center;
+  margin-top: 46px;
   overflow: hidden;
-  -webkit-mask-image: linear-gradient(
-    90deg,
-    transparent,
-    #000 14%,
-    #000 86%,
-    transparent
-  );
-  mask-image: linear-gradient(
-    90deg,
-    transparent,
-    #000 14%,
-    #000 86%,
-    transparent
-  );
-}
-
-.belt-run {
-  display: flex;
-  align-items: center;
-  gap: 64px;
-  width: max-content;
 }
 
 .belt-item {
+  grid-area: 1 / 1;
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   font-family: var(--display);
   font-variation-settings: "wght" 420, "wdth" 88;
-  font-size: 26px;
+  font-size: 34px;
   letter-spacing: -0.01em;
   white-space: nowrap;
-  color: var(--muted);
+  color: var(--text);
+  opacity: 0;
+}
+
+.belt-item[data-n="1"] {
+  opacity: 1;
 }
 
 .belt-mark {
-  width: 27px;
-  height: 27px;
+  width: 34px;
+  height: 34px;
   color: var(--salmon);
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .belt-run {
-    animation: belt-run 34s linear infinite;
+  .belt-item {
+    animation: agent-pass 12s infinite backwards;
+  }
+
+  .belt-item[data-n="2"] {
+    animation-delay: 4s;
+  }
+
+  .belt-item[data-n="3"] {
+    animation-delay: 8s;
   }
 }
 
-@keyframes belt-run {
-  to {
-    transform: translateX(-50%);
+@keyframes agent-pass {
+  0% {
+    opacity: 0;
+    transform: translateX(320px);
+    animation-timing-function: cubic-bezier(0.12, 0.82, 0.22, 1);
+  }
+
+  17% {
+    opacity: 1;
+    transform: translateX(0);
+    animation-timing-function: linear;
+  }
+
+  25% {
+    opacity: 1;
+    transform: translateX(0);
+    animation-timing-function: cubic-bezier(0.78, 0, 0.88, 0);
+  }
+
+  34%,
+  100% {
+    opacity: 0;
+    transform: translateX(-320px);
   }
 }
 
 @media (max-width: 620px) {
-  .belt-run {
-    gap: 40px;
-  }
-
   .belt-item {
-    font-size: 21px;
+    font-size: 25px;
   }
 
   .belt-mark {
-    width: 22px;
-    height: 22px;
+    width: 25px;
+    height: 25px;
   }
 }
 
@@ -1302,8 +1341,8 @@ strong {
 .app-shot {
   display: grid;
   grid-template-rows: auto 1fr;
-  height: 540px;
-  max-width: 880px;
+  height: 560px;
+  max-width: 1040px;
   margin-inline: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -2234,7 +2273,7 @@ strong {
   }
 
   .hero-name {
-    font-size: clamp(76px, 15vw, 150px);
+    font-size: clamp(72px, 15vw, 150px);
   }
 
   .app-shot {
