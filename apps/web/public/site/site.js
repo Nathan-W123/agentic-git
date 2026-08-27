@@ -746,9 +746,6 @@ function wire() {
     }
   });
 
-  attempt("ticker", () => {
-    heroTicker();
-  });
   attempt("channel", () => {
     channelStory(animate, inView);
   });
@@ -763,120 +760,6 @@ function wire() {
   if (broke.length > 0) {
     disarm();
   }
-}
-
-/* ---------------------------------------------------------- hero ticker -- */
-
-/**
- * The room, overheard, above the name.
- *
- * Five lines in a loop, and the cast is the point: a person asks, an agent
- * takes it, the coordinator rules between two agents that want the same
- * file, the other agent reports, and a person ships. Nothing here is
- * narration about the product — it is the product's own three voices, in the
- * order they actually speak.
- *
- * The first line is in the HTML and every attribute this touches is put back
- * by disarm(), so the resting page is a single quiet message rather than an
- * empty bubble waiting on JavaScript.
- */
-function heroTicker() {
-  const ticker = document.querySelector(".ticker");
-  if (ticker === null) {
-    return;
-  }
-  const line = ticker.querySelector(".bubble-text");
-  const name = ticker.querySelector(".who-name");
-  if (line === null || name === null) {
-    return;
-  }
-
-  const SCRIPT = [
-    {
-      who: "ethan",
-      name: "Ethan",
-      kind: "person",
-      text: "can we get Apple Pay into checkout this week?",
-    },
-    {
-      who: "hera",
-      name: "Hera",
-      kind: "agent",
-      text: "on it. filing a plan for five files.",
-    },
-    {
-      who: "coord",
-      name: "Coordinator",
-      kind: "coordinator",
-      text: "@Hera and @Rhea both want checkout.ts. @Hera goes first.",
-    },
-    {
-      who: "rhea",
-      name: "Rhea",
-      kind: "agent",
-      text: "done. promo codes trimmed, checkout.ts is free.",
-    },
-  ];
-
-  const resting = {
-    who: ticker.dataset.who,
-    kind: ticker.dataset.kind,
-    text: line.textContent,
-    name: name.textContent,
-  };
-  undoers.push(() => {
-    ticker.dataset.who = resting.who;
-    ticker.dataset.kind = resting.kind;
-    line.textContent = resting.text;
-    line.classList.remove("mid");
-    name.textContent = resting.name;
-    ticker.style.opacity = "";
-  });
-
-  // One interval per line rather than one timer per character: a page left
-  // open all afternoon should not collect a timer for every letter it typed.
-  const type = (full) =>
-    new Promise((resolve) => {
-      const started = performance.now();
-      line.classList.add("mid");
-      const interval = setInterval(() => {
-        const shown = Math.floor((performance.now() - started) / 26);
-        line.textContent = full.slice(0, Math.min(shown, full.length));
-        if (disarmed || shown >= full.length) {
-          clearInterval(interval);
-          line.textContent = full;
-          line.classList.remove("mid");
-          resolve();
-        }
-      }, 26);
-      intervals.push(interval);
-    });
-
-  let at = 0;
-  const run = async () => {
-    for (;;) {
-      const beat = SCRIPT[at % SCRIPT.length];
-      at += 1;
-      if (disarmed) {
-        return;
-      }
-      ticker.dataset.who = beat.who;
-      ticker.dataset.kind = beat.kind;
-      name.textContent = beat.name;
-      line.textContent = "";
-      ticker.style.opacity = "1";
-      await type(beat.text);
-      // Long enough to be read, short enough that the next voice feels like
-      // an answer rather than a new subject.
-      await later(2200);
-      if (disarmed) {
-        return;
-      }
-      ticker.style.opacity = "0";
-      await later(420);
-    }
-  };
-  void run();
 }
 
 /* ------------------------------------------------------- channel replay -- */

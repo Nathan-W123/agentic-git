@@ -388,14 +388,18 @@ strong {
   gap: 24px;
 }
 
-/* The mark alone, and white. The artwork is a flat salmon silhouette with
-   an alpha channel, so knocking it to black and inverting paints every
-   opaque pixel white and leaves the shape exactly as drawn — and a browser
-   that somehow refused the filter would still show a legible logo rather
-   than nothing, which is why this is a filtered <img> and not a mask. */
+/* The name and the mark together, since this is now the only place the
+   wordmark appears. The mark is knocked white by filter: the artwork is a
+   flat salmon silhouette with an alpha channel, so brightness(0) then
+   invert(1) paints every opaque pixel white and leaves the shape as drawn. */
 .nav-brand {
   display: inline-flex;
   align-items: center;
+  gap: 10px;
+  font-family: var(--display);
+  font-variation-settings: "wght" 600, "wdth" 84;
+  font-size: 19px;
+  letter-spacing: -0.02em;
 }
 
 .nav-brand img {
@@ -562,187 +566,116 @@ strong {
   padding: 176px 0 8px;
 }
 
+/* Two columns: the claim, and the room deciding things next to it. The
+   claim takes the wider share because it is the thing being read. */
 .hero-grid {
   display: grid;
-  gap: 40px;
+  grid-template-columns: minmax(0, 1.06fr) minmax(0, 0.94fr);
+  align-items: center;
+  gap: 56px;
 }
 
 .hero-lede {
   display: grid;
   gap: 26px;
-  justify-items: center;
-  text-align: center;
+  justify-items: start;
 }
 
 .hero h1 {
-  max-width: 12ch;
-  margin-inline: auto;
+  max-width: 13ch;
 }
 
 /*
- * The room, overheard.
+ * The claim, at headline size.
  *
- * One line at a time above the name: a person asking, an agent answering,
- * the coordinator ruling between two of them. Three voices, drawn the way
- * the product draws them — people in a plain bubble, agents in a bubble
- * their own colour, and the coordinator in the transcript's own centred
- * pill rather than a bubble at all, because in the product it is a ruling
- * and not a remark.
- *
- * The bubble's width follows its words, so the line grows as it is typed.
+ * It used to be one word and could be enormous; a sentence cannot, so this
+ * is a third of that and wraps to three lines at the measure above. The
+ * width axis stays low because it is what makes this face angular: at the
+ * bottom of the axis the bowls pull their sides upright and the junctions
+ * sharpen. The rest of the page's headings keep h1's own width.
  */
+.hero-name {
+  font-size: clamp(46px, 5.6vw, 84px);
+  font-variation-settings: "wght" 300, "wdth" 78;
+  line-height: 1.02;
+  letter-spacing: -0.032em;
+}
 
-.ticker {
+/*
+ * The rulings, running.
+ *
+ * A window onto something continuous rather than a list: the run is written
+ * twice and travelled by exactly half its own height, so the moment it has
+ * scrolled one full copy it is back where it started and the seam never
+ * arrives. Masked to nothing at both ends, which is what makes it read as a
+ * feed passing through rather than six lines that begin and end.
+ *
+ * The mask is the fade, so there is no gradient overlay to keep in step with
+ * whatever the water is doing behind it.
+ */
+.coord-feed {
+  height: clamp(260px, 34vh, 360px);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 22%,
+    #000 78%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 22%,
+    #000 78%,
+    transparent
+  );
+}
+
+/* The spacing is a margin on each line rather than a gap between them, and
+   that is what makes the loop exact: with a gap, the run is twelve lines and
+   eleven gaps, so half of it lands half a gap short of the second copy and
+   the seam needs a fudge factor. With the space carried by the lines, half
+   the run is exactly one copy plus its own trailing space.
+
+   `flow-root` rather than `block` for the same reason: a plain block lets
+   the last line's bottom margin collapse straight out through it, so the run
+   measures one margin short of twice a copy and half of it lands early. */
+.coord-run {
+  display: flow-root;
+}
+
+.coord-line {
+  margin-bottom: 14px;
   display: grid;
-  justify-items: center;
-  gap: 8px;
-  max-width: min(100%, 46ch);
-  transition: opacity 0.35s var(--ease-motion);
-}
-
-.bubble {
-  padding: 9px 14px;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 13px 16px;
   border: 1px solid var(--border);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
-  backdrop-filter: blur(10px);
-  font-size: 15px;
-  line-height: 1.5;
-  color: var(--text);
-  text-align: left;
-}
-
-/* An agent's line carries an agent's colour, the way its name does in the
-   product. */
-.ticker[data-kind="agent"] .bubble {
-  border-color: color-mix(in srgb, var(--lavender) 40%, var(--border));
-}
-
-/* The coordinator does not chat. Same pill the transcript gives a ruling. */
-.ticker[data-kind="coordinator"] .bubble {
   border-radius: var(--radius);
-  border-color: var(--border-strong);
-  background: color-mix(in srgb, var(--surface-1) 78%, transparent);
-  font-size: 13px;
+  background: color-mix(in srgb, var(--surface-1) 66%, transparent);
+  font-size: 14.5px;
+  line-height: 1.5;
   color: var(--muted);
+  text-wrap: pretty;
 }
 
-/* The caret only exists while a line is being typed; site.js owns the
-   class, so the resting markup never blinks. */
-.bubble-text.mid::after {
-  content: "";
-  display: inline-block;
-  width: 2px;
-  height: 1em;
-  margin-left: 3px;
-  vertical-align: -0.14em;
-  background: var(--salmon);
+.coord-mark {
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .bubble-text.mid::after {
-    animation: caret-blink 0.8s steps(1) infinite;
+  .coord-run {
+    animation: coord-run 34s linear infinite;
   }
 }
 
-.ticker-who {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12.5px;
-  color: var(--faint);
-}
-
-/* Four speakers share one row; the ticker's own attribute says which of
-   them is talking. */
-.w-mark {
-  display: none;
-  place-items: center;
-  width: 19px;
-  height: 19px;
-  font-size: 8.5px;
-  font-weight: 640;
-  letter-spacing: 0.02em;
-}
-
-.ticker[data-who="ethan"] .w-ethan,
-.ticker[data-who="rhea"] .w-rhea,
-.ticker[data-who="hera"] .w-hera,
-.ticker[data-who="coord"] .w-coord {
-  display: grid;
-}
-
-.w-ethan {
-  border-radius: 50%;
-  background: var(--salmon);
-  color: var(--accent-ink);
-}
-
-.w-rhea,
-.w-hera {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface-2);
-}
-
-.w-rhea svg,
-.w-hera svg {
-  width: 11px;
-  height: 11px;
-}
-
-.w-rhea {
-  color: var(--salmon);
-}
-
-.w-hera {
-  color: var(--lavender);
-}
-
-.w-coord {
-  font-size: 13px;
-}
-
-@media (max-width: 900px) {
-  .ticker {
-    max-width: 100%;
+@keyframes coord-run {
+  to {
+    transform: translateY(-50%);
   }
-
-  .bubble {
-    font-size: 14px;
-  }
-}
-
-/* One word, so it gets to be enormous. The size lives on this class rather
-   than on h1, because the pricing page's hero is still a sentence.
- *
- * The width axis is the only angularity this face offers — there is no
- * optical-size axis in the subset — and it buys more than a narrower word:
- * at the bottom of the axis the U's bowl pulls its sides upright and its
- * corner tight, and the K's junction sharpens, so the name reads faceted
- * beside a mark that is nothing but facets. The rest of the page's headings
- * stay at h1's own width; this is the wordmark, not the prose. */
-.hero-name {
-  font-size: clamp(76px, 12.4vw, 166px);
-  font-variation-settings: "wght" 300, "wdth" 75;
-  letter-spacing: -0.035em;
-}
-
-/* The line under the name, in the name's own cut so the two read as one
-   lockup rather than a heading with a caption stuck beneath it. */
-.hero-tag {
-  margin-top: -8px;
-  font-family: var(--display);
-  font-variation-settings: "wght" 380, "wdth" 82;
-  font-size: clamp(19px, 1.7vw, 25px);
-  letter-spacing: -0.015em;
-  color: var(--muted);
-}
-
-/* The name is one object, and the only thing on its line, so it centres on
-   the page's own axis with nothing to compensate for. */
-.hero-name .w {
-  white-space: nowrap;
 }
 
 .hero-aside {
@@ -2520,8 +2453,11 @@ strong {
     max-width: none;
   }
 
+  /* Sized for the sentence this became, not the single word it was: at
+     15vw the old wordmark scale put the first line under the nav with four
+     pixels to spare. */
   .hero-name {
-    font-size: clamp(72px, 15vw, 150px);
+    font-size: clamp(40px, 10vw, 64px);
   }
 
   .app-shot {
@@ -2542,8 +2478,11 @@ strong {
     padding: 104px 0;
   }
 
+  /* Clears the fixed nav on its own. On a short window the hero's content is
+     taller than the space it has, so it cannot centre and simply starts at
+     this edge — 82px left four pixels between the bar and the headline. */
   .hero {
-    padding-top: 82px;
+    padding-top: 104px;
   }
 
   .cards,
@@ -2660,7 +2599,8 @@ html.anim .claim p {
   display: inline-block;
 }
 
-/* The caret the channel replay types behind. */
+/* The caret the channel replay types behind. It shared its blink with the
+   hero ticker's caret; the ticker is gone, so the clock lives here now. */
 .caret {
   display: inline-block;
   width: 2px;
