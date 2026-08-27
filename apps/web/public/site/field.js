@@ -233,6 +233,12 @@ function readColour(name, fallback) {
  * complete and reasonable version of the page.
  */
 export function startField(canvas, options = {}) {
+  const trace = (step) => {
+    if (Array.isArray(window.__kumiTrace)) {
+      window.__kumiTrace.push(step);
+    }
+  };
+  trace("water-enter");
   const gl = canvas.getContext("webgl2", {
     alpha: true,
     antialias: false,
@@ -242,8 +248,10 @@ export function startField(canvas, options = {}) {
     powerPreference: "high-performance",
   });
   if (gl === null) {
+    trace("water-noctx");
     return undefined;
   }
+  trace("water-ctx");
 
   // Density scaled to the surface actually being filled. A phone drawing a
   // desktop's point count is a hot phone showing the same picture.
@@ -301,6 +309,7 @@ export function startField(canvas, options = {}) {
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     throw new Error(gl.getProgramInfoLog(program) ?? "water failed to link");
   }
+  trace("water-linked");
   gl.useProgram(program);
 
   const bind = (name, data, size) => {
@@ -480,6 +489,7 @@ export function startField(canvas, options = {}) {
     gl.drawArrays(gl.POINTS, 0, count);
   }
   frame = requestAnimationFrame(draw);
+  trace("water-loop");
 
   function onPointer(event) {
     pointerTarget = [

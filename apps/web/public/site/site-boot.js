@@ -33,7 +33,7 @@
  */
 (function () {
   "use strict";
-  var BOOT_REV = "w7";
+  var BOOT_REV = "w8";
   var hash = window.location.hash;
 
   // Every resource that fails to arrive is recorded, so the ?why overlay
@@ -96,6 +96,10 @@
             (window.__kumiErrors && window.__kumiErrors.length
               ? window.__kumiErrors.join(" | ")
               : "none"),
+          "trace: " +
+            (window.__kumiTrace && window.__kumiTrace.length
+              ? window.__kumiTrace.join(" > ")
+              : "(none)"),
         ].join("\n");
         panel.style.cssText =
           "position:fixed;left:12px;right:12px;bottom:12px;z-index:9999;" +

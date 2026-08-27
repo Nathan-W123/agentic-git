@@ -31,13 +31,24 @@ import { startField } from "./field.js";
 
 // Read by the boot script's ?why diagnostics: proof this module's graph
 // loaded, and which revision of it.
-window.__kumiSiteRev = "w7";
+window.__kumiSiteRev = "w8";
+
+// A breadcrumb per top-level step, printed by the ?why panel. On one phone
+// the module provably ran its first statement and provably reached none of
+// its later effects, with no error recorded anywhere — which means the
+// engine stops somewhere in between, and this trace is how the somewhere
+// gets a name.
+window.__kumiTrace = ["module"];
+function mark(step) {
+  window.__kumiTrace.push(step);
+}
 
 // Every animation failure lands here with a name and a message, and the
 // ?why overlay prints them. A device this page misbehaves on is a device
 // nobody can attach a debugger to; a caught exception with no record is
 // how one stayed undiagnosed across four rounds of screenshots.
 window.__kumiErrors = [];
+mark("ledger");
 
 function note(phase, error) {
   window.__kumiErrors.push(
@@ -54,10 +65,13 @@ let reduceMotion = {
 };
 try {
   reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  mark("mql");
 } catch (error) {
   note("matchMedia", error);
+  mark("mql-threw");
 }
 const motion = window.Motion;
+mark("motion:" + typeof motion);
 const EASE = [0.32, 0.72, 0, 1];
 
 let stopField;
@@ -114,8 +128,10 @@ function disarm() {
  * the water, aborting the module's evaluation with nothing to note it. No
  * line in this gate is allowed to be that line again.
  */
+mark("gate-call");
 try {
   gate();
+  mark("gate-done");
 } catch (error) {
   note("gate", error);
   disarm();
@@ -127,7 +143,9 @@ try {
 }
 
 function gate() {
+  mark("gate-run");
   if (reduceMotion.matches) {
+    mark("gate-reduced");
     disarm();
     return;
   }
@@ -145,6 +163,7 @@ function gate() {
   };
   try {
     reduceMotion.addEventListener("change", onFlip);
+    mark("listener");
   } catch (error) {
     try {
       reduceMotion.addListener(onFlip);
@@ -162,12 +181,14 @@ function gate() {
     // move the arming anywhere earlier than the module that owns the
     // animations.
     document.documentElement.classList.add("anim");
+    mark("armed");
     // A throw anywhere in wiring forfeits the animations, never the
     // content: disarm() shows everything again and undoes any staging that
     // happened before the throw. wire() records its own failures per
     // feature; this belt catches only what escapes even that.
     try {
       wire();
+      mark("wired");
     } catch (error) {
       note("wire", error);
       disarm();
@@ -176,6 +197,7 @@ function gate() {
   // The water is raw WebGL and needs no library, so it starts whether or
   // not the Motion bundle arrived — and inside its own guard, so nothing
   // that went wrong above it can cost the background.
+  mark("field-call");
   try {
     field();
   } catch (error) {
