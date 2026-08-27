@@ -1196,7 +1196,7 @@ function personRow(person) {
           personProfile(userId, name, repositoryId),
           "rr-avatar",
           "down",
-          `${avatar(name, 28, name, me ? myAvatar() : undefined)}${
+          `${avatar(name, 22, name, me ? myAvatar() : undefined)}${
             // Your own dot is green whenever you can see it: the page being
             // open is what "here" means, and a roster where everyone else
             // has a status and you have none reads as broken rather than
@@ -1389,7 +1389,7 @@ function rosterRow(agent) {
           agentProfile(agent, activeChannelId()),
           "rr-avatar",
           "down",
-          statusAgentFace(agent, 28, activeChannelId()),
+          statusAgentFace(agent, 22, activeChannelId()),
           {
             "data-hover": "agent-usage",
             "data-hover-value": usageProviderId(agent),
@@ -1979,9 +1979,13 @@ function threadSaidCount(said) {
  * reply: those are the thread naming itself and thinking aloud, not replies,
  * and counting them made a one-line edit look like a long conversation.
  *
- * A held run says “Blocked” in the same activity position. The state remains
- * understandable without colour or motion and does not need a second banner
- * repeating the room's own coordination notice.
+ * A held run adds one breathing amber dot beside the count and nothing else.
+ * This used to be a bordered amber banner on its own line under the link,
+ * spelling out "open the thread and reply go ahead" — directly above the
+ * room's own line saying the same sentence in words. Two paragraphs and a
+ * link for one fact. The dot keeps the fact and drops the repetition; the
+ * words survive for screen readers, and the sentence itself is still in the
+ * room, one message down, now pointing back here.
  *
  * A run still going draws its position as a pie filling the whole face of the
  * agent running it — dark for the part still to come, a light wash of the
@@ -2041,18 +2045,21 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
     .join("");
   const activity =
     progress === undefined ? undefined : threadActivityLabel(entry);
-  const agentName = working?.name ?? ordered[0]?.name ?? "Thread";
-  const status = threadAwaitsGoAhead(entry) ? "Blocked" : activity;
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
-      data-value="${esc(entry.id)}" aria-current="${state.activeChannelThread === entry.id}">
+      data-value="${esc(entry.id)}">
       <span class="avatar-stack ctl-faces">${faces}</span>
       <span class="ctl-copy">
-        <span class="ctl-agent">${esc(agentName)}</span>
-        <span class="ctl-separator" aria-hidden="true">·</span>
-        <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
-          status === undefined
+        <span class="ctl-summary-main">
+          <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
+            threadAwaitsGoAhead(entry)
+              ? `<span class="ctl-held" aria-hidden="true"></span>
+          <span class="sr-only">Waiting for your go-ahead</span>`
+              : ""
+          }
+        </span>${
+          activity === undefined
             ? ""
-            : `<span class="ctl-separator" aria-hidden="true">·</span><span class="ctl-activity">${esc(status)}</span>`
+            : `<span class="ctl-activity">${esc(activity)}</span>`
         }
       </span>
     </button>`;
@@ -2119,97 +2126,18 @@ const NOTICE_ICONS = [
   { prefix: PLAN_LAPSED_PREFIX, marker: "⌛ ", iconName: "clock" },
 ];
 
-/**
- * A finished task's prose and the files that belong beside it.
- *
- * New endings carry files only as structured message data. Older endings also
- * named one or two paths (or a count) in parentheses, so that suffix is
- * removed when it agrees with the structured list; the same saved message
- * then gains the compact controls without repeating every path in prose.
- *
- * A thread reply inherits the files and task id from its root. A quick task is
- * itself a root and now carries those fields directly. Both therefore open
- * the existing file drawer on the exact changeset the ending describes.
- */
-function outcomeFilePresentation(entry, repositoryId) {
-  const content = String(entry.content ?? "");
-  if (entry.kind !== "outcome") {
-    return { content, pills: "" };
-  }
-  const source =
-    entry.messageId === undefined
-      ? entry
-      : channelMessagesFor(repositoryId).find(
-          (candidate) => candidate.id === entry.messageId,
-        );
-  const files = (Array.isArray(source?.changedFiles) ? source.changedFiles : [])
-    .filter(
-      (file) =>
-        typeof file === "object" &&
-        file !== null &&
-        typeof file.path === "string" &&
-        file.path.trim() !== "",
-    );
-  if (files.length === 0) {
-    return { content, pills: "" };
-  }
-
-  // Attachments follow the sentence as their own marker. Match a legacy
-  // suffix against only the prose so an outcome with a screenshot is upgraded
-  // too, then put the untouched marker back for `messageBody` to render.
-  const attachmentAt = content.search(ATTACHMENT_PATTERN);
-  const prose = attachmentAt < 0 ? content : content.slice(0, attachmentAt);
-  const attachments = attachmentAt < 0 ? "" : content.slice(attachmentAt);
-  const suffix = /\s+\(([^()\n]+)\)\s*$/u.exec(prose);
-  const knownPaths = new Set(files.map((file) => file.path));
-  const legacyNames = (suffix?.[1] ?? "")
-    .split(/,\s+/u)
-    .filter((path) => path !== "");
-  const legacyCount = /^\d+ files? changed$/u.test(suffix?.[1] ?? "");
-  const legacyPaths =
-    legacyNames.length > 0 && legacyNames.every((path) => knownPaths.has(path));
-  const displayContent =
-    suffix !== null && (legacyCount || legacyPaths)
-      ? `${prose.slice(0, suffix.index)}${attachments}`
-      : content;
-  const taskId = source?.taskId;
-  const controls = files
-    .map((file) => {
-      const path = String(file.path);
-      const label = `${icon("file")}<span class="pill-label">${esc(path)}</span>`;
-      // A deleted path has no working-copy file to open. It still belongs in
-      // the compact set, but presenting a button that can only end in the
-      // editor's not-found state would not be a useful link.
-      if (file.status === "deleted") {
-        return `<span class="pill cmsg-outcome-file deleted"
-          title="Deleted ${esc(path)}">${label}</span>`;
-      }
-      return `<button type="button" class="pill cmsg-outcome-file"
-        data-act="chan-file-open" data-value="${esc(path)}"${
-          taskId === undefined ? "" : ` data-task="${esc(taskId)}"`
-        } title="Open ${esc(path)}">${label}</button>`;
-    })
-    .join("");
-  return {
-    content: displayContent,
-    pills: `<span class="pill-bar cmsg-outcome-files" aria-label="Files changed">${controls}</span>`,
-  };
-}
-
 function messageBodyWithIcons(entry, repositoryId) {
-  const presentation = outcomeFilePresentation(entry, repositoryId);
-  const content = presentation.content;
+  const content = String(entry.content ?? "");
   const notice = NOTICE_ICONS.find(({ prefix }) => content.startsWith(prefix));
-  const body =
-    notice === undefined
-      ? messageBody(content, repositoryId, entry.mentions)
-      : `<div class="cmsg-library-notice">${icon(notice.iconName)}
-          <div>${messageBody(
-            content.slice(notice.marker.length),
-            repositoryId,
-            entry.mentions,
-          )}</div></div>`;
-  return `${body}${presentation.pills}`;
+  if (notice === undefined) {
+    return messageBody(content, repositoryId, entry.mentions);
+  }
+  return `<div class="cmsg-library-notice">${icon(notice.iconName)}
+    <div>${messageBody(
+      content.slice(notice.marker.length),
+      repositoryId,
+      entry.mentions,
+    )}</div></div>`;
 }
 
 /** Root kinds spoken by an agent rather than a person or the coordinator. */
@@ -2467,32 +2395,32 @@ function changedFilesBlock(entry, repositoryId) {
 function threadActivityLabel(entry) {
   const turns = threadReplyTurns(entry.replies ?? []);
   const replies = turns[turns.length - 1]?.replies ?? [];
-  let label = "Queued";
+  let label = "Starting";
   for (const reply of replies) {
     if (reply.kind !== "progress") {
       continue;
     }
     const text = String(reply.content ?? "").trim();
     if (/Reading the repository/iu.test(text)) {
-      label = "Inspecting repository";
+      label = "Reading code";
     }
     if (/Planning changes|Planned the change|re-planning/iu.test(text)) {
       label = "Planning";
     }
     if (/starting on the code|Starting on |execution started/iu.test(text)) {
-      label = "Editing files";
+      label = "Writing code";
     }
     const working = /^Working on ([^,]+?)(?:,| and |…|\.\.\.|$)/u.exec(text);
     if (working?.[1] !== undefined) {
       const path = working[1].trim();
       const name = path.split(/[\\/]/u).pop();
-      label = name === undefined || name === "" ? "Editing files" : `Editing ${name}`;
+      label = name === undefined || name === "" ? "Writing code" : `Editing ${name}`;
     }
     if (/Validating…|Wrote changes to|Finished editing/iu.test(text)) {
       label = "Testing";
     }
     if (/Validation passed/iu.test(text)) {
-      label = "Done";
+      label = "Finishing";
     }
   }
   return label;
@@ -2884,7 +2812,7 @@ function messageRow(
   // connect prompt), so a mention refusal or dispatch confirmation reads as
   // the same kind of thing there.
   if (entry.kind === "system") {
-    return `<div class="cmsg-row cmsg-system"><p class="msg system coordination-event"><span>${esc(entry.content)}</span></p></div>`;
+    return `<div class="cmsg-row cmsg-system"><p class="msg system transcript-separator"><span>${esc(entry.content)}</span></p></div>`;
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
@@ -3002,7 +2930,7 @@ function messageRow(
         ? ""
         : `<span class="cmsg-avatar">${identityWrap(
             identity,
-            authorFace(author, 36, repositoryId),
+            authorFace(author, 32, repositoryId),
             true,
           )}</span>`
     }
@@ -3728,12 +3656,7 @@ export function paintJumpToLatest() {
     pill.dataset.count = String(count);
     const label = pill.querySelector(".chan-jump-count");
     if (label !== null) {
-      label.textContent =
-        count === 0
-          ? "Latest"
-          : count === 1
-            ? "New update"
-            : `${count > 99 ? "99+" : count} new updates`;
+      label.textContent = count === 0 ? "" : `${count > 99 ? "99+" : count} new`;
     }
     pill.classList.toggle("has-new", count > 0);
   }
@@ -6047,20 +5970,35 @@ function threadPanel(repositoryId, selectedMessageId) {
     state.threadAttaching > 0 ||
     threadReplyTarget !== undefined ||
     draftAttachments(repositoryId, state.threadDraft).length > 0;
-  return `<aside class="thread-panel" data-thread-id="${esc(messageId)}" aria-label="Thread: ${esc(title)}">
+  return `<aside class="thread-panel" data-thread-id="${esc(messageId)}">
     ${panelGrip()}
     <header class="thread-head">
+      ${panelKind("Thread", "channel-threads-toggle", `thread:${messageId}`)}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
+      ${
+        // Stopping the run, where somebody watching it decides it has gone
+        // wrong. The thread header already owns this thread's task, and there
+        // was no clickable way to stop an agent anywhere in the product —
+        // `/cancel` typed into the composer was the whole of it. The handler
+        // asks first: this ends work that is mid-run and holding a workspace.
+        threadIsWorking(root)
+          ? iconButton("close", {
+              act: "thread-task-cancel",
+              value: root.taskId ?? "",
+              title: "Stop this task",
+            })
+          : ""
+      }
       ${iconButton("pin", {
         act: "channel-pin",
         value: messageId,
         title: root.pinnedAt === undefined ? "Pin thread" : "Unpin thread",
       })}
-      ${iconButton("arrowLeft", {
-        act: "thread-return-source",
+      ${iconButton("reply", {
+        act: "thread-composer-focus",
         value: messageId,
-        title: "Return to source message",
+        title: "Reply in this thread",
       })}
       ${iconButton("close", {
         act: "channel-thread-close",
@@ -6072,13 +6010,6 @@ function threadPanel(repositoryId, selectedMessageId) {
     <div class="thread-body"
       data-scroll-key="thread:${esc(repositoryId)}:${esc(messageId)}">
       <div class="thread-root${hasReplies ? " has-replies" : ""}">${messageRow(root, repositoryId, { isReply: true })}</div>
-      ${
-        threadIsWorking(root)
-          ? `<div class="thread-active-actions"><button type="button" class="thread-stop-task"
-              data-act="thread-task-cancel" data-value="${esc(root.taskId ?? "")}">
-              ${icon("close")} Stop task</button></div>`
-          : ""
-      }
       ${threadReplies(root, repositoryId)}
       ${threadTyping(root)}
       ${typingIndicator(repositoryId, root.id)}
@@ -6580,9 +6511,9 @@ function simplifyAction(reply) {
  *
  * Folded rather than truncated: a summary is the most valuable thing in a
  * thread and cutting it off mid-sentence would be worse than either showing
- * all of it or none. Long work starts as a compact artifact with its first
- * line visible; an explicit expansion is remembered per message in both
- * directions.
+ * all of it or none. Open by default — it is the answer, and a reader who has
+ * to expand the answer has been given a filing cabinet rather than a reply —
+ * but the choice is remembered per message, in both directions.
  */
 function summaryBlock(reply, repositoryId) {
   const full = String(reply.content ?? "");
@@ -6599,7 +6530,7 @@ function summaryBlock(reply, repositoryId) {
   }
   const firstLine = full.split(/\n/u).find((line) => line.trim().length > 0) ?? "";
   return `<details class="thread-summary"${
-    state.summaryOpen[reply.id] === true ? " open" : ""
+    state.summaryOpen[reply.id] === false ? "" : " open"
   }>
     <summary data-act="summary-toggle" data-value="${esc(reply.id)}">
       <span class="tt-caret">${icon("chevronRight")}</span>
@@ -6977,13 +6908,11 @@ export function renderChats() {
   // has to know: two or three of them cannot each keep the width a reader
   // dragged for one, or the conversation they are all about would be squeezed
   // out of its own screen. A phone draws one however many are being held.
-  const panels = keptRightPanels();
-  const columns = phoneLayout() ? 1 : panels.length;
-  const threadContextOpen = panels.some((panel) => panel.startsWith("thread:"));
+  const columns = phoneLayout() ? 1 : keptRightPanels().length;
 
   const rail = showsChannelRail();
 
-  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}${threadContextOpen ? " thread-context-open" : ""}${columns > 1 ? ` panels-${columns}` : ""}">
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}${columns > 1 ? ` panels-${columns}` : ""}">
     ${rail ? channelRail(repositoryId) : ""}
     ${chanSidebar(repositoryId)}
     ${

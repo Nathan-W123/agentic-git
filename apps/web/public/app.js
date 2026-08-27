@@ -2810,7 +2810,6 @@ const ATTACH_TARGETS = {
  */
 async function attachChannelImages(files, target = "channel") {
   const where = ATTACH_TARGETS[target] ?? ATTACH_TARGETS.channel;
-  const projectId = state.projectId;
   const repositoryId = activeChannelId();
   const dmUserId = target === "dm" ? state.activeDm : undefined;
   const images = files.filter((file) => file.type.startsWith("image/"));
@@ -2845,13 +2844,10 @@ async function attachChannelImages(files, target = "channel") {
   for (const file of images) {
     try {
       const id = await uploadAttachment(repositoryId, file);
-      // A DM upload belongs to the project and person whose panel started it.
-      // If the reader changes either before the bytes arrive, do not append an
-      // old workspace's reference to the new conversation's draft.
-      if (
-        target === "dm" &&
-        (state.projectId !== projectId || state.activeDm !== dmUserId)
-      ) {
+      // A DM upload belongs to the person whose panel started it. If the
+      // reader opens a different conversation before the bytes arrive, do
+      // not append the old reference to the new person's draft.
+      if (target === "dm" && state.activeDm !== dmUserId) {
         continue;
       }
       const alt = file.name.replace(/\.[^.]+$/u, "").slice(0, 60);
@@ -3972,12 +3968,12 @@ function applyTheme() {
     .getPropertyValue("--bg-chat")
     .trim();
   const ground = mix(
-    neutralGround || (light ? "#ddd7cb" : "#0e0e0d"),
+    neutralGround || (light ? "#ddd7cb" : "#121110"),
     accent,
     0.02,
   );
   const roomTint = mix(
-    neutralRoom || (light ? "#f1ede3" : "#171715"),
+    neutralRoom || (light ? "#f1ede3" : "#1a1817"),
     accent,
     0.02,
   );
@@ -4260,33 +4256,31 @@ const BARE = new Set(["code", "coordinator", "chats"]);
 /* --------------------------------------------------------- panel width ---- */
 
 const PANEL_WIDTH_KEY = "ag.panelWidth";
-const PANEL_DEFAULT = 440;
-const PANEL_MIN = 420;
+const PANEL_DEFAULT = 340;
+const PANEL_MIN = 280;
 /**
  * What the conversation keeps no matter how far the panel is pulled open.
  *
- * A readable conversation column. Context is useful only while the source
- * remains understandable beside it, so drawer resizing keeps this much room
- * for the transcript. Responsive layout folds the sidebar or overlays the
- * drawer before a narrow laptop can violate the same constraint.
+ * Nothing. Reserving a strip for the transcript meant the panel stopped short
+ * of the window while there was visibly room left, which reads as a bug rather
+ * than a guard rail — and somebody reading a long file wants the whole width,
+ * not most of it. The channel list stays put, so there is always a way back,
+ * and double-clicking the edge restores the default.
  */
-const MAIN_MIN = 760;
+const MAIN_MIN = 0;
 
 /**
  * How wide the side panel is allowed to get, right now.
  *
- * Measured rather than assumed, because both navigation columns may collapse
- * on a narrow window and the panel should use only the room they actually
- * leave behind.
+ * Measured rather than assumed, because the channel sidebar collapses on a
+ * narrow window and the panel should be allowed to claim the space that frees
+ * up rather than stay bounded by a number written for a wide one.
  */
 function panelMax() {
   const shell = $(".chats-shell");
   const sidebar = $(".chan-sidebar");
-  const rail = $(".channel-rail");
   const available =
-    (shell?.clientWidth ?? window.innerWidth) -
-    (sidebar?.offsetWidth ?? 0) -
-    (rail?.offsetWidth ?? 0);
+    (shell?.clientWidth ?? window.innerWidth) - (sidebar?.offsetWidth ?? 0);
   return Math.max(PANEL_MIN, available - MAIN_MIN);
 }
 
@@ -4362,28 +4356,6 @@ function openThreadPanel(messageId) {
     messageId,
   ];
   moveRightPanel(`thread:${messageId}`, "right");
-}
-
-/** Return keyboard and visual context to the message that opened a thread. */
-function focusThreadSource(messageId, { scroll = true } = {}) {
-  requestAnimationFrame(() => {
-    const source = document.getElementById(`cmsg-${messageId}`);
-    if (source === null) {
-      return;
-    }
-    if (scroll) {
-      source.scrollIntoView({
-        block: "center",
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? "auto"
-          : "smooth",
-      });
-    }
-    const target = source.querySelector("[data-act='channel-thread-open']");
-    if (target instanceof HTMLElement) {
-      target.focus({ preventScroll: true });
-    }
-  });
 }
 
 /**
@@ -5308,9 +5280,6 @@ function closeSidePanel() {
     return false;
   }
   putAwayRightPanel(showing);
-  if (showing.startsWith("thread:")) {
-    focusThreadSource(showing.slice("thread:".length));
-  }
   return true;
 }
 
@@ -8162,14 +8131,6 @@ document.addEventListener("click", (event) => {
       putAwayRightPanel(`thread:${value ?? state.activeChannelThread}`);
       state.threadReplyMessageId = undefined;
       render();
-      focusThreadSource(value ?? state.activeChannelThread ?? "");
-      return;
-    case "thread-return-source":
-      if (window.matchMedia("(max-width: 1340px)").matches) {
-        putAwayRightPanel(`thread:${value ?? state.activeChannelThread}`);
-        render();
-      }
-      focusThreadSource(value ?? state.activeChannelThread ?? "");
       return;
     // A plan joins the column the same way a thread does, at the right edge.
     case "plan-open":
