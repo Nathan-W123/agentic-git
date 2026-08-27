@@ -830,7 +830,7 @@ function channelStory(animate, inView) {
   // everything — typing, entrances, the waits between beats, the hold —
   // stretches by the same factor, so slowing down never changes the rhythm,
   // only the tempo.
-  const PACE = 0.64;
+  const PACE = 0.512;
   const slow = (ms) => ms / PACE;
   const shot = document.querySelector(".app-shot");
   if (shot === null) {
