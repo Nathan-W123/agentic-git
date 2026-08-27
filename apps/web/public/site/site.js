@@ -516,11 +516,10 @@ function wire() {
       /*
        * The card rows arrive with a spring — risen and slightly scaled, each
        * a beat behind its neighbour — because a row of surfaces landing has
-       * weight in a way a paragraph fading in should not. The orbit pills
-       * get the bounciest version; everything else keeps the quiet fade.
+       * weight in a way a paragraph fading in should not. Everything else
+       * keeps the quiet fade.
        */
       const springy = group.matches(".moves, .cards");
-      const bouncy = group.matches(".orbit");
       pendingReveals.set(group, () => {
         {
           if (springy) {
@@ -534,18 +533,6 @@ function wire() {
                 ],
               },
               { delay: stagger(0.1), type: "spring", stiffness: 150, damping: 19 },
-            );
-          } else if (bouncy) {
-            animate(
-              items,
-              {
-                opacity: [0, 1],
-                transform: [
-                  "translateY(20px) scale(0.75)",
-                  "translateY(0px) scale(1)",
-                ],
-              },
-              { delay: stagger(0.06), type: "spring", stiffness: 260, damping: 15 },
             );
           } else {
             animate(

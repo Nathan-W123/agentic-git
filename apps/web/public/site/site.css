@@ -890,41 +890,6 @@ strong {
   line-height: 1.6;
 }
 
-/* ---------------------------------------------------------------- orbit -- */
-
-/*
- * The names that turn up in a channel. Pills rather than a logo wall: these
- * are participants in a conversation, and a row of trademarks would promise
- * an integrations directory this product does not have.
- */
-.orbit {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 10px;
-  margin-top: 64px;
-}
-
-.orbit-pill {
-  padding: 9px 18px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--surface-1) 70%, transparent);
-  backdrop-filter: blur(8px);
-  font-size: 14px;
-  color: var(--muted);
-  transition: transform 0.3s var(--ease-motion),
-    border-color 0.3s var(--ease-motion), color 0.3s var(--ease-motion);
-}
-
-@media (hover: hover) {
-  .orbit-pill:hover {
-    transform: translateY(-2px);
-    border-color: var(--border-strong);
-    color: var(--text);
-  }
-}
-
 /* ---------------------------------------------------------------- cards -- */
 
 .cards {
