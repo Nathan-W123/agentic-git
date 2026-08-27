@@ -2053,7 +2053,10 @@ export async function revokeInvitation(invitationId) {
 
 /** The link a recipient opens. Built here so one place decides its shape. */
 export function invitationLink(token) {
-  return `${window.location.origin}/#invite/${token}`;
+  // The deployment's root is the public website now; the invite router lives
+  // in the signed-in dashboard at /app. Fragments never reach the server, so
+  // leaving that path out strands the recipient on the marketing page.
+  return `${window.location.origin}/app#invite/${token}`;
 }
 
 export async function readInvitation(token) {

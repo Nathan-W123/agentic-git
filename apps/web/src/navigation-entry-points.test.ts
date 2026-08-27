@@ -363,6 +363,18 @@ test("a NATHAN-style invite link enters the invitation flow in a running session
   assert.match(request, /createInvitation\(recipientName, role, repositoryId\)/u);
   assert.match(request, /body: \{[\s\S]*recipientName,\s*role,/u);
 
+  // The deployment root is the marketing site. The generated link must name
+  // the dashboard path before its fragment, or the invite router never runs.
+  const link = slice(
+    data,
+    "export function invitationLink(token) {",
+    "\n}\n\nexport async function readInvitation(",
+  );
+  assert.match(
+    link,
+    /return `\$\{window\.location\.origin\}\/app#invite\/\$\{token\}`;/u,
+  );
+
   const linkDialog = slice(
     app,
     "async function showInviteLink(token, repositoryId) {",
