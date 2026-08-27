@@ -242,3 +242,95 @@ test("a first decode holds a reader who is not following", async () => {
   assert.match(chats, /scroller\.scrollTop !== held\.applied/u);
   assert.match(chats, /heldAnchors\.set\(\s*entry\.selector/u);
 });
+
+test("a pinned transcript eases one message and snaps everything else", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // Correctness first: this is only ever reached when the reader was already
+  // at the bottom, and it always ends at the bottom. The easing is a finish
+  // on top of the instant behaviour, never a replacement for it — so every
+  // uncertain case falls back to the assignment that has always been here.
+  const start = chats.indexOf("function settleFollowToBottom(list)");
+  assert.notEqual(start, -1, "the follow should be able to settle");
+  const body = chats.slice(start, chats.indexOf("\n}\n", start));
+  assert.match(body, /delta > 0 &&\s*delta <= FOLLOW_SETTLE_MAX_PX/u);
+  assert.match(body, /!motionIsUnwanted\(\)/u);
+  assert.match(body, /!followMediaUnsettled\(list\)/u);
+  // Never two at once: a second settle takes the first one's place rather
+  // than running beside it.
+  assert.match(body, /followSettle === undefined &&/u);
+  assert.match(body, /if \(!eased\) \{\n {4}cancelFollowSettle\(\);\n {4}list\.scrollTop = target;/u);
+  // A line of conversation, not a page of history.
+  const distance = /const FOLLOW_SETTLE_MAX_PX = (\d+);/u.exec(chats)?.[1];
+  assert.equal(Number(distance) <= 160, true, "a long distance is a jump, not an arrival");
+  const duration = /const FOLLOW_SETTLE_MS = (\d+);/u.exec(chats)?.[1];
+  assert.equal(Number(duration) >= 160 && Number(duration) <= 220, true);
+  // The bottom is re-read every frame, so a message arriving mid-settle does
+  // not leave it stopping short of the newest line.
+  assert.match(body, /const bottom = list\.scrollHeight - list\.clientHeight;/u);
+  assert.match(body, /progress === 1 \? bottom :/u);
+  // Blanket smooth scrolling is what this exists instead of.
+  const css = await publicFile("styles.css");
+  assert.doesNotMatch(css, /scroll-behavior: smooth/u);
+});
+
+test("touching the transcript stops it moving on its own", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // Every route a reader has into a scroller cancels the settle: wheel and
+  // trackpad, touch, the keyboard, and a drag on the scrollbar itself.
+  assert.match(chats, /"wheel",\n {4}\(event\) => \{\n {6}cancelFollowSettle\(\);/u);
+  assert.match(chats, /list\.addEventListener\("pointerdown", cancelFollowSettle, \{ passive: true \}\)/u);
+  assert.match(chats, /list\.addEventListener\("keydown", cancelFollowSettle\)/u);
+  assert.match(chats, /"touchstart",\n {4}\(event\) => \{\n {6}cancelFollowSettle\(\);/u);
+  // And an explicit jump outranks it, in all three directions: asking for the
+  // latest, asking for one older message by name, and asking for the line
+  // where the unread started.
+  assert.match(chats, /export function scrollChannel\(\) \{[\s\S]*?cancelFollowSettle\(\);/u);
+  assert.match(chats, /followingChannel = false;\n {6}\/\/ Asked for by name[\s\S]*?cancelFollowSettle\(\);/u);
+  // The unread line is above the bottom, so the pin is given up with it: a
+  // transcript that kept following would leave the line the reader pressed a
+  // button to reach on the very next message, and a settle already in flight
+  // would take them off it before they read a word.
+  const jump = chats.slice(
+    chats.indexOf("export function jumpToUnreadOrLatest()"),
+    chats.indexOf("\n}\n", chats.indexOf("export function jumpToUnreadOrLatest()")),
+  );
+  assert.match(jump, /cancelFollowSettle\(\);/u);
+  assert.match(jump, /followingChannel = false;/u);
+  assert.match(jump, /target\.scrollIntoView\(\{ block: "center" \}\);/u);
+  // Cancelling leaves the scroller where the reader took it over, rather than
+  // finishing the journey they interrupted.
+  const cancel = chats.slice(
+    chats.indexOf("function cancelFollowSettle()"),
+    chats.indexOf("\n}\n", chats.indexOf("function cancelFollowSettle()")),
+  );
+  assert.doesNotMatch(cancel, /scrollTop/u);
+});
+
+test("the settle's own frames are not mistaken for a reader scrolling", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // The scroll listener turns following off when the reader moves away from
+  // the bottom. Every eased frame is a scroll event moving away from the
+  // bottom, so without this a settle would switch off the following it exists
+  // to carry out, half way through itself.
+  assert.match(chats, /function followSettleOwns\(list\)/u);
+  assert.match(chats, /Math\.abs\(list\.scrollTop - followSettle\.expected\) <= 1\.5/u);
+  assert.match(
+    chats,
+    /list\.addEventListener\("scroll", \(\) => \{[\s\S]*?if \(followSettleOwns\(list\)\) \{\n {6}return;/u,
+  );
+});
+
+test("a picture landing late moves nothing and replays nothing", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // An unmeasured picture means the bottom is about to move, so the settle
+  // does not start: it would ease toward a target that grows underneath it
+  // and stop with the newest message half off the screen.
+  assert.match(chats, /function followMediaUnsettled\(list\)/u);
+  assert.match(chats, /\.some\(\(image\) => !image\.complete\)/u);
+  // And when the decode does land, the pin is taken straight to the bottom
+  // with nothing restarted — a picture resolving is not a message arriving.
+  assert.match(
+    chats,
+    /"load",\n {4}\(\) => \{\n {6}if \(followingChannel\) \{[\s\S]*?cancelFollowSettle\(\);\n {8}list\.scrollTop = list\.scrollHeight;/u,
+  );
+});

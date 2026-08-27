@@ -109,6 +109,7 @@ import {
   imeComposing,
   emptyState,
   miniEditable,
+  motionIsUnwanted,
   pillBar,
   relativeTime,
   searchBox,
@@ -2032,12 +2033,21 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
               ? `<span class="ctl-held" aria-hidden="true"></span>
           <span class="sr-only">Waiting for your go-ahead</span>`
               : ""
+          }${
+            // Beside the count rather than under it: a phase line that comes
+            // and goes with the run took a second row of the message with it,
+            // so every message below moved when a task started and again when
+            // it finished. `data-phase-slot` is what makes the change itself
+            // one legible swap — see `playPhaseSlots` in app.js — and the
+            // travelling highlight this used to carry is gone: the face at the
+            // head of the link is already sweeping, and one task gets one
+            // continuous signal.
+            activity === undefined
+              ? ""
+              : `<span class="ctl-activity phase-slot"
+            data-phase-slot="thread-link:${esc(entry.id)}">${esc(activity)}</span>`
           }
-        </span>${
-          activity === undefined
-            ? ""
-            : `<span class="ctl-activity">${esc(activity)}</span>`
-        }
+        </span>
       </span>
     </button>`;
 }
@@ -2771,6 +2781,40 @@ export function messageOverflowMenuItems(
   return items;
 }
 
+/**
+ * What a message is, to anything that has to tell an arrival from a redraw.
+ *
+ * The surface it is in, then the message itself — and one function, because
+ * two things read this and they must never disagree about it. The shell owns
+ * where a message is and the reveal owns whether its text is legible yet, so
+ * each decides separately that it has already played; but both draw the same
+ * line between "this arrived" and "this was already here", and a room whose
+ * halves drew it differently would throw a whole opened thread up the screen
+ * while its words sat still.
+ *
+ * The surface half is what makes a backlog quiet: a thread being opened is a
+ * group nobody was watching a moment ago, so nothing in it counts as having
+ * arrived. The message half is what makes an arrival happen once.
+ */
+function messageMotionKey(entry, repositoryId, isReply) {
+  const group = isReply
+    ? `thread:${entry.messageId ?? entry.id}`
+    : `chan:${repositoryId}`;
+  return `${group}|msg-${entry.id}`;
+}
+
+/**
+ * The identity a message settles into its place under, once.
+ *
+ * Read by `playMessageEntrance` in app.js, which is where the decision is
+ * made — the document is replaced on every keystroke and every event off the
+ * stream, so no stylesheet can tell a message that just arrived from one that
+ * has been on screen for an hour. A message with no key never moves.
+ */
+function entranceKey(entry, repositoryId, isReply) {
+  return ` data-entrance="${esc(messageMotionKey(entry, repositoryId, isReply))}"`;
+}
+
 function messageRow(
   entry,
   repositoryId,
@@ -2789,7 +2833,11 @@ function messageRow(
   // connect prompt), so a mention refusal or dispatch confirmation reads as
   // the same kind of thing there.
   if (entry.kind === "system") {
-    return `<div class="cmsg-row cmsg-system"><p class="msg system transcript-separator"><span>${esc(entry.content)}</span></p></div>`;
+    return `<div class="cmsg-row cmsg-system"${entranceKey(
+      entry,
+      repositoryId,
+      isReply,
+    )}><p class="msg system transcript-separator"><span>${esc(entry.content)}</span></p></div>`;
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
@@ -2869,6 +2917,12 @@ function messageRow(
     // rather than a colour of their own, because a second meaning-carrying
     // colour in a room that already has one is just noise.
     isAuditor(author.agent ?? {}) ? " cmsg-auditor" : ""
+  }${
+    // The one thing a run leaves behind that is not another remark: the
+    // result. It arrives with a little more weight than the replies around it
+    // — see `.cmsg-final.msg-entering` — and that weight is reserved for
+    // this, an approval and a handoff, so that it still means something.
+    entry.kind === "outcome" ? " cmsg-final" : ""
   }"${
     // The id is the jump target the pinned banner scrolls to. Gated on the
     // channel copy only: the thread panel renders the same root with
@@ -2878,7 +2932,7 @@ function messageRow(
         ? ""
         : ` id="thread-msg-${esc(entry.id)}"`
       : ` id="cmsg-${esc(entry.id)}"`
-  }>
+  }${entranceKey(entry, repositoryId, isReply)}>
     ${
       // Above the name, the way a reply's reference sits above the reply:
       // this line is an answer to a thread further up, and the reference is
@@ -2926,11 +2980,10 @@ function messageRow(
       }
       <div class="cmsg-text" data-reveal="${esc(
         // The key the render loop watches new words arrive under — see
-        // `playTextReveal` in app.js. Its first half is the surface, so a
-        // reply already read in the room does not arrive a second time when
-        // the thread holding it is opened; its second half is the message,
-        // which is what makes an arrival happen once and never again.
-        `${isReply ? `thread:${entry.messageId ?? entry.id}` : `chan:${repositoryId}`}|msg-${entry.id}`,
+        // `playTextReveal` in app.js. The same key the shell around it takes
+        // its place under, from the same function, because the two have to
+        // agree about which messages are new; see `messageMotionKey`.
+        messageMotionKey(entry, repositoryId, isReply),
       )}">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
@@ -3204,9 +3257,14 @@ function typingIndicator(repositoryId, threadId) {
   // Reuses `.chan-typing`/`.typing-dots`, the same dots `threadTyping`
   // already animates for an agent mid-task, so a person typing and an agent
   // working do not arrive as two different visual languages.
-  return `<div class="chan-typing" aria-live="polite">
+  //
+  // The dots are the whole of the motion here. The words beside them used to
+  // carry a travelling highlight as well, which meant one thing happening was
+  // saying so twice, in two different rhythms, on one line.
+  return `<div class="chan-typing" aria-live="polite"
+    data-typing-room="${esc(repositoryId)}">
     <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span class="typing-who text-sweep">${esc(who)}</span>
+    <span class="typing-who">${esc(who)}</span>
   </div>`;
 }
 
@@ -4677,7 +4735,8 @@ function threadListPanel(repositoryId) {
               finished
                 ? ""
                 : working
-                  ? `<span class="ti-activity text-sweep">${esc(status)}</span>`
+                  ? `<span class="ti-activity phase-slot"
+                      data-phase-slot="thread-item:${esc(entry.id)}">${esc(status)}</span>`
                   : waiting
                     ? `<span class="ti-held">Waiting for you</span>`
                     : `<span class="ti-pending">Pending</span>`
@@ -5839,6 +5898,7 @@ function dmPanel() {
                   compact ? " dm-compact" : ""
                 }${selected ? " dm-selected" : ""}"
                     id="dm-msg-${esc(message.id)}"
+                    data-entrance="dm:${esc(userId)}|msg-${esc(message.id)}"
                     data-dm-message="${esc(message.id)}">
                   ${directMessageReference(message, messages, name)}
                   <div class="dm-bubble cmsg-text"
@@ -6947,9 +7007,147 @@ const FOLLOW_SLACK_PX = 80;
  */
 let followHeight = 0;
 
+/**
+ * The most a pinned transcript will ever be eased over, and how long that
+ * takes.
+ *
+ * One message appended to a conversation somebody is already at the bottom of
+ * moves the text by about a line, and letting the last line travel that
+ * distance is what says the words came from below rather than that the whole
+ * page changed. Anything further than this is not a message arriving — it is
+ * a page of history loading, a picture resolving, or a burst of replies — and
+ * for those the honest answer is to be at the bottom already, because a
+ * reader watching several hundred pixels scroll past is a reader waiting.
+ *
+ * Bounded by `FOLLOW_SLACK_PX` and not by taste. A render landing mid-settle
+ * measures the distance to the bottom to decide whether this reader is still
+ * following, and a transcript easing over more than the slack would be read,
+ * for those few frames, as somebody who had scrolled up — so the pin would
+ * switch itself off in the middle of the animation that was carrying it out.
+ */
+const FOLLOW_SETTLE_MAX_PX = 80;
+const FOLLOW_SETTLE_MS = 180;
+
+/**
+ * The follow currently easing, if any: the surface, the frame it has booked,
+ * and where it last put the scroll.
+ *
+ * There is never more than one. A second arriving mid-settle takes the first
+ * one's place rather than running beside it — two animations moving one
+ * scroller between them is how a transcript ends up somewhere neither of them
+ * was aiming at.
+ *
+ * `expected` is how the scroll listener tells this function's writes from the
+ * reader's own. Without it every eased frame reads as "they scrolled", and a
+ * settle would turn following off half way through itself.
+ */
+let followSettle;
+
+/**
+ * Stops the current settle, wherever it had got to.
+ *
+ * Called by every direct input on the transcript — wheel, trackpad, touch,
+ * keyboard, the scrollbar — because direct input outranks anything cosmetic.
+ * Deliberately does not move the scroller: wherever the animation had reached
+ * when the reader took over is where the reader now is.
+ */
+function cancelFollowSettle() {
+  if (followSettle === undefined) {
+    return;
+  }
+  window.cancelAnimationFrame(followSettle.frame);
+  followSettle = undefined;
+}
+
+/** Whether this scroll position was put there by the settle rather than by a reader. */
+function followSettleOwns(list) {
+  return (
+    followSettle !== undefined &&
+    followSettle.list === list &&
+    Math.abs(list.scrollTop - followSettle.expected) <= 1.5
+  );
+}
+
+/**
+ * A picture in the transcript whose real height nobody has measured yet.
+ *
+ * Easing toward a bottom that is about to move is how a settle ends up short:
+ * the image lands mid-animation, the target grows, and the transcript stops
+ * with the newest message half off the screen. Snapping keeps the pin, and
+ * the `load` handler further down puts it back on the bottom again.
+ */
+function followMediaUnsettled(list) {
+  return [...list.querySelectorAll("img")].some((image) => !image.complete);
+}
+
+/**
+ * Takes a pinned transcript to the bottom — over a few frames when what
+ * arrived was small enough to be worth seeing arrive, and immediately in
+ * every other case.
+ *
+ * Correctness first: this is only ever reached when the reader was already at
+ * the bottom, it always ends at the bottom, and anything at all uncertain —
+ * a long distance, unmeasured media, reduced motion, a settle already running
+ * — takes the instant path that has always been here. The easing is a small
+ * finish on top of that behaviour, not a replacement for it.
+ */
+function settleFollowToBottom(list) {
+  const target = list.scrollHeight - list.clientHeight;
+  const from = list.scrollTop;
+  const delta = target - from;
+  const eased =
+    followSettle === undefined &&
+    delta > 0 &&
+    delta <= FOLLOW_SETTLE_MAX_PX &&
+    !motionIsUnwanted() &&
+    !followMediaUnsettled(list);
+  if (!eased) {
+    cancelFollowSettle();
+    list.scrollTop = target;
+    followHeight = list.clientHeight;
+    return false;
+  }
+  const started = Date.now();
+  const step = () => {
+    // Gone, replaced by a render, or taken over: either way this is no longer
+    // the thing moving the conversation.
+    if (!list.isConnected || !followingChannel || !followSettleOwns(list)) {
+      cancelFollowSettle();
+      return;
+    }
+    const progress = Math.min(1, (Date.now() - started) / FOLLOW_SETTLE_MS);
+    // The same shape as `--ease-motion`: most of the distance early, then a
+    // quiet tail. Written out rather than read from CSS because this moves a
+    // scroll offset, which no transition can own.
+    const travelled = 1 - Math.pow(1 - progress, 3);
+    // Re-read every frame. A message arriving mid-settle makes the bottom
+    // further away, and easing toward the distance measured at the start
+    // would stop short of it.
+    const bottom = list.scrollHeight - list.clientHeight;
+    const next = progress === 1 ? bottom : from + (bottom - from) * travelled;
+    list.scrollTop = next;
+    followSettle.expected = list.scrollTop;
+    if (progress === 1) {
+      followSettle = undefined;
+      followHeight = list.clientHeight;
+      return;
+    }
+    followSettle.frame = window.requestAnimationFrame(step);
+  };
+  followSettle = {
+    list,
+    expected: from,
+    frame: window.requestAnimationFrame(step),
+  };
+  return true;
+}
+
 export function scrollChannel() {
   const list = document.querySelector("#chan-messages");
   if (list !== null) {
+    // An explicit jump, so it happens: opening a room or pressing "latest" is
+    // an answer to a question, not a message arriving.
+    cancelFollowSettle();
     list.scrollTop = list.scrollHeight;
     followHeight = list.clientHeight;
     followingChannel = true;
@@ -7007,6 +7205,14 @@ export function jumpToUnreadOrLatest() {
     scrollChannel();
     return;
   }
+  // Asked for, so nothing cosmetic may still be moving this scroller when it
+  // lands. A settle carrying the transcript toward the bottom would otherwise
+  // take the reader straight back off the line they just pressed a button to
+  // reach — `scrollChannel` above cancels for the same reason.
+  cancelFollowSettle();
+  // And the pin goes with it: the destination is above the bottom, so a
+  // transcript that kept following would leave it again on the next message.
+  followingChannel = false;
   target.scrollIntoView({ block: "center" });
 }
 
@@ -7216,27 +7422,39 @@ export function restoreChannelScroll(saved) {
     state.scrollToMessage = undefined;
     if (target !== null) {
       followingChannel = false;
+      // Asked for by name: nothing cosmetic may still be moving this
+      // scroller when it lands.
+      cancelFollowSettle();
       target.scrollIntoView({ block: "center" });
       return;
     }
     toast("That message is older than the loaded history", "error");
   }
   if (followingChannel) {
-    list.scrollTop = list.scrollHeight;
+    // One line of new conversation is eased over; everything else is the
+    // bottom, immediately, exactly as it always was. See
+    // `settleFollowToBottom` — it answers whether it took the slow path.
+    const easing = settleFollowToBottom(list);
     // The pin above measured a transcript that may still be settling: a
     // picture nobody has measured yet holds the stylesheet's guessed box
     // until its bytes arrive. Settling on the next frame catches the text
     // that laid itself out late; the `load` handler below catches the
     // pictures whose real shape turns out not to be the guess.
-    requestAnimationFrame(() => {
-      const settled = document.querySelector("#chan-messages");
-      // A second render can replace the node before this callback runs. Never
-      // let an old render reach forward and move the new transcript.
-      if (settled === list && followingChannel) {
-        settled.scrollTop = settled.scrollHeight;
-        followHeight = settled.clientHeight;
-      }
-    });
+    //
+    // Not while easing: that path re-reads the bottom on every frame and
+    // finishes on it, and a second write into the middle of it would be a
+    // jump out of an animation the reader is watching.
+    if (!easing) {
+      requestAnimationFrame(() => {
+        const settled = document.querySelector("#chan-messages");
+        // A second render can replace the node before this callback runs.
+        // Never let an old render reach forward and move the new transcript.
+        if (settled === list && followingChannel && followSettle === undefined) {
+          settled.scrollTop = settled.scrollHeight;
+          followHeight = settled.clientHeight;
+        }
+      });
+    }
   }
   paintJumpToLatest();
   if (list.dataset.followBound === "1") {
@@ -7247,19 +7465,29 @@ export function restoreChannelScroll(saved) {
   // a phone. Record the reader's intent before that event: the height-change
   // branch below may keep following through a keyboard/address-bar resize,
   // but it must not turn an upward wheel or drag into a jump to the bottom.
+  // Any wheel or trackpad movement stops the settle on the spot, in either
+  // direction — a reader nudging the conversation owns it from that moment,
+  // and an animation that carries on underneath the gesture is the transcript
+  // arguing with them. Only an upward one also stops following, which is the
+  // long-standing rule and a different question.
   list.addEventListener(
     "wheel",
     (event) => {
+      cancelFollowSettle();
       if (event.deltaY < 0) {
         followingChannel = false;
       }
     },
     { passive: true },
   );
+  // The scrollbar and a keyboard reach the same scroller by other routes.
+  list.addEventListener("pointerdown", cancelFollowSettle, { passive: true });
+  list.addEventListener("keydown", cancelFollowSettle);
   let touchStartY;
   list.addEventListener(
     "touchstart",
     (event) => {
+      cancelFollowSettle();
       touchStartY = event.touches[0]?.clientY;
     },
     { passive: true },
@@ -7284,6 +7512,11 @@ export function restoreChannelScroll(saved) {
     "load",
     () => {
       if (followingChannel) {
+        // The bottom moved after the fact. Straight to it, and without
+        // restarting anything: a picture resolving is not an arrival, and a
+        // reader who has already watched the message come in must not watch
+        // it come in again because its attachment was slow.
+        cancelFollowSettle();
         list.scrollTop = list.scrollHeight;
         followHeight = list.clientHeight;
       }
@@ -7291,6 +7524,12 @@ export function restoreChannelScroll(saved) {
     true,
   );
   list.addEventListener("scroll", () => {
+    // This function's own frames. Reading them as the reader moving is what
+    // would turn following off in the middle of a settle whose whole purpose
+    // is to follow.
+    if (followSettleOwns(list)) {
+      return;
+    }
     const height = list.clientHeight;
     // Not the reader: the scroller changed size under them and the browser
     // adjusted. Following is theirs to turn off by scrolling away, and a

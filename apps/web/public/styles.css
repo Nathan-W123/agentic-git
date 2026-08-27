@@ -124,17 +124,38 @@
      moves. A symmetric ease over the same duration reads as slower, because
      it saves half the travel for the second half of the time.
 
-     Only the rules that arrived with these tokens read them. The durations
-     written inline elsewhere in this file are the same vocabulary reached at
-     by hand, and rewriting them to point here would be a large diff that
-     changes nothing on screen. */
+     Every surface the conversation is made of reads them: the transcript,
+     the thread panel, live status, the controls beside them. The durations
+     still written inline are the app's other screens reaching at the same
+     vocabulary by hand, and rewriting those would be a large diff that
+     changes nothing on screen — but nothing in chat may hold a second number
+     for a role that has one here, and nothing may hold a second easing
+     curve. There is one curve. */
   --ease-motion: cubic-bezier(0.32, 0.72, 0, 1);
+  /* A press is answered, not animated: the finger is still on the way down
+     when this is over, which is the only thing that makes it read as the
+     control responding rather than as the control moving. */
+  --motion-press: 0.09s;
   /* A popup is anchored to the click that opened it and has nowhere to
-     travel; it only has to not blink into existence. */
+     travel; it only has to not blink into existence. Also the length of a
+     hover, a colour change and a status phase swapping for the next one. */
   --motion-pop: 0.14s;
+  /* Something arriving in the conversation — a message settling into its
+     place, a word coming in. Long enough to be seen as an arrival and short
+     enough that the reader is never waiting on words already on screen. */
+  --motion-content: 0.22s;
   /* A panel crosses real distance, so it gets long enough to be seen doing
-     it — still short enough that nobody opening one waits for it. */
-  --motion-panel: 0.2s;
+     it — still short enough that nobody opening one waits for it. The
+     conversation beside it gives up its width over the same number, because
+     one surface opening and its neighbour making room are one event. */
+  --motion-panel: 0.26s;
+  /* And leaves faster than it arrived. A surface on its way out is already
+     answered — the reader asked for it to go — so the exit only has to be
+     legible, not admired. */
+  --motion-panel-out: 0.19s;
+  /* The rare one: a conflict, an approval, a handoff, the artifact at the end
+     of a run. Reserved so it still means something when it is used. */
+  --motion-emphasis: 0.3s;
   --motion-scrim: 0.18s;
 
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -495,7 +516,32 @@ svg.ui-icon {
   font-weight: 500;
   color: var(--text);
   white-space: nowrap;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease,
+    color var(--motion-pop) ease,
+    transform var(--motion-press) var(--ease-motion);
+}
+
+/* Answered under the finger, and by almost nothing.
+ *
+ * A button is a standalone target with a rim of its own, so a press it can be
+ * seen giving to reads as the control responding. It is deliberately the only
+ * thing in the conversation that does: a message row, a channel in the list,
+ * a thread tab and the composer are all surfaces you press *through* to reach
+ * something, and a surface that shrinks under the finger reads as the surface
+ * being the thing that happened. Small enough that it is felt rather than
+ * watched, and over before the finger is back up. */
+.btn:active:not(:disabled),
+.send-btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn:active:not(:disabled),
+  .send-btn:active:not(:disabled) {
+    transform: none;
+  }
 }
 
 .btn:hover:not(:disabled) {
@@ -644,8 +690,8 @@ svg.ui-icon {
   border-bottom: 1px solid var(--border-soft);
   overflow: hidden;
   transition:
-    gap 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
-    padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+    gap var(--motion-content) var(--ease-motion),
+    padding var(--motion-content) var(--ease-motion);
 }
 
 /* The picture control that stands in for the rail's own when there is no
@@ -1075,8 +1121,10 @@ svg.ui-icon {
 }
 
 /* The unfilled mark reads as a run still going rather than as a frozen
-   remainder, so it carries the same travelling highlight the live status copy
-   does — see `.text-sweep`, same gradient shape and same clock. A band of the
+   remainder, so it carries a travelling highlight — and it is the only thing
+   about a running task that carries one. The status line beside it names the
+   phase and stays still; this is the signal that the phase is still being
+   worked on. A band of the
    dark copy is held back as it passes, which is what makes the glimmer a wave
    across the unbrightened part of the logo rather than across the bright fill.
    Masking the base mark rather than tinting it keeps the dim sector in the
@@ -1295,13 +1343,19 @@ svg.ui-icon {
   background-position: 100% 0;
   background-size: 250% 100%;
   animation: thread-activity-sweep 2.4s ease-in-out infinite;
-  transition: width 0.4s ease;
+  transition: width var(--motion-content) var(--ease-motion);
 }
 
+/* A step forward is an event, and for the length of it the event owns the
+   bar: the travelling highlight says "still running", which is not the thing
+   being said while the fill is moving, and the transition above is a second
+   claim on the same width the keyframes are already animating. Two owners of
+   one property is how a bar ends up somewhere neither of them meant. The
+   sweep comes back on the next render, which is the next thing that happens
+   anyway. */
 .bar > i.bar-progress-fill {
-  animation:
-    bar-progress-fill 0.65s cubic-bezier(0.22, 1, 0.36, 1) both,
-    thread-activity-sweep 2.4s ease-in-out infinite;
+  animation: bar-progress-fill var(--motion-emphasis) var(--ease-motion) both;
+  transition: none;
 }
 
 @keyframes bar-progress-fill {
@@ -1540,7 +1594,13 @@ svg.ui-icon {
     var(--bg-card) 75%
   );
   background-size: 400% 100%;
-  animation: shimmer 1.4s ease infinite;
+  /* The same 2.4s ease-in-out every other continuous signal in the app runs
+     at. A loading screen is a dozen of these at once, and at the pace this
+     used to travel it was the busiest thing the app ever showed — faster
+     while nothing was happening than a running agent is while something is.
+     Sharing the clock is what makes a screen full of them read as one surface
+     waiting rather than as a dozen separate things flickering. */
+  animation: shimmer 2.4s ease-in-out infinite;
   border-radius: var(--radius);
 }
 
@@ -3078,6 +3138,9 @@ svg.ui-icon {
   background: transparent;
   color: var(--salmon);
   flex: none;
+  /* The one control in the composer that answers a press — see `.btn:active`.
+     The bar around it is a surface being typed into and stays put. */
+  transition: transform var(--motion-press) var(--ease-motion);
 }
 
 .send-btn:hover:not(:disabled) {
@@ -3177,7 +3240,7 @@ svg.ui-icon {
   padding: 16px;
   display: grid;
   gap: 14px;
-  animation: pop-in 0.14s ease;
+  animation: pop-in var(--motion-pop) var(--ease-motion);
 }
 
 @keyframes pop-in {
@@ -3198,7 +3261,7 @@ svg.ui-icon {
 }
 
 .pop-layer.pop-closing .popover {
-  animation: pop-out var(--motion-pop) ease forwards;
+  animation: pop-out var(--motion-panel-out) var(--ease-motion) forwards;
 }
 
 .pop-layer.pop-closing .pop-scrim {
@@ -4969,7 +5032,7 @@ button.chip.lg:hover {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-xl);
   overflow-x: hidden;
-  transition: width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: width var(--motion-content) var(--ease-motion);
   /* The quiet edge matches the reference's nested panes and remains subtle
      because the neighbouring surfaces already provide most of the separation.
      Off-canvas on a phone the drawer also carries `--shadow-pop`, where the
@@ -5088,10 +5151,10 @@ button.chip.lg:hover {
   visibility: visible;
   transform: translateY(0);
   transition:
-    max-height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
-    padding 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
-    opacity 0.16s ease,
-    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    max-height var(--motion-content) var(--ease-motion),
+    padding var(--motion-content) var(--ease-motion),
+    opacity var(--motion-pop) ease,
+    transform var(--motion-content) var(--ease-motion),
     visibility 0s linear;
 }
 
@@ -5116,7 +5179,7 @@ button.chip.lg:hover {
   height: 12px;
   flex: none;
   color: var(--text-3);
-  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: transform var(--motion-content) var(--ease-motion);
 }
 
 .chan-sec-toggle:hover svg {
@@ -5427,9 +5490,9 @@ button.chip.lg:hover {
   visibility: visible;
   transform: translateY(0);
   transition:
-    grid-template-rows 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
-    opacity 0.16s ease,
-    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    grid-template-rows var(--motion-content) var(--ease-motion),
+    opacity var(--motion-pop) ease,
+    transform var(--motion-content) var(--ease-motion),
     visibility 0s linear;
 }
 
@@ -6245,9 +6308,10 @@ button.chip.lg:hover {
   /* And the face the path turns into. Every branch ends beside a 20px replier
      face, and the turn, its round cap and the foot of the final stem are all
      measured from that face's centre line rather than from the summary's line
-     box: the summary grows a second line whenever an agent is working, and a
-     line box that changes height moved the stroke off the picture it points
-     at. The face is the one part of the link whose size never changes, so it
+     box: the summary used to grow a second line whenever an agent was working
+     — it no longer does, since the phase reads on the same line as the count
+     — and a line box that changes height moved the stroke off the picture it
+     points at. The face is the one part of the link whose size never changes, so it
      is what the connector is aimed at. */
   --cmsg-face: 20px;
   /* And the colour of that line, flattened. The connector is one stroke drawn
@@ -7345,9 +7409,17 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   min-width: 0;
 }
 
-/* A narrow highlight travels through the letters while the task is live. The
-   base and highlight both come from the theme, so the sweep remains legible
-   on light and dark chat surfaces and with a custom accent. */
+/* What the run is doing, on the summary's own line rather than under it.
+   Still: the face beside it is already sweeping, and one task carries one
+   continuous signal — a phrase that travels beside a mark that travels is two
+   things asking to be watched about one piece of work. This one changes when
+   the phase changes, which is the whole of what it has to say, and the swap
+   is `.phase-slot` below.
+
+   On the line rather than under it because the line is what stops the row
+   moving: this appears when a run starts and goes when it ends, and as a
+   second row that was a message shifting every message below it twice per
+   task. */
 .cmsg-thread-link .ctl-activity {
   max-width: min(220px, 45vw);
   overflow: hidden;
@@ -7357,31 +7429,11 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-3);
-  background: linear-gradient(
-    100deg,
-    var(--text-4) 0 38%,
-    var(--text) 48%,
-    var(--text-4) 58% 100%
-  );
-  background-position: 100% 0;
-  background-size: 250% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: thread-activity-sweep 2.4s ease-in-out infinite;
 }
 
 @keyframes thread-activity-sweep {
   to {
     background-position: -150% 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cmsg-thread-link .ctl-activity {
-    animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
   }
 }
 
@@ -7399,7 +7451,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
    anything was wrapped. */
 .text-reveal-word {
   display: inline-block;
-  animation: text-reveal-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation: text-reveal-in var(--motion-content) var(--ease-motion) both;
   /* Set per word by the render loop, and negative for a word part-way
      through: a redraw lands in the middle of most arrivals, and a negative
      delay is what carries the animation on from where it was rather than
@@ -7412,7 +7464,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
    its own on purpose: `.cmsg-image` is the block that reserves the picture's
    box, and overriding that here would move the message as it came in. */
 .text-reveal-media {
-  animation: text-reveal-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation: text-reveal-in var(--motion-content) var(--ease-motion) both;
   animation-delay: var(--reveal-delay, 0ms);
 }
 
@@ -7427,22 +7479,74 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   }
 }
 
-/* Live status copy — who is thinking, what a run is doing — reads as ongoing
-   rather than as having arrived, so it keeps the same travelling highlight the
-   thread summary's activity line uses instead of the one-off reveal. */
-.text-sweep {
-  background: linear-gradient(
-    100deg,
-    var(--text-4) 0 38%,
-    var(--text) 48%,
-    var(--text-4) 58% 100%
-  );
-  background-position: 100% 0;
-  background-size: 250% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: thread-activity-sweep 2.4s ease-in-out infinite;
+/* A message settling into the room.
+ *
+ * Position only, and deliberately: the words inside are already coming in on
+ * their own opacity above, and a parent fading while every word fades inside
+ * it is the same message arriving twice. The shell owns where the message is,
+ * the reveal owns whether its text is legible yet, and neither reaches into
+ * the other's property.
+ *
+ * Driven from `playMessageEntrance` in app.js for the reason every other
+ * one-time effect here is: the document is replaced on every keystroke and
+ * every event off the stream, so the stylesheet cannot tell a message that
+ * just arrived from one that has been on screen for an hour. The delay is set
+ * per message and negative for one part-way through, so a redraw mid-arrival
+ * carries on instead of starting again.
+ */
+.msg-entering {
+  animation: message-enter var(--motion-content) var(--ease-motion);
+  animation-delay: var(--entrance-delay, 0ms);
+}
+
+@keyframes message-enter {
+  from {
+    transform: translateY(6px);
+  }
+}
+
+/* The rare one, and the reason `--motion-emphasis` exists: what a run leaves
+   behind when it is over. A little further, a little longer, and settling out
+   of a fraction of scale — the difference between something being said and
+   something being concluded.
+ *
+ * Transform only, like every other shell here. The spec this was drawn from
+ * asks for opacity as well, and it does not get it: the words inside are
+ * already arriving on their own opacity, and one thing fading inside another
+ * thing fading is the double arrival every rule on this surface exists to
+ * prevent. */
+.cmsg-final.msg-entering {
+  animation: message-enter-final var(--motion-emphasis) var(--ease-motion);
+  animation-delay: var(--entrance-delay, 0ms);
+}
+
+@keyframes message-enter-final {
+  from {
+    transform: translateY(5px) scale(0.98);
+  }
+}
+
+/* A live status line changing to the next phase — see `playPhaseSlots`.
+ *
+ * The slot is one line whether or not anything is in it, so a run starting or
+ * ending never moves the row it is on. Only a real change plays, and several
+ * arriving together are coalesced into the latest, so a run that reports four
+ * phases in one tick swaps once rather than flickering through three states
+ * nobody could read. */
+.phase-slot {
+  display: block;
+  min-height: 1.3em;
+}
+
+.phase-changing {
+  animation: phase-swap var(--motion-pop) var(--ease-motion);
+}
+
+@keyframes phase-swap {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -7454,10 +7558,17 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
     animation: none;
   }
 
-  .text-sweep {
+  /* Resolved rather than turned off, in both cases. These have no fill mode,
+     so a message that is not animating is already where it belongs and a
+     phase that is not animating is already the current one — the arrival is
+     the whole of what is being removed here, not the content. */
+  .msg-entering,
+  .cmsg-final.msg-entering {
     animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
+  }
+
+  .phase-changing {
+    animation: none;
   }
 }
 
@@ -9191,6 +9302,29 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
    all it can still do. */
 .thread-panel.panel-entering {
   animation: panel-in var(--motion-panel) var(--ease-motion);
+  /* Its width is what the conversation beside it gives up, so growing into
+     the column *is* the reflow — one event with two halves rather than a
+     panel sliding over a transcript that jumped aside a frame earlier. The
+     floor and the overflow are only for the length of that growth: the
+     contents are laid out for the full width from the first frame and would
+     otherwise hang over the edge while the panel caught up. */
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The header and the body, a beat behind the surface carrying them.
+ *
+ * Two children, not every child: a panel whose every button, row and label
+ * arrives on its own is a surface being assembled in front of the reader
+ * rather than one being opened. These two are what the panel *is*, so they
+ * come in together, once, and everything inside them belongs to them.
+ *
+ * The offset is small on purpose — enough that the panel reads as arriving
+ * before its contents do, and not enough to be waited on. */
+.thread-panel.panel-entering > .thread-head,
+.thread-panel.panel-entering > .thread-body {
+  animation: panel-content-in var(--motion-content) var(--ease-motion) 40ms
+    backwards;
 }
 
 /* A tab joining a column that already has one in it opens the room for
@@ -9205,14 +9339,10 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .chats-shell.panels-2 .thread-panel.panel-entering,
 .chats-shell.panels-3 .thread-panel.panel-entering {
   animation: panel-join var(--motion-panel) var(--ease-motion);
-  /* Only for the length of the growth: its contents are laid out for the
-     full width from the first frame, and without this they hang out over the
-     tab beside it while the panel catches up. */
-  overflow: hidden;
 }
 
 .thread-panel.panel-leaving {
-  animation: panel-out var(--motion-panel) var(--ease-motion) forwards;
+  animation: panel-out var(--motion-panel-out) var(--ease-motion) forwards;
   pointer-events: none;
 }
 
@@ -9242,7 +9372,15 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 @keyframes panel-in {
   from {
     opacity: 0;
+    width: 0;
     transform: translateX(16px);
+  }
+}
+
+@keyframes panel-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
   }
 }
 
@@ -9264,7 +9402,9 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 @media (prefers-reduced-motion: reduce) {
   .thread-panel.panel-entering,
   .chats-shell.panels-2 .thread-panel.panel-entering,
-  .chats-shell.panels-3 .thread-panel.panel-entering {
+  .chats-shell.panels-3 .thread-panel.panel-entering,
+  .thread-panel.panel-entering > .thread-head,
+  .thread-panel.panel-entering > .thread-body {
     animation: none;
   }
 
@@ -9317,6 +9457,21 @@ body.resizing-panel .panel-grip::after {
 body.resizing-panel {
   cursor: col-resize;
   user-select: none;
+}
+
+/* And the pointer owns the width, too.
+ *
+ * A drag is direct manipulation: the edge belongs under the finger, at the
+ * pixel the finger is at. Anything easing toward the dragged width arrives
+ * late by the length of its own duration, which reads as the panel being
+ * pulled on elastic — and a render arriving mid-drag must not restart an
+ * opening animation over the top of it either. Restored the moment the
+ * pointer is released, because the class goes with it. */
+body.resizing-panel .thread-panel,
+body.resizing-panel .chan-main,
+body.resizing-panel .chan-sidebar {
+  transition: none;
+  animation: none;
 }
 
 .thread-head {
@@ -10000,7 +10155,7 @@ body.resizing-panel {
   border-left: 3px solid var(--border-strong);
   border-radius: var(--radius);
   font-size: 12.5px;
-  animation: toast-in 0.18s ease;
+  animation: toast-in var(--motion-scrim) var(--ease-motion);
   max-width: 340px;
 }
 
@@ -10959,7 +11114,7 @@ dialog.modal[open]::backdrop {
     width: 250px;
     z-index: 78;
     border-right: 1px solid var(--border);
-    animation: tree-out var(--motion-panel) var(--ease-motion) forwards;
+    animation: tree-out var(--motion-panel-out) var(--ease-motion) forwards;
     pointer-events: none;
   }
 
@@ -11116,9 +11271,12 @@ dialog.modal[open]::backdrop {
     transform: translateX(-100%);
     /* Most of the distance covered early, then a long quiet tail — the curve
        a drawer thrown by a hand would follow. A symmetric `ease` over the
-       same 0.28s reads as slower, because it saves half the travel for the
-       second half of the time and the panel appears to hesitate. */
-    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+       same time reads as slower, because it saves half the travel for the
+       second half of the time and the panel appears to hesitate. The curve is
+       `--ease-motion`, written out nowhere: this is the drawer the token was
+       named after, and it crosses the screen, so it takes the panel duration
+       the thread panel beside it takes. */
+    transition: transform var(--motion-panel) var(--ease-motion);
     border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
     box-shadow: var(--shadow-pop);
     /* Declared here rather than added with `.chan-dragging`, even though it is
@@ -11162,7 +11320,7 @@ dialog.modal[open]::backdrop {
     background: rgba(4, 5, 9, 0.5);
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    transition: opacity var(--motion-panel) var(--ease-motion);
   }
 
   .chats-shell.roster-open .chan-sidebar-scrim {
@@ -11309,6 +11467,25 @@ dialog.modal[open]::backdrop {
   /* Nothing to drag full-screen wider than the screen. */
   .thread-panel .panel-grip {
     display: none;
+  }
+
+  /* And nothing beside it to make room, either: there is no conversation left
+     on screen to give up its width, so the panel comes in over the room
+     rather than growing into it. The desktop entrance animates the width the
+     transcript is losing, which on a surface pinned to both edges of the
+     phone would be the screen narrowing to nothing and back. */
+  .thread-panel.panel-entering,
+  .chats-shell.panels-2 .thread-panel.panel-entering,
+  .chats-shell.panels-3 .thread-panel.panel-entering {
+    animation: panel-cover var(--motion-panel) var(--ease-motion);
+    overflow: hidden;
+  }
+
+  @keyframes panel-cover {
+    from {
+      opacity: 0;
+      transform: translateX(16px);
+    }
   }
 
   /* And the header's tools go back to the size every other button on a phone
@@ -11595,6 +11772,49 @@ dialog.modal[open]::backdrop {
   font-size: 0.86rem;
 }
 
+/* Arriving and leaving, driven from `playSurfaceMotion` in app.js — the room
+   is redrawn constantly, so only the render loop knows which of the two this
+   is. The line says one thing ("somebody is about to say something") and is
+   answered by the thing itself, so what matters is that it is seen going: it
+   fades while the message that replaced it settles into the room above.
+   Opacity only, and out of flow on the way out, because the transcript
+   underneath it may be pinned to its own bottom. */
+.chan-typing.typing-entering {
+  animation: typing-in var(--motion-pop) var(--ease-motion);
+}
+
+.chan-typing.typing-leaving {
+  position: absolute;
+  inset: auto 0 0 0;
+  pointer-events: none;
+  animation: typing-out var(--motion-pop) var(--ease-motion) forwards;
+}
+
+@keyframes typing-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes typing-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chan-typing.typing-entering {
+    animation: none;
+  }
+
+  /* As with the closing popover and the closing panel: the exit is the only
+     reason this node is still in the document, so it is taken to its last
+     frame rather than left standing. */
+  .chan-typing.typing-leaving {
+    display: none;
+  }
+}
+
 .typing-dots {
   display: inline-flex;
   align-items: center;
@@ -11607,7 +11827,7 @@ dialog.modal[open]::backdrop {
   border-radius: 50%;
   background: currentColor;
   opacity: 0.35;
-  animation: typing-bounce 1.2s infinite ease-in-out;
+  animation: typing-bounce 1.2s ease-in-out infinite;
 }
 
 .typing-dots i:nth-child(2) {
@@ -11860,7 +12080,11 @@ dialog.modal[open]::backdrop {
 .ch-preview-toggle.starting {
   color: var(--accent-bright);
   cursor: progress;
-  animation: pulse 1.6s ease-in-out infinite;
+  /* On the same clock as every other "still working" in the room — the
+     agent's mark, a running bar, a live thread's dot. A second cadence for
+     the same meaning is what makes two things happening read as two kinds of
+     urgency. */
+  animation: pulse 2.4s ease-in-out infinite;
 }
 
 /* Motion is the only thing carrying "still working" here, so what is left
@@ -12067,6 +12291,10 @@ dialog.modal[open]::backdrop {
    "moving" and "stopped until you answer" everywhere else here — `.cr-held`
    in the room list, `.thread-item-held` in the pullout. The words are still
    said, in `.sr-only` text, where there is no colour or motion to read. */
+/* Static, unlike the live marker it is shaped like. A thread waiting on a
+   person is not working — it is stopped until somebody answers — and a
+   stopped thing that keeps moving is the room telling the reader something is
+   happening when nothing is. The colour is the whole of the difference. */
 .cmsg-thread-link .ctl-held {
   flex: none;
   align-self: center;
@@ -12075,13 +12303,6 @@ dialog.modal[open]::backdrop {
   border-radius: 50%;
   background: var(--orange);
   box-shadow: 0 0 0 2px var(--orange-wash);
-  animation: status-breathe 2.4s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cmsg-thread-link .ctl-held {
-    animation: none;
-  }
 }
 
 /* ------------------------------------------------------ avatar and theme ---- */

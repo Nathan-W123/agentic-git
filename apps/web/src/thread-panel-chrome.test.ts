@@ -212,3 +212,105 @@ test("an open thread does not caption itself with a reply count", async () => {
   // of it are already indented to, so nothing here moves them apart.
   assert.doesNotMatch(composer, /margin/u);
 });
+
+test("a thread and the conversation beside it move as one thing", async () => {
+  const css = await publicFile("styles.css");
+
+  // The panel's width is what the transcript gives up, so growing into the
+  // column is the reflow rather than something that happens a frame before
+  // it. The first panel used only to translate, which meant the conversation
+  // jumped to its narrow width in one frame and the panel then slid over the
+  // gap that had already appeared.
+  const entering = rule(css, ".thread-panel.panel-entering");
+  assert.match(entering, /animation: panel-in var\(--motion-panel\) var\(--ease-motion\);/u);
+  assert.match(entering, /min-width: 0;/u);
+  assert.match(entering, /overflow: hidden;/u);
+  assert.match(
+    /@keyframes panel-in \{([\s\S]*?)\n\}\n/u.exec(css)?.[1] ?? "",
+    /width: 0;/u,
+  );
+
+  // The header and the body follow a beat later — two children, not every
+  // child. A panel whose every row and button arrives on its own clock is a
+  // surface being assembled in front of the reader.
+  const children = rule(
+    css,
+    ".thread-panel.panel-entering > .thread-head,\n.thread-panel.panel-entering > .thread-body",
+  );
+  assert.match(
+    children,
+    /animation: panel-content-in var\(--motion-content\) var\(--ease-motion\) 40ms\n {4}backwards;/u,
+  );
+  assert.match(
+    /@keyframes panel-content-in \{([\s\S]*?)\n\}\n/u.exec(css)?.[1] ?? "",
+    /transform: translateY\(4px\);/u,
+  );
+
+  // Out faster than in, and every exit in the app agrees about how fast.
+  assert.match(
+    rule(css, ".thread-panel.panel-leaving"),
+    /animation: panel-out var\(--motion-panel-out\) var\(--ease-motion\) forwards;/u,
+  );
+
+  // Reduced motion resolves all of it, including the children, and takes the
+  // exit to its last frame rather than turning it off — the exit is the only
+  // reason the outgoing node is still in the document.
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.thread-panel\.panel-entering,[\s\S]*?\.thread-panel\.panel-entering > \.thread-body \{\n {4}animation: none;/u,
+  );
+  assert.match(
+    css,
+    /\.thread-panel\.panel-leaving \{\n {4}display: none;/u,
+  );
+});
+
+test("dragging the panel edge is direct, and opening it is not replayed", async () => {
+  const css = await publicFile("styles.css");
+  const app = await publicFile("app.js");
+
+  // A drag is direct manipulation: the edge belongs at the pixel the pointer
+  // is at. Anything easing toward the dragged width arrives a whole duration
+  // late, which reads as the panel being pulled on elastic.
+  const dragging = rule(
+    css,
+    "body.resizing-panel .thread-panel,\nbody.resizing-panel .chan-main,\nbody.resizing-panel .chan-sidebar",
+  );
+  assert.match(dragging, /transition: none;/u);
+  assert.match(dragging, /animation: none;/u);
+  // Put on for the drag and taken off on release, by the same handler that
+  // owns the pointer.
+  assert.match(app, /document\.body\.classList\.add\("resizing-panel"\)/u);
+  assert.match(app, /document\.body\.classList\.remove\("resizing-panel"\)/u);
+
+  // The width itself lives on the document element, so a render arriving
+  // mid-drag cannot lose it — and the panel is keyed, so a render arriving
+  // mid-drag is not read as the panel opening again either.
+  assert.match(app, /document\.documentElement\.style\.setProperty\("--panel-w"/u);
+  assert.match(app, /key: \(node\) => node\.dataset\.panelKey \?\? "",/u);
+});
+
+test("closing a thread leaves the keyboard somewhere", async () => {
+  const app = await publicFile("app.js");
+  // The render replaces the button that was pressed, so focus fell to the
+  // document body: Tab started again from the top of the page and a screen
+  // reader was told nothing about where it now was. The source message is
+  // both the trigger and the honest answer to "where was I".
+  assert.match(app, /function focusThreadSource\(messageId\)/u);
+  assert.match(
+    app,
+    /\[data-act="channel-thread-open"\]\[data-value="\$\{CSS\.escape\(String\(messageId\)\)\}"\]/u,
+  );
+  assert.match(app, /source\.focus\(\{ preventScroll: true \}\)/u);
+  // And a fallback for a thread whose message has aged off the loaded page.
+  assert.match(
+    app,
+    /function returnFocusFromThread\(messageId\) \{[\s\S]*?channel-input'\]"\)\?\.focus\(\{ preventScroll: true \}\)/u,
+  );
+  // Both ways out use it: the close button and Escape.
+  assert.match(app, /putAwayRightPanel\(`thread:\$\{closing\}`\);[\s\S]*?returnFocusFromThread\(closing\)/u);
+  assert.match(
+    app,
+    /if \(sidePanelOpen\(\) && closeSidePanel\(\)\) \{\n {4}render\(\);\n {4}if \(state\.activeChannelThread === undefined\) \{\n {6}returnFocusFromThread\(closing\);/u,
+  );
+});

@@ -152,6 +152,7 @@ import {
   iconButton,
   imeComposing,
   emptyState,
+  motionIsUnwanted,
   closePopover,
   showMenu,
   showPopover,
@@ -5583,6 +5584,42 @@ function closeSidePanel() {
   return true;
 }
 
+/**
+ * Puts the keyboard back on the thing the thread was opened from.
+ *
+ * A render replaces the whole document, so the button somebody pressed to
+ * open or close a thread is a different element by the time the panel exists
+ * — and the old one took the focus with it. What is left is `document.body`,
+ * which answers to no key: Tab starts again from the top of the page and a
+ * screen reader is told nothing about where it now is. Restoring the source
+ * link is also the honest answer to "where was I": the thread was opened from
+ * that message, and closing it leaves the reader beside that message again.
+ *
+ * `preventScroll`, for the same reason `restoreFocus` uses it — the
+ * transcript has just been put back where the reader had it.
+ */
+function focusThreadSource(messageId) {
+  if (messageId === undefined || messageId === "") {
+    return false;
+  }
+  const source = document.querySelector(
+    `[data-act="channel-thread-open"][data-value="${CSS.escape(String(messageId))}"]`,
+  );
+  if (source === null) {
+    return false;
+  }
+  source.focus({ preventScroll: true });
+  return true;
+}
+
+/** Closing, where the message it was opened from may have scrolled out of the loaded page. */
+function returnFocusFromThread(messageId) {
+  if (focusThreadSource(messageId)) {
+    return;
+  }
+  $("[data-act='channel-input']")?.focus({ preventScroll: true });
+}
+
 function sidePanelOpen() {
   return (
     state.catchUp !== undefined ||
@@ -5745,8 +5782,15 @@ document.addEventListener("keydown", (event) => {
     setChanDrawer(false);
     return;
   }
+  // The thread the press is about, taken before it is closed: afterwards
+  // there is nothing left to name it, and Escape has to leave the reader
+  // somewhere as much as the close button does.
+  const closing = state.activeChannelThread;
   if (sidePanelOpen() && closeSidePanel()) {
     render();
+    if (state.activeChannelThread === undefined) {
+      returnFocusFromThread(closing);
+    }
   }
 });
 
@@ -6252,6 +6296,42 @@ const MOTION_SURFACES = [
     enter: "scrim-entering",
     leave: "scrim-leaving",
   },
+  // The room's live line: somebody typing, an agent thinking. It is the one
+  // thing in the transcript that is *replaced* by what it was announcing, so
+  // it is the one thing that needs to be seen going — dots that blink out in
+  // the same frame the answer appears read as the answer having interrupted
+  // something rather than as it having arrived.
+  //
+  // Only the channel's own copy. The thread panel has a second one at the
+  // foot of its body, and a surface here is re-appended to one parent by
+  // selector, so a thread's dots would leave from the bottom of the room. The
+  // exit is `position: absolute` against the transcript — which is already
+  // the containing block — so a row on its way out cannot change the height
+  // of a conversation somebody is pinned to the bottom of.
+  {
+    selector: "#chan-messages > .chan-typing",
+    parent: "#chan-messages",
+    enter: "typing-entering",
+    leave: "typing-leaving",
+    // Only back into the room it belonged to. Changing channels also ends a
+    // typing line, and appending that one to the transcript that has just
+    // opened would fade somebody else's dots at the foot of a conversation
+    // they were never in. Left unplaced it is simply dropped, which is what
+    // "it went away because you left" should look like.
+    place: (parent, closed) => {
+      if (parent.dataset.scrollKey !== `channel:${closed.dataset.typingRoom}`) {
+        return;
+      }
+      // Silent on the way out. The transcript is a live region that announces
+      // what is added to it, and this node has already been announced once —
+      // put back for its exit it would be read out a second time, over the
+      // answer that replaced it, which is the one thing anybody listening
+      // actually wants to hear.
+      closed.removeAttribute("aria-live");
+      closed.setAttribute("aria-hidden", "true");
+      parent.append(closed);
+    },
+  },
   // Settings is redrawn with the rest of the app. An animation on the bare
   // dialog would play from opacity 0 on every control that calls render —
   // theme, section, sounds — so the panel would vanish and settle again
@@ -6489,13 +6569,6 @@ let revealGroups = new Set();
 function revealGroupOf(key) {
   const cut = key.indexOf("|");
   return cut === -1 ? key : key.slice(0, cut);
-}
-
-function motionIsUnwanted() {
-  return (
-    window.matchMedia !== undefined &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
 }
 
 /**
@@ -6750,6 +6823,175 @@ function revealPingOf(node, block) {
   return null;
 }
 
+/* ---------------------------------------------------- message arrival ---- */
+
+/**
+ * How long a message may still be settling into its place.
+ *
+ * The longest of the shell entrances rather than the common one: an ordinary
+ * message takes `--motion-content`, and the artifact at the end of a run
+ * takes `--motion-emphasis`. This is only the window in which a redraw
+ * resumes an arrival instead of ignoring it, so the longer of the two is the
+ * safe number — a resume that overshoots lands on an animation that has
+ * already finished, which is where the message belongs anyway.
+ */
+const ENTRANCE_MS = 300;
+
+/** How many arrivals are remembered before the oldest are let go. */
+const ENTRANCE_MEMORY = 800;
+
+/**
+ * What this tab has already watched arrive, and when each one started.
+ *
+ * The twin of `revealSeen`, for the message rather than for the words in it,
+ * and separate from it on purpose: the shell owns where a message is and the
+ * reveal owns whether its text is legible yet, so each has to be able to
+ * decide on its own that it has already played. Sharing one record would mean
+ * a message whose words were skipped — a picture, a tombstone, a system line —
+ * could never be given a position either.
+ */
+const entranceSeen = new Map();
+
+/** The surfaces that were on screen a moment ago, by the group half of the key. */
+let entranceGroups = new Set();
+
+/**
+ * Moves a message that is genuinely new into its place, once.
+ *
+ * The same test the words go through, for the same reason: the document is
+ * replaced on every keystroke, every poll tick and every event off the
+ * stream, so "is this element new" is not a question CSS can answer. A key
+ * that was not in the map is new to the document; a key whose surface was not
+ * on screen last time is a backlog being opened rather than a message
+ * arriving, and a backlog is still.
+ *
+ * Position only. The words inside are already coming in on their own opacity,
+ * and the one thing this must never do is fade a parent while every word
+ * inside it fades too.
+ */
+function playMessageEntrance(root) {
+  const quiet = motionIsUnwanted();
+  const now = Date.now();
+  const groups = new Set();
+  for (const shell of root.querySelectorAll("[data-entrance]")) {
+    const key = shell.dataset.entrance ?? "";
+    if (key === "") {
+      continue;
+    }
+    const group = revealGroupOf(key);
+    groups.add(group);
+    const started = entranceSeen.get(key);
+    if (started === undefined) {
+      const arriving = !quiet && entranceGroups.has(group);
+      entranceSeen.set(key, arriving ? now : 0);
+      if (arriving) {
+        startEntrance(shell, 0);
+      }
+      continue;
+    }
+    // Zero means "was already here", which never animates again.
+    if (started === 0 || quiet) {
+      continue;
+    }
+    const elapsed = now - started;
+    if (elapsed < ENTRANCE_MS) {
+      startEntrance(shell, elapsed);
+    }
+  }
+  entranceGroups = groups;
+  forgetOldEntrances(groups);
+}
+
+/**
+ * A negative delay is what resumes an arrival a redraw landed in the middle
+ * of, exactly as it does for a word. The animation has no fill mode, so a
+ * message that is interrupted, or one whose animation never runs at all under
+ * reduced motion, is simply where it belongs — there is no state it can be
+ * left stuck in.
+ */
+function startEntrance(shell, elapsed) {
+  shell.style.setProperty("--entrance-delay", `${-Math.round(elapsed)}ms`);
+  shell.classList.add("msg-entering");
+}
+
+/** Keeps the map from growing for as long as the tab is open. See `forgetOldReveals`. */
+function forgetOldEntrances(groups) {
+  if (entranceSeen.size <= ENTRANCE_MEMORY) {
+    return;
+  }
+  for (const key of entranceSeen.keys()) {
+    if (!groups.has(revealGroupOf(key))) {
+      entranceSeen.delete(key);
+    }
+  }
+}
+
+/* ------------------------------------------------------- phase changes ---- */
+
+/**
+ * How close together two phase reports have to be to count as one.
+ *
+ * A run narrates in bursts — planned, claimed, working on a file, working on
+ * the next — and several can land in the same tick or a frame apart. Played
+ * one after another that is a status line flickering through states nobody
+ * could read, ending on the only one that mattered. Inside this window the
+ * latest is simply written into the slot without a second swap: the reader
+ * sees the current phase immediately, and sees it move once.
+ */
+const PHASE_COALESCE_MS = 280;
+
+/** How many slots are remembered before the oldest are let go. */
+const PHASE_MEMORY = 400;
+
+/** What each phase slot last said, and when it last changed. */
+const phaseSeen = new Map();
+
+/**
+ * Swaps a live status line for the next phase, once per real change.
+ *
+ * Nothing here delays or withholds data: the render has already written the
+ * current phase into the document, and this only decides whether the change
+ * is allowed to be *seen* moving. An unchanged phase — which is what almost
+ * every render carries — plays nothing at all, which is what keeps a
+ * background redraw silent.
+ */
+function playPhaseSlots(root) {
+  const quiet = motionIsUnwanted();
+  const now = Date.now();
+  const live = new Set();
+  for (const slot of root.querySelectorAll("[data-phase-slot]")) {
+    const key = slot.dataset.phaseSlot ?? "";
+    if (key === "") {
+      continue;
+    }
+    live.add(key);
+    const text = slot.textContent.trim();
+    const last = phaseSeen.get(key);
+    if (last === undefined) {
+      // First sight of this task's status line. It arrived with its row.
+      phaseSeen.set(key, { text, at: 0 });
+      continue;
+    }
+    if (last.text === text) {
+      continue;
+    }
+    // Coalesced: the newest text is on screen either way, and the swap that
+    // is already playing is the one the reader is watching.
+    const coalesce = last.at !== 0 && now - last.at < PHASE_COALESCE_MS;
+    phaseSeen.set(key, { text, at: coalesce ? last.at : now });
+    if (!quiet && !coalesce) {
+      animateOnce(slot, "phase-changing", false);
+    }
+  }
+  if (phaseSeen.size > PHASE_MEMORY) {
+    for (const key of phaseSeen.keys()) {
+      if (!live.has(key)) {
+        phaseSeen.delete(key);
+      }
+    }
+  }
+}
+
 export function render() {
   if (rendering) {
     renderAgain = true;
@@ -6938,7 +7180,18 @@ function renderNow() {
   // What the swap turned out to have *said*: the words that were not in the
   // room a moment ago come in one at a time, and everything already there
   // stays where it is. See `playTextReveal`.
+  //
+  // The shell first and the words second, because they are halves of one
+  // arrival: the message takes its place while its own text comes in, and a
+  // message the reveal has nothing to say about — a picture, a deleted line,
+  // a system notice — still arrives rather than appearing. Neither touches
+  // the other's property; see `playMessageEntrance`.
+  playMessageEntrance(root);
   playTextReveal(root);
+  // And what it turned out to have *changed*: a run reporting its next phase
+  // swaps one line in place, without reanimating the message or the face it
+  // belongs to. See `playPhaseSlots`.
+  playPhaseSlots(root);
 
   // Chats owns this now: the inline file and diff blocks in the transcript are
   // the only place code is read, so the channel has to load its own changeset
@@ -8413,6 +8666,11 @@ document.addEventListener("click", (event) => {
       // Chosen, so `openPromptedThread` will not choose over it.
       state.autoOpenedThread = undefined;
       render();
+      // The link stays where it was and keeps the keyboard: the panel is
+      // beside the conversation rather than over it, so nothing has been
+      // taken away from the reader to move focus out of. See
+      // `focusThreadSource` for what the render would otherwise cost.
+      focusThreadSource(value);
       return;
     case "thread-composer-focus":
       // The header's reply affordance belongs to the thread already on
@@ -8427,11 +8685,14 @@ document.addEventListener("click", (event) => {
       render();
       $("[data-act='channel-input']")?.focus();
       return;
-    case "channel-thread-close":
-      putAwayRightPanel(`thread:${value ?? state.activeChannelThread}`);
+    case "channel-thread-close": {
+      const closing = value ?? state.activeChannelThread;
+      putAwayRightPanel(`thread:${closing}`);
       state.threadReplyMessageId = undefined;
       render();
+      returnFocusFromThread(closing);
       return;
+    }
     // A plan joins the column the same way a thread does, at the right edge.
     case "plan-open":
       state.activePlan = value;
