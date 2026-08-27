@@ -115,6 +115,77 @@ for (const dir of roots) {
   }
 }
 
+/*
+ * Brace balance in every stylesheet served.
+ *
+ * The same argument as the modules above — nothing compiles or lints these —
+ * but the failure is quieter still. A stray `}` at the top level is not an
+ * error a browser reports: the parser treats it as the start of a bad rule,
+ * swallows everything up to and including the NEXT block, and carries on.
+ * One extra brace therefore deletes exactly one innocent rule, somewhere
+ * below where it was typed, with no warning anywhere.
+ *
+ * That is not hypothetical. An edit that removed a component left its closing
+ * brace behind, which ate `.belt-defs { position: absolute; width: 0 }` — the
+ * rule that folds the symbol defs out of the layout. The defs SVG fell back
+ * to its intrinsic 300x150, and a 198px hole opened in the middle of a
+ * section. Everything still "worked"; it just looked wrong, and nothing but
+ * measuring the page could say why.
+ *
+ * Comments are blanked line-for-line so the reported line number is the real
+ * one, and quoted strings are blanked so a brace inside `content:` cannot
+ * count.
+ */
+const cssFailures = [];
+let sheets = 0;
+for (const dir of roots) {
+  for (const entry of readdirSync(dir)) {
+    if (!entry.endsWith(".css")) {
+      continue;
+    }
+    const label = dir === publicDir ? entry : `${path.basename(dir)}/${entry}`;
+    const source = readFileSync(path.join(dir, entry), "utf8")
+      .replaceAll(/\/\*[\s\S]*?\*\//gu, (block) =>
+        "\n".repeat((block.match(/\n/gu) ?? []).length),
+      )
+      .replaceAll(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/gu, '""');
+    let depth = 0;
+    let line = 1;
+    const opened = [];
+    for (const character of source) {
+      if (character === "\n") {
+        line += 1;
+      } else if (character === "{") {
+        depth += 1;
+        opened.push(line);
+      } else if (character === "}") {
+        depth -= 1;
+        if (depth < 0) {
+          cssFailures.push(
+            `${label}:${String(line)}: a closing brace with nothing open — ` +
+              `this silently deletes the next rule`,
+          );
+          depth = 0;
+        } else {
+          opened.pop();
+        }
+      }
+    }
+    for (const at of opened) {
+      cssFailures.push(`${label}:${String(at)}: this block is never closed`);
+    }
+    sheets += 1;
+  }
+}
+
+if (cssFailures.length > 0) {
+  console.error(`Stylesheets that do not balance (${cssFailures.length}):`);
+  for (const failure of cssFailures) {
+    console.error(`  ${failure}`);
+  }
+  process.exit(1);
+}
+
 if (failures.length > 0) {
   console.error(`Browser modules that do not parse (${failures.length}):`);
   for (const failure of failures) {
@@ -134,4 +205,7 @@ if (commentBackticks.length > 0) {
   process.exit(1);
 }
 
-console.log(`public/*.js: ${checked} browser modules parse`);
+console.log(
+  `public/*.js: ${checked} browser modules parse; ` +
+    `${sheets} stylesheets balance`,
+);
