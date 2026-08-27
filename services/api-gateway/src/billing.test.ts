@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+// The rules below are the rules a deployment that takes payments follows, so
+// the switch is on for the file. The two cases that are about it being off
+// pass `false` explicitly, which is also what stops them depending on the
+// environment they happen to run in.
+process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+
 import type {
   OrganizationMembership,
   OrganizationRole,
@@ -11,6 +17,7 @@ import {
   TRIAL_DAYS,
   billableSeats,
   effectiveRole,
+  paymentsEnabled,
   roleIsBillable,
   subscriptionAllowsWork,
   trialEndsAtFrom,
@@ -296,4 +303,67 @@ test("a comped seat never reaches the invoice, at any role", () => {
   assert.equal(billableSeats([member("owner", true)]), 0);
   assert.equal(billableSeats([member("admin", true)]), 0);
   assert.equal(billableSeats([member("developer", true)]), 0);
+});
+
+/* ------------------------------------------- payments switched off ------ */
+
+test("the payment pathway is off unless a deployment says otherwise", () => {
+  // Default-off is the whole safety property: a deployment that has switched
+  // payments off and is read as having them on locks its own users out of
+  // their repositories over an invoice nobody sent.
+  assert.equal(paymentsEnabled({}), false);
+  assert.equal(paymentsEnabled({ KUMI_PAYMENTS_ENABLED: "" }), false);
+  assert.equal(paymentsEnabled({ KUMI_PAYMENTS_ENABLED: "0" }), false);
+  assert.equal(paymentsEnabled({ KUMI_PAYMENTS_ENABLED: "off" }), false);
+  for (const value of ["1", "true", "TRUE", "yes", "on", " 1 "]) {
+    assert.equal(
+      paymentsEnabled({ KUMI_PAYMENTS_ENABLED: value }),
+      true,
+      `${value} should switch payments on`,
+    );
+  }
+});
+
+test("nothing is gated where nothing is sold", () => {
+  // Every state that would otherwise stop work — no row at all, a cancelled
+  // subscription, a trial that ran out a month ago — allows it once payments
+  // are off. There is no checkout to send anybody to, so a refusal here would
+  // be a locked door with no key on the other side of it.
+  const spent = subscription({
+    status: "trialing",
+    trialEndsAt: "2026-01-01T00:00:00.000Z",
+  });
+  for (const state of [undefined, spent, subscription({ status: "canceled" })]) {
+    assert.equal(subscriptionAllowsWork(state, ORG_CREATED, NOW, false), true);
+    assert.equal(effectiveRole("owner", state, ORG_CREATED, NOW, false), "owner");
+    assert.equal(
+      effectiveRole("developer", state, ORG_CREATED, NOW, false),
+      "developer",
+    );
+  }
+  // And a viewer is still a viewer: this switch is about entitlement, not
+  // about handing everybody a role they were never given.
+  assert.equal(
+    effectiveRole("viewer", undefined, ORG_CREATED, NOW, false),
+    "viewer",
+  );
+});
+
+test("switching payments back on restores every rule unchanged", () => {
+  // The same three states, judged with the switch on. Asserted together with
+  // the case above so the pair reads as one fact: this is a switch, not a
+  // rewrite of what a subscription means.
+  assert.equal(subscriptionAllowsWork(undefined, ORG_CREATED, NOW, true), false);
+  assert.equal(
+    subscriptionAllowsWork(subscription({ status: "canceled" }), ORG_CREATED, NOW, true),
+    false,
+  );
+  assert.equal(
+    effectiveRole("owner", subscription({ status: "canceled" }), ORG_CREATED, NOW, true),
+    "viewer",
+  );
+  assert.equal(
+    effectiveRole("owner", subscription({ status: "active" }), ORG_CREATED, NOW, true),
+    "owner",
+  );
 });

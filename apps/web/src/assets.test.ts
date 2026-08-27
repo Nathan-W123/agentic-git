@@ -7164,9 +7164,13 @@ test("the marketing front page forwards legacy deep links to /app", async () => 
 
   const boot = await siteFile("site-boot.js");
   assert.match(boot, /window\.location\.replace\("\/app" \+ hash\)/u);
-  // Every screen name AUTH_HASHES routes (app.js), plus the billing and
-  // settings returns the server mails out and hands to Stripe. An allowlist,
-  // not "any hash": the page's own anchors must keep scrolling.
+  // Every screen the server or an old mail can send somebody to on this
+  // origin, plus the billing and settings returns. An allowlist, not "any
+  // hash": the page's own anchors must keep scrolling.
+  //
+  // `waitlist` is deliberately not here. It is new, so no link to `/#waitlist`
+  // exists anywhere to forward, and the site's own buttons name `/app#waitlist`
+  // outright rather than relying on this.
   for (const screen of [
     "signin",
     "register",
@@ -7221,6 +7225,35 @@ test("marketing motion is an enhancement behind the reduced-motion gate", async 
     assert.match(html, /<script src="\/vendor\/motion\/motion\.js"><\/script>/u);
     assert.match(html, /<script type="module" src="\/site\.js"><\/script>/u);
   }
+});
+
+test("the marketing site sends newcomers to the waitlist, not to a card", async () => {
+  // Payments are off, so every call to action on the site has to lead
+  // somewhere that works. A "Start free trial" button pointing at a sign-up
+  // route that answers 501 is the single worst thing this site could ship.
+  for (const page of ["index.html", "pricing.html"]) {
+    const html = await siteFile(page);
+    assert.equal(
+      html.includes("/app#signup"),
+      false,
+      `${page} must not link at the card path`,
+    );
+    assert.match(
+      html,
+      /href="\/app#waitlist"/u,
+      `${page} should offer the waitlist`,
+    );
+    assert.doesNotMatch(
+      html,
+      /Start (your )?free trial/u,
+      `${page} must not promise a trial`,
+    );
+  }
+  // The pricing page still says what a seat will cost, and says plainly that
+  // nobody is paying it yet — the number is what it will be, not a bill.
+  const pricing = await siteFile("pricing.html");
+  assert.match(pricing, /Payments are switched off/u);
+  assert.match(pricing, /Nobody is being charged\s*\n?\s*today/u);
 });
 
 test("the seat price is written exactly once, on the pricing page", async () => {

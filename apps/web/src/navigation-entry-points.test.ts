@@ -325,6 +325,27 @@ test("Advanced is a category in the settings dialog", async () => {
   );
 });
 
+test("the waitlist is where whoever runs the deployment finds it", async () => {
+  const app = await publicFile("app.js");
+
+  // Under Deployment, beside the other things only a system administrator
+  // sees, and above the health numbers: the top of that screen is a job —
+  // a queue somebody works down — and the rest of it is a readout.
+  const dialog = slice(app, "const SETTINGS_SECTIONS = [", "\n/**\n * The user's own GitHub");
+  assert.match(
+    dialog,
+    /case "deployment":\s*\n\s*return `\$\{waitlistCard\(\)\}\$\{deploymentCard\(\)\}`/u,
+  );
+  assert.match(dialog, /id: "deployment"[\s\S]{0,200}adminOnly: true/u);
+
+  // Letting somebody in and taking them off the list are both one press, and
+  // both go through the data layer rather than patching the row on screen.
+  assert.match(app, /data-act="waitlist-approve"/u);
+  assert.match(app, /data-act="waitlist-remove"/u);
+  assert.match(app, /void waitlistAction\("approve", value\)/u);
+  assert.match(app, /void waitlistAction\("remove", value\)/u);
+});
+
 test("a NATHAN-style invite link enters the invitation flow in a running session", async () => {
   const app = await publicFile("app.js");
   const data = await publicFile("data.js");

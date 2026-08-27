@@ -110,6 +110,10 @@ import {
   openBillingPortal,
   startCheckout,
   ensureBilling,
+  joinWaitlist,
+  loadWaitlist,
+  approveWaitlistEntry,
+  deleteWaitlistEntry,
   decideApproval,
   ensureDeployment,
   loadBilling,
@@ -382,6 +386,10 @@ function minutesValue(milliseconds) {
  */
 const AUTH_HASHES = new Map([
   ["signin", "login"],
+  // Where everybody goes while payments are off. It has its own address so
+  // the marketing site can link straight at it, and so somebody can be sent
+  // the form rather than "open the app and look for the link".
+  ["waitlist", "waitlist"],
   // `register` still maps, so an older bookmark opens the trial rather than
   // a blank screen — the free form it used to open is gone.
   ["register", "signup"],
@@ -632,6 +640,12 @@ function renderAuth() {
   if (authMode === "forgot" || authMode === "reset") {
     return renderPasswordReset();
   }
+  if (authMode === "waitlist" || (authMode === "signup" && !paymentsOn())) {
+    // `#signup` lands here too while payments are off: it is the address on
+    // every link this product has ever sent, and a card form nobody can
+    // complete is a worse answer than the thing that replaced it.
+    return renderWaitlist();
+  }
   if (authMode === "signup") {
     return renderSignup();
   }
@@ -760,11 +774,15 @@ function renderAuth() {
             ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
             : register
               ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
-              : // Points at the paid sign-up, which is the one that takes a
-                // card and starts the trial. `#register` still resolves, so a
-                // link somebody already has keeps working until the free path
-                // is retired in its own commit.
-                `New here? <a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
+              : paymentsOn()
+                ? // Points at the paid sign-up, which is the one that takes a
+                  // card and starts the trial. `#register` still resolves, so
+                  // a link somebody already has keeps working.
+                  `New here? <a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
+                : // Nobody is being charged and nobody is let in
+                  // automatically, so the only honest thing to offer a
+                  // newcomer is a place in the queue.
+                  `New here? <a class="link-muted" href="#waitlist" data-act="auth-mode" data-value="waitlist">Join the waitlist</a>.`
       }</p>
       ${
         bootstrap
@@ -784,6 +802,60 @@ function renderAuth() {
  * share the shell — and because the reset half has to say something useful
  * when the link has expired, which is the state people actually arrive in.
  */
+/**
+ * Whether this deployment is taking money at all.
+ *
+ * Read from health rather than kept as its own flag, so the screens can never
+ * disagree with what the server will actually allow — a card form the
+ * checkout route answers 501 to is worse than no form.
+ *
+ * Unknown reads as off: health has not answered yet when the signed-out shell
+ * first paints, and offering a waitlist to somebody who could have paid is a
+ * recoverable mistake in a way that offering a dead card form is not.
+ */
+function paymentsOn() {
+  return state.health?.billing?.payments === true;
+}
+
+/** Where everybody goes while nobody is being let in automatically. */
+function renderWaitlist() {
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandWordmark(120)}
+        <div>
+          <h1>Join the waitlist</h1>
+          <p>Kumi is invitation-only right now. Leave your address and we
+            will be in touch — there is nothing to pay.</p>
+        </div>
+      </div>
+      <form class="auth-card" data-act="waitlist">
+        <label class="field">
+          <span>Work email</span>
+          <input class="input" name="email" type="email"
+            autocomplete="email" required placeholder="you@company.com">
+        </label>
+        <label class="field">
+          <span>Your name <span class="field-optional">optional</span></span>
+          <input class="input" name="displayName" autocomplete="name">
+        </label>
+        <label class="field">
+          <span>What would you use it for?
+            <span class="field-optional">optional</span></span>
+          <input class="input" name="note"
+            placeholder="A sentence is plenty">
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Join the waitlist
+        </button>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
+      </form>
+      <p class="auth-foot">Already have an account? <a class="link-muted"
+        href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.</p>
+    </div>
+  </main>`;
+}
+
 /** Where a paid sign-up starts: an address, then Stripe takes the card. */
 function renderSignup() {
   return `<main class="auth-shell">
@@ -997,6 +1069,34 @@ async function loadWelcome() {
   window.clearTimeout(welcomePoll);
   if (welcomeState?.error === undefined && welcomeState?.paid !== true) {
     welcomePoll = window.setTimeout(() => void loadWelcome(), 2000);
+  }
+}
+
+/**
+ * Takes a place in the queue.
+ *
+ * The reply is deliberately the same whether the address was new, already
+ * waiting or already approved, so this says the same thing back: asked and
+ * heard. Anything more specific would make the form an oracle for which
+ * addresses this deployment knows.
+ */
+async function submitWaitlist(form) {
+  const data = new FormData(form);
+  const message = $("#auth-msg");
+  try {
+    await joinWaitlist({
+      email: String(data.get("email") ?? ""),
+      displayName: String(data.get("displayName") ?? "").trim(),
+      note: String(data.get("note") ?? "").trim(),
+      source: "app",
+    });
+    form.innerHTML = `<p class="auth-msg" role="status">You are on the list.
+      We will email you when there is a place — nothing has been charged and
+      there is nothing to pay.</p>`;
+  } catch (error) {
+    if (message !== null) {
+      message.textContent = error.message;
+    }
   }
 }
 
@@ -1839,7 +1939,7 @@ function settingsSectionMarkup(section) {
     case "billing":
       return billingCard();
     case "deployment":
-      return deploymentCard();
+      return `${waitlistCard()}${deploymentCard()}`;
     case "advanced":
       return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
     default:
@@ -3769,6 +3869,17 @@ function billingCard() {
       <div class="sr-title">Billing</div>
       <div class="sr-sub">Loading…</div></span></div></section>`;
   }
+  if (billing.payments !== true) {
+    // Switched off, not missing. Said as a decision rather than as a gap,
+    // because it is one — and because "not set up" reads as something an
+    // operator should go and fix.
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Kumi is not charging right now</div>
+      <div class="sr-sub">Payments are switched off on this deployment.
+        Nothing is billed, nothing expires, and every seat has full use of
+        the repositories it can reach.</div>
+    </span></div></section>`;
+  }
   if (billing.configured !== true) {
     return `<section class="card"><div class="set-row"><span class="sr-body">
       <div class="sr-title">Billing is not set up on this deployment</div>
@@ -3851,6 +3962,86 @@ async function billingAction(kind) {
   } catch (error) {
     toast(error.message ?? "Billing could not be opened.", "error");
   }
+}
+
+/**
+ * Letting somebody in, or taking their place off the list.
+ *
+ * Both clear the cache and re-render rather than patching the row in place:
+ * the list is short, an operator works down it one row at a time, and an
+ * optimistic update that disagreed with the server would be a row saying
+ * somebody was let in when they were not.
+ */
+async function waitlistAction(kind, entryId) {
+  try {
+    if (kind === "approve") {
+      await approveWaitlistEntry(entryId);
+      toast("They can create an account now", "ok");
+    } else {
+      await deleteWaitlistEntry(entryId);
+      toast("Taken off the list", "ok");
+    }
+    render();
+  } catch (error) {
+    toast(error.message ?? "That did not work.", "error");
+  }
+}
+
+/**
+ * The waitlist, for whoever runs the deployment.
+ *
+ * Waiting first and let-in below, because the top of this list is a job — it
+ * is the queue somebody works down — and the bottom is a record of what has
+ * already been done to it.
+ */
+function waitlistCard() {
+  if (state.waitlist === undefined) {
+    // Claimed before the request so a second render in the same tick does not
+    // fire it again — the guard `ensureBilling` uses.
+    state.waitlist = null;
+    void loadWaitlist().then(render, () => undefined);
+  }
+  if (!Array.isArray(state.waitlist)) {
+    // Still loading, or the read failed. Either way this is not "nobody is
+    // waiting", and saying so would be worse than saying nothing yet.
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Waitlist</div>
+      <div class="sr-sub">Loading…</div></span></div></section>`;
+  }
+  const entries = state.waitlist;
+  const waiting = entries.filter((entry) => !entry.invitedAt);
+  const admitted = entries.filter((entry) => entry.invitedAt);
+  const row = (entry) => `<div class="set-row">
+    <span class="sr-body">
+      <div class="sr-title">${esc(entry.displayName || entry.email)}</div>
+      <div class="sr-sub">${esc(entry.email)}${
+        entry.note ? ` — ${esc(entry.note)}` : ""
+      }</div>
+    </span>
+    <span class="sr-ctl">
+      ${
+        entry.invitedAt
+          ? `<span class="sr-sub">Let in ${esc(
+              formatDate(entry.invitedAt, { short: false }),
+            )}</span>`
+          : `<button class="btn btn-sm btn-primary" data-act="waitlist-approve"
+               data-value="${esc(entry.id)}">Let in</button>`
+      }
+      <button class="btn btn-sm" data-act="waitlist-remove"
+        data-value="${esc(entry.id)}">Remove</button>
+    </span>
+  </div>`;
+  return `<section class="card">
+    <div class="panel-head"><div><h3>Waitlist</h3>
+      <p>People who asked for an account. Letting somebody in lets that
+        address — and only that address — create one for itself.</p></div></div>
+    ${
+      entries.length === 0
+        ? `<div class="set-row"><span class="sr-body">
+             <div class="sr-sub">Nobody is waiting.</div></span></div>`
+        : `${waiting.map(row).join("")}${admitted.map(row).join("")}`
+    }
+  </section>`;
 }
 
 /** Pending invitations, for the Settings screen. */
@@ -4186,7 +4377,14 @@ const TRIAL_WARNING_DAYS = 3;
 
 function billingBanner() {
   const billing = state.billing;
-  if (billing === undefined || billing === null || billing.configured !== true) {
+  if (
+    billing === undefined ||
+    billing === null ||
+    // Nothing to warn about where nothing is sold: no trial to run out, no
+    // payment to fail, and no subscribe button that would answer 501.
+    billing.payments !== true ||
+    billing.configured !== true
+  ) {
     return "";
   }
   const canManage = canManageOrganization();
@@ -8655,6 +8853,14 @@ document.addEventListener("click", (event) => {
       void billingAction(act === "billing-portal" ? "portal" : "checkout");
       return;
     }
+    case "waitlist-approve": {
+      void waitlistAction("approve", value);
+      return;
+    }
+    case "waitlist-remove": {
+      void waitlistAction("remove", value);
+      return;
+    }
     case "approval-decide": {
       const separatorIndex = value.lastIndexOf(":");
       void decideApprovalAction(
@@ -9375,6 +9581,9 @@ document.addEventListener("submit", (event) => {
       return;
     case "password-reset":
       void submitPasswordReset(form);
+      return;
+    case "waitlist":
+      void submitWaitlist(form);
       return;
     case "signup":
       void submitSignup(form);

@@ -42,6 +42,9 @@ services:
       COORD_CREDENTIAL_KEY: ${COORD_CREDENTIAL_KEY:-}
       COORD_CREDENTIAL_POLICY: ${COORD_CREDENTIAL_POLICY:-}
       COORD_ALLOW_REGISTRATION: ${COORD_ALLOW_REGISTRATION:-}
+      # Off unless set: no checkout, no trial, and a waitlist instead of
+      # self-service sign-up. See .env.example.
+      KUMI_PAYMENTS_ENABLED: ${KUMI_PAYMENTS_ENABLED:-}
       # Without one of these two the sign-up code and the password reset link
       # are written to this container's log and never posted anywhere.
       COORD_MAIL_API_URL: ${COORD_MAIL_API_URL:-}

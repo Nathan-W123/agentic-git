@@ -241,6 +241,32 @@ export interface SignupIntentRecord {
   completedAt: string | undefined;
 }
 
+/**
+ * Somebody who asked to be let in, while nobody is being let in automatically.
+ *
+ * Not an account and not a credential: an address, a name if they gave one,
+ * and a note. Nothing here can be signed in to, so the table is a list of
+ * people to contact rather than a list of ways in — which is what makes it
+ * safe to fill from an unauthenticated form.
+ *
+ * `invitedAt` is the only state it has. Unset means waiting; set means
+ * somebody who runs the deployment has decided this address may create an
+ * account, and it is what the registration route reads before it builds one.
+ * Kept rather than deleted on approval so the list stays a record of who was
+ * let in and when, which is the question an operator actually asks of it.
+ */
+export interface WaitlistEntry {
+  id: string;
+  /** Lowercased on the way in, so one person cannot hold two places. */
+  email: string;
+  displayName: string | undefined;
+  note: string | undefined;
+  /** Where they came from — the marketing page, the app, an operator. */
+  source: string | undefined;
+  createdAt: string;
+  invitedAt: string | undefined;
+}
+
 export interface UserAppearance {
   accent?: string;
   /**
@@ -1547,6 +1573,31 @@ export interface CoordinationStore {
    * local-development backend, and this does not change that.
    */
   runInTransaction<T>(body: (store: CoordinationStore) => Promise<T>): Promise<T>;
+
+  /**
+   * Records a place in the queue, or refreshes one that already exists.
+   *
+   * Upsert rather than insert: somebody who fills the form twice is one
+   * person who did not hear back, not an error worth showing them, and their
+   * second attempt usually carries the better note. `createdAt` and
+   * `invitedAt` survive the refresh — where they are in the queue is not
+   * something re-asking should move, in either direction.
+   */
+  createWaitlistEntry(entry: WaitlistEntry): Promise<WaitlistEntry>;
+  /** The place this address holds, if it holds one. Matched case-insensitively. */
+  getWaitlistEntryByEmail(email: string): Promise<WaitlistEntry | undefined>;
+  /** Everybody waiting, oldest first, so the queue reads as a queue. */
+  listWaitlistEntries(): Promise<WaitlistEntry[]>;
+  /**
+   * Lets one address through, and says whether this caller is who did it.
+   *
+   * Conditional on still waiting, like {@link completeSignupIntent}: two
+   * operators pressing approve on the same row should send one welcome, not
+   * two.
+   */
+  markWaitlistEntryInvited(id: string, at: string): Promise<boolean>;
+  /** Removes a place entirely — a duplicate, or somebody who asked to go. */
+  deleteWaitlistEntry(id: string): Promise<void>;
 
   createSignupIntent(intent: SignupIntentRecord): Promise<void>;
   getSignupIntent(id: string): Promise<SignupIntentRecord | undefined>;

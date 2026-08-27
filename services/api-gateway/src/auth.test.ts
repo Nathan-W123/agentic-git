@@ -218,10 +218,43 @@ test("a sign-up that fails partway leaves no account behind", async () => {
     (await store.listProjects(organizations[0]?.id ?? "")).map((p) => p.slug),
     ["default"],
   );
+  // Comped, not trialing: payments are off by default, so there is nothing
+  // for a trial to run out into and a countdown would only be a clock ticking
+  // toward a paywall that does not exist.
   assert.equal(
     (await store.getSubscription(organizations[0]?.id ?? ""))?.status,
-    "trialing",
+    "comped",
   );
+});
+
+test("switching payments on puts the trial back", async () => {
+  // The same registration, with the switch on. The entitlement row is written
+  // either way — a missing one is no entitlement at all — and what changes is
+  // only which kind it is.
+  const previous = process.env["KUMI_PAYMENTS_ENABLED"];
+  process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+  try {
+    const store = new InMemoryCoordinationStore();
+    const auth = new AuthService(store, {});
+    const user = await auth.registerUnconfirmed({
+      email: "paying@example.com",
+      displayName: "Paying",
+      password: "PayingSignup123!",
+    });
+    const organizations = await store.listOrganizations(user.id);
+    const subscription = await store.getSubscription(organizations[0]?.id ?? "");
+    assert.equal(subscription?.status, "trialing");
+    assert.ok(
+      Date.parse(subscription?.trialEndsAt ?? "") > Date.now(),
+      "the trial should end in the future",
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env["KUMI_PAYMENTS_ENABLED"];
+    } else {
+      process.env["KUMI_PAYMENTS_ENABLED"] = previous;
+    }
+  }
 });
 
 test("registration rejects wrong, expired, exhausted, reused, and unknown challenges", async () => {

@@ -1028,4 +1028,26 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         WHERE o.id NOT IN (SELECT organization_id FROM subscriptions)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version. Case-insensitive
+    // uniqueness is a unique index over LOWER(...) in this dialect, as it is
+    // for every other address column here.
+    version: 48,
+    name: "waitlist",
+    statements: [
+      `CREATE TABLE waitlist_entries (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        display_name TEXT,
+        note TEXT,
+        source TEXT,
+        created_at TEXT NOT NULL,
+        invited_at TEXT
+      )`,
+      `CREATE UNIQUE INDEX waitlist_entries_email
+         ON waitlist_entries(LOWER(email))`,
+      `CREATE INDEX waitlist_entries_by_created
+         ON waitlist_entries(created_at)`,
+    ],
+  },
 ];

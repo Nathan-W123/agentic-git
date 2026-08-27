@@ -2724,6 +2724,101 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a place on the waitlist is held by the address, and let through once`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const joined = await store.createWaitlistEntry({
+        id: "wait_1",
+        email: "Ada@Example.com",
+        displayName: "Ada",
+        note: "Two agents on one repo",
+        source: "site",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        invitedAt: undefined,
+      });
+      // Lowercased on the way in, because the address is what a person types
+      // and one person must not be able to hold two places by capitalising.
+      assert.equal(joined.email, "ada@example.com");
+      assert.equal(
+        (await store.getWaitlistEntryByEmail("ADA@example.com"))?.id,
+        "wait_1",
+      );
+
+      // Asking again is one person who did not hear back, not a second place.
+      // What they wrote this time replaces what they wrote last time; where
+      // they are in the queue does not move.
+      await store.createWaitlistEntry({
+        id: "wait_duplicate",
+        email: "ada@example.com",
+        displayName: "Ada L",
+        note: "Still interested",
+        source: "app",
+        createdAt: "2026-02-01T00:00:00.000Z",
+        invitedAt: undefined,
+      });
+      const after = await store.getWaitlistEntryByEmail("ada@example.com");
+      assert.equal(after?.id, "wait_1");
+      assert.equal(after?.displayName, "Ada L");
+      assert.equal(after?.note, "Still interested");
+      assert.equal(after?.createdAt, "2026-01-01T00:00:00.000Z");
+      assert.equal((await store.listWaitlistEntries()).length, 1);
+
+      await store.createWaitlistEntry({
+        id: "wait_2",
+        email: "grace@example.com",
+        displayName: undefined,
+        note: undefined,
+        source: undefined,
+        createdAt: "2026-03-01T00:00:00.000Z",
+        invitedAt: undefined,
+      });
+      // Oldest first, so the queue reads as a queue.
+      assert.deepEqual(
+        (await store.listWaitlistEntries()).map((entry) => entry.id),
+        ["wait_1", "wait_2"],
+      );
+
+      // Two operators pressing approve send one welcome between them.
+      assert.equal(
+        await store.markWaitlistEntryInvited("wait_1", "2026-04-01T00:00:00.000Z"),
+        true,
+      );
+      assert.equal(
+        await store.markWaitlistEntryInvited("wait_1", "2026-04-02T00:00:00.000Z"),
+        false,
+        "a second approval must not send a second welcome",
+      );
+      assert.equal(
+        (await store.getWaitlistEntryByEmail("ada@example.com"))?.invitedAt,
+        "2026-04-01T00:00:00.000Z",
+      );
+      // And approval survives them asking again, so a re-join cannot take
+      // somebody's place back off them.
+      await store.createWaitlistEntry({
+        id: "wait_again",
+        email: "ada@example.com",
+        displayName: "Ada",
+        note: undefined,
+        source: "app",
+        createdAt: "2026-05-01T00:00:00.000Z",
+        invitedAt: undefined,
+      });
+      assert.equal(
+        (await store.getWaitlistEntryByEmail("ada@example.com"))?.invitedAt,
+        "2026-04-01T00:00:00.000Z",
+      );
+
+      await store.deleteWaitlistEntry("wait_2");
+      assert.deepEqual(
+        (await store.listWaitlistEntries()).map((entry) => entry.id),
+        ["wait_1"],
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: audit events belong to the project of the run they were written under`, async () => {
     const { store, cleanup } = await backend.open();
     try {

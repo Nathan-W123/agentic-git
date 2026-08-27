@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+// Every case here is about what a lapsed subscription does, which is a
+// question only a deployment that takes payments can ask. Set before the
+// module under test reads it, so the gate is on for the whole file.
+process.env["KUMI_PAYMENTS_ENABLED"] = "1";
+
 import { InMemoryCoordinationStore } from "@coord/persistence";
 import type { CoordinationStore } from "@coord/persistence";
 

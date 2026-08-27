@@ -102,6 +102,7 @@ import type {
   InvitationRecord,
   PasswordResetRecord,
   SignupIntentRecord,
+  WaitlistEntry,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1445,6 +1446,85 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare("SELECT * FROM password_resets WHERE id = ?")
       .get(id) as Row | undefined;
     return row === undefined ? undefined : this.toPasswordReset(row);
+  }
+
+  public async createWaitlistEntry(entry: WaitlistEntry): Promise<WaitlistEntry> {
+    const email = entry.email.trim().toLowerCase();
+    // Upsert on the address, not on the id: the id is minted by the caller
+    // and a second attempt from the same person carries a new one, so keying
+    // the conflict on it would insert a duplicate the unique index then
+    // refuses. What they told us this time replaces what they told us last
+    // time; where they are in the queue, and whether they have been let in
+    // already, do not move.
+    this.db
+      .prepare(
+        `INSERT INTO waitlist_entries
+           (id, email, display_name, note, source, created_at, invited_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(email) DO UPDATE SET
+           display_name = excluded.display_name,
+           note = excluded.note,
+           source = excluded.source`,
+      )
+      .run(
+        entry.id,
+        email,
+        entry.displayName ?? null,
+        entry.note ?? null,
+        entry.source ?? null,
+        entry.createdAt,
+        entry.invitedAt ?? null,
+      );
+    const stored = await this.getWaitlistEntryByEmail(email);
+    return stored ?? { ...entry, email };
+  }
+
+  public async getWaitlistEntryByEmail(
+    email: string,
+  ): Promise<WaitlistEntry | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM waitlist_entries WHERE email = ? COLLATE NOCASE")
+      .get(email.trim().toLowerCase()) as Row | undefined;
+    return row === undefined ? undefined : this.toWaitlistEntry(row);
+  }
+
+  public async listWaitlistEntries(): Promise<WaitlistEntry[]> {
+    return (
+      this.db
+        .prepare("SELECT * FROM waitlist_entries ORDER BY created_at, id")
+        .all() as Row[]
+    ).map((row) => this.toWaitlistEntry(row));
+  }
+
+  public async markWaitlistEntryInvited(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still waiting, so two operators approving the same row
+    // send one welcome between them rather than one each.
+    const result = this.db
+      .prepare(
+        `UPDATE waitlist_entries SET invited_at = ?
+         WHERE id = ? AND invited_at IS NULL`,
+      )
+      .run(at, id);
+    return Number(result.changes) === 1;
+  }
+
+  public async deleteWaitlistEntry(id: string): Promise<void> {
+    this.db.prepare("DELETE FROM waitlist_entries WHERE id = ?").run(id);
+  }
+
+  private toWaitlistEntry(row: Row): WaitlistEntry {
+    return {
+      id: text(row, "id"),
+      email: text(row, "email"),
+      displayName: optionalText(row, "display_name"),
+      note: optionalText(row, "note"),
+      source: optionalText(row, "source"),
+      createdAt: text(row, "created_at"),
+      invitedAt: optionalText(row, "invited_at"),
+    };
   }
 
   public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {
