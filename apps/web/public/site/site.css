@@ -560,11 +560,13 @@ strong {
 .hero-lede {
   display: grid;
   gap: 26px;
-  justify-items: start;
+  justify-items: center;
+  text-align: center;
 }
 
 .hero h1 {
   max-width: 12ch;
+  margin-inline: auto;
 }
 
 /*
@@ -582,7 +584,7 @@ strong {
 
 .ticker {
   display: grid;
-  justify-items: start;
+  justify-items: center;
   gap: 8px;
   max-width: min(100%, 46ch);
   transition: opacity 0.35s var(--ease-motion);
@@ -592,7 +594,6 @@ strong {
   padding: 9px 14px;
   border: 1px solid var(--border);
   border-radius: 16px;
-  border-bottom-left-radius: 5px;
   background: color-mix(in srgb, var(--surface-2) 82%, transparent);
   backdrop-filter: blur(10px);
   font-size: 15px;
@@ -638,7 +639,6 @@ strong {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding-left: 4px;
   font-size: 12.5px;
   color: var(--faint);
 }
@@ -839,6 +839,22 @@ strong {
   justify-items: start;
 }
 
+.section-head.centred {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  text-align: center;
+}
+
+.section-head.centred .section-title {
+  justify-items: center;
+}
+
+/* The claim, then the first thing that backs it — read as a pair rather
+   than as two sections that happen to follow each other. */
+.section-head.agents-sub {
+  margin-top: 54px;
+}
+
 
 
 .field-band {
@@ -957,17 +973,15 @@ strong {
    The closing claim is the one thing in it at full strength. */
 
 .manifesto {
-  max-width: 58ch;
+  max-width: 84ch;
   margin-inline: auto;
+  margin-top: 32px;
+  margin-bottom: 88px;
   font-size: clamp(18px, 1.55vw, 22px);
   line-height: 1.72;
   color: var(--muted);
+  text-align: center;
   text-wrap: pretty;
-}
-
-.manifesto strong {
-  font-weight: inherit;
-  color: var(--text);
 }
 
 /* ----------------------------------------------------------------- belt -- */
