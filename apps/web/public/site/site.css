@@ -535,11 +535,7 @@ strong {
  * part of the particles.
  */
 .hero {
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  padding: 148px 0 44px;
+  padding: 118px 0 30px;
 }
 
 /*
@@ -1570,32 +1566,8 @@ strong {
 
 /* ------------------------------------------------------------- cta band -- */
 
-.cta-band {
-  padding: 40px 0 148px;
-  text-align: center;
-}
 
-.cta-band .wrap {
-  display: grid;
-  gap: 22px;
-  justify-items: center;
-  padding: 76px 32px;
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  background:
-    radial-gradient(
-      70% 120% at 50% 0%,
-      color-mix(in srgb, var(--salmon) 12%, transparent) 0%,
-      transparent 70%
-    ),
-    color-mix(in srgb, var(--surface-1) 88%, transparent);
-  backdrop-filter: blur(14px);
-}
 
-.cta-band p {
-  color: var(--muted);
-  max-width: 52ch;
-}
 
 /* --------------------------------------------------------------- pricing -- */
 
@@ -1773,7 +1745,7 @@ strong {
   }
 
   .hero {
-    padding-top: 128px;
+    padding-top: 96px;
   }
 
   .cards,
@@ -1785,9 +1757,6 @@ strong {
     display: none;
   }
 
-  .cta-band .wrap {
-    padding: 56px 22px;
-  }
 
   .site-footer .legal {
     margin-left: 0;

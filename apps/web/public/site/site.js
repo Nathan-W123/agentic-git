@@ -393,7 +393,7 @@ function wire() {
   //    heading ends up permanently translated.
   attempt("headings", () => {
     for (const heading of document.querySelectorAll(
-      ".section-title h2, .cta-band h2",
+      ".section-title h2",
     )) {
       const original = heading.textContent;
       heading.classList.remove("reveal");
