@@ -949,6 +949,30 @@ async function runProjectLoads(loads, project, organization) {
 }
 
 /**
+ * Drops every piece of private-message state that belongs to one project.
+ *
+ * The server already keys direct mail by project. The browser did not: its
+ * thread cache was keyed by the other person's id alone, so moving to another
+ * project where the same coworker was present briefly showed — and could
+ * append to — the conversation from the project just left. Clearing the whole
+ * private surface at the boundary keeps the browser's identity for a
+ * conversation the same as the store's: project plus correspondent.
+ */
+export function resetDirectMessageState() {
+  state.presence = [];
+  state.dmPeople = [];
+  state.dmConversations = [];
+  state.dmThreads = {};
+  state.activeDm = undefined;
+  state.dmDraft = "";
+  state.dmReplyMessageId = undefined;
+  state.dmSelectedMessageId = undefined;
+  state.dmLoadedProject = undefined;
+  state.dmLoadedAt = 0;
+  state.dmAttaching = 0;
+}
+
+/**
  * Loads the context a screen can be drawn from.
  *
  * `defer` splits the project fan-out in two: with it, only the loads a first
@@ -962,6 +986,7 @@ async function runProjectLoads(loads, project, organization) {
  * cold start for nothing.
  */
 export async function loadContext({ defer = false } = {}) {
+  const previousProjectId = state.projectId;
   state.loadError = undefined;
   const [principal, organizations] = await Promise.all([
     api("/auth/me"),
@@ -1005,6 +1030,9 @@ export async function loadContext({ defer = false } = {}) {
 
   if (!state.projects.some((project) => project.id === state.projectId)) {
     state.projectId = state.projects[0]?.id ?? "";
+  }
+  if (state.projectId !== previousProjectId) {
+    resetDirectMessageState();
   }
   persist("ag.project", state.projectId);
 
@@ -3649,8 +3677,9 @@ export async function loadDirectMessages() {
   if (!state.projectId) {
     return;
   }
+  const projectId = state.projectId;
   const response = await apiOptional(directPath(), undefined);
-  if (response === undefined) {
+  if (response === undefined || state.projectId !== projectId) {
     return false;
   }
   state.dmConversations = response.conversations ?? [];
@@ -3666,9 +3695,10 @@ export async function loadDmThread(userId) {
   if (!state.projectId || !userId) {
     return;
   }
+  const projectId = state.projectId;
   const path = directPath(`/${encodeURIComponent(userId)}`);
   const response = await apiOptional(path, undefined);
-  if (response === undefined) {
+  if (response === undefined || state.projectId !== projectId) {
     return;
   }
   state.dmThreads[userId] = response.messages ?? [];
@@ -3764,7 +3794,10 @@ export async function deleteDirectMessageEntry(userId, messageId) {
  */
 export function noteDirectMessage(frame) {
   const message = frame?.message;
-  if (message === undefined) {
+  if (
+    message === undefined ||
+    (message.projectId ?? frame?.projectId) !== state.projectId
+  ) {
     return false;
   }
   const me = currentUserId();
@@ -3810,7 +3843,10 @@ export function noteDirectMessage(frame) {
 /** Applies a private-message correction echoed to either participant. */
 export function noteDirectMessageEdited(frame) {
   const message = frame?.message;
-  if (message === undefined) {
+  if (
+    message === undefined ||
+    (message.projectId ?? frame?.projectId) !== state.projectId
+  ) {
     return;
   }
   const me = currentUserId();
@@ -3836,7 +3872,7 @@ export function noteDirectMessageEdited(frame) {
  */
 export function noteDirectMessageDeleted(frame) {
   const messageId = frame?.messageId;
-  if (messageId === undefined) {
+  if (messageId === undefined || frame?.projectId !== state.projectId) {
     return;
   }
   const me = currentUserId();

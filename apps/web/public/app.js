@@ -2810,6 +2810,7 @@ const ATTACH_TARGETS = {
  */
 async function attachChannelImages(files, target = "channel") {
   const where = ATTACH_TARGETS[target] ?? ATTACH_TARGETS.channel;
+  const projectId = state.projectId;
   const repositoryId = activeChannelId();
   const dmUserId = target === "dm" ? state.activeDm : undefined;
   const images = files.filter((file) => file.type.startsWith("image/"));
@@ -2844,10 +2845,13 @@ async function attachChannelImages(files, target = "channel") {
   for (const file of images) {
     try {
       const id = await uploadAttachment(repositoryId, file);
-      // A DM upload belongs to the person whose panel started it. If the
-      // reader opens a different conversation before the bytes arrive, do
-      // not append the old reference to the new person's draft.
-      if (target === "dm" && state.activeDm !== dmUserId) {
+      // A DM upload belongs to the project and person whose panel started it.
+      // If the reader changes either before the bytes arrive, do not append an
+      // old workspace's reference to the new conversation's draft.
+      if (
+        target === "dm" &&
+        (state.projectId !== projectId || state.activeDm !== dmUserId)
+      ) {
         continue;
       }
       const alt = file.name.replace(/\.[^.]+$/u, "").slice(0, 60);
