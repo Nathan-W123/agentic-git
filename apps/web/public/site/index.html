@@ -255,16 +255,35 @@
             </div>
           </div>
 
-          <p class="manifesto reveal">
-            KUMI gives humans and coding agents a shared environment for
-            building software together. Agents work against the same evolving
-            codebase, while KUMI coordinates what everybody's doing. Before an
-            agent makes a change, it understands what the rest of the team is
-            working on. When one task changes the assumptions of another, KUMI
-            carries that context forward. When work overlaps, KUMI coordinates
-            it before it becomes a merge conflict. You shouldn't have to become
-            the project manager for a team of machines. KUMI does that for you.
-          </p>
+          <!-- Three claims rather than a paragraph: this is the one place
+               on the page that has to survive a reader who does not read.
+               No numbers on them — they are three facets of one thing, not
+               a sequence, and a numbered list would promise an order that
+               does not exist. The rule above each is the only structure
+               they need. -->
+          <div class="claims" data-reveal-group>
+            <div class="claim reveal">
+              <h3>Agents read the room first.</h3>
+              <p>
+                Before an agent touches a file, it knows what everyone else is
+                working on.
+              </p>
+            </div>
+            <div class="claim reveal">
+              <h3>Context is shared.</h3>
+              <p>
+                When one task changes the assumptions of another, KUMI passes
+                that along instead of letting it go stale.
+              </p>
+            </div>
+            <div class="claim reveal">
+              <h3>Overlaps get settled, not merged.</h3>
+              <p>
+                Two agents reaching for the same file is a conversation, not a
+                conflict.
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -476,6 +495,55 @@
             <span class="belt-item" data-n="2"><svg class="belt-mark" aria-hidden="true"><use href="#m-codex"/></svg>Codex</span>
             <span class="belt-item" data-n="3"><svg class="belt-mark" aria-hidden="true"><use href="#m-cursor"/></svg>Cursor</span>
           </div>
+        </div>
+      </section>
+
+      <!-- The question every developer asks about a thing that sits between
+           their agents and their codebase, answered before the ask rather
+           than after it. Every sentence here is a fact from the README and
+           the overlay-workspace design, not a posture: the canonical
+           repository lives on the control-plane host, overlays are detached
+           git worktrees owned by one principal, promotion writes a real
+           commit, and the export to GitHub is one-way, explicit, and on its
+           own branch. -->
+      <section class="section section-tight" id="trust">
+        <div class="wrap">
+          <div class="section-head" data-reveal-group>
+            <div class="section-title">
+              <h2 class="reveal">Your code stays where it is.</h2>
+            </div>
+          </div>
+
+          <p class="manifesto reveal">
+            KUMI keeps its copy of your repository on the machine where KUMI
+            runs, not automatically in anybody's cloud. Agents never edit that
+            copy directly. Each one works in an isolated git worktree of its
+            own, and changes reach the shared codebase one at a time, after
+            validation. Underneath it is ordinary Git, so every change that
+            lands is a real commit in a real repository. Nothing goes back to
+            GitHub unless you send it, on a branch of its own.
+          </p>
+        </div>
+      </section>
+
+      <!-- The ask, and the last thing on the page: what the product actually
+           is in physical terms, which nothing above says. -->
+      <section class="section section-tight section-close" id="get">
+        <div class="wrap">
+          <div class="section-head" data-reveal-group>
+            <div class="section-title">
+              <h2 class="reveal">Runs where you work.</h2>
+            </div>
+          </div>
+
+          <p class="manifesto reveal">
+            An app you install, for Mac, Windows and Linux, and the same room
+            in a browser when you would rather not install anything.
+          </p>
+
+          <p class="get-cta reveal">
+            <a class="btn btn-primary" href="download">Download KUMI</a>
+          </p>
         </div>
       </section>
 

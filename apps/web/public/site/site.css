@@ -280,6 +280,12 @@ main,
   padding-top: 72px;
 }
 
+/* The page's ending is one move, not two sections: the objection is
+   answered and the ask follows it immediately. */
+#trust {
+  padding-bottom: 40px;
+}
+
 /* --------------------------------------------------------------- typography */
 
 h1,
@@ -1018,6 +1024,61 @@ strong {
   line-height: 1.72;
   color: var(--muted);
   text-wrap: pretty;
+}
+
+/* --------------------------------------------------------------- claims -- */
+
+/*
+ * Three named claims where a paragraph used to be.
+ *
+ * This is the page's only scannable layer — everything else above the demo
+ * is either a headline or a block of prose — so it is set as three columns
+ * a reader can take in at a glance rather than a list they have to work
+ * down. Deliberately unnumbered: these are three facets of one behaviour,
+ * not three steps in an order, and a numbered marker would assert a
+ * sequence the product does not have. The hairline above each is the whole
+ * of the structure, and it delimits without ranking.
+ */
+
+.claims {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 44px;
+  margin-top: 48px;
+  /* Matches the measure the manifesto held here, so the join with the demo
+     below is unchanged by the swap. */
+  margin-bottom: 40px;
+}
+
+.claim {
+  display: grid;
+  align-content: start;
+  gap: 13px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.claim h3 {
+  font-family: var(--display);
+  font-variation-settings: "wght" 380, "wdth" 92;
+  font-size: clamp(20px, 1.62vw, 24px);
+  line-height: 1.24;
+  letter-spacing: -0.022em;
+  color: var(--text);
+  text-wrap: balance;
+}
+
+.claim p {
+  font-size: clamp(15.5px, 1.16vw, 17.5px);
+  line-height: 1.62;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+/* The one button in the body of the page, ranged left under its own
+   paragraph like everything else. */
+.get-cta {
+  margin-top: 36px;
 }
 
 /* ----------------------------------------------------------------- belt -- */
@@ -2480,6 +2541,13 @@ strong {
 @media (max-width: 900px) {
   .hero-grid {
     grid-template-columns: 1fr;
+  }
+
+  /* Three columns of this measure stop being scannable well before they
+     stop fitting. */
+  .claims {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 32px;
   }
 
   .field-band {
