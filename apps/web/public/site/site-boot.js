@@ -92,5 +92,17 @@
 
   if (window.matchMedia("(prefers-reduced-motion: no-preference)").matches) {
     document.documentElement.className += " anim";
+    // The fuse. Arming `anim` hides the hero and every reveal on the promise
+    // that site.js will play them in — a promise a 404 on any file in its
+    // module graph silently breaks, and a page that kept that promise-shaped
+    // hole was shipped: one stale checkout serving an old file list left the
+    // whole page blank down to the first unstaged section. site.js writes
+    // data-anim-live the moment it evaluates; if that mark has not appeared
+    // shortly, the animations are forfeit and the content is not.
+    setTimeout(function () {
+      if (!document.documentElement.hasAttribute("data-anim-live")) {
+        document.documentElement.classList.remove("anim");
+      }
+    }, 1500);
   }
 })();

@@ -1,148 +1,165 @@
 /**
- * The thing the page is about, drawn.
+ * The thing the page is about, drawn — as water.
  *
- * One point cloud behind every section, morphing between three forms as the
- * page scrolls. The forms are not decoration picked for looking expensive —
- * they are the product's three moves, and each particle keeps its identity
- * across all of them, which is the whole argument: the same work, carried
- * from many agents into one history without ever being lost or duplicated.
+ * Kumi is 汲み, from 汲む: to draw water. So the background is a surface of
+ * water at night, and the page's argument plays out on it as the visitor
+ * scrolls. Every request is a drop. At the top of the page it is raining —
+ * many agents, many asks, rings spreading from every impact and passing
+ * through each other without erasing one another, which is the whole claim
+ * arbitration makes. As the page descends the rain thins, the swells widen
+ * and slow, and by the last section the surface has settled to near-glass
+ * with one slow ring breathing from the centre: one history, still water.
  *
- *   0. CONVERGE   Six strands rise from separate points on the floor, spiral
- *                 inward, and braid into a single trunk. Many agents, one
- *                 repository.
- *   1. ARBITRATE  The trunk opens into stacked rings, one arc per strand,
- *                 none of them touching. Plans granted side by side — the
- *                 gaps are the point.
- *   2. PROMOTE    Everything collapses onto the edges and interior lattice of
- *                 a cube. The canonical history, closed.
+ * The surface is a disc of points, and every ripple is computed in the
+ * vertex shader from a small ring buffer of drops — position, impact time,
+ * size — that the CPU refills on a schedule the scroll position sets. The
+ * drops themselves fall: a handful of dedicated vertices streak down to
+ * their own impact points just before each ring is born. On a machine with
+ * a precise pointer, moving across the hero drips where the pointer goes.
  *
- * Colour carries state rather than taste: warm for work that has not been
- * claimed, cool for work a plan holds. A particle warms and cools as it moves
- * between forms, so the palette says something true at every frame.
+ * Colour carries state, as it did before the water: crests warm, troughs
+ * cool, and the whole surface cools toward the lavender of settled work as
+ * the page calms. The tokens are --field-warm and --field-cool.
  *
- * WebGL because the count is the effect — forty thousand points at sixty
- * frames is a texture, four thousand is a screensaver — and one draw call
- * with additive blending is cheaper than any of the alternatives. Written
- * against raw WebGL rather than a library on purpose: the control plane
- * serves `script-src 'self'`, there is no bundler in this repository, and a
- * vendored engine would be an order of magnitude more bytes than the whole
- * rest of the site.
- *
- * Absent by design under `prefers-reduced-motion`, on a machine with no
- * WebGL, and with JavaScript off. The stylesheet paints a still gradient in
- * the same colours underneath, so the page never has a hole in it.
+ * WebGL because the count is the effect, one draw call, additive blending,
+ * no library — the control plane serves `script-src 'self'`, this repo has
+ * no bundler, and a vendored engine would outweigh the site. Absent by
+ * design under `prefers-reduced-motion`, without WebGL, and without
+ * JavaScript, where the stylesheet's gradient stands as the background.
  */
 
-const FORMS = 3;
+/** How many drops the surface remembers at once. */
+const DROPS = 12;
 
-/** Strand count. Six reads as "several" without any arc getting thin. */
-const STRANDS = 6;
-
-/** Points that draw the floor rings rather than the moving forms. */
-const FLOOR_SHARE = 0.32;
+/** How long a drop streaks down before its ring is born, in seconds. */
+const FALL_SECONDS = 0.45;
 
 /* --------------------------------------------------------------- shaders -- */
 
 const VERTEX = `#version 300 es
 precision highp float;
 
-in vec3 aConverge;
-in vec3 aArbitrate;
-in vec3 aPromote;
-/* seed.x drifts phase, seed.y drifts amplitude, seed.z twinkles. */
+/* Where this point rests on the surface (x, z). */
+in vec2 aPos;
+/* seed.x drifts chop phase, seed.y drifts amplitude, seed.z twinkles. */
 in vec3 aSeed;
-/* 0 = a floor ring, 1 = a moving particle. Floor points ignore the morph. */
-in float aMoving;
-/* Which plan holds this work in the arbitrated form, as a hue position. */
-in float aState;
+/* 0 = surface; n > 0 = the falling droplet for drop slot n - 1. */
+in float aRole;
 
-uniform float uMorph;
 uniform float uTime;
+/* Scroll progress, 0 at the hero and 1 by the last section. */
+uniform float uCalmIn;
 uniform vec2 uViewport;
 uniform vec2 uParallax;
-/* Where the form should sit on screen for the section now being read. The
-   copy is left-aligned in one section and right-heavy in another, and a
-   fixed centred form would be behind the text in both. */
 uniform vec2 uShift;
-/* Point-size multiplier only. The projection deliberately does not use it —
-   a field that grew with the display's pixel ratio would be composed for one
-   class of screen and wrong on every other. */
 uniform float uScale;
+/* One drop per slot: x, z, impact time, size. Size 0 is an empty slot. */
+uniform vec4 uDrops[${DROPS}];
 
-/* How much of the scene fits across the viewport. A constant, because the
-   composition is fixed: the copy is laid out around where the form lands. */
-const float LENS = 1.34;
-
+out float vMix;
 out float vGlow;
-out float vState;
 
-/* Two morphs, chained, so a particle never teleports between forms. */
-vec3 formAt(float t) {
-  float first = smoothstep(0.0, 1.0, clamp(t, 0.0, 1.0));
-  float second = smoothstep(0.0, 1.0, clamp(t - 1.0, 0.0, 1.0));
-  return mix(mix(aConverge, aArbitrate, first), aPromote, second);
-}
+const float LENS = 1.34;
+const float SPEED = 0.55;
+const float FREQ = 24.0;
+const float DAMP = 0.38;
 
 void main() {
-  vec3 p = mix(aConverge, formAt(uMorph), aMoving);
+  float calm = smoothstep(0.45, 0.95, uCalmIn);
+  float energy = 1.0 - calm * 0.85;
 
-  /* Breathing. Small, seeded per particle, and never enough to blur an edge
-     of the cube — the forms have to stay legible as forms. */
-  float phase = uTime * 0.55 + aSeed.x * 6.2831853;
-  float sway = 0.012 + aSeed.y * 0.016;
-  p.x += sin(phase) * sway;
-  p.z += cos(phase * 0.83) * sway;
-  p.y += sin(phase * 0.61) * sway * 0.7;
+  vec3 p = vec3(aPos.x, -0.06, aPos.y);
+  float height = 0.0;
+  float ringGlow = 0.0;
 
-  /* The floor rings travel outward forever and fade as they go, which is what
-     makes the plane read as a plane rather than a set of drawn circles. */
-  float ripple = 1.0;
-  if (aMoving < 0.5) {
-    /* seed.z holds the ring's phase, shared by every point on that ring, so a
-       ring expands as one thing. Per-particle phase put every point of a ring
-       at a different radius at once, which is not a ripple — it is a disc of
-       dust, and that is how it drew. */
-    float travel = fract(aSeed.z + uTime * 0.05);
-    p.xz *= 0.34 + travel * 2.1;
-    p.y -= travel * 0.03;
-    /* Born at the centre, spent at the rim, so nothing pops at the loop. */
-    ripple = sin(travel * 3.14159265);
+  if (aRole < 0.5) {
+    /* The ambient chop: small crossing swells that keep the surface alive
+       between drops, dying away as the page calms. */
+    float chop =
+      sin(p.x * 7.0 + uTime * 0.8 + aSeed.x * 6.2831853) +
+      sin(p.z * 9.0 - uTime * 1.1) +
+      sin((p.x + p.z) * 5.0 + uTime * 0.6);
+    height += chop * 0.009 * energy * (0.7 + aSeed.y * 0.6);
+
+    /* Every remembered drop, summed. A ring is a travelling band: sharp at
+       the wavefront, trailing shorter wavelets, decaying with age and with
+       distance from its own centre. */
+    for (int i = 0; i < ${DROPS}; i += 1) {
+      vec4 drop = uDrops[i];
+      if (drop.w <= 0.0) {
+        continue;
+      }
+      float age = uTime - drop.z;
+      if (age <= 0.0) {
+        continue;
+      }
+      float away = distance(p.xz, drop.xy);
+      float front = age * SPEED;
+      float band = exp(-pow((away - front) * 4.5, 2.0));
+      float decay = exp(-age * DAMP) * drop.w / (1.0 + away * 1.05);
+      height += cos((away - front) * FREQ) * band * decay * 0.075;
+      ringGlow += band * decay;
+    }
+    p.y += height;
+  } else {
+    /* A falling drop: visible only in the moment before its own impact,
+       streaking from above the surface down to the point its ring will
+       spread from. */
+    vec4 drop = uDrops[int(aRole - 0.5)];
+    float age = uTime - drop.z;
+    if (drop.w <= 0.0 || age < -${FALL_SECONDS.toFixed(2)} || age >= 0.05) {
+      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+      gl_PointSize = 0.0;
+      vGlow = 0.0;
+      vMix = 0.0;
+      return;
+    }
+    float t = 1.0 + age / ${FALL_SECONDS.toFixed(2)};
+    p = vec3(drop.x, mix(1.1, -0.05, t * t), drop.y);
   }
 
-  /* A fixed camera: pulled back, lifted, tilted down at the floor. Written
-     out rather than passed in as a matrix — it never changes, and spelling it
-     here keeps the whole projection readable in one place. */
-  vec3 eye = vec3(0.0, 0.60, 2.02);
+  /* The camera pulls up and tilts down as the page calms, trading the low
+     dusk view of rain for a higher look at a still mirror. */
+  vec3 eye = vec3(0.0, 0.6 + 0.28 * calm, 2.02 - 0.22 * calm);
   vec3 view = p - eye;
-  float tilt = 0.20;
+  float tilt = 0.2 + 0.16 * calm;
   float ct = cos(tilt);
   float st = sin(tilt);
   view = vec3(view.x, view.y * ct - view.z * st, view.y * st + view.z * ct);
-
-  /* Pointer parallax, applied in view space so it never distorts the form. */
-  view.xy += uParallax * (0.06 + 0.10 * (1.0 - aMoving)) + uShift;
+  view.xy += uParallax * 0.08 + uShift;
 
   float depth = max(-view.z, 0.05);
   vec2 projected = view.xy / depth * LENS;
   gl_Position = vec4(projected * vec2(uViewport.y / uViewport.x, 1.0), 0.0, 1.0);
 
   float near = clamp(1.0 - (depth - 1.2) / 2.6, 0.0, 1.0);
-  float twinkle = 0.75 + 0.25 * sin(uTime * 1.7 + aSeed.z * 6.2831853);
-  gl_PointSize = (1.05 + 2.7 * near) * uScale;
-  vGlow = near * twinkle * mix(1.25 * ripple, 1.0, aMoving);
-  vState = aState;
+  float twinkle = 0.8 + 0.2 * sin(uTime * 1.7 + aSeed.z * 6.2831853);
+
+  if (aRole < 0.5) {
+    /* Flat water is dim; the light lives on the rings and crests, with a
+       soft bloom at the centre once the surface has stilled. */
+    float bloom = exp(-dot(p.xz, p.xz) * 0.9) * 0.85 * calm;
+    gl_PointSize = (1.05 + 2.5 * near) * uScale;
+    vGlow = (0.3 + 0.14 * calm + ringGlow * 2.6 + abs(height) * 11.0 + bloom) * twinkle * near;
+    /* Crests warm, troughs cool, and the whole surface cools as it settles. */
+    float crest = clamp(height * 34.0, -1.0, 1.0);
+    vMix = mix(0.5 - crest * 0.42, 0.8, calm * 0.55);
+  } else {
+    gl_PointSize = (2.2 + 1.6 * near) * uScale;
+    vGlow = 1.1;
+    vMix = 0.18;
+  }
 }
 `;
 
 const FRAGMENT = `#version 300 es
 precision highp float;
 
+in float vMix;
 in float vGlow;
-in float vState;
 
 uniform vec3 uWarm;
 uniform vec3 uCool;
-uniform float uMorph;
 
 out vec4 outColour;
 
@@ -151,20 +168,17 @@ void main() {
      GL_POINTS and not thought about. */
   float d = length(gl_PointCoord - 0.5);
   float mask = smoothstep(0.5, 0.05, d);
-  if (mask <= 0.001) {
+  if (mask <= 0.001 || vGlow <= 0.001) {
     discard;
   }
-  /* Warm until a plan holds it, cool once one does. The transition is the
-     arbitration step, so it tracks the morph rather than being a gradient. */
-  float claimed = clamp(uMorph, 0.0, 1.0) * vState;
-  vec3 colour = mix(uWarm, uCool, claimed);
-  outColour = vec4(colour * vGlow * mask, mask * vGlow * 0.85);
+  vec3 colour = mix(uWarm, uCool, clamp(vMix, 0.0, 1.0));
+  outColour = vec4(colour * vGlow * mask, mask * min(vGlow, 1.0) * 0.85);
 }
 `;
 
-/* ----------------------------------------------------------------- forms -- */
+/* ------------------------------------------------------------- machinery -- */
 
-/** A deterministic generator, so a reload draws the same field. */
+/** A deterministic generator, so a reload lays out the same surface. */
 function makeRandom(seed) {
   let state = seed >>> 0;
   return () => {
@@ -173,147 +187,14 @@ function makeRandom(seed) {
   };
 }
 
-/**
- * Six strands leaving the floor, spiralling in, braiding into one trunk.
- *
- * The merge height is the whole read: below it the strands are visibly
- * separate and countable, above it they are one thing. Placed at a third of
- * the way up so both halves get room.
- */
-function converge(index, count, strand, random) {
-  const along = index / count;
-  const merge = 0.34;
-  const turn = strand * ((Math.PI * 2) / STRANDS);
-
-  if (along < merge) {
-    // Spiralling inward. Radius closes as height rises; a little scatter so
-    // the strand is a rope rather than a wire.
-    const t = along / merge;
-    const radius = (1.05 - t * 0.98) * (0.85 + random() * 0.3);
-    const angle = turn + t * 2.4 + random() * 0.16;
-    return [
-      Math.cos(angle) * radius,
-      -0.34 + t * 0.72 + (random() - 0.5) * 0.05,
-      Math.sin(angle) * radius,
-    ];
-  }
-
-  // The trunk, and the flare at the top where the work spreads out again.
-  const t = (along - merge) / (1 - merge);
-  const flare = Math.pow(t, 2.4) * 0.78;
-  const angle = turn + t * 3.1 + random() * Math.PI * 2 * Math.pow(t, 2);
-  const radius = (0.055 + flare) * (0.4 + random() * 0.8);
-  return [
-    Math.cos(angle) * radius,
-    0.38 + t * 0.82 + (random() - 0.5) * 0.06,
-    Math.sin(angle) * radius,
-  ];
-}
-
-/**
- * Stacked concentric rings, one long arc per strand, with deliberate gaps.
- *
- * The gaps are the argument. Arbitration is not a queue and it is not a free
- * for all — it is several plans holding several parts of the same repository
- * at once, and the picture has to show them not touching. Two strands share
- * each ring and take half of it apiece, so an arc is long enough to read as
- * an arc rather than as a smudge.
- *
- * Radius falls as height rises, which makes the set read as one stepped cone
- * rather than three unrelated hoops, and echoes the floor rings underneath.
- */
-function arbitrate(index, count, strand, random) {
-  const ring = strand % 3;
-  const side = Math.floor(strand / 3);
-  const gap = 0.34;
-  const angle =
-    side * Math.PI +
-    Math.PI * 0.5 +
-    ring * 0.7 +
-    gap * 0.5 +
-    random() * (Math.PI - gap);
-  const radius = (1.26 - ring * 0.32) * (0.985 + random() * 0.03);
-  const height = 0.24 + ring * 0.30 + (random() - 0.5) * 0.03;
-  // A thin skirt under each arc, so a ring reads as a disc seen near
-  // edge-on rather than as a wire floating in the dark.
-  const drop = random() < 0.3 ? random() * 0.075 : 0;
-  return [
-    Math.cos(angle) * radius,
-    height - drop,
-    Math.sin(angle) * radius,
-  ];
-}
-
-/**
- * The cube: twelve edges, dense, with a sparse interior lattice.
- *
- * Closed and countable on purpose. Everything before it is in motion and
- * partially claimed; this is the state where a change is a commit and there
- * is exactly one of it.
- */
-function promote(index, count, strand, random) {
-  const half = 0.44;
-  const lift = 0.54;
-  const jitter = () => (random() - 0.5) * 0.012;
-
-  if (random() < 0.72) {
-    // On an edge. Pick an axis, then a corner of the face it runs along.
-    const axis = index % 3;
-    const a = random() < 0.5 ? -half : half;
-    const b = random() < 0.5 ? -half : half;
-    const t = (random() * 2 - 1) * half;
-    const point =
-      axis === 0 ? [t, a, b] : axis === 1 ? [a, t, b] : [a, b, t];
-    return [
-      point[0] + jitter(),
-      point[1] + lift + jitter(),
-      point[2] + jitter(),
-    ];
-  }
-
-  // Interior lattice, on a coarse grid so it reads as structure rather than
-  // as fog inside a box.
-  const step = half / 2;
-  const snap = (v) => Math.round(v / step) * step;
-  return [
-    snap((random() * 2 - 1) * half) + jitter(),
-    snap((random() * 2 - 1) * half) + lift + jitter(),
-    snap((random() * 2 - 1) * half) + jitter(),
-  ];
-}
-
-/**
- * A ring on the floor.
- *
- * These never morph — they are the ground everything else stands on, and the
- * only thing in the picture that is the same in all three forms. The shader
- * pushes each one outward on a loop and fades it as it goes, so the plane
- * reads as a plane rather than as a set of drawn circles.
- */
-const FLOOR_RINGS = 7;
-
-function floorRing(random) {
-  const angle = random() * Math.PI * 2;
-  const ring = Math.floor(random() * FLOOR_RINGS);
-  const radius = 0.30 + ring * 0.05 + (random() - 0.5) * 0.008;
-  return {
-    at: [Math.cos(angle) * radius, -0.42, Math.sin(angle) * radius],
-    // Evenly spaced phases, so the rings leave the centre one after another
-    // rather than all at once.
-    phase: ring / FLOOR_RINGS,
-  };
-}
-
-/* ------------------------------------------------------------- machinery -- */
-
 function compile(gl, type, source) {
   const shader = gl.createShader(type);
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    // Thrown rather than logged: the caller's catch removes the canvas, and a
-    // field that failed to build must not sit there as a black rectangle over
-    // the gradient the stylesheet already drew.
+    // Thrown rather than logged: the caller's catch leaves the CSS gradient
+    // as the background, and a surface that failed to build must not sit
+    // there as a dead rectangle over it.
     throw new Error(gl.getShaderInfoLog(shader) ?? "shader failed to compile");
   }
   return shader;
@@ -336,7 +217,7 @@ function readColour(name, fallback) {
 }
 
 /**
- * Builds the field and starts it.
+ * Builds the water and starts it.
  *
  * Returns a stop function, or undefined when this machine cannot draw it —
  * the caller treats undefined as "leave the CSS backdrop alone", which is a
@@ -346,8 +227,8 @@ export function startField(canvas, options = {}) {
   const gl = canvas.getContext("webgl2", {
     alpha: true,
     antialias: false,
-    // The field is redrawn every frame and never read back; not preserving it
-    // lets the driver throw the buffer away between frames.
+    // Redrawn every frame and never read back; not preserving the buffer
+    // lets the driver throw it away between frames.
     preserveDrawingBuffer: false,
     powerPreference: "high-performance",
   });
@@ -356,47 +237,52 @@ export function startField(canvas, options = {}) {
   }
 
   // Density scaled to the surface actually being filled. A phone drawing a
-  // desktop's particle count is a hot phone showing the same picture.
+  // desktop's point count is a hot phone showing the same picture.
   const area = window.innerWidth * window.innerHeight;
-  const count = Math.round(
-    Math.max(14000, Math.min(46000, area * 0.028)),
-  );
+  const surfaceCount = Math.round(Math.max(14000, Math.min(46000, area * 0.028)));
+  const count = surfaceCount + DROPS;
 
-  const converged = new Float32Array(count * 3);
-  const arbitrated = new Float32Array(count * 3);
-  const promoted = new Float32Array(count * 3);
+  const positions = new Float32Array(count * 2);
   const seeds = new Float32Array(count * 3);
-  const moving = new Float32Array(count);
-  const states = new Float32Array(count);
+  const roles = new Float32Array(count);
 
+  // A jittered polar disc: rings of points, more per ring as radius grows,
+  // each nudged off its lattice. Even density without the moiré a square
+  // grid throws when a ripple crosses it.
   const random = makeRandom(0x9e3779b9);
-  const movingCount = Math.round(count * (1 - FLOOR_SHARE));
-
-  for (let i = 0; i < count; i += 1) {
-    const strand = i % STRANDS;
-    const isMoving = i < movingCount;
-    let a;
-    if (isMoving) {
-      const along = i / movingCount;
-      a = converge(Math.floor(along * movingCount), movingCount, strand, random);
-      const b = arbitrate(i, movingCount, strand, random);
-      const c = promote(i, movingCount, strand, random);
-      arbitrated.set(b, i * 3);
-      promoted.set(c, i * 3);
-      seeds.set([random(), random(), random()], i * 3);
-    } else {
-      const ring = floorRing(random);
-      a = ring.at;
-      arbitrated.set(a, i * 3);
-      promoted.set(a, i * 3);
-      // seed.z is the ring's travel phase here rather than a twinkle offset.
-      seeds.set([random(), random(), ring.phase], i * 3);
+  const RADIUS = 2.05;
+  const RINGS = Math.round(Math.sqrt(surfaceCount / 3.2));
+  let placed = 0;
+  for (let ring = 0; ring < RINGS && placed < surfaceCount; ring += 1) {
+    const r = ((ring + 0.5) / RINGS) * RADIUS;
+    const around = Math.max(6, Math.round((surfaceCount * 2 * (ring + 0.5)) / (RINGS * RINGS)));
+    for (let step = 0; step < around && placed < surfaceCount; step += 1) {
+      const angle =
+        (step / around) * Math.PI * 2 + (random() - 0.5) * (2.4 / around);
+      const radius = r + (random() - 0.5) * (RADIUS / RINGS);
+      positions[placed * 2] = Math.cos(angle) * radius;
+      positions[placed * 2 + 1] = Math.sin(angle) * radius;
+      seeds.set([random(), random(), random()], placed * 3);
+      roles[placed] = 0;
+      placed += 1;
     }
-    converged.set(a, i * 3);
-    moving[i] = isMoving ? 1 : 0;
-    // Two of every three strands end up held by a plan, which keeps the
-    // arbitrated form visibly mixed rather than uniformly recoloured.
-    states[i] = strand % 3 === 0 ? 0 : 0.6 + random() * 0.4;
+  }
+  // However rounding fell out, every remaining surface slot gets a point.
+  for (; placed < surfaceCount; placed += 1) {
+    const angle = random() * Math.PI * 2;
+    const radius = Math.sqrt(random()) * RADIUS;
+    positions[placed * 2] = Math.cos(angle) * radius;
+    positions[placed * 2 + 1] = Math.sin(angle) * radius;
+    seeds.set([random(), random(), random()], placed * 3);
+    roles[placed] = 0;
+  }
+  // The falling drops: one vertex per slot, positioned by the shader.
+  for (let i = 0; i < DROPS; i += 1) {
+    const at = surfaceCount + i;
+    positions[at * 2] = 0;
+    positions[at * 2 + 1] = 0;
+    seeds.set([random(), random(), random()], at * 3);
+    roles[at] = i + 1;
   }
 
   const program = gl.createProgram();
@@ -404,7 +290,7 @@ export function startField(canvas, options = {}) {
   gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw new Error(gl.getProgramInfoLog(program) ?? "field program failed to link");
+    throw new Error(gl.getProgramInfoLog(program) ?? "water failed to link");
   }
   gl.useProgram(program);
 
@@ -419,81 +305,169 @@ export function startField(canvas, options = {}) {
     gl.enableVertexAttribArray(location);
     gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
   };
-  bind("aConverge", converged, 3);
-  bind("aArbitrate", arbitrated, 3);
-  bind("aPromote", promoted, 3);
+  bind("aPos", positions, 2);
   bind("aSeed", seeds, 3);
-  bind("aMoving", moving, 1);
-  bind("aState", states, 1);
+  bind("aRole", roles, 1);
 
   const uniform = (name) => gl.getUniformLocation(program, name);
-  const uMorph = uniform("uMorph");
   const uTime = uniform("uTime");
+  const uCalmIn = uniform("uCalmIn");
   const uViewport = uniform("uViewport");
   const uParallax = uniform("uParallax");
   const uShift = uniform("uShift");
   const uScale = uniform("uScale");
+  const uDrops = uniform("uDrops");
 
-  const warm = readColour("--field-warm", [0.88, 0.55, 0.42]);
-  const cool = readColour("--field-cool", [0.66, 0.58, 0.79]);
-  gl.uniform3fv(uniform("uWarm"), warm);
-  gl.uniform3fv(uniform("uCool"), cool);
+  gl.uniform3fv(uniform("uWarm"), readColour("--field-warm", [0.88, 0.55, 0.42]));
+  gl.uniform3fv(uniform("uCool"), readColour("--field-cool", [0.66, 0.58, 0.79]));
 
   gl.disable(gl.DEPTH_TEST);
   gl.enable(gl.BLEND);
-  // Additive. Overlapping points build brightness, which is what makes a
-  // dense region read as a solid mass and a sparse one as dust.
+  // Additive: overlapping rings brighten where they cross, which is exactly
+  // the point — interference that adds instead of destroying.
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
   gl.clearColor(0, 0, 0, 0);
 
-  let pixelRatio = 1;
   function resize() {
-    pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-    const width = Math.round(canvas.clientWidth * pixelRatio);
-    const height = Math.round(canvas.clientHeight * pixelRatio);
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.round(canvas.clientWidth * ratio);
+    const height = Math.round(canvas.clientHeight * ratio);
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
       canvas.height = height;
     }
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.uniform2f(uViewport, canvas.width || 1, canvas.height || 1);
-    gl.uniform1f(uScale, pixelRatio);
+    gl.uniform1f(uScale, ratio);
   }
   resize();
 
-  let target = 0;
+  /* ------------------------------------------------------------- drops -- */
+
+  const drops = new Float32Array(DROPS * 4);
+  let dropAt = 0;
+  const started = performance.now();
+  const now = () => (performance.now() - started) / 1000;
+
+  function spawnDrop(x, z, size, delay = FALL_SECONDS) {
+    drops[dropAt * 4] = x;
+    drops[dropAt * 4 + 1] = z;
+    // Impact lands after the streak has had time to fall.
+    drops[dropAt * 4 + 2] = now() + delay;
+    drops[dropAt * 4 + 3] = size;
+    dropAt = (dropAt + 1) % DROPS;
+  }
+
+  /**
+   * The weather, set by the scroll. Rain at the hero; occasional drops
+   * mid-page; near the end just the centre, breathing.
+   */
+  let nextDrop = 0.4;
+  for (const age of [-2.6, -1.9, -1.2, -0.6, -0.15]) {
+    const angle = Math.random() * Math.PI * 2;
+    const radius = Math.sqrt(Math.random()) * 1.3;
+    spawnDrop(Math.cos(angle) * radius, Math.sin(angle) * radius, 0.7 + Math.random() * 0.5, age);
+  }
+  function weather(calm, time) {
+    if (time < nextDrop) {
+      return;
+    }
+    if (calm > 0.9) {
+      spawnDrop(
+        (Math.random() - 0.5) * 0.2,
+        (Math.random() - 0.5) * 0.2,
+        0.85,
+      );
+      nextDrop = time + 3.6 + Math.random() * 0.8;
+      return;
+    }
+    const angle = Math.random() * Math.PI * 2;
+    const radius = Math.sqrt(Math.random()) * 1.35;
+    spawnDrop(
+      Math.cos(angle) * radius,
+      Math.sin(angle) * radius,
+      0.75 + Math.random() * 0.55,
+    );
+    nextDrop = time + 0.3 + calm * 3.4 + Math.random() * 0.45;
+  }
+
+  /**
+   * A precise pointer drips where it moves. The screen position is cast
+   * back through the same fixed camera the shader uses onto the resting
+   * surface — parallax and shift are ignored on the way, which costs less
+   * accuracy than a ripple is wide.
+   */
+  let lastDrip = 0;
+  function drip(event) {
+    const time = now();
+    if (time - lastDrip < 0.18) {
+      return;
+    }
+    const nx = (event.clientX / window.innerWidth) * 2 - 1;
+    const ny = -((event.clientY / window.innerHeight) * 2 - 1);
+    const calm = Math.min(1, Math.max(0, (shownCalm - 0.45) / 0.5));
+    const eye = [0, 0.6 + 0.28 * calm, 2.02 - 0.22 * calm];
+    const tilt = 0.2 + 0.16 * calm;
+    const aspect = window.innerWidth / window.innerHeight;
+    // The ray in tilted view space, untilted, then run to the surface.
+    const direction = [(nx * aspect) / 1.34, ny / 1.34, -1];
+    const ct = Math.cos(-tilt);
+    const st = Math.sin(-tilt);
+    const dy = direction[1] * ct - direction[2] * st;
+    const dz = direction[1] * st + direction[2] * ct;
+    if (Math.abs(dy) < 0.001) {
+      return;
+    }
+    const t = (-0.06 - eye[1]) / dy;
+    if (t <= 0) {
+      return;
+    }
+    const x = eye[0] + direction[0] * t;
+    const z = eye[2] + dz * t;
+    if (x * x + z * z > 2.05 * 2.05) {
+      return;
+    }
+    lastDrip = time;
+    spawnDrop(x, z, 0.3, 0.1);
+  }
+
+  /* -------------------------------------------------------------- frame -- */
+
   let shown = 0;
+  let shownCalm = 0;
   let pointer = [0, 0];
   let pointerTarget = [0, 0];
   let shift = [0, 0];
   let running = true;
   let frame = 0;
-  const started = performance.now();
 
   const readProgress = options.progress ?? (() => 0);
   const readShift = options.shift ?? (() => [0, 0]);
 
-  function draw(now) {
+  function draw() {
     if (!running) {
       return;
     }
     frame = requestAnimationFrame(draw);
-    target = readProgress();
-    // Damped rather than pinned to the scrollbar: a trackpad fling would
-    // otherwise snap the form from one to the next in a single frame, and the
-    // morph is the thing worth watching.
-    shown += (target - shown) * 0.075;
+    const time = now();
+    // Damped rather than pinned to the scrollbar: a trackpad fling should
+    // change the weather, not teleport it.
+    shown += (readProgress() - shown) * 0.075;
+    shownCalm = shown;
     pointer[0] += (pointerTarget[0] - pointer[0]) * 0.06;
     pointer[1] += (pointerTarget[1] - pointer[1]) * 0.06;
     const wanted = readShift();
     shift[0] += (wanted[0] - shift[0]) * 0.05;
     shift[1] += (wanted[1] - shift[1]) * 0.05;
 
+    weather(Math.min(1, Math.max(0, (shown - 0.45) / 0.5)), time);
+
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.uniform1f(uMorph, shown * (FORMS - 1));
-    gl.uniform1f(uTime, (now - started) / 1000);
+    gl.uniform1f(uTime, time);
+    gl.uniform1f(uCalmIn, shown);
     gl.uniform2f(uParallax, pointer[0], pointer[1]);
     gl.uniform2f(uShift, shift[0], shift[1]);
+    gl.uniform4fv(uDrops, drops);
     gl.drawArrays(gl.POINTS, 0, count);
   }
   frame = requestAnimationFrame(draw);
@@ -503,6 +477,7 @@ export function startField(canvas, options = {}) {
       (event.clientX / window.innerWidth) * 2 - 1,
       -((event.clientY / window.innerHeight) * 2 - 1),
     ];
+    drip(event);
   }
   const fine = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
   if (fine) {
@@ -510,8 +485,7 @@ export function startField(canvas, options = {}) {
   }
   window.addEventListener("resize", resize, { passive: true });
 
-  // A field drawing sixty frames a second behind a hidden tab is a laptop fan
-  // and nothing else.
+  // Water drawn behind a hidden tab is a laptop fan and nothing else.
   function onVisibility() {
     if (document.hidden) {
       running = false;

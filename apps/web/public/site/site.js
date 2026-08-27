@@ -27,6 +27,11 @@
 
 import { startField } from "./field.js";
 
+// The other half of the boot script's fuse: this attribute existing is what
+// tells it the module graph loaded and someone is now responsible for the
+// `anim` class. Set before anything that could throw.
+document.documentElement.setAttribute("data-anim-live", "1");
+
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const motion = window.Motion;
 const EASE = [0.32, 0.72, 0, 1];
@@ -87,7 +92,14 @@ if (reduceMotion.matches || motion === undefined) {
       disarm();
     }
   });
-  wire();
+  // A throw anywhere in wiring forfeits the animations, never the content:
+  // disarm() shows everything the boot script hid and undoes any staging
+  // that happened before the throw.
+  try {
+    wire();
+  } catch {
+    disarm();
+  }
   field();
 }
 
@@ -120,9 +132,9 @@ function progress() {
  */
 const SHIFTS = [
   [0.0, [0.0, 0.0]],
-  [0.34, [0.0, -0.14]],
-  [0.62, [0.0, -0.2]],
-  [1.0, [0.0, -0.18]],
+  [0.34, [0.0, 0.62]],
+  [0.62, [0.0, 0.8]],
+  [1.0, [0.0, 0.78]],
 ];
 
 function shift() {
