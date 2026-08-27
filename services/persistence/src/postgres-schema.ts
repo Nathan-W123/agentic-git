@@ -998,15 +998,6 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     version: 47,
     name: "paywalled-signup",
     statements: [
-      `CREATE TABLE waitlist_signups (
-        email TEXT PRIMARY KEY,
-        name TEXT,
-        company TEXT,
-        team_size TEXT,
-        agents TEXT,
-        note TEXT,
-        created_at TEXT NOT NULL
-      )`,
       `CREATE TABLE signup_intents (
         id TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL,
@@ -1035,6 +1026,28 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
               o.created_at
          FROM organizations o
         WHERE o.id NOT IN (SELECT organization_id FROM subscriptions)`,
+    ],
+  },
+  {
+    // Mirrors the SQLite migration of the same version. Case-insensitive
+    // uniqueness is a unique index over LOWER(...) in this dialect, as it is
+    // for every other address column here.
+    version: 48,
+    name: "waitlist",
+    statements: [
+      `CREATE TABLE waitlist_entries (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        display_name TEXT,
+        note TEXT,
+        source TEXT,
+        created_at TEXT NOT NULL,
+        invited_at TEXT
+      )`,
+      `CREATE UNIQUE INDEX waitlist_entries_email
+         ON waitlist_entries(LOWER(email))`,
+      `CREATE INDEX waitlist_entries_by_created
+         ON waitlist_entries(created_at)`,
     ],
   },
 ];

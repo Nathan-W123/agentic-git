@@ -4759,6 +4759,18 @@ button.chip.lg:hover {
  * is unaffected either way: green, amber and red mean what they mean.
  */
 .chats-shell {
+  /* How tall the channel's own banner is, published on the shell so the side
+     panels can start underneath it instead of running the full height beside
+     it. A thread that begins level with the channel header reads as a second
+     header competing with the first — two titles, two rules, on one line. Held
+     to the same number `.chan-head` is given below, so the two cannot drift.
+
+     The phone tier redefines both this and the banner further down: there the
+     header is fixed across the whole screen and the panel takes the screen. */
+  --chan-head-h: 68px;
+  /* And how tall a side panel's own header is — one short row of tools, set
+     once here because every panel shares `.thread-head`. */
+  --thread-head-h: 38px;
   display: flex;
   gap: 8px;
   height: 100%;
@@ -5665,13 +5677,18 @@ button.chip.lg:hover {
   align-items: center;
 }
 
-/* The usage figures are a section of the profile card now (see `.pcard`), so
-   what is left here is only how one window is drawn. */
+/* A quota window is the only operational detail kept in the compact card.
+   Label, meter and percentage share one line; the reset stays beneath it
+   because that is the part that says when an unavailable agent comes back. */
 .rr-usage-row {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 11px;
+}
+
+.rr-usage-row:not(:first-child) {
+  margin-top: 8px;
 }
 
 .rr-usage-label {
@@ -5704,22 +5721,12 @@ button.chip.lg:hover {
   font-variant-numeric: tabular-nums;
 }
 
-.rr-usage-reset,
-.rr-usage-plan,
-.rr-usage-src,
-.rr-usage-empty {
+.rr-usage-reset {
   display: block;
-  margin-top: 4px;
+  margin-top: 3px;
   font-size: 10.5px;
   line-height: 1.45;
   color: var(--text-3);
-}
-
-/* The plan and credit balance are the account's own facts, not a footnote
-   about where the numbers came from, so they read a shade louder than the
-   source line they sit above. */
-.rr-usage-plan {
-  color: var(--text-2);
 }
 
 /* Scaled to the roster's own face rather than in `.status-dot` itself, which
@@ -6013,6 +6020,14 @@ button.chip.lg:hover {
   display: flex;
   align-items: center;
   gap: 12px;
+  /* The banner's height, taken from the shell rather than left to whatever
+     the title and its counts happen to measure — the side panels are seated
+     against this number and nothing else can tell them what it turned out to
+     be. `min-height` rather than `height` so the row can still grow if a
+     larger text size needs it: the panels would then start a few pixels high,
+     which is a nudge rather than a broken layout. The fallback keeps the rule
+     inert anywhere the shell is not the ancestor. */
+  min-height: var(--chan-head-h, auto);
   padding: 13px 18px;
   background: color-mix(in srgb, var(--room-tint) 94%, var(--surface-1));
   border-bottom: 1px solid var(--border-soft);
@@ -6640,17 +6655,14 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   }
 }
 
-/* Shaped after the reference profile popout: a coloured crown, the face
-   breaking out of it, the name and the one line that identifies it, then a
-   short column of labelled facts and the way through to the whole page.
-   Deliberately short — everything on it is what somebody needs *before*
-   deciding whether to open the rest. */
+/* A compact identity surface, not a second profile page. It holds the live
+   answer needed before opening an agent and leaves settings to that page. */
 .pcard {
   display: block;
-  width: min(246px, var(--profile-max-width, calc(100vw - 20px)));
+  width: min(236px, var(--profile-max-width, calc(100vw - 20px)));
   max-height: var(--profile-max-height, calc(100dvh - 34px));
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
+  border-radius: 12px;
   background: var(--surface-1);
   background-color: var(--surface-1);
   opacity: 1;
@@ -6665,48 +6677,36 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   cursor: default;
 }
 
-/* Whoever's colour this is: an agent carries its owner's, a person carries
-   their own, and anybody who has chosen none gets the theme's accent. The
-   only large block of colour on the card, which is what lets the rest of it
-   stay quiet. */
-.pcard-banner {
-  display: block;
-  height: 42px;
-  background: linear-gradient(
-    145deg,
-    color-mix(in srgb, var(--pcard-accent, var(--accent)) 42%, var(--surface-2)),
-    color-mix(in srgb, var(--pcard-accent, var(--accent)) 12%, var(--surface-2))
-  );
-}
-
 .pcard-body {
   display: block;
-  padding: 0 13px 13px;
+  padding: 12px;
   background: var(--surface-1);
 }
 
-/* Breaking out of the crown, as the reference does. The ring is the card's
-   own background, so the face reads as sitting on the card rather than
-   punched through it. */
+.pcard-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
 .pcard-face {
   position: relative;
-  /* A block-level flex box rather than an inline one: inline sits on a text
-     baseline, and the descender space under a 52px face is a band of empty
-     card nobody put there. */
   display: flex;
-  width: fit-content;
-  margin: -22px 0 6px;
-  padding: 3px;
-  border-radius: 50%;
-  background: var(--surface-1);
+  flex: none;
 }
 
 .pcard-face .status-dot {
-  right: 2px;
-  bottom: 2px;
-  width: 9px;
-  height: 9px;
-  border-width: 2px;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-width: 1.5px;
+}
+
+.pcard-identity {
+  display: block;
+  min-width: 0;
 }
 
 .pcard-name {
@@ -6720,12 +6720,24 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   white-space: nowrap;
 }
 
-/* The one line that tells two of them apart — an address for a person, the
-   vendor and owner for an agent. */
-.pcard-sub {
-  display: block;
-  margin-top: 1px;
+.pcard-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 5px;
+  margin-top: 3px;
   font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.pcard-meta .sep {
+  color: var(--text-4);
+}
+
+/* The provider or address identifies the subject; the adjacent words state
+   availability without adding a second status dot beside the one on the
+   face. */
+.pcard-sub {
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6733,37 +6745,26 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 .pcard-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 7px;
-  font-size: 11.5px;
   color: var(--text-2);
 }
 
-/* The dot means what it means everywhere else — the palette lives in
-   `.status-dot` and its colours, and only the placement changes: pinned
-   to the corner of a face, and simply sitting in a line of text here. */
-.pcard-status .status-dot {
-  position: static;
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border: 0;
-}
-
-.pcard-rule {
+.pcard-facts {
   display: block;
-  height: 1px;
-  margin: 11px 0 1px;
-  background: var(--border-soft);
+  margin-top: 12px;
 }
 
-/* One fact: what it is, then what it says. The small label is what keeps a
-   short column of these readable without a rule between every pair. */
 .pcard-section {
   display: block;
-  margin-top: 8px;
+  margin-top: 10px;
+}
+
+.pcard-facts .pcard-section:first-child,
+.pcard-usage-section {
+  margin-top: 0;
+}
+
+.pcard-usage-section {
+  padding-top: 11px;
 }
 
 .pcard-section-label {
@@ -6790,30 +6791,39 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 
 .pcard-usage {
   display: block;
-  margin-top: 4px;
+  margin-top: 6px;
 }
 
 /* The way through to everything this card left out, which is what lets it
    stay this short. */
 .pcard-open {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
-  margin-top: 12px;
-  padding: 7px 10px;
+  margin-top: 11px;
+  padding: 9px 0 0;
   border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  color: var(--text);
+  border-top: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
   font-family: inherit;
   font-size: 11.5px;
   font-weight: 500;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: color 0.12s ease;
+}
+
+.pcard-open::after {
+  content: "→";
+  color: var(--text-4);
 }
 
 .pcard-open:hover {
-  background: var(--bg-hover);
+  background: transparent;
+  color: var(--text);
 }
 
 .pcard-open:focus-visible {
@@ -7570,6 +7580,31 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .thread-composer-wrap {
   position: relative;
   min-width: 0;
+  /* Air between the last reply and the box, so the box reads as a thing
+     resting on the floor of the panel rather than as the next row of the
+     conversation. */
+  padding-top: 4px;
+}
+
+/* One sleek pill on that floor.
+ *
+ * The panel is the narrowest surface in the app and the box on the floor of it
+ * is the only thing a reader is there to act on, so it is the one element here
+ * allowed to look like an object. It gets that from its own outline rather
+ * than from a shadow: rounder than anything above it, and edged in the solid
+ * border instead of the hairline. The card shadow that would ordinarily raise
+ * it goes — a soft edge inside an already-bordered panel is a third line in a
+ * column that has just had two taken out of it, and it reads as smudge rather
+ * than as lift at this width.
+ *
+ * The insets are left alone. The picker above the box and the row of staged
+ * attachments are both indented to the composer's margin by the rules either
+ * side of this one, and the safe-area rule at the foot of the file owns the
+ * bottom, so this is shape and edge only. */
+.thread-composer-wrap .composer {
+  --composer-shape: 17px;
+  border-color: var(--border);
+  box-shadow: none;
 }
 
 /* The thread picker belongs to the inset composer rather than to the full
@@ -9057,6 +9092,17 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 0;
+  /* Under the channel banner, not beside it. The panel is a sibling of the
+     conversation column rather than a child, so at full height its own header
+     sat level with the channel's — two title rows and two hairlines across
+     one line, each naming a different thing. Dropped by the banner's height
+     it begins where the transcript begins, and reads as something opened
+     inside this channel rather than as a second channel next to it.
+
+     Zeroed again wherever there is no banner above it to sit under: the
+     multi-panel widths below 1100px, which stand the conversation down, and
+     the phone tier, where the panel is the whole screen. */
+  margin-top: var(--chan-head-h, 0px);
   background: var(--bg-panel);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-xl);
@@ -9124,6 +9170,10 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   .chats-shell.panels-3 .thread-panel {
     width: 0;
     flex: 1 1 0;
+    /* The conversation — and with it the banner these are seated under — has
+       just been stood down by the rule above. There is nothing left up there
+       to sit beneath, so they take the full height back. */
+    margin-top: 0;
   }
 }
 
@@ -9272,10 +9322,19 @@ body.resizing-panel {
 .thread-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 11px 10px 11px 14px;
+  /* Tight, because the tools after the title are a cluster rather than a
+     list: pin and reply belong together and read as one group of two, with
+     the close fenced off past them. The label and the name it labels buy
+     their own room back below, so this gap is only ever the space between
+     adjacent glyphs. */
+  gap: 2px;
+  /* No vertical padding: the row is exactly as tall as it is told to be and
+     its 26px tools centre inside that, which is what makes it read as a
+     strip of controls rather than as a second banner. */
+  min-height: var(--thread-head-h, 38px);
+  padding: 0 8px 0 12px;
   border-bottom: 1px solid var(--border-soft);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   /* The header is a row of `.thread-panel`'s grid, and a grid item's automatic
      minimum size is its min-content width. Its title is `white-space: nowrap`,
@@ -9296,6 +9355,13 @@ body.resizing-panel {
    way. */
 .thread-head .icon-btn {
   flex: none;
+  /* A size below the 30px box the rest of the app uses. The header is the
+     shortest row in the panel and a full-size button in it leaves no air
+     above or below itself, so the strip reads as full of buttons rather than
+     as a title with tools at the end of it. */
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
 }
 
 /* One quiet word saying which side surface this is — see `panelKind`.
@@ -9308,9 +9374,11 @@ body.resizing-panel {
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--text-3);
-  /* Butted against what it labels rather than spaced evenly among the
-     header's other children, which read as two peers otherwise. */
-  margin-right: -4px;
+  /* Spaced from what it labels rather than butted against it. The row's own
+     gap is now the distance between two adjacent glyphs, which is far too
+     little between a word and the name it introduces — so the label buys
+     back the room the old wider gap used to give it. */
+  margin-right: 6px;
 }
 
 /* The one control the eye goes to when something is covering what was being
@@ -9324,16 +9392,20 @@ body.resizing-panel {
 .thread-head .panel-close {
   flex: none;
   position: relative;
-  margin-left: 9px;
+  /* Its own margin is the whole of the space around the rule now that the
+     row's gap is only two pixels: eight of these sit before the rule and the
+     rest after it, so the fence has air on both sides rather than being
+     pressed against the tool in front of it. */
+  margin-left: 14px;
   color: var(--text-2);
 }
 
 .thread-head .panel-close::before {
   content: "";
   position: absolute;
-  left: -9px;
-  top: 5px;
-  bottom: 5px;
+  left: -6px;
+  top: 6px;
+  bottom: 6px;
   width: 1px;
   background: var(--border-soft);
 }
@@ -9352,6 +9424,10 @@ body.resizing-panel {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  /* The one thing on the row read at full strength. Everything either side of
+     it — the category before, the tools after — is grey by design, so the
+     name is the only thing the eye has to find. */
+  color: var(--text);
 }
 
 .thread-head .spacer {
@@ -9361,7 +9437,27 @@ body.resizing-panel {
 .thread-body {
   overflow-y: auto;
   min-height: 0;
-  padding: 10px 14px 14px;
+  padding: 12px 14px 16px;
+}
+
+/* A message in the panel, at the panel's rhythm.
+ *
+ * The room's rows are spaced for a wide column a reader skims down; the panel
+ * is a third of that width, so the same nine pixels above and below every line
+ * turn four short replies into a page of scrolling. Tighter inside each
+ * message — name, line, whatever it carried — and the room between two of
+ * them is spent once, by `.thread-replies-flow` above, where it separates
+ * things that are actually separate.
+ *
+ * The side padding is deliberately left alone: it is the eight pixels the
+ * compact rows subtract from `--cmsg-body-x` to line their text up under the
+ * group's avatar, and a different number here would step every grouped line
+ * out of that column. Only the vertical is the panel's to change, and only
+ * for rows that are not part of a group — a run from one person stays as
+ * tight as the transcript makes it. */
+.thread-panel .cmsg-row:not(.cmsg-compact) {
+  padding-top: 5px;
+  padding-bottom: 5px;
 }
 
 .thread-root {
@@ -9378,7 +9474,12 @@ body.resizing-panel {
   position: absolute;
   left: 15px;
   top: 48px;
-  bottom: -15px;
+  /* Down past the root and into the air the replies keep above themselves,
+     stopping just short of the first one. It used to run fifteen pixels into
+     a caption row that said how many replies there were; with the caption
+     gone the stroke would have crossed the first replier's own picture, so it
+     now ends in the gutter above it and points at it instead. */
+  bottom: -8px;
   width: 11px;
   border-left: 3px solid var(--border-strong);
   border-bottom: 3px solid var(--border-strong);
@@ -9388,28 +9489,26 @@ body.resizing-panel {
   pointer-events: none;
 }
 
-.thread-replies-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-height: 28px;
-  padding-left: 35px;
-  color: var(--text-3);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.thread-replies-head::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: linear-gradient(90deg, var(--border-soft), transparent);
-}
-
+/* No caption over the replies.
+ *
+ * There used to be one: "2 REPLIES" in small grey capitals, with a hairline
+ * fading off to the right of it. Both were spent saying something the panel
+ * is already showing — the replies are directly underneath, and they can be
+ * counted by looking at them. Between that rule, the panel's own border and
+ * the header's, an open thread was three horizontal lines deep before any of
+ * it was a message. The count survives where it is genuinely not visible:
+ * `.thread-replies` carries it as the section's accessible name.
+ *
+ * What is left is the air the root's branch reaches down into. */
 .thread-replies-flow {
-  padding-top: 2px;
+  padding-top: 10px;
+}
+
+/* One message to the next. The rows themselves are tight so that a person's
+   name, their line and its attachments read as a single block; this is the
+   space between two of those blocks, which is what makes them read as two. */
+.thread-replies-flow > * + * {
+  margin-top: 7px;
 }
 
 .thread-count {
@@ -11101,6 +11200,10 @@ dialog.modal[open]::backdrop {
   .chats-shell {
     --chan-head-h: calc(52px + var(--safe-top));
     padding-top: var(--chan-head-h);
+    /* Taller than the desktop strip because the tools in a panel header go
+       back to the phone's touch target below, and 38px boxes in a 38px row
+       leave the header no air of its own. */
+    --thread-head-h: 56px;
   }
 
   .chats-shell .chan-head {
@@ -11192,6 +11295,10 @@ dialog.modal[open]::backdrop {
     min-width: 0;
     border: 0;
     border-radius: 0;
+    /* It covers the banner here rather than sitting under it — and a margin
+       on a box pinned top *and* bottom would shorten it as well as move it,
+       leaving a strip of the screen behind it at the foot. */
+    margin-top: 0;
     z-index: 72;
   }
 
@@ -11202,6 +11309,15 @@ dialog.modal[open]::backdrop {
   /* Nothing to drag full-screen wider than the screen. */
   .thread-panel .panel-grip {
     display: none;
+  }
+
+  /* And the header's tools go back to the size every other button on a phone
+     is. The desktop rule shrinks them to 26px for a dense strip beside a
+     pointer; a thumb cannot aim at that, and being the panel's only close it
+     is the last control in the app that should be hard to hit. */
+  .thread-head .icon-btn {
+    width: 38px;
+    height: 38px;
   }
 
   .code-shell .chat-pane {

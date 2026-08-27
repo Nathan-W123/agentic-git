@@ -73,6 +73,12 @@ process.env["COORD_ALLOW_REGISTRATION"] = "1";
 // exercise it, so they ask for it explicitly; the test that pins the default
 // clears it for its own runtime.
 process.env["COORD_REQUIRE_EMAIL_CONFIRMATION"] = "1";
+// Payments are off in the product now. Almost every test in this file is
+// about a deployment that takes them — the trial, the seat count, the
+// entitlement gate — so the switch is on for the fixtures, and the tests that
+// are about it being off clear it for their own runtime with
+// `withEnvironment`.
+process.env["KUMI_PAYMENTS_ENABLED"] = "1";
 
 interface TestRuntime {
   gateway: ApiGateway;
@@ -6337,26 +6343,23 @@ test("a finished task says what it did, not that the pipeline worked", () => {
         "Repointed six test imports at their new modules; collection passes.",
       files: ["a.py", "b.py"],
     }),
-    "Repointed six test imports at their new modules; collection passes. " +
-      "(a.py, b.py)",
+    "Repointed six test imports at their new modules; collection passes.",
   );
-  // Named while there are few enough to name: "(1 file changed)" says
-  // something landed without saying what, which is the one thing a reader
-  // cannot check against the repository in front of them.
-  assert.match(
+  // The changed-file block already names the files. The ending is only the
+  // agent's answer, regardless of how many changed files the task reports.
+  assert.equal(
     narrateTaskEvent("canonical_promoted", {
       agentExplanation: "Raised the retry ceiling to five.",
       files: ["retry.ts"],
-    }) ?? "",
-    /\(retry\.ts\)$/u,
+    }),
+    "Raised the retry ceiling to five.",
   );
-  // Past two, a count again — an ending that lists a dozen paths is not one.
-  assert.match(
+  assert.equal(
     narrateTaskEvent("canonical_promoted", {
       agentExplanation: "Split the module.",
       files: ["a.py", "b.py", "c.py"],
-    }) ?? "",
-    /\(3 files changed\)$/u,
+    }),
+    "Split the module.",
   );
   // No files recorded is not a reason to withhold the summary.
   assert.equal(
@@ -11538,6 +11541,10 @@ test("health says which billing variables reached the process", async (t) => {
   const bare = await startBareGateway(t, {});
   const unset = await bare.client.request("/api/v1/health");
   assert.deepEqual(unset.data.billing, {
+    // The switch first, because with it false the other three decide nothing
+    // and reading them without it is how somebody concludes billing is broken
+    // when it is simply off. On here, because the fixtures run with it on.
+    payments: true,
     secretKey: false,
     webhookSecret: false,
     priceId: false,
@@ -11554,6 +11561,7 @@ test("health says which billing variables reached the process", async (t) => {
   });
   const set = await configured.client.request("/api/v1/health");
   assert.deepEqual(set.data.billing, {
+    payments: true,
     secretKey: true,
     webhookSecret: true,
     priceId: true,
@@ -16575,9 +16583,11 @@ function resetLink(message: MailMessage | undefined): string {
   return match?.[1] ?? "";
 }
 
-test("the free registration routes are retired, and say so", async (t) => {
-  // They made an account without a card. Sign-up takes one now, so leaving
-  // these reachable would leave the paywall with a door beside it.
+test("the free registration routes are retired while payments are on", async (t) => {
+  // They made an account without a card. Sign-up takes one when payments are
+  // on, so leaving these reachable then would leave the paywall with a door
+  // beside it. With payments off they are the door — gated on the waitlist,
+  // which has its own tests at the foot of this file.
   //
   // 410 rather than 404, and rather than silence: they existed, they are gone
   // deliberately, and a client still calling one should be told which of
@@ -18474,120 +18484,233 @@ test("an app cannot be approved for somewhere else, or by another app", async (t
   assert.equal(byToken.status, 403);
 });
 
-test("the waitlist takes an address from a stranger, once, in either encoding", async (t) => {
-  // Shipping as a waitlist means the one thing a visitor can do is leave an
-  // address, and they do it with no account, no session, and no CSRF token.
-  // That is three of the gateway's defences deliberately stood down for one
-  // route, so this pins what it actually accepts.
-  const store = new InMemoryCoordinationStore();
-  const gateway = new ApiGateway({
-    store,
-    operations: {
-      async createRepository() {
+/* ------------------------------------------- payments switched off ------ */
+
+test("with payments off the card path is closed and the waitlist is open", async (t) => {
+  withEnvironment(t, { KUMI_PAYMENTS_ENABLED: undefined });
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+
+  // Health says so first, because it is the one place an operator can look
+  // when the answer surprises them.
+  const health = await client.request("/api/v1/health");
+  assert.equal(health.data.billing.payments, false);
+
+  // The card path answers 501 and names the door that is open. It is not a
+  // 404: the address is on links people already hold.
+  const card = await client.request("/api/v1/auth/signup", {
+    method: "POST",
+    body: { email: "buyer@example.com" },
+  });
+  assert.equal(card.status, 501, JSON.stringify(card.data));
+  assert.equal(card.data.error.code, "payments_disabled");
+  assert.match(card.data.error.message, /waitlist/u);
+
+  // Anybody may ask for a place, without an account and without a card.
+  const joined = await client.request("/api/v1/waitlist", {
+    method: "POST",
+    body: {
+      email: "Ada@Example.com",
+      displayName: "Ada",
+      note: "Two agents on one repo",
+    },
+  });
+  assert.equal(joined.status, 202, JSON.stringify(joined.data));
+  assert.equal(joined.data.waitlisted, true);
+  assert.equal(joined.data.email, "ada@example.com");
+
+  // Nothing was created that anybody can sign in to.
+  assert.equal(await runtime.store.getUserByEmail("ada@example.com"), undefined);
+
+  // And asking twice is one place, not two, with the same answer either way.
+  const again = await client.request("/api/v1/waitlist", {
+    method: "POST",
+    body: { email: "ada@example.com", note: "Still interested" },
+  });
+  assert.equal(again.status, 202);
+  assert.equal((await runtime.store.listWaitlistEntries()).length, 1);
+});
+
+test("registration admits the address an operator approved, and nobody else", async (t) => {
+  withEnvironment(t, {
+    KUMI_PAYMENTS_ENABLED: undefined,
+    COORD_REQUIRE_EMAIL_CONFIRMATION: undefined,
+  });
+  const runtime = await startRuntime(t);
+  const admin = new TestClient(runtime.origin);
+  await bootstrap(admin);
+
+  const stranger = new TestClient(runtime.origin);
+  await stranger.request("/api/v1/waitlist", {
+    method: "POST",
+    body: { email: "ada@example.com", displayName: "Ada" },
+  });
+
+  // Still waiting: registration refuses, and says the same thing it would say
+  // to an address that never asked at all.
+  const early = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "ada@example.com",
+      displayName: "Ada",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(early.status, 403, JSON.stringify(early.data));
+  assert.equal(early.data.error.code, "waitlist_pending");
+  const never = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "nobody@example.com",
+      displayName: "Nobody",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(never.status, 403);
+  assert.equal(never.data.error.code, "waitlist_pending");
+
+  // The list is the operator's, and only the operator's.
+  const refusedList = await stranger.request("/api/v1/admin/waitlist");
+  assert.equal(refusedList.status, 401);
+  const list = await admin.request("/api/v1/admin/waitlist");
+  assert.equal(list.status, 200, JSON.stringify(list.data));
+  assert.equal(list.data.waitlist.length, 1);
+  const entryId = list.data.waitlist[0].id;
+
+  const approved = await admin.request(
+    `/api/v1/admin/waitlist/${entryId}/approve`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  assert.equal(approved.data.approved, true);
+  assert.notEqual(approved.data.entry.invitedAt, undefined);
+  // Approving twice sends one welcome between them.
+  const twice = await admin.request(
+    `/api/v1/admin/waitlist/${entryId}/approve`,
+    { method: "POST", body: {} },
+  );
+  assert.equal(twice.data.approved, false);
+
+  // Now the address is through, and the account it builds is free.
+  const created = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "ada@example.com",
+      displayName: "Ada",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.user.email, "ada@example.com");
+  assert.equal(created.data.memberships.length, 1);
+  assert.equal(created.data.memberships[0].role, "owner");
+  const subscription = await runtime.store.getSubscription(
+    created.data.memberships[0].organizationId,
+  );
+  assert.equal(subscription?.status, "comped");
+  assert.equal(subscription?.trialEndsAt, undefined);
+
+  // And an address nobody approved is still refused after all that.
+  const stillOut = await new TestClient(runtime.origin).request(
+    "/api/v1/auth/register",
+    {
+      method: "POST",
+      body: {
+        email: "nobody@example.com",
+        displayName: "Nobody",
+        password: PASSWORD,
+      },
+    },
+  );
+  assert.equal(stillOut.status, 403);
+});
+
+test("with payments off nothing is billed, gated, or reachable at Stripe", async (t) => {
+  withEnvironment(t, { KUMI_PAYMENTS_ENABLED: undefined });
+  const stripeCalls: string[] = [];
+  const runtime = await startRuntime(t, {
+    // A perfectly good client, injected: the refusal below is a decision this
+    // deployment made, not a key it is missing, and the two must not be
+    // confused for each other.
+    stripe: {
+      async createCheckoutSession() {
+        stripeCalls.push("checkout");
+        return { id: "cs_1", url: "https://stripe.example/checkout" };
+      },
+      async createPortalSession() {
+        stripeCalls.push("portal");
+        return { url: "https://stripe.example/portal" };
+      },
+      async getSubscription() {
+        stripeCalls.push("get");
         throw new Error("unused");
       },
-    } as unknown as ApiOperations,
+      async getSubscriptionItemId() {
+        stripeCalls.push("item");
+        throw new Error("unused");
+      },
+      async updateSubscriptionQuantity() {
+        stripeCalls.push("quantity");
+      },
+    } as unknown as StripeClient,
   });
-  t.after(async () => {
-    await gateway.close();
-    await store.close();
-  });
-  await new Promise<void>((resolve, reject) => {
-    gateway.server.once("error", reject);
-    gateway.server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = gateway.server.address();
-  if (address === null || typeof address === "string") {
-    throw new Error("Test gateway did not bind a TCP port");
+  const client = new TestClient(runtime.origin);
+  const owner = await bootstrap(client);
+  const organizationId = owner.memberships[0].organizationId;
+
+  // A subscription that would lock this team out if anybody were charging.
+  await runtime.store.saveSubscription({ organizationId, status: "canceled" });
+
+  const billing = await client.request(
+    `/api/v1/organizations/${organizationId}/billing`,
+  );
+  assert.equal(billing.status, 200, JSON.stringify(billing.data));
+  assert.equal(billing.data.billing.payments, false);
+  assert.equal(billing.data.billing.configured, false);
+
+  for (const path of ["billing/checkout", "billing/portal"]) {
+    const refused = await client.request(
+      `/api/v1/organizations/${organizationId}/${path}`,
+      { method: "POST", body: {} },
+    );
+    assert.equal(refused.status, 501, `${path}: ${JSON.stringify(refused.data)}`);
+    assert.equal(refused.data.error.code, "payments_disabled");
   }
-  const base = `http://127.0.0.1:${address.port}`;
-
-  const joined = await fetch(`${base}/api/v1/waitlist`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({
-      email: "Someone@Example.com ",
-      name: "  Ada  ",
-      company: "Relay",
-      teamSize: "2 to 5",
-      agents: "Claude, Codex",
-      note: "checkout",
-    }),
-  });
-  assert.equal(joined.status, 200);
-  assert.deepEqual(await joined.json(), { status: "joined", added: true });
-
-  // Everything the form asks is kept, trimmed, beside the address.
-  const [first] = await store.listWaitlistSignups();
-  assert.deepEqual(
-    {
-      email: first?.email,
-      name: first?.name,
-      company: first?.company,
-      teamSize: first?.teamSize,
-      agents: first?.agents,
-      note: first?.note,
-    },
-    {
-      email: "someone@example.com",
-      name: "Ada",
-      company: "Relay",
-      teamSize: "2 to 5",
-      agents: "Claude, Codex",
-      note: "checkout",
-    },
+  const webhook = await new TestClient(runtime.origin).request(
+    "/api/v1/stripe/webhook",
+    { method: "POST", raw: Buffer.from("{}"), rawType: "application/json" },
   );
+  assert.equal(webhook.status, 501);
+  assert.equal(webhook.data.error.code, "payments_disabled");
+  assert.deepEqual(stripeCalls, [], "Stripe must not be called at all");
 
-  // Normalised on the way in, so the same address typed two ways is one row.
-  const again = await fetch(`${base}/api/v1/waitlist`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ email: "someone@example.com" }),
+  // And a cancelled subscription gates nothing.
+  //
+  // Asked of somebody who is not a system administrator, because those are
+  // exempt from the gate anyway and would prove nothing about it. This owner
+  // is an ordinary one, their organization's subscription is cancelled, and
+  // `manage_members` is a permission a folded `viewer` does not hold — so a
+  // 403 here would be the gate closing, and anything else is it staying open.
+  // (That it *does* close with payments on is pinned in billing.test.ts and
+  // authorization.test.ts, which is where that rule lives.)
+  const member = new TestClient(runtime.origin);
+  const registered = await registerAccount(runtime.store, member, {
+    email: "ordinary@example.com",
+    displayName: "Ordinary",
+    password: PASSWORD,
   });
-  assert.equal(again.status, 200);
-  assert.deepEqual(
-    await again.json(),
-    { status: "joined", added: false },
-    "a second submission must not be an error the visitor has to read",
+  const ownOrganization = registered.data.memberships[0].organizationId;
+  await runtime.store.saveSubscription({
+    organizationId: ownOrganization,
+    status: "canceled",
+  });
+  const invited = await member.request(
+    `/api/v1/organizations/${ownOrganization}/invitations`,
+    { method: "GET" },
   );
-
-  // The form without JavaScript: a browser's own encoding, and a page rather
-  // than a screenful of JSON.
-  const noScript = await fetch(`${base}/api/v1/waitlist`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      accept: "text/html,application/xhtml+xml",
-    },
-    body: new URLSearchParams({
-      email: "second@example.com",
-      name: "Grace",
-      // Left blank the way a person leaves an optional field blank: stored as
-      // nothing rather than as an empty string.
-      company: "",
-    }).toString(),
-  });
-  assert.equal(noScript.status, 200);
-  assert.match(noScript.headers.get("content-type") ?? "", /text\/html/u);
-  assert.match(await noScript.text(), /You are on the list/u);
-
-  const rejected = await fetch(`${base}/api/v1/waitlist`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ email: "not an address" }),
-  });
-  assert.equal(rejected.status, 400);
-
-  const rows = await store.listWaitlistSignups();
-  assert.deepEqual(
-    rows.map((row) => row.email),
-    ["someone@example.com", "second@example.com"],
-    "one row per address, in the order they arrived",
-  );
-  assert.equal(rows[1]?.name, "Grace", "a form post keeps its fields too");
   assert.equal(
-    rows[1]?.company,
-    undefined,
-    "a field left blank is absent, not an empty string",
+    invited.status,
+    200,
+    `a cancelled subscription must not gate anything: ${JSON.stringify(invited.data)}`,
   );
 });

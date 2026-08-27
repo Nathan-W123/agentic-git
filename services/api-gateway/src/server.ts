@@ -99,7 +99,7 @@ import {
   verifyWebhookSignature,
   type StripeClient,
 } from "./stripe.js";
-import { billableSeats, TRIAL_DAYS } from "./billing.js";
+import { billableSeats, paymentsEnabled, TRIAL_DAYS } from "./billing.js";
 import {
   arbitrationLine,
   type DeferredRef,
@@ -1209,7 +1209,7 @@ const OPENING_TIMEOUT_MS = 120000;
  * service) on purpose: whichever limit fires, the reader should be told the
  * model gave up rather than that this control plane stopped listening.
  */
-const DEEP_PLAN_TIMEOUT_MS = 300_000;
+const DEEP_PLAN_TIMEOUT_MS = 1_000_000;
 /**
  * How much of a plan is worth keeping.
  *
@@ -2042,23 +2042,10 @@ export function narrateTaskEvent(
       }
       // Whole: this is the one line most people read of a task, and a bound
       // low enough to shape it was a bound it kept being cut at mid-word.
-      const summary = shortenEnding(written);
-      // The count, not the names — the reader who wants those is one click
-      // Named while there are few enough to name. "(1 file changed)" is the
-      // one fact about an ending that a reader cannot check and cannot use:
-      // it says something landed without saying what, so a thread reporting
-      // one file and a repository holding three cannot be reconciled from the
-      // channel at all — which is exactly the question this line kept being
-      // asked to answer and could not.
-      //
-      // Past two it goes back to a count, for the reason it always was one:
-      // an ending that lists a dozen paths stops being an ending.
-      if (files.length === 0) {
-        return summary;
-      }
-      return files.length <= 2
-        ? `${summary} (${files.join(", ")})`
-        : `${summary} (${String(files.length)} files changed)`;
+      // Changed files already have their own structured block immediately
+      // above this ending. Repeating their paths or count here makes the
+      // agent's answer noisier without adding anything the reader cannot see.
+      return shortenEnding(written);
     }
     case "task_reported": {
       // The agent's own words are the deliverable here — the report *is* the
@@ -3964,6 +3951,16 @@ export interface ApiGatewayOptions {
    * about a missing key. Injected by tests, which must not call Stripe.
    */
   stripe?: StripeClient;
+  /**
+   * Whether this deployment takes money at all.
+   *
+   * Defaults to `KUMI_PAYMENTS_ENABLED`, which is off. With it off there is
+   * no checkout, no billing portal, no webhook, no seat reconciliation and no
+   * trial — public sign-up is a waitlist instead, and the entitlement gate
+   * stops folding anybody to `viewer`. Injected by tests so one case can be
+   * written on each side of the switch.
+   */
+  paymentsEnabled?: boolean;
   /** Signing secret for Stripe webhooks; without it no webhook is accepted. */
   stripeWebhookSecret?: string;
   /** The price a seat is sold at. Required before checkout can be started. */
@@ -4326,61 +4323,8 @@ function narrowToRepositories<T extends { repositoryId?: string }>(
   );
 }
 
-/** An invitation without its secret, which is never stored recoverably. */
-/**
- * What a browser sees when it posts the waitlist form without JavaScript.
- *
- * Deliberately self-contained and tiny: it cannot reach the marketing site's
- * stylesheet without knowing where that is deployed, and a confirmation is
- * two sentences and a way back. It says the same thing whether or not the
- * address was new, for the same reason the JSON does.
- */
-function waitlistPage(): string {
-  return [
-    "<!doctype html>",
-    '<html lang="en"><head><meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    "<title>You are on the list</title>",
-    "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;",
-    "background:#121110;color:#f3efe8;font:16px/1.6 system-ui,sans-serif;",
-    "text-align:center;padding:24px}a{color:#d88973}</style>",
-    "</head><body><main><h1>You are on the list.</h1>",
-    "<p>We will be in touch when KUMI opens up.</p>",
-    '<p><a href="/">Back to the site</a></p></main></body></html>',
-  ].join("");
-}
 
-/** An optional answer, trimmed and capped, or nothing if it was left blank. */
-function waitlistText(value: unknown, max: number): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const text = value.trim().slice(0, max);
-  return text.length === 0 ? undefined : text;
-}
 
-/**
- * The one address this endpoint will keep, or nothing.
- *
- * Deliberately not a full RFC 5322 parser: this is a marketing form, and the
- * only failures worth catching are the ones a person makes by hand. Lowercased
- * and trimmed so the same address typed two ways is one row rather than two,
- * and length-capped because the column is a key and nothing else bounds what
- * arrives.
- */
-function normaliseWaitlistEmail(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const email = value.trim().toLowerCase();
-  if (email.length === 0 || email.length > 254) {
-    return undefined;
-  }
-  if (!/^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$/u.test(email)) {
-    return undefined;
-  }
-  return email;
-}
 
 function publicInvitation(invitation: {
   id: string;
@@ -4854,6 +4798,8 @@ export class ApiGateway {
    */
   private readonly bootstrapToken: string | undefined;
   private readonly stripe: StripeClient | undefined;
+  /** Whether the payment pathway is switched on — see `paymentsEnabled`. */
+  private readonly payments: boolean;
   private readonly stripeWebhookSecret: string | undefined;
   private readonly stripePriceId: string | undefined;
   private readonly appBaseUrl: string;
@@ -4872,6 +4818,10 @@ export class ApiGateway {
     const configured = (options.bootstrapToken ?? "").trim();
     this.bootstrapToken = configured.length === 0 ? undefined : configured;
     this.stripe = options.stripe;
+    // Read once, at construction, so every route in one process answers the
+    // same way about it — a switch that could change between two requests of
+    // the same sign-up would be worse than either setting of it.
+    this.payments = options.paymentsEnabled ?? paymentsEnabled(process.env);
     const webhookSecret = (options.stripeWebhookSecret ?? "").trim();
     this.stripeWebhookSecret =
       webhookSecret.length === 0 ? undefined : webhookSecret;
@@ -5125,7 +5075,14 @@ export class ApiGateway {
    * to run this.
    */
   private startBillingReconcile(): void {
-    if (this.billingReconcileTimer !== undefined || this.stripe === undefined) {
+    if (
+      this.billingReconcileTimer !== undefined ||
+      this.stripe === undefined ||
+      // Nothing to reconcile against, and nothing to sweep: with payments off
+      // no checkout is started, so no sign-up intent is written and no seat
+      // quantity exists at Stripe to drift from.
+      !this.payments
+    ) {
       return;
     }
     const interval =
@@ -5302,8 +5259,10 @@ export class ApiGateway {
           // unthrottled one is a way to make this deployment mint checkout
           // sessions and customers for a stranger.
           `${API_PREFIX}/auth/signup`,
-          // Unauthenticated and it writes a row somebody chose the contents
-          // of, which is the whole of the case for the stricter bucket.
+          // The waitlist form writes a row from an unauthenticated request.
+          // It creates nothing anybody can sign in to, but an unthrottled one
+          // is still a way to fill the operators' only list of who is waiting
+          // with noise, which is the thing that makes it useless to them.
           `${API_PREFIX}/waitlist`,
         ].includes(url.pathname) ||
         // Password reset belongs here too, and more than any of them: it sends
@@ -5386,8 +5345,10 @@ export class ApiGateway {
             // abandoned checkout leaves a row naming an organization that was
             // never made and an email that was never claimed.
             `${API_PREFIX}/auth/signup`,
-            // Asking to be told when this opens cannot require an account:
-            // not having one is the entire reason somebody is here.
+            // Asking to be let in cannot require having been let in. It
+            // stores an address and a note and returns nothing about anybody
+            // else, so there is nothing here for an unauthenticated caller to
+            // learn.
             `${API_PREFIX}/waitlist`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
@@ -5441,6 +5402,17 @@ export class ApiGateway {
     const path = url.pathname;
 
     if (method === "POST" && path === `${API_PREFIX}/stripe/webhook`) {
+      if (!this.payments) {
+        // Answered before the signature is even looked at. With payments off
+        // no checkout was ever started here, so any event arriving is for a
+        // subscription this deployment did not sell — and applying one would
+        // move an entitlement nobody is being charged for.
+        throw new HttpError(
+          501,
+          "payments_disabled",
+          "This deployment is not taking payments",
+        );
+      }
       if (this.stripeWebhookSecret === undefined) {
         // Refused rather than ignored. A deployment with no secret cannot tell
         // a real event from a forged one, and answering 200 to both would let
@@ -5515,6 +5487,10 @@ export class ApiGateway {
         // `build.startedAt` above already says which container is answering;
         // this says what it was handed.
         billing: {
+          // The switch itself, first: with this false none of the three
+          // below matter, and reading them without it is how somebody
+          // concludes billing is broken when it is simply off.
+          payments: this.payments,
           secretKey: this.stripe !== undefined,
           webhookSecret: this.stripeWebhookSecret !== undefined,
           priceId: this.stripePriceId !== undefined,
@@ -5548,52 +5524,6 @@ export class ApiGateway {
         },
         time: new Date().toISOString(),
       });
-      return;
-    }
-
-    if (method === "POST" && path === `${API_PREFIX}/waitlist`) {
-      // Both encodings, because both really arrive: the site's script sends
-      // JSON, and the same form without JavaScript sends what every browser
-      // sends, which `readJson` would refuse with a 415 before the page below
-      // could ever be reached.
-      const fields = await this.readWaitlistFields(request);
-      const email = normaliseWaitlistEmail(fields["email"]);
-      if (email === undefined) {
-        throw new HttpError(
-          400,
-          "invalid_email",
-          "A valid email address is required",
-        );
-      }
-      // Everything else is optional and simply capped. A waitlist form is not
-      // a place to argue with somebody about how they described their team.
-      const added = await this.options.store.recordWaitlistSignup({
-        email,
-        name: waitlistText(fields["name"], 120),
-        company: waitlistText(fields["company"], 120),
-        teamSize: waitlistText(fields["teamSize"], 40),
-        agents: waitlistText(fields["agents"], 200),
-        note: waitlistText(fields["note"], 1000),
-        createdAt: new Date().toISOString(),
-      });
-      // A browser that submitted the form itself gets a page, because the
-      // alternative is a screenful of JSON. The site's script asks for JSON
-      // explicitly; anything that says it wants HTML, or says nothing at all
-      // and is clearly a browser, gets the page.
-      const accept =
-        typeof request.headers.accept === "string" ? request.headers.accept : "";
-      if (accept.includes("text/html")) {
-        response
-          .writeHead(200, {
-            "content-type": "text/html; charset=utf-8",
-            "cache-control": "no-store",
-          })
-          .end(waitlistPage());
-        return;
-      }
-      // The same answer either way. Telling a stranger which addresses are
-      // already on the list would make this endpoint a way to test them.
-      this.sendJson(response, 200, { status: "joined", added });
       return;
     }
 
@@ -5675,6 +5605,17 @@ export class ApiGateway {
       // charging them for a second one — and the organization id is minted
       // now so it can be stamped into Stripe's metadata, which is what makes
       // an invoice three months from now attributable with no lookup table.
+      if (!this.payments) {
+        // The card path is closed, not broken. Said as 501 with the address
+        // of the door that is open, because the caller here is a browser that
+        // followed a link somebody still has — an older bookmark, a page in a
+        // cache — and "this moved" is the only useful thing to tell it.
+        throw new HttpError(
+          501,
+          "payments_disabled",
+          "This deployment is not taking payments. Join the waitlist at /api/v1/waitlist.",
+        );
+      }
       if (!registrationOpen(process.env)) {
         throw new HttpError(
           403,
@@ -5855,23 +5796,173 @@ export class ApiGateway {
       return;
     }
 
+    if (method === "POST" && path === `${API_PREFIX}/waitlist`) {
+      // Where everybody goes while nobody is being let in automatically.
+      //
+      // Deliberately the least this can be: an address, optionally a name and
+      // a sentence about what they want it for. No password, no organization,
+      // no token — nothing here becomes a credential, which is what makes it
+      // safe to leave open to anybody who finds the page.
+      const body = objectBody(await this.readJson(request));
+      const email = (emailField(body["email"]) ?? "").trim().toLowerCase();
+      if (email === "") {
+        throw new HttpError(400, "invalid_request", "An email is required");
+      }
+      const entry = await this.options.store.createWaitlistEntry({
+        id: `wait_${randomBytes(9).toString("base64url")}`,
+        email,
+        // `min: 0`, then empty read as absent: these are three optional boxes
+        // on a form, and a browser that posts an untouched one as "" is not
+        // making a mistake worth a 400.
+        displayName:
+          stringField(body["displayName"], "displayName", {
+            min: 0,
+            max: 120,
+            optional: true,
+          }) || undefined,
+        note:
+          stringField(body["note"], "note", {
+            min: 0,
+            max: 2000,
+            optional: true,
+          }) || undefined,
+        source:
+          stringField(body["source"], "source", {
+            min: 0,
+            max: 120,
+            optional: true,
+          }) || undefined,
+        createdAt: new Date().toISOString(),
+        invitedAt: undefined,
+      });
+      // No audit event. The row is the record — when they asked, and when
+      // somebody let them in — and the audit chain's vocabulary is a closed
+      // union describing work on a repository, which this is not.
+      //
+      // The same answer whether this address was already on the list, already
+      // approved, or already has an account. The form is open to anybody, so
+      // any difference between those replies is a way to ask it which
+      // addresses this deployment knows about.
+      this.sendJson(response, 202, {
+        waitlisted: true,
+        email: entry.email,
+      });
+      return;
+    }
+
     if (
       method === "POST" &&
       (path === `${API_PREFIX}/auth/register` ||
         path === `${API_PREFIX}/auth/register/confirm`)
     ) {
-      // Retired. Sign-up takes a card now, and this route made an account
-      // without one — so leaving it reachable would leave the paywall with a
-      // door beside it.
-      //
-      // 410 rather than 404: it existed, it is gone deliberately, and a
-      // client still calling it should be told that rather than left to
-      // wonder whether it moved. `POST /auth/signup` is the way in.
-      throw new HttpError(
-        410,
-        "registration_retired",
-        "Accounts are created by starting a trial at /auth/signup.",
+      if (this.payments) {
+        // Retired while payments are on. Sign-up takes a card then, and this
+        // route made an account without one — so leaving it reachable would
+        // leave the paywall with a door beside it.
+        //
+        // 410 rather than 404: it existed, it is gone deliberately, and a
+        // client still calling it should be told that rather than left to
+        // wonder whether it moved. `POST /auth/signup` is the way in.
+        throw new HttpError(
+          410,
+          "registration_retired",
+          "Accounts are created by starting a trial at /auth/signup.",
+        );
+      }
+      // With payments off this is the door again — but it opens for one
+      // address at a time, and only for an address somebody who runs the
+      // deployment has approved off the waitlist. That is what "waitlisting
+      // everyone and giving select people free accounts" means as a rule a
+      // route can enforce: joining the list is open to anybody, and being let
+      // through it is a decision a person made.
+      if (!registrationOpen(process.env)) {
+        throw new HttpError(
+          403,
+          "registration_closed",
+          "This control plane does not accept new accounts",
+        );
+      }
+      if (path.endsWith("/confirm")) {
+        const body = objectBody(await this.readJson(request));
+        const user = await this.auth.confirmRegistration({
+          registrationId:
+            stringField(body["registrationId"], "registrationId", {
+              max: 200,
+            }) ?? "",
+          code: stringField(body["code"], "code", { max: 32 }) ?? "",
+        });
+        const issued = await this.auth.issueSession(
+          user,
+          this.remoteAddress(request),
+          request.headers["user-agent"] ?? "",
+          context.secure,
+        );
+        response.setHeader("Set-Cookie", issued.cookies);
+        this.sendJson(response, 201, {
+          user: issued.principal.user,
+          memberships: issued.principal.memberships,
+          csrfToken: issued.csrfToken,
+        });
+        return;
+      }
+      const body = objectBody(await this.readJson(request));
+      const email = (emailField(body["email"]) ?? "").trim().toLowerCase();
+      if (email === "") {
+        throw new HttpError(400, "invalid_request", "An email is required");
+      }
+      const waiting = await this.options.store.getWaitlistEntryByEmail(email);
+      if (waiting?.invitedAt === undefined) {
+        // One refusal for "never asked", "still waiting" and "we said no", so
+        // this cannot be used to read the list back out one address at a
+        // time. It still says the useful thing: there is a list, and this
+        // address is not through it.
+        throw new HttpError(
+          403,
+          "waitlist_pending",
+          "Kumi is invitation-only right now. Join the waitlist and we will be in touch.",
+        );
+      }
+      const organizationName = stringField(
+        body["organizationName"],
+        "organizationName",
+        { max: 120, optional: true },
       );
+      const registration = {
+        email,
+        displayName:
+          stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
+        password: stringField(body["password"], "password", { max: 256 }) ?? "",
+        // Omitted rather than passed as undefined: `exactOptionalPropertyTypes`
+        // draws the distinction, and "absent" is what naming no team means.
+        ...(organizationName === undefined ? {} : { organizationName }),
+      };
+      if (emailConfirmationRequired(process.env)) {
+        const started = await this.auth.startRegistration(registration);
+        this.sendJson(response, 202, {
+          registrationId: started.registrationId,
+          expiresAt: started.expiresAt,
+          delivery: started.delivery,
+        });
+        return;
+      }
+      const user = await this.auth.registerUnconfirmed(registration);
+      const issued = await this.auth.issueSession(
+        user,
+        this.remoteAddress(request),
+        request.headers["user-agent"] ?? "",
+        context.secure,
+      );
+      response.setHeader("Set-Cookie", issued.cookies);
+      await this.options.store.appendAudit(undefined, {
+        type: "user_authenticated",
+        data: { userId: user.id, bootstrap: false },
+      });
+      this.sendJson(response, 201, {
+        user: issued.principal.user,
+        memberships: issued.principal.memberships,
+        csrfToken: issued.csrfToken,
+      });
+      return;
     }
 
 
@@ -11965,7 +12056,15 @@ export class ApiGateway {
         await this.options.store.listMemberships(organizationId);
       this.sendJson(response, 200, {
         billing: {
-          configured: this.stripe !== undefined && this.stripePriceId !== undefined,
+          // Whether anybody is being charged here, and whether the plumbing
+          // to charge them exists. Two questions, because a deployment with
+          // payments switched off is not a deployment somebody misconfigured
+          // and the screen should not read like one.
+          payments: this.payments,
+          configured:
+            this.payments &&
+            this.stripe !== undefined &&
+            this.stripePriceId !== undefined,
           status: subscription?.status ?? "trialing",
           trialEndsAt: subscription?.trialEndsAt,
           currentPeriodEnd: subscription?.currentPeriodEnd,
@@ -11996,6 +12095,7 @@ export class ApiGateway {
         // A lapsed subscription must not block the act that ends the lapse.
         { ignoreEntitlement: true },
       );
+      this.assertPaymentsEnabled();
       const stripe = this.requireStripe();
       const priceId = this.stripePriceId;
       if (priceId === undefined) {
@@ -12064,6 +12164,7 @@ export class ApiGateway {
         // A lapsed subscription must not block the act that ends the lapse.
         { ignoreEntitlement: true },
       );
+      this.assertPaymentsEnabled();
       const stripe = this.requireStripe();
       const subscription =
         await this.options.store.getSubscription(organizationId);
@@ -12085,6 +12186,89 @@ export class ApiGateway {
     if (path.startsWith(`${API_PREFIX}/admin/`)) {
       assertTokenScope(principal, "manage_organization");
     }
+
+    // ---- The waitlist, from the operator's side ---------------------------
+    // Behind the same system-administrator check as every other admin route:
+    // the list is people's addresses and what they wrote about themselves,
+    // and nobody inside one organization has any business reading it.
+    if (path === `${API_PREFIX}/admin/waitlist` && method === "GET") {
+      if (!principal.user.systemAdmin) {
+        throw new HttpError(403, "forbidden", "System administrator required");
+      }
+      this.sendJson(response, 200, {
+        waitlist: await this.options.store.listWaitlistEntries(),
+      });
+      return;
+    }
+
+    const waitlistApproveMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/admin/waitlist/([^/]+)/approve$`, "u"),
+    );
+    if (waitlistApproveMatch !== undefined && method === "POST") {
+      if (!principal.user.systemAdmin) {
+        throw new HttpError(403, "forbidden", "System administrator required");
+      }
+      const entryId = waitlistApproveMatch[0] ?? "";
+      const entries = await this.options.store.listWaitlistEntries();
+      const entry = entries.find((candidate) => candidate.id === entryId);
+      if (entry === undefined) {
+        throw new HttpError(404, "not_found", "That waitlist entry was not found");
+      }
+      // Approving is what turns the address into one registration will build
+      // an account for. Nothing is created here — they still choose their own
+      // name and password — so an approval that is never used costs nothing
+      // and can be taken back by removing the row.
+      const first = await this.options.store.markWaitlistEntryInvited(
+        entry.id,
+        new Date().toISOString(),
+      );
+      if (first) {
+        try {
+          await this.mailer({
+            to: entry.email,
+            subject: "Your Kumi invitation",
+            text:
+              `You are through the Kumi waitlist.\n\n` +
+              `Create your account here:\n\n${
+                this.appBaseUrl === "" ? "/app#register" : `${this.appBaseUrl}/app#register`
+              }\n\n` +
+              `Use this address — ${entry.email} — when you sign up; it is the ` +
+              `one that has been let through.\n`,
+          });
+        } catch (error) {
+          // Best effort, like every other message this sends. The approval is
+          // already durable and the address can be told by any other means;
+          // failing the request would only make an operator press approve
+          // again against a row that is already approved.
+          console.error(
+            `[mail] Could not tell ${entry.email} they are through the ` +
+              `waitlist: ${describeError(error)}`,
+          );
+        }
+      }
+      this.sendJson(response, 200, {
+        entry: await this.options.store.getWaitlistEntryByEmail(entry.email),
+        // Whether this call is the one that did it, so two operators pressing
+        // approve together can tell which of them sent the message.
+        approved: first,
+      });
+      return;
+    }
+
+    const waitlistEntryMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/admin/waitlist/([^/]+)$`, "u"),
+    );
+    if (waitlistEntryMatch !== undefined && method === "DELETE") {
+      if (!principal.user.systemAdmin) {
+        throw new HttpError(403, "forbidden", "System administrator required");
+      }
+      await this.options.store.deleteWaitlistEntry(waitlistEntryMatch[0] ?? "");
+      this.sendJson(response, 200, { removed: true });
+      return;
+    }
+
     if (path === `${API_PREFIX}/admin/users`) {
       if (!principal.user.systemAdmin) {
         throw new HttpError(403, "forbidden", "System administrator required");
@@ -21180,7 +21364,10 @@ export class ApiGateway {
   private async syncSeatQuantity(
     organizationId: string,
   ): Promise<number | undefined> {
-    if (this.stripe === undefined) {
+    // Nothing to sync to while payments are off, and the seat count is not a
+    // number anybody is being charged for — so a membership change must not
+    // reach out to Stripe on its way through.
+    if (this.stripe === undefined || !this.payments) {
       return undefined;
     }
     try {
@@ -21226,6 +21413,25 @@ export class ApiGateway {
     return undefined;
   }
 
+  /**
+   * Refuses anything that would move money while payments are switched off.
+   *
+   * Separate from `requireStripe` because the two say different things: one
+   * is "this deployment has no key", which is a configuration problem, and
+   * this one is "this deployment does not sell anything", which is a
+   * decision. A deployment can hold a perfectly good Stripe key and still be
+   * closed for business, and that is exactly the state this exists to name.
+   */
+  private assertPaymentsEnabled(): void {
+    if (!this.payments) {
+      throw new HttpError(
+        501,
+        "payments_disabled",
+        "This deployment is not taking payments",
+      );
+    }
+  }
+
   private requireStripe(): StripeClient {
     if (this.stripe === undefined) {
       throw new HttpError(
@@ -21251,45 +21457,7 @@ export class ApiGateway {
     return Buffer.concat(chunks);
   }
 
-  /**
-   * The submitted address, from JSON or from an ordinary form post.
-   *
-   * The body limit and the streaming read are `readJson`'s, deliberately: a
-   * public unauthenticated endpoint is exactly where an unbounded read would
-   * matter, and there is no reason for this one to have its own.
-   */
-  private async readWaitlistFields(
-    request: IncomingMessage,
-  ): Promise<Record<string, unknown>> {
-    const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
-    if (contentType === "application/x-www-form-urlencoded") {
-      const params = new URLSearchParams(await this.readBodyText(request));
-      return Object.fromEntries(params.entries());
-    }
-    return objectBody(await this.readJson(request));
-  }
 
-  /** The raw body, bounded the way `readJson` bounds it. */
-  private async readBodyText(request: IncomingMessage): Promise<string> {
-    const declared = Number.parseInt(
-      request.headers["content-length"] ?? "0",
-      10,
-    );
-    if (Number.isFinite(declared) && declared > this.bodyLimit) {
-      throw new HttpError(413, "body_too_large", "Request body is too large");
-    }
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const chunk of request) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += buffer.length;
-      if (size > this.bodyLimit) {
-        throw new HttpError(413, "body_too_large", "Request body is too large");
-      }
-      chunks.push(buffer);
-    }
-    return Buffer.concat(chunks).toString("utf8");
-  }
 
   private async readJson(request: IncomingMessage): Promise<unknown> {
     const contentType = request.headers["content-type"]?.split(";")[0]?.trim();

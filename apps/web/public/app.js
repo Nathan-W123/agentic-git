@@ -110,6 +110,10 @@ import {
   openBillingPortal,
   startCheckout,
   ensureBilling,
+  joinWaitlist,
+  loadWaitlist,
+  approveWaitlistEntry,
+  deleteWaitlistEntry,
   decideApproval,
   ensureDeployment,
   loadBilling,
@@ -382,6 +386,10 @@ function minutesValue(milliseconds) {
  */
 const AUTH_HASHES = new Map([
   ["signin", "login"],
+  // Where everybody goes while payments are off. It has its own address so
+  // the marketing site can link straight at it, and so somebody can be sent
+  // the form rather than "open the app and look for the link".
+  ["waitlist", "waitlist"],
   // `register` still maps, so an older bookmark opens the trial rather than
   // a blank screen — the free form it used to open is gone.
   ["register", "signup"],
@@ -632,6 +640,12 @@ function renderAuth() {
   if (authMode === "forgot" || authMode === "reset") {
     return renderPasswordReset();
   }
+  if (authMode === "waitlist" || (authMode === "signup" && !paymentsOn())) {
+    // `#signup` lands here too while payments are off: it is the address on
+    // every link this product has ever sent, and a card form nobody can
+    // complete is a worse answer than the thing that replaced it.
+    return renderWaitlist();
+  }
   if (authMode === "signup") {
     return renderSignup();
   }
@@ -760,11 +774,15 @@ function renderAuth() {
             ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
             : register
               ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
-              : // Points at the paid sign-up, which is the one that takes a
-                // card and starts the trial. `#register` still resolves, so a
-                // link somebody already has keeps working until the free path
-                // is retired in its own commit.
-                `New here? <a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
+              : paymentsOn()
+                ? // Points at the paid sign-up, which is the one that takes a
+                  // card and starts the trial. `#register` still resolves, so
+                  // a link somebody already has keeps working.
+                  `New here? <a class="link-muted" href="#signup" data-act="auth-mode" data-value="signup">Start a free trial</a>.`
+                : // Nobody is being charged and nobody is let in
+                  // automatically, so the only honest thing to offer a
+                  // newcomer is a place in the queue.
+                  `New here? <a class="link-muted" href="#waitlist" data-act="auth-mode" data-value="waitlist">Join the waitlist</a>.`
       }</p>
       ${
         bootstrap
@@ -784,6 +802,60 @@ function renderAuth() {
  * share the shell — and because the reset half has to say something useful
  * when the link has expired, which is the state people actually arrive in.
  */
+/**
+ * Whether this deployment is taking money at all.
+ *
+ * Read from health rather than kept as its own flag, so the screens can never
+ * disagree with what the server will actually allow — a card form the
+ * checkout route answers 501 to is worse than no form.
+ *
+ * Unknown reads as off: health has not answered yet when the signed-out shell
+ * first paints, and offering a waitlist to somebody who could have paid is a
+ * recoverable mistake in a way that offering a dead card form is not.
+ */
+function paymentsOn() {
+  return state.health?.billing?.payments === true;
+}
+
+/** Where everybody goes while nobody is being let in automatically. */
+function renderWaitlist() {
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandWordmark(120)}
+        <div>
+          <h1>Join the waitlist</h1>
+          <p>Kumi is invitation-only right now. Leave your address and we
+            will be in touch — there is nothing to pay.</p>
+        </div>
+      </div>
+      <form class="auth-card" data-act="waitlist">
+        <label class="field">
+          <span>Work email</span>
+          <input class="input" name="email" type="email"
+            autocomplete="email" required placeholder="you@company.com">
+        </label>
+        <label class="field">
+          <span>Your name <span class="field-optional">optional</span></span>
+          <input class="input" name="displayName" autocomplete="name">
+        </label>
+        <label class="field">
+          <span>What would you use it for?
+            <span class="field-optional">optional</span></span>
+          <input class="input" name="note"
+            placeholder="A sentence is plenty">
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Join the waitlist
+        </button>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
+      </form>
+      <p class="auth-foot">Already have an account? <a class="link-muted"
+        href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.</p>
+    </div>
+  </main>`;
+}
+
 /** Where a paid sign-up starts: an address, then Stripe takes the card. */
 function renderSignup() {
   return `<main class="auth-shell">
@@ -997,6 +1069,34 @@ async function loadWelcome() {
   window.clearTimeout(welcomePoll);
   if (welcomeState?.error === undefined && welcomeState?.paid !== true) {
     welcomePoll = window.setTimeout(() => void loadWelcome(), 2000);
+  }
+}
+
+/**
+ * Takes a place in the queue.
+ *
+ * The reply is deliberately the same whether the address was new, already
+ * waiting or already approved, so this says the same thing back: asked and
+ * heard. Anything more specific would make the form an oracle for which
+ * addresses this deployment knows.
+ */
+async function submitWaitlist(form) {
+  const data = new FormData(form);
+  const message = $("#auth-msg");
+  try {
+    await joinWaitlist({
+      email: String(data.get("email") ?? ""),
+      displayName: String(data.get("displayName") ?? "").trim(),
+      note: String(data.get("note") ?? "").trim(),
+      source: "app",
+    });
+    form.innerHTML = `<p class="auth-msg" role="status">You are on the list.
+      We will email you when there is a place — nothing has been charged and
+      there is nothing to pay.</p>`;
+  } catch (error) {
+    if (message !== null) {
+      message.textContent = error.message;
+    }
   }
 }
 
@@ -1568,7 +1668,7 @@ function admissionsCard() {
           <div class="sr-sub">One glob per line. Changes here always need review.</div>
         </span>
       </div>
-      <div style="padding:0 17px 14px">
+      <div class="set-field">
         <textarea class="input" name="protectedPaths" rows="3"
           placeholder="infrastructure/**">${esc(
             (approvals.protectedPaths ?? []).join("\n"),
@@ -1839,7 +1939,7 @@ function settingsSectionMarkup(section) {
     case "billing":
       return billingCard();
     case "deployment":
-      return deploymentCard();
+      return `${waitlistCard()}${deploymentCard()}`;
     case "advanced":
       return `${repositoryCard()}${admissionsCard()}${apiTokensCard()}`;
     default:
@@ -1848,10 +1948,90 @@ function settingsSectionMarkup(section) {
 }
 
 /**
+ * The rail's second level.
+ *
+ * Seven flat categories was a list you had to read end to end to find
+ * anything in, because nothing on it said which ones were about you and
+ * which were about the deployment. Grouping them puts a two-word answer
+ * above each run of rows, which is what lets somebody skip four of them
+ * without reading a word — and it is why the rows themselves can then be
+ * smaller, not larger.
+ *
+ * Membership is by id, so a section stays defined in one place. Anything
+ * this list forgets is still drawn, unlabelled, at the foot of the rail:
+ * a category that exists and cannot be reached is the worse failure.
+ */
+const SETTINGS_GROUPS = [
+  {
+    id: "account",
+    label: "Account",
+    sections: ["general", "agents", "connections"],
+  },
+  { id: "team", label: "Team", sections: ["workspace", "billing"] },
+  { id: "system", label: "System", sections: ["deployment", "advanced"] },
+];
+
+/** One category in the rail. */
+function settingsRow(item, selected) {
+  const active = item.id === selected;
+  return `<button type="button" class="settings-nav-item${
+    active ? " active" : ""
+  }" data-act="settings-section" data-value="${esc(item.id)}"
+    aria-current="${active ? "page" : "false"}">
+    ${icon(item.iconName)}<span>${esc(item.label)}</span></button>`;
+}
+
+/**
+ * One labelled run of categories. Drawn only when something in it survived
+ * the admin filter, so a deployment nobody administers does not show a
+ * "System" heading over an empty space.
+ */
+function settingsGroup(label, items, selected) {
+  if (items.length === 0) {
+    return "";
+  }
+  const id = `settings-group-${esc(label.toLowerCase().replace(/\s+/gu, "-"))}`;
+  return `<div class="settings-nav-group" role="group" aria-labelledby="${id}">
+    <div class="settings-nav-label" id="${id}">${esc(label)}</div>
+    ${items.map((item) => settingsRow(item, selected)).join("")}
+  </div>`;
+}
+
+/** The whole rail, grouped, with anything ungrouped kept at the foot of it. */
+function settingsRail(sections, selected) {
+  const grouped = new Set(SETTINGS_GROUPS.flatMap((group) => group.sections));
+  const groups = SETTINGS_GROUPS.map((group) =>
+    settingsGroup(
+      group.label,
+      sections.filter((section) => group.sections.includes(section.id)),
+      selected,
+    ),
+  ).join("");
+  const rest = sections.filter((section) => !grouped.has(section.id));
+  return `<nav class="settings-nav" aria-label="Settings categories">
+    ${groups}${
+      rest.length === 0
+        ? ""
+        : `<div class="settings-nav-group">${rest
+            .map((item) => settingsRow(item, selected))
+            .join("")}</div>`
+    }
+  </nav>`;
+}
+
+/**
  * Settings is a large dialog over the conversation, with one stable category
  * rail and a single, focused content pane. It deliberately does not become a
  * router screen: closing it returns to the exact channel and scroll position
  * that were visible underneath.
+ *
+ * The two halves are quiet in opposite ways. The rail is dense — small rows
+ * under small headings, one soft pill on the row you are on — because it is
+ * a place you pass through, not a place you read. The pane loses the card
+ * chrome the rows used to sit in: a border around every setting and a rule
+ * under every line drew nine boxes on a surface that holds one subject, and
+ * a rule now appears only where one group of settings ends and the next
+ * begins.
  */
 function settingsDialog() {
   // A section nobody may open is not offered. `adminOnly` is read here rather
@@ -1871,41 +2051,63 @@ function settingsDialog() {
   return `<div class="settings-layer" data-act="settings-backdrop">
   <style id="settings-dialog-styles">
     .settings-layer{position:fixed;inset:0;z-index:84;display:grid;place-items:center;padding:24px;background:rgba(4,5,9,.58);backdrop-filter:blur(3px)}
-    .settings-dialog{width:min(980px,calc(100vw - 48px));height:min(720px,calc(100dvh - 48px));min-height:min(520px,calc(100dvh - 48px));display:grid;grid-template-columns:220px minmax(0,1fr);overflow:hidden;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:16px;box-shadow:var(--shadow-pop);color:var(--text)}
+    .settings-dialog{width:min(940px,calc(100vw - 48px));height:min(700px,calc(100dvh - 48px));min-height:min(520px,calc(100dvh - 48px));display:grid;grid-template-columns:206px minmax(0,1fr);overflow:hidden;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:18px;box-shadow:var(--shadow-pop);color:var(--text)}
     .settings-layer.settings-entering{animation:scrim-in var(--motion-scrim) ease}
-    .settings-layer.settings-entering .settings-dialog{animation:settings-in var(--motion-pop) ease}
+    .settings-layer.settings-entering .settings-dialog{animation:settings-in var(--motion-pop) var(--ease-motion)}
     .settings-layer.settings-leaving{animation:scrim-out var(--motion-scrim) ease forwards;pointer-events:none}
-    .settings-layer.settings-leaving .settings-dialog{animation:settings-out var(--motion-pop) ease forwards}
+    .settings-layer.settings-leaving .settings-dialog{animation:settings-out var(--motion-pop) var(--ease-motion) forwards}
     @keyframes settings-in{from{opacity:0;transform:translateY(6px) scale(.99)}}
     @keyframes settings-out{to{opacity:0;transform:translateY(6px) scale(.99)}}
-    .settings-sidebar{min-width:0;display:flex;flex-direction:column;padding:18px 12px 14px;background:var(--bg-panel);border-right:1px solid var(--border-soft)}
-    .settings-brand{display:flex;align-items:center;gap:9px;padding:2px 9px 16px;font-size:15px;font-weight:650;letter-spacing:-.01em}.settings-brand .ui-icon{width:17px;height:17px;color:var(--text-2)}
-    .settings-nav{display:grid;gap:3px}.settings-nav-item{width:100%;min-height:38px;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;color:var(--text-2);font-size:13px;text-align:left}.settings-nav-item:hover{background:var(--bg-hover);color:var(--text)}.settings-nav-item.active{background:var(--bg-active);color:var(--text);font-weight:550}.settings-nav-item .ui-icon{width:15px;height:15px;color:var(--text-3)}.settings-nav-item.active .ui-icon{color:var(--text)}
-    .settings-sidebar-account{display:flex;align-items:center;gap:9px;margin-top:auto;padding:12px 9px 2px;border-top:1px solid var(--border-soft);min-width:0}.settings-sidebar-account-copy{min-width:0}.settings-sidebar-account-name,.settings-sidebar-account-email{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.settings-sidebar-account-name{font-size:12.5px;font-weight:550}.settings-sidebar-account-email{font-size:11px;color:var(--text-4);margin-top:1px}
+    /* The two halves arrive a beat apart, on the same curve every panel in
+       the product uses. Qualified by the entering class rather than left on
+       the bare one, for the reason the dialog itself is: these nodes are
+       rebuilt by every render, and an unqualified animation would replay the
+       entrance each time somebody flipped a switch. */
+    @keyframes settings-rise{from{opacity:0;transform:translateY(5px)}}
+    .settings-layer.settings-entering .settings-rail{animation:settings-rise var(--motion-panel) var(--ease-motion) backwards}
+    .settings-layer.settings-entering .settings-content-inner{animation:settings-rise var(--motion-panel) var(--ease-motion) 50ms backwards}
+    .settings-rail{min-width:0;display:flex;flex-direction:column;padding:16px 10px 12px;background:var(--bg-panel);border-right:1px solid var(--border-soft)}
+    .settings-brand{display:flex;align-items:center;gap:8px;padding:2px 8px 14px;font-size:14px;font-weight:650;letter-spacing:-.01em}.settings-brand .ui-icon{width:16px;height:16px;color:var(--text-3)}
+    .settings-nav{min-height:0;display:grid;align-content:start;gap:14px;overflow:auto;scrollbar-width:none}.settings-nav::-webkit-scrollbar{display:none}
+    .settings-nav-group{display:grid;gap:1px}
+    .settings-nav-label{padding:0 9px 4px;font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-4)}
+    .settings-nav-item{width:100%;min-height:31px;display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:8px;color:var(--text-2);font-size:12.5px;line-height:1.2;text-align:left;transition:background var(--motion-pop) var(--ease-motion),color var(--motion-pop) var(--ease-motion)}
+    .settings-nav-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .settings-nav-item:hover{background:var(--bg-hover);color:var(--text)}
+    .settings-nav-item.active{background:var(--bg-active);color:var(--text);font-weight:550}
+    .settings-nav-item .ui-icon{width:15px;height:15px;flex:none;color:var(--text-4)}.settings-nav-item:hover .ui-icon,.settings-nav-item.active .ui-icon{color:var(--text)}
+    .settings-rail-account{display:flex;align-items:center;gap:9px;margin-top:auto;padding:12px 8px 0;border-top:1px solid var(--border-soft);min-width:0}.settings-rail-account-copy{min-width:0}.settings-rail-account-name,.settings-rail-account-email{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.settings-rail-account-name{font-size:12px;font-weight:550}.settings-rail-account-email{font-size:10.5px;color:var(--text-4);margin-top:1px}
     .settings-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg-card)}
-    .settings-main-head{min-height:86px;display:flex;align-items:flex-start;gap:18px;padding:23px 26px 18px;border-bottom:1px solid var(--border-soft)}.settings-main-title{min-width:0}.settings-main-title h2{font-size:20px;line-height:1.25;letter-spacing:-.025em}.settings-main-title p{margin-top:5px;color:var(--text-3);font-size:12.5px}.settings-close{margin-left:auto;flex:none}
+    .settings-main-head{display:flex;align-items:flex-start;gap:18px;padding:20px 28px 15px;border-bottom:1px solid var(--border-soft)}.settings-main-title{min-width:0}.settings-main-title h2{font-size:19px;line-height:1.25;letter-spacing:-.025em}.settings-main-title p{margin-top:4px;color:var(--text-3);font-size:12px}.settings-close{margin-left:auto;flex:none}
     .token-secret{display:block;margin-top:8px;padding:8px 10px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:8px;font-size:12px;word-break:break-all;user-select:all}
-    .settings-content.scroll{min-height:0;padding:22px 26px 30px}.settings-content-inner{display:grid;gap:14px;max-width:680px;margin:0 auto}.settings-content .card{box-shadow:none;border-color:var(--border-soft);background:var(--bg-card-2)}.settings-content .panel-head{padding:16px 17px 10px}.settings-content .panel-head h3{font-size:14px}.settings-content .panel-head p{margin-top:3px}.settings-account-avatar{flex:none}.settings-choice{display:inline-flex;gap:3px;padding:3px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:9px}.settings-choice button{padding:5px 10px;border-radius:6px;color:var(--text-3);font-size:12px}.settings-choice button:hover{color:var(--text)}.settings-choice button.active{background:var(--bg-active);color:var(--text);box-shadow:0 1px 2px rgb(0 0 0 / 18%)}
-    @media(max-width:700px){.settings-layer{padding:0}.settings-dialog{width:100vw;height:100dvh;min-height:0;border:0;border-radius:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.settings-sidebar{padding:calc(10px + var(--safe-top)) 12px 10px;border-right:0;border-bottom:1px solid var(--border-soft)}.settings-brand{padding:0 4px 10px}.settings-nav{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}.settings-nav::-webkit-scrollbar{display:none}.settings-nav-item{width:auto;min-height:34px;flex:none;padding:7px 10px}.settings-sidebar-account{display:none}.settings-main-head{min-height:78px;padding:16px 18px 14px}.settings-main-title p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.settings-content.scroll{padding:16px 14px calc(24px + var(--safe-bottom))}.settings-content .set-row{align-items:flex-start;flex-wrap:wrap}.settings-content .set-row .sr-ctl{margin-left:auto}.settings-choice button{padding:6px 9px}}
+    .settings-content.scroll{min-height:0;padding:4px 28px 34px}.settings-content-inner{max-width:640px;margin:0 auto}
+    /* The card chrome comes off in here. A settings pane holds one subject,
+       and a border around every group of it — plus a rule under every line
+       inside those borders — draws a dozen boxes nobody asked about. What is
+       left is one surface with a heading over each run of rows, and a single
+       rule where one run ends and the next starts. */
+    .settings-content .card{background:none;border:0;border-radius:0;box-shadow:none;padding:18px 0}
+    .settings-content .card+.card{border-top:1px solid var(--border-soft)}
+    .settings-content .panel-head{padding:0 0 2px}.settings-content .panel-head h3{font-size:13px}.settings-content .panel-head p{margin-top:2px;font-size:11.5px}
+    .settings-content .set-row{gap:14px;padding:10px 0;border-bottom:0}
+    .settings-content .set-field{padding:2px 0 8px}
+    .settings-content .wheel-drop{padding:2px 0 12px;border-bottom:0}
+    .settings-content .channel-wrapped{padding:8px 0 2px}
+    .settings-content .dep-stats{gap:8px;background:none;border-top:0;padding:8px 0 2px}.settings-content .dep-stat{background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:var(--radius)}
+    .settings-account-avatar{flex:none}
+    .settings-choice{display:inline-flex;gap:3px;padding:3px;background:var(--bg-inset);border:1px solid var(--border-soft);border-radius:9px}.settings-choice button{padding:5px 10px;border-radius:6px;color:var(--text-3);font-size:12px;transition:background var(--motion-pop) var(--ease-motion),color var(--motion-pop) var(--ease-motion)}.settings-choice button:hover{color:var(--text)}.settings-choice button.active{background:var(--bg-active);color:var(--text);box-shadow:0 1px 2px rgb(0 0 0 / 18%)}
+    @media(max-width:700px){.settings-layer{padding:0}.settings-dialog{width:100vw;height:100dvh;min-height:0;border:0;border-radius:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.settings-rail{padding:calc(10px + var(--safe-top)) 12px 10px;border-right:0;border-bottom:1px solid var(--border-soft)}.settings-brand{padding:0 4px 10px}.settings-nav{display:flex;gap:4px;overflow-x:auto}.settings-nav-group{display:flex;gap:4px}.settings-nav-label{display:none}.settings-nav-item{width:auto;min-height:32px;flex:none;padding:7px 10px}.settings-rail-account{display:none}.settings-main-head{padding:14px 18px 12px}.settings-main-title p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.settings-content.scroll{padding:2px 16px calc(24px + var(--safe-bottom))}.settings-content .set-row{align-items:flex-start;flex-wrap:wrap}.settings-content .set-row .sr-ctl{margin-left:auto}.settings-choice button{padding:6px 9px}}
   </style>
     <section class="settings-dialog" data-act="settings-dialog" role="dialog"
       aria-modal="true" aria-labelledby="settings-title">
-      <aside class="settings-sidebar">
+      <aside class="settings-rail">
         <div class="settings-brand">${icon("gear")}<span>Settings</span></div>
-        <nav class="settings-nav" aria-label="Settings categories">
-          ${sections.map(
-            (item) => `<button type="button" class="settings-nav-item${
-              item.id === selected ? " active" : ""
-            }" data-act="settings-section" data-value="${esc(item.id)}"
-              aria-current="${item.id === selected ? "page" : "false"}">
-              ${icon(item.iconName)}<span>${esc(item.label)}</span></button>`,
-          ).join("")}
-        </nav>
-        <div class="settings-sidebar-account">
-          ${avatar(currentUserName(), 30, currentUserName(), myAvatar())}
-          <span class="settings-sidebar-account-copy">
-            <div class="settings-sidebar-account-name">${esc(currentUserName())}</div>
-            <div class="settings-sidebar-account-email">${esc(
+        ${settingsRail(sections, selected)}
+        <div class="settings-rail-account">
+          ${avatar(currentUserName(), 28, currentUserName(), myAvatar())}
+          <span class="settings-rail-account-copy">
+            <div class="settings-rail-account-name">${esc(currentUserName())}</div>
+            <div class="settings-rail-account-email">${esc(
               state.principal?.user?.email ?? "",
             )}</div>
           </span>
@@ -3769,6 +3971,17 @@ function billingCard() {
       <div class="sr-title">Billing</div>
       <div class="sr-sub">Loading…</div></span></div></section>`;
   }
+  if (billing.payments !== true) {
+    // Switched off, not missing. Said as a decision rather than as a gap,
+    // because it is one — and because "not set up" reads as something an
+    // operator should go and fix.
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Kumi is not charging right now</div>
+      <div class="sr-sub">Payments are switched off on this deployment.
+        Nothing is billed, nothing expires, and every seat has full use of
+        the repositories it can reach.</div>
+    </span></div></section>`;
+  }
   if (billing.configured !== true) {
     return `<section class="card"><div class="set-row"><span class="sr-body">
       <div class="sr-title">Billing is not set up on this deployment</div>
@@ -3851,6 +4064,86 @@ async function billingAction(kind) {
   } catch (error) {
     toast(error.message ?? "Billing could not be opened.", "error");
   }
+}
+
+/**
+ * Letting somebody in, or taking their place off the list.
+ *
+ * Both clear the cache and re-render rather than patching the row in place:
+ * the list is short, an operator works down it one row at a time, and an
+ * optimistic update that disagreed with the server would be a row saying
+ * somebody was let in when they were not.
+ */
+async function waitlistAction(kind, entryId) {
+  try {
+    if (kind === "approve") {
+      await approveWaitlistEntry(entryId);
+      toast("They can create an account now", "ok");
+    } else {
+      await deleteWaitlistEntry(entryId);
+      toast("Taken off the list", "ok");
+    }
+    render();
+  } catch (error) {
+    toast(error.message ?? "That did not work.", "error");
+  }
+}
+
+/**
+ * The waitlist, for whoever runs the deployment.
+ *
+ * Waiting first and let-in below, because the top of this list is a job — it
+ * is the queue somebody works down — and the bottom is a record of what has
+ * already been done to it.
+ */
+function waitlistCard() {
+  if (state.waitlist === undefined) {
+    // Claimed before the request so a second render in the same tick does not
+    // fire it again — the guard `ensureBilling` uses.
+    state.waitlist = null;
+    void loadWaitlist().then(render, () => undefined);
+  }
+  if (!Array.isArray(state.waitlist)) {
+    // Still loading, or the read failed. Either way this is not "nobody is
+    // waiting", and saying so would be worse than saying nothing yet.
+    return `<section class="card"><div class="set-row"><span class="sr-body">
+      <div class="sr-title">Waitlist</div>
+      <div class="sr-sub">Loading…</div></span></div></section>`;
+  }
+  const entries = state.waitlist;
+  const waiting = entries.filter((entry) => !entry.invitedAt);
+  const admitted = entries.filter((entry) => entry.invitedAt);
+  const row = (entry) => `<div class="set-row">
+    <span class="sr-body">
+      <div class="sr-title">${esc(entry.displayName || entry.email)}</div>
+      <div class="sr-sub">${esc(entry.email)}${
+        entry.note ? ` — ${esc(entry.note)}` : ""
+      }</div>
+    </span>
+    <span class="sr-ctl">
+      ${
+        entry.invitedAt
+          ? `<span class="sr-sub">Let in ${esc(
+              formatDate(entry.invitedAt, { short: false }),
+            )}</span>`
+          : `<button class="btn btn-sm btn-primary" data-act="waitlist-approve"
+               data-value="${esc(entry.id)}">Let in</button>`
+      }
+      <button class="btn btn-sm" data-act="waitlist-remove"
+        data-value="${esc(entry.id)}">Remove</button>
+    </span>
+  </div>`;
+  return `<section class="card">
+    <div class="panel-head"><div><h3>Waitlist</h3>
+      <p>People who asked for an account. Letting somebody in lets that
+        address — and only that address — create one for itself.</p></div></div>
+    ${
+      entries.length === 0
+        ? `<div class="set-row"><span class="sr-body">
+             <div class="sr-sub">Nobody is waiting.</div></span></div>`
+        : `${waiting.map(row).join("")}${admitted.map(row).join("")}`
+    }
+  </section>`;
 }
 
 /** Pending invitations, for the Settings screen. */
@@ -4186,7 +4479,14 @@ const TRIAL_WARNING_DAYS = 3;
 
 function billingBanner() {
   const billing = state.billing;
-  if (billing === undefined || billing === null || billing.configured !== true) {
+  if (
+    billing === undefined ||
+    billing === null ||
+    // Nothing to warn about where nothing is sold: no trial to run out, no
+    // payment to fail, and no subscribe button that would answer 501.
+    billing.payments !== true ||
+    billing.configured !== true
+  ) {
     return "";
   }
   const canManage = canManageOrganization();
@@ -8655,6 +8955,14 @@ document.addEventListener("click", (event) => {
       void billingAction(act === "billing-portal" ? "portal" : "checkout");
       return;
     }
+    case "waitlist-approve": {
+      void waitlistAction("approve", value);
+      return;
+    }
+    case "waitlist-remove": {
+      void waitlistAction("remove", value);
+      return;
+    }
     case "approval-decide": {
       const separatorIndex = value.lastIndexOf(":");
       void decideApprovalAction(
@@ -9375,6 +9683,9 @@ document.addEventListener("submit", (event) => {
       return;
     case "password-reset":
       void submitPasswordReset(form);
+      return;
+    case "waitlist":
+      void submitWaitlist(form);
       return;
     case "signup":
       void submitSignup(form);

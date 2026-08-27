@@ -94,7 +94,7 @@ import type {
   InvitationRecord,
   PasswordResetRecord,
   SignupIntentRecord,
-  WaitlistSignup,
+  WaitlistEntry,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1014,20 +1014,60 @@ export class InMemoryCoordinationStore implements CoordinationStore {
 
   /* ---------------------------------------------------- password resets ---- */
 
-  private readonly waitlist = new Map<string, WaitlistSignup>();
+  private readonly waitlistEntries = new Map<string, WaitlistEntry>();
 
-  public async recordWaitlistSignup(signup: WaitlistSignup): Promise<boolean> {
-    if (this.waitlist.has(signup.email)) {
+  public async createWaitlistEntry(entry: WaitlistEntry): Promise<WaitlistEntry> {
+    const email = entry.email.trim().toLowerCase();
+    const existing = await this.getWaitlistEntryByEmail(email);
+    // Re-asking refreshes what they told us and keeps where they are in the
+    // queue, which is the behaviour the backends with a unique index give.
+    const stored: WaitlistEntry = {
+      ...entry,
+      email,
+      ...(existing === undefined
+        ? {}
+        : {
+            id: existing.id,
+            createdAt: existing.createdAt,
+            invitedAt: existing.invitedAt,
+          }),
+    };
+    this.waitlistEntries.set(stored.id, stored);
+    return { ...stored };
+  }
+
+  public async getWaitlistEntryByEmail(
+    email: string,
+  ): Promise<WaitlistEntry | undefined> {
+    const wanted = email.trim().toLowerCase();
+    for (const entry of this.waitlistEntries.values()) {
+      if (entry.email.toLowerCase() === wanted) {
+        return { ...entry };
+      }
+    }
+    return undefined;
+  }
+
+  public async listWaitlistEntries(): Promise<WaitlistEntry[]> {
+    return [...this.waitlistEntries.values()]
+      .map((entry) => ({ ...entry }))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  public async markWaitlistEntryInvited(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    const found = this.waitlistEntries.get(id);
+    if (found === undefined || found.invitedAt !== undefined) {
       return false;
     }
-    this.waitlist.set(signup.email, { ...signup });
+    found.invitedAt = at;
     return true;
   }
 
-  public async listWaitlistSignups(): Promise<readonly WaitlistSignup[]> {
-    return [...this.waitlist.values()].sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt),
-    );
+  public async deleteWaitlistEntry(id: string): Promise<void> {
+    this.waitlistEntries.delete(id);
   }
 
   private readonly signupIntents = new Map<string, SignupIntentRecord>();
@@ -3048,6 +3088,10 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       ["projects", this.projects as unknown as Map<unknown, unknown>],
       ["subscriptions", this.subscriptions as unknown as Map<unknown, unknown>],
       ["signupIntents", this.signupIntents as unknown as Map<unknown, unknown>],
+      [
+        "waitlistEntries",
+        this.waitlistEntries as unknown as Map<unknown, unknown>,
+      ],
     ];
   }
 

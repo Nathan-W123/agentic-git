@@ -1309,33 +1309,32 @@ export const MIGRATIONS: readonly Migration[] = [
     ],
   },
   {
+    // Everybody is waitlisted while payments are off, so there has to be
+    // somewhere for "everybody" to go.
+    //
+    // No foreign key and no secret: a row here is an address and a note, and
+    // it deliberately cannot be signed in to. What it can do is one thing —
+    // once `invited_at` is set, registration will build an account for that
+    // address — which is why the uniqueness is on the address itself rather
+    // than on the id nobody outside the database ever sees.
+    //
+    // `COLLATE NOCASE` because the address is what a person types, and
+    // "Ada@Example.com" arriving after "ada@example.com" is the same person
+    // asking twice rather than a second place in the queue.
     version: 48,
     name: "waitlist",
     statements: [
-      // The address is the key, so joining twice is the same row rather than
-      // two, and the endpoint can say "already on the list" without a read of
-      // its own. Nothing else is collected: a waitlist that holds more than
-      // it needs is a breach waiting for a reason.
-      `CREATE TABLE waitlist_signups (
-        email TEXT PRIMARY KEY,
-        created_at TEXT NOT NULL
+      `CREATE TABLE waitlist_entries (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name TEXT,
+        note TEXT,
+        source TEXT,
+        created_at TEXT NOT NULL,
+        invited_at TEXT
       )`,
-    ],
-  },
-  {
-    version: 49,
-    name: "waitlist-details",
-    statements: [
-      // Added rather than folded into 48, which has already run wherever this
-      // branch is deployed and is never re-applied. Every one of these is
-      // nullable: the form asks for them, and a waitlist that refuses an
-      // address because somebody skipped their team size is a waitlist with
-      // fewer people on it.
-      `ALTER TABLE waitlist_signups ADD COLUMN name TEXT`,
-      `ALTER TABLE waitlist_signups ADD COLUMN company TEXT`,
-      `ALTER TABLE waitlist_signups ADD COLUMN team_size TEXT`,
-      `ALTER TABLE waitlist_signups ADD COLUMN agents TEXT`,
-      `ALTER TABLE waitlist_signups ADD COLUMN note TEXT`,
+      `CREATE INDEX waitlist_entries_by_created
+         ON waitlist_entries(created_at)`,
     ],
   },
 ];

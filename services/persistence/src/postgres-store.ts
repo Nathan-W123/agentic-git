@@ -103,7 +103,7 @@ import type {
   InvitationRecord,
   PasswordResetRecord,
   SignupIntentRecord,
-  WaitlistSignup,
+  WaitlistEntry,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1531,50 +1531,79 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : this.toPasswordReset(row);
   }
 
-  public async recordWaitlistSignup(signup: WaitlistSignup): Promise<boolean> {
-    // `ON CONFLICT DO NOTHING` for the same reason SQLite uses OR IGNORE: two
-    // simultaneous submissions of one address must not race on the key.
-    const result = await this.query(
-      `INSERT INTO waitlist_signups
-         (email, name, company, team_size, agents, note, created_at)
+  public async createWaitlistEntry(entry: WaitlistEntry): Promise<WaitlistEntry> {
+    const email = entry.email.trim().toLowerCase();
+    // Upsert on the address, which is where the uniqueness lives — the id is
+    // the caller's and a second attempt carries a new one. `LOWER(email)` is
+    // an expression index, so the conflict target has to name the expression
+    // rather than the column.
+    await this.query(
+      `INSERT INTO waitlist_entries
+         (id, email, display_name, note, source, created_at, invited_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (email) DO NOTHING`,
+       ON CONFLICT (LOWER(email)) DO UPDATE SET
+         display_name = EXCLUDED.display_name,
+         note = EXCLUDED.note,
+         source = EXCLUDED.source`,
       [
-        signup.email,
-        signup.name ?? null,
-        signup.company ?? null,
-        signup.teamSize ?? null,
-        signup.agents ?? null,
-        signup.note ?? null,
-        signup.createdAt,
+        entry.id,
+        email,
+        entry.displayName ?? null,
+        entry.note ?? null,
+        entry.source ?? null,
+        entry.createdAt,
+        entry.invitedAt ?? null,
       ],
     );
-    return (result.rowCount ?? 0) > 0;
+    const stored = await this.getWaitlistEntryByEmail(email);
+    return stored ?? { ...entry, email };
   }
 
-  public async listWaitlistSignups(): Promise<readonly WaitlistSignup[]> {
-    const result = await this.query(
-      `SELECT email, name, company, team_size, agents, note, created_at
-         FROM waitlist_signups ORDER BY created_at`,
+  public async getWaitlistEntryByEmail(
+    email: string,
+  ): Promise<WaitlistEntry | undefined> {
+    const row = await this.row(
+      "SELECT * FROM waitlist_entries WHERE LOWER(email) = $1",
+      [email.trim().toLowerCase()],
     );
-    const rows = result.rows as {
-      email: string;
-      name: string | null;
-      company: string | null;
-      team_size: string | null;
-      agents: string | null;
-      note: string | null;
-      created_at: string;
-    }[];
-    return rows.map((row) => ({
-      email: row.email,
-      name: row.name ?? undefined,
-      company: row.company ?? undefined,
-      teamSize: row.team_size ?? undefined,
-      agents: row.agents ?? undefined,
-      note: row.note ?? undefined,
-      createdAt: row.created_at,
-    }));
+    return row === undefined ? undefined : this.toWaitlistEntry(row);
+  }
+
+  public async listWaitlistEntries(): Promise<WaitlistEntry[]> {
+    return (
+      await this.rows("SELECT * FROM waitlist_entries ORDER BY created_at, id")
+    ).map((row) => this.toWaitlistEntry(row));
+  }
+
+  public async markWaitlistEntryInvited(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still waiting, so two operators approving the same row
+    // send one welcome between them rather than one each.
+    const rows = await this.rows(
+      `UPDATE waitlist_entries SET invited_at = $1
+       WHERE id = $2 AND invited_at IS NULL
+       RETURNING id`,
+      [at, id],
+    );
+    return rows.length === 1;
+  }
+
+  public async deleteWaitlistEntry(id: string): Promise<void> {
+    await this.query("DELETE FROM waitlist_entries WHERE id = $1", [id]);
+  }
+
+  private toWaitlistEntry(row: Row): WaitlistEntry {
+    return {
+      id: text(row, "id"),
+      email: text(row, "email"),
+      displayName: optionalText(row, "display_name"),
+      note: optionalText(row, "note"),
+      source: optionalText(row, "source"),
+      createdAt: text(row, "created_at"),
+      invitedAt: optionalText(row, "invited_at"),
+    };
   }
 
   public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {

@@ -115,6 +115,10 @@ function roleFor(
  * over its own unpaid invoice would make the failure unrecoverable from
  * inside the product.
  *
+ * A deployment with payments switched off is exempt in `effectiveRole`
+ * itself, which is where the answer belongs: there is nothing to lapse from,
+ * and every role stands as stored.
+ *
  * Costs one primary-key read per authorized request. That is the price of the
  * gate living here rather than being spelled out at each of the routes, where
  * the one that got forgotten would be the one that mattered.
