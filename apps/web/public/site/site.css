@@ -270,6 +270,16 @@ main,
   padding-top: 62px;
 }
 
+/* Same again for the answer and the product that demonstrates it: the demo
+   is this paragraph's illustration, not the next chapter. */
+#solution {
+  padding-bottom: 40px;
+}
+
+#demo {
+  padding-top: 72px;
+}
+
 /* --------------------------------------------------------------- typography */
 
 h1,
@@ -540,16 +550,22 @@ strong {
 /* ----------------------------------------------------------------- hero -- */
 
 /*
- * Deliberately asymmetric, and deliberately bottom-aligned.
+ * The first screen, and nothing else on it.
  *
- * The field's own shape lives in the upper middle of the viewport, so the
- * copy sits under it in two columns rather than centred through it. The
- * headline takes the left because it is the thing being read first; the
- * paragraph and the buttons take the right because they are what is done
- * second. Centring both would put the type straight through the brightest
- * part of the particles.
+ * The name is the whole of the opening view: the argument underneath has to
+ * be scrolled to, which is the point — a reader arrives at a wordmark and a
+ * line, not at a wall of prose. The block is a viewport tall and its content
+ * is centred in it, with the padding left asymmetric so that centre lands a
+ * little below the viewport's own, clear of the fixed nav.
+ *
+ * `svh` rather than `vh`: on a phone the small viewport is the one that is
+ * actually visible with the browser chrome showing, so the hero does not
+ * hide its own tagline behind a URL bar.
  */
 .hero {
+  display: grid;
+  align-content: center;
+  min-height: 100svh;
   padding: 92px 0 30px;
 }
 
@@ -985,7 +1001,9 @@ strong {
 .manifesto {
   max-width: 84ch;
   margin-top: 32px;
-  margin-bottom: 88px;
+  /* The paragraph and the thing that illustrates it are one unit: set them
+     closer together than either is to the heading above. */
+  margin-bottom: 40px;
   font-size: clamp(18px, 1.55vw, 22px);
   line-height: 1.72;
   color: var(--muted);
