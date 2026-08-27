@@ -6926,7 +6926,7 @@ export function channelInfoPopoverHtml(repositoryId) {
 
 export function renderChats() {
   if (state.repositories.length === 0) {
-    return `<div class="chats-shell"><div class="scroll" style="flex:1"><div class="page">
+    return `<div class="chats-shell no-banner"><div class="scroll" style="flex:1"><div class="page">
       ${emptyState(
         "chatBubble",
         "No channels yet",
@@ -6954,6 +6954,18 @@ export function renderChats() {
   const rail = showsChannelRail();
 
   return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}${columns > 1 ? ` panels-${columns}` : ""}">
+    <!-- The channel's banner, first in the shell and first in the reading
+         order, because it is the bar across the top of everything below it.
+         It used to be the conversation column's own first row, which meant a
+         thread or a file opening beside the conversation narrowed the column
+         and shoved the channel's name, counts and actions leftward with it —
+         the top bar moved because something unrelated to it had opened. Out
+         here it spans the whole shell and only the things underneath it give
+         ground. It is pinned rather than in flow; the shell reserves its
+         height as padding. See \`.chan-head\` in styles.css — the
+         backticks are escaped because this comment is inside a template
+         literal, where a bare one would close the string. -->
+    ${chanHeader(repositoryId)}
     ${rail ? channelRail(repositoryId) : ""}
     ${chanSidebar(repositoryId)}
     ${
@@ -6970,7 +6982,6 @@ export function renderChats() {
       `<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"></div>`
     }
     <div class="chan-main">
-      ${chanHeader(repositoryId)}
       ${pinnedBanner(repositoryId)}
       ${messageList(repositoryId)}
       ${jumpToLatest()}

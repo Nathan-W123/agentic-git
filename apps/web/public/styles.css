@@ -4821,15 +4821,23 @@ button.chip.lg:hover {
  * is unaffected either way: green, amber and red mean what they mean.
  */
 .chats-shell {
-  /* How tall the channel's own banner is, published on the shell so the side
-     panels can start underneath it instead of running the full height beside
-     it. A thread that begins level with the channel header reads as a second
-     header competing with the first — two titles, two rules, on one line. Held
-     to the same number `.chan-head` is given below, so the two cannot drift.
+  /* How tall the channel's own banner is, published on the shell because the
+     banner itself is out of flow: it is pinned across the top of the shell,
+     over the rail and the side panels as well as the conversation, and the
+     shell pays its height back as padding so everything underneath starts
+     below it. That is the only way the top bar can stay one unbroken row
+     while a thread opens — as a child of the conversation column it was
+     squeezed to whatever width the panels left over, and a thread's own
+     header came up level with it, two titles and two hairlines on one line.
+
+     The inset is folded in here rather than paid separately, so a status bar
+     lengthens the banner and the padding underneath it in one move. Held to
+     the same number `.chan-head` is given below, so the two cannot drift.
 
      The phone tier redefines both this and the banner further down: there the
-     header is fixed across the whole screen and the panel takes the screen. */
-  --chan-head-h: 68px;
+     header is fixed to the viewport rather than to the shell, and the panel
+     takes the whole screen. */
+  --chan-head-h: calc(56px + var(--safe-top));
   /* And how tall a side panel's own header is — one short row of tools, set
      once here because every panel shares `.thread-head`. */
   --thread-head-h: 38px;
@@ -4838,6 +4846,11 @@ button.chip.lg:hover {
   height: 100%;
   min-height: 0;
   padding: 8px;
+  /* The room the banner is taking above, plus the gutter every other edge of
+     the shell already has — the conversation is a rounded card, and a card
+     whose corners butt straight into the hairline under the banner reads as
+     a rendering fault rather than as a layout. */
+  padding-top: calc(var(--chan-head-h) + 8px);
   overflow: hidden;
   background: var(--bg);
   /* The ground a closing side panel is pinned against while it leaves — see
@@ -4846,6 +4859,13 @@ button.chip.lg:hover {
      pill, the panel itself for its drag grip), so this claims nothing that
      was not already claimed. */
   position: relative;
+}
+
+/* The one shell that draws no banner: no repository has been created yet, so
+   there is no channel to name. Without this it would reserve a bar's worth of
+   room at the top for nothing. */
+.chats-shell.no-banner {
+  padding-top: 8px;
 }
 
 /* A dedicated channel switcher stays narrow while the adjacent sidebar is
@@ -5911,7 +5931,6 @@ button.chip.lg:hover {
   flex: 1;
 }
 
-.chan-main > .chan-head,
 .chan-main > .chan-pins,
 .chan-main > .chan-composer-wrap {
   flex: none;
@@ -6079,18 +6098,35 @@ button.chip.lg:hover {
 }
 
 .chan-head {
+  /* One bar across the whole shell, and out of its flow. Inside the
+     conversation column the banner was a column-width thing: opening a thread
+     narrowed the column, so the channel's name, its counts and its actions
+     were all shoved leftward by a panel that has nothing to do with them, and
+     the panel's own header arrived level with it. Pinned to the shell instead
+     it spans the rail, the conversation and every open panel, and none of
+     them can move it — they all begin underneath it, in the room the shell
+     sets aside as `padding-top`.
+
+     `top/left/right: 0` are the shell's own edges: an absolute box is laid
+     out against its container's padding box, and the shell has no border. */
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
   gap: 12px;
-  /* The banner's height, taken from the shell rather than left to whatever
-     the title and its counts happen to measure — the side panels are seated
-     against this number and nothing else can tell them what it turned out to
-     be. `min-height` rather than `height` so the row can still grow if a
-     larger text size needs it: the panels would then start a few pixels high,
-     which is a nudge rather than a broken layout. The fallback keeps the rule
-     inert anywhere the shell is not the ancestor. */
-  min-height: var(--chan-head-h, auto);
-  padding: 13px 18px;
+  /* Exactly the height the shell published and paid for. A fixed height
+     rather than a floor, because the shell's padding cannot follow a bar that
+     grows: anything taller than this would print over the first line of the
+     conversation instead of pushing it down. The vertical padding that used
+     to set the height is gone with it — the row is the height it is told to
+     be, and its contents sit centred in it, which is what took the slack out
+     of the top of the screen. The fallback keeps the rule sane anywhere the
+     shell is not the ancestor. */
+  height: var(--chan-head-h, auto);
+  padding: var(--safe-top) 18px 0;
   background: color-mix(in srgb, var(--room-tint) 94%, var(--surface-1));
   border-bottom: 1px solid var(--border-soft);
 }
@@ -9202,17 +9238,13 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 0;
-  /* Under the channel banner, not beside it. The panel is a sibling of the
-     conversation column rather than a child, so at full height its own header
-     sat level with the channel's — two title rows and two hairlines across
-     one line, each naming a different thing. Dropped by the banner's height
-     it begins where the transcript begins, and reads as something opened
-     inside this channel rather than as a second channel next to it.
-
-     Zeroed again wherever there is no banner above it to sit under: the
-     multi-panel widths below 1100px, which stand the conversation down, and
-     the phone tier, where the panel is the whole screen. */
-  margin-top: var(--chan-head-h, 0px);
+  /* Nothing here drops the panel under the channel banner any more, and
+     nothing needs to: the banner is pinned across the top of the shell and
+     the shell reserves its height, so every child of the shell already
+     starts below it. This used to carry a `margin-top` of the banner's
+     height, which was right while the banner was inside the conversation
+     column and wrong the moment it stopped being — it would have pushed the
+     panel a second bar's worth down the screen. */
   background: var(--bg-panel);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-xl);
@@ -9280,10 +9312,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   .chats-shell.panels-3 .thread-panel {
     width: 0;
     flex: 1 1 0;
-    /* The conversation — and with it the banner these are seated under — has
-       just been stood down by the rule above. There is nothing left up there
-       to sit beneath, so they take the full height back. */
-    margin-top: 0;
   }
 }
 
@@ -9362,7 +9390,12 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 @media (min-width: 601px) {
   .thread-panel.panel-leaving {
     position: absolute;
-    top: 8px;
+    /* Exactly where the live panel stood: taken out of flow it no longer gets
+       the shell's own `padding-top`, so the room the banner is holding has to
+       be counted back in here, or the ghost jumps up under the banner for the
+       length of the animation. `right`/`bottom` are the shell's plain gutter,
+       which is all flow was giving it on those edges. */
+    top: calc(var(--chan-head-h) + 8px);
     right: 8px;
     bottom: 8px;
   }
@@ -11350,10 +11383,11 @@ dialog.modal[open]::backdrop {
      the rail, the conversation and the drawer below it.
 
      Selectors are `.chats-shell`-prefixed on purpose: the base `.chan-head`
-     padding and the safe-area top-up further down this file are both one
-     class deep and both come later, so a bare `.chan-head` rule here is
-     outranked and silently does nothing. The inset is folded into the
-     height and paid as padding here instead. */
+     rule is one class deep, and a bare `.chan-head` rule here would only tie
+     with it rather than beat it. Fixed to the viewport rather than absolute
+     inside the shell, because on a phone the shell is the screen and a
+     drawer, a scrim and a full-screen panel are all pinned to the viewport
+     around it. */
   .chats-shell {
     --chan-head-h: calc(52px + var(--safe-top));
     padding-top: var(--chan-head-h);
@@ -11452,10 +11486,9 @@ dialog.modal[open]::backdrop {
     min-width: 0;
     border: 0;
     border-radius: 0;
-    /* It covers the banner here rather than sitting under it — and a margin
-       on a box pinned top *and* bottom would shorten it as well as move it,
-       leaving a strip of the screen behind it at the foot. */
-    margin-top: 0;
+    /* Pinned to the viewport, so the shell's padding does not reach it: it
+       covers the banner here rather than starting below it, which is what
+       gives a thread the whole phone. */
     z-index: 72;
   }
 
@@ -12476,10 +12509,10 @@ dialog.modal[open]::backdrop {
   --safe-right: env(safe-area-inset-right, 0px);
 }
 
-/* Header rows in normal flow at the top of the viewport. */
-.chan-head {
-  padding-top: calc(13px + var(--safe-top));
-}
+/* No `.chan-head` here. The channel banner is pinned rather than in flow, and
+   folds the inset into the height the shell reserves for it — see
+   `--chan-head-h`. A top-up out here would have added the inset a second time,
+   inside a box that is no longer free to grow by it. */
 
 .code-toolbar {
   height: calc(54px + var(--safe-top));
@@ -12522,12 +12555,22 @@ dialog.modal[open]::backdrop {
 }
 
 /* Landscape puts the cutout on a side instead, where it would clip the
-   message column rather than the header. */
+   message column rather than the top of it. */
 @media (orientation: landscape) {
   .chan-main,
   .code-shell {
     padding-left: var(--safe-left);
     padding-right: var(--safe-right);
+  }
+
+  /* The banner reaches both edges of the shell now, so it meets a side cutout
+     itself rather than being held clear of one by the column it used to sit
+     inside. Written against its own 18px so the inset is added to that gutter
+     rather than replacing it; both resolve to the plain 18px on every screen
+     without a cutout, desktop included. */
+  .chan-head {
+    padding-left: calc(18px + var(--safe-left));
+    padding-right: calc(18px + var(--safe-right));
   }
 }
 

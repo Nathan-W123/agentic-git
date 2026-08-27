@@ -34,44 +34,88 @@ function rule(css: string, selector: string): string {
 
 test("the thread panel opens under the channel header rather than beside it", async () => {
   const css = await publicFile("styles.css");
+  const chats = await publicFile("screen-chats.js");
 
-  // The panel is a sibling of the conversation column, not a child of it, so
-  // at full height its own header sat level with the channel's: two titles and
-  // two hairlines across one line, each naming something different. One number
-  // fixes it, and both the banner and the panel have to be told the same one —
-  // so the shell publishes it and neither of them invents its own.
-  const shell = rule(css, ".chats-shell");
+  // The banner belongs to the shell, not to the conversation column. Inside
+  // the column it was column-width: opening a thread narrowed the column, so
+  // the channel's name and its actions were dragged leftward by a panel that
+  // has nothing to do with them, and the panel's own header came up level with
+  // the channel's — two titles and two hairlines across one line, each naming
+  // something different.
+  const shell = chats.slice(
+    chats.indexOf('<div class="chats-shell${'),
+    chats.indexOf("${rightPanels(repositoryId)}"),
+  );
+  assert.notEqual(shell, "", "the chats shell markup is still there");
+  assert.ok(
+    shell.indexOf("${chanHeader(repositoryId)}") <
+      shell.indexOf('<div class="chan-main">'),
+    "the banner is drawn by the shell, ahead of the conversation column",
+  );
+  assert.doesNotMatch(
+    shell.slice(shell.indexOf('<div class="chan-main">')),
+    /chanHeader\(/u,
+    "and no longer from inside the conversation column",
+  );
+
+  // One number seats everything: the banner is that tall, and the shell keeps
+  // exactly that much room clear above its children — plus the gutter it
+  // already has on every other edge. Nothing else may tell either of them what
+  // the number turned out to be.
+  const shellRule = rule(css, ".chats-shell");
   assert.match(
-    shell,
-    /--chan-head-h: 68px;/u,
+    shellRule,
+    /--chan-head-h: calc\(56px \+ var\(--safe-top\)\);/u,
     "the shell should publish how tall the channel banner is",
   );
-  const banner = rule(css, ".chan-head");
   assert.match(
-    banner,
-    /min-height: var\(--chan-head-h, auto\);/u,
-    "the banner should be exactly the height the shell published",
-  );
-  const panel = rule(css, ".thread-panel");
-  assert.match(
-    panel,
-    /margin-top: var\(--chan-head-h, 0px\);/u,
-    "the panel should start where the banner ends",
+    shellRule,
+    /padding-top: calc\(var\(--chan-head-h\) \+ 8px\);/u,
+    "and pay that height back, because the banner is out of its flow",
   );
 
-  // And zeroed again wherever there is no banner left to sit under. Two panels
-  // sharing the column below 1100px stand the conversation down entirely, and
-  // a phone gives the panel the whole screen.
+  // Pinned across the top of the shell — over the rail and every open panel,
+  // not merely over the transcript — and exactly as tall as it was paid for.
+  const banner = rule(css, ".chan-head");
+  assert.match(banner, /position: absolute;/u);
+  assert.match(banner, /top: 0;/u);
+  assert.match(banner, /left: 0;/u);
+  assert.match(banner, /right: 0;/u);
   assert.match(
-    css,
-    /\.chats-shell\.panels-2 \.thread-panel,\n\s*\.chats-shell\.panels-3 \.thread-panel \{[\s\S]*?margin-top: 0;/u,
-    "panels that have displaced the conversation take the full height back",
+    banner,
+    /height: var\(--chan-head-h, auto\);/u,
+    "the banner should be exactly the height the shell published",
   );
-  const phone = /@media \(max-width: 600px\) \{[\s\S]*$/u.exec(css)?.[0] ?? "";
-  assert.match(
-    /\n {2}\.thread-panel \{([\s\S]*?)\n {2}\}/u.exec(phone)?.[1] ?? "",
-    /margin-top: 0;/u,
-    "a full-screen panel is not also pushed down by the banner it covers",
+  assert.doesNotMatch(
+    banner,
+    /min-height:/u,
+    "a bar the shell has already reserved room for cannot be free to grow",
+  );
+  // The row is the height it is told to be. Vertical padding on top of that is
+  // what made the old header 68px tall with a band of dead space above the
+  // name, and the safe-area top-up further down the file used to add its own.
+  assert.match(banner, /padding: var\(--safe-top\) 18px 0;/u);
+  assert.doesNotMatch(banner, /padding: 13px/u, "the tall banner should be gone");
+  const safeAreasAt = css.indexOf("------- safe areas ----");
+  assert.notEqual(safeAreasAt, -1, "the safe-area section is still there");
+  assert.doesNotMatch(
+    css.slice(safeAreasAt),
+    /\n\.chan-head \{/u,
+    "the banner pays the status-bar inset inside its own height",
+  );
+
+  // And nothing compensates for it any more. Every panel is a child of the
+  // shell, so the shell's own padding already starts it below the banner; a
+  // margin as well would have pushed it a second bar's worth down the screen.
+  assert.doesNotMatch(
+    css,
+    /margin-top: var\(--chan-head-h/u,
+    "panels are seated by the shell's padding, not by a margin of their own",
+  );
+  assert.doesNotMatch(
+    rule(css, ".thread-panel"),
+    /margin-top:/u,
+    "the panel does not place itself vertically at all",
   );
 });
 
