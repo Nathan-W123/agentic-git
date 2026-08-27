@@ -1209,7 +1209,7 @@ const OPENING_TIMEOUT_MS = 120000;
  * service) on purpose: whichever limit fires, the reader should be told the
  * model gave up rather than that this control plane stopped listening.
  */
-const DEEP_PLAN_TIMEOUT_MS = 300_000;
+const DEEP_PLAN_TIMEOUT_MS = 1_000_000;
 /**
  * How much of a plan is worth keeping.
  *
