@@ -561,12 +561,22 @@ strong {
  * `svh` rather than `vh`: on a phone the small viewport is the one that is
  * actually visible with the browser chrome showing, so the hero does not
  * hide its own tagline behind a URL bar.
+ *
+ * The bottom padding is the bias, and it is doing real work: the water's lit
+ * band starts lifting at about half the viewport height and crests at two
+ * thirds, so a lockup centred in the block sits straight through the
+ * brightest part of it. Padding the foot of the hero carries the whole lockup
+ * up by half the difference, which puts the wordmark clear of the band and
+ * leaves the crest and its ripples uninterrupted beneath. It is a fraction of
+ * the viewport rather than a fixed number because the band's own position is
+ * — but clamped, so a short window does not push the ticker into the nav and
+ * a tall one does not strand the name at the ceiling.
  */
 .hero {
   display: grid;
   align-content: center;
   min-height: 100svh;
-  padding: 92px 0 30px;
+  padding: 92px 0 clamp(140px, 34vh, 340px);
 }
 
 /*
