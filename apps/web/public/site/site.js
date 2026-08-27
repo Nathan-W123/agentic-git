@@ -732,10 +732,11 @@ function channelStory(animate, inView) {
     return;
   }
 
-  // The status chips under the threaded asks: "Done" in the HTML, "Writing
-  // code" while the replay is mid-flight.
+  // The swappable chips: status text under the threaded asks ("Done" in the
+  // HTML, "Writing code" mid-flight) and the reply counts that tick up when
+  // a summary lands. Anything with data-agent and data-busy plays.
   const statuses = new Map();
-  for (const el of shot.querySelectorAll(".a-status[data-agent]")) {
+  for (const el of shot.querySelectorAll("[data-agent][data-busy]")) {
     statuses.set(el.dataset.agent, { el, done: el.textContent });
   }
   undoers.push(() => {
