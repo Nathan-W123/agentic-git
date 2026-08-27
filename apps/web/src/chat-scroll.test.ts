@@ -242,3 +242,36 @@ test("a first decode holds a reader who is not following", async () => {
   assert.match(chats, /scroller\.scrollTop !== held\.applied/u);
   assert.match(chats, /heldAnchors\.set\(\s*entry\.selector/u);
 });
+
+test("closing a thread returns focus to its source message", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const helper = app.slice(
+    app.indexOf("function focusThreadSource"),
+    app.indexOf("\n/**", app.indexOf("function focusThreadSource")),
+  );
+
+  assert.match(helper, /document\.getElementById\(`cmsg-\$\{messageId\}`\)/u);
+  assert.match(helper, /\[data-act='channel-thread-open'\]/u);
+  assert.match(helper, /target\.focus\(\{ preventScroll: true \}\)/u);
+  const close = app.slice(
+    app.indexOf('case "channel-thread-close":'),
+    app.indexOf('case "plan-open":'),
+  );
+  assert.match(close, /render\(\);\s*focusThreadSource/u);
+  assert.match(close, /case "thread-return-source":/u);
+  assert.match(chats, /act: "thread-return-source"/u);
+});
+
+test("new channel output follows only near the bottom and otherwise exposes New update", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const paint = chats.slice(
+    chats.indexOf("export function paintJumpToLatest"),
+    chats.indexOf("\n/**", chats.indexOf("export function paintJumpToLatest")),
+  );
+
+  assert.match(paint, /const count = followingChannel \? 0 : channelNewSince/u);
+  assert.match(paint, /count === 1\s*\? "New update"/u);
+  assert.match(paint, /new updates/u);
+  assert.match(paint, /pill\.hidden = followingChannel/u);
+});

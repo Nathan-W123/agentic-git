@@ -4,8 +4,8 @@
   "description": "Coordination for humans and coding agents on one live codebase.",
   "start_url": "/app",
   "display": "standalone",
-  "background_color": "#121110",
-  "theme_color": "#121110",
+  "background_color": "#0E0E0D",
+  "theme_color": "#0E0E0D",
   "icons": [
     {
       "src": "/kumi-mark.svg",

@@ -2042,23 +2042,11 @@ export function narrateTaskEvent(
       }
       // Whole: this is the one line most people read of a task, and a bound
       // low enough to shape it was a bound it kept being cut at mid-word.
-      const summary = shortenEnding(written);
-      // The count, not the names — the reader who wants those is one click
-      // Named while there are few enough to name. "(1 file changed)" is the
-      // one fact about an ending that a reader cannot check and cannot use:
-      // it says something landed without saying what, so a thread reporting
-      // one file and a repository holding three cannot be reconciled from the
-      // channel at all — which is exactly the question this line kept being
-      // asked to answer and could not.
-      //
-      // Past two it goes back to a count, for the reason it always was one:
-      // an ending that lists a dozen paths stops being an ending.
-      if (files.length === 0) {
-        return summary;
-      }
-      return files.length <= 2
-        ? `${summary} (${files.join(", ")})`
-        : `${summary} (${String(files.length)} files changed)`;
+      // File paths travel separately on the channel message. The browser can
+      // turn that structured list into compact controls that open each file;
+      // baking the same paths into this sentence leaves every other client
+      // with prose it cannot act on and makes the browser show them twice.
+      return shortenEnding(written);
     }
     case "task_reported": {
       // The agent's own words are the deliverable here — the report *is* the
@@ -2234,7 +2222,16 @@ type ChannelMessageMention =
   | { kind: "user"; id: string; name: string }
   | { kind: "agent"; id: string; name: string };
 
-function textMentionsName(content: string, name: string): boolean {
+/**
+ * Whether `content` names `name` with an "@", the way a reader means it —
+ * case-insensitively, and only where the name ends rather than merely starts
+ * (so "@Keep" does not match "@Keeper").
+ *
+ * Typing "@romeo" is the same act as typing "@Romeo"; a person tasking an
+ * agent from a phone keyboard should not have to fight autocapitalisation to
+ * be heard. This is the single rule every mention path matches by.
+ */
+export function textMentionsName(content: string, name: string): boolean {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`@${escaped}(?=$|[\\s,.:;!?()\\[\\]{}])`, "iu").test(content);
 }
@@ -14955,8 +14952,8 @@ export class ApiGateway {
       // Legacy tasks may not resolve against the current configured-agent
       // list. An explicit mention in their root remains an unambiguous
       // fallback.
-      const namedAtRoot = candidates.find(
-        (entry) => root.content.includes(`@${entry.name}`),
+      const namedAtRoot = candidates.find((entry) =>
+        textMentionsName(root.content, entry.name),
       );
       if (threadAuthorId === undefined && namedAtRoot !== undefined) {
         threadAuthorId = `${namedAtRoot.userId}:${namedAtRoot.provider}`;
@@ -14979,12 +14976,12 @@ export class ApiGateway {
       // agent's own thread is. Only a thread whose root named nobody is a
       // conversation between people, and stays one.
       const inReply = question.includes("@")
-        ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+        ? candidates.filter((entry) => textMentionsName(question, entry.name))
         : [];
       const inRoot =
         inReply.length === 0 && root.content.includes("@")
           ? candidates.filter((entry) =>
-              root.content.includes(`@${entry.name}`),
+              textMentionsName(root.content, entry.name),
             )
           : [];
       const named = (inReply.length > 0 ? inReply : inRoot).filter(
@@ -15084,7 +15081,7 @@ export class ApiGateway {
     // construction. That is the behaviour this method was written for and it
     // stays the default.
     const mentioned = question.includes("@")
-      ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+      ? candidates.filter((entry) => textMentionsName(question, entry.name))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
     const firstAnswering = answering[0];
@@ -19053,6 +19050,12 @@ export class ApiGateway {
                 repositoryId: watched.repositoryId,
                 kind: "outcome",
                 authorId: watched.authorId,
+                // Keep the quick ending joined to its run even though it does
+                // not open a thread. `withChangedFiles` uses this existing
+                // field to attach the structured file list when messages are
+                // read, giving the inline ending the same drill-in data as a
+                // thread outcome.
+                taskId: watched.taskId,
                 // One line in the room reads as one line.
                 content: collapseWhitespace(line),
               });

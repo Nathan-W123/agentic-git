@@ -2,7 +2,7 @@
   width="64" height="64" role="img" aria-label="Kumi">
   <style>
     :root { --mark: #9A4C33; }
-    @media (prefers-color-scheme: dark) { :root { --mark: #D88973; } }
+    @media (prefers-color-scheme: dark) { :root { --mark: #D79A81; } }
   </style>
   <g fill="none" stroke="var(--mark)" stroke-width="3.52"
      stroke-linecap="round" stroke-linejoin="round">
