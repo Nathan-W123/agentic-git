@@ -400,7 +400,7 @@ strong {
   align-items: center;
   gap: 10px;
   font-family: var(--display);
-  font-variation-settings: "wght" 600, "wdth" 92;
+  font-variation-settings: "wght" 600, "wdth" 84;
   font-size: 18px;
   letter-spacing: -0.02em;
 }
@@ -570,9 +570,18 @@ strong {
 }
 
 /* One word, so it gets to be enormous. The size lives on this class rather
-   than on h1, because the pricing page's hero is still a sentence. */
+   than on h1, because the pricing page's hero is still a sentence.
+ *
+ * The width axis is the only angularity this face offers — there is no
+ * optical-size axis in the subset — and it buys more than a narrower word:
+ * at the bottom of the axis the U's bowl pulls its sides upright and its
+ * corner tight, and the K's junction sharpens, so the name reads faceted
+ * beside a mark that is nothing but facets. The rest of the page's headings
+ * stay at h1's own width; this is the wordmark, not the prose. */
 .hero-name {
   font-size: clamp(76px, 13vw, 172px);
+  font-variation-settings: "wght" 300, "wdth" 75;
+  letter-spacing: -0.035em;
 }
 
 /* The lockup is one object: the mark never wraps away from the word. */
