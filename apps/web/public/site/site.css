@@ -281,8 +281,15 @@ main,
 }
 
 /* The page's ending is one move, not two sections: the objection is
-   answered and the ask follows it immediately. */
+   answered and the ask follows it immediately. The belt closes up with it
+   too — every other join on the page had been tightened, which left this
+   one reading as a hole rather than as a rhythm. */
+#agents {
+  padding-bottom: 44px;
+}
+
 #trust {
+  padding-top: 66px;
   padding-bottom: 40px;
 }
 
@@ -1054,8 +1061,17 @@ strong {
   display: grid;
   align-content: start;
   gap: 13px;
-  padding-top: 24px;
-  border-top: 1px solid var(--border);
+}
+
+/* The rule is a real element rather than a border, because a border cannot
+   be drawn: this one is scaled from its left edge on reveal. At rest it is
+   simply a hairline, which is what a reader with JavaScript off or motion
+   turned down sees. */
+.claim-rule {
+  height: 1px;
+  margin-bottom: 11px;
+  background: var(--border);
+  transform-origin: left center;
 }
 
 .claim h3 {
@@ -1075,10 +1091,58 @@ strong {
   text-wrap: pretty;
 }
 
-/* The one button in the body of the page, ranged left under its own
-   paragraph like everything else. */
-.get-cta {
+/*
+ * The four installations, as a row of things to pick rather than one button
+ * that hides the choice. Auto-fit rather than a fixed four columns: the row
+ * folds to two and then to one on its own, at whatever width the names stop
+ * fitting, instead of at a breakpoint guessed in advance.
+ */
+.installs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+  gap: 12px;
   margin-top: 36px;
+  max-width: 860px;
+  /* This stylesheet has no list reset of its own — the one `list-style` in
+     it belongs to a component — so the markers are cleared here. */
+  padding: 0;
+  list-style: none;
+}
+
+.installs a {
+  display: grid;
+  gap: 3px;
+  padding: 15px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-1) 62%, transparent);
+  transition: border-color 0.22s var(--ease-motion),
+    background-color 0.22s var(--ease-motion),
+    transform 0.22s var(--ease-motion);
+}
+
+.install-os {
+  font-family: var(--display);
+  font-variation-settings: "wght" 400, "wdth" 94;
+  font-size: 17px;
+  letter-spacing: -0.012em;
+  color: var(--text);
+}
+
+.install-kind {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+@media (hover: hover) {
+  .installs a:hover {
+    border-color: var(--border-strong);
+    background: color-mix(in srgb, var(--surface-2) 76%, transparent);
+    transform: translateY(-2px);
+  }
 }
 
 /* ----------------------------------------------------------------- belt -- */
@@ -2632,6 +2696,21 @@ html.anim .reveal {
   transform: translateY(18px);
 }
 
+/* The claims are hidden a part at a time rather than as three blocks,
+   because they are revealed a part at a time — the rule draws, then the
+   heading and its line rise behind it. Same contract as .reveal: only
+   site.js ever adds `anim`, and the sequence that hides these is the
+   sequence that shows them. */
+html.anim .claim-rule {
+  transform: scaleX(0);
+}
+
+html.anim .claim h3,
+html.anim .claim p {
+  opacity: 0;
+  transform: translateY(16px);
+}
+
 /* --------------------------------------------------------- reduced motion -- */
 
 /* The CSS half of the kill switch. The JS half is site.js never wiring
@@ -2653,10 +2732,16 @@ html.anim .reveal {
   }
 
   html.anim .reveal,
+  html.anim .claim h3,
+  html.anim .claim p,
   html.anim .hero .chip,
   html.anim .hero-aside,
   html.anim .scroll-cue {
     opacity: 1;
+    transform: none;
+  }
+
+  html.anim .claim-rule {
     transform: none;
   }
 

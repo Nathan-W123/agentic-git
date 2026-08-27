@@ -522,9 +522,42 @@ function wire() {
        * keeps the quiet fade.
        */
       const springy = group.matches(".moves, .cards");
+      /*
+       * The three claims are the one place on the page with structure worth
+       * animating rather than fading. Each has a hairline over it, so the
+       * rule draws from its left edge and the heading and its line rise a
+       * beat behind it, three claims a beat apart — the reveal describes the
+       * shape of the thing instead of dissolving it into view. Three calls
+       * rather than a loop per claim: one stagger per part keeps the three
+       * columns in step with each other, which a per-claim sequence would
+       * have to re-derive.
+       */
+      const claims = group.matches(".claims");
       pendingReveals.set(group, () => {
         {
-          if (springy) {
+          if (claims) {
+            const part = (sel) => group.querySelectorAll(sel);
+            const STEP = 0.13;
+            const rise = {
+              opacity: [0, 1],
+              transform: ["translateY(16px)", "translateY(0px)"],
+            };
+            animate(
+              part(".claim-rule"),
+              { transform: ["scaleX(0)", "scaleX(1)"] },
+              { duration: 0.62, delay: stagger(STEP), ease: EASE },
+            );
+            animate(part(".claim h3"), rise, {
+              duration: 0.62,
+              delay: stagger(STEP, { startDelay: 0.14 }),
+              ease: EASE,
+            });
+            animate(part(".claim p"), rise, {
+              duration: 0.62,
+              delay: stagger(STEP, { startDelay: 0.21 }),
+              ease: EASE,
+            });
+          } else if (springy) {
             animate(
               items,
               {
