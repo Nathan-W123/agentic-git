@@ -803,6 +803,7 @@ strong {
 .app-shot {
   display: grid;
   grid-template-rows: auto 1fr;
+  height: 660px;
   max-width: 880px;
   margin-inline: auto;
   border: 1px solid var(--border);
@@ -872,6 +873,7 @@ strong {
 .shot-cols {
   display: grid;
   grid-template-columns: 60px minmax(0, 1fr) auto;
+  min-height: 0;
 }
 
 .shot-rail {
@@ -946,13 +948,22 @@ strong {
   display: grid;
   grid-template-rows: 1fr auto;
   min-width: 0;
+  min-height: 0;
 }
 
 .shot-feed {
   display: grid;
   gap: 14px;
   align-content: start;
+  min-height: 0;
   padding: 16px 18px 8px;
+  overflow-y: auto;
+  /* The demo's scrollbar would only narrate the player's own staging. */
+  scrollbar-width: none;
+}
+
+.shot-feed::-webkit-scrollbar {
+  display: none;
 }
 
 /* The channel's past, standing in for messages that are not the story:
@@ -1423,7 +1434,14 @@ strong {
   display: grid;
   gap: 12px;
   align-content: start;
+  min-height: 0;
   padding: 12px 13px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.th-body::-webkit-scrollbar {
+  display: none;
 }
 
 /* The elbow out of the root's avatar gutter, the way the open thread draws
@@ -1512,12 +1530,21 @@ strong {
    narrower gutter, and the thread panel docks below the room the way a
    phone-width panel takes the screen for itself. */
 @media (max-width: 720px) {
+  .app-shot {
+    height: auto;
+  }
+
   .shot-cols {
     grid-template-columns: 52px minmax(0, 1fr);
   }
 
   .shot-feed {
+    max-height: 440px;
     padding: 14px 12px 8px;
+  }
+
+  .th-body {
+    max-height: 320px;
   }
 
   .shot-thread {

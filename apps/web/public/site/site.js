@@ -739,6 +739,26 @@ function channelStory(animate, inView) {
   for (const el of shot.querySelectorAll("[data-agent][data-busy]")) {
     statuses.set(el.dataset.agent, { el, done: el.textContent });
   }
+
+  // While a chip is busy, its label walks the task's real phases — planning,
+  // reading, writing, editing the file — the way the app's activity label
+  // follows the narration.
+  for (const { el } of statuses.values()) {
+    const phases = (el.dataset.phases ?? "").split("|").filter(Boolean);
+    if (phases.length < 2) {
+      continue;
+    }
+    let at = 0;
+    intervals.push(
+      setInterval(() => {
+        if (disarmed || !el.classList.contains("busy")) {
+          return;
+        }
+        at = (at + 1) % phases.length;
+        el.textContent = phases[at];
+      }, slow(2600)),
+    );
+  }
   undoers.push(() => {
     for (const { el, done } of statuses.values()) {
       el.textContent = done;
@@ -760,15 +780,30 @@ function channelStory(animate, inView) {
   }
 
   // The room owns the whole width until the thread arrives; the HTML ships
-  // thread-open (the finished scene) and the player closes it to start.
-  // Measured open, the figure keeps the height of its final state, so the
-  // panel sliding in — and every loop after it — never pumps the page.
-  shot.style.minHeight = `${shot.offsetHeight}px`;
+  // thread-open (the finished scene) and the player closes it to start. The
+  // figure itself is a fixed frame — the feed scrolls inside it like the
+  // channel it is, so the page never grows with the story.
   shot.classList.remove("thread-open");
   undoers.push(() => {
-    shot.style.minHeight = "";
     shot.classList.add("thread-open");
   });
+
+  // A chat follows its newest message. Whenever a beat lands below the fold
+  // of its pane — the feed or the thread body — the pane glides down so the
+  // beat ends at the bottom edge, the way the real channel keeps its floor.
+  const follow = (el) => {
+    const pane = el.closest(".shot-feed, .th-body");
+    if (pane === null) {
+      return;
+    }
+    const delta =
+      el.getBoundingClientRect().bottom -
+      pane.getBoundingClientRect().bottom +
+      14;
+    if (delta > 0) {
+      pane.scrollTo({ top: pane.scrollTop + delta, behavior: "smooth" });
+    }
+  };
 
   const reset = () => {
     shot.classList.remove("thread-open");
@@ -779,6 +814,9 @@ function channelStory(animate, inView) {
     for (const { el } of statuses.values()) {
       el.textContent = el.dataset.busy;
       el.classList.add("busy");
+    }
+    for (const pane of shot.querySelectorAll(".shot-feed, .th-body")) {
+      pane.scrollTop = 0;
     }
   };
   reset();
@@ -884,8 +922,10 @@ function channelStory(animate, inView) {
               },
         { duration: (card ? 0.5 : panel ? 0.6 : 0.4) / PACE, ease: EASE },
       );
+      follow(el);
       if (el.dataset.type !== undefined) {
         await typeInto(el.querySelector(".m-text"), slow(18));
+        follow(el);
         await later(slow(260));
       } else {
         await later(slow(card ? 1100 : panel ? 1000 : 640));
