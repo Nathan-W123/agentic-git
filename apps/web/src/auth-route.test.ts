@@ -349,3 +349,75 @@ test("the paid sign-up has a page, a return address, and no card of its own", as
   // Sign-in sends new people to the paid trial rather than the free form.
   assert.match(app, /href="#signup"[^>]*data-value="signup"/u);
 });
+
+test("the waitlist is a signed-out screen with its own address", async () => {
+  const app = await publicFile("app.js");
+
+  // A hash, so the marketing site can link straight at it and so somebody can
+  // be sent the form rather than "open the app and look for the link".
+  assert.match(app, /\["waitlist", "waitlist"\]/u);
+
+  // `#signup` lands here too while payments are off. It is the address on
+  // every link this product has ever sent, and a card form nobody can
+  // complete is a worse answer than the thing that replaced it.
+  assert.match(
+    app,
+    /authMode === "waitlist" \|\| \(authMode === "signup" && !paymentsOn\(\)\)/u,
+  );
+
+  // Read from health rather than kept as its own flag, so the screen can
+  // never disagree with what the server will allow.
+  assert.match(
+    app,
+    /function paymentsOn\(\)\s*\{\s*\n\s*return state\.health\?\.billing\?\.payments === true;/u,
+  );
+
+  const waitlist = app.slice(
+    app.indexOf("function renderWaitlist()"),
+    app.indexOf("function renderSignup()"),
+  );
+  assert.match(waitlist, /data-act="waitlist"/u);
+  assert.match(waitlist, /name="email"/u);
+  // No card, and no promise of one: nothing on this screen may imply a
+  // charge, because nothing is being charged.
+  assert.doesNotMatch(waitlist, /name="(card|cvc|cc-|expiry)/iu);
+  assert.doesNotMatch(waitlist, /trial/iu);
+  assert.match(waitlist, /nothing to pay/u);
+
+  // Sign-in offers the queue rather than a trial while payments are off.
+  assert.match(
+    app,
+    /href="#waitlist" data-act="auth-mode" data-value="waitlist"/u,
+  );
+
+  // And the form posts to the route that holds a place, saying the same thing
+  // back whichever state the address was in.
+  const submit = app.slice(
+    app.indexOf("async function submitWaitlist(form)"),
+    app.indexOf("async function submitSignup(form)"),
+  );
+  assert.match(submit, /joinWaitlist\(\{/u);
+  assert.match(submit, /You are on the list/u);
+});
+
+test("billing says it is switched off rather than misconfigured", async () => {
+  const app = await publicFile("app.js");
+
+  const card = app.slice(
+    app.indexOf("function billingCard()"),
+    app.indexOf("async function billingAction("),
+  );
+  // Two different sentences, because they are two different situations: a
+  // deployment that has switched payments off is not one somebody
+  // misconfigured, and "not set up" reads as something to go and fix.
+  assert.match(card, /billing\.payments !== true/u);
+  assert.match(card, /Kumi is not charging right now/u);
+  assert.match(card, /billing\.configured !== true/u);
+
+  // And nothing warns about a trial or a failed payment that cannot exist.
+  const banner = app.slice(
+    app.indexOf("function billingBanner()"),
+    app.indexOf("function banner()"),
+  );
+  assert.match(banner, /billing\.payments !== true/u);
+});

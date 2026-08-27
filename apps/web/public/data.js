@@ -382,6 +382,8 @@ export const state = {
   repositoryGrants: {},
   /** Entitlement and seat count — see `ensureBilling`. */
   billing: undefined,
+  /** Everybody waiting to be let in — see `loadWaitlist`. Admin only. */
+  waitlist: undefined,
   /** Deployment counts and coordination metrics — see `ensureDeployment`. */
   deployment: undefined,
   activeChannelThread: undefined,
@@ -5863,6 +5865,55 @@ export async function ensureBilling(rerender) {
   state.billing = null;
   await loadBilling();
   rerender();
+}
+
+/**
+ * Asks to be let in, from the signed-out form.
+ *
+ * Answers the same way whichever state the address is in — new, already
+ * waiting, already approved — because the form is open to anybody and any
+ * difference between those replies would tell a stranger which addresses this
+ * deployment knows about.
+ */
+export async function joinWaitlist(entry) {
+  await api("/waitlist", {
+    method: "POST",
+    body: {
+      email: entry.email,
+      ...(entry.displayName ? { displayName: entry.displayName } : {}),
+      ...(entry.note ? { note: entry.note } : {}),
+      source: entry.source ?? "app",
+    },
+  });
+}
+
+/**
+ * Everybody waiting, for whoever runs the deployment.
+ *
+ * Cached on `state` like the other settings reads, and cleared by the actions
+ * that change it — approving somebody, or removing a row.
+ */
+export async function loadWaitlist() {
+  const response = await apiOptional("/admin/waitlist", undefined);
+  state.waitlist = response?.waitlist ?? [];
+  return state.waitlist;
+}
+
+/** Lets one address through, so registration will build it an account. */
+export async function approveWaitlistEntry(entryId) {
+  await api(`/admin/waitlist/${encodeURIComponent(entryId)}/approve`, {
+    method: "POST",
+    body: {},
+  });
+  state.waitlist = undefined;
+}
+
+/** Removes a place in the queue — a duplicate, or somebody who asked to go. */
+export async function deleteWaitlistEntry(entryId) {
+  await api(`/admin/waitlist/${encodeURIComponent(entryId)}`, {
+    method: "DELETE",
+  });
+  state.waitlist = undefined;
 }
 
 /** A Stripe Checkout URL for this organization, or throws with the reason. */

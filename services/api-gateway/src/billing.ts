@@ -18,6 +18,33 @@ import type {
 export const TRIAL_DAYS = 14;
 
 /**
+ * Whether this deployment takes money at all.
+ *
+ * Off unless `KUMI_PAYMENTS_ENABLED` says otherwise, which is the switch the
+ * whole payment pathway hangs from: with it off there is no checkout, no
+ * billing portal, no seat reconciliation against Stripe, no trial, and — the
+ * part that matters most here — no entitlement gate, so nobody is folded to
+ * `viewer` for not having paid something nobody was asked to pay.
+ *
+ * Default-off rather than default-on because the failure modes point opposite
+ * ways. A deployment that has switched payments off and is wrongly read as
+ * having them on locks its own users out of their repositories over an
+ * invoice that does not exist; one read the other way simply does not charge.
+ * Only the second is recoverable by the person it happens to.
+ *
+ * Read at the call rather than captured at import so a test can set it around
+ * one case, and so the gateway and this module can never disagree about it.
+ */
+export function paymentsEnabled(
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const value = (environment["KUMI_PAYMENTS_ENABLED"] ?? "")
+    .trim()
+    .toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+/**
  * Roles that cost money.
  *
  * The line falls exactly where `submit_task` and `run_task` do, which is not a
@@ -110,7 +137,16 @@ export function subscriptionAllowsWork(
   subscription: Subscription | undefined,
   organizationCreatedAt: string | undefined,
   now: Date = new Date(),
+  payments: boolean = paymentsEnabled(),
 ): boolean {
+  // Nothing is gated where nothing is sold. A deployment with payments off
+  // has no way for anybody to buy an entitlement, so reading a missing or
+  // lapsed row as "no" would make the read-only state permanent and the door
+  // out of it unreachable — the exact trap `ignoreEntitlement` exists to keep
+  // the checkout route out of, applied to every route at once.
+  if (!payments) {
+    return true;
+  }
   if (subscription === undefined) {
     return false;
   }
@@ -174,8 +210,9 @@ export function effectiveRole(
   subscription: Subscription | undefined,
   organizationCreatedAt: string | undefined,
   now: Date = new Date(),
+  payments: boolean = paymentsEnabled(),
 ): OrganizationRole {
-  return subscriptionAllowsWork(subscription, organizationCreatedAt, now)
+  return subscriptionAllowsWork(subscription, organizationCreatedAt, now, payments)
     ? role
     : "viewer";
 }

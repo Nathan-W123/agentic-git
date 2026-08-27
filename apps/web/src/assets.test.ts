@@ -348,11 +348,11 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
   }
 
-  // Basil uses one light rounded line on a 24px grid. Pin the shared wrapper
-  // here so adding a glyph cannot quietly introduce a second optical weight,
-  // lose its theme colour, or become visible to a screen reader as
-  // meaningless content — and so the set it was replaced from cannot creep
-  // back one icon at a time.
+  // Iconly's Light style is one thin rounded line on a 24px grid. Pin the
+  // shared wrapper here so adding a glyph cannot quietly introduce a second
+  // optical weight, lose its theme colour, or become visible to a screen
+  // reader as meaningless content — and so the set it was replaced from
+  // cannot creep back one icon at a time.
   for (const [name, glyph] of Object.entries(ui.ICONS)) {
     assert.match(
       glyph,
@@ -364,19 +364,19 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
       /stroke="currentColor"/u,
       `${name} follows text colour`,
     );
-    assert.match(glyph, /stroke-width="1\.8"/u, `${name} uses Basil's stroke`);
+    assert.match(glyph, /stroke-width="1\.5"/u, `${name} uses Iconly's stroke`);
     assert.match(glyph, /stroke-linecap="round"/u, `${name} has rounded ends`);
     assert.match(glyph, /stroke-linejoin="round"/u, `${name} has rounded joins`);
     assert.match(glyph, /aria-hidden="true"/u, `${name} is decorative`);
     assert.match(glyph, /focusable="false"/u, `${name} cannot take focus`);
     assert.match(
       glyph,
-      /data-icon-style="basil"/u,
+      /data-icon-style="iconly"/u,
       `${name} identifies the selected icon treatment`,
     );
     assert.match(
       glyph,
-      /data-icon-source="basil-icons-community"/u,
+      /data-icon-source="iconly-v3-community"/u,
       `${name} keeps the source attribution`,
     );
     assert.doesNotMatch(
@@ -1408,7 +1408,6 @@ test("a reply carries a quiet visual path back to its root", async () => {
     "the changed files should sit after the route endpoint",
   );
   assert.match(renderer, /class="thread-replies"/u);
-  assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
   // The panel never borrows the channel's avatar-to-thread path classes —
   // those belong to the room transcript only. Kept from the test this one
@@ -1565,7 +1564,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /top: 48px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
-  assert.match(css, /\.thread-replies-head::after \{/u);
+  // And the foot of that branch reaches into the air the replies keep above
+  // themselves rather than into a caption that no longer exists.
+  assert.match(panelBranch ?? "", /bottom: -8px;/u);
+  const repliesFlow = /\n\.thread-replies-flow \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(repliesFlow ?? "", /padding-top: 10px;/u);
 });
 
 test("a thread says what it is without a connector drawn to it", async () => {
@@ -1575,11 +1578,10 @@ test("a thread says what it is without a connector drawn to it", async () => {
   const rendererEnd = chats.indexOf("\n/**\n * How much summary", rendererStart);
   const renderer = chats.slice(rendererStart, rendererEnd);
 
-  // Inside the open thread panel the conversation names itself with a head and
-  // a flow of replies. That panel never borrows the channel's avatar-to-thread
-  // path classes — those belong to the room transcript only.
+  // Inside the open thread panel the conversation is a named section holding a
+  // flow of replies, and nothing else. That panel never borrows the channel's
+  // avatar-to-thread path classes — those belong to the room transcript only.
   assert.match(renderer, /class="thread-replies"/u);
-  assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
   assert.doesNotMatch(renderer, /cmsg-thread-path/u);
   assert.doesNotMatch(renderer, /cmsg-thread-route/u);
@@ -1596,7 +1598,10 @@ test("a thread says what it is without a connector drawn to it", async () => {
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /top: 48px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
-  assert.match(css, /\.thread-replies-head::after \{/u);
+  // The caption the branch used to end at is gone, and so is the hairline that
+  // trailed off the end of it — see the reply-count test in
+  // thread-panel-chrome.test.ts.
+  assert.doesNotMatch(css, /\.thread-replies-head/u);
 });
 
 test("user-rooted tasks promote when their first reply arrives", async () => {
@@ -1683,8 +1688,11 @@ test("a long thread name cannot push the panel's close out of reach", async () =
   // controls after it — including the close — leave the panel entirely.
   assert.match(head ?? "", /min-width: 0;/u);
   // And once the row is the panel's width, the tools hold their box rather
-  // than shrinking under the name.
-  assert.match(css, /\.thread-head \.icon-btn \{\s*flex: none;\s*\}/u);
+  // than shrinking under the name. That box is now also given a size of its
+  // own — see the compact-header test in thread-panel-chrome.test.ts — so it
+  // is the declaration that is pinned here, not the whole rule.
+  const tools = /\n\.thread-head \.icon-btn \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(tools ?? "", /flex: none;/u);
   // The title is the one thing in the row that gives way, by ellipsis.
   const title = /\n\.thread-head \.thread-title \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(title ?? "", /min-width: 0;/u);
@@ -6403,18 +6411,20 @@ test("one profile card describes people and agents wherever a face is drawn", as
   );
   assert.match(person, /profileAnchor\(\s*personProfile\(userId, name, repositoryId\),\s*"rr-avatar",\s*"down",/u);
   assert.match(agentRow, /profileAnchor\(\s*agentProfile\(agent, activeChannelId\(\)\),\s*"rr-avatar",\s*"down",/u);
-  // The agent popout is intentionally only identity, live status and the two
-  // execution choices. Role, task/path, access policy and usage belong to the
-  // profile page and do not turn a hover into a scrolling settings card.
+  // The agent popout is intentionally only identity, live status and real
+  // quota windows. Execution settings and account diagnostics belong to the
+  // full profile and do not turn a hover into a settings card.
   const agentCard = chats.slice(
     chats.indexOf("function agentProfile(agent, repositoryId)"),
     chats.indexOf("function personProfile(userId, name, repositoryId)"),
   );
-  assert.match(agentCard, /label: "Model", value: model \|\| "Not reported"/u);
-  assert.match(agentCard, /label: "Reasoning", value: effort \|\| "Provider default"/u);
+  assert.match(agentCard, /facts: \[\],/u);
   assert.match(agentCard, /subtitle: agentLabelOf\(providerId\)/u);
   assert.match(agentCard, /usage: usageBlock\(agent\)/u);
-  assert.doesNotMatch(agentCard, /Role here|Who may task it|Working on|Waiting to start/u);
+  assert.doesNotMatch(
+    agentCard,
+    /agent\.model|agent\.effort|label: "Model"|label: "Reasoning"|Role here|Who may task it|Working on|Waiting to start/u,
+  );
   assert.doesNotMatch(agentRow, /class="roster-row-main"[^>]*data-hover/u);
 
   // A conversation opened from a search or a notification is the one place
@@ -6432,24 +6442,26 @@ test("one profile card describes people and agents wherever a face is drawn", as
     /\? profileAnchor\(identity, "cmsg-identity", "up", content, attributes\)\s*: plainAnchor\(identity, "cmsg-identity", content, attributes\)/u,
   );
 
-  // What the card actually says: who they are, how to read them at a glance,
-  // and the way through to everything it left out.
-  assert.match(chats, /class="pcard-banner"/u);
+  // What the card actually says: who they are and the way through to
+  // everything it intentionally left out. The decorative colour banner and
+  // duplicated status dot are gone from the neutral surface.
+  assert.match(chats, /class="pcard-head"/u);
   assert.match(chats, /class="pcard-name"/u);
-  assert.match(chats, /class="pcard-sub"/u);
+  assert.match(chats, /class="pcard-meta"/u);
   assert.match(chats, /class="pcard-section-label"/u);
+  assert.doesNotMatch(chats, /class="pcard-banner"|--pcard-accent/u);
+  const profile = chats.slice(
+    chats.indexOf("function profileCard(profile)"),
+    chats.indexOf("function profileAnchor(", chats.indexOf("function profileCard(profile)")),
+  );
+  assert.doesNotMatch(profile, /status-dot status-/u);
   assert.match(chats, /label: "View full profile"/u);
   assert.match(chats, /label: unread > 0 \? `Message · \$\{unread\} unread` : "Message"/u);
-  assert.match(chats, /<span class="pcard-pop"><span class="pcard" role="group"/u);
+  assert.match(chats, /class="pcard pcard-\$\{esc\(profile\.kind\)\}"/u);
   assert.match(chats, /<button type="button" class="pcard-open"/u);
   assert.doesNotMatch(chats, /class="pcard-open" role="button"/u);
   assert.match(browser, /case "agent-panel-open":/u);
   assert.match(browser, /case "dm-open":/u);
-  // A colour somebody chose reaches a `style` attribute, so it is matched
-  // against the shape a picker stores rather than escaped and hoped for.
-  assert.match(chats, /const HEX_COLOR = \/\^#\(\?:\[0-9a-f\]\{3\}\|\[0-9a-f\]\{6\}\)\$\/iu/u);
-  assert.match(chats, /style="--pcard-accent:\$\{profile\.accent\}"/u);
-
   // The card lives inside its own anchor and carries the gap as padding, which
   // is what makes it reachable at all: a pointer moving from the face to the
   // card never leaves the thing the hover is on.
@@ -6484,6 +6496,10 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(card, /opacity: 1/u);
   const body = /\n\.pcard-body \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
   assert.match(body, /background: var\(--surface-1\)/u);
+  assert.doesNotMatch(css, /\n\.pcard-banner \{/u);
+  const open = /\n\.pcard-open \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(open, /background: transparent/u);
+  assert.match(open, /border-top: 1px solid var\(--border-soft\)/u);
   assert.match(
     css,
     /\.cmsg-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
@@ -6513,7 +6529,7 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.doesNotMatch(css, /\.pcard-anchor\[data-profile-dir=/u);
   assert.match(
     css,
-    /width: min\(246px, var\(--profile-max-width, calc\(100vw - 20px\)\)\);/u,
+    /width: min\(236px, var\(--profile-max-width, calc\(100vw - 20px\)\)\);/u,
   );
   assert.match(css, /max-height: var\(--profile-max-height/u);
   assert.match(css, /overflow-y: auto/u);
@@ -7156,9 +7172,13 @@ test("the marketing front page forwards legacy deep links to /app", async () => 
 
   const boot = await siteFile("site-boot.js");
   assert.match(boot, /window\.location\.replace\("\/app" \+ hash\)/u);
-  // Every screen name AUTH_HASHES routes (app.js), plus the billing and
-  // settings returns the server mails out and hands to Stripe. An allowlist,
-  // not "any hash": the page's own anchors must keep scrolling.
+  // Every screen the server or an old mail can send somebody to on this
+  // origin, plus the billing and settings returns. An allowlist, not "any
+  // hash": the page's own anchors must keep scrolling.
+  //
+  // `waitlist` is deliberately not here. It is new, so no link to `/#waitlist`
+  // exists anywhere to forward, and the site's own buttons name `/app#waitlist`
+  // outright rather than relying on this.
   for (const screen of [
     "signin",
     "register",
@@ -7213,6 +7233,35 @@ test("marketing motion is an enhancement behind the reduced-motion gate", async 
     assert.match(html, /<script src="\/vendor\/motion\/motion\.js"><\/script>/u);
     assert.match(html, /<script type="module" src="\/site\.js"><\/script>/u);
   }
+});
+
+test("the marketing site sends newcomers to the waitlist, not to a card", async () => {
+  // Payments are off, so every call to action on the site has to lead
+  // somewhere that works. A "Start free trial" button pointing at a sign-up
+  // route that answers 501 is the single worst thing this site could ship.
+  for (const page of ["index.html", "pricing.html"]) {
+    const html = await siteFile(page);
+    assert.equal(
+      html.includes("/app#signup"),
+      false,
+      `${page} must not link at the card path`,
+    );
+    assert.match(
+      html,
+      /href="\/app#waitlist"/u,
+      `${page} should offer the waitlist`,
+    );
+    assert.doesNotMatch(
+      html,
+      /Start (your )?free trial/u,
+      `${page} must not promise a trial`,
+    );
+  }
+  // The pricing page still says what a seat will cost, and says plainly that
+  // nobody is paying it yet — the number is what it will be, not a bill.
+  const pricing = await siteFile("pricing.html");
+  assert.match(pricing, /Payments are switched off/u);
+  assert.match(pricing, /Nobody is being charged\s*\n?\s*today/u);
 });
 
 test("the seat price is written exactly once, on the pricing page", async () => {

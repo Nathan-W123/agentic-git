@@ -1308,6 +1308,35 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE o.id NOT IN (SELECT organization_id FROM subscriptions)`,
     ],
   },
+  {
+    // Everybody is waitlisted while payments are off, so there has to be
+    // somewhere for "everybody" to go.
+    //
+    // No foreign key and no secret: a row here is an address and a note, and
+    // it deliberately cannot be signed in to. What it can do is one thing —
+    // once `invited_at` is set, registration will build an account for that
+    // address — which is why the uniqueness is on the address itself rather
+    // than on the id nobody outside the database ever sees.
+    //
+    // `COLLATE NOCASE` because the address is what a person types, and
+    // "Ada@Example.com" arriving after "ada@example.com" is the same person
+    // asking twice rather than a second place in the queue.
+    version: 48,
+    name: "waitlist",
+    statements: [
+      `CREATE TABLE waitlist_entries (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name TEXT,
+        note TEXT,
+        source TEXT,
+        created_at TEXT NOT NULL,
+        invited_at TEXT
+      )`,
+      `CREATE INDEX waitlist_entries_by_created
+         ON waitlist_entries(created_at)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

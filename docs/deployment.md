@@ -60,6 +60,7 @@ the web UI.
 | `COORD_ALLOWED_ORIGINS` | Comma-separated browser origins allowed CORS access, for a UI hosted on a different origin. | none |
 | `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. Read once at boot and then removed from the process environment, so nothing the control plane spawns can see it. | generated |
 | `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
+| `KUMI_PAYMENTS_ENABLED` | Set to `1` to switch the payment pathway on. Off by default, and off means off: no checkout, no billing portal, no Stripe webhook, no trial, and no entitlement gate — every organization keeps full use of its repositories. Public sign-up becomes a waitlist at `POST /api/v1/waitlist`; whoever runs the deployment lets people through one at a time in Settings — Deployment, which admits that address at `POST /api/v1/auth/register` and gives it a free organization. The four `STRIPE_*` settings are only read when this is on. | off |
 | `COORD_ALLOW_REGISTRATION` | Set to `0` to close self-service sign-up at `/api/v1/auth/register`. A new account owns its own organization and can run tasks, so close registration on a deployment strangers can reach unless that is intentional. Invitations are unaffected. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | open |
 | `COORD_REQUIRE_EMAIL_CONFIRMATION` | Set to `1` to make sign-up mail a six-digit code and create the account only once that code is submitted. Off by default: sign-up creates the account immediately and signs the browser in, so a deployment with no mail configured can still take sign-ups. Only turn it on where a mail transport below is configured and tested — otherwise the code goes to the log and nobody can finish signing up. | off |
 | `COORD_MAIL_API_URL` | HTTPS endpoint of a mail provider used to send "forgotten password" links (and sign-up confirmation codes where `COORD_REQUIRE_EMAIL_CONFIRMATION` is on), e.g. `https://api.resend.com/emails`. Takes precedence over `COORD_SMTP_URL`. Prefer it on any platform that blocks outbound SMTP ports (Railway, Fly, most serverless hosts), where a relay cannot be reached and the code silently never arrives. The request body is `{from, to, subject, text}`, which every hosted provider of this shape accepts. Step by step: [setting up email](email-setup.md). | unset |
@@ -88,6 +89,33 @@ not forwarded there yet, so a Compose deployment that wants one adds the line
 (`COORD_MAX_CONVERSATION_SESSIONS: ${COORD_MAX_CONVERSATION_SESSIONS:-}`, and
 the same shape for the other two) beside the ones already there. Empty is each
 one's own default, so an unset variable changes nothing.
+
+## Payments and the waitlist
+
+**Off by default.** With `KUMI_PAYMENTS_ENABLED` unset, this deployment sells
+nothing and gates nothing:
+
+- `POST /api/v1/auth/signup` — the card path — answers `501`, and both the app
+  and the marketing site point at the waitlist instead.
+- `POST /api/v1/organizations/{id}/billing/checkout`, `.../billing/portal` and
+  `POST /api/v1/stripe/webhook` answer `501`. Stripe is never called, and the
+  client is not even constructed.
+- No trial runs, and no organization is folded to read-only for lack of a
+  subscription. Every organization created while payments are off is written
+  as `comped`.
+
+Anybody can ask for a place at `POST /api/v1/waitlist` (an address, optionally
+a name and a note — nothing that can be signed in to). Whoever runs the
+deployment sees the queue in **Settings — Deployment** and lets people through
+one at a time; approving mails that address a link and admits it — and only it
+— at `POST /api/v1/auth/register`, which builds them their own organization,
+project and comped subscription. Every other way in is unchanged: an
+invitation still works, and a comped invitation or repository grant still
+carries no charge.
+
+Switching `KUMI_PAYMENTS_ENABLED=1` back on restores the paid sign-up, the
+fourteen-day trial and the entitlement gate exactly as they were; the waitlist
+table and its routes stay, and `POST /api/v1/auth/register` goes back to `410`.
 
 ## Account email confirmation
 

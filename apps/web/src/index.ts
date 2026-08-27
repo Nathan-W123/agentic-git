@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   ApiGateway,
   HttpStripeClient,
+  paymentsEnabled,
   type ApiOperations,
 } from "@coord/api-gateway";
 import { CodeIntelligenceService } from "@coord/code-intelligence";
@@ -214,9 +215,22 @@ async function serve(
   // secret, it is a lockout. A deployment that wants the guard sets the
   // variable, and then it is stable because they chose it.
   const bootstrapToken = process.env["COORD_BOOTSTRAP_TOKEN"]?.trim();
-  const stripeSecretKey = trimmedEnv("STRIPE_SECRET_KEY");
-  const stripeWebhookSecret = trimmedEnv("STRIPE_WEBHOOK_SECRET");
-  const stripePriceId = trimmedEnv("STRIPE_PRICE_ID");
+  // The switch the whole payment pathway hangs from, read here so the Stripe
+  // client is not even constructed while it is off — no key in memory, no
+  // outbound call possible, and nothing for a stray route to reach for.
+  const payments = paymentsEnabled(process.env);
+  const stripeSecretKey = payments ? trimmedEnv("STRIPE_SECRET_KEY") : undefined;
+  const stripeWebhookSecret = payments
+    ? trimmedEnv("STRIPE_WEBHOOK_SECRET")
+    : undefined;
+  const stripePriceId = payments ? trimmedEnv("STRIPE_PRICE_ID") : undefined;
+  if (!payments) {
+    console.info(
+      "[billing] KUMI_PAYMENTS_ENABLED is not set, so this deployment takes " +
+        "no payments: sign-up is a waitlist, nothing is gated on a " +
+        "subscription, and Stripe is never called.",
+    );
+  }
 
   const repositories = new RepositoryService();
   // One index for the whole process, like the credential store below.
@@ -839,9 +853,11 @@ async function serve(
     allowedOrigins: configuredOrigins(),
     secureCookies: process.env["COORD_SECURE_COOKIES"] === "true",
     staticAssets: await loadStaticAssets(),
-    // Billing is opt-in. Without a secret key every billing route answers 501
-    // and the entitlement gate falls back to what the store already says, so
-    // a self-hosted deployment runs exactly as it did before payment existed.
+    // Billing is opt-in twice over: the switch above, and then a secret key.
+    // With either missing every billing route answers 501, and with the
+    // switch off nothing is gated on a subscription at all — so a deployment
+    // runs exactly as it did before payment existed.
+    paymentsEnabled: payments,
     ...(stripeSecretKey === undefined
       ? {}
       : { stripe: new HttpStripeClient(stripeSecretKey) }),

@@ -17,7 +17,7 @@ import type {
 import { createId } from "@coord/shared-types";
 
 import { mailDeliveryMode, type Mailer } from "./mailer.js";
-import { trialEndsAtFrom } from "./billing.js";
+import { paymentsEnabled, trialEndsAtFrom } from "./billing.js";
 
 const SESSION_COOKIE = "coord_session";
 const CSRF_COOKIE = "coord_csrf";
@@ -561,15 +561,25 @@ export class AuthService {
       name: "My Project",
       description: "Repositories you create live here.",
     });
-    // The trial starts here rather than at first use. Starting it on the first
+    // The entitlement is written here either way, because a missing row is no
+    // entitlement at all.
+    //
+    // With payments off it is `comped`: nobody is being invoiced, so there is
+    // nothing for a trial to run out into and a countdown would only be a
+    // clock ticking toward a paywall that does not exist. With payments on the
+    // trial starts here rather than at first use — starting it on the first
     // dispatch would mean an account that signed up, looked around, and came
-    // back a month later still had its whole trial — which sounds generous and
+    // back a month later still had its whole trial, which sounds generous and
     // is really just an unbounded free tier wearing a trial's name.
-    await store.saveSubscription({
-      organizationId: organization.id,
-      status: "trialing",
-      trialEndsAt: trialEndsAtFrom(),
-    });
+    await store.saveSubscription(
+      paymentsEnabled()
+        ? {
+            organizationId: organization.id,
+            status: "trialing",
+            trialEndsAt: trialEndsAtFrom(),
+          }
+        : { organizationId: organization.id, status: "comped" },
+    );
     const user = await store.createUser({
       email: input.email,
       displayName: input.displayName,

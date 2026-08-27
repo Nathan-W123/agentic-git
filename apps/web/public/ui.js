@@ -51,22 +51,22 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * The local subset of Basil Icons selected for Kumi's interface.
+ * The local subset of Iconly selected for Kumi's interface.
  *
- * Basil is by Zaid Bin Sayeed and published to the Figma community under
- * CC BY 4.0:
- * https://www.figma.com/community/file/1219493694635474558
- * https://creativecommons.org/licenses/by/4.0/
+ * Iconly is by Piqo Design and published to the Figma community:
+ * https://www.figma.com/community/file/1101191259402846404
  *
- * It replaces the line set the interface used before, wholesale rather than
- * icon by icon: half a set is worse than either whole one, because the eye
- * reads the difference in weight long before it reads the picture. Basil's
- * marks sit large in the box with soft, generous corners and one light
- * rounded stroke, which is the friendlier register this product wanted.
+ * It replaces the set the interface used before, wholesale rather than icon
+ * by icon: half a set is worse than either whole one, because the eye reads
+ * the difference in weight long before it reads the picture. Iconly's Light
+ * style is the quieter register this product wanted — marks drawn a little
+ * smaller inside the box, corners rounded far more generously than a
+ * geometric line set would allow, and one thin stroke that stops the chrome
+ * competing with the words beside it.
  *
  * Only the geometry the product uses is kept inline, so the marks stay
  * instant and available when the control plane is offline. The shared wrapper
- * preserves Basil's 24px grid, 1.8px rounded stroke and `currentColor`
+ * preserves Iconly's 24px grid, 1.5px rounded stroke and `currentColor`
  * behaviour, while keeping every interface mark decorative to assistive
  * technology. Product-only concepts (agents and the Kumi network) use that
  * same grid and optical weight rather than introducing a second visual
@@ -75,68 +75,76 @@ export function imeComposing(event) {
  * is no longer the logo.
  */
 const S = (body, extra = "") =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="basil" data-icon-source="basil-icons-community"${extra}>${body}</svg>`;
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="iconly" data-icon-source="iconly-v3-community"${extra}>${body}</svg>`;
 
 export const ICONS = {
+  // Iconly's Home carries its roof on a radius rather than a point: the two
+  // eaves and the ridge are all the same soft corner, which is what stops a
+  // 16px house from reading as an arrowhead.
   home: S(
-    '<path d="M3.8 10.6 12 4.1l8.2 6.5v8.1a1.8 1.8 0 0 1-1.8 1.8H5.6a1.8 1.8 0 0 1-1.8-1.8z"/><path d="M9.6 20.5v-5a2.4 2.4 0 0 1 4.8 0v5"/>',
+    '<path d="M3.4 10.4a2.5 2.5 0 0 1 .95-1.96l6.3-4.93a2.15 2.15 0 0 1 2.7 0l6.3 4.93a2.5 2.5 0 0 1 .95 1.96v7.3a2.6 2.6 0 0 1-2.6 2.6H6a2.6 2.6 0 0 1-2.6-2.6z"/><path d="M9.7 20.3v-4.1a2.3 2.3 0 0 1 4.6 0v4.1"/>',
   ),
   folder: S(
-    '<path d="M3.2 8.2A2.8 2.8 0 0 1 6 5.4h2.7c.6 0 1.2.2 1.7.6l1.5 1.2h6.1a2.8 2.8 0 0 1 2.8 2.8v6.6a2.8 2.8 0 0 1-2.8 2.8H6a2.8 2.8 0 0 1-2.8-2.8z"/>',
+    '<path d="M3.5 9.4a3 3 0 0 1 3-3h2.3c.5 0 1 .17 1.4.48l1.42 1.12h5.88a3 3 0 0 1 3 3v5.6a3 3 0 0 1-3 3h-11a3 3 0 0 1-3-3z"/><path d="M8.7 14.6h6.6"/>',
   ),
   code: S(
-    '<path d="M8.4 8.2 4.2 12l4.2 3.8"/><path d="m15.6 8.2 4.2 3.8-4.2 3.8"/><path d="m13.4 6-2.8 12"/>',
+    '<path d="M9.1 8.6 5.2 12l3.9 3.4"/><path d="m14.9 8.6 3.9 3.4-3.9 3.4"/><path d="m13.2 6.4-2.4 11.2"/>',
   ),
   robot: S(
-    '<rect x="3.4" y="7.4" width="17.2" height="12.4" rx="4.6"/><path d="M12 7.4V4.7"/><circle cx="12" cy="3.5" r="1.2"/><circle cx="9" cy="12.8" r="1.25" fill="currentColor" stroke="none"/><circle cx="15" cy="12.8" r="1.25" fill="currentColor" stroke="none"/><path d="M9.9 16.4h4.2"/>',
+    '<rect x="3.6" y="7.6" width="16.8" height="12" rx="5"/><path d="M12 7.6V5.3"/><circle cx="12" cy="4.1" r="1.15"/><circle cx="9.1" cy="12.9" r="1.15" fill="currentColor" stroke="none"/><circle cx="14.9" cy="12.9" r="1.15" fill="currentColor" stroke="none"/><path d="M10.1 16.3h3.8"/>',
   ),
   // Head and shoulders, the two of them deliberately the same silhouette so
   // the pair reads as one count of people beside one count of agents rather
   // than as two unrelated pictures. Soft-cornered head and antenna for the
   // agent, round head for the person; nothing below the shoulders in either.
   personBust: S(
-    '<circle cx="12" cy="7.9" r="3.6"/><path d="M4.9 20.1c0-3.5 3.2-5.7 7.1-5.7s7.1 2.2 7.1 5.7"/>',
+    '<circle cx="12" cy="7.5" r="3.9"/><path d="M4.7 19.9c0-3.4 3.3-5.4 7.3-5.4s7.3 2 7.3 5.4"/>',
   ),
   robotBust: S(
-    '<rect x="6.4" y="5" width="11.2" height="8.6" rx="3.2"/><path d="M12 5V3.1"/><circle cx="12" cy="2.4" r="1"/><circle cx="9.7" cy="9.2" r="1.05" fill="currentColor" stroke="none"/><circle cx="14.3" cy="9.2" r="1.05" fill="currentColor" stroke="none"/><path d="M4.9 20.1c0-3.3 3.2-5.4 7.1-5.4s7.1 2.1 7.1 5.4"/>',
+    '<rect x="6.2" y="4.8" width="11.6" height="9" rx="3.6"/><path d="M12 4.8V3"/><circle cx="12" cy="2.3" r=".95"/><circle cx="9.6" cy="9.3" r="1" fill="currentColor" stroke="none"/><circle cx="14.4" cy="9.3" r="1" fill="currentColor" stroke="none"/><path d="M4.7 19.9c0-3.2 3.3-5.2 7.3-5.2s7.3 2 7.3 5.2"/>',
   ),
   network: S(
-    '<circle cx="12" cy="12" r="3.2"/><circle cx="4.8" cy="5.8" r="2.2"/><circle cx="19.2" cy="5.8" r="2.2"/><circle cx="12" cy="20.1" r="2.2"/><path d="m6.5 7.3 3.2 2.6M17.5 7.3l-3.2 2.6M12 15.2v2.7"/>',
+    '<circle cx="12" cy="12" r="3"/><circle cx="4.7" cy="5.5" r="2.3"/><circle cx="19.3" cy="5.5" r="2.3"/><circle cx="12" cy="20.2" r="2.3"/><path d="m6.45 7.05 3.3 2.8M17.55 7.05l-3.3 2.8M12 15v2.9"/>',
   ),
+  // Iconly's Notification: a flat-bottomed bell whose skirt is squared off by
+  // two soft curls rather than a rim line, so the mark keeps its weight low
+  // and stays legible in a topbar.
   bell: S(
-    '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/>',
+    '<path d="M12 3.3a5.9 5.9 0 0 0-5.9 5.9c0 1.35-.13 2.35-.42 3.15-.3.85-.78 1.55-1.45 2.3a1.2 1.2 0 0 0 .87 2.05h13.8a1.2 1.2 0 0 0 .87-2.05c-.67-.75-1.15-1.45-1.45-2.3-.29-.8-.42-1.8-.42-3.15A5.9 5.9 0 0 0 12 3.3z"/><path d="M9.9 19.6a2.3 2.3 0 0 0 4.2 0"/>',
   ),
   // The same bell with a stroke through it, deliberately: a muted room is the
   // notification mark negated, and inventing a second unrelated picture for
   // it would make the pair harder to read than the one crossed-out one.
   bellOff: S(
-    '<path d="M6.3 10.5a5.7 5.7 0 0 1 11.4 0c0 4 1.4 5.3 2 6.1H4.3c.6-.8 2-2.1 2-6.1Z"/><path d="M9.9 19.3a2.3 2.3 0 0 0 4.2 0"/><path d="M4.2 4.2 19.8 19.8"/>',
+    '<path d="M12 3.3a5.9 5.9 0 0 0-5.9 5.9c0 1.35-.13 2.35-.42 3.15-.3.85-.78 1.55-1.45 2.3a1.2 1.2 0 0 0 .87 2.05h13.8a1.2 1.2 0 0 0 .87-2.05c-.67-.75-1.15-1.45-1.45-2.3-.29-.8-.42-1.8-.42-3.15A5.9 5.9 0 0 0 12 3.3z"/><path d="M9.9 19.6a2.3 2.3 0 0 0 4.2 0"/><path d="M4.1 4.1 19.9 19.9"/>',
   ),
+  // Iconly's Setting, drawn as eight soft lobes around a hub. The set it
+  // replaced reached past the artboard on every side, which is why the
+  // brand gear used to need its own size rule wherever it appeared.
   gear: S(
-    '<circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+    '<circle cx="12" cy="12" r="2.9"/><path d="M10.3 3.7a1.75 1.75 0 0 1 3.4 0 1.75 1.75 0 0 0 2.5 1.05 1.75 1.75 0 0 1 2.4 2.4 1.75 1.75 0 0 0 1.05 2.5 1.75 1.75 0 0 1 0 3.4 1.75 1.75 0 0 0-1.05 2.5 1.75 1.75 0 0 1-2.4 2.4 1.75 1.75 0 0 0-2.5 1.05 1.75 1.75 0 0 1-3.4 0 1.75 1.75 0 0 0-2.5-1.05 1.75 1.75 0 0 1-2.4-2.4 1.75 1.75 0 0 0-1.05-2.5 1.75 1.75 0 0 1 0-3.4A1.75 1.75 0 0 0 5.4 7.15a1.75 1.75 0 0 1 2.4-2.4 1.75 1.75 0 0 0 2.5-1.05z"/>',
   ),
-  search: S('<circle cx="10.9" cy="10.9" r="6.5"/><path d="m15.7 15.7 3.9 3.9"/>'),
-  plus: S('<path d="M12 5.4v13.2M5.4 12h13.2"/>'),
-  close: S('<path d="M17.6 6.4 6.4 17.6M6.4 6.4l11.2 11.2"/>'),
+  search: S('<circle cx="11.3" cy="11.3" r="7.3"/><path d="m16.65 16.9 2.85 2.85"/>'),
+  plus: S('<path d="M12 5.9v12.2M5.9 12h12.2"/>'),
+  close: S('<path d="M17.3 6.7 6.7 17.3M6.7 6.7l10.6 10.6"/>'),
   // Deleting is the one action here that destroys something, so it gets its
   // own mark rather than borrowing the close cross — the two must not be a
-  // slip apart.
+  // slip apart. Iconly's Delete tapers the bin toward its base and keeps the
+  // lid a single line above it.
   trash: S(
-    '<path d="M4.4 6.7h15.2"/><path d="M9.4 6.7V5.4A1.6 1.6 0 0 1 11 3.8h2a1.6 1.6 0 0 1 1.6 1.6v1.3"/><path d="m6.5 6.7.8 11.5a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9l.8-11.5"/><path d="M10.4 10.6v5.3M13.6 10.6v5.3"/>',
+    '<path d="M4.7 6.4h14.6"/><path d="M17.85 8.7 17.5 18a2.4 2.4 0 0 1-2.4 2.3H8.9A2.4 2.4 0 0 1 6.5 18l-.35-9.3"/><path d="M9.6 6.4V4.9a1.6 1.6 0 0 1 1.6-1.6h1.6a1.6 1.6 0 0 1 1.6 1.6v1.5"/><path d="M10.3 11.4v5.1M13.7 11.4v5.1"/>',
   ),
-  chevronDown: S('<path d="m7.4 10 4.6 4.4L16.6 10"/>'),
-  chevronRight: S('<path d="m10 7.4 4.4 4.6L10 16.6"/>'),
-  chevronUp: S('<path d="m7.4 14 4.6-4.4L16.6 14"/>'),
-  arrowRight: S('<path d="M4.4 12h15.2"/><path d="m13.4 6.2 5.8 5.8-5.8 5.8"/>'),
-  arrowLeft: S('<path d="M19.6 12H4.4"/><path d="m10.6 6.2-5.8 5.8 5.8 5.8"/>'),
+  chevronDown: S('<path d="m7.9 10.1 4.1 4.1 4.1-4.1"/>'),
+  chevronRight: S('<path d="m10.1 7.9 4.1 4.1-4.1 4.1"/>'),
+  chevronUp: S('<path d="m7.9 13.9 4.1-4.1 4.1 4.1"/>'),
+  arrowRight: S('<path d="M4.6 12h14.8"/><path d="m13.3 6 6.1 6-6.1 6"/>'),
+  arrowLeft: S('<path d="M19.4 12H4.6"/><path d="m10.7 6-6.1 6 6.1 6"/>'),
   branch: S(
-    '<circle cx="7" cy="5.8" r="2.4"/><circle cx="7" cy="18.2" r="2.4"/><circle cx="17" cy="7.6" r="2.4"/><path d="M7 8.2v7.6"/><path d="M17 10c0 3.7-3.3 4.4-6.3 5.4"/>',
+    '<circle cx="7.1" cy="5.7" r="2.5"/><circle cx="7.1" cy="18.3" r="2.5"/><circle cx="16.9" cy="7.5" r="2.5"/><path d="M7.1 8.2v7.6"/><path d="M16.9 10c0 3.7-3.4 4.4-6.4 5.4"/>',
   ),
-  git: S(
-    '<circle cx="12" cy="12" r="3.1"/><path d="M3.6 12h5.3M15.1 12h5.3"/>',
-  ),
+  git: S('<circle cx="12" cy="12" r="3"/><path d="M3.8 12h5.2M15 12h5.2"/>'),
   // GitHub and Google keep their owners' published artwork rather than being
-  // redrawn in Basil's hand: a logo in somebody else's style is a drawing of
+  // redrawn in Iconly's hand: a logo in somebody else's style is a drawing of
   // a logo, and these two say which account somebody is signing in with.
   github: S(
     '<path d="M9 19c-4 1.2-4-2.2-5.6-2.8M15 21v-3.3c0-.9-.1-1.3-.6-1.8 2.4-.3 4.8-1.2 4.8-5.2a4 4 0 0 0-1.1-2.8 3.7 3.7 0 0 0-.1-2.8s-.9-.3-2.9 1.1a10 10 0 0 0-5.2 0C7.9 2 7 2.3 7 2.3a3.7 3.7 0 0 0-.1 2.8A4 4 0 0 0 5.8 8c0 3.9 2.4 4.8 4.7 5.2-.3.3-.6.8-.6 1.6V21"/>',
@@ -145,142 +153,158 @@ export const ICONS = {
     '<path d="M20.6 12.2c0-.6-.1-1.2-.2-1.8H12v3.4h4.8a4.1 4.1 0 0 1-1.8 2.7v2.2h2.9a8.6 8.6 0 0 0 2.7-6.5z"/><path d="M12 21a8.5 8.5 0 0 0 5.9-2.2l-2.9-2.2A5.3 5.3 0 0 1 12 17.4a5.3 5.3 0 0 1-4.9-3.6H4.1v2.3A9 9 0 0 0 12 21z"/><path d="M7.1 13.8a5.3 5.3 0 0 1 0-3.4V8.1H4.1a9 9 0 0 0 0 8.1z"/><path d="M12 6.6c1.3 0 2.5.5 3.5 1.4l2.6-2.6A9 9 0 0 0 4.1 8.1l3 2.3A5.3 5.3 0 0 1 12 6.6z"/>',
   ),
   cloud: S(
-    '<path d="M7.6 19.2a4.4 4.4 0 0 1-.7-8.7 5.7 5.7 0 0 1 10.8 1.1 3.8 3.8 0 0 1-.5 7.6z"/>',
+    '<path d="M7.4 19.4a4.6 4.6 0 0 1-.55-9.17 5.9 5.9 0 0 1 11.2.87 4.05 4.05 0 0 1-.55 8.3z"/>',
   ),
   link: S(
-    '<path d="M10.3 13.7a3.9 3.9 0 0 0 5.9.4l2.1-2.1a3.9 3.9 0 0 0-5.5-5.5l-1.2 1.2"/><path d="M13.7 10.3a3.9 3.9 0 0 0-5.9-.4l-2.1 2.1a3.9 3.9 0 0 0 5.5 5.5l1.2-1.2"/>',
+    '<path d="M10.4 13.6a3.8 3.8 0 0 0 5.73.41l2-2a3.8 3.8 0 0 0-5.37-5.37l-1.15 1.14"/><path d="M13.6 10.4a3.8 3.8 0 0 0-5.73-.41l-2 2a3.8 3.8 0 0 0 5.37 5.37l1.14-1.14"/>',
   ),
   star: S(
-    '<path d="m12 3.8 2.6 5.2 5.8.9-4.2 4 1 5.7-5.2-2.7-5.2 2.7 1-5.7-4.2-4 5.8-.9z"/>',
+    '<path d="M12.9 3.9 15 8.15c.14.29.41.49.73.53l4.7.69c.8.11 1.12 1.1.54 1.67l-3.4 3.31c-.23.23-.34.55-.28.87l.8 4.67c.14.8-.7 1.41-1.42 1.03l-4.2-2.2a1 1 0 0 0-.94 0l-4.2 2.2c-.72.38-1.56-.23-1.42-1.03l.8-4.67a1 1 0 0 0-.28-.87l-3.4-3.31c-.58-.57-.26-1.56.54-1.67l4.7-.69a1 1 0 0 0 .73-.53l2.1-4.25a1 1 0 0 1 1.8 0z"/>',
   ),
   dots: S(
-    '<circle cx="12" cy="5.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="18.8" r="1.5" fill="currentColor" stroke="none"/>',
+    '<circle cx="12" cy="5.1" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="18.9" r="1.4" fill="currentColor" stroke="none"/>',
   ),
   dotsHorizontal: S(
-    '<circle cx="5.2" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="18.8" cy="12" r="1.5" fill="currentColor" stroke="none"/>',
+    '<circle cx="5.1" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18.9" cy="12" r="1.4" fill="currentColor" stroke="none"/>',
   ),
-  filter: S('<path d="M4.4 7.2h15.2M7.2 12h9.6M10 16.8h4"/>'),
+  // Iconly's Filter is a funnel rather than three stacked rules: the rules
+  // read as a list at small sizes, which is the one thing a filter control
+  // must not be mistaken for.
+  filter: S(
+    '<path d="M19.9 4.4H4.1a.85.85 0 0 0-.64 1.4l5.75 6.65c.16.19.25.43.25.68v4.42c0 .3.16.58.42.73l2.9 1.68a.85.85 0 0 0 1.28-.73v-6.1c0-.25.09-.49.25-.68l5.23-6.65a.85.85 0 0 0-.64-1.4z"/>',
+  ),
   grid: S(
-    '<rect x="3.8" y="3.8" width="7.4" height="7.4" rx="2.6"/><rect x="12.8" y="3.8" width="7.4" height="7.4" rx="2.6"/><rect x="3.8" y="12.8" width="7.4" height="7.4" rx="2.6"/><rect x="12.8" y="12.8" width="7.4" height="7.4" rx="2.6"/>',
+    '<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="2.8"/><rect x="13.2" y="3.2" width="7.6" height="7.6" rx="2.8"/><rect x="3.2" y="13.2" width="7.6" height="7.6" rx="2.8"/><rect x="13.2" y="13.2" width="7.6" height="7.6" rx="2.8"/>',
   ),
   list: S(
-    '<path d="M9 6.6h10.6M9 12h10.6M9 17.4h10.6"/><circle cx="4.8" cy="6.6" r="1.15" fill="currentColor" stroke="none"/><circle cx="4.8" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="4.8" cy="17.4" r="1.15" fill="currentColor" stroke="none"/>',
+    '<path d="M9.2 6.8h10.4M9.2 12h10.4M9.2 17.2h10.4"/><circle cx="4.9" cy="6.8" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.9" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.9" cy="17.2" r="1.1" fill="currentColor" stroke="none"/>',
   ),
+  // Iconly's Document keeps two written lines inside the page, which is what
+  // tells it apart from an empty card at 14px.
   file: S(
-    '<path d="M13.6 3.6H7.8a2.4 2.4 0 0 0-2.4 2.4v12a2.4 2.4 0 0 0 2.4 2.4h8.4a2.4 2.4 0 0 0 2.4-2.4V8.4z"/><path d="M13.4 3.8v2.9a1.8 1.8 0 0 0 1.8 1.8h3.1"/>',
+    '<path d="M14.1 2.9H8.2a3.1 3.1 0 0 0-3.1 3.1v12a3.1 3.1 0 0 0 3.1 3.1h7.6a3.1 3.1 0 0 0 3.1-3.1V7.9z"/><path d="M13.9 3.1v3.1a1.9 1.9 0 0 0 1.9 1.9h3.1"/><path d="M9.1 16.2h5.8M9.1 12.5h3.5"/>',
   ),
   history: S(
-    '<path d="M3.8 12a8.2 8.2 0 1 0 2.6-6"/><path d="M3.6 5.2v4.2h4.2"/><path d="M12 7.9v4.4l3 1.7"/>',
+    '<path d="M3.4 12a8.6 8.6 0 1 0 2.75-6.3"/><path d="M3.2 4.9v4.4h4.4"/><path d="M12 7.7v4.5l3.1 1.8"/>',
   ),
   sparkle: S(
-    '<path d="M11.4 4.2c0 3.7 2.5 6.2 6.2 6.2-3.7 0-6.2 2.5-6.2 6.2 0-3.7-2.5-6.2-6.2-6.2 3.7 0 6.2-2.5 6.2-6.2Z"/><path d="M18 15.6v3M19.5 17.1h-3"/>',
+    '<path d="M11.4 3.9c0 3.9 2.6 6.5 6.5 6.5-3.9 0-6.5 2.6-6.5 6.5 0-3.9-2.6-6.5-6.5-6.5 3.9 0 6.5-2.6 6.5-6.5Z"/><path d="M18.1 15.4v3.2M19.7 17h-3.2"/>',
   ),
   wand: S(
-    '<path d="M4.4 19.6 14 10"/><path d="m16.6 3.8.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9z"/><path d="M6.4 5.2v2.4M7.6 6.4H5.2"/><path d="M19.2 14.4v2.2M20.3 15.5h-2.2"/>',
+    '<path d="M4.4 19.6 14.1 9.9"/><path d="m16.6 3.7.95 2.65 2.65.95-2.65.95-.95 2.65-.95-2.65-2.65-.95 2.65-.95z"/><path d="M6.4 5.1v2.4M7.6 6.3H5.2"/><path d="M19.2 14.3v2.2M20.3 15.4h-2.2"/>',
   ),
   paperclip: S(
-    '<path d="M19.4 11.4 12 18.8a4.7 4.7 0 0 1-6.6-6.6l7.5-7.5a3.2 3.2 0 0 1 4.5 4.5l-7.4 7.5a1.6 1.6 0 0 1-2.3-2.3l6.8-6.8"/>',
+    '<path d="M19.2 11.3 11.9 18.6a4.6 4.6 0 0 1-6.5-6.5l7.4-7.4a3.1 3.1 0 0 1 4.4 4.4l-7.35 7.4a1.55 1.55 0 0 1-2.2-2.2l6.75-6.75"/>',
   ),
   at: S(
-    '<circle cx="12" cy="12" r="3.5"/><path d="M15.5 12v1.4a2.6 2.6 0 0 0 5.1 0V12a8.6 8.6 0 1 0-3.4 6.8"/>',
+    '<circle cx="12" cy="12" r="3.4"/><path d="M15.4 12v1.4a2.6 2.6 0 0 0 5.2 0V12a8.6 8.6 0 1 0-3.4 6.85"/>',
   ),
-  send: S('<path d="M4.4 12h15.2"/><path d="m13.4 6.2 5.8 5.8-5.8 5.8"/>'),
+  // Iconly's Send is a paper plane with the fold drawn in — the arrow this
+  // used to be was the same picture as "next", and the composer's primary
+  // action should not be a navigation mark.
+  send: S(
+    '<path d="M20.3 3.7 4.6 9.05a.85.85 0 0 0-.07 1.58l4.9 2.34c.3.14.54.38.68.68l2.34 4.9a.85.85 0 0 0 1.58-.07z"/><path d="m9.9 14.1 3.2-3.2"/>',
+  ),
   sliders: S(
-    '<path d="M4.4 8.2h3.4M12.2 8.2h7.4M4.4 15.8h7.4M15.8 15.8h3.8"/><circle cx="10" cy="8.2" r="2.3"/><circle cx="13.6" cy="15.8" r="2.3"/>',
+    '<path d="M4.6 8.2h3.2M12.4 8.2h7M4.6 15.8h7M16 15.8h3.4"/><circle cx="10.1" cy="8.2" r="2.3"/><circle cx="13.7" cy="15.8" r="2.3"/>',
   ),
-  check: S('<path d="m5.4 12.6 4.4 4.4L18.6 7.4"/>'),
+  check: S('<path d="m5.6 12.5 4.3 4.3L18.4 7.5"/>'),
   doubleCheck: S(
-    '<path d="m3.4 12.6 3.9 3.9 7.8-8.2"/><path d="m11.4 15.1 2 2 7.2-8.6"/>',
+    '<path d="m3.4 12.5 3.9 3.9 7.7-8.1"/><path d="m11.4 15 2 2 7.2-8.5"/>',
   ),
   checkCircle: S(
-    '<circle cx="12" cy="12" r="8.4"/><path d="m8.4 12.2 2.5 2.5 4.7-5"/>',
+    '<circle cx="12" cy="12" r="8.6"/><path d="m8.4 12.2 2.5 2.5 4.7-5.1"/>',
   ),
-  closeCircle: S('<circle cx="12" cy="12" r="8.4"/><path d="m9.2 9.2 5.6 5.6M14.8 9.2l-5.6 5.6"/>'),
-  minusCircle: S('<circle cx="12" cy="12" r="8.4"/><path d="M8.2 12h7.6"/>'),
+  closeCircle: S(
+    '<circle cx="12" cy="12" r="8.6"/><path d="m9.3 9.3 5.4 5.4M14.7 9.3l-5.4 5.4"/>',
+  ),
+  minusCircle: S('<circle cx="12" cy="12" r="8.6"/><path d="M8.3 12h7.4"/>'),
   helpCircle: S(
-    '<circle cx="12" cy="12" r="8.4"/><path d="M9.8 9.4a2.4 2.4 0 1 1 3.4 2.2c-.85.45-1.2.95-1.2 1.9"/><circle cx="12" cy="16.4" r=".9" fill="currentColor" stroke="none"/>',
+    '<circle cx="12" cy="12" r="8.6"/><path d="M9.9 9.5a2.35 2.35 0 1 1 3.3 2.15c-.83.44-1.2.93-1.2 1.85"/><circle cx="12" cy="16.3" r=".85" fill="currentColor" stroke="none"/>',
   ),
   alert: S(
-    '<path d="M10.3 5a2 2 0 0 1 3.4 0l6.8 11.7a2 2 0 0 1-1.7 3H5.2a2 2 0 0 1-1.7-3z"/><path d="M12 9.6v3.9"/><circle cx="12" cy="16.6" r=".9" fill="currentColor" stroke="none"/>',
+    '<path d="M10.35 4.75a1.9 1.9 0 0 1 3.3 0l6.65 11.5a1.9 1.9 0 0 1-1.65 2.85H5.35a1.9 1.9 0 0 1-1.65-2.85z"/><path d="M12 9.5v3.9"/><circle cx="12" cy="16.4" r=".85" fill="currentColor" stroke="none"/>',
   ),
-  clock: S('<circle cx="12" cy="12" r="8.4"/><path d="M12 7.2V12l3.1 1.8"/>'),
+  clock: S('<circle cx="12" cy="12" r="8.6"/><path d="M15.3 13.8 12 11.8V7.3"/>'),
   users: S(
-    '<circle cx="9.4" cy="8.2" r="3.4"/><path d="M3.4 19.4a6 6 0 0 1 12 0"/><path d="M16.2 5.3a3.4 3.4 0 0 1 0 5.8"/><path d="M17.6 13.9a5.8 5.8 0 0 1 3 5.5"/>',
+    '<circle cx="9.5" cy="8" r="3.5"/><path d="M3.6 19.3a5.9 5.9 0 0 1 11.8 0"/><path d="M16.3 5.2a3.4 3.4 0 0 1 0 5.7"/><path d="M17.7 13.7a5.7 5.7 0 0 1 3 5.6"/>',
   ),
   lock: S(
-    '<rect x="4.6" y="10.2" width="14.8" height="9.6" rx="3.2"/><path d="M8 10.2V7.7a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15" r="1.25" fill="currentColor" stroke="none"/>',
+    '<rect x="4.6" y="10.1" width="14.8" height="9.9" rx="3.6"/><path d="M8.1 10.1V7.6a3.9 3.9 0 0 1 7.8 0v2.5"/><circle cx="12" cy="15" r="1.2" fill="currentColor" stroke="none"/>',
   ),
-  play: S('<path d="M8 5.5 19 12 8 18.5z"/>'),
+  play: S(
+    '<path d="M8.4 6.1a1.1 1.1 0 0 1 1.67-.94l8 5.9a1.1 1.1 0 0 1 0 1.88l-8 5.9A1.1 1.1 0 0 1 8.4 17.9z"/>',
+  ),
   pause: S(
-    '<rect x="7.2" y="4.8" width="3.6" height="14.4" rx="1.7"/><rect x="13.2" y="4.8" width="3.6" height="14.4" rx="1.7"/>',
+    '<rect x="7.4" y="4.9" width="3.4" height="14.2" rx="1.7"/><rect x="13.2" y="4.9" width="3.4" height="14.2" rx="1.7"/>',
   ),
   globe: S(
-    '<circle cx="12" cy="12" r="8.4"/><path d="M3.7 9.6h16.6M3.7 14.4h16.6"/><path d="M12 3.6a14 14 0 0 1 0 16.8 14 14 0 0 1 0-16.8z"/>',
+    '<circle cx="12" cy="12" r="8.6"/><path d="M3.75 9.5h16.5M3.75 14.5h16.5"/><path d="M12 3.4a14.4 14.4 0 0 1 0 17.2 14.4 14.4 0 0 1 0-17.2z"/>',
   ),
   shield: S(
-    '<path d="M12 3.4 19 6.2v5.6c0 4.2-2.9 7.3-7 8.8-4.1-1.5-7-4.6-7-8.8V6.2z"/><path d="m9.2 12 2.1 2.1 3.5-4"/>',
+    '<path d="M12 20.9c-4.2-1.5-7-4.65-7-8.85V6.4c0-.58.36-1.1.9-1.31l5.6-2.1c.32-.12.68-.12 1 0l5.6 2.1c.54.21.9.73.9 1.31v5.65c0 4.2-2.8 7.35-7 8.85z"/><path d="m9.4 11.9 1.9 1.9 3.4-3.9"/>',
   ),
   sync: S(
-    '<path d="M20.2 12a8.2 8.2 0 0 1-14.1 5.7"/><path d="M3.8 12a8.2 8.2 0 0 1 14.1-5.7"/><path d="M17.6 2.9v3.7h-3.7M6.4 21.1v-3.7h3.7"/>',
+    '<path d="M20.2 12a8.2 8.2 0 0 1-14.05 5.75"/><path d="M3.8 12a8.2 8.2 0 0 1 14.05-5.75"/><path d="M17.8 3.1v3.6h-3.6M6.2 20.9v-3.6h3.6"/>',
   ),
   database: S(
-    '<ellipse cx="12" cy="6.2" rx="7.2" ry="2.8"/><path d="M4.8 6.2v11.6c0 1.6 3.2 2.8 7.2 2.8s7.2-1.2 7.2-2.8V6.2"/><path d="M4.8 12c0 1.6 3.2 2.8 7.2 2.8s7.2-1.2 7.2-2.8"/>',
+    '<ellipse cx="12" cy="6.3" rx="7.1" ry="2.9"/><path d="M4.9 6.3v11.4c0 1.6 3.18 2.9 7.1 2.9s7.1-1.3 7.1-2.9V6.3"/><path d="M4.9 12c0 1.6 3.18 2.9 7.1 2.9s7.1-1.3 7.1-2.9"/>',
   ),
   cpu: S(
-    '<rect x="6.6" y="6.6" width="10.8" height="10.8" rx="3.2"/><rect x="10.2" y="10.2" width="3.6" height="3.6" rx="1.3"/><path d="M9.8 3.4v3.2M14.2 3.4v3.2M9.8 17.4v3.2M14.2 17.4v3.2M3.4 9.8h3.2M3.4 14.2h3.2M17.4 9.8h3.2M17.4 14.2h3.2"/>',
+    '<rect x="6.8" y="6.8" width="10.4" height="10.4" rx="3.4"/><rect x="10.3" y="10.3" width="3.4" height="3.4" rx="1.2"/><path d="M9.9 3.6v3.2M14.1 3.6v3.2M9.9 17.2v3.2M14.1 17.2v3.2M3.6 9.9h3.2M3.6 14.1h3.2M17.2 9.9h3.2M17.2 14.1h3.2"/>',
   ),
   layers: S(
-    '<path d="m12 3.6 8.2 4.3-8.2 4.3-8.2-4.3z"/><path d="m4.4 12.4 7.6 4 7.6-4"/><path d="m4.4 16.4 7.6 4 7.6-4"/>',
+    '<path d="m12 3.7 8.1 4.2-8.1 4.2-8.1-4.2z"/><path d="m4.5 12.3 7.5 3.9 7.5-3.9"/><path d="m4.5 16.3 7.5 3.9 7.5-3.9"/>',
   ),
   terminal: S(
-    '<rect x="2.8" y="4.4" width="18.4" height="15.2" rx="4.4"/><path d="m7.6 9.8 2.6 2.5-2.6 2.5"/><path d="M12.8 14.8h4.2"/>',
+    '<rect x="3" y="4.6" width="18" height="14.8" rx="4.6"/><path d="m7.8 9.9 2.5 2.4-2.5 2.4"/><path d="M12.9 14.7h4.1"/>',
   ),
-  refresh: S('<path d="M20 12a8 8 0 1 1-2.5-5.8"/><path d="M20.4 4.2v4.2h-4.2"/>'),
+  refresh: S('<path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20.3 4.4v4.1h-4.1"/>'),
   folderPlus: S(
-    '<path d="M3.2 8.2A2.8 2.8 0 0 1 6 5.4h2.7c.6 0 1.2.2 1.7.6l1.5 1.2h6.1a2.8 2.8 0 0 1 2.8 2.8v6.6a2.8 2.8 0 0 1-2.8 2.8H6a2.8 2.8 0 0 1-2.8-2.8z"/><path d="M12 11v5M9.5 13.5h5"/>',
+    '<path d="M3.5 9.4a3 3 0 0 1 3-3h2.3c.5 0 1 .17 1.4.48l1.42 1.12h5.88a3 3 0 0 1 3 3v5.6a3 3 0 0 1-3 3h-11a3 3 0 0 1-3-3z"/><path d="M12 11.2v5M9.5 13.7h5"/>',
   ),
   columns: S(
-    '<rect x="3.4" y="4.6" width="17.2" height="14.8" rx="3.6"/><path d="M12 4.6v14.8"/>',
+    '<rect x="3.6" y="4.8" width="16.8" height="14.4" rx="4.2"/><path d="M12 4.8v14.4"/>',
   ),
   info: S(
-    '<circle cx="12" cy="12" r="8.4"/><path d="M12 11.2v5.2"/><circle cx="12" cy="8.1" r=".9" fill="currentColor" stroke="none"/>',
+    '<circle cx="12" cy="12" r="8.6"/><path d="M12 11.3v5"/><circle cx="12" cy="8.1" r=".85" fill="currentColor" stroke="none"/>',
   ),
   chart: S(
-    '<path d="M4.2 3.8v14.4a2 2 0 0 0 2 2h13.6"/><path d="M8.6 16.6v-3.4M12.6 16.6V8.6M16.6 16.6v-5.6"/>',
+    '<path d="M4.4 3.9v14a2.1 2.1 0 0 0 2.1 2.1h13.1"/><path d="M8.7 16.5v-3.3M12.6 16.5V8.7M16.5 16.5v-5.5"/>',
   ),
   logout: S(
-    '<path d="M14.2 4.4h3.4A2.4 2.4 0 0 1 20 6.8v10.4a2.4 2.4 0 0 1-2.4 2.4h-3.4"/><path d="m9.2 8.4-3.6 3.6 3.6 3.6"/><path d="M5.6 12h9"/>',
+    '<path d="M14.6 4.5h2.5A2.9 2.9 0 0 1 20 7.4v9.2a2.9 2.9 0 0 1-2.9 2.9h-2.5"/><path d="m8.9 8.5-3.5 3.5 3.5 3.5"/><path d="M5.6 12h9.2"/>',
   ),
   external: S(
-    '<path d="M13.6 4.4h6v6"/><path d="m19.6 4.4-8.2 8.2"/><path d="M17.8 13.8v4.2a1.8 1.8 0 0 1-1.8 1.8H6a1.8 1.8 0 0 1-1.8-1.8V8a1.8 1.8 0 0 1 1.8-1.8h4.2"/>',
+    '<path d="M13.9 4.6h5.5v5.5"/><path d="m19.4 4.6-7.9 7.9"/><path d="M17.6 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8.4a2 2 0 0 1 2-2h4"/>',
   ),
-  bolt: S('<path d="M13.4 3.2 5.6 13.4h5.4l-.4 7.4 7.8-10.2H13z"/>'),
+  bolt: S('<path d="M13.2 3.4 5.9 13.2h5.2l-.3 7.4 7.3-9.9h-5.2z"/>'),
   eye: S(
-    '<path d="M2.8 12S6.6 6 12 6s9.2 6 9.2 6-3.8 6-9.2 6-9.2-6-9.2-6Z"/><circle cx="12" cy="12" r="3"/>',
+    '<path d="M3 12s3.6-6.2 9-6.2 9 6.2 9 6.2-3.6 6.2-9 6.2S3 12 3 12z"/><circle cx="12" cy="12" r="2.9"/>',
   ),
-  menu: S('<path d="M4.4 7.2h15.2M4.4 12h15.2M4.4 16.8h15.2"/>'),
+  menu: S('<path d="M4.6 7.4h14.8M4.6 12h14.8M4.6 16.6h14.8"/>'),
   chatBubble: S(
-    '<path d="M12 4.2c-4.5 0-8.1 3-8.1 6.8 0 2.1 1.1 3.9 2.8 5.2l-.7 3.4a.6.6 0 0 0 .9.6l3.7-2c.5.1.9.1 1.4.1 4.5 0 8.1-3 8.1-6.8s-3.6-7.3-8.1-7.3z"/>',
+    '<path d="M12 3.7c-4.6 0-8.3 3.35-8.3 7.5 0 2.35 1.2 4.45 3.05 5.8l-.6 3.05a.7.7 0 0 0 1.03.75l3.35-1.8c.48.06.96.1 1.47.1 4.6 0 8.3-3.35 8.3-7.5S16.6 3.7 12 3.7z"/>',
   ),
   smile: S(
-    '<circle cx="12" cy="12" r="8.4"/><path d="M8.4 14.1c.9 1.3 2.2 2 3.6 2s2.7-.7 3.6-2"/><circle cx="8.9" cy="9.9" r="1.05" fill="currentColor" stroke="none"/><circle cx="15.1" cy="9.9" r="1.05" fill="currentColor" stroke="none"/>',
+    '<circle cx="12" cy="12" r="8.6"/><path d="M8.5 14.2c.9 1.3 2.1 2 3.5 2s2.6-.7 3.5-2"/><circle cx="9" cy="9.9" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="9.9" r="1" fill="currentColor" stroke="none"/>',
   ),
   reply: S(
-    '<path d="M9.4 7.4 4.8 11.8l4.6 4.4"/><path d="M4.8 11.8h8.6a5.8 5.8 0 0 1 5.8 5.8v1"/>',
+    '<path d="M9.5 7.2 4.7 11.8l4.8 4.6"/><path d="M4.7 11.8h8.6a5.9 5.9 0 0 1 5.9 5.9v1"/>',
   ),
   // Two overlapping sheets — the clipboard glyph every surface uses for "take
   // these words with you". Drawn as one rounded rectangle behind another
   // rather than as a clipboard with a clasp: at 14px the clasp closes up into
   // a smudge and the pair of sheets stays readable.
   copy: S(
-    '<rect x="8.6" y="8.6" width="11.6" height="11.6" rx="3.4"/><path d="M5.8 15.4h-.4a2 2 0 0 1-2-2V5.8a2 2 0 0 1 2-2H13a2 2 0 0 1 2 2v.4"/>',
+    '<rect x="8.9" y="8.9" width="11.3" height="11.3" rx="3.5"/><path d="M5.7 15.3h-.3a2.1 2.1 0 0 1-2.1-2.1V5.9a2.1 2.1 0 0 1 2.1-2.1h7.3a2.1 2.1 0 0 1 2.1 2.1v.3"/>',
   ),
   pin: S(
-    '<path d="m14.5 3.4 6.1 6.1-2.4.6-3.3 3.3-.3 3.7-1.4 1.4-7.7-7.7 1.4-1.4 3.7-.3 3.3-3.3z"/><path d="m8.9 15.1-4.5 4.5"/>',
+    '<path d="m14.4 3.4 6.2 6.2-2.45.6-3.3 3.3-.3 3.7-1.4 1.4L5.4 10.9l1.4-1.4 3.7-.3 3.3-3.3z"/><path d="m8.85 15.15-4.45 4.45"/>',
   ),
-  hash: S('<path d="M9.9 4.2 7.7 19.8M16.3 4.2l-2.2 15.6M4.6 8.9h15M3.9 15.1h15"/>'),
+  hash: S('<path d="M10 4.4 7.8 19.6M16.2 4.4 14 19.6M4.7 9h14.9M4.1 15H19"/>'),
   pencil: S(
-    '<path d="m4.2 19.8.9-4.4L15.9 4.6a2 2 0 0 1 2.8 0l.7.7a2 2 0 0 1 0 2.8L8.6 18.9z"/><path d="m14.4 6.1 3.5 3.5"/>',
+    '<path d="m4.2 19.8.9-4.35L15.9 4.7a1.95 1.95 0 0 1 2.75 0l.65.65a1.95 1.95 0 0 1 0 2.75L8.55 18.9z"/><path d="m14.4 6.2 3.4 3.4"/>',
   ),
 };
 
@@ -308,7 +332,7 @@ export function icon(name, extra = "") {
  * Each is built from the same three parts a rendered icon has — a body under
  * a top-lit gradient, a soft specular highlight, and the subject itself in
  * white — so the family looks like one set rather than a bag of stickers.
- * The interface set in {@link ICONS} stays flat Basil everywhere else, and
+ * The interface set in {@link ICONS} stays flat Iconly everywhere else, and
  * these appear only inside {@link pillBar}.
  */
 const PILL_ART = {
