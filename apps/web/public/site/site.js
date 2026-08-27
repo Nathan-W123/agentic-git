@@ -31,7 +31,7 @@ import { startField } from "./field.js";
 
 // Read by the boot script's ?why diagnostics: proof this module's graph
 // loaded, and which revision of it.
-window.__kumiSiteRev = "w8";
+window.__kumiSiteRev = "w9";
 
 // A breadcrumb per top-level step, printed by the ?why panel. On one phone
 // the module provably ran its first statement and provably reached none of
@@ -40,7 +40,12 @@ window.__kumiSiteRev = "w8";
 // gets a name.
 window.__kumiTrace = ["module"];
 function mark(step) {
-  window.__kumiTrace.push(step);
+  // The trace is diagnostics; losing a breadcrumb must never cost the page.
+  try {
+    window.__kumiTrace.push(step);
+  } catch (error) {
+    // A clobbered ledger is itself a finding the global error net reports.
+  }
 }
 
 // Every animation failure lands here with a name and a message, and the

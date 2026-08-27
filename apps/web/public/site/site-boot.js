@@ -33,7 +33,7 @@
  */
 (function () {
   "use strict";
-  var BOOT_REV = "w8";
+  var BOOT_REV = "w9";
   var hash = window.location.hash;
 
   // Every resource that fails to arrive is recorded, so the ?why overlay
@@ -42,16 +42,43 @@
   // bubble; registered here because this file is the first script and the
   // one most likely to survive whatever broke.
   window.__kumiLoadErrors = [];
+  // Uncaught runtime errors land here too — including the abort of a module
+  // whose evaluation dies between two statements, which no try/catch inside
+  // the module can see. The browser's own error event is the one net under
+  // everything, and it carries the message, file, and line.
+  window.__kumiJsErrors = [];
   window.addEventListener(
     "error",
     function (event) {
       var el = event.target;
-      if (el && (el.tagName === "SCRIPT" || el.tagName === "LINK")) {
+      if (
+        el &&
+        el !== window &&
+        (el.tagName === "SCRIPT" || el.tagName === "LINK")
+      ) {
         window.__kumiLoadErrors.push(el.src || el.href || "unknown");
+        return;
+      }
+      if (event && event.message) {
+        window.__kumiJsErrors.push(
+          event.message +
+            " @ " +
+            (event.filename || "?") +
+            ":" +
+            (event.lineno || 0) +
+            ":" +
+            (event.colno || 0)
+        );
       }
     },
     true
   );
+  window.addEventListener("unhandledrejection", function (event) {
+    var reason = event && event.reason;
+    window.__kumiJsErrors.push(
+      "promise: " + (reason && reason.message ? reason.message : String(reason))
+    );
+  });
 
   // The page's own account of itself, for the day it misbehaves on a device
   // nobody can attach a debugger to. Add ?why to the address and it says
@@ -100,6 +127,10 @@
             (window.__kumiTrace && window.__kumiTrace.length
               ? window.__kumiTrace.join(" > ")
               : "(none)"),
+          "js errors: " +
+            (window.__kumiJsErrors && window.__kumiJsErrors.length
+              ? window.__kumiJsErrors.join(" | ")
+              : "none"),
         ].join("\n");
         panel.style.cssText =
           "position:fixed;left:12px;right:12px;bottom:12px;z-index:9999;" +
