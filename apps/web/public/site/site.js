@@ -31,7 +31,7 @@ import { startField } from "./field.js";
 
 // Read by the boot script's ?why diagnostics: proof this module's graph
 // loaded, and which revision of it.
-window.__kumiSiteRev = "w10";
+window.__kumiSiteRev = "w11";
 
 // A breadcrumb per top-level step, printed by the ?why panel. On one phone
 // the module provably ran its first statement and provably reached none of
@@ -701,47 +701,152 @@ function wire() {
 /* ------------------------------------------------------- channel replay -- */
 
 /**
- * The channel mock plays as the conversation it is, in the order it
- * happened: the request types itself, the plan and arbitration lines stamp
- * in, the agent answers, the commit lands. Once, when it scrolls into view —
- * a chat that loops is a screensaver, and this one is evidence.
+ * The channel mock replays the day it depicts, in order: the request types
+ * itself, the two threaded asks land, both agents go busy, the coordinator's
+ * conflict card orders their overlapping plans, and the deliveries arrive in
+ * exactly the order that card promised. Then it holds, fades, and plays
+ * again — the conversation is a demonstration, and a demonstration you
+ * missed the start of should come back around.
+ *
+ * The HTML holds the finished conversation, so the page without JavaScript
+ * (or with reduced motion) reads as the story's ending: statuses resolved,
+ * typing row hidden. Everything this player changes is either restored by an
+ * undoer or was hidden in the markup to begin with.
  */
 function channelStory(animate, inView) {
-  const body = document.querySelector(".hero-shot .shot-body");
-  if (body === null) {
+  const shot = document.querySelector(".app-shot");
+  if (shot === null) {
     return;
   }
-  const steps = [...body.children];
-  for (const el of steps) {
-    stage(el, { opacity: "0" });
+  const feed = shot.querySelector(".shot-feed");
+  const steps = [...shot.querySelectorAll("[data-step]")].sort(
+    (a, b) => Number(a.dataset.step) - Number(b.dataset.step),
+  );
+  if (feed === null || steps.length === 0) {
+    return;
   }
-  pendingReveals.set(body, () => {
-    void play();
+
+  // The status chips under the threaded asks: "Done" in the HTML, "Writing
+  // code" while the replay is mid-flight.
+  const statuses = new Map();
+  for (const el of shot.querySelectorAll(".a-status[data-agent]")) {
+    statuses.set(el.dataset.agent, { el, done: el.textContent });
+  }
+  undoers.push(() => {
+    for (const { el, done } of statuses.values()) {
+      el.textContent = done;
+      el.classList.remove("busy");
+    }
   });
-  inView(body, () => fireReveal(body), { margin: "0px 0px -15% 0px" });
+
+  // The typing row is hidden markup until the player owns it, and hidden
+  // markup again if the player disarms.
+  const typing = shot.querySelector(".typing");
+  if (typing !== null) {
+    typing.hidden = false;
+    undoers.push(() => {
+      typing.hidden = true;
+      typing.style.opacity = "";
+    });
+  }
+
+  // The thread wrapper draws the rail its replies hang from; staged with
+  // its children, or the story opens on a line pointing at nothing.
+  const threads = [...shot.querySelectorAll(".thread")];
+
+  const reset = () => {
+    for (const el of [...steps, ...threads]) {
+      el.style.opacity = "0";
+      el.style.transform = "";
+    }
+    for (const { el } of statuses.values()) {
+      el.textContent = el.dataset.busy;
+      el.classList.add("busy");
+    }
+  };
+  reset();
+  undoers.push(() => {
+    for (const el of [...steps, ...threads]) {
+      el.style.opacity = "";
+      el.style.transform = "";
+    }
+    feed.style.opacity = "";
+  });
+
+  // The loop only restarts while somebody could be watching it.
+  let onScreen = false;
+  inView(shot, () => {
+    onScreen = true;
+    return () => {
+      onScreen = false;
+    };
+  });
+
+  pendingReveals.set(feed, () => {
+    void run();
+  });
+  inView(feed, () => fireReveal(feed), { margin: "0px 0px -15% 0px" });
+
+  async function run() {
+    for (;;) {
+      await play();
+      if (disarmed) {
+        return;
+      }
+      await later(4600);
+      if (disarmed) {
+        return;
+      }
+      animate(feed, { opacity: [1, 0] }, { duration: 0.45, ease: "easeOut" });
+      await later(500);
+      if (disarmed) {
+        return;
+      }
+      reset();
+      animate(feed, { opacity: [0, 1] }, { duration: 0.3, ease: "easeOut" });
+      while (!onScreen && !disarmed) {
+        await later(700);
+      }
+      if (disarmed) {
+        return;
+      }
+    }
+  }
+
   async function play() {
     for (const el of steps) {
       if (disarmed) {
         return;
       }
+      if (el.dataset.clearsTyping !== undefined && typing !== null) {
+        animate(typing, { opacity: [1, 0] }, { duration: 0.3, ease: "easeOut" });
+      }
+      const resolves = statuses.get(el.dataset.resolves);
+      if (resolves !== undefined) {
+        resolves.el.textContent = resolves.done;
+        resolves.el.classList.remove("busy");
+      }
+      const thread = el.closest(".thread");
+      if (thread !== null) {
+        thread.style.opacity = "1";
+      }
+      const card = el.classList.contains("arb-card");
       animate(
         el,
-        { opacity: [0, 1], transform: ["translateY(10px)", "translateY(0px)"] },
-        { duration: 0.4, ease: EASE },
+        card
+          ? { opacity: [0, 1], transform: ["scale(0.92)", "scale(1)"] }
+          : {
+              opacity: [0, 1],
+              transform: ["translateY(10px)", "translateY(0px)"],
+            },
+        { duration: card ? 0.5 : 0.4, ease: EASE },
       );
-      if (el.classList.contains("msg")) {
-        await typeInto(el.querySelector("p"));
+      if (el.dataset.type !== undefined) {
+        await typeInto(el.querySelector(".m-text"));
+        await later(260);
       } else {
-        await later(560);
+        await later(card ? 1100 : 640);
       }
-    }
-    const code = body.querySelector("code");
-    if (code !== null && !disarmed) {
-      animate(
-        code,
-        { opacity: [0.1, 1], transform: ["scale(1.15)", "scale(1)"] },
-        { duration: 0.5, ease: EASE },
-      );
     }
   }
 }

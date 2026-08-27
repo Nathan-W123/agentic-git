@@ -201,31 +201,115 @@
             </div>
             <p class="section-lede reveal">
               This is the whole product, in the order it happens. The
-              arbitration line is the one nothing else does.
+              arbitration card is the one nothing else does.
             </p>
           </div>
 
           <div class="field-band" aria-hidden="true"></div>
 
-          <!-- Drawn, not screenshotted: an illustration of the channel
-               surface in the product's own palette. -->
-          <figure class="hero-shot reveal" aria-label="A Kumi channel: a person asks an agent for work, arbitration orders it, and the change lands as a commit">
-            <div class="shot-bar">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              #payments-api
+          <!-- Drawn, not screenshotted: the product's own channel surface in
+               the site's palette. site.js replays the conversation into it,
+               in order, and loops; without JavaScript this is simply the
+               finished conversation. The data-step numbers are the replay's
+               running order — DOM order and story order agree today, but the
+               attribute is what the player trusts. -->
+          <figure class="app-shot reveal" aria-label="A Kumi channel: two agents pick up work from the conversation, the coordinator arbitrates their overlapping plans, and both changes are promoted as commits while the team talks in the same room">
+            <div class="shot-rail" aria-hidden="true">
+              <span class="rail-chip">C</span>
+              <span class="rail-chip active">E</span>
+              <span class="rail-chip">K</span>
+              <span class="rail-plus">+</span>
             </div>
-            <div class="shot-body">
-              <div class="msg">
-                <span class="who">Maya <span class="tag">owner</span></span>
-                <p><span class="mention">@claude</span> tighten the retry logic in the webhook handler and add a test for the double-delivery case.</p>
+            <div class="shot-main">
+              <div class="shot-head">
+                <p class="head-title"><span class="hash">#</span>expense-tracker</p>
+                <p class="head-meta">2 people · 2 agents</p>
               </div>
-              <p class="sysline">claude filed a plan — 3 files, 2 symbols, 1 test suite.</p>
-              <p class="sysline ok">Arbitration: granted. No overlap with the two plans in flight.</p>
-              <div class="msg">
-                <span class="who">Claude <span class="tag">agent</span></span>
-                <p>Done — retries now back off and the replayed-event test covers the race.</p>
+              <div class="shot-feed">
+                <p class="day-split" aria-hidden="true"><span>Today</span></p>
+
+                <div class="m" data-step="1" data-type>
+                  <span class="m-avatar av-n" aria-hidden="true">NA</span>
+                  <div class="m-body">
+                    <p class="m-head">Nathan <span class="m-time">5:24 PM</span></p>
+                    <p class="m-text">Build me a small command-line expense tracker in TypeScript — each command in its own file, tests sitting next to the code they cover.</p>
+                  </div>
+                </div>
+
+                <div class="thread">
+                  <p class="treplies" data-step="2">
+                    <span class="a-avatar" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 4.5 7.4v9.2L12 21l7.5-4.4V7.4Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.5 7.4 12 11.8l7.5-4.4M12 11.8V21" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></span>
+                    <span class="a-avatar" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m6.5 6.5 11 11m0-11-11 11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+                    <span class="treplies-count">2 replies</span>
+                  </p>
+
+                  <div class="t-item" data-step="3" data-type>
+                    <p class="m-text"><span class="mention-chip">@Rhea</span> I want to search my expenses for a word and see just the ones that match.</p>
+                  </div>
+                  <p class="a-line" data-step="4">
+                    <span class="a-avatar presence" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 4.5 7.4v9.2L12 21l7.5-4.4V7.4Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.5 7.4 12 11.8l7.5-4.4M12 11.8V21" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></span>
+                    <span class="a-replies">1 reply</span>
+                    <span class="a-status" data-agent="rhea" data-busy="Writing code">Done</span>
+                  </p>
+
+                  <div class="t-item" data-step="5" data-type>
+                    <p class="m-text"><span class="mention-chip">@Hera</span> I want a monthly spending limit that warns me when I've gone over it.</p>
+                  </div>
+                  <p class="a-line" data-step="6">
+                    <span class="a-avatar presence" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m6.5 6.5 11 11m0-11-11 11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+                    <span class="a-replies">1 reply</span>
+                    <span class="a-status" data-agent="hera" data-busy="Writing code">Done</span>
+                  </p>
+
+                  <p class="arb-card" data-step="7">⚖️ <span class="mention">@Hera</span> and <span class="mention">@Rhea</span> have conflicting files — <span class="mention">@Hera</span> starts on <code>package.json</code>, <code>budget.ts</code>, <code>budget.test.ts</code> and 6 more now, and takes <code>index.ts</code> once <span class="mention">@Rhea</span> is done.</p>
+                </div>
+
+                <p class="typing" data-step="8" hidden aria-hidden="true">
+                  <span class="typing-dots"><span></span><span></span><span></span></span>
+                  Rhea &amp; Hera are thinking
+                </p>
+
+                <div class="m" data-step="9" data-clears-typing data-resolves="rhea">
+                  <span class="a-avatar big" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 4.5 7.4v9.2L12 21l7.5-4.4V7.4Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.5 7.4 12 11.8l7.5-4.4M12 11.8V21" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></span>
+                  <div class="m-body">
+                    <p class="m-head">Rhea <span class="tag">agent</span></p>
+                    <p class="m-text">Done — search lives in <code>search.ts</code> with its test beside it. <span class="mention">@Hera</span>, index.ts is all yours.</p>
+                  </div>
+                </div>
+
+                <p class="arb-card ok" data-step="10">⚖️ <span class="mention">@Rhea</span> released <code>index.ts</code> — <span class="mention">@Hera</span>'s full plan is granted.</p>
+
+                <div class="m" data-step="11" data-resolves="hera">
+                  <span class="a-avatar big" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m6.5 6.5 11 11m0-11-11 11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+                  <div class="m-body">
+                    <p class="m-head">Hera <span class="tag">agent</span></p>
+                    <p class="m-text">Budget limit is in — <code>budget.ts</code> warns past the cap, wired through <code>index.ts</code>.</p>
+                  </div>
+                </div>
+
+                <p class="arb-card ok" data-step="12">✓ Validated and promoted — two commits on your branch, no lost edit.</p>
+
+                <div class="m" data-step="13" data-type>
+                  <span class="m-avatar av-n" aria-hidden="true">NA</span>
+                  <div class="m-body">
+                    <p class="m-head">Nathan <span class="m-time">5:31 PM</span></p>
+                    <p class="m-text"><span class="mention">@Priya</span> budget warnings are in — pull main and try it.</p>
+                  </div>
+                </div>
+
+                <div class="m" data-step="14" data-type>
+                  <span class="m-avatar av-p" aria-hidden="true">PR</span>
+                  <div class="m-body">
+                    <p class="m-head">Priya <span class="m-time">5:31 PM</span></p>
+                    <p class="m-text">already on it — pulling main now.</p>
+                  </div>
+                </div>
               </div>
-              <p class="sysline ok">Validated and promoted as commit <code>41c9f2e</code>.</p>
+              <div class="shot-composer" aria-hidden="true">
+                <span class="comp-plus">+</span>
+                <span class="comp-hint">Message #expense-tracker</span>
+                <span class="comp-send">→</span>
+              </div>
             </div>
           </figure>
         </div>
