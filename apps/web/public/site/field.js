@@ -151,7 +151,7 @@ void main() {
      the camera is overhead the rain is gathered into the bottom-left corner
      rather than sitting behind whatever the section is saying. Carried on
      the same rise as the flight, so it is one movement and not two. */
-  vec2 corner = vec2(-1.45, -0.88) * rise;
+  vec2 corner = vec2(-2.15, -0.88) * rise;
   vec2 comp = uParallax * 0.08 + uShift + corner;
 
   /* The exact inverse of the point renderer's projection, compositional

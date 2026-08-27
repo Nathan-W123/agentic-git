@@ -554,9 +554,9 @@ strong {
 
 .hero-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
-  gap: 40px 64px;
-  align-items: end;
+  grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
+  gap: 40px 56px;
+  align-items: center;
 }
 
 .hero-lede {
@@ -717,7 +717,7 @@ strong {
  * beside a mark that is nothing but facets. The rest of the page's headings
  * stay at h1's own width; this is the wordmark, not the prose. */
 .hero-name {
-  font-size: clamp(76px, 13vw, 172px);
+  font-size: clamp(64px, 8.6vw, 132px);
   font-variation-settings: "wght" 300, "wdth" 75;
   letter-spacing: -0.035em;
 }
@@ -945,6 +945,96 @@ strong {
   }
 }
 
+/* ----------------------------------------------------------------- belt -- */
+
+/*
+ * The names you already pay for, running past.
+ *
+ * The list is short and true, so the belt repeats it rather than padding it
+ * out with vendors nobody here has signed into. Eight passes make the run
+ * wider than any viewport twice over, and it translates by exactly half its
+ * own width — which lands the second half of the run precisely where the
+ * first began, so the loop has no seam to find. Masked at both ends so names
+ * arrive and leave rather than appearing at an edge.
+ */
+
+.belt-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.belt {
+  margin-top: 38px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent,
+    #000 14%,
+    #000 86%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent,
+    #000 14%,
+    #000 86%,
+    transparent
+  );
+}
+
+.belt-run {
+  display: flex;
+  align-items: center;
+  gap: 64px;
+  width: max-content;
+}
+
+.belt-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--display);
+  font-variation-settings: "wght" 420, "wdth" 88;
+  font-size: 26px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.belt-mark {
+  width: 27px;
+  height: 27px;
+  color: var(--salmon);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .belt-run {
+    animation: belt-run 34s linear infinite;
+  }
+}
+
+@keyframes belt-run {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (max-width: 620px) {
+  .belt-run {
+    gap: 40px;
+  }
+
+  .belt-item {
+    font-size: 21px;
+  }
+
+  .belt-mark {
+    width: 22px;
+    height: 22px;
+  }
+}
+
 /* ------------------------------------------------------------------ sky -- */
 
 /*
@@ -964,7 +1054,7 @@ strong {
  */
 
 .sky-fig {
-  max-width: 660px;
+  max-width: 880px;
   margin-inline: auto;
 }
 
@@ -976,12 +1066,12 @@ strong {
 
 .dark-in {
   stop-color: var(--bg-deep);
-  stop-opacity: 0.84;
+  stop-opacity: 0.9;
 }
 
 .dark-mid {
   stop-color: var(--bg-deep);
-  stop-opacity: 0.48;
+  stop-opacity: 0.6;
 }
 
 .dark-out {
@@ -1023,9 +1113,9 @@ strong {
 .sky-say {
   display: grid;
   justify-items: center;
-  margin-top: 24px;
+  margin-top: 26px;
   padding-inline: 12px;
-  font-size: 14px;
+  font-size: 17px;
   line-height: 1.5;
   text-align: center;
   color: var(--muted);
@@ -1122,7 +1212,7 @@ strong {
   }
 
   .sky-say {
-    font-size: 13.5px;
+    font-size: 15px;
   }
 }
 
@@ -1212,7 +1302,7 @@ strong {
 .app-shot {
   display: grid;
   grid-template-rows: auto 1fr;
-  height: 660px;
+  height: 540px;
   max-width: 880px;
   margin-inline: auto;
   border: 1px solid var(--border);
@@ -2141,6 +2231,14 @@ strong {
 
   .hero h1 {
     max-width: none;
+  }
+
+  .hero-name {
+    font-size: clamp(76px, 15vw, 150px);
+  }
+
+  .app-shot {
+    height: auto;
   }
 
   .moves {

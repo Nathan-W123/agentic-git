@@ -244,7 +244,7 @@ function gate() {
  * the footer, where nobody is looking.
  */
 function progress() {
-  const end = document.querySelector("#channel");
+  const end = document.querySelector("#room");
   const last =
     end === null
       ? document.body.scrollHeight - window.innerHeight
@@ -834,7 +834,7 @@ function channelStory(animate, inView) {
   // everything — typing, entrances, the waits between beats, the hold —
   // stretches by the same factor, so slowing down never changes the rhythm,
   // only the tempo.
-  const PACE = 0.8;
+  const PACE = 0.64;
   const slow = (ms) => ms / PACE;
   const shot = document.querySelector(".app-shot");
   if (shot === null) {
