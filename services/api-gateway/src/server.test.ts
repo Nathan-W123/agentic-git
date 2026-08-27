@@ -18252,3 +18252,80 @@ test("an app cannot be approved for somewhere else, or by another app", async (t
   );
   assert.equal(byToken.status, 403);
 });
+
+test("the waitlist takes an address from a stranger, once, in either encoding", async (t) => {
+  // Shipping as a waitlist means the one thing a visitor can do is leave an
+  // address, and they do it with no account, no session, and no CSRF token.
+  // That is three of the gateway's defences deliberately stood down for one
+  // route, so this pins what it actually accepts.
+  const store = new InMemoryCoordinationStore();
+  const gateway = new ApiGateway({
+    store,
+    operations: {
+      async createRepository() {
+        throw new Error("unused");
+      },
+    } as unknown as ApiOperations,
+  });
+  t.after(async () => {
+    await gateway.close();
+    await store.close();
+  });
+  await new Promise<void>((resolve, reject) => {
+    gateway.server.once("error", reject);
+    gateway.server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = gateway.server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Test gateway did not bind a TCP port");
+  }
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const joined = await fetch(`${base}/api/v1/waitlist`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ email: "Someone@Example.com " }),
+  });
+  assert.equal(joined.status, 200);
+  assert.deepEqual(await joined.json(), { status: "joined", added: true });
+
+  // Normalised on the way in, so the same address typed two ways is one row.
+  const again = await fetch(`${base}/api/v1/waitlist`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ email: "someone@example.com" }),
+  });
+  assert.equal(again.status, 200);
+  assert.deepEqual(
+    await again.json(),
+    { status: "joined", added: false },
+    "a second submission must not be an error the visitor has to read",
+  );
+
+  // The form without JavaScript: a browser's own encoding, and a page rather
+  // than a screenful of JSON.
+  const noScript = await fetch(`${base}/api/v1/waitlist`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "text/html,application/xhtml+xml",
+    },
+    body: new URLSearchParams({ email: "second@example.com" }).toString(),
+  });
+  assert.equal(noScript.status, 200);
+  assert.match(noScript.headers.get("content-type") ?? "", /text\/html/u);
+  assert.match(await noScript.text(), /You are on the list/u);
+
+  const rejected = await fetch(`${base}/api/v1/waitlist`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ email: "not an address" }),
+  });
+  assert.equal(rejected.status, 400);
+
+  assert.deepEqual(
+    (await store.listWaitlistSignups()).map((row) => row.email),
+    ["someone@example.com", "second@example.com"],
+    "one row per address, in the order they arrived",
+  );
+});

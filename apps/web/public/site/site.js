@@ -158,6 +158,71 @@ function disarm() {
  * the water, aborting the module's evaluation with nothing to note it. No
  * line in this gate is allowed to be that line again.
  */
+/*
+ * The waitlist form, wired whatever the motion gate decided.
+ *
+ * Deliberately outside `wire()`. Everything in there is decoration and is
+ * skipped when a reader asks for less motion; answering a form in place is
+ * not decoration, and a reduced-motion visitor should not be the one who gets
+ * a page of JSON. The form posts perfectly well on its own without this — the
+ * server answers a browser with HTML — so this is still an enhancement, just
+ * not one that belongs behind that particular gate.
+ */
+function waitlist() {
+  const form = document.querySelector(".waitlist");
+  if (form === null) {
+    return;
+  }
+  const field = form.querySelector(".waitlist-email");
+  const say = form.querySelector(".waitlist-say");
+  const button = form.querySelector("button");
+  if (field === null || say === null || button === null) {
+    return;
+  }
+  form.addEventListener("submit", (event) => {
+    const email = field.value.trim();
+    if (email === "") {
+      return;
+    }
+    event.preventDefault();
+    button.disabled = true;
+    say.classList.remove("bad");
+    say.textContent = "Adding you...";
+    fetch(form.action, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ email }),
+    })
+      .then(async (reply) => {
+        if (!reply.ok) {
+          throw new Error(String(reply.status));
+        }
+        const data = await reply.json();
+        // The endpoint answers the same whether or not the address was
+        // already there, so this says the same thing too.
+        say.textContent =
+          data.added === false
+            ? "You are already on the list. We will be in touch."
+            : "You are on the list. We will be in touch.";
+        field.value = "";
+      })
+      .catch(() => {
+        say.classList.add("bad");
+        say.textContent = "That did not go through. Try again in a moment.";
+      })
+      .finally(() => {
+        button.disabled = false;
+      });
+  });
+}
+
+try {
+  waitlist();
+  mark("waitlist");
+} catch (error) {
+  note("waitlist", error);
+}
+
 mark("gate-call");
 try {
   gate();

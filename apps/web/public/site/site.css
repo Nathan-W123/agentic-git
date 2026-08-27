@@ -392,18 +392,14 @@ strong {
   width: min(1600px, calc(100% - 48px));
 }
 
-/* The name and the mark together, since this is now the only place the
-   wordmark appears. The mark is knocked white by filter: the artwork is a
-   flat salmon silhouette with an alpha channel, so brightness(0) then
-   invert(1) paints every opaque pixel white and leaves the shape as drawn. */
+/* The mark alone: the name is the hero's, and saying it twice on one screen
+   makes neither of them the title. It is knocked white by filter, because
+   the artwork is a flat salmon silhouette with an alpha channel and
+   brightness(0) then invert(1) paints every opaque pixel white without
+   touching the shape. */
 .nav-brand {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-family: var(--display);
-  font-variation-settings: "wght" 600, "wdth" 84;
-  font-size: 19px;
-  letter-spacing: -0.02em;
 }
 
 .nav-brand img {
@@ -570,195 +566,111 @@ strong {
   padding: 176px 0 8px;
 }
 
-/* Two columns: the claim, and the room deciding things next to it. The
-   claim takes the wider share because it is the thing being read. */
 .hero-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.06fr) minmax(0, 0.94fr);
-  align-items: center;
-  gap: 56px;
+  gap: 40px;
 }
 
 .hero-lede {
   display: grid;
   gap: 26px;
-  justify-items: start;
+  justify-items: center;
+  text-align: center;
 }
 
-/* Only the pricing hero needs a measure: its headline is centred with
-   nothing beside it, so without one it would run the full 1200. The landing
-   headline is bounded by its own grid column, and a `ch` cap on top of that
-   was the thing breaking it after "Making" rather than after
-   "development". */
-.hero-short h1 {
+.hero h1 {
   max-width: 12ch;
   margin-inline: auto;
 }
 
-/*
- * The claim, at headline size.
+/* One word, so it gets to be enormous. The size lives on this class rather
+   than on h1, because the pricing page's hero is still a sentence.
  *
- * Heavy and at the top of the width axis, which is the opposite of what the
- * one-word wordmark wanted: that was drawn thin and narrow to read as a
- * mark, where a sentence has to read as a voice. 700 of the face's 200 to
- * 800, full width, and the leading pulled in so the lines sit as a block
- * rather than as separate sentences.
- */
+ * The width axis is the only angularity this face offers, and it buys more
+ * than a narrower word: at the bottom of the axis the U's bowl pulls its
+ * sides upright and its corner tight, and the K's junction sharpens, so the
+ * name reads faceted. */
 .hero-name {
-  /* Capped at 60 rather than 66 so the claim breaks after "development"
-     instead of after "Making". The column stops widening at the 1200px wrap
-     while a vw size does not, so it is the ceiling that decides this: the
-     two words need 10.23% of the column's width per pixel of type, which is
-     62px at the 606px column this layout gives them. */
-  font-size: clamp(38px, 4.4vw, 60px);
-  font-variation-settings: "wght" 700, "wdth" 100;
-  line-height: 1.06;
-  letter-spacing: -0.028em;
+  font-size: clamp(76px, 12.4vw, 166px);
+  font-variation-settings: "wght" 300, "wdth" 75;
+  letter-spacing: -0.035em;
 }
 
-/* The line under the claim: what the headline means, at reading size. */
-.hero-sub {
-  max-width: 46ch;
-  font-size: clamp(15.5px, 1.2vw, 17.5px);
-  line-height: 1.62;
+/* The line under the name, in the name's own cut so the two read as one
+   lockup rather than a heading with a caption stuck beneath it. */
+.hero-tag {
+  margin-top: -8px;
+  font-family: var(--display);
+  font-variation-settings: "wght" 380, "wdth" 82;
+  font-size: clamp(19px, 1.7vw, 25px);
+  letter-spacing: -0.015em;
   color: var(--muted);
-  text-wrap: pretty;
 }
 
 /*
- * The rulings, running.
+ * The one thing to do on this page.
  *
- * A list being read through rather than a stack of cards: every line dim,
- * the one crossing the middle lit and marked, the whole column faded to
- * nothing at both ends.
- *
- * The geometry is deliberately whole slots, because the lighting depends on
- * it. Each line is exactly one slot tall and the window is exactly five, so
- * the middle of the window is slot 2.5 whatever the viewport does to the
- * type. The run is twelve slots, the six rulings twice, and travels exactly
- * six, so the loop closes on itself.
- *
- * That fixed geometry is what lets the highlight be pure CSS. The run moves
- * one slot every sixth of the loop, so a line is centred at a moment that
- * depends only on its slot index, and each line's animation is started that
- * far behind its neighbour's. `--i` is the whole input; both copies carry 0
- * to 5 because they sit six slots apart, which is a whole copy, so they
- * light in the same phase and are never both on screen.
+ * A row on a wide screen and a stack on a narrow one, which `wrap` gives for
+ * free. The reply sits on its own line below both, so an answer never
+ * changes the width of what is above it.
  */
-
-.coord-feed {
-  /* One line and its air. Everything below counts in these. */
-  --slot: 3.15em;
-  height: calc(var(--slot) * 5);
+/* This stylesheet had no visually-hidden helper, because until now nothing
+   on the site needed a label a sighted reader does not: the field's
+   placeholder is not one, so the label is real and only its pixels are
+   gone. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
   overflow: hidden;
-  font-family: var(--display);
-  font-size: clamp(15px, 1.45vw, 21px);
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent,
-    #000 26%,
-    #000 74%,
-    transparent
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    transparent,
-    #000 26%,
-    #000 74%,
-    transparent
-  );
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
-.coord-line {
-  display: grid;
-  grid-template-columns: 1.1em minmax(0, 1fr);
-  align-items: center;
-  height: var(--slot);
-  font-variation-settings: "wght" 560, "wdth" 92;
-  letter-spacing: -0.014em;
-  line-height: 1.3;
+.waitlist {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  width: min(100%, 460px);
+  margin-top: 6px;
+}
+
+.waitlist-email {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface-1) 78%, transparent);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  transition: border-color 0.22s var(--ease-motion);
+}
+
+.waitlist-email::placeholder {
   color: var(--faint);
 }
 
-/* Drawn from borders rather than set as a character, so it is the same
-   triangle in every font and crisp at every size. */
-.coord-cue {
-  /* Centred in its own gutter rather than flush to the column's edge, which
-     put it hard against the side of the window with half of it clipped. */
-  justify-self: center;
-  width: 0;
-  height: 0;
-  border-left: 7px solid var(--salmon);
-  border-top: 5px solid transparent;
-  border-bottom: 5px solid transparent;
-  opacity: 0;
+.waitlist-email:focus-visible {
+  outline: none;
+  border-color: var(--salmon);
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .coord-run {
-    animation: coord-run 36s linear infinite;
-  }
-
-  /*
-   * Line i is centred at t = 6(i - 2) seconds, so its own animation peaks
-   * there: the delay is that moment less one whole period, which makes every
-   * value negative so nothing sits waiting on its first turn showing a lit
-   * state it has not reached yet.
-   */
-  .coord-line,
-  .coord-cue {
-    animation-duration: 36s;
-    animation-timing-function: ease-in-out;
-    animation-iteration-count: infinite;
-    animation-delay: calc(var(--i) * 6s - 48s);
-  }
-
-  .coord-line {
-    animation-name: coord-focus;
-  }
-
-  .coord-cue {
-    animation-name: coord-lit;
-  }
+/* Empty until there is something to say, and it takes no room until then. */
+.waitlist-say {
+  flex-basis: 100%;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
-@keyframes coord-run {
-  to {
-    transform: translateY(-50%);
-  }
-}
-
-/* Peaked at 0%, which is where the delay above puts the moment a line is in
-   the middle of the window; the ramps either side are about half a slot of
-   travel each. */
-@keyframes coord-focus {
-  0% {
-    color: var(--text);
-  }
-
-  9%,
-  91% {
-    color: var(--faint);
-  }
-
-  100% {
-    color: var(--text);
-  }
-}
-
-@keyframes coord-lit {
-  0% {
-    opacity: 1;
-  }
-
-  9%,
-  91% {
-    opacity: 0;
-  }
-
-  100% {
-    opacity: 1;
-  }
+.waitlist-say.bad {
+  color: var(--salmon);
 }
 
 .hero-aside {
@@ -2536,11 +2448,8 @@ strong {
     max-width: none;
   }
 
-  /* Sized for the sentence this became, not the single word it was: at
-     15vw the old wordmark scale put the first line under the nav with four
-     pixels to spare. */
   .hero-name {
-    font-size: clamp(40px, 10vw, 64px);
+    font-size: clamp(72px, 15vw, 150px);
   }
 
   .app-shot {

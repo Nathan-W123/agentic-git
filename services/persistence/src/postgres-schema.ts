@@ -998,6 +998,10 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     version: 47,
     name: "paywalled-signup",
     statements: [
+      `CREATE TABLE waitlist_signups (
+        email TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
+      )`,
       `CREATE TABLE signup_intents (
         id TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL,

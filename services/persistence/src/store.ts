@@ -223,6 +223,12 @@ export interface PasswordResetRecord {
  * an organization that exists, with no lookup table and no metadata written
  * back.
  */
+/** One address waiting for an invitation, and when it started waiting. */
+export interface WaitlistSignup {
+  email: string;
+  createdAt: string;
+}
+
 export interface SignupIntentRecord {
   id: string;
   /** Minted now, created once payment clears, named by Stripe in between. */
@@ -1547,6 +1553,19 @@ export interface CoordinationStore {
    * local-development backend, and this does not change that.
    */
   runInTransaction<T>(body: (store: CoordinationStore) => Promise<T>): Promise<T>;
+
+  /**
+   * Puts an address on the pre-launch waitlist, and says whether this call is
+   * what put it there.
+   *
+   * Idempotent on the address: somebody who submits twice is told they are on
+   * the list both times, and there is still one row. That is also what keeps
+   * the endpoint from being a way to find out who has already signed up,
+   * since the answer it gives a stranger is the same either way.
+   */
+  recordWaitlistSignup(email: string, at: string): Promise<boolean>;
+  /** The whole list, oldest first, for whoever is going to send the invites. */
+  listWaitlistSignups(): Promise<readonly WaitlistSignup[]>;
 
   createSignupIntent(intent: SignupIntentRecord): Promise<void>;
   getSignupIntent(id: string): Promise<SignupIntentRecord | undefined>;

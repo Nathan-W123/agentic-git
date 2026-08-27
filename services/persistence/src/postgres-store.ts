@@ -103,6 +103,7 @@ import type {
   InvitationRecord,
   PasswordResetRecord,
   SignupIntentRecord,
+  WaitlistSignup,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1528,6 +1529,32 @@ export class PostgresCoordinationStore implements CoordinationStore {
       id,
     ]);
     return row === undefined ? undefined : this.toPasswordReset(row);
+  }
+
+  public async recordWaitlistSignup(
+    email: string,
+    at: string,
+  ): Promise<boolean> {
+    // `ON CONFLICT DO NOTHING` for the same reason SQLite uses OR IGNORE: two
+    // simultaneous submissions of one address must not race on the key.
+    const result = await this.query(
+      `INSERT INTO waitlist_signups (email, created_at)
+       VALUES ($1, $2)
+       ON CONFLICT (email) DO NOTHING`,
+      [email, at],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  public async listWaitlistSignups(): Promise<readonly WaitlistSignup[]> {
+    const result = await this.query(
+      `SELECT email, created_at FROM waitlist_signups ORDER BY created_at`,
+    );
+    const rows = result.rows as { email: string; created_at: string }[];
+    return rows.map((row) => ({
+      email: row.email,
+      createdAt: row.created_at,
+    }));
   }
 
   public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {

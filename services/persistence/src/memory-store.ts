@@ -94,6 +94,7 @@ import type {
   InvitationRecord,
   PasswordResetRecord,
   SignupIntentRecord,
+  WaitlistSignup,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1012,6 +1013,25 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   /* ---------------------------------------------------- password resets ---- */
+
+  private readonly waitlist = new Map<string, string>();
+
+  public async recordWaitlistSignup(
+    email: string,
+    at: string,
+  ): Promise<boolean> {
+    if (this.waitlist.has(email)) {
+      return false;
+    }
+    this.waitlist.set(email, at);
+    return true;
+  }
+
+  public async listWaitlistSignups(): Promise<readonly WaitlistSignup[]> {
+    return [...this.waitlist.entries()]
+      .map(([email, createdAt]) => ({ email, createdAt }))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
 
   private readonly signupIntents = new Map<string, SignupIntentRecord>();
   /** Held while a `runInTransaction` body runs, for rollback. */

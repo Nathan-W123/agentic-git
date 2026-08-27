@@ -1308,6 +1308,20 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE o.id NOT IN (SELECT organization_id FROM subscriptions)`,
     ],
   },
+  {
+    version: 48,
+    name: "waitlist",
+    statements: [
+      // The address is the key, so joining twice is the same row rather than
+      // two, and the endpoint can say "already on the list" without a read of
+      // its own. Nothing else is collected: a waitlist that holds more than
+      // it needs is a breach waiting for a reason.
+      `CREATE TABLE waitlist_signups (
+        email TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
+      )`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

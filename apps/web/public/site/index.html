@@ -33,20 +33,21 @@
 
     <nav class="site-nav">
       <div class="wrap">
-        <!-- The name lives here now rather than in the hero, so the mark is
-             decoration again and the word carries the link. Empty alt: with
-             "KUMI" beside it, alt text would only say it twice. -->
+        <!-- The mark is the whole brand here: the name is the hero's, and
+             saying it twice on one screen makes neither of them the title.
+             With the word gone the alt text is this link's only accessible
+             name. -->
         <a class="nav-brand" href=".">
-          <img src="kumi-mark.png" alt="" width="26" height="26">
-          KUMI
+          <img src="kumi-mark.png" alt="KUMI" width="30" height="30">
         </a>
         <div class="nav-links">
           <a class="nav-link" href="pricing">Pricing</a>
           <a class="nav-link optional" href="download">Download</a>
         </div>
+        <!-- No trial to start while this ships as a waitlist. Sign in stays:
+             the people who already have access still need a door. -->
         <div class="nav-end">
-          <a class="nav-link optional" href="/app#signin">Sign in</a>
-          <a class="btn btn-primary btn-small" href="/app#signup">Start free trial</a>
+          <a class="nav-link" href="/app#signin">Sign in</a>
         </div>
       </div>
       <!-- The scroll's own position, drawn on the nav's bottom edge by
@@ -58,67 +59,30 @@
       <div class="wrap hero-grid">
         <div class="hero-lede">
           <h1 class="hero-name">
-            <span class="w"><span>Making development multiplayer.</span></span>
+            <!-- Still a span inside a span: the outer one is the clipped line
+                 box the reveal raises the word out of. -->
+            <span class="w"><span>KUMI</span></span>
           </h1>
+          <p class="hero-tag">Making development multiplayer.</p>
 
-          <!-- What it does for the reader, not what it is. The old line
-               opened by defining the product ("a shared room...") and then
-               listed its mechanism; a stranger three seconds into the page
-               wants the outcome, and the mechanism is what the three claims
-               further down are for. -->
-          <p class="hero-sub">
-            Run as many agents as you like against one codebase. KUMI keeps
-            them out of each other's way, and out of yours.
-          </p>
-
-          <!-- There is no waitlist route in this deployment yet, so this goes
-               to the signup the nav already offers. Point it at a form when
-               there is one. -->
-          <p class="hero-cta">
-            <a class="btn btn-primary" href="/app#signup">Join the waitlist</a>
-          </p>
-        </div>
-
-        <!-- The room, still overheard, but only the rulings: a slow vertical
-             run of what the coordinator decided, faded out at both ends so it
-             reads as a window onto something continuous rather than a list
-             that starts and stops. The run is written twice and travelled by
-             exactly half its height, which is what makes the loop seamless;
-             the second copy is hidden from assistive technology because it is
-             the same six lines again. Pure stylesheet: it needs no
-             JavaScript to run, and it holds still showing the first few for
-             a reader who asked for less motion. -->
-        <!-- The room, still overheard, but only the rulings: a slow vertical
-             run of what the coordinator decided, dimmed and faded to nothing
-             at both ends, with whichever line is crossing the middle lit and
-             marked. Nothing is a card — this is a list being read through, so
-             the only furniture is the cue.
-
-             The run is written twice and travelled by exactly half its
-             height, which is what makes the loop seamless; the second copy is
-             hidden from assistive technology because it is the same six lines
-             again. `--i` is the slot index within a copy, and it is what puts
-             each line's turn in the light one step behind its neighbour; the
-             two copies share indices because they are six slots apart, which
-             is a whole copy, so they light at the same phase and never both
-             on screen. Pure stylesheet: it needs no JavaScript to run, and it
-             holds still showing the first few for a reader who asked for less
-             motion. -->
-        <div class="coord-feed" aria-label="Rulings the coordinator is making, on a loop">
-          <div class="coord-run">
-            <p class="coord-line" style="--i: 0"><span class="coord-cue" aria-hidden="true"></span>@Hera goes first on checkout.ts</p>
-            <p class="coord-line" style="--i: 1"><span class="coord-cue" aria-hidden="true"></span>@Cursor replanned on the new head</p>
-            <p class="coord-line" style="--i: 2"><span class="coord-cue" aria-hidden="true"></span>4 files granted, 2 held behind @Hera</p>
-            <p class="coord-line" style="--i: 3"><span class="coord-cue" aria-hidden="true"></span>@Rhea warned before the schema moved</p>
-            <p class="coord-line" style="--i: 4"><span class="coord-cue" aria-hidden="true"></span>Promoted: two commits, no lost edit</p>
-            <p class="coord-line" style="--i: 5"><span class="coord-cue" aria-hidden="true"></span>checkout.ts released to @Hera</p>
-            <p class="coord-line" style="--i: 0" aria-hidden="true"><span class="coord-cue" aria-hidden="true"></span>@Hera goes first on checkout.ts</p>
-            <p class="coord-line" style="--i: 1" aria-hidden="true"><span class="coord-cue" aria-hidden="true"></span>@Cursor replanned on the new head</p>
-            <p class="coord-line" style="--i: 2" aria-hidden="true"><span class="coord-cue" aria-hidden="true"></span>4 files granted, 2 held behind @Hera</p>
-            <p class="coord-line" style="--i: 3" aria-hidden="true"><span class="coord-cue" aria-hidden="true"></span>@Rhea warned before the schema moved</p>
-            <p class="coord-line" style="--i: 4" aria-hidden="true"><span class="coord-cue" aria-hidden="true"></span>Promoted: two commits, no lost edit</p>
-            <p class="coord-line" style="--i: 5" aria-hidden="true"><span class="coord-cue" aria-hidden="true"></span>checkout.ts released to @Hera</p>
-          </div>
+          <!-- A real form rather than a link dressed as one: it posts to the
+               waitlist endpoint on its own, so it works with no JavaScript at
+               all. site.js upgrades it in place to answer without navigating
+               away; the no-script path lands on a plain confirmation. -->
+          <form class="waitlist" method="post" action="/api/v1/waitlist">
+            <label class="sr-only" for="waitlist-email">Email address</label>
+            <input
+              class="waitlist-email"
+              id="waitlist-email"
+              type="email"
+              name="email"
+              required
+              autocomplete="email"
+              placeholder="you@company.com"
+            >
+            <button class="btn btn-primary" type="submit">Join the waitlist</button>
+            <p class="waitlist-say" role="status" aria-live="polite"></p>
+          </form>
         </div>
 
       </div>

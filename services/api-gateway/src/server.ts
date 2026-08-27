@@ -4115,6 +4115,52 @@ function narrowToRepositories<T extends { repositoryId?: string }>(
 }
 
 /** An invitation without its secret, which is never stored recoverably. */
+/**
+ * What a browser sees when it posts the waitlist form without JavaScript.
+ *
+ * Deliberately self-contained and tiny: it cannot reach the marketing site's
+ * stylesheet without knowing where that is deployed, and a confirmation is
+ * two sentences and a way back. It says the same thing whether or not the
+ * address was new, for the same reason the JSON does.
+ */
+function waitlistPage(): string {
+  return [
+    "<!doctype html>",
+    '<html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    "<title>You are on the list</title>",
+    "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;",
+    "background:#121110;color:#f3efe8;font:16px/1.6 system-ui,sans-serif;",
+    "text-align:center;padding:24px}a{color:#d88973}</style>",
+    "</head><body><main><h1>You are on the list.</h1>",
+    "<p>We will be in touch when KUMI opens up.</p>",
+    '<p><a href="/">Back to the site</a></p></main></body></html>',
+  ].join("");
+}
+
+/**
+ * The one address this endpoint will keep, or nothing.
+ *
+ * Deliberately not a full RFC 5322 parser: this is a marketing form, and the
+ * only failures worth catching are the ones a person makes by hand. Lowercased
+ * and trimmed so the same address typed two ways is one row rather than two,
+ * and length-capped because the column is a key and nothing else bounds what
+ * arrives.
+ */
+function normaliseWaitlistEmail(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const email = value.trim().toLowerCase();
+  if (email.length === 0 || email.length > 254) {
+    return undefined;
+  }
+  if (!/^[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+$/u.test(email)) {
+    return undefined;
+  }
+  return email;
+}
+
 function publicInvitation(invitation: {
   id: string;
   organizationId: string;
@@ -5025,6 +5071,9 @@ export class ApiGateway {
           // unthrottled one is a way to make this deployment mint checkout
           // sessions and customers for a stranger.
           `${API_PREFIX}/auth/signup`,
+          // Unauthenticated and it writes a row somebody chose the contents
+          // of, which is the whole of the case for the stricter bucket.
+          `${API_PREFIX}/waitlist`,
         ].includes(url.pathname) ||
         // Password reset belongs here too, and more than any of them: it sends
         // mail to an address the caller chose, so an unthrottled one is a way
@@ -5106,6 +5155,9 @@ export class ApiGateway {
             // abandoned checkout leaves a row naming an organization that was
             // never made and an email that was never claimed.
             `${API_PREFIX}/auth/signup`,
+            // Asking to be told when this opens cannot require an account:
+            // not having one is the entire reason somebody is here.
+            `${API_PREFIX}/waitlist`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
           new RegExp(`^${API_PREFIX}/auth/signup/[^/]+/complete$`, "u").test(
@@ -5265,6 +5317,44 @@ export class ApiGateway {
         },
         time: new Date().toISOString(),
       });
+      return;
+    }
+
+    if (method === "POST" && path === `${API_PREFIX}/waitlist`) {
+      // Both encodings, because both really arrive: the site's script sends
+      // JSON, and the same form without JavaScript sends what every browser
+      // sends, which `readJson` would refuse with a 415 before the page below
+      // could ever be reached.
+      const email = normaliseWaitlistEmail(await this.readWaitlistField(request));
+      if (email === undefined) {
+        throw new HttpError(
+          400,
+          "invalid_email",
+          "A valid email address is required",
+        );
+      }
+      const added = await this.options.store.recordWaitlistSignup(
+        email,
+        new Date().toISOString(),
+      );
+      // A browser that submitted the form itself gets a page, because the
+      // alternative is a screenful of JSON. The site's script asks for JSON
+      // explicitly; anything that says it wants HTML, or says nothing at all
+      // and is clearly a browser, gets the page.
+      const accept =
+        typeof request.headers.accept === "string" ? request.headers.accept : "";
+      if (accept.includes("text/html")) {
+        response
+          .writeHead(200, {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+          })
+          .end(waitlistPage());
+        return;
+      }
+      // The same answer either way. Telling a stranger which addresses are
+      // already on the list would make this endpoint a way to test them.
+      this.sendJson(response, 200, { status: "joined", added });
       return;
     }
 
@@ -20907,6 +20997,46 @@ export class ApiGateway {
       chunks.push(buffer);
     }
     return Buffer.concat(chunks);
+  }
+
+  /**
+   * The submitted address, from JSON or from an ordinary form post.
+   *
+   * The body limit and the streaming read are `readJson`'s, deliberately: a
+   * public unauthenticated endpoint is exactly where an unbounded read would
+   * matter, and there is no reason for this one to have its own.
+   */
+  private async readWaitlistField(
+    request: IncomingMessage,
+  ): Promise<unknown> {
+    const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
+    if (contentType === "application/x-www-form-urlencoded") {
+      const text = await this.readBodyText(request);
+      return new URLSearchParams(text).get("email") ?? undefined;
+    }
+    return objectBody(await this.readJson(request))["email"];
+  }
+
+  /** The raw body, bounded the way `readJson` bounds it. */
+  private async readBodyText(request: IncomingMessage): Promise<string> {
+    const declared = Number.parseInt(
+      request.headers["content-length"] ?? "0",
+      10,
+    );
+    if (Number.isFinite(declared) && declared > this.bodyLimit) {
+      throw new HttpError(413, "body_too_large", "Request body is too large");
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > this.bodyLimit) {
+        throw new HttpError(413, "body_too_large", "Request body is too large");
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks).toString("utf8");
   }
 
   private async readJson(request: IncomingMessage): Promise<unknown> {
