@@ -325,7 +325,7 @@ function textNodeOf(el) {
  * line is done. The full text came from the HTML and goes back to the HTML:
  * an undoer restores it, and a disarm mid-type completes instantly.
  */
-function typeInto(p) {
+function typeInto(p, tick = 18) {
   const node = textNodeOf(p);
   if (node === undefined) {
     return later(400);
@@ -353,7 +353,7 @@ function typeInto(p) {
         caret.remove();
         resolve();
       }
-    }, 18);
+    }, tick);
     intervals.push(interval);
   });
 }
@@ -714,6 +714,12 @@ function wire() {
  * undoer or was hidden in the markup to begin with.
  */
 function channelStory(animate, inView) {
+  // The replay's clock. 1 is the pace the demo was written at; below it,
+  // everything — typing, entrances, the waits between beats, the hold —
+  // stretches by the same factor, so slowing down never changes the rhythm,
+  // only the tempo.
+  const PACE = 0.8;
+  const slow = (ms) => ms / PACE;
   const shot = document.querySelector(".app-shot");
   if (shot === null) {
     return;
@@ -789,17 +795,27 @@ function channelStory(animate, inView) {
       if (disarmed) {
         return;
       }
-      await later(4600);
+      await later(slow(4600));
       if (disarmed) {
         return;
       }
-      animate(feed, { opacity: [1, 0] }, { duration: 0.45, ease: "easeOut" });
-      await later(500);
+      // The thread panel lives outside the feed, so the loop's fade has to
+      // carry it too — reset() alone would snap it off mid-frame.
+      const panel = shot.querySelector(".shot-thread");
+      if (panel !== null) {
+        animate(
+          panel,
+          { opacity: [1, 0] },
+          { duration: 0.45 / PACE, ease: "easeOut" },
+        );
+      }
+      animate(feed, { opacity: [1, 0] }, { duration: 0.45 / PACE, ease: "easeOut" });
+      await later(slow(500));
       if (disarmed) {
         return;
       }
       reset();
-      animate(feed, { opacity: [0, 1] }, { duration: 0.3, ease: "easeOut" });
+      animate(feed, { opacity: [0, 1] }, { duration: 0.3 / PACE, ease: "easeOut" });
       while (!onScreen && !disarmed) {
         await later(700);
       }
@@ -815,7 +831,11 @@ function channelStory(animate, inView) {
         return;
       }
       if (el.dataset.clearsTyping !== undefined && typing !== null) {
-        animate(typing, { opacity: [1, 0] }, { duration: 0.3, ease: "easeOut" });
+        animate(
+          typing,
+          { opacity: [1, 0] },
+          { duration: 0.3 / PACE, ease: "easeOut" },
+        );
       }
       // One step can settle several chips at once — the channel's and the
       // thread panel's copy of the same agent going quiet together.
@@ -835,13 +855,13 @@ function channelStory(animate, inView) {
               opacity: [0, 1],
               transform: ["translateY(10px)", "translateY(0px)"],
             },
-        { duration: card ? 0.5 : 0.4, ease: EASE },
+        { duration: (card ? 0.5 : 0.4) / PACE, ease: EASE },
       );
       if (el.dataset.type !== undefined) {
-        await typeInto(el.querySelector(".m-text"));
-        await later(260);
+        await typeInto(el.querySelector(".m-text"), slow(18));
+        await later(slow(260));
       } else {
-        await later(card ? 1100 : 640);
+        await later(slow(card ? 1100 : 640));
       }
     }
   }
