@@ -21,8 +21,8 @@
         place-items: center;
         padding: 28px;
         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-        background: #0b0d12;
-        color: #e6e8ee;
+        background: #121110;
+        color: #efe9e1;
       }
       main {
         width: 100%;
@@ -30,44 +30,54 @@
         display: grid;
         gap: 14px;
       }
+      /* Inline rather than a file: this window opens before any server is
+         known, so the only artwork it can reach is artwork it already holds. */
+      .mark {
+        width: 46px;
+        height: 46px;
+        justify-self: center;
+        color: #D88973;
+      }
       h1 {
         margin: 0;
         font-size: 19px;
         letter-spacing: -0.02em;
+        text-align: center;
       }
       p {
         margin: 0;
         font-size: 13px;
         line-height: 1.5;
-        color: #9aa3b2;
+        color: #a29a90;
+        text-align: center;
       }
       label {
         display: grid;
         gap: 6px;
         font-size: 12.5px;
-        color: #9aa3b2;
+        color: #a29a90;
       }
       input {
         width: 100%;
         padding: 10px 12px;
         font: inherit;
         font-size: 14px;
-        color: #e6e8ee;
-        background: #12151d;
-        border: 1px solid #262b36;
+        color: #efe9e1;
+        background: #1b1917;
+        border: 1px solid #322e2a;
         border-radius: 10px;
       }
       input:focus {
         outline: none;
-        border-color: #4c7dfd;
+        border-color: #D88973;
       }
       button {
         padding: 10px 14px;
         font: inherit;
         font-size: 14px;
         font-weight: 550;
-        color: #ffffff;
-        background: #3f6ef0;
+        color: #141312;
+        background: #D88973;
         border: 0;
         border-radius: 10px;
         cursor: pointer;
@@ -78,16 +88,27 @@
       }
       #status {
         min-height: 18px;
+        text-align: center;
         font-size: 12.5px;
-        color: #f0968c;
+        color: #e8907f;
       }
       #status.working {
-        color: #9aa3b2;
+        color: #a29a90;
       }
     </style>
   </head>
   <body>
     <main>
+      <svg class="mark" viewBox="0 0 64 64" fill="none" stroke="currentColor"
+        stroke-width="3.52" stroke-linecap="round" stroke-linejoin="round"
+        aria-hidden="true">
+        <path d="M29.92 9.08A4.16 4.16 0 0 1 34.08 9.08L50.92 18.8A4.16 4.16 0 0 1 53 22.4L53 41.6A4.16 4.16 0 0 1 50.92 45.2L34.08 54.92A4.16 4.16 0 0 1 29.92 54.92L13.08 45.2A4.16 4.16 0 0 1 11 41.6L11 22.4A4.16 4.16 0 0 1 13.08 18.8Z"/>
+        <path d="M12.25 20.72L32 32.12L51.75 20.72"/>
+        <path d="M32 32.12L32 54.68"/>
+        <path d="M24.16 19.07L30.39 15.47"/>
+        <path d="M17.3 28.6L17.3 35.8"/>
+        <path d="M39.38 45.13L45.62 41.53"/>
+      </svg>
       <h1>Connect to Kumi</h1>
       <p>
         The address of your deployment. This app is a window onto it — the
