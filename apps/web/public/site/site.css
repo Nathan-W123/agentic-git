@@ -259,6 +259,17 @@ main,
   padding-top: 124px;
 }
 
+/* Two sections that are really one argument: the constellation states the
+   problem and the next heading answers it, so they are set a paragraph
+   apart rather than a section apart. */
+#room {
+  padding-bottom: 34px;
+}
+
+.section-close {
+  padding-top: 62px;
+}
+
 /* --------------------------------------------------------------- typography */
 
 h1,
@@ -643,7 +654,7 @@ strong {
   color: var(--faint);
 }
 
-/* Five speakers share one row; the ticker's own attribute says which of
+/* Four speakers share one row; the ticker's own attribute says which of
    them is talking. */
 .w-mark {
   display: none;
@@ -656,15 +667,13 @@ strong {
 }
 
 .ticker[data-who="ethan"] .w-ethan,
-.ticker[data-who="nathan"] .w-nathan,
 .ticker[data-who="rhea"] .w-rhea,
 .ticker[data-who="hera"] .w-hera,
 .ticker[data-who="coord"] .w-coord {
   display: grid;
 }
 
-.w-ethan,
-.w-nathan {
+.w-ethan {
   border-radius: 50%;
   background: var(--salmon);
   color: var(--accent-ink);
@@ -731,8 +740,14 @@ strong {
   color: var(--muted);
 }
 
-/* The lockup is one object: the mark never wraps away from the word. */
+/* The lockup is one object: the mark never wraps away from the word.
+ *
+ * What the page centres is the name, not the pair. The negative margin is
+ * exactly the mark's own footprint — its width plus the gap after it — so
+ * the mark contributes nothing to the line's measured width and hangs off
+ * the left of a KUMI that sits on the page's own axis. */
 .hero-name .w {
+  margin-left: -0.94em;
   white-space: nowrap;
 }
 
@@ -770,6 +785,11 @@ strong {
   .hero-name .mark {
     width: 0;
     margin-right: 0;
+  }
+
+  /* No mark to hang, so nothing to hang it by. */
+  .hero-name .w {
+    margin-left: 0;
   }
 }
 
@@ -839,20 +859,10 @@ strong {
   justify-items: start;
 }
 
-.section-head.centred {
+/* Nothing sits beside these heads any more, so the second column would
+   only be dead air the heading is pushed left of. */
+.section-head {
   grid-template-columns: minmax(0, 1fr);
-  justify-items: center;
-  text-align: center;
-}
-
-.section-head.centred .section-title {
-  justify-items: center;
-}
-
-/* The claim, then the first thing that backs it — read as a pair rather
-   than as two sections that happen to follow each other. */
-.section-head.agents-sub {
-  margin-top: 54px;
 }
 
 
@@ -968,19 +978,17 @@ strong {
 
 /* ------------------------------------------------------------ manifesto -- */
 
-/* One measure, centred, set larger than body copy and looser than it: this
-   is the only place on the page that asks to be read rather than scanned.
-   The closing claim is the one thing in it at full strength. */
+/* One measure, ranged left under its heading and set larger than body copy
+   and looser than it: this is the only place on the page that asks to be
+   read rather than scanned. */
 
 .manifesto {
   max-width: 84ch;
-  margin-inline: auto;
   margin-top: 32px;
   margin-bottom: 88px;
   font-size: clamp(18px, 1.55vw, 22px);
   line-height: 1.72;
   color: var(--muted);
-  text-align: center;
   text-wrap: pretty;
 }
 
@@ -1107,7 +1115,7 @@ strong {
  */
 
 .sky-fig {
-  max-width: 880px;
+  max-width: min(1120px, 100%);
   margin-inline: auto;
 }
 
@@ -1166,9 +1174,9 @@ strong {
 .sky-say {
   display: grid;
   justify-items: center;
-  margin-top: 26px;
+  margin-top: 34px;
   padding-inline: 12px;
-  font-size: 17px;
+  font-size: clamp(18px, 1.5vw, 22px);
   line-height: 1.5;
   text-align: center;
   color: var(--muted);
@@ -1265,7 +1273,7 @@ strong {
   }
 
   .sky-say {
-    font-size: 15px;
+    font-size: 16px;
   }
 }
 
@@ -2273,8 +2281,7 @@ strong {
 }
 
 @media (max-width: 900px) {
-  .hero-grid,
-  .section-head {
+  .hero-grid {
     grid-template-columns: 1fr;
   }
 

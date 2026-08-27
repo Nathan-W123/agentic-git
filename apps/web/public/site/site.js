@@ -241,10 +241,12 @@ function gate() {
  * Measured against the top of the last section rather than the whole
  * document, so the final form is fully assembled while it is still on screen
  * — running the morph to the very bottom of the page would finish it under
- * the footer, where nobody is looking.
+ * the footer, where nobody is looking. The section is found by position
+ * rather than by name so that reordering the page cannot silently retarget
+ * the camera at a section in the middle of it.
  */
 function progress() {
-  const end = document.querySelector("#demo");
+  const end = document.querySelector("main > section:last-of-type");
   const last =
     end === null
       ? document.body.scrollHeight - window.innerHeight
@@ -744,12 +746,6 @@ function heroTicker() {
       name: "Rhea",
       kind: "agent",
       text: "done. promo codes trimmed, checkout.ts is free.",
-    },
-    {
-      who: "nathan",
-      name: "Nathan",
-      kind: "person",
-      text: "shipping tonight.",
     },
   ];
 
