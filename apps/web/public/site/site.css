@@ -16,7 +16,7 @@
  *
  * Motion lives in three layers. The point field behind the page is field.js
  * and WebGL, and is simply absent where either is unavailable. Everything
- * continuous (marquee, shimmer) is CSS and dies under
+ * continuous (the belt, the sky, the water's captions) is CSS and dies under
  * `prefers-reduced-motion: reduce` below. Everything discrete (reveals,
  * springs) is site.js, which never wires itself when reduced motion is asked
  * for — and the hidden starting states for reveals are armed only by
@@ -79,16 +79,6 @@
   --radius-pill: 999px;
   --shadow-card: 0 1px 0 rgb(255 255 255 / 3%), 0 18px 44px rgb(0 0 0 / 34%);
   --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
-  /* The sweep that crosses the headline. Declared once because two things
-     wear it: the word, which clips it to its letters, and the mark beside
-     it, which masks it to the cube. */
-  --sheen: linear-gradient(
-    100deg,
-    var(--text) 18%,
-    var(--salmon) 38%,
-    var(--lavender) 52%,
-    var(--text) 74%
-  );
   --display: "Bricolage Grotesque Variable", "Inter Variable", -apple-system,
     BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   --font: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -369,37 +359,6 @@ strong {
   text-wrap: pretty;
 }
 
-/*
- * The one continuous animation in the type.
- *
- * A slow sweep across two words of the headline rather than the whole of it:
- * a shimmer over every word reads as a loading state, over two it reads as
- * emphasis.
- */
-.shimmer {
-  background: var(--sheen);
-  background-size: 260% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .shimmer {
-    animation: sweep 7s var(--ease-motion) infinite;
-  }
-}
-
-@keyframes sweep {
-  0%,
-  100% {
-    background-position: 130% 50%;
-  }
-  50% {
-    background-position: -30% 50%;
-  }
-}
-
 /* ------------------------------------------------------------------ nav -- */
 
 .site-nav {
@@ -429,18 +388,19 @@ strong {
   gap: 24px;
 }
 
+/* The mark alone, and white. The artwork is a flat salmon silhouette with
+   an alpha channel, so knocking it to black and inverting paints every
+   opaque pixel white and leaves the shape exactly as drawn — and a browser
+   that somehow refused the filter would still show a legible logo rather
+   than nothing, which is why this is a filtered <img> and not a mask. */
 .nav-brand {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-family: var(--display);
-  font-variation-settings: "wght" 600, "wdth" 84;
-  font-size: 18px;
-  letter-spacing: -0.02em;
 }
 
 .nav-brand img {
   flex: none;
+  filter: brightness(0) invert(1);
 }
 
 .nav-links {
@@ -779,57 +739,10 @@ strong {
   color: var(--muted);
 }
 
-/* The lockup is one object: the mark never wraps away from the word.
- *
- * What the page centres is the name, not the pair. The negative margin is
- * exactly the mark's own footprint — its width plus the gap after it — so
- * the mark contributes nothing to the line's measured width and hangs off
- * the left of a KUMI that sits on the page's own axis. */
+/* The name is one object, and the only thing on its line, so it centres on
+   the page's own axis with nothing to compensate for. */
 .hero-name .w {
-  margin-left: -0.94em;
   white-space: nowrap;
-}
-
-/*
- * The mark before the name, painted rather than drawn: the artwork is a mask,
- * and what shows through it is the headline's own sheen — same gradient, same
- * sweep, same clock — so the cube and the letters are lit by one light. It is
- * also a `.w > span`, which is what makes it rise out of the line box with the
- * word rather than after it.
- */
-.hero-name .mark {
-  display: inline-block;
-  width: 0.84em;
-  height: 0.84em;
-  margin-right: 0.1em;
-  vertical-align: -0.084em;
-  background: var(--sheen);
-  background-size: 260% 100%;
-  -webkit-mask: url(kumi-mark.png) center / contain no-repeat;
-  mask: url(kumi-mark.png) center / contain no-repeat;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .hero-name .mark {
-    animation: sweep 7s var(--ease-motion) infinite;
-  }
-}
-
-/* Without masking there is no cube to paint, and a filled gradient square is
-   worse than no mark at all. Width is the lever rather than `display`, because
-   the motion gate sets that on every word in the line. */
-@supports not (
-  (mask-image: url(kumi-mark.png)) or (-webkit-mask-image: url(kumi-mark.png))
-) {
-  .hero-name .mark {
-    width: 0;
-    margin-right: 0;
-  }
-
-  /* No mark to hang, so nothing to hang it by. */
-  .hero-name .w {
-    margin-left: 0;
-  }
 }
 
 .hero-aside {
@@ -2704,16 +2617,6 @@ html.anim .claim p {
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
-  }
-
-  .shimmer {
-    animation: none;
-    background: none;
-    color: var(--text);
-  }
-
-  .hero-name .mark {
-    background: var(--salmon);
   }
 
   html.anim .reveal,

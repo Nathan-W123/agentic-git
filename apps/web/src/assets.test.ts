@@ -7186,10 +7186,49 @@ test("marketing motion is an enhancement behind the reduced-motion gate", async 
   // Hidden starting states are all scoped to the armed class...
   assert.match(css, /html\.anim \.reveal \{/u);
   assert.doesNotMatch(css, /(?<!html\.anim )\.reveal \{/u);
-  // ...and the CSS-only animations die under the media kill switch.
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*animation: none/u,
+  // ...and every CSS-only animation is declared inside the motion gate.
+  //
+  // This used to look for a single `animation: none` inside the reduce
+  // block, which one opt-out anywhere in the file satisfied — it could not
+  // have caught an ungated animation added next to it. The site states the
+  // rule the other way round now: an animation is only ever declared under
+  // `no-preference`, so a reader who asked for stillness never has one to
+  // turn off. Checked exhaustively, because the point is that there is no
+  // exception rather than that there is an example.
+  const openBlocks: string[] = [];
+  const ungated: string[] = [];
+  let prelude = "";
+  let line = 1;
+  for (const character of css.replaceAll(/\/\*[\s\S]*?\*\//gu, " ")) {
+    if (character === "\n") {
+      line += 1;
+      prelude += " ";
+    } else if (character === "{") {
+      openBlocks.push(prelude.trim());
+      prelude = "";
+    } else if (character === "}") {
+      openBlocks.pop();
+      prelude = "";
+    } else if (character === ";") {
+      const declaration = prelude.trim();
+      // `animation: none` disables rather than animates, so it is allowed
+      // anywhere — it is how the fork antidote unrenders a stray button.
+      if (
+        /^animation(-name)?\s*:/u.test(declaration) &&
+        !/:\s*none/u.test(declaration) &&
+        !openBlocks.some((block) => block.includes("no-preference"))
+      ) {
+        ungated.push(`${String(line)}: ${declaration}`);
+      }
+      prelude = "";
+    } else {
+      prelude += character;
+    }
+  }
+  assert.deepEqual(
+    ungated,
+    [],
+    `site.css animates outside the reduced-motion gate:\n  ${ungated.join("\n  ")}`,
   );
 
   // Both pages load the gate before the library and the module.
