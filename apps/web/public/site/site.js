@@ -62,6 +62,7 @@ function later(ms) {
 function disarm() {
   disarmed = true;
   document.documentElement.classList.remove("anim");
+  document.documentElement.classList.remove("field-live");
   for (const timer of timers) {
     clearTimeout(timer);
   }
@@ -77,34 +78,42 @@ function disarm() {
   }
 }
 
-if (reduceMotion.matches || motion === undefined) {
+if (reduceMotion.matches) {
   disarm();
 } else {
-  // The `anim` class is added HERE, by the file that will animate what it
-  // hides — never by the boot script, and never on the promise that some
-  // other file will follow through. A 404 anywhere in this module's graph
-  // means this line never runs and nothing was ever hidden; the page simply
-  // appears, complete and unanimated. That invariant is the fix for a blank
-  // page that shipped twice, and it is load-bearing: do not move the arming
-  // anywhere earlier than the module that owns the animations.
-  document.documentElement.classList.add("anim");
   // A preference flipped mid-visit is honoured immediately: the CSS block in
   // site.css stops the continuous animations, dropping the class shows
   // anything still waiting on a scroll reveal, the undoers restore any text
-  // an effect was mid-way through, and the field stops drawing.
+  // an effect was mid-way through, and the water stops drawing.
   reduceMotion.addEventListener("change", () => {
     if (reduceMotion.matches) {
       disarm();
     }
   });
-  // A throw anywhere in wiring forfeits the animations, never the content:
-  // disarm() shows everything the boot script hid and undoes any staging
-  // that happened before the throw.
-  try {
-    wire();
-  } catch {
-    disarm();
+  if (motion !== undefined) {
+    // The `anim` class is added HERE, by the file that will animate what it
+    // hides — never by the boot script, and never on the promise that some
+    // other file will follow through. A 404 anywhere in this module's graph
+    // means this line never runs and nothing was ever hidden; the page
+    // simply appears, complete and unanimated. That invariant is the fix
+    // for a blank page that shipped twice, and it is load-bearing: do not
+    // move the arming anywhere earlier than the module that owns the
+    // animations.
+    document.documentElement.classList.add("anim");
+    // A throw anywhere in wiring forfeits the animations, never the
+    // content: disarm() shows everything again and undoes any staging that
+    // happened before the throw.
+    try {
+      wire();
+    } catch {
+      disarm();
+    }
   }
+  // The water is raw WebGL and needs no library, so it starts whether or
+  // not the Motion bundle arrived — a checkout that lost one vendor file
+  // costs the reveals and springs, never the background. It shipped
+  // coupled once, and a page with a working GPU sat still because a
+  // different file 404ed.
   field();
 }
 
@@ -163,6 +172,11 @@ function field() {
   }
   try {
     stopField = startField(canvas, { progress, shift });
+    if (stopField !== undefined) {
+      // Tells the stylesheet the real water is running, so the CSS-only
+      // swell that stands in for it on machines without WebGL steps aside.
+      document.documentElement.classList.add("field-live");
+    }
   } catch {
     // A shader that would not compile, or a context lost on creation. The
     // stylesheet's gradient is already behind the canvas and is a complete

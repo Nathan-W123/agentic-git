@@ -160,17 +160,49 @@ a {
 }
 
 .field {
-  background:
+  background-image:
     radial-gradient(
-      62% 48% at 50% 40%,
+      closest-side,
       color-mix(in srgb, var(--field-warm) 13%, transparent) 0%,
-      transparent 70%
+      transparent 100%
     ),
     radial-gradient(
-      40% 34% at 50% 62%,
+      closest-side,
       color-mix(in srgb, var(--field-cool) 11%, transparent) 0%,
-      transparent 72%
+      transparent 100%
     );
+  background-repeat: no-repeat;
+  background-position: 50% 30%, 50% 68%;
+  background-size: 130% 110%, 96% 76%;
+}
+
+/*
+ * Water even where WebGL is not: the gradients breathe, slowly, like swell
+ * under a hull. Runs only while the real water is NOT drawing — site.js
+ * adds `field-live` the moment the WebGL surface starts — and never under
+ * reduced motion. So every visitor gets a background that is alive: the
+ * full rain-to-glass surface where the GPU allows it, this slow breathing
+ * where it does not, and stillness where stillness was asked for.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  html:not(.field-live) .field {
+    animation: field-swell 16s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes field-swell {
+  0% {
+    background-position: 47% 28%, 52% 66%;
+    background-size: 128% 106%, 92% 72%;
+  }
+  50% {
+    background-position: 52% 33%, 47% 70%;
+    background-size: 142% 118%, 104% 84%;
+  }
+  100% {
+    background-position: 49% 30%, 51% 64%;
+    background-size: 132% 110%, 96% 78%;
+  }
 }
 
 .field-veil {
