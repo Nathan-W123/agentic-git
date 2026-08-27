@@ -72,6 +72,18 @@ const SITE_FILES = [
   ["site.css", "/site.css", "text/css; charset=utf-8"],
   ["site.js", "/site.js", "text/javascript; charset=utf-8"],
   ["site-boot.js", "/site-boot.js", "text/javascript; charset=utf-8"],
+  ["field.js", "/field.js", "text/javascript; charset=utf-8"],
+  // Self-hosted because the CSP is `font-src 'self'`: a Google Fonts link is
+  // not refused loudly, it simply never loads, and the page falls back to
+  // whatever sans the visitor's system has — which is not the design. Latin
+  // subsets of three variable faces, OFL, notice served beside them. Flat on
+  // disk because `loadStaticAssets` refuses a site file outside the site
+  // directory; the nesting is in the address, which is all the stylesheet's
+  // relative `url()` needs.
+  ["bricolage-grotesque.woff2", "/fonts/bricolage-grotesque.woff2", "font/woff2"],
+  ["inter.woff2", "/fonts/inter.woff2", "font/woff2"],
+  ["jetbrains-mono.woff2", "/fonts/jetbrains-mono.woff2", "font/woff2"],
+  ["fonts.LICENSE.md", "/fonts/LICENSE.md", "text/plain; charset=utf-8"],
   ["motion.js", "/vendor/motion/motion.js", "text/javascript; charset=utf-8"],
   ["motion.LICENSE.md", "/vendor/motion/LICENSE.md", "text/plain; charset=utf-8"],
 ] as const;

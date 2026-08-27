@@ -6955,7 +6955,12 @@ test("the marketing site is served at its own addresses, beside the dashboard", 
     );
   }
   assert.equal(assets.get("/site.css")?.contentType, "text/css; charset=utf-8");
-  for (const script of ["/site.js", "/site-boot.js", "/vendor/motion/motion.js"]) {
+  for (const script of [
+    "/site.js",
+    "/site-boot.js",
+    "/field.js",
+    "/vendor/motion/motion.js",
+  ]) {
     assert.equal(
       assets.get(script)?.contentType,
       "text/javascript; charset=utf-8",
@@ -6966,6 +6971,10 @@ test("the marketing site is served at its own addresses, beside the dashboard", 
   const licence = assets.get("/vendor/motion/LICENSE.md")?.body.toString("utf8") ?? "";
   assert.match(licence, /The MIT License/u);
   assert.match(licence, /Motion\]\(https:\/\/motion\.dev\) B\.V\./u);
+
+  // OFL, same rule: the notice travels with the files.
+  const fonts = assets.get("/fonts/LICENSE.md")?.body.toString("utf8") ?? "";
+  assert.match(fonts, /SIL Open Font License/u);
 
   // The front page is the site; the dashboard document keeps `/index.html`,
   // which is what the gateway's extensionless fallback serves for `/app`.
@@ -7032,6 +7041,48 @@ test("the marketing front page forwards legacy deep links to /app", async () => 
   // installers); the preload's KUMI_SERVER global is the tell that sends them
   // to the dashboard.
   assert.match(boot, /window\.KUMI_SERVER/u);
+});
+
+test("the marketing type is served from this origin, not asked for", async () => {
+  /*
+   * The control plane sends `font-src 'self'`.
+   *
+   * A Google Fonts link is not refused loudly under that policy — the request
+   * is blocked, the @font-face never resolves, and the page renders in
+   * whatever sans the visitor's system happens to have. Which is the failure
+   * this whole file exists to catch elsewhere: it looks fine on the machine
+   * that built it, because that machine has the font installed.
+   *
+   * So the faces ship. Three of them, latin subsets, and the stylesheet must
+   * reach them by a relative URL for the same reason every page does — a
+   * stylesheet served through the preview proxy resolves `url()` against
+   * itself, and `/fonts/...` would fetch the deployment's copy instead.
+   */
+  const assets = await loadStaticAssets();
+  for (const face of ["bricolage-grotesque", "inter", "jetbrains-mono"]) {
+    const font = assets.get(`/fonts/${face}.woff2`);
+    assert.equal(font?.contentType, "font/woff2", `${face} should be served`);
+    const body = font?.body;
+    assert.ok(Buffer.isBuffer(body), `${face} should be served as bytes`);
+    // woff2's magic number, so a truncated or wrong-format file fails here
+    // rather than silently in a browser.
+    assert.equal(
+      body.subarray(0, 4).toString("latin1"),
+      "wOF2",
+      `${face} is not a woff2 file`,
+    );
+  }
+
+  const css = await siteFile("site.css");
+  assert.doesNotMatch(
+    css,
+    /@import|https:\/\/fonts\.googleapis\.com|https:\/\/fonts\.gstatic\.com/u,
+    "the stylesheet must not reach off-origin for type",
+  );
+  for (const face of ["bricolage-grotesque", "inter", "jetbrains-mono"]) {
+    assert.match(css, new RegExp(`url\\(fonts/${face}\\.woff2\\)`, "u"));
+  }
+  assert.doesNotMatch(css, /url\(\/fonts\//u, "font URLs must stay relative");
 });
 
 test("the marketing pages survive being served under a path prefix", async () => {
