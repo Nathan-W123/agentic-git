@@ -50,6 +50,7 @@ import {
   summariseChannelThread,
   summariseObjective,
   summariseThreadTitle,
+  textMentionsName,
   textOverlap,
   truncateToTokens,
   withRoleContext,
@@ -7145,6 +7146,135 @@ test("a reply in a person's thread does not summon an agent", async (t) => {
     before,
     "a human thread must not spend somebody's model usage",
   );
+});
+
+test("textMentionsName matches a name whatever its capitalisation", () => {
+  // The one rule every mention path matches by. A phone keyboard that
+  // capitalises the first word of a message, or a person who simply does not
+  // reach for shift, must not change who gets tasked.
+  assert.equal(textMentionsName("@keeper ship it", "Keeper"), true);
+  assert.equal(textMentionsName("@KEEPER ship it", "Keeper"), true);
+  assert.equal(textMentionsName("@kEePeR ship it", "Keeper"), true);
+  assert.equal(textMentionsName("hey @keeper, ship it", "KEEPER"), true);
+  // Case-insensitive is not the same as loose: a name still has to end where
+  // it ends, so a different agent is never picked up by accident.
+  assert.equal(textMentionsName("@keeperbot ship it", "Keeper"), false);
+  assert.equal(textMentionsName("@keep ship it", "Keeper"), false);
+  assert.equal(textMentionsName("keeper ship it", "Keeper"), false);
+});
+
+test("a lowercase @mention in a person-rooted thread reaches the named agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "lowercase-person-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (
+      await owner.request(`${base}/agents/anthropic`, {
+        method: "POST",
+        body: { name: "Keeper" },
+      })
+    ).status,
+    200,
+  );
+
+  runtime.chatAnswer.text = "On it — updating the retry helper.";
+  // A person's own message, naming nobody: this thread becomes an agent's
+  // only because the reply names one — which is the whole point of reading
+  // that name the way the person typed it.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: ownerId,
+    content: "Notes from standup.",
+  });
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    {
+      method: "POST",
+      body: {
+        content: "@keeper please update the retry helper in src/retry.ts",
+      },
+    },
+  );
+  assert.equal(replied.status, 201);
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "a lowercase mention in a person's thread reached nobody",
+  );
+  assert.equal(runtime.submittedTasks[0]?.vendor, "anthropic");
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /retry helper/u);
+});
+
+test("a lowercase @mention in a task thread reaches that agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "lowercase-task-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (
+      await owner.request(`${base}/agents/anthropic`, {
+        method: "POST",
+        body: { name: "Keeper" },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await owner.request(`${base}/agents/openai`, {
+        method: "POST",
+        body: { name: "Other" },
+      })
+    ).status,
+    200,
+  );
+
+  runtime.chatAnswer.text = "On it — updating the config loader.";
+  // Keeper's own thread. A reply naming nobody would go back to Keeper by
+  // construction, so naming @other in lowercase is the only way this reaches
+  // Other — and that is exactly what makes the casing observable here.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "Done — the retry helper now backs off.",
+  });
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    {
+      method: "POST",
+      body: { content: "@other now update the config loader the same way" },
+    },
+  );
+  assert.equal(replied.status, 201);
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "a lowercase mention in a task thread reached nobody",
+  );
+  assert.equal(
+    runtime.submittedTasks[0]?.vendor,
+    "openai",
+    "the lowercase mention must route to the agent it named, not the thread's own",
+  );
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /config loader/u);
 });
 
 test("a reply in an open thread continues the conversation, whoever it mentions", async (t) => {

@@ -2222,7 +2222,16 @@ type ChannelMessageMention =
   | { kind: "user"; id: string; name: string }
   | { kind: "agent"; id: string; name: string };
 
-function textMentionsName(content: string, name: string): boolean {
+/**
+ * Whether `content` names `name` with an "@", the way a reader means it —
+ * case-insensitively, and only where the name ends rather than merely starts
+ * (so "@Keep" does not match "@Keeper").
+ *
+ * Typing "@romeo" is the same act as typing "@Romeo"; a person tasking an
+ * agent from a phone keyboard should not have to fight autocapitalisation to
+ * be heard. This is the single rule every mention path matches by.
+ */
+export function textMentionsName(content: string, name: string): boolean {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`@${escaped}(?=$|[\\s,.:;!?()\\[\\]{}])`, "iu").test(content);
 }
@@ -14943,8 +14952,8 @@ export class ApiGateway {
       // Legacy tasks may not resolve against the current configured-agent
       // list. An explicit mention in their root remains an unambiguous
       // fallback.
-      const namedAtRoot = candidates.find(
-        (entry) => root.content.includes(`@${entry.name}`),
+      const namedAtRoot = candidates.find((entry) =>
+        textMentionsName(root.content, entry.name),
       );
       if (threadAuthorId === undefined && namedAtRoot !== undefined) {
         threadAuthorId = `${namedAtRoot.userId}:${namedAtRoot.provider}`;
@@ -14967,12 +14976,12 @@ export class ApiGateway {
       // agent's own thread is. Only a thread whose root named nobody is a
       // conversation between people, and stays one.
       const inReply = question.includes("@")
-        ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+        ? candidates.filter((entry) => textMentionsName(question, entry.name))
         : [];
       const inRoot =
         inReply.length === 0 && root.content.includes("@")
           ? candidates.filter((entry) =>
-              root.content.includes(`@${entry.name}`),
+              textMentionsName(root.content, entry.name),
             )
           : [];
       const named = (inReply.length > 0 ? inReply : inRoot).filter(
@@ -15072,7 +15081,7 @@ export class ApiGateway {
     // construction. That is the behaviour this method was written for and it
     // stays the default.
     const mentioned = question.includes("@")
-      ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+      ? candidates.filter((entry) => textMentionsName(question, entry.name))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
     const firstAnswering = answering[0];
