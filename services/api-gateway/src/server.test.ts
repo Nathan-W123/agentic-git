@@ -6343,26 +6343,23 @@ test("a finished task says what it did, not that the pipeline worked", () => {
         "Repointed six test imports at their new modules; collection passes.",
       files: ["a.py", "b.py"],
     }),
-    "Repointed six test imports at their new modules; collection passes. " +
-      "(a.py, b.py)",
+    "Repointed six test imports at their new modules; collection passes.",
   );
-  // Named while there are few enough to name: "(1 file changed)" says
-  // something landed without saying what, which is the one thing a reader
-  // cannot check against the repository in front of them.
-  assert.match(
+  // The changed-file block already names the files. The ending is only the
+  // agent's answer, regardless of how many changed files the task reports.
+  assert.equal(
     narrateTaskEvent("canonical_promoted", {
       agentExplanation: "Raised the retry ceiling to five.",
       files: ["retry.ts"],
-    }) ?? "",
-    /\(retry\.ts\)$/u,
+    }),
+    "Raised the retry ceiling to five.",
   );
-  // Past two, a count again — an ending that lists a dozen paths is not one.
-  assert.match(
+  assert.equal(
     narrateTaskEvent("canonical_promoted", {
       agentExplanation: "Split the module.",
       files: ["a.py", "b.py", "c.py"],
-    }) ?? "",
-    /\(3 files changed\)$/u,
+    }),
+    "Split the module.",
   );
   // No files recorded is not a reason to withhold the summary.
   assert.equal(
