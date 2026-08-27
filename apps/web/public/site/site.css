@@ -407,17 +407,14 @@ strong {
   filter: brightness(0) invert(1);
 }
 
-.nav-links {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-inline: auto;
-}
-
+/* `margin-left: auto` rather than a spacer: the middle group used to carry
+   the spring that held this against the right edge, and it went with the
+   links. */
 .nav-end {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 
 .nav-link {
@@ -619,23 +616,15 @@ strong {
 /*
  * The waitlist form.
  *
- * Two columns on a wide screen and one on a narrow, from the same auto-fit
- * the installer cards use, so the break happens when the fields stop fitting
- * rather than at a width guessed in advance. The note and the button span the
- * row, because a textarea in a half column is a scrollbar and a submit button
- * that moves with the layout is one nobody finds twice.
+ * One column, centred under a centred heading. It was two while there were
+ * six fields; four of them do not need the width, and a form ranged left
+ * under a centred title reads as though it belongs to a different page.
  */
 .join {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 22px 24px;
-  max-width: 760px;
-  margin-top: 44px;
-}
-
-.join-wide,
-.join-send {
-  grid-column: 1 / -1;
+  gap: 22px;
+  width: min(100%, 460px);
+  margin: 44px auto 0;
 }
 
 .join-field {
@@ -693,15 +682,16 @@ strong {
 }
 
 .join-send {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  margin-top: 4px;
 }
 
 /* Empty until there is something to say. */
 .join-say {
   font-size: 14px;
+  text-align: center;
   line-height: 1.5;
   color: var(--muted);
 }
@@ -2497,9 +2487,6 @@ strong {
     grid-template-columns: 1fr;
   }
 
-  .nav-links {
-    display: none;
-  }
 }
 
 @media (max-width: 720px) {

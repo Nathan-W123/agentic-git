@@ -25,10 +25,6 @@
         <a class="nav-brand" href=".">
           <img src="kumi-mark.png" alt="KUMI" width="26" height="26">
         </a>
-        <div class="nav-links">
-          <a class="nav-link" href="pricing">Pricing</a>
-          <a class="nav-link optional" href="download">Download</a>
-        </div>
         <div class="nav-end">
           <a class="nav-link" href="/app#signin">Sign in</a>
         </div>
@@ -52,11 +48,16 @@
     <main>
       <section class="section section-close">
         <div class="wrap">
-          <!-- A real form, posting on its own to the same origin. Everything
-               but the address is optional and says so, because a waitlist
-               that turns somebody away over their team size is a waitlist
-               with fewer people on it. site.js answers in place where it can;
-               without JavaScript the server answers with a page. -->
+          <!-- A real form, posting on its own to the same origin. Four
+               questions, and only the address is required: every one of the
+               others is somebody deciding whether to keep typing. site.js
+               answers in place where it can; without JavaScript the server
+               answers with a page.
+
+               The route still accepts a company and a team size, and the
+               columns are still there — they are nullable, and leaving the
+               back end able to take a field the form has stopped asking for
+               costs nothing and saves a migration if it comes back. -->
           <form class="join" method="post" action="/api/v1/waitlist">
             <div class="join-field">
               <label for="join-name">Your name</label>
@@ -64,25 +65,8 @@
             </div>
 
             <div class="join-field">
-              <label for="join-email">Work email <span class="join-need">required</span></label>
+              <label for="join-email">Email <span class="join-need">required</span></label>
               <input id="join-email" name="email" type="email" required autocomplete="email" maxlength="254">
-            </div>
-
-            <div class="join-field">
-              <label for="join-company">Company</label>
-              <input id="join-company" name="company" type="text" autocomplete="organization" maxlength="120">
-            </div>
-
-            <div class="join-field">
-              <label for="join-team">How many people build with you?</label>
-              <select id="join-team" name="teamSize">
-                <option value="">Rather not say</option>
-                <option>Just me</option>
-                <option>2 to 5</option>
-                <option>6 to 20</option>
-                <option>21 to 100</option>
-                <option>More than 100</option>
-              </select>
             </div>
 
             <div class="join-field">
@@ -90,7 +74,7 @@
               <input id="join-agents" name="agents" type="text" maxlength="200" placeholder="Claude, Codex, Cursor...">
             </div>
 
-            <div class="join-field join-wide">
+            <div class="join-field">
               <label for="join-note">What would you point KUMI at first?</label>
               <textarea id="join-note" name="note" rows="4" maxlength="1000"></textarea>
             </div>
