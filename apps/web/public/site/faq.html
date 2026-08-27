@@ -49,17 +49,21 @@
               who touches what, and carries context between them.</p>
 
             <h2>Which agents does it run?</h2>
-            <p>Claude, Codex, Gemini, Cursor, Copilot and Kiro have adapters
-              today, and there is a generic JSONL protocol for anything else
-              that can speak it. You sign in with the accounts and
-              subscriptions you already pay for.</p>
+            <p>Claude, Codex and Cursor are the ones we have verified end to
+              end, and they are the three named on the front page for that
+              reason. Adapters are written for Gemini, Copilot and Kiro, and
+              there is a generic JSONL protocol for anything else that can
+              speak it, but we are not claiming those until they have been
+              run properly. You sign in with the accounts and subscriptions
+              you already pay for.</p>
 
             <h2>Where does my code live?</h2>
-            <p>With the deployment. KUMI keeps one copy of the repository on
-              the machine it runs on, and agents never edit that copy: each
-              works in an isolated git worktree of its own. Underneath it is
-              ordinary Git, so every change that lands is a real commit in a
-              real repository.</p>
+            <p>On our servers, while KUMI is hosted. The repository sits with
+              the deployment that runs it, and today that deployment is ours
+              rather than yours. There is one copy of it, not one per agent,
+              and no agent edits it directly: each works in an isolated git
+              worktree of its own. Underneath it is ordinary Git, so every
+              change that lands is a real commit in a real repository.</p>
 
             <h2>Does it push to my GitHub?</h2>
             <p>Only when you ask. Import is a clone. The one path back out is
@@ -80,15 +84,11 @@
             <h2>Is it open yet?</h2>
             <p>Not yet. The waitlist is how you hear when it is.</p>
 
-            <h2>What will it cost?</h2>
-            <p>The plan is one price per seat, and a seat is a person who can
-              start work. People who only watch do not count, and agents are
-              not seats.</p>
-
             <h2>Can I run it myself?</h2>
-            <p>That is the intended shape: one control plane you run, with
-              workers able to execute on other machines. Hosting is not open
-              yet either.</p>
+            <p>Not yet, and it is the thing we most want to offer. KUMI is
+              built as one control plane with workers that can execute on
+              other machines, which is the shape a self-hosted or on-premises
+              deployment needs. Today it only runs on ours.</p>
           </div>
         </div>
       </section>
