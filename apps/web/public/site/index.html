@@ -48,6 +48,9 @@
           <a class="btn btn-primary btn-small" href="/app#signup">Start free trial</a>
         </div>
       </div>
+      <!-- The scroll's own position, drawn on the nav's bottom edge by
+           site.js. Inert without JavaScript: scaleX(0) is invisible. -->
+      <span class="nav-progress" aria-hidden="true"></span>
     </nav>
 
     <header class="hero">
@@ -206,6 +209,38 @@
               </p>
             </article>
           </div>
+
+          <!-- Partial admission, drawn as what it does to two plans' files
+               over time. site.js plays it while it is on screen; without
+               JavaScript this is a still diagram of the final state and the
+               status line below is its caption. -->
+          <figure class="admission reveal" data-admission
+            aria-label="Two plans over one repository: plan B is granted auth.ts immediately, and webhooks.ts the moment plan A releases it">
+            <div class="adm-lane">
+              <span class="adm-plan"><i class="adm-dot a"></i>plan A — claude</span>
+              <span class="adm-tray claim" data-adm-tray="a"></span>
+              <span class="adm-commit a" data-adm-commit="a">✓ promoted 41c9f2e</span>
+            </div>
+            <div class="adm-lane">
+              <span class="adm-plan">repository</span>
+              <span class="adm-tray" data-adm-tray="repo">
+                <span class="adm-pill" data-adm-file="auth.ts">auth.ts</span>
+                <span class="adm-pill" data-adm-file="retry.ts">retry.ts</span>
+                <span class="adm-pill" data-adm-file="webhooks.ts">webhooks.ts</span>
+                <span class="adm-pill" data-adm-file="queue.ts">queue.ts</span>
+              </span>
+            </div>
+            <div class="adm-lane">
+              <span class="adm-plan"><i class="adm-dot b"></i>plan B — codex</span>
+              <span class="adm-tray claim" data-adm-tray="b">
+                <span class="adm-held" data-adm-held>webhooks.ts — held</span>
+              </span>
+              <span class="adm-commit b" data-adm-commit="b">✓ promoted 8f31d2c</span>
+            </div>
+            <p class="adm-status" data-adm-status>plan B was granted auth.ts
+              immediately, and webhooks.ts the moment plan A released it —
+              the second agent never waited for work it did not share.</p>
+          </figure>
         </div>
       </section>
 

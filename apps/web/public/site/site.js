@@ -12,6 +12,12 @@
  * be left waiting for a reveal that will never come. The page reads
  * perfectly with this file absent; everything below is decoration.
  *
+ * Some effects here restyle real content — they empty a paragraph to retype
+ * it, split a heading into word spans, zero a price to count it up. Every
+ * one of those registers an undoer, and disarm() runs them all, so a motion
+ * preference flipped mid-visit restores the page to exactly what the HTML
+ * says rather than leaving it half-played.
+ *
  * The point field is the one thing here that is not decoration, and it is
  * also the one thing that can fail on its own — no WebGL, a driver that
  * refuses, a shader that will not compile on some phone. It is therefore
@@ -26,9 +32,43 @@ const motion = window.Motion;
 const EASE = [0.32, 0.72, 0, 1];
 
 let stopField;
+let disarmed = false;
+
+/** What wire() changed and started, so disarm() can put all of it back. */
+const undoers = [];
+const timers = [];
+const intervals = [];
+
+function stage(el, style) {
+  const names = Object.keys(style);
+  for (const name of names) {
+    el.style[name] = style[name];
+  }
+  undoers.push(() => {
+    for (const name of names) {
+      el.style[name] = "";
+    }
+  });
+}
+
+function later(ms) {
+  return new Promise((resolve) => {
+    timers.push(setTimeout(resolve, ms));
+  });
+}
 
 function disarm() {
+  disarmed = true;
   document.documentElement.classList.remove("anim");
+  for (const timer of timers) {
+    clearTimeout(timer);
+  }
+  for (const interval of intervals) {
+    clearInterval(interval);
+  }
+  for (const undo of undoers) {
+    undo();
+  }
   if (stopField !== undefined) {
     stopField();
     stopField = undefined;
@@ -40,7 +80,8 @@ if (reduceMotion.matches || motion === undefined) {
 } else {
   // A preference flipped mid-visit is honoured immediately: the CSS block in
   // site.css stops the continuous animations, dropping the class shows
-  // anything still waiting on a scroll reveal, and the field stops drawing.
+  // anything still waiting on a scroll reveal, the undoers restore any text
+  // an effect was mid-way through, and the field stops drawing.
   reduceMotion.addEventListener("change", () => {
     if (reduceMotion.matches) {
       disarm();
@@ -73,14 +114,9 @@ function progress() {
 /**
  * Where the form should sit on screen, section by section.
  *
- * The copy is not centred — the hero splits left and right, "how it works"
- * is a left column, and the last section puts a wide card on the right. A
- * form fixed at the middle of the viewport would be behind the text in two
- * of those four, so it steps aside instead, and the step is slow enough to
- * read as the field making room rather than as a jump.
- *
  * Keyed to the same scroll progress that drives the morph, so the two never
- * disagree about which section is being read.
+ * disagree about which section is being read, and eased between stops so the
+ * field reads as making room rather than jumping.
  */
 const SHIFTS = [
   [0.0, [0.0, 0.0]],
@@ -96,8 +132,6 @@ function shift() {
     const [start, from] = SHIFTS[i - 1];
     if (p <= end || i === SHIFTS.length - 1) {
       const t = Math.max(0, Math.min(1, (p - start) / (end - start)));
-      // Smoothstep rather than linear: the field should ease out of one
-      // position and into the next, not slide at a constant rate.
       const e = t * t * (3 - 2 * t);
       return [from[0] + (to[0] - from[0]) * e, from[1] + (to[1] - from[1]) * e];
     }
@@ -121,10 +155,147 @@ function field() {
   }
 }
 
+/* ------------------------------------------------------------- helpers -- */
+
+/** The last text node with content in an element — the part worth typing. */
+function textNodeOf(el) {
+  return [...el.childNodes]
+    .reverse()
+    .find(
+      (node) =>
+        node.nodeType === Node.TEXT_NODE && node.textContent.trim().length > 0,
+    );
+}
+
+/**
+ * Retypes one line character by character, with a caret that leaves when the
+ * line is done. The full text came from the HTML and goes back to the HTML:
+ * an undoer restores it, and a disarm mid-type completes instantly.
+ */
+function typeInto(p) {
+  const node = textNodeOf(p);
+  if (node === undefined) {
+    return later(400);
+  }
+  const full = node.textContent;
+  undoers.push(() => {
+    node.textContent = full;
+  });
+  node.textContent = "";
+  const caret = document.createElement("span");
+  caret.className = "caret";
+  caret.setAttribute("aria-hidden", "true");
+  p.append(caret);
+  undoers.push(() => {
+    caret.remove();
+  });
+  return new Promise((resolve) => {
+    let shown = 0;
+    const interval = setInterval(() => {
+      shown += 2;
+      node.textContent = full.slice(0, shown);
+      if (disarmed || shown >= full.length) {
+        clearInterval(interval);
+        node.textContent = full;
+        caret.remove();
+        resolve();
+      }
+    }, 18);
+    intervals.push(interval);
+  });
+}
+
+/* ---------------------------------------------------------------- wire -- */
+
 function wire() {
   const { animate, inView, stagger, hover, press } = motion;
   const fine =
     window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+  // -- Section headings: split into words that arrive out of a blur, each a
+  //    beat behind its neighbour. Split here rather than in the HTML so the
+  //    markup stays one readable sentence; the undoer joins it back.
+  //    Runs before the reveal groups are collected, because a split heading
+  //    leaves the group — two animators fighting over one element is how a
+  //    heading ends up permanently translated.
+  for (const heading of document.querySelectorAll(
+    ".section-title h2, .cta-band h2",
+  )) {
+    const original = heading.textContent;
+    heading.classList.remove("reveal");
+    heading.textContent = "";
+    const words = [];
+    for (const word of original.split(/\s+/u).filter((w) => w.length > 0)) {
+      const span = document.createElement("span");
+      span.className = "wd";
+      span.textContent = word;
+      heading.append(span, " ");
+      words.push(span);
+    }
+    undoers.push(() => {
+      heading.textContent = original;
+    });
+    for (const span of words) {
+      span.style.opacity = "0";
+      span.style.filter = "blur(10px)";
+      span.style.transform = "translateY(14px)";
+    }
+    inView(
+      heading,
+      () => {
+        animate(
+          words,
+          {
+            opacity: [0, 1],
+            filter: ["blur(10px)", "blur(0px)"],
+            transform: ["translateY(14px)", "translateY(0px)"],
+          },
+          { delay: stagger(0.05), duration: 0.55, ease: EASE },
+        );
+      },
+      { margin: "0px 0px -12% 0px" },
+    );
+  }
+
+  // -- The mono labels decode into place, left to right. The characters
+  //    come from and return to the HTML; only the journey is scrambled.
+  const GLYPHS = "abcdefghijklmnopqrstuvwxyz#=+/";
+  for (const chip of document.querySelectorAll(".chip")) {
+    const node = textNodeOf(chip);
+    if (node === undefined) {
+      continue;
+    }
+    const full = node.textContent;
+    inView(chip, () => {
+      undoers.push(() => {
+        node.textContent = full;
+      });
+      let frame = 0;
+      const total = Math.max(12, full.length * 2);
+      const interval = setInterval(() => {
+        if (disarmed) {
+          clearInterval(interval);
+          return;
+        }
+        frame += 1;
+        const settled = Math.floor((frame / total) * full.length);
+        node.textContent =
+          full.slice(0, settled) +
+          [...full.slice(settled)]
+            .map((ch) =>
+              ch === " "
+                ? " "
+                : GLYPHS[Math.floor(Math.random() * GLYPHS.length)],
+            )
+            .join("");
+        if (settled >= full.length) {
+          clearInterval(interval);
+          node.textContent = full;
+        }
+      }, 34);
+      intervals.push(interval);
+    });
+  }
 
   // -- Hero: words rise out of their clipped line boxes, then the chip, the
   //    aside, and the scroll cue follow. The starting offsets came from the
@@ -185,20 +356,32 @@ function wire() {
     );
   }
 
-  // -- Nav grows an edge once the page has left the hero: transparent over
-  //    the field, blurred ground with a hairline after 40px.
+  // -- Nav grows an edge once the page has left the hero, and carries the
+  //    scroll's own position on that edge — a reader glancing up sees how
+  //    far through the argument they are.
   const nav = document.querySelector(".site-nav");
+  const bar = document.querySelector(".nav-progress");
   if (nav !== null) {
     const settle = () => {
       nav.classList.toggle("lifted", window.scrollY > 40);
+      if (bar !== null && !disarmed) {
+        const max = document.body.scrollHeight - window.innerHeight;
+        bar.style.transform = `scaleX(${max > 0 ? window.scrollY / max : 0})`;
+      }
     };
+    if (bar !== null) {
+      undoers.push(() => {
+        bar.style.transform = "";
+      });
+    }
     window.addEventListener("scroll", settle, { passive: true });
     settle();
   }
 
-  // -- Cards: a spring lift on hover. Desktop-only by capability, not
-  //    user-agent — coarse pointers never see it, because a lift that
-  //    triggers on tap reads as a rendering bug.
+  // -- Cards: a spring lift on hover, and a spotlight that follows the
+  //    cursor across the row — the ::after gradient in the stylesheet reads
+  //    these two custom properties. Desktop-only by capability, not
+  //    user-agent; coarse pointers see neither.
   if (fine) {
     hover(".card", (el) => {
       animate(
@@ -214,6 +397,15 @@ function wire() {
         );
       };
     });
+    for (const grid of document.querySelectorAll(".cards")) {
+      grid.addEventListener("pointermove", (event) => {
+        for (const card of grid.querySelectorAll(".card")) {
+          const box = card.getBoundingClientRect();
+          card.style.setProperty("--mx", `${event.clientX - box.left}px`);
+          card.style.setProperty("--my", `${event.clientY - box.top}px`);
+        }
+      });
+    }
   }
 
   // -- Primary CTAs: pressed-in feedback, and a small particle burst on
@@ -250,4 +442,299 @@ function wire() {
       }
     });
   }
+
+  channelStory(animate, inView);
+  admissionBoard(animate, inView);
+  priceCounter(inView);
+}
+
+/* ------------------------------------------------------- channel replay -- */
+
+/**
+ * The channel mock plays as the conversation it is, in the order it
+ * happened: the request types itself, the plan and arbitration lines stamp
+ * in, the agent answers, the commit lands. Once, when it scrolls into view —
+ * a chat that loops is a screensaver, and this one is evidence.
+ */
+function channelStory(animate, inView) {
+  const body = document.querySelector(".hero-shot .shot-body");
+  if (body === null) {
+    return;
+  }
+  const steps = [...body.children];
+  for (const el of steps) {
+    stage(el, { opacity: "0" });
+  }
+  inView(
+    body,
+    () => {
+      void play();
+    },
+    { margin: "0px 0px -15% 0px" },
+  );
+  async function play() {
+    for (const el of steps) {
+      if (disarmed) {
+        return;
+      }
+      animate(
+        el,
+        { opacity: [0, 1], transform: ["translateY(10px)", "translateY(0px)"] },
+        { duration: 0.4, ease: EASE },
+      );
+      if (el.classList.contains("msg")) {
+        await typeInto(el.querySelector("p"));
+      } else {
+        await later(560);
+      }
+    }
+    const code = body.querySelector("code");
+    if (code !== null && !disarmed) {
+      animate(
+        code,
+        { opacity: [0.1, 1], transform: ["scale(1.15)", "scale(1)"] },
+        { duration: 0.5, ease: EASE },
+      );
+    }
+  }
+}
+
+/* ----------------------------------------------------- admission board -- */
+
+/**
+ * Partial admission as physics.
+ *
+ * The file pills are real elements, and a claim is a journey: a pill leaves
+ * the repository row and lands in a plan's tray on a spring. The move is a
+ * FLIP — measure where it was, reparent it, measure where it is, start from
+ * the difference — which is what lets the layout stay ordinary responsive
+ * flow while the pill appears to fly between rows. The contested file
+ * wobbles when the second plan asks for it, a dashed ghost holds its place
+ * in plan B's tray, and the moment plan A's commit chip lands the pill
+ * crosses over and the ghost pops away.
+ *
+ * It loops while it is on screen and stops when it is not. Without
+ * JavaScript every pill sits in the repository row and the status line is
+ * the diagram's caption.
+ */
+function admissionBoard(animate, inView) {
+  const figure = document.querySelector("[data-admission]");
+  if (figure === null) {
+    return;
+  }
+  const tray = (name) => figure.querySelector(`[data-adm-tray="${name}"]`);
+  const repo = tray("repo");
+  const trayA = tray("a");
+  const trayB = tray("b");
+  const held = figure.querySelector("[data-adm-held]");
+  const commitA = figure.querySelector('[data-adm-commit="a"]');
+  const commitB = figure.querySelector('[data-adm-commit="b"]');
+  const status = figure.querySelector("[data-adm-status]");
+  if ([repo, trayA, trayB, held, commitA, commitB].some((el) => el === null)) {
+    return;
+  }
+  const pills = [...repo.querySelectorAll(".adm-pill")];
+  const pill = (file) =>
+    pills.find((el) => el.dataset.admFile === file) ?? pills[0];
+  const auth = pill("auth.ts");
+  const retry = pill("retry.ts");
+  const webhooks = pill("webhooks.ts");
+
+  // Everything this board moves goes back exactly where the HTML put it.
+  const restingStatus = status === null ? "" : status.textContent;
+  undoers.push(() => {
+    for (const el of pills) {
+      el.className = "adm-pill";
+      el.removeAttribute("style");
+      repo.append(el);
+    }
+    for (const el of [held, commitA, commitB]) {
+      el.removeAttribute("style");
+    }
+    if (status !== null) {
+      status.textContent = restingStatus;
+    }
+  });
+  stage(commitA, { opacity: "0" });
+  stage(commitB, { opacity: "0" });
+
+  /**
+   * Reinserts a pill into the repository row where it started, so a return
+   * journey never shuffles the order of the files still at home.
+   */
+  const home = (el) => {
+    const after = pills.slice(pills.indexOf(el) + 1);
+    const anchor = after.find((sibling) => sibling.parentElement === repo);
+    if (anchor === undefined) {
+      repo.append(el);
+    } else {
+      repo.insertBefore(el, anchor);
+    }
+  };
+
+  /** The FLIP move: reparent, then spring from where it used to be. */
+  const fly = (el, place) => {
+    const first = el.getBoundingClientRect();
+    place(el);
+    const last = el.getBoundingClientRect();
+    el.style.transform = `translate(${first.left - last.left}px, ${
+      first.top - last.top
+    }px)`;
+    animate(
+      el,
+      { transform: "translate(0px, 0px)" },
+      { type: "spring", stiffness: 220, damping: 24 },
+    );
+  };
+
+  const chipIn = (chip) => {
+    animate(
+      chip,
+      {
+        opacity: [0, 1],
+        transform: ["translateY(8px) scale(0.85)", "translateY(0px) scale(1)"],
+      },
+      { type: "spring", stiffness: 260, damping: 20 },
+    );
+  };
+
+  const say = (text) => {
+    if (status !== null && !disarmed) {
+      status.textContent = text;
+      animate(status, { opacity: [0, 1] }, { duration: 0.35 });
+    }
+  };
+
+  let visible = false;
+  let playing = false;
+  inView(figure, () => {
+    visible = true;
+    if (!playing) {
+      playing = true;
+      void loop();
+    }
+    return () => {
+      visible = false;
+    };
+  });
+
+  async function loop() {
+    while (visible && !disarmed) {
+      // Everything springs home rather than snapping, so the loop reads as
+      // the next request arriving instead of a video restarting.
+      for (const el of pills) {
+        el.classList.remove("claimed-a", "claimed-b", "dim");
+        if (el.parentElement !== repo) {
+          fly(el, home);
+        }
+      }
+      animate(commitA, { opacity: 0 }, { duration: 0.3 });
+      animate(commitB, { opacity: 0 }, { duration: 0.3 });
+      held.style.opacity = "0";
+      await later(1000);
+      if (!visible || disarmed) break;
+
+      say("plan A claims retry.ts and webhooks.ts");
+      retry.classList.add("claimed-a");
+      fly(retry, (el) => trayA.append(el));
+      await later(160);
+      webhooks.classList.add("claimed-a");
+      fly(webhooks, (el) => trayA.append(el));
+      await later(1100);
+      if (!visible || disarmed) break;
+
+      say("plan B wants auth.ts and webhooks.ts — granted auth.ts now, webhooks.ts held");
+      auth.classList.add("claimed-b");
+      fly(auth, (el) => trayB.append(el));
+      animate(
+        webhooks,
+        {
+          transform: [
+            "translate(0px, 0px)",
+            "translate(-4px, 0px)",
+            "translate(4px, 0px)",
+            "translate(-2px, 0px)",
+            "translate(0px, 0px)",
+          ],
+        },
+        { duration: 0.5, ease: EASE },
+      );
+      animate(
+        held,
+        { opacity: [0, 1], transform: ["scale(0.7)", "scale(1)"] },
+        { type: "spring", stiffness: 260, damping: 20 },
+      );
+      await later(1900);
+      if (!visible || disarmed) break;
+
+      say("plan A promoted — webhooks.ts released to plan B");
+      chipIn(commitA);
+      retry.classList.add("dim");
+      retry.classList.remove("claimed-a");
+      fly(retry, home);
+      await later(350);
+      animate(
+        held,
+        { opacity: 0, transform: "scale(0.6)" },
+        { duration: 0.25, ease: EASE },
+      );
+      webhooks.classList.remove("claimed-a");
+      webhooks.classList.add("claimed-b");
+      fly(webhooks, (el) => trayB.append(el));
+      await later(1000);
+      if (!visible || disarmed) break;
+
+      say("both plans ran the whole time — nothing waited that did not have to");
+      chipIn(commitB);
+      await later(3400);
+    }
+    playing = false;
+  }
+}
+
+/* ------------------------------------------------------- price counter -- */
+
+/**
+ * The price counts up to itself when it arrives on screen.
+ *
+ * The number in the HTML is the number — the seat-price test holds this site
+ * to writing it exactly once — so the counter reads its target out of the
+ * text it is animating and never knows the amount itself. Manual rAF rather
+ * than the library: it is one eased value, and the undoer must be able to
+ * restore the text exactly.
+ */
+function priceCounter(inView) {
+  const line = document.querySelector(".price-line");
+  if (line === null) {
+    return;
+  }
+  const node = line.firstChild;
+  if (node === null || node.nodeType !== Node.TEXT_NODE) {
+    return;
+  }
+  const full = node.textContent;
+  const target = Number(full.replace(/[^0-9]/gu, ""));
+  if (!Number.isFinite(target) || target <= 0) {
+    return;
+  }
+  undoers.push(() => {
+    node.textContent = full;
+  });
+  node.textContent = full.replace(/\d+/u, "0");
+  inView(line, () => {
+    const started = performance.now();
+    const duration = 1100;
+    const tick = () => {
+      if (disarmed) {
+        return;
+      }
+      const t = Math.min(1, (performance.now() - started) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      node.textContent = full.replace(/\d+/u, String(Math.round(target * eased)));
+      if (t < 1) {
+        requestAnimationFrame(tick);
+      }
+    };
+    requestAnimationFrame(tick);
+  });
 }
