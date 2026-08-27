@@ -33,7 +33,7 @@
  */
 (function () {
   "use strict";
-  var BOOT_REV = "w6";
+  var BOOT_REV = "w7";
   var hash = window.location.hash;
 
   // Every resource that fails to arrive is recorded, so the ?why overlay
@@ -66,6 +66,18 @@
         } catch (error) {
           probe = null;
         }
+        // The panel reports on broken environments, so it must not trust
+        // the APIs it is reporting on.
+        function reducedMotionState() {
+          try {
+            return window.matchMedia("(prefers-reduced-motion: reduce)")
+              .matches
+              ? "on"
+              : "off";
+          } catch (error) {
+            return "unknown (matchMedia threw)";
+          }
+        }
         var panel = document.createElement("pre");
         panel.textContent = [
           "kumi site diagnostics",
@@ -75,10 +87,7 @@
           "Motion: " + typeof window.Motion,
           "webgl2: " + (probe ? "available" : "unavailable"),
           "water: " + (window.__kumiFieldState || "not started"),
-          "reduced motion: " +
-            (window.matchMedia("(prefers-reduced-motion: reduce)").matches
-              ? "on"
-              : "off"),
+          "reduced motion: " + reducedMotionState(),
           "failed loads: " +
             (window.__kumiLoadErrors.length
               ? window.__kumiLoadErrors.join(", ")
@@ -129,7 +138,13 @@
     // with no hash and no preload global — so neither tell above fires and
     // the person's installed app opens on its own advertisement. Standalone
     // display mode is the one thing such a launch cannot hide.
-    if (window.matchMedia("(display-mode: standalone)").matches) {
+    var standalone = false;
+    try {
+      standalone = window.matchMedia("(display-mode: standalone)").matches;
+    } catch (error) {
+      standalone = false;
+    }
+    if (standalone) {
       window.location.replace("/app" + hash);
       return;
     }

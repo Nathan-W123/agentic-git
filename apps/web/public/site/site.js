@@ -31,7 +31,7 @@ import { startField } from "./field.js";
 
 // Read by the boot script's ?why diagnostics: proof this module's graph
 // loaded, and which revision of it.
-window.__kumiSiteRev = "w6";
+window.__kumiSiteRev = "w7";
 
 // Every animation failure lands here with a name and a message, and the
 // ?why overlay prints them. A device this page misbehaves on is a device
@@ -45,7 +45,18 @@ function note(phase, error) {
   );
 }
 
-const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+// Belt on the very first API call: a WebView with a broken matchMedia gets
+// a stand-in that reports motion as welcome and accepts no listeners,
+// rather than aborting the module three lines in.
+let reduceMotion = {
+  matches: false,
+  addEventListener() {},
+};
+try {
+  reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+} catch (error) {
+  note("matchMedia", error);
+}
 const motion = window.Motion;
 const EASE = [0.32, 0.72, 0, 1];
 
@@ -94,18 +105,53 @@ function disarm() {
   }
 }
 
-if (reduceMotion.matches) {
+/**
+ * The whole gate runs inside one guard, and the guard's failure path still
+ * starts the water. On one phone the ?why panel read: module loaded, Motion
+ * present, WebGL2 available, nothing 404ed, reduced motion off — and no
+ * classes, no water, no recorded error. The only code that could produce
+ * that exact panel was an unguarded line here, before the arming and before
+ * the water, aborting the module's evaluation with nothing to note it. No
+ * line in this gate is allowed to be that line again.
+ */
+try {
+  gate();
+} catch (error) {
+  note("gate", error);
   disarm();
-} else {
-  // A preference flipped mid-visit is honoured immediately: the CSS block in
-  // site.css stops the continuous animations, dropping the class shows
+  try {
+    field();
+  } catch (fieldError) {
+    note("field", fieldError);
+  }
+}
+
+function gate() {
+  if (reduceMotion.matches) {
+    disarm();
+    return;
+  }
+  // A preference flipped mid-visit is honoured immediately: the CSS block
+  // in site.css stops the continuous animations, dropping the class shows
   // anything still waiting on a scroll reveal, the undoers restore any text
-  // an effect was mid-way through, and the water stops drawing.
-  reduceMotion.addEventListener("change", () => {
+  // an effect was mid-way through, and the water stops drawing. Some WebKit
+  // builds only ship the legacy listener API on MediaQueryList; the flip is
+  // an accessibility promise, so both forms are tried before giving up —
+  // and giving up costs the flip, never the page.
+  const onFlip = () => {
     if (reduceMotion.matches) {
       disarm();
     }
-  });
+  };
+  try {
+    reduceMotion.addEventListener("change", onFlip);
+  } catch (error) {
+    try {
+      reduceMotion.addListener(onFlip);
+    } catch (legacyError) {
+      note("reduce-flip", legacyError);
+    }
+  }
   if (motion !== undefined) {
     // The `anim` class is added HERE, by the file that will animate what it
     // hides — never by the boot script, and never on the promise that some
@@ -129,9 +175,7 @@ if (reduceMotion.matches) {
   }
   // The water is raw WebGL and needs no library, so it starts whether or
   // not the Motion bundle arrived — and inside its own guard, so nothing
-  // that went wrong above it can cost the background. On one phone,
-  // everything above succeeded except a single swallowed throw, and the
-  // water never started: this call must be unskippable.
+  // that went wrong above it can cost the background.
   try {
     field();
   } catch (error) {
