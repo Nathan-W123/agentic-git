@@ -31,7 +31,19 @@ import { startField } from "./field.js";
 
 // Read by the boot script's ?why diagnostics: proof this module's graph
 // loaded, and which revision of it.
-window.__kumiSiteRev = "w5";
+window.__kumiSiteRev = "w6";
+
+// Every animation failure lands here with a name and a message, and the
+// ?why overlay prints them. A device this page misbehaves on is a device
+// nobody can attach a debugger to; a caught exception with no record is
+// how one stayed undiagnosed across four rounds of screenshots.
+window.__kumiErrors = [];
+
+function note(phase, error) {
+  window.__kumiErrors.push(
+    phase + ": " + (error instanceof Error ? error.message : String(error)),
+  );
+}
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const motion = window.Motion;
@@ -106,19 +118,25 @@ if (reduceMotion.matches) {
     document.documentElement.classList.add("anim");
     // A throw anywhere in wiring forfeits the animations, never the
     // content: disarm() shows everything again and undoes any staging that
-    // happened before the throw.
+    // happened before the throw. wire() records its own failures per
+    // feature; this belt catches only what escapes even that.
     try {
       wire();
-    } catch {
+    } catch (error) {
+      note("wire", error);
       disarm();
     }
   }
   // The water is raw WebGL and needs no library, so it starts whether or
-  // not the Motion bundle arrived — a checkout that lost one vendor file
-  // costs the reveals and springs, never the background. It shipped
-  // coupled once, and a page with a working GPU sat still because a
-  // different file 404ed.
-  field();
+  // not the Motion bundle arrived — and inside its own guard, so nothing
+  // that went wrong above it can cost the background. On one phone,
+  // everything above succeeded except a single swallowed throw, and the
+  // water never started: this call must be unskippable.
+  try {
+    field();
+  } catch (error) {
+    note("field", error);
+  }
 }
 
 /**
@@ -253,177 +271,216 @@ function wire() {
   const fine =
     window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
+  /*
+   * Every feature wires inside its own guard, and a failure is recorded by
+   * name — so one feature a particular browser objects to costs that
+   * feature's animation, is named in the ?why overlay, and cannot silently
+   * take the rest of the page's motion with it. If anything at all broke,
+   * the whole page disarms afterwards: some features hide content they then
+   * reveal, and a partial wiring must never leave part of the page waiting
+   * on a reveal that died. The disarm is safe because every feature stages
+   * through undoers; what matters is that the failure is no longer silent.
+   */
+  const broke = [];
+  const attempt = (name, run) => {
+    try {
+      run();
+    } catch (error) {
+      broke.push(name);
+      note("wire/" + name, error);
+    }
+  };
+
   // -- Section headings: split into words that arrive out of a blur, each a
   //    beat behind its neighbour. Split here rather than in the HTML so the
   //    markup stays one readable sentence; the undoer joins it back.
   //    Runs before the reveal groups are collected, because a split heading
   //    leaves the group — two animators fighting over one element is how a
   //    heading ends up permanently translated.
-  for (const heading of document.querySelectorAll(
-    ".section-title h2, .cta-band h2",
-  )) {
-    const original = heading.textContent;
-    heading.classList.remove("reveal");
-    heading.textContent = "";
-    const words = [];
-    for (const word of original.split(/\s+/u).filter((w) => w.length > 0)) {
-      const span = document.createElement("span");
-      span.className = "wd";
-      span.textContent = word;
-      heading.append(span, " ");
-      words.push(span);
+  attempt("headings", () => {
+    for (const heading of document.querySelectorAll(
+      ".section-title h2, .cta-band h2",
+    )) {
+      const original = heading.textContent;
+      heading.classList.remove("reveal");
+      heading.textContent = "";
+      const words = [];
+      for (const word of original.split(/\s+/u).filter((w) => w.length > 0)) {
+        const span = document.createElement("span");
+        span.className = "wd";
+        span.textContent = word;
+        heading.append(span, " ");
+        words.push(span);
+      }
+      undoers.push(() => {
+        heading.textContent = original;
+      });
+      for (const span of words) {
+        span.style.opacity = "0";
+        span.style.filter = "blur(10px)";
+        span.style.transform = "translateY(14px)";
+      }
+      inView(
+        heading,
+        () => {
+          animate(
+            words,
+            {
+              opacity: [0, 1],
+              filter: ["blur(10px)", "blur(0px)"],
+              transform: ["translateY(14px)", "translateY(0px)"],
+            },
+            { delay: stagger(0.05), duration: 0.55, ease: EASE },
+          );
+        },
+        { margin: "0px 0px -12% 0px" },
+      );
     }
-    undoers.push(() => {
-      heading.textContent = original;
-    });
-    for (const span of words) {
-      span.style.opacity = "0";
-      span.style.filter = "blur(10px)";
-      span.style.transform = "translateY(14px)";
-    }
-    inView(
-      heading,
-      () => {
-        animate(
-          words,
-          {
-            opacity: [0, 1],
-            filter: ["blur(10px)", "blur(0px)"],
-            transform: ["translateY(14px)", "translateY(0px)"],
-          },
-          { delay: stagger(0.05), duration: 0.55, ease: EASE },
-        );
-      },
-      { margin: "0px 0px -12% 0px" },
-    );
-  }
+  });
 
   // -- The mono labels decode into place, left to right. The characters
   //    come from and return to the HTML; only the journey is scrambled.
-  const GLYPHS = "abcdefghijklmnopqrstuvwxyz#=+/";
-  for (const chip of document.querySelectorAll(".chip")) {
-    const node = textNodeOf(chip);
-    if (node === undefined) {
-      continue;
-    }
-    const full = node.textContent;
-    inView(chip, () => {
-      undoers.push(() => {
-        node.textContent = full;
-      });
-      let frame = 0;
-      const total = Math.max(12, full.length * 2);
-      const interval = setInterval(() => {
-        if (disarmed) {
-          clearInterval(interval);
-          return;
-        }
-        frame += 1;
-        const settled = Math.floor((frame / total) * full.length);
-        node.textContent =
-          full.slice(0, settled) +
-          [...full.slice(settled)]
-            .map((ch) =>
-              ch === " "
-                ? " "
-                : GLYPHS[Math.floor(Math.random() * GLYPHS.length)],
-            )
-            .join("");
-        if (settled >= full.length) {
-          clearInterval(interval);
+  attempt("labels", () => {
+    const GLYPHS = "abcdefghijklmnopqrstuvwxyz#=+/";
+    for (const chip of document.querySelectorAll(".chip")) {
+      const node = textNodeOf(chip);
+      if (node === undefined) {
+        continue;
+      }
+      const full = node.textContent;
+      inView(chip, () => {
+        undoers.push(() => {
           node.textContent = full;
-        }
-      }, 34);
-      intervals.push(interval);
-    });
-  }
+        });
+        let frame = 0;
+        const total = Math.max(12, full.length * 2);
+        const interval = setInterval(() => {
+          if (disarmed) {
+            clearInterval(interval);
+            return;
+          }
+          frame += 1;
+          const settled = Math.floor((frame / total) * full.length);
+          node.textContent =
+            full.slice(0, settled) +
+            [...full.slice(settled)]
+              .map((ch) =>
+                ch === " "
+                  ? " "
+                  : GLYPHS[Math.floor(Math.random() * GLYPHS.length)],
+              )
+              .join("");
+          if (settled >= full.length) {
+            clearInterval(interval);
+            node.textContent = full;
+          }
+        }, 34);
+        intervals.push(interval);
+      });
+    }
+  });
 
   // -- Hero: words rise out of their clipped line boxes, then the chip, the
   //    aside, and the scroll cue follow. The starting offsets came from the
   //    stylesheet (armed by `html.anim`), so the first frame never flashes.
-  const words = document.querySelectorAll(".hero h1 .w > span");
-  if (words.length > 0) {
-    animate(
-      words,
-      { transform: ["translateY(110%)", "translateY(0%)"] },
-      { delay: stagger(0.07), type: "spring", stiffness: 120, damping: 18 },
-    );
-  }
-  const follow = (selector, delay) => {
-    const el = document.querySelector(selector);
-    if (el !== null) {
+  attempt("hero", () => {
+    const words = document.querySelectorAll(".hero h1 .w > span");
+    if (words.length > 0) {
       animate(
-        el,
-        { opacity: [0, 1], transform: ["translateY(16px)", "translateY(0px)"] },
-        { duration: 0.6, delay, ease: EASE },
+        words,
+        { transform: ["translateY(110%)", "translateY(0%)"] },
+        { delay: stagger(0.07), type: "spring", stiffness: 120, damping: 18 },
       );
     }
-  };
-  follow(".hero .chip", 0.15);
-  follow(".hero-aside", 0.42);
-  follow(".scroll-cue", 0.62);
+    const follow = (selector, delay) => {
+      const el = document.querySelector(selector);
+      if (el !== null) {
+        animate(
+          el,
+          {
+            opacity: [0, 1],
+            transform: ["translateY(16px)", "translateY(0px)"],
+          },
+          { duration: 0.6, delay, ease: EASE },
+        );
+      }
+    };
+    follow(".hero .chip", 0.15);
+    follow(".hero-aside", 0.42);
+    follow(".scroll-cue", 0.62);
+  });
 
   // -- Scroll reveals: one behaviour for every section heading, paragraph
   //    block, and card. Card rows and step rows stagger their children as a
   //    group instead, so neighbours arrive as a family, not a queue.
-  for (const group of document.querySelectorAll("[data-reveal-group]")) {
-    const items = group.querySelectorAll(".reveal");
-    inView(
-      group,
-      () => {
-        animate(
-          items,
-          { opacity: [0, 1], transform: ["translateY(24px)", "translateY(0px)"] },
-          { duration: 0.6, delay: stagger(0.08), ease: EASE },
-        );
-      },
-      { margin: "0px 0px -12% 0px" },
-    );
-  }
-  for (const el of document.querySelectorAll(".reveal")) {
-    if (el.closest("[data-reveal-group]") !== null) {
-      continue;
+  attempt("reveals", () => {
+    for (const group of document.querySelectorAll("[data-reveal-group]")) {
+      const items = group.querySelectorAll(".reveal");
+      inView(
+        group,
+        () => {
+          animate(
+            items,
+            {
+              opacity: [0, 1],
+              transform: ["translateY(24px)", "translateY(0px)"],
+            },
+            { duration: 0.6, delay: stagger(0.08), ease: EASE },
+          );
+        },
+        { margin: "0px 0px -12% 0px" },
+      );
     }
-    inView(
-      el,
-      () => {
-        animate(
-          el,
-          { opacity: [0, 1], transform: ["translateY(24px)", "translateY(0px)"] },
-          { duration: 0.6, ease: EASE },
-        );
-      },
-      { margin: "0px 0px -12% 0px" },
-    );
-  }
+    for (const el of document.querySelectorAll(".reveal")) {
+      if (el.closest("[data-reveal-group]") !== null) {
+        continue;
+      }
+      inView(
+        el,
+        () => {
+          animate(
+            el,
+            {
+              opacity: [0, 1],
+              transform: ["translateY(24px)", "translateY(0px)"],
+            },
+            { duration: 0.6, ease: EASE },
+          );
+        },
+        { margin: "0px 0px -12% 0px" },
+      );
+    }
+  });
 
   // -- Nav grows an edge once the page has left the hero, and carries the
-  //    scroll's own position on that edge — a reader glancing up sees how
-  //    far through the argument they are.
-  const nav = document.querySelector(".site-nav");
-  const bar = document.querySelector(".nav-progress");
-  if (nav !== null) {
-    const settle = () => {
-      nav.classList.toggle("lifted", window.scrollY > 40);
-      if (bar !== null && !disarmed) {
-        const max = document.body.scrollHeight - window.innerHeight;
-        bar.style.transform = `scaleX(${max > 0 ? window.scrollY / max : 0})`;
+  //    scroll's own position on that edge.
+  attempt("nav", () => {
+    const nav = document.querySelector(".site-nav");
+    const bar = document.querySelector(".nav-progress");
+    if (nav !== null) {
+      const settle = () => {
+        nav.classList.toggle("lifted", window.scrollY > 40);
+        if (bar !== null && !disarmed) {
+          const max = document.body.scrollHeight - window.innerHeight;
+          bar.style.transform = `scaleX(${max > 0 ? window.scrollY / max : 0})`;
+        }
+      };
+      if (bar !== null) {
+        undoers.push(() => {
+          bar.style.transform = "";
+        });
       }
-    };
-    if (bar !== null) {
-      undoers.push(() => {
-        bar.style.transform = "";
-      });
+      window.addEventListener("scroll", settle, { passive: true });
+      settle();
     }
-    window.addEventListener("scroll", settle, { passive: true });
-    settle();
-  }
+  });
 
   // -- Cards: a spring lift on hover, and a spotlight that follows the
-  //    cursor across the row — the ::after gradient in the stylesheet reads
-  //    these two custom properties. Desktop-only by capability, not
-  //    user-agent; coarse pointers see neither.
-  if (fine) {
+  //    cursor across the row. Desktop-only by capability, not user-agent.
+  attempt("cards", () => {
+    if (!fine) {
+      return;
+    }
     hover(".card", (el) => {
       animate(
         el,
@@ -447,46 +504,61 @@ function wire() {
         }
       });
     }
-  }
+  });
 
   // -- Primary CTAs: pressed-in feedback, and a small particle burst on
-  //    activation. The burst spawns real elements rather than a canvas so it
-  //    inherits the button's colours and needs nothing else.
-  press(".btn-primary", (el) => {
-    animate(el, { scale: 0.97 }, { duration: 0.14, ease: EASE });
-    return () => {
-      animate(
-        el,
-        { scale: 1 },
-        { type: "spring", stiffness: 400, damping: 20 },
-      );
-    };
-  });
-  for (const el of document.querySelectorAll(".btn-primary")) {
-    el.addEventListener("click", () => {
-      for (let i = 0; i < 12; i += 1) {
-        const spark = document.createElement("span");
-        spark.className = "spark";
-        el.append(spark);
+  //    activation.
+  attempt("cta", () => {
+    press(".btn-primary", (el) => {
+      animate(el, { scale: 0.97 }, { duration: 0.14, ease: EASE });
+      return () => {
         animate(
-          spark,
-          {
-            x: (Math.random() - 0.5) * 80,
-            y: (Math.random() - 0.5) * 80,
-            opacity: [1, 0],
-            scale: [1, 0],
-          },
-          { duration: 0.6, ease: "easeOut" },
-        ).finished.then(() => {
-          spark.remove();
-        });
-      }
+          el,
+          { scale: 1 },
+          { type: "spring", stiffness: 400, damping: 20 },
+        );
+      };
     });
-  }
+    for (const el of document.querySelectorAll(".btn-primary")) {
+      el.addEventListener("click", () => {
+        for (let i = 0; i < 12; i += 1) {
+          const spark = document.createElement("span");
+          spark.className = "spark";
+          el.append(spark);
+          animate(
+            spark,
+            {
+              x: (Math.random() - 0.5) * 80,
+              y: (Math.random() - 0.5) * 80,
+              opacity: [1, 0],
+              scale: [1, 0],
+            },
+            { duration: 0.6, ease: "easeOut" },
+          ).finished.then(() => {
+            spark.remove();
+          });
+        }
+      });
+    }
+  });
 
-  channelStory(animate, inView);
-  admissionBoard(animate, inView);
-  priceCounter(inView);
+  attempt("channel", () => {
+    channelStory(animate, inView);
+  });
+  attempt("board", () => {
+    admissionBoard(animate, inView);
+  });
+  attempt("price", () => {
+    priceCounter(inView);
+  });
+
+  // Some of the features above hide content they then reveal. If any of
+  // them broke, a partial wiring must not leave part of the page waiting on
+  // a reveal that died — everything disarms, and the overlay says which
+  // feature to blame.
+  if (broke.length > 0) {
+    disarm();
+  }
 }
 
 /* ------------------------------------------------------- channel replay -- */
