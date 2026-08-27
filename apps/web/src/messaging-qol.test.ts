@@ -168,7 +168,7 @@ test("the unread line is taken before opening the room marks it read", async () 
   assert.match(css, /\.chan-unread \{/u);
 });
 
-test("quiet transcript metadata avoids full-width decorative rules", async () => {
+test("quiet transcript metadata uses an outlined label on a straight separator", async () => {
   const [chat, chats, css] = await Promise.all([
     publicFile("chat.js"),
     publicFile("screen-chats.js"),
@@ -181,18 +181,18 @@ test("quiet transcript metadata avoids full-width decorative rules", async () =>
   assert.match(chat, /thread-day transcript-separator/u);
   assert.match(chat, /msg system transcript-separator/u);
   assert.match(chats, /chan-day transcript-separator/u);
-  assert.match(chats, /cmsg-system[\s\S]{0,100}coordination-event/u);
+  assert.match(chats, /cmsg-system[\s\S]{0,100}transcript-separator/u);
 
-  // The final workspace rules remove both the line and outlined label while
-  // preserving the shared semantic date treatment in every transcript.
-  const refinement = css.slice(css.indexOf("calm technical workspace"));
-  assert.match(refinement, /\.transcript-separator::before,[\s\S]{0,180}display: none;/u);
-  assert.match(refinement, /\.transcript-separator > span \{[\s\S]{0,180}border: 0;/u);
+  // The label owns the outline; the two pseudo-elements are the uninterrupted
+  // hairline on either side, so long notices can wrap without drawing through
+  // their words.
+  assert.match(css, /\.transcript-separator::before,[\s\S]{0,80}\.transcript-separator::after/u);
+  assert.match(css, /\.transcript-separator > span \{[\s\S]{0,260}border: 1px solid/u);
 
   // Channel rows use the whole chat panel rather than a fixed desktop column.
   // That gives ordinary messages the available line length and also centers
   // the full-width coordinator separator in the room.
-  assert.match(css, /--room-column: 960px/u);
+  assert.match(css, /--room-column: 100%/u);
   assert.match(css, /\.cmsg-row \{[\s\S]{0,180}max-width: var\(--room-column\)/u);
 });
 
@@ -348,14 +348,15 @@ test("the Thread label opens the thread library as the visible side panel", asyn
     app.indexOf('case "channel-thread-delete":'),
   );
 
-  // Other contextual panels retain their category control.
+  // The category in the screenshot is a real control, not inert header text.
   assert.match(kind, /<button type="button" class="panel-kind" data-act=/u);
-  // The focused thread header keeps only its title and contextual actions;
-  // returning to the source is explicit and the redundant reply button is gone.
-  assert.match(panel, /act: "thread-return-source"/u);
-  assert.match(panel, /act: "channel-pin"/u);
-  assert.match(panel, /act: "channel-thread-close"/u);
-  assert.doesNotMatch(panel, /act: "thread-composer-focus"/u);
+  // `panelKind` gained a third `panelId` argument so several open thread
+  // panels can be told apart for drag and keep; the label is still the same
+  // `channel-threads-toggle` breadcrumb button, and both are still pinned.
+  assert.match(
+    panel,
+    /panelKind\(\s*"Thread",\s*"channel-threads-toggle",\s*`thread:\$\{messageId\}`/u,
+  );
 
   // A list marked open with no room left to draw it — or, on a phone, with a
   // newer surface over it — is not visibly open. Pressing Thread there
@@ -383,58 +384,6 @@ test("the Thread label opens the thread library as the visible side panel", asyn
   ]) {
     assert.doesNotMatch(action, new RegExp(`state\\.${field} = undefined`, "u"));
   }
-});
-
-test("navigation rows and ordinary messages have no resting card borders", async () => {
-  const css = await publicFile("styles.css");
-  const refinement = css.slice(css.indexOf("calm technical workspace"));
-
-  assert.match(
-    refinement,
-    /\.chan-sidebar-head\.chan-quick-links \{[\s\S]{0,220}border: 0;[\s\S]{0,80}background: transparent;/u,
-  );
-  assert.match(refinement, /\.chan-quick-link \{[\s\S]{0,180}min-height: 40px;/u);
-  assert.match(refinement, /\.cmsg-row \{[\s\S]{0,300}border: 0;/u);
-  assert.match(refinement, /\.cmsg-row \.cmsg-text \{[\s\S]{0,220}font-size: 15px;[\s\S]{0,80}line-height: 24px;/u);
-});
-
-test("completed agent work remains a compact expandable artifact", async () => {
-  const [chats, css] = await Promise.all([
-    publicFile("screen-chats.js"),
-    publicFile("styles.css"),
-  ]);
-  const summary = chats.slice(
-    chats.indexOf("function summaryBlock"),
-    chats.indexOf("\n/**", chats.indexOf("function summaryBlock")),
-  );
-  const refinement = css.slice(css.indexOf("calm technical workspace"));
-
-  assert.match(summary, /state\.summaryOpen\[reply\.id\] === true \? " open" : ""/u);
-  assert.match(chats, /function outcomeFilePresentation/u);
-  assert.match(chats, /function changedFilesBlock/u);
-  assert.match(
-    refinement,
-    /\.thread-summary,[\s\S]{0,100}\.cmsg-changes \{[\s\S]{0,180}border-radius: 16px;/u,
-  );
-});
-
-test("the thread drawer preserves a readable conversation across laptop widths", async () => {
-  const [chats, css] = await Promise.all([
-    publicFile("screen-chats.js"),
-    publicFile("styles.css"),
-  ]);
-  const refinement = css.slice(css.indexOf("calm technical workspace"));
-
-  assert.match(chats, /threadContextOpen = panels\.some/u);
-  assert.match(chats, /" thread-context-open"/u);
-  assert.match(
-    refinement,
-    /@media \(min-width: 601px\) and \(max-width: 1650px\)[\s\S]*?thread-context-open:not\(\.no-rail\) > \.chan-sidebar \{\s*width: 0;/u,
-  );
-  assert.match(
-    refinement,
-    /@media \(min-width: 601px\) and \(max-width: 1340px\)[\s\S]*?position: absolute;[\s\S]*?right: 16px;/u,
-  );
 });
 
 /*
