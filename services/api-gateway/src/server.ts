@@ -7,7 +7,9 @@ import {
 import {
   createServer,
   request as httpRequest,
+  type IncomingHttpHeaders,
   type IncomingMessage,
+  type OutgoingHttpHeaders,
   type Server,
   type ServerResponse,
 } from "node:http";
@@ -2848,6 +2850,216 @@ export function looksLikeTaskRequest(content: string): boolean {
   return true;
 }
 
+/**
+ * Where a proxied preview lives, from the browser's point of view.
+ *
+ * The app itself thinks it is at the root of an origin — every framework
+ * writes `/assets/index.js` and means "the top of wherever I am served". Here
+ * it is served underneath a path, so the top of the origin is the control
+ * plane and not the app: a root-absolute asset asked the dashboard for the
+ * app's bundle, got this deployment's 404 (or, for an extensionless one, its
+ * own index.html), and the page rendered as an empty white document with no
+ * error anybody could read.
+ *
+ * This is the prefix everything the app asks for has to be moved under. One
+ * function because three separate readers need the same answer: the `<base>`
+ * that fixes relative URLs, the rewrite that fixes root-absolute ones, and
+ * the redirect rewrite that fixes the `Location` of a login bounce.
+ */
+export function previewBaseHref(
+  projectId: string,
+  repositoryId: string,
+): string {
+  return (
+    `${API_PREFIX}/projects/${encodeURIComponent(projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`
+  );
+}
+
+/**
+ * Whether a path is one the previewed app answers, rather than this one.
+ *
+ * Tested before routing so the response's headers can be decided before a
+ * single one is written — see `securityHeaders`. Kept beside
+ * {@link previewBaseHref} because the two describe the same URL shape and
+ * drifting apart would mean a preview served under headers meant for the
+ * dashboard, which is the failure this file exists to stop repeating.
+ */
+export const PREVIEW_APP_PATH = new RegExp(
+  `^${API_PREFIX}/projects/[^/]+/repositories/[^/]+/preview/app(?:/|$)`,
+  "u",
+);
+
+/** Attributes whose value is one URL the browser will go and fetch. */
+const PREVIEW_URL_ATTRIBUTES =
+  /\b(src|href|action|poster|formaction|data|srcset|imagesrcset)=("|')\/(?!\/)/giu;
+
+/**
+ * Moves a previewed page's own addresses under the path it is served from.
+ *
+ * Two separate repairs, because a page has two kinds of address in it and
+ * only one of them is fixable by declaration:
+ *
+ * - A `<base>` element handles every *relative* URL at once, and also pins
+ *   them for a client-side route: an SPA sitting at `…/preview/app/settings`
+ *   otherwise resolves `./assets/x.js` against `…/preview/app/`'s child and
+ *   asks for a bundle that was never there.
+ * - Root-absolute URLs ignore `<base>` entirely — that is the whole point of
+ *   the leading slash — so each one is rewritten in place. This is the repair
+ *   that matters: `/assets/index.js` is what a built Vite, Next or CRA app
+ *   emits, and it is exactly the request that was reaching the control plane
+ *   instead of the app.
+ *
+ * Protocol-relative `//host/…` is deliberately left alone: it names another
+ * origin, and moving it under this path would break a page that is correctly
+ * asking somewhere else.
+ *
+ * Nothing here tries to rewrite URLs built by script at runtime. It cannot be
+ * done honestly from the outside — a string concatenated in a bundle is not
+ * distinguishable from any other string — and the `<base>` plus the document's
+ * own paths is what makes the overwhelming majority of apps render. An app
+ * that computes absolute paths in JavaScript is still best served by opening
+ * the loopback address directly, which is what the title on the link says.
+ */
+export function rewritePreviewHtml(html: string, base: string): string {
+  const rewritten = html.replace(
+    PREVIEW_URL_ATTRIBUTES,
+    (_match, attribute: string, quote: string) =>
+      `${attribute}=${quote}${base}`,
+  );
+  const baseTag = `<base href="${base}">`;
+  // Ahead of anything that could already have been fetched by the time it is
+  // read: a `<base>` after the first `<script src>` does not apply to it.
+  const head = /<head\b[^>]*>/iu.exec(rewritten);
+  if (head?.index !== undefined) {
+    const at = head.index + head[0].length;
+    return rewritten.slice(0, at) + baseTag + rewritten.slice(at);
+  }
+  const html5 = /<html\b[^>]*>/iu.exec(rewritten);
+  if (html5?.index !== undefined) {
+    const at = html5.index + html5[0].length;
+    return rewritten.slice(0, at) + baseTag + rewritten.slice(at);
+  }
+  return baseTag + rewritten;
+}
+
+/**
+ * How much of a preview's document is read before it is rewritten.
+ *
+ * A page is kilobytes. Anything past this is not a document somebody is
+ * reading — a data URL of a video, a generated report — and it is streamed on
+ * untouched rather than held whole in this process's memory, where a reader
+ * loading their own app could otherwise use it as a way to exhaust the
+ * deployment.
+ */
+const MAX_REWRITTEN_PREVIEW_BYTES = 4 * 1024 * 1024;
+
+/** Headers that describe one hop and must not be copied onto the next. */
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+/**
+ * What to send back for one answer the previewed app gave.
+ *
+ * Three things this has to get right, all of which were wrong:
+ *
+ * 1. **The control plane's own policy has to come off.** `securityHeaders`
+ *    sets a `Content-Security-Policy` describing *this dashboard* — no inline
+ *    script, no `eval`, `base-uri 'none'` — and `X-Frame-Options: DENY`. On a
+ *    proxied preview that is a policy about the wrong application: it blocks
+ *    the inline bootstrap script every bundler emits, blocks the `<base>` that
+ *    makes the rest of the page resolve, and the result is a blank document.
+ *    The app's own policy is kept where it sent one; where it did not, a
+ *    permissive one is written, because a preview exists to run the app rather
+ *    than to sandbox it.
+ * 2. **Redirects have to be moved too.** A dev server answering `/` with a 302
+ *    to `/login` sends the reader to the dashboard's own `/login`, which is a
+ *    different application entirely.
+ * 3. **Cookies have to stay in the preview's own path**, so an app that sets
+ *    one called `coord_session` cannot sign the reader out of the deployment
+ *    they are watching it from.
+ */
+export function previewProxyHeaders(
+  upstream: IncomingHttpHeaders,
+  base: string,
+  previewOrigin: string,
+): OutgoingHttpHeaders {
+  const headers: OutgoingHttpHeaders = {};
+  for (const [name, value] of Object.entries(upstream)) {
+    const lower = name.toLowerCase();
+    if (value === undefined || HOP_BY_HOP_HEADERS.has(lower)) {
+      continue;
+    }
+    if (lower === "location" && typeof value === "string") {
+      headers[name] = rewritePreviewLocation(value, base, previewOrigin);
+      continue;
+    }
+    if (lower === "set-cookie") {
+      const cookies = Array.isArray(value) ? value : [String(value)];
+      headers[name] = cookies.map((cookie) =>
+        /;\s*path=/iu.test(cookie)
+          ? cookie.replace(/;\s*path=[^;]*/iu, `; Path=${base}`)
+          : `${cookie}; Path=${base}`,
+      );
+      continue;
+    }
+    headers[name] = value;
+  }
+  // Always written, never merely left off: an absent header here would let
+  // the control plane's own `setHeader` value survive onto this response,
+  // which is the bug rather than the fix.
+  const stated = upstream["content-security-policy"];
+  headers["content-security-policy"] =
+    typeof stated === "string" ? stated : PREVIEW_CONTENT_SECURITY_POLICY;
+  // Same origin, so the dashboard may frame its own preview and nobody else
+  // may frame either of them. `DENY` — what this deployment sends for its own
+  // pages — would also refuse the dashboard.
+  headers["x-frame-options"] = "SAMEORIGIN";
+  return headers;
+}
+
+/**
+ * The policy a previewed app runs under when it states none of its own.
+ *
+ * Deliberately loose, and not a widening of what a previewed app can do. The
+ * page is somebody's dev server — inline scripts, `eval` in a bundler's HMR
+ * client, `blob:` workers, a font or a stylesheet from a CDN — and every one
+ * of those, restricted, is a working app rendered as a white rectangle with a
+ * console message no reader of this product will ever open. The app was
+ * always able to run its own code here: it is served same-origin, and
+ * `script-src 'self'` allowed its bundle. What the strict policy stopped was
+ * never an attacker; it was the app.
+ *
+ * `frame-ancestors 'self'` is kept because it costs the app nothing and is
+ * the one clause that is about this deployment rather than about the page.
+ */
+const PREVIEW_CONTENT_SECURITY_POLICY =
+  "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; " +
+  "frame-ancestors 'self'";
+
+/** Moves a redirect the app issued into the path the app is served under. */
+function rewritePreviewLocation(
+  location: string,
+  base: string,
+  previewOrigin: string,
+): string {
+  if (location.startsWith(previewOrigin)) {
+    return base + location.slice(previewOrigin.length).replace(/^\//u, "");
+  }
+  if (location.startsWith("/") && !location.startsWith("//")) {
+    return base + location.slice(1);
+  }
+  return location;
+}
+
 /** Common words that carry no relevance signal, stripped before scoring. */
 const RELEVANCE_STOPWORDS = new Set([
   "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with",
@@ -5043,7 +5255,6 @@ export class ApiGateway {
         ? request.headers["x-request-id"]
         : randomUUID();
     const secure = this.requestIsSecure(request);
-    this.securityHeaders(response, requestId, secure);
     let url: URL;
     try {
       // Routing needs only the origin-form path. Never parse an untrusted Host
@@ -5051,6 +5262,7 @@ export class ApiGateway {
       // request error boundary or trigger an unhandled rejection.
       url = new URL(request.url ?? "/", "http://localhost");
     } catch {
+      this.securityHeaders(response, requestId, secure);
       this.sendError(
         response,
         requestId,
@@ -5058,6 +5270,16 @@ export class ApiGateway {
       );
       return;
     }
+    // Parsed before the headers are written, because which headers are right
+    // depends on whose application is answering. A proxied preview is the
+    // app's document, not this one's, and the dashboard's own policy applied
+    // to it is what rendered a working app as an empty white page.
+    this.securityHeaders(
+      response,
+      requestId,
+      secure,
+      PREVIEW_APP_PATH.test(url.pathname),
+    );
     const context: RequestContext = {
       request,
       response,
@@ -8621,7 +8843,13 @@ export class ApiGateway {
       ),
     );
     if (previewAppMatch !== undefined) {
-      const [projectId = "", repositoryId = "", rest = "/"] = previewAppMatch;
+      const [projectId = "", repositoryId = "", matched = "/"] = previewAppMatch;
+      // `matchPath` maps every group through `decodeURIComponent`, so a group
+      // that did not participate arrives as the *string* "undefined" — which
+      // was handed to the app as a request for `/undefined`. Opening the
+      // preview without its trailing slash therefore served the app's 404
+      // rather than its front page.
+      const rest = matched === "undefined" || matched === "" ? "/" : matched;
       await authorizeRepository(
         this.options.store,
         principal,
@@ -8644,7 +8872,14 @@ export class ApiGateway {
           "No preview is running for this repository",
         );
       }
-      await this.proxyToPreview(request, response, status.url, rest, url.search);
+      await this.proxyToPreview(
+        request,
+        response,
+        status.url,
+        rest,
+        url.search,
+        previewBaseHref(projectId, repositoryId),
+      );
       return;
     }
 
@@ -21353,13 +21588,33 @@ export class ApiGateway {
     return value?.split(",")[0]?.trim().toLowerCase() === "https";
   }
 
+  /**
+   * The headers every answer from this deployment carries.
+   *
+   * `forPreview` is the one exception, and it is not a relaxation of this
+   * deployment's posture — it is the recognition that a proxied preview is a
+   * *different application* being handed back through this socket. The policy
+   * below describes the dashboard: no inline script, no `eval`, `base-uri
+   * 'none'`, `frame-ancestors 'none'`. Applied to somebody's dev server it
+   * blocks the inline bootstrap every bundler emits and the `<base>` the
+   * rewrite depends on, and the reader gets a white page with no error in it.
+   * So for those responses the policy is left to {@link previewProxyHeaders},
+   * which writes the app's own or a permissive one.
+   *
+   * `nosniff` goes with it, for the same reason and not as an oversight: a
+   * dev server that labels its bundle `text/plain` — and several do — has
+   * that bundle refused, which is the same white page by a different route.
+   * The app's own content types are the app's to get right. What stays is
+   * what is about the connection rather than the document: the request id,
+   * HSTS, and the referrer policy.
+   */
   private securityHeaders(
     response: ServerResponse,
     requestId: string,
     secure: boolean,
+    forPreview = false,
   ): void {
     response.setHeader("X-Request-Id", requestId);
-    response.setHeader("X-Content-Type-Options", "nosniff");
     // Only on a request that already arrived over TLS. Sending it on a
     // plain-HTTP deployment would pin that host to HTTPS in every visitor's
     // browser for the lifetime of the header — the one change here a user
@@ -21370,8 +21625,12 @@ export class ApiGateway {
         `max-age=${String(this.hstsMaxAgeSeconds)}`,
       );
     }
-    response.setHeader("X-Frame-Options", "DENY");
     response.setHeader("Referrer-Policy", "no-referrer");
+    if (forPreview) {
+      return;
+    }
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("X-Frame-Options", "DENY");
     response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     // style-src allows 'unsafe-inline' because the vendored Monaco editor
     // injects its theming through runtime <style> elements; script-src stays
@@ -21467,6 +21726,7 @@ export class ApiGateway {
     previewUrl: string,
     rest: string,
     search: string,
+    base: string,
   ): Promise<void> {
     const target = new URL(
       `${rest.length === 0 ? "/" : rest}${search}`,
@@ -21498,14 +21758,79 @@ export class ApiGateway {
         target,
         { method: request.method ?? "GET", headers },
         (answer) => {
-          if (!response.headersSent) {
-            // `content-security-policy` from the app is kept: it is the app's
-            // own claim about itself. Nothing is added, because this is not
-            // trying to sandbox the page — it is trying to reach it.
-            response.writeHead(answer.statusCode ?? 502, answer.headers);
+          const proxied = previewProxyHeaders(
+            answer.headers,
+            base,
+            new URL(previewUrl).origin,
+          );
+          // A document is the one thing that has to be read before it is
+          // handed on: its own addresses are written for the root of an
+          // origin and it is not being served at one. Everything else —
+          // bundles, images, a video, a long poll — is streamed untouched,
+          // because buffering those to measure them would be a denial of
+          // service anybody could trigger by loading their own page.
+          const status = answer.statusCode ?? 502;
+          const rewritable =
+            /^\s*text\/html\b/iu.test(
+              String(answer.headers["content-type"] ?? ""),
+            ) &&
+            request.method !== "HEAD" &&
+            status !== 204 &&
+            status !== 304 &&
+            // Compressed bytes are not a document this can read. The request
+            // upstream drops `accept-encoding` so this is nearly never true;
+            // a server that compresses anyway is passed through rather than
+            // corrupted.
+            answer.headers["content-encoding"] === undefined;
+          if (!rewritable) {
+            if (!response.headersSent) {
+              response.writeHead(status, proxied);
+            }
+            answer.pipe(response);
+            answer.on("end", resolve);
+            answer.on("error", () => {
+              response.destroy();
+              resolve();
+            });
+            return;
           }
-          answer.pipe(response);
-          answer.on("end", resolve);
+          const chunks: Buffer[] = [];
+          let held = 0;
+          answer.on("data", (chunk: Buffer) => {
+            held += chunk.length;
+            // A "document" larger than this is not one anybody is reading;
+            // it is handed back as it came rather than held in memory.
+            if (held > MAX_REWRITTEN_PREVIEW_BYTES) {
+              if (!response.headersSent) {
+                response.writeHead(status, proxied);
+                response.write(Buffer.concat(chunks));
+              }
+              chunks.length = 0;
+              response.write(chunk);
+              return;
+            }
+            chunks.push(chunk);
+          });
+          answer.on("end", () => {
+            if (!response.headersSent) {
+              const body = Buffer.from(
+                rewritePreviewHtml(
+                  Buffer.concat(chunks).toString("utf8"),
+                  base,
+                ),
+                "utf8",
+              );
+              // Rewritten, so the length that arrived is no longer the length
+              // going out — and a wrong one truncates the page.
+              delete proxied["content-length"];
+              proxied["Content-Length"] = String(body.length);
+              response.writeHead(status, proxied);
+              response.end(body);
+            } else {
+              response.end();
+            }
+            resolve();
+          });
           answer.on("error", () => {
             response.destroy();
             resolve();

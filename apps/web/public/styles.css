@@ -747,6 +747,14 @@ svg.ui-icon {
   flex: none;
 }
 
+/* The mark is the one piece of branding that is a colour rather than a shape
+   of text, so it takes the accent wherever it lands instead of the ink of
+   whatever is beside it. It draws itself in `currentColor`, so any surface
+   that needs it to match its own text can still say so. */
+.brand-mark {
+  color: var(--accent);
+}
+
 .brand-text {
   display: grid;
   line-height: 1.2;
@@ -5193,8 +5201,8 @@ button.chip.lg:hover {
     opacity: 1;
   }
 
-  /* A touch selects one message before surfacing its actions. Keeping the
-     unselected rule explicit also defeats the synthetic/sticky `:hover` some
+  /* A message is held to surface its actions, and shows them alone. Keeping
+     the unheld rule explicit also defeats the synthetic/sticky `:hover` some
      mobile browsers add after a tap. `!important` is intentional: the base
      hover/focus reveal is defined later and must remain the desktop contract. */
   .cmsg-row .cmsg-actions {
@@ -5212,6 +5220,45 @@ button.chip.lg:hover {
     pointer-events: auto !important;
     width: max-content;
     margin: 8px 0 0 auto;
+  }
+
+  /* The hold belongs to this app for its whole length. A long press over
+     text otherwise raises the platform's selection magnifier and copy bubble
+     on top of the bar the same press is opening, and the two fight for the
+     finger. The words are still copyable: "Copy text" is the first thing in
+     the row's own menu. */
+  .cmsg-row:not(.cmsg-system),
+  .dm-msg {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Except over a command or a path somebody posted, where a long press is
+     the reader reaching for the words themselves. `beginMessageHold` leaves
+     those presses to the platform for the same reason. */
+  .cmsg-row code,
+  .cmsg-row pre,
+  .dm-msg code,
+  .dm-msg pre {
+    -webkit-touch-callout: default;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Held, but not yet long enough. The row answers the finger as soon as it
+     lands, so a hold under way reads as one rather than as a press that did
+     nothing for half a second. */
+  .cmsg-row.msg-holding {
+    background: var(--bg-hover);
+  }
+
+  .dm-msg .dm-bubble {
+    transition: box-shadow 0.12s ease;
+  }
+
+  .dm-msg.msg-holding .dm-bubble {
+    box-shadow: 0 0 0 2px var(--accent-line);
   }
 
   /* The platform's tap flash is a grey-blue rectangle in somebody else's

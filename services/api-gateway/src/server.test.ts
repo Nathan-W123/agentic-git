@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import {
+  createServer,
   request as httpRequest,
   type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
 } from "node:http";
 import net from "node:net";
 import { createHmac } from "node:crypto";
@@ -35,9 +38,12 @@ import {
   normaliseThreadTitle,
   parseAnswerTaskDirective,
   parseAutoClaimVerdict,
+  previewBaseHref,
+  previewProxyHeaders,
   readsAsEchoOfRequest,
   reportedFreshTokens,
   requestFromObjective,
+  rewritePreviewHtml,
   selectChannelMemo,
   selectThreadContext,
   summariseAuditData,
@@ -100,6 +106,12 @@ interface TestRuntime {
    * globally and would happily move somebody else's mirror.
    */
   syncCalls: Array<{ projectId: string; repositoryId: string; actorId: string }>;
+  /**
+   * What the fake preview operations report, so a test can point the proxy at
+   * a server it controls. `url` absent is a deployment with nothing running,
+   * which is what every test that is not about the preview sees.
+   */
+  preview: { url?: string; exited?: unknown };
   /**
    * Every call the fake `submitTask` operation received, in order — for
    * asserting @mention dispatch submits under the *mentioned agent's owner*,
@@ -449,6 +461,7 @@ async function startRuntime(
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const pushCalls: TestRuntime["pushCalls"] = [];
   const syncCalls: TestRuntime["syncCalls"] = [];
+  const preview: TestRuntime["preview"] = {};
   const pushOutcomes = [...(options.pushOutcomes ?? [])];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
@@ -925,6 +938,15 @@ async function startRuntime(
         planUrl: `/api/v1/workers/leases/${leased.lease.id}/plan`,
       };
     },
+    async previewStart() {
+      return preview.url === undefined ? undefined : { ...preview };
+    },
+    async previewStatus() {
+      return preview.url === undefined ? undefined : { ...preview };
+    },
+    async previewStop() {
+      delete preview.url;
+    },
     async leaseBundle() {
       return Buffer.from("PACK-placeholder");
     },
@@ -1033,6 +1055,7 @@ async function startRuntime(
     submittedTasks,
     pushCalls,
     syncCalls,
+    preview,
     chatPrompts,
     chatAnswer,
     providerUsage,
@@ -10514,6 +10537,204 @@ async function startBareGateway(
     sent,
   };
 }
+
+/**
+ * A preview that renders, rather than a preview that merely answers.
+ *
+ * Reported from a real press of play: the app started, the link appeared, and
+ * opening it produced a white rectangle. Nothing was broken in the app — the
+ * proxy was handing back the dashboard's own security policy and the app's
+ * own root-absolute asset paths, so every `/assets/*.js` the document asked
+ * for went to the control plane instead of to the app, and the inline
+ * bootstrap script that would have reported it was blocked by a CSP written
+ * about a different application.
+ */
+
+/** A stand-in dev server, answering the way a bundled app's really does. */
+async function fakePreview(
+  t: TestContext,
+  handler: (
+    request: IncomingMessage,
+    response: ServerResponse,
+  ) => void,
+): Promise<string> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  // Unreferenced so a socket the proxy's keep-alive agent is still holding
+  // cannot keep this test file's process alive after the assertions are done.
+  server.unref();
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("The fake preview did not bind a port");
+  }
+  return `http://127.0.0.1:${String(address.port)}`;
+}
+
+test("a proxied preview is served as its own app, not under this one's policy", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  await client.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+    method: "POST",
+    body: { id: "greenfield", branch: "main" },
+  });
+
+  runtime.preview.url = await fakePreview(t, (request, response) => {
+    if (request.url === "/assets/main.js") {
+      response.writeHead(200, { "Content-Type": "text/javascript" });
+      response.end("export const ok = 1;\n");
+      return;
+    }
+    if (request.url === "/login") {
+      response.writeHead(302, { Location: "/signed-in" });
+      response.end();
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    response.end(
+      '<!doctype html><html><head><link rel="stylesheet" href="/assets/app.css">' +
+        '</head><body><div id="root"></div>' +
+        '<script type="module" src="/assets/main.js"></script>' +
+        "</body></html>",
+    );
+  });
+
+  const base = previewBaseHref(DEFAULT_PROJECT_ID, "greenfield");
+  const page = await client.request(base);
+  assert.equal(page.status, 200);
+
+  // The document's own addresses now point at the app rather than at the
+  // dashboard. This is the whole of the white page: `/assets/main.js` asked
+  // this deployment for the app's bundle and got a 404 with a content type a
+  // browser will not execute.
+  assert.match(page.data, new RegExp(`src="${base}assets/main\\.js"`, "u"));
+  assert.match(page.data, new RegExp(`href="${base}assets/app\\.css"`, "u"));
+  // And a `<base>`, ahead of anything that could already have been fetched,
+  // so relative URLs and client-side routes resolve under the app too.
+  assert.match(page.data, new RegExp(`<head><base href="${base}">`, "u"));
+
+  // The dashboard's policy is about the dashboard. Applied here it blocks the
+  // inline bootstrap every bundler emits and the `<base>` above — `base-uri
+  // 'none'` — and the page renders empty with the reason in a console nobody
+  // in this product ever opens.
+  const policy = page.headers.get("content-security-policy") ?? "";
+  assert.doesNotMatch(policy, /base-uri 'none'/u);
+  assert.doesNotMatch(policy, /frame-ancestors 'none'/u);
+  assert.match(policy, /'unsafe-inline'/u);
+  // Framed by this deployment and by nobody else — `DENY` would refuse the
+  // dashboard's own preview pane as readily as a stranger's.
+  assert.equal(page.headers.get("x-frame-options"), "SAMEORIGIN");
+
+  // The bundle itself reaches the app and comes back executable.
+  const bundle = await client.request(`${base}assets/main.js`);
+  assert.equal(bundle.status, 200);
+  assert.equal(bundle.data, "export const ok = 1;\n");
+  assert.match(bundle.headers.get("content-type") ?? "", /javascript/u);
+
+  // A redirect the app issues stays inside the app. `/signed-in` on this
+  // origin is the dashboard, which is a different application entirely.
+  const redirected = await fetch(`${runtime.origin}${base}login`, {
+    headers: { Cookie: client.cookieHeader },
+    redirect: "manual",
+  });
+  assert.equal(redirected.status, 302);
+  assert.equal(redirected.headers.get("location"), `${base}signed-in`);
+
+  // Everything this deployment answers for itself is unchanged: the strict
+  // policy is lifted for the previewed app and for nothing else.
+  const dashboard = await client.request("/some/client/route");
+  assert.match(
+    dashboard.headers.get("content-security-policy") ?? "",
+    /base-uri 'none'/u,
+  );
+  assert.equal(dashboard.headers.get("x-frame-options"), "DENY");
+});
+
+test("the preview proxy moves a page's addresses without touching anything else", () => {
+  const base = previewBaseHref("proj_1", "greenfield");
+  assert.equal(base, "/api/v1/projects/proj_1/repositories/greenfield/preview/app/");
+
+  const rewritten = rewritePreviewHtml(
+    '<!doctype html><html><head><meta charset="utf-8">' +
+      '<script src="/main.js"></script>' +
+      '<script src="https://cdn.example.com/x.js"></script>' +
+      '<script src="//cdn.example.com/y.js"></script>' +
+      '<img src="./logo.png"><a href="/about">About</a>' +
+      "</head></html>",
+    base,
+  );
+  assert.match(rewritten, new RegExp(`<head><base href="${base}">`, "u"));
+  assert.ok(rewritten.includes(`src="${base}main.js"`));
+  assert.ok(rewritten.includes(`href="${base}about"`));
+  // Another origin is another origin. Moving these under this path would
+  // break a page that is correctly asking somewhere else.
+  assert.ok(rewritten.includes('src="https://cdn.example.com/x.js"'));
+  assert.ok(rewritten.includes('src="//cdn.example.com/y.js"'));
+  // Relative URLs are already handled by the <base>, so they are left alone.
+  assert.ok(rewritten.includes('src="./logo.png"'));
+
+  // A document with no head still gets one address it can resolve against.
+  assert.match(rewritePreviewHtml("<p>hi</p>", base), /^<base href="/u);
+});
+
+test("preview headers keep the app's own claims and drop this deployment's", () => {
+  const base = previewBaseHref("proj_1", "greenfield");
+  const origin = "http://127.0.0.1:4310";
+
+  const stated = previewProxyHeaders(
+    {
+      "content-type": "text/html",
+      "content-security-policy": "default-src 'self'",
+      connection: "keep-alive",
+      "transfer-encoding": "chunked",
+    },
+    base,
+    origin,
+  );
+  // The app said something about itself, so that is what is sent.
+  assert.equal(stated["content-security-policy"], "default-src 'self'");
+  // Hop-by-hop headers describe this connection and not the next one.
+  assert.equal(stated["connection"], undefined);
+  assert.equal(stated["transfer-encoding"], undefined);
+
+  const silent = previewProxyHeaders({ "content-type": "text/html" }, base, origin);
+  // It said nothing, so a policy loose enough to run a dev server is written
+  // — inline scripts, eval, blob workers, a socket back to itself.
+  assert.match(String(silent["content-security-policy"]), /'unsafe-inline'/u);
+  assert.match(String(silent["content-security-policy"]), /'unsafe-eval'/u);
+
+  // A redirect stated either way lands inside the app.
+  assert.equal(
+    previewProxyHeaders({ location: "/next" }, base, origin)["location"],
+    `${base}next`,
+  );
+  assert.equal(
+    previewProxyHeaders({ location: `${origin}/next` }, base, origin)["location"],
+    `${base}next`,
+  );
+  // Somewhere else is left where it was pointed.
+  assert.equal(
+    previewProxyHeaders({ location: "https://example.com/x" }, base, origin)[
+      "location"
+    ],
+    "https://example.com/x",
+  );
+
+  // A previewed app cannot sign the reader out of the deployment they are
+  // watching it from: its cookies stay in its own path.
+  assert.deepEqual(
+    previewProxyHeaders(
+      { "set-cookie": ["coord_session=theirs; Path=/; HttpOnly", "a=b"] },
+      base,
+      origin,
+    )["set-cookie"],
+    [`coord_session=theirs; Path=${base}; HttpOnly`, `a=b; Path=${base}`],
+  );
+});
 
 test("with no token configured, first-run setup is open", async (t) => {
   const { client } = await startBareGateway(t, {});
