@@ -701,8 +701,8 @@ function wire() {
 /* ------------------------------------------------------- channel replay -- */
 
 /**
- * The channel mock replays the day it depicts, in order: the request types
- * itself, the two threaded asks land, both agents go busy, the coordinator's
+ * The channel mock replays the day it depicts, in order: two people each
+ * type a request at an agent, both agents go busy, the coordinator's
  * conflict card orders their overlapping plans, and the deliveries arrive in
  * exactly the order that card promised. Then it holds, fades, and plays
  * again — the conversation is a demonstration, and a demonstration you
@@ -750,12 +750,8 @@ function channelStory(animate, inView) {
     });
   }
 
-  // The thread wrapper draws the rail its replies hang from; staged with
-  // its children, or the story opens on a line pointing at nothing.
-  const threads = [...shot.querySelectorAll(".thread")];
-
   const reset = () => {
-    for (const el of [...steps, ...threads]) {
+    for (const el of steps) {
       el.style.opacity = "0";
       el.style.transform = "";
     }
@@ -766,7 +762,7 @@ function channelStory(animate, inView) {
   };
   reset();
   undoers.push(() => {
-    for (const el of [...steps, ...threads]) {
+    for (const el of steps) {
       el.style.opacity = "";
       el.style.transform = "";
     }
@@ -825,10 +821,6 @@ function channelStory(animate, inView) {
       if (resolves !== undefined) {
         resolves.el.textContent = resolves.done;
         resolves.el.classList.remove("busy");
-      }
-      const thread = el.closest(".thread");
-      if (thread !== null) {
-        thread.style.opacity = "1";
       }
       const card = el.classList.contains("arb-card");
       animate(
