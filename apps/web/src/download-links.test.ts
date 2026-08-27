@@ -24,17 +24,31 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..", "..");
 
 /**
- * The page and the script beside it, read as one thing.
+ * Every served file that names a release, read as one thing.
  *
- * Both are searched because the links live in whichever of them happens to
- * hold the behaviour, and that moved once already: extracting the script to
- * satisfy the content security policy took every filename with it, and a
- * check that read only the HTML found nothing and said so cheerfully.
+ * The download page and the script beside it are both searched because the
+ * links live in whichever of them happens to hold the behaviour, and that
+ * moved once already: extracting the script to satisfy the content security
+ * policy took every filename with it, and a check that read only the HTML
+ * found nothing and said so cheerfully.
+ *
+ * The marketing site used to be a third copy of these filenames and was
+ * checked here too. It now lives in the Kumi-Website repository, which
+ * carries the same check in its own suite — the filenames still have to
+ * agree with the packager, and the guard went with the pages.
  */
+const RELEASE_PAGES = [
+  ["download.html"],
+  ["download.js"],
+];
+
 async function downloadPageSource(): Promise<string> {
   const parts = await Promise.all(
-    ["download.html", "download.js"].map(async (name) =>
-      await readFile(path.join(repoRoot, "apps", "web", "public", name), "utf8"),
+    RELEASE_PAGES.map(async (name) =>
+      await readFile(
+        path.join(repoRoot, "apps", "web", "public", ...name),
+        "utf8",
+      ),
     ),
   );
   return parts.join("\n");
@@ -105,10 +119,17 @@ test("every download the page offers is a file the packager actually builds", as
   );
 
   const page = await downloadPageSource();
+  // Collected case-insensitively and compared exactly, which is the whole
+  // point: a release asset path is case sensitive, so `KUMI-win-x64.exe` is
+  // a 404 and not a spelling preference. Matching only `Kumi-` would let
+  // that name through by never seeing it at all — which is how the marketing
+  // site once came to ship five links that cannot resolve.
   const offered = new Set(
-    [...page.matchAll(/"(Kumi-[^"]+\.(?:dmg|zip|exe|AppImage|deb))"/gu)].map(
-      (match) => match[1] as string,
-    ),
+    [
+      ...page.matchAll(
+        /(kumi-[a-z0-9_.-]+\.(?:dmg|zip|exe|appimage|deb))/giu,
+      ),
+    ].map((match) => match[1] as string),
   );
   assert.ok(offered.size > 0, "the download page offers no files");
   // A list this test also wrote can only catch drift between two files, not a

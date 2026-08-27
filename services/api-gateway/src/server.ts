@@ -4323,7 +4323,9 @@ function narrowToRepositories<T extends { repositoryId?: string }>(
   );
 }
 
-/** An invitation without its secret, which is never stored recoverably. */
+
+
+
 function publicInvitation(invitation: {
   id: string;
   organizationId: string;
@@ -21454,6 +21456,8 @@ export class ApiGateway {
     }
     return Buffer.concat(chunks);
   }
+
+
 
   private async readJson(request: IncomingMessage): Promise<unknown> {
     const contentType = request.headers["content-type"]?.split(";")[0]?.trim();

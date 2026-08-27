@@ -494,13 +494,19 @@ test("one play control beside the pin runs whatever the channel's app is", async
     chats.indexOf("function previewControl(repositoryId)"),
     chats.indexOf("function previewLink(repositoryId)"),
   );
-  assert.match(control, /class="ch-count ch-preview-toggle on"/u);
+  // `on` is written as the head of a template expression, not a closed class
+  // string: a preview whose build did not finish is running *and* wrong, and
+  // appends `warn` to say so. Matching the literal `on"` asserted the shape
+  // this had before that state existed, and went red the moment it landed.
+  assert.match(control, /class="ch-count ch-preview-toggle on\$\{/u);
+  assert.match(control, /" warn"/u);
   assert.match(control, /data-act="preview-stop"/u);
   assert.match(control, /data-act="preview-start"/u);
   assert.match(control, /icon\("play"\)/u);
   assert.doesNotMatch(control, /icon-btn/u);
   assert.match(css, /\.ch-preview-toggle \{/u);
   assert.match(css, /\.ch-preview-toggle\.on \{/u);
+  assert.match(css, /\.ch-preview-toggle\.warn \{/u);
 
   // A preview that died on its own is not the same as one that was never
   // started, and the control is the only place that difference is reported.
@@ -1922,10 +1928,17 @@ test("the composer is one card with bottom utilities and a send arrow", async ()
     css,
     /\.send-btn \{[\s\S]{0,260}background: transparent;[\s\S]{0,80}color: var\(--salmon\);/u,
   );
+  // A paper plane, not an arrow. The arrow was the same picture as "next",
+  // and the composer's primary action should not read as a navigation mark —
+  // ui.js says so where the icon is defined. Asserted as the plane's body
+  // plus the fold line across it, loosely enough that the path may be
+  // renumbered and tightly enough that swapping it back for a chevron fails.
+  const icons = await publicFile("ui.js");
   assert.match(
-    await publicFile("ui.js"),
-    /send: S\('<path d="M[\d.]+ 12h[\d.]+"\/><path d="m[\d.]+ [\d.]+ [\d.]+ [\d.]+-[\d.]+ [\d.]+"\/>'\),/u,
+    icons,
+    /send: S\(\s*'<path d="M[\d.]+ [\d.]+ [\d.]+ [\d.]+a\.85\.85 0 0 0[^"]+"\/><path d="m[\d.]+ [\d.]+ [\d.]+-[\d.]+"\/>',/u,
   );
+  assert.doesNotMatch(icons, /send: S\('<path d="M[\d.]+ 12h[\d.]+"/u);
 });
 
 test("the composer stays open over a decision the textarea cannot see", async () => {
@@ -7097,188 +7110,56 @@ test("Codex offers its documented ids when the account reports none", async () =
   );
 });
 
-/* -------------------------------------------------------- marketing site -- */
+/* ------------------------------------------------------- the front door -- */
 
-async function siteFile(name: string): Promise<string> {
-  return await readFile(path.join(packageRoot, "public", "site", name), "utf8");
-}
-
-test("the marketing site is served at its own addresses, beside the dashboard", async () => {
+test("the origin's front door is the application, not a page about it", async () => {
   const assets = await loadStaticAssets();
-
-  // Page keys are extensionless addresses, on the `/authorize` precedent.
-  // `/download` is deliberately absent: the dashboard's own functional page
-  // owns that address, and the marketing nav links into it.
-  for (const page of ["/", "/pricing"]) {
-    assert.equal(
-      assets.get(page)?.contentType,
-      "text/html; charset=utf-8",
-      `${page} should serve a marketing page`,
-    );
-  }
-  assert.equal(assets.get("/site.css")?.contentType, "text/css; charset=utf-8");
-  for (const script of ["/site.js", "/site-boot.js", "/vendor/motion/motion.js"]) {
-    assert.equal(
-      assets.get(script)?.contentType,
-      "text/javascript; charset=utf-8",
-      `${script} should be served`,
-    );
-  }
-  // MIT: the notice travels with the vendored code, same-origin like the code.
-  const licence = assets.get("/vendor/motion/LICENSE.md")?.body.toString("utf8") ?? "";
-  assert.match(licence, /The MIT License/u);
-  assert.match(licence, /Motion\]\(https:\/\/motion\.dev\) B\.V\./u);
-
-  // The front page is the site; the dashboard document keeps `/index.html`,
-  // which is what the gateway's extensionless fallback serves for `/app`.
-  const front = assets.get("/")?.body.toString("utf8") ?? "";
-  assert.match(front, /coordination layer/iu);
-  const dashboard = assets.get("/index.html")?.body.toString("utf8") ?? "";
-  assert.match(dashboard, /id="app-root"/u);
-  assert.doesNotMatch(front, /id="app-root"/u);
-
-  // Marketing pages are editable, so none may promise immutability — that is
-  // reserved for names that carry their own digest.
-  for (const key of ["/", "/pricing", "/site.css", "/site.js"]) {
-    assert.equal(assets.get(key)?.immutable, undefined, `${key} must revalidate`);
-  }
-});
-
-test("every marketing script parses before it is served", async () => {
-  const dir = path.join(packageRoot, "public", "site");
-  const scripts = (await readdir(dir)).filter((name) => name.endsWith(".js"));
-  assert.ok(scripts.length >= 3, `expected the site scripts, saw ${scripts.length}`);
-  for (const name of scripts) {
-    const checked = spawnSync(
-      process.execPath,
-      ["--check", path.join(dir, name)],
-      { encoding: "utf8" },
-    );
-    assert.equal(checked.status, 0, `${name} does not parse:\n${checked.stderr}`);
-  }
-});
-
-test("the marketing front page forwards legacy deep links to /app", async () => {
-  // Mailed links predate the move of the dashboard to /app — claim links,
-  // password resets, the trial-warning mail's settings pointer — and inboxes
-  // cannot be re-sent. The front page therefore forwards any hash that names
-  // a dashboard screen, before paint, with the fragment intact. The gateway's
-  // CSP forbids inline scripts, so the forwarder is the first external script
-  // in <head>, parser-blocking on purpose.
-  const html = await siteFile("index.html");
-  const headEnd = html.indexOf("</head>");
-  assert.ok(headEnd > 0);
-  assert.match(html.slice(0, headEnd), /<script src="\/site-boot\.js"><\/script>/u);
-
-  const boot = await siteFile("site-boot.js");
-  assert.match(boot, /window\.location\.replace\("\/app" \+ hash\)/u);
-  // Every screen the server or an old mail can send somebody to on this
-  // origin, plus the billing and settings returns. An allowlist, not "any
-  // hash": the page's own anchors must keep scrolling.
-  //
-  // `waitlist` is deliberately not here. It is new, so no link to `/#waitlist`
-  // exists anywhere to forward, and the site's own buttons name `/app#waitlist`
-  // outright rather than relying on this.
-  for (const screen of [
-    "signin",
-    "register",
-    "signup",
-    "welcome",
-    "setup",
-    "forgot",
-    "reset",
-    "billing",
-    "billing-done",
-    "billing-cancelled",
-    "settings",
-  ]) {
-    assert.match(boot, new RegExp(`"${screen}"`, "u"), `${screen} should forward`);
-  }
-  // Installed desktop shells load the bare origin forever (main.mjs ships in
-  // installers); the preload's KUMI_SERVER global is the tell that sends them
-  // to the dashboard.
-  assert.match(boot, /window\.KUMI_SERVER/u);
-});
-
-test("marketing motion is an enhancement behind the reduced-motion gate", async () => {
-  const boot = await siteFile("site-boot.js");
-  const site = await siteFile("site.js");
-  const css = await siteFile("site.css");
-
-  // The class that arms hidden reveal states exists only when JavaScript ran
-  // AND motion is welcome — so no-JS visitors and reduced-motion visitors
-  // never have content hidden from them.
-  assert.match(
-    boot,
-    /matchMedia\("\(prefers-reduced-motion: no-preference\)"\)\.matches/u,
-  );
-  assert.match(site, /matchMedia\("\(prefers-reduced-motion: reduce\)"\)/u);
-  // And the module strips the class rather than animating when the gate is
-  // closed or the vendored library failed to load.
-  assert.match(site, /classList\.remove\("anim"\)/u);
-
-  // Hidden starting states are all scoped to the armed class...
-  assert.match(css, /html\.anim \.reveal \{/u);
-  assert.doesNotMatch(css, /(?<!html\.anim )\.reveal \{/u);
-  // ...and the CSS-only animations die under the media kill switch.
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*animation: none/u,
-  );
-
-  // Both pages load the gate before the library and the module.
-  for (const page of ["index.html", "pricing.html"]) {
-    const html = await siteFile(page);
-    assert.match(html, /<script src="\/site-boot\.js"><\/script>/u);
-    assert.match(html, /<script src="\/vendor\/motion\/motion\.js"><\/script>/u);
-    assert.match(html, /<script type="module" src="\/site\.js"><\/script>/u);
-  }
-});
-
-test("the marketing site sends newcomers to the waitlist, not to a card", async () => {
-  // Payments are off, so every call to action on the site has to lead
-  // somewhere that works. A "Start free trial" button pointing at a sign-up
-  // route that answers 501 is the single worst thing this site could ship.
-  for (const page of ["index.html", "pricing.html"]) {
-    const html = await siteFile(page);
-    assert.equal(
-      html.includes("/app#signup"),
-      false,
-      `${page} must not link at the card path`,
-    );
-    assert.match(
-      html,
-      /href="\/app#waitlist"/u,
-      `${page} should offer the waitlist`,
-    );
-    assert.doesNotMatch(
-      html,
-      /Start (your )?free trial/u,
-      `${page} must not promise a trial`,
-    );
-  }
-  // The pricing page still says what a seat will cost, and says plainly that
-  // nobody is paying it yet — the number is what it will be, not a bill.
-  const pricing = await siteFile("pricing.html");
-  assert.match(pricing, /Payments are switched off/u);
-  assert.match(pricing, /Nobody is being charged\s*\n?\s*today/u);
-});
-
-test("the seat price is written exactly once, on the pricing page", async () => {
-  // The product code carries no amount at all — only a STRIPE_PRICE_ID — so
-  // the site is the single place a human reads the number. Keeping it to one
-  // marked line is what makes a Stripe price change a one-line site edit.
-  const pricing = await siteFile("pricing.html");
-  const amounts = pricing.match(/\$\d+/gu) ?? [];
-  assert.equal(amounts.length, 1, `expected one price, saw: ${amounts.join(", ")}`);
-  assert.match(pricing, /PRICE — the only place/u);
-  const home = await siteFile("index.html");
+  // The marketing site used to register itself under the bare "/" key, which
+  // is what made this deployment answer its own address with an advertisement
+  // instead of the product. The site now lives in the Kumi-Website repository
+  // and this build serves none of it, so "/" has no key of its own and
+  // `serveStatic` falls through to the dashboard document — the behaviour it
+  // has always had for every other extensionless path under /app.
   assert.equal(
-    (home.match(/\$\d+/gu) ?? []).length,
-    0,
-    "index.html must not repeat the price",
+    assets.has("/"),
+    false,
+    'a "/" key here means something has claimed the front door again',
   );
+  const document = assets.get("/index.html");
+  assert.ok(document, "the dashboard document is what / falls back to");
+  const body = Buffer.isBuffer(document.body)
+    ? document.body.toString("utf8")
+    : document.body;
+  assert.match(body, /id="app-root"/u);
 });
+
+test("no marketing address is served from this build", async () => {
+  const assets = await loadStaticAssets();
+  // Naming them individually rather than pattern-matching: these are the
+  // addresses the site actually held, and a re-added page would land on one
+  // of them. /download stays — it is the dashboard's own page, served from
+  // public/download.html, and the site links to it from the other repository.
+  for (const gone of [
+    "/",
+    "/pricing",
+    "/about",
+    "/faq",
+    "/security",
+    "/waitlist",
+    "/privacy",
+    "/terms",
+    "/site.css",
+    "/site.js",
+    "/site-boot.js",
+    "/field.js",
+    "/vendor/motion/motion.js",
+    "/fonts/inter.woff2",
+  ]) {
+    assert.equal(assets.has(gone), false, `${gone} is served again`);
+  }
+  assert.ok(assets.has("/download"), "the dashboard still serves /download");
+});
+
 /* ------------------------------------------------- room presentation ---- */
 
 test("the channel rail is drawn only when there is a channel to switch to", async () => {
