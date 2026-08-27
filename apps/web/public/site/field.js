@@ -104,8 +104,17 @@ void main() {
   } else {
     /* A falling drop: visible only in the moment before its own impact,
        streaking from above the surface down to the point its ring will
-       spread from. */
-    vec4 drop = uDrops[int(aRole - 0.5)];
+       spread from. The slot is picked by comparing against the loop counter
+       rather than indexing the array with the attribute: constant-index
+       loops are the one form every GLSL ES compiler accepts, and a stricter
+       mobile compiler rejecting the dynamic form would silently cost the
+       whole surface. */
+    vec4 drop = vec4(0.0);
+    for (int i = 0; i < ${DROPS}; i += 1) {
+      if (float(i) == aRole - 1.0) {
+        drop = uDrops[i];
+      }
+    }
     float age = uTime - drop.z;
     if (drop.w <= 0.0 || age < -${FALL_SECONDS.toFixed(2)} || age >= 0.05) {
       gl_Position = vec4(0.0, 0.0, 2.0, 1.0);

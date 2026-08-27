@@ -33,7 +33,67 @@
  */
 (function () {
   "use strict";
+  var BOOT_REV = "w5";
   var hash = window.location.hash;
+
+  // Every resource that fails to arrive is recorded, so the ?why overlay
+  // below can name the missing file instead of anyone diagnosing a phone
+  // from a screenshot. Capture phase, because resource error events do not
+  // bubble; registered here because this file is the first script and the
+  // one most likely to survive whatever broke.
+  window.__kumiLoadErrors = [];
+  window.addEventListener(
+    "error",
+    function (event) {
+      var el = event.target;
+      if (el && (el.tagName === "SCRIPT" || el.tagName === "LINK")) {
+        window.__kumiLoadErrors.push(el.src || el.href || "unknown");
+      }
+    },
+    true
+  );
+
+  // The page's own account of itself, for the day it misbehaves on a device
+  // nobody can attach a debugger to. Add ?why to the address and it says
+  // which rev of each file ran, what loaded, and why the water is or is not
+  // drawing. Costs nothing when the flag is absent.
+  if (/[?#&]why\b/.test(window.location.search + window.location.hash)) {
+    window.addEventListener("load", function () {
+      setTimeout(function () {
+        var probe = null;
+        try {
+          probe = document.createElement("canvas").getContext("webgl2");
+        } catch (error) {
+          probe = null;
+        }
+        var panel = document.createElement("pre");
+        panel.textContent = [
+          "kumi site diagnostics",
+          "boot: " + BOOT_REV,
+          "site.js: " + (window.__kumiSiteRev || "DID NOT RUN"),
+          "classes: " + (document.documentElement.className.trim() || "(none)"),
+          "Motion: " + typeof window.Motion,
+          "webgl2: " + (probe ? "available" : "unavailable"),
+          "water: " + (window.__kumiFieldState || "not started"),
+          "reduced motion: " +
+            (window.matchMedia("(prefers-reduced-motion: reduce)").matches
+              ? "on"
+              : "off"),
+          "failed loads: " +
+            (window.__kumiLoadErrors.length
+              ? window.__kumiLoadErrors.join(", ")
+              : "none"),
+        ].join("\n");
+        panel.style.cssText =
+          "position:fixed;left:12px;right:12px;bottom:12px;z-index:9999;" +
+          "padding:14px 16px;background:rgba(12,11,10,.95);" +
+          "border:1px solid #453f3b;border-radius:10px;color:#f3efe8;" +
+          "font:12px/1.6 ui-monospace,Menlo,monospace;" +
+          "white-space:pre-wrap;word-break:break-all";
+        document.body.appendChild(panel);
+      }, 1200);
+    });
+  }
 
   /**
    * Whether this page is the origin's front door.

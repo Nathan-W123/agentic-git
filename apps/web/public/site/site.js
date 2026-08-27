@@ -29,6 +29,10 @@
 
 import { startField } from "./field.js";
 
+// Read by the boot script's ?why diagnostics: proof this module's graph
+// loaded, and which revision of it.
+window.__kumiSiteRev = "w5";
+
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const motion = window.Motion;
 const EASE = [0.32, 0.72, 0, 1];
@@ -168,6 +172,7 @@ function shift() {
 function field() {
   const canvas = document.querySelector("#field");
   if (canvas === null) {
+    window.__kumiFieldState = "no canvas in the page";
     return;
   }
   try {
@@ -176,13 +181,18 @@ function field() {
       // Tells the stylesheet the real water is running, so the CSS-only
       // swell that stands in for it on machines without WebGL steps aside.
       document.documentElement.classList.add("field-live");
+      window.__kumiFieldState = "running";
+    } else {
+      window.__kumiFieldState = "webgl2 unavailable — CSS swell instead";
     }
-  } catch {
+  } catch (error) {
     // A shader that would not compile, or a context lost on creation. The
-    // stylesheet's gradient is already behind the canvas and is a complete
-    // background on its own, so there is nothing to clean up and nothing
-    // worth telling the visitor.
+    // stylesheet's swell is already behind the canvas and is a complete,
+    // living background on its own — but the reason is kept for the ?why
+    // overlay, because a silent catch is how this stayed undiagnosable.
     stopField = undefined;
+    window.__kumiFieldState =
+      "crashed: " + (error instanceof Error ? error.message : String(error));
   }
 }
 

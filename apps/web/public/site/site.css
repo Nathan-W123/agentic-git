@@ -186,22 +186,25 @@ a {
  */
 @media (prefers-reduced-motion: no-preference) {
   html:not(.field-live) .field {
-    animation: field-swell 16s ease-in-out infinite alternate;
+    animation: field-swell 11s ease-in-out infinite alternate;
   }
 }
 
 @keyframes field-swell {
   0% {
-    background-position: 47% 28%, 52% 66%;
-    background-size: 128% 106%, 92% 72%;
+    background-position: 42% 24%, 56% 64%;
+    background-size: 118% 96%, 84% 62%;
+    opacity: 0.75;
   }
   50% {
-    background-position: 52% 33%, 47% 70%;
-    background-size: 142% 118%, 104% 84%;
+    background-position: 58% 36%, 42% 74%;
+    background-size: 152% 130%, 116% 96%;
+    opacity: 1;
   }
   100% {
-    background-position: 49% 30%, 51% 64%;
-    background-size: 132% 110%, 96% 78%;
+    background-position: 45% 27%, 53% 61%;
+    background-size: 124% 102%, 90% 68%;
+    opacity: 0.8;
   }
 }
 
