@@ -582,99 +582,167 @@ strong {
 }
 
 .hero h1 {
-  max-width: 13ch;
+  max-width: 17ch;
 }
 
 /*
  * The claim, at headline size.
  *
- * It used to be one word and could be enormous; a sentence cannot, so this
- * is a third of that and wraps to three lines at the measure above. The
- * width axis stays low because it is what makes this face angular: at the
- * bottom of the axis the bowls pull their sides upright and the junctions
- * sharpen. The rest of the page's headings keep h1's own width.
+ * Heavy and at the top of the width axis, which is the opposite of what the
+ * one-word wordmark wanted: that was drawn thin and narrow to read as a
+ * mark, where a sentence has to read as a voice. 700 of the face's 200 to
+ * 800, full width, and the leading pulled in so the lines sit as a block
+ * rather than as separate sentences.
  */
 .hero-name {
-  font-size: clamp(46px, 5.6vw, 84px);
-  font-variation-settings: "wght" 300, "wdth" 78;
-  line-height: 1.02;
-  letter-spacing: -0.032em;
+  font-size: clamp(38px, 4.5vw, 66px);
+  font-variation-settings: "wght" 700, "wdth" 100;
+  line-height: 1.06;
+  letter-spacing: -0.028em;
+}
+
+/* The line under the claim: what the headline means, at reading size. */
+.hero-sub {
+  max-width: 46ch;
+  font-size: clamp(15.5px, 1.2vw, 17.5px);
+  line-height: 1.62;
+  color: var(--muted);
+  text-wrap: pretty;
 }
 
 /*
  * The rulings, running.
  *
- * A window onto something continuous rather than a list: the run is written
- * twice and travelled by exactly half its own height, so the moment it has
- * scrolled one full copy it is back where it started and the seam never
- * arrives. Masked to nothing at both ends, which is what makes it read as a
- * feed passing through rather than six lines that begin and end.
+ * A list being read through rather than a stack of cards: every line dim,
+ * the one crossing the middle lit and marked, the whole column faded to
+ * nothing at both ends.
  *
- * The mask is the fade, so there is no gradient overlay to keep in step with
- * whatever the water is doing behind it.
+ * The geometry is deliberately whole slots, because the lighting depends on
+ * it. Each line is exactly one slot tall and the window is exactly five, so
+ * the middle of the window is slot 2.5 whatever the viewport does to the
+ * type. The run is twelve slots, the six rulings twice, and travels exactly
+ * six, so the loop closes on itself.
+ *
+ * That fixed geometry is what lets the highlight be pure CSS. The run moves
+ * one slot every sixth of the loop, so a line is centred at a moment that
+ * depends only on its slot index, and each line's animation is started that
+ * far behind its neighbour's. `--i` is the whole input; both copies carry 0
+ * to 5 because they sit six slots apart, which is a whole copy, so they
+ * light in the same phase and are never both on screen.
  */
+
 .coord-feed {
-  height: clamp(260px, 34vh, 360px);
+  /* One line and its air. Everything below counts in these. */
+  --slot: 3.15em;
+  height: calc(var(--slot) * 5);
   overflow: hidden;
+  font-family: var(--display);
+  font-size: clamp(15px, 1.45vw, 21px);
   -webkit-mask-image: linear-gradient(
     to bottom,
     transparent,
-    #000 22%,
-    #000 78%,
+    #000 26%,
+    #000 74%,
     transparent
   );
   mask-image: linear-gradient(
     to bottom,
     transparent,
-    #000 22%,
-    #000 78%,
+    #000 26%,
+    #000 74%,
     transparent
   );
 }
 
-/* The spacing is a margin on each line rather than a gap between them, and
-   that is what makes the loop exact: with a gap, the run is twelve lines and
-   eleven gaps, so half of it lands half a gap short of the second copy and
-   the seam needs a fudge factor. With the space carried by the lines, half
-   the run is exactly one copy plus its own trailing space.
-
-   `flow-root` rather than `block` for the same reason: a plain block lets
-   the last line's bottom margin collapse straight out through it, so the run
-   measures one margin short of twice a copy and half of it lands early. */
-.coord-run {
-  display: flow-root;
-}
-
 .coord-line {
-  margin-bottom: 14px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  padding: 13px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--surface-1) 66%, transparent);
-  font-size: 14.5px;
-  line-height: 1.5;
-  color: var(--muted);
-  text-wrap: pretty;
+  grid-template-columns: 1.1em minmax(0, 1fr);
+  align-items: center;
+  height: var(--slot);
+  font-variation-settings: "wght" 560, "wdth" 92;
+  letter-spacing: -0.014em;
+  line-height: 1.3;
+  color: var(--faint);
 }
 
-.coord-mark {
-  font-size: 13px;
-  line-height: 1.6;
+/* Drawn from borders rather than set as a character, so it is the same
+   triangle in every font and crisp at every size. */
+.coord-cue {
+  /* Centred in its own gutter rather than flush to the column's edge, which
+     put it hard against the side of the window with half of it clipped. */
+  justify-self: center;
+  width: 0;
+  height: 0;
+  border-left: 7px solid var(--salmon);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  opacity: 0;
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .coord-run {
-    animation: coord-run 34s linear infinite;
+    animation: coord-run 36s linear infinite;
+  }
+
+  /*
+   * Line i is centred at t = 6(i - 2) seconds, so its own animation peaks
+   * there: the delay is that moment less one whole period, which makes every
+   * value negative so nothing sits waiting on its first turn showing a lit
+   * state it has not reached yet.
+   */
+  .coord-line,
+  .coord-cue {
+    animation-duration: 36s;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+    animation-delay: calc(var(--i) * 6s - 48s);
+  }
+
+  .coord-line {
+    animation-name: coord-focus;
+  }
+
+  .coord-cue {
+    animation-name: coord-lit;
   }
 }
 
 @keyframes coord-run {
   to {
     transform: translateY(-50%);
+  }
+}
+
+/* Peaked at 0%, which is where the delay above puts the moment a line is in
+   the middle of the window; the ramps either side are about half a slot of
+   travel each. */
+@keyframes coord-focus {
+  0% {
+    color: var(--text);
+  }
+
+  9%,
+  91% {
+    color: var(--faint);
+  }
+
+  100% {
+    color: var(--text);
+  }
+}
+
+@keyframes coord-lit {
+  0% {
+    opacity: 1;
+  }
+
+  9%,
+  91% {
+    opacity: 0;
+  }
+
+  100% {
+    opacity: 1;
   }
 }
 
