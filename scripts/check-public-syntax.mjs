@@ -38,11 +38,10 @@ const scratch = mkdtempSync(path.join(tmpdir(), "coord-public-syntax-"));
 const failures = [];
 let checked = 0;
 
-// The marketing site's scripts live one level down in `public/site` and ship
-// just as verbatim, so they get the same parse. The vendored Motion bundle is
-// included on purpose: it is served to browsers like everything else, and it
-// parses cleanly as a module even though it runs as a classic script.
-const roots = [publicDir, path.join(publicDir, "site")];
+// The marketing site used to live one level down in `public/site` and was
+// parsed here too. It moved to the Kumi-Website repository and took this
+// check with it — the same two passes run there, over its own files.
+const roots = [publicDir];
 
 try {
   for (const dir of roots) {
@@ -125,12 +124,13 @@ for (const dir of roots) {
  * One extra brace therefore deletes exactly one innocent rule, somewhere
  * below where it was typed, with no warning anywhere.
  *
- * That is not hypothetical. An edit that removed a component left its closing
- * brace behind, which ate `.belt-defs { position: absolute; width: 0 }` — the
- * rule that folds the symbol defs out of the layout. The defs SVG fell back
- * to its intrinsic 300x150, and a 198px hole opened in the middle of a
- * section. Everything still "worked"; it just looked wrong, and nothing but
- * measuring the page could say why.
+ * That is not hypothetical. On the marketing site, an edit that removed a
+ * component left its closing brace behind, which ate the next rule — one that
+ * folded a block of SVG symbol defs out of the layout. The defs fell back to
+ * their intrinsic 300x150 and a 198px hole opened in the middle of a section.
+ * Everything still "worked"; it just looked wrong, and nothing but measuring
+ * the page could say why. The site has moved out, but the dashboard's own
+ * stylesheet is served exactly as unchecked as that one was.
  *
  * Comments are blanked line-for-line so the reported line number is the real
  * one, and quoted strings are blanked so a brace inside `content:` cannot

@@ -6935,326 +6935,56 @@ test("Codex offers its documented ids when the account reports none", async () =
   );
 });
 
-/* -------------------------------------------------------- marketing site -- */
+/* ------------------------------------------------------- the front door -- */
 
-async function siteFile(name: string): Promise<string> {
-  return await readFile(path.join(packageRoot, "public", "site", name), "utf8");
-}
-
-test("the marketing site is served at its own addresses, beside the dashboard", async () => {
+test("the origin's front door is the application, not a page about it", async () => {
   const assets = await loadStaticAssets();
+  // The marketing site used to register itself under the bare "/" key, which
+  // is what made this deployment answer its own address with an advertisement
+  // instead of the product. The site now lives in the Kumi-Website repository
+  // and this build serves none of it, so "/" has no key of its own and
+  // `serveStatic` falls through to the dashboard document — the behaviour it
+  // has always had for every other extensionless path under /app.
+  assert.equal(
+    assets.has("/"),
+    false,
+    'a "/" key here means something has claimed the front door again',
+  );
+  const document = assets.get("/index.html");
+  assert.ok(document, "the dashboard document is what / falls back to");
+  const body = Buffer.isBuffer(document.body)
+    ? document.body.toString("utf8")
+    : document.body;
+  assert.match(body, /id="app-root"/u);
+});
 
-  // Page keys are extensionless addresses, on the `/authorize` precedent.
-  // `/download` is deliberately absent: the dashboard's own functional page
-  // owns that address, and the marketing nav links into it.
-  for (const page of ["/", "/pricing"]) {
-    assert.equal(
-      assets.get(page)?.contentType,
-      "text/html; charset=utf-8",
-      `${page} should serve a marketing page`,
-    );
-  }
-  assert.equal(assets.get("/site.css")?.contentType, "text/css; charset=utf-8");
-  for (const script of [
+test("no marketing address is served from this build", async () => {
+  const assets = await loadStaticAssets();
+  // Naming them individually rather than pattern-matching: these are the
+  // addresses the site actually held, and a re-added page would land on one
+  // of them. /download stays — it is the dashboard's own page, served from
+  // public/download.html, and the site links to it from the other repository.
+  for (const gone of [
+    "/",
+    "/pricing",
+    "/about",
+    "/faq",
+    "/security",
+    "/waitlist",
+    "/privacy",
+    "/terms",
+    "/site.css",
     "/site.js",
     "/site-boot.js",
     "/field.js",
     "/vendor/motion/motion.js",
+    "/fonts/inter.woff2",
   ]) {
-    assert.equal(
-      assets.get(script)?.contentType,
-      "text/javascript; charset=utf-8",
-      `${script} should be served`,
-    );
+    assert.equal(assets.has(gone), false, `${gone} is served again`);
   }
-  // MIT: the notice travels with the vendored code, same-origin like the code.
-  const licence = assets.get("/vendor/motion/LICENSE.md")?.body.toString("utf8") ?? "";
-  assert.match(licence, /The MIT License/u);
-  assert.match(licence, /Motion\]\(https:\/\/motion\.dev\) B\.V\./u);
-
-  // OFL, same rule: the notice travels with the files.
-  const fonts = assets.get("/fonts/LICENSE.md")?.body.toString("utf8") ?? "";
-  assert.match(fonts, /SIL Open Font License/u);
-
-  // The front page is the site; the dashboard document keeps `/index.html`,
-  // which is what the gateway's extensionless fallback serves for `/app`.
-  const front = assets.get("/")?.body.toString("utf8") ?? "";
-  assert.match(front, /coordination layer/iu);
-  const dashboard = assets.get("/index.html")?.body.toString("utf8") ?? "";
-  assert.match(dashboard, /id="app-root"/u);
-  assert.doesNotMatch(front, /id="app-root"/u);
-
-  // Marketing pages are editable, so none may promise immutability — that is
-  // reserved for names that carry their own digest.
-  for (const key of ["/", "/pricing", "/site.css", "/site.js"]) {
-    assert.equal(assets.get(key)?.immutable, undefined, `${key} must revalidate`);
-  }
+  assert.ok(assets.has("/download"), "the dashboard still serves /download");
 });
 
-test("every marketing script parses before it is served", async () => {
-  const dir = path.join(packageRoot, "public", "site");
-  const scripts = (await readdir(dir)).filter((name) => name.endsWith(".js"));
-  assert.ok(scripts.length >= 3, `expected the site scripts, saw ${scripts.length}`);
-  for (const name of scripts) {
-    const checked = spawnSync(
-      process.execPath,
-      ["--check", path.join(dir, name)],
-      { encoding: "utf8" },
-    );
-    assert.equal(checked.status, 0, `${name} does not parse:\n${checked.stderr}`);
-  }
-});
-
-test("the marketing front page forwards legacy deep links to /app", async () => {
-  // Mailed links predate the move of the dashboard to /app — claim links,
-  // password resets, the trial-warning mail's settings pointer — and inboxes
-  // cannot be re-sent. The front page therefore forwards any hash that names
-  // a dashboard screen, before paint, with the fragment intact. The gateway's
-  // CSP forbids inline scripts, so the forwarder is the first external script
-  // in <head>, parser-blocking on purpose.
-  const html = await siteFile("index.html");
-  const headEnd = html.indexOf("</head>");
-  assert.ok(headEnd > 0);
-  assert.match(html.slice(0, headEnd), /<script src="site-boot\.js"><\/script>/u);
-
-  const boot = await siteFile("site-boot.js");
-  assert.match(boot, /window\.location\.replace\("\/app" \+ hash\)/u);
-  // Every screen name AUTH_HASHES routes (app.js), plus the billing and
-  // settings returns the server mails out and hands to Stripe. An allowlist,
-  // not "any hash": the page's own anchors must keep scrolling.
-  for (const screen of [
-    "signin",
-    "register",
-    "signup",
-    "welcome",
-    "setup",
-    "forgot",
-    "reset",
-    "billing",
-    "billing-done",
-    "billing-cancelled",
-    "settings",
-  ]) {
-    assert.match(boot, new RegExp(`"${screen}"`, "u"), `${screen} should forward`);
-  }
-  // Installed desktop shells load the bare origin forever (main.mjs ships in
-  // installers); the preload's KUMI_SERVER global is the tell that sends them
-  // to the dashboard.
-  assert.match(boot, /window\.KUMI_SERVER/u);
-});
-
-test("the marketing type is served from this origin, not asked for", async () => {
-  /*
-   * The control plane sends `font-src 'self'`.
-   *
-   * A Google Fonts link is not refused loudly under that policy — the request
-   * is blocked, the @font-face never resolves, and the page renders in
-   * whatever sans the visitor's system happens to have. Which is the failure
-   * this whole file exists to catch elsewhere: it looks fine on the machine
-   * that built it, because that machine has the font installed.
-   *
-   * So the faces ship. Three of them, latin subsets, and the stylesheet must
-   * reach them by a relative URL for the same reason every page does — a
-   * stylesheet served through the preview proxy resolves `url()` against
-   * itself, and `/fonts/...` would fetch the deployment's copy instead.
-   */
-  const assets = await loadStaticAssets();
-  for (const face of ["bricolage-grotesque", "inter", "jetbrains-mono"]) {
-    const font = assets.get(`/fonts/${face}.woff2`);
-    assert.equal(font?.contentType, "font/woff2", `${face} should be served`);
-    const body = font?.body;
-    assert.ok(Buffer.isBuffer(body), `${face} should be served as bytes`);
-    // woff2's magic number, so a truncated or wrong-format file fails here
-    // rather than silently in a browser.
-    assert.equal(
-      body.subarray(0, 4).toString("latin1"),
-      "wOF2",
-      `${face} is not a woff2 file`,
-    );
-  }
-
-  const css = await siteFile("site.css");
-  assert.doesNotMatch(
-    css,
-    /@import|https:\/\/fonts\.googleapis\.com|https:\/\/fonts\.gstatic\.com/u,
-    "the stylesheet must not reach off-origin for type",
-  );
-  for (const face of ["bricolage-grotesque", "inter", "jetbrains-mono"]) {
-    assert.match(css, new RegExp(`url\\(fonts/${face}\\.woff2\\)`, "u"));
-  }
-  assert.doesNotMatch(css, /url\(\/fonts\//u, "font URLs must stay relative");
-});
-
-test("the marketing pages survive being served under a path prefix", async () => {
-  /*
-   * The site is served at three depths, not one.
-   *
-   * Production gives it "/" and "/pricing" off the origin root. The control
-   * plane's preview proxy gives the same pages a deep path —
-   * `/api/v1/projects/<id>/repositories/<id>/preview/app/` — so somebody can
-   * look at the site an agent just changed, from a phone, without a port
-   * being opened. A root-absolute `href="/site.css"` resolves to the
-   * deployment's own stylesheet in that second case, not the preview's, and
-   * every link in the nav walks straight out of the preview into production.
-   * The page looks right and is not the page being previewed, which is the
-   * worst way for a preview to fail.
-   *
-   * Relative references are correct at both depths: "/" and "/pricing" share
-   * a base directory, and so do the proxied forms of each.
-   *
-   * `/app` is the deliberate exception. The dashboard really is at the
-   * origin's root, and from inside a preview "open the product" should reach
-   * the deployment rather than something inside the preview.
-   */
-  for (const page of ["index.html", "pricing.html"]) {
-    const html = await siteFile(page);
-    const absolute = [...html.matchAll(/(?:href|src)="(\/[^"]*)"/gu)]
-      .map((match) => match[1] as string)
-      .filter((target) => !target.startsWith("/app"));
-    assert.deepEqual(
-      absolute,
-      [],
-      `${page} would resolve these against the deployment root, not the ` +
-        `page's own directory: ${absolute.join(", ")}`,
-    );
-  }
-});
-
-test("the marketing forwards only from the origin's front door", async () => {
-  /*
-   * Each forward in the boot script rescues somebody who asked for "/" —
-   * a mailed dashboard link, a desktop shell built before the move, a PWA
-   * whose cached start_url still says "/". Served through the preview proxy
-   * instead, the standalone tell fires for any reader who has Kumi
-   * installed, and the preview replaced itself with the real dashboard: the
-   * play button appeared to start the product rather than the page.
-   */
-  const boot = await siteFile("site-boot.js");
-  assert.match(boot, /window\.location\.pathname === "\/"/u);
-  const guard = boot.indexOf('window.location.pathname === "/"');
-  for (const forward of [...boot.matchAll(/location\.replace\("\/app"/gu)]) {
-    assert.ok(
-      (forward.index ?? 0) > guard,
-      "a forward to /app sits outside the front-door guard",
-    );
-  }
-});
-
-test("only the module that animates may hide anything", async () => {
-  /*
-   * The page went blank twice, both times the same way: the boot script
-   * armed the `anim` class that hides the hero and every reveal, on the
-   * promise that site.js would play them in — and a 404 anywhere in
-   * site.js's module graph silently broke that promise, leaving a page
-   * where nothing had loaded to show what nothing would ever reveal.
-   *
-   * The invariant that closed it: the file that hides content is the file
-   * that animates it. site.js adds the class, after its reduced-motion and
-   * library gates pass; the boot script never touches it. A stale checkout,
-   * a missing file, a parse error — any of them now cost the animations and
-   * never the content.
-   */
-  const boot = await siteFile("site-boot.js");
-  assert.doesNotMatch(
-    boot,
-    /classList\.add\("anim"\)|className \+= " anim"/u,
-    "the boot script must never arm the motion class",
-  );
-  const site = await siteFile("site.js");
-  assert.match(site, /classList\.add\("anim"\)/u);
-  // Armed only after the gate: the add sits inside the else of the
-  // reduced-motion/missing-library check, textually after the disarm path.
-  assert.ok(
-    site.indexOf('classList.add("anim")') >
-      site.indexOf('classList.remove("anim")'),
-    "the arming must come after the gate that would refuse it",
-  );
-});
-
-test("marketing motion is an enhancement behind the reduced-motion gate", async () => {
-  const site = await siteFile("site.js");
-  const css = await siteFile("site.css");
-
-  // The class that arms hidden reveal states exists only when JavaScript ran
-  // AND motion is welcome — so no-JS visitors and reduced-motion visitors
-  // never have content hidden from them.
-  assert.match(site, /matchMedia\("\(prefers-reduced-motion: reduce\)"\)/u);
-  // And the module strips the class rather than animating when the gate is
-  // closed or the vendored library failed to load.
-  assert.match(site, /classList\.remove\("anim"\)/u);
-
-  // Hidden starting states are all scoped to the armed class...
-  assert.match(css, /html\.anim \.reveal \{/u);
-  assert.doesNotMatch(css, /(?<!html\.anim )\.reveal \{/u);
-  // ...and every CSS-only animation is declared inside the motion gate.
-  //
-  // This used to look for a single `animation: none` inside the reduce
-  // block, which one opt-out anywhere in the file satisfied — it could not
-  // have caught an ungated animation added next to it. The site states the
-  // rule the other way round now: an animation is only ever declared under
-  // `no-preference`, so a reader who asked for stillness never has one to
-  // turn off. Checked exhaustively, because the point is that there is no
-  // exception rather than that there is an example.
-  const openBlocks: string[] = [];
-  const ungated: string[] = [];
-  let prelude = "";
-  let line = 1;
-  for (const character of css.replaceAll(/\/\*[\s\S]*?\*\//gu, " ")) {
-    if (character === "\n") {
-      line += 1;
-      prelude += " ";
-    } else if (character === "{") {
-      openBlocks.push(prelude.trim());
-      prelude = "";
-    } else if (character === "}") {
-      openBlocks.pop();
-      prelude = "";
-    } else if (character === ";") {
-      const declaration = prelude.trim();
-      // `animation: none` disables rather than animates, so it is allowed
-      // anywhere — it is how the fork antidote unrenders a stray button.
-      if (
-        /^animation(-name)?\s*:/u.test(declaration) &&
-        !/:\s*none/u.test(declaration) &&
-        !openBlocks.some((block) => block.includes("no-preference"))
-      ) {
-        ungated.push(`${String(line)}: ${declaration}`);
-      }
-      prelude = "";
-    } else {
-      prelude += character;
-    }
-  }
-  assert.deepEqual(
-    ungated,
-    [],
-    `site.css animates outside the reduced-motion gate:\n  ${ungated.join("\n  ")}`,
-  );
-
-  // Both pages load the gate before the library and the module.
-  for (const page of ["index.html", "pricing.html"]) {
-    const html = await siteFile(page);
-    assert.match(html, /<script src="site-boot\.js"><\/script>/u);
-    assert.match(html, /<script src="vendor\/motion\/motion\.js"><\/script>/u);
-    assert.match(html, /<script type="module" src="site\.js"><\/script>/u);
-  }
-});
-
-test("the seat price is written exactly once, on the pricing page", async () => {
-  // The product code carries no amount at all — only a STRIPE_PRICE_ID — so
-  // the site is the single place a human reads the number. Keeping it to one
-  // marked line is what makes a Stripe price change a one-line site edit.
-  const pricing = await siteFile("pricing.html");
-  const amounts = pricing.match(/\$\d+/gu) ?? [];
-  assert.equal(amounts.length, 1, `expected one price, saw: ${amounts.join(", ")}`);
-  assert.match(pricing, /PRICE — the only place/u);
-  const home = await siteFile("index.html");
-  assert.equal(
-    (home.match(/\$\d+/gu) ?? []).length,
-    0,
-    "index.html must not repeat the price",
-  );
-});
 /* ------------------------------------------------- room presentation ---- */
 
 test("the channel rail is drawn only when there is a channel to switch to", async () => {

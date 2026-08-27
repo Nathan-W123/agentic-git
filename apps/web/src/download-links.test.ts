@@ -32,15 +32,14 @@ const repoRoot = path.resolve(here, "..", "..", "..");
  * policy took every filename with it, and a check that read only the HTML
  * found nothing and said so cheerfully.
  *
- * The marketing page is searched for the same reason. It now offers the four
- * installers itself rather than sending a reader to the download page, so it
- * is a third copy of the same filenames — and the one nobody would think to
- * update, because it is not called download anything.
+ * The marketing site used to be a third copy of these filenames and was
+ * checked here too. It now lives in the Kumi-Website repository, which
+ * carries the same check in its own suite — the filenames still have to
+ * agree with the packager, and the guard went with the pages.
  */
 const RELEASE_PAGES = [
   ["download.html"],
   ["download.js"],
-  ["site", "index.html"],
 ];
 
 async function downloadPageSource(): Promise<string> {
@@ -123,8 +122,8 @@ test("every download the page offers is a file the packager actually builds", as
   // Collected case-insensitively and compared exactly, which is the whole
   // point: a release asset path is case sensitive, so `KUMI-win-x64.exe` is
   // a 404 and not a spelling preference. Matching only `Kumi-` would let
-  // that name through by never seeing it at all — which is how the mirrored
-  // copy of this site came to ship five links that cannot resolve.
+  // that name through by never seeing it at all — which is how the marketing
+  // site once came to ship five links that cannot resolve.
   const offered = new Set(
     [
       ...page.matchAll(
