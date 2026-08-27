@@ -2133,15 +2133,15 @@ export async function signInForInvitation(email, password) {
 
 /* --------------------------------------------------------- appearance ---- */
 
-export const DEFAULT_ACCENT = "#d88973";
+export const DEFAULT_ACCENT = "#d79a81";
 /**
  * The second colour, when nobody has chosen one.
  *
- * The palette's muted lilac: the quiet half of the pair, far enough from the
- * clay primary to stay legible as a second colour wherever both appear
- * together, and close enough in weight that neither shouts over the other.
+ * The interface starts with one identity accent. A separately chosen second
+ * colour is still respected, but an untouched account stays on the same calm
+ * salmon instead of introducing a competing hue.
  */
-export const DEFAULT_ACCENT_SECONDARY = "#a894b6";
+export const DEFAULT_ACCENT_SECONDARY = "#d79a81";
 
 /**
  * The colour an agent is drawn in when nobody has chosen one.
@@ -2172,7 +2172,7 @@ export const PALETTE = [
   { value: "#4f8ef7", label: "Blue" },
   { value: "#2fae7f", label: "Green" },
   { value: "#e0663d", label: "Orange" },
-  { value: "#d88973", label: "Clay" },
+  { value: "#d79a81", label: "Clay" },
   { value: "#3fa8b5", label: "Teal" },
   { value: "#d7a13b", label: "Amber" },
   { value: "#a894b6", label: "Lilac" },

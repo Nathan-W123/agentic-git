@@ -95,7 +95,7 @@ test("offers the mark as the favicon in both a vector and a raster, and as an iO
   // colour from the page that placed it.
   const mark = assets.get("/kumi-mark.svg")?.body.toString("utf8") ?? "";
   assert.match(mark, /prefers-color-scheme: dark/u);
-  assert.match(mark, /#D88973/u);
+  assert.match(mark, /#D79A81/u);
   assert.match(mark, /#9A4C33/u);
 });
 
@@ -1190,7 +1190,7 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
 
   // People and agents are drawn at the same, smaller face — the two rosters
   // must not disagree about how big somebody in the room is.
-  assert.match(chats, /avatar\(name, 22, name, me \? myAvatar\(\) : undefined\)/u);
+  assert.match(chats, /avatar\(name, 28, name, me \? myAvatar\(\) : undefined\)/u);
   assert.match(chats, /agentFace\(agent, 22\)/u);
   assert.match(css, /\.roster-row \.status-dot \{[\s\S]{0,80}width: 6px;/u);
   assert.match(css, /\.roster-row-main \{[\s\S]{0,120}padding: 4px 8px;/u);
@@ -2533,7 +2533,7 @@ test("working agent faces fill the mark itself with the run's progress", async (
     chats.indexOf('/**\n * What the "..." on a roster row offers'),
   );
 
-  assert.match(row, /statusAgentFace\(agent, 22, activeChannelId\(\)\)/u);
+  assert.match(row, /statusAgentFace\(agent, 28, activeChannelId\(\)\)/u);
   assert.doesNotMatch(row, /statusDot\(/u);
 
   // One run, one mark, wherever it is met. The sidebar roster above, the room's
@@ -2812,28 +2812,28 @@ test("the theme is driven by custom properties rather than per-component colour"
   const app = await browserSource();
   const css = await publicFile("styles.css");
   for (const [token, value] of [
-    ["--bg", "#121110"],
-    ["--surface-1", "#1A1817"],
-    ["--surface-2", "#24211F"],
-    ["--surface-3", "#2C2926"],
-    ["--text", "#F3EFE8"],
-    ["--muted", "#B5AEA5"],
-    ["--salmon", "#D88973"],
-    ["--lavender", "#A894B6"],
+    ["--bg", "#0E0E0D"],
+    ["--surface-1", "#131312"],
+    ["--surface-2", "#1D1C19"],
+    ["--surface-3", "#27251F"],
+    ["--text", "#F0EDE8"],
+    ["--muted", "#A29E97"],
+    ["--salmon", "#D79A81"],
+    ["--lavender", "#D79A81"],
   ]) {
     assert.match(css, new RegExp(`${token}: ${value};`, "u"));
   }
   for (const [alias, token] of [
     ["--bg-panel", "--surface-1"],
     ["--bg-card", "--surface-2"],
-    ["--bg-card-2", "--surface-3"],
+    ["--bg-card-2", "--surface-2"],
     ["--text-2", "--muted"],
     ["--accent", "--salmon"],
     ["--accent-2", "--lavender"],
   ]) {
     assert.match(css, new RegExp(`${alias}: var\\(${token}\\);`, "u"));
   }
-  assert.match(css, /--radius-sm: 10px;/u);
+  assert.match(css, /--radius-sm: 8px;/u);
   assert.match(css, /--radius-lg: 12px;/u);
   const start = app.indexOf("function applyTheme");
   const body = app.slice(start, app.indexOf("\n}", start));
@@ -2909,7 +2909,7 @@ test("the user icon defaults to salmon", async () => {
   const start = ui.indexOf("export function avatar");
   const end = ui.indexOf("\n}", start);
   assert.notEqual(start, -1, "the avatar helper was not found in ui.js");
-  assert.match(ui.slice(start, end), /background:#D88973/u);
+  assert.match(ui.slice(start, end), /background:#D79A81/u);
 });
 
 test("the product is named Kumi throughout the browser surface", async () => {
@@ -4887,10 +4887,9 @@ test("thinking disclosures show only useful status and deduplicated milestones",
     3,
   );
   const milestones = [
-    "Reading code",
+    "Inspecting repository",
     "Planning",
     "Editing screen-chats.js",
-    "Checking an unfamiliar reply shape",
     "Testing",
   ];
   let previous = -1;
@@ -4906,12 +4905,10 @@ test("thinking disclosures show only useful status and deduplicated milestones",
   }
   assert.match(
     compact.html,
-    /class="tt-line tt-cue"><span>Reading code<\/span>/u,
+    /class="tt-line tt-thought">Inspecting repository<\/p>/u,
   );
-  assert.match(
-    compact.html,
-    /class="tt-line tt-thought">Checking an unfamiliar reply shape<\/p>/u,
-  );
+  const refinement = styles.slice(styles.indexOf("calm technical workspace"));
+  assert.match(refinement, /\.thread-thinking \{\s*display: none;/u);
   assert.equal(compact.html.includes("Task: Keep the thread concise"), false);
   assert.deepEqual(
     compact.visible.map((reply) => reply.kind),
@@ -5194,6 +5191,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
     "currentUserName",
     "myAvatar",
     "esc",
+    "state",
     `"use strict";\n${slice("function threadParticipants(replies", "\n/**")}\n${slice(
       "function threadWorkingAuthor(entry",
       "\n/*",
@@ -5224,6 +5222,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
     () => "Ada",
     () => undefined,
     (value: string) => String(value),
+    { activeChannelThread: "m1" },
   ) as (
     entry: unknown,
     replies: unknown[],
@@ -5245,7 +5244,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
   );
   assert.match(
     running,
-    /<span class="ctl-activity">Starting<\/span>/u,
+    /<span class="ctl-activity">Queued<\/span>/u,
     "a live thread should say what the agent is doing",
   );
   assert.match(
@@ -5319,7 +5318,7 @@ test("the run fills the agent working, at the front of the stack", async () => {
   );
 });
 
-test("working thread summaries carry a concise sweeping activity", async () => {
+test("working thread summaries carry one concise observable activity", async () => {
   const source = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const start = source.indexOf("function threadActivityLabel(entry)");
@@ -5337,7 +5336,7 @@ test("working thread summaries carry a concise sweeping activity", async () => {
     activity({
       replies: [{ kind: "progress", content: "Reading the repository and working out a plan…" }],
     }),
-    "Reading code",
+    "Inspecting repository",
   );
   assert.equal(
     activity({
@@ -5359,10 +5358,12 @@ test("working thread summaries carry a concise sweeping activity", async () => {
   );
   assert.match(list, /class="ti-activity text-sweep"/u);
 
-  const sweep = /\n\.cmsg-thread-link \.ctl-activity \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.match(sweep ?? "", /animation: thread-activity-sweep/u);
-  assert.match(sweep ?? "", /background-clip: text;/u);
-  assert.match(css, /@keyframes thread-activity-sweep/u);
+  const refinement = css.slice(css.indexOf("calm technical workspace"));
+  assert.match(
+    refinement,
+    /\.cmsg-thread-link \.ctl-activity,[\s\S]{0,300}animation: none;/u,
+  );
+  assert.match(refinement, /-webkit-text-fill-color: currentColor;/u);
   assert.match(
     css,
     /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-activity \{\n {4}animation: none;/u,
@@ -6368,14 +6369,12 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   // they happen to be looking at: the room list, the message in the channel,
   // and the thread list.
   assert.match(chats, /class="cr-held"/u);
-  assert.match(chats, /class="ctl-held"/u);
+  assert.match(chats, /threadAwaitsGoAhead\(entry\) \? "Blocked" : activity/u);
   assert.match(chats, /class="ti-held"/u);
-  // The channel's mark is a dot beside the reply count, not a bordered banner
-  // repeating in full the sentence the room's own hold line already says one
-  // message below it. The words survive where colour and motion cannot be
-  // read.
+  // The channel summary says the state in text rather than relying on a
+  // continuously animated dot.
   assert.equal(/class="thread-held"/u.test(chats), false);
-  assert.match(chats, /class="sr-only">Waiting for your go-ahead/u);
+  assert.doesNotMatch(chats, /class="ctl-held"/u);
 
   // Amber, not the accent: "moving" and "stopped until you answer" are the two
   // states this list exists to tell apart, and one colour for both is no answer.
@@ -6384,17 +6383,7 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   assert.match(held ?? "", /var\(--orange\)/u);
   assert.equal(/var\(--accent\)/u.test(held ?? ""), false);
 
-  // Same amber on the channel's dot, and the same clock every other live
-  // signal in the app breathes on — with the motion reducible, because the
-  // fade is the whole of what it says.
-  const dot = /\n\.cmsg-thread-link \.ctl-held \{([\s\S]*?)\n\}/u.exec(css)?.[1];
-  assert.notEqual(dot, undefined, "the channel's held mark has a shape rule");
-  assert.match(dot ?? "", /var\(--orange\)/u);
-  assert.match(dot ?? "", /animation: status-breathe/u);
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-held \{\n {4}animation: none;/u,
-  );
+  assert.match(chats, /<span class="ctl-activity">\$\{esc\(status\)\}<\/span>/u);
 });
 
 test("the room's hold line carries a way back to the thread it is about", async () => {
@@ -7343,8 +7332,8 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   );
   assert.match(chats, /const rail = showsChannelRail\(\);/u);
   assert.match(chats, /\$\{rail \? "" : " no-rail"\}/u);
-  assert.match(css, /--rail-w: 60px;/u);
-  assert.match(css, /--chan-sidebar-w: 256px;/u);
+  assert.match(css, /--rail-w: 76px;/u);
+  assert.match(css, /--chan-sidebar-w: 296px;/u);
   assert.match(css, /\.channel-rail \{\s*width: var\(--rail-w\);/u);
   assert.match(css, /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);/u);
 
@@ -7478,8 +7467,8 @@ test("the transcript reads in a column rather than across the window", async () 
   // A message run edge to edge on a wide screen is a message read twice: the
   // eye leaves the end of one line with nowhere to land on the next. Day
   // separators still span the panel so "Today" is not left-shifted short.
-  assert.match(css, /--room-column: 940px;/u);
-  assert.match(css, /--message-max: 100%;/u);
+  assert.match(css, /--room-column: 960px;/u);
+  assert.match(css, /--message-max: 960px;/u);
   assert.match(
     css,
     /\.chan-messages \{[\s\S]{0,400}padding: 12px 18px 20px;/u,
@@ -7502,4 +7491,39 @@ test("the transcript reads in a column rather than across the window", async () 
   // The phone tier keeps its own tighter padding rather than inheriting a
   // desktop measure.
   assert.match(css, /\.chan-messages \{\s*padding: 6px 12px 14px;/u);
+});
+
+test("the workspace uses one coherent flat shell and restrained motion", async () => {
+  const css = await publicFile("styles.css");
+  const refinement = css.slice(css.indexOf("calm technical workspace"));
+
+  assert.match(
+    refinement,
+    /\.chats-shell \{[\s\S]{0,220}border: 1px solid var\(--border-soft\);[\s\S]{0,80}border-radius: 24px;/u,
+  );
+  assert.match(
+    refinement,
+    /\.channel-rail \{[\s\S]{0,180}width: var\(--rail-w\);[\s\S]{0,180}border: 0;[\s\S]{0,80}border-radius: 0;/u,
+  );
+  assert.match(
+    refinement,
+    /\.chan-sidebar \{[\s\S]{0,180}border: 0;[\s\S]{0,80}border-radius: 0;/u,
+  );
+  assert.match(
+    refinement,
+    /\.chan-main \{[\s\S]{0,180}border: 0;[\s\S]{0,80}border-radius: 0;/u,
+  );
+  assert.match(
+    refinement,
+    /\.thread-panel\[data-thread-id\] \{[\s\S]{0,160}min-width: 420px;[\s\S]{0,80}max-width: 460px;/u,
+  );
+  assert.match(
+    refinement,
+    /\.composer \{[\s\S]{0,180}border: 1px solid transparent;[\s\S]{0,80}border-radius: var\(--composer-shape\);/u,
+  );
+  assert.match(refinement, /\.skeleton \{[\s\S]{0,180}animation: none;/u);
+  assert.match(
+    refinement,
+    /\.text-reveal-word,[\s\S]{0,80}\.text-reveal-media \{\s*animation: none;/u,
+  );
 });
