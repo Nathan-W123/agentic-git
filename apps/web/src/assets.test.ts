@@ -6491,18 +6491,20 @@ test("one profile card describes people and agents wherever a face is drawn", as
   );
   assert.match(person, /profileAnchor\(\s*personProfile\(userId, name, repositoryId\),\s*"rr-avatar",\s*"down",/u);
   assert.match(agentRow, /profileAnchor\(\s*agentProfile\(agent, activeChannelId\(\)\),\s*"rr-avatar",\s*"down",/u);
-  // The agent popout is intentionally only identity, live status and the two
-  // execution choices. Role, task/path, access policy and usage belong to the
-  // profile page and do not turn a hover into a scrolling settings card.
+  // The agent popout is intentionally only identity, live status and real
+  // quota windows. Execution settings and account diagnostics belong to the
+  // full profile and do not turn a hover into a settings card.
   const agentCard = chats.slice(
     chats.indexOf("function agentProfile(agent, repositoryId)"),
     chats.indexOf("function personProfile(userId, name, repositoryId)"),
   );
-  assert.match(agentCard, /label: "Model", value: model \|\| "Not reported"/u);
-  assert.match(agentCard, /label: "Reasoning", value: effort \|\| "Provider default"/u);
+  assert.match(agentCard, /facts: \[\],/u);
   assert.match(agentCard, /subtitle: agentLabelOf\(providerId\)/u);
   assert.match(agentCard, /usage: usageBlock\(agent\)/u);
-  assert.doesNotMatch(agentCard, /Role here|Who may task it|Working on|Waiting to start/u);
+  assert.doesNotMatch(
+    agentCard,
+    /agent\.model|agent\.effort|label: "Model"|label: "Reasoning"|Role here|Who may task it|Working on|Waiting to start/u,
+  );
   assert.doesNotMatch(agentRow, /class="roster-row-main"[^>]*data-hover/u);
 
   // A conversation opened from a search or a notification is the one place
@@ -6520,24 +6522,26 @@ test("one profile card describes people and agents wherever a face is drawn", as
     /\? profileAnchor\(identity, "cmsg-identity", "up", content, attributes\)\s*: plainAnchor\(identity, "cmsg-identity", content, attributes\)/u,
   );
 
-  // What the card actually says: who they are, how to read them at a glance,
-  // and the way through to everything it left out.
-  assert.match(chats, /class="pcard-banner"/u);
+  // What the card actually says: who they are and the way through to
+  // everything it intentionally left out. The decorative colour banner and
+  // duplicated status dot are gone from the neutral surface.
+  assert.match(chats, /class="pcard-head"/u);
   assert.match(chats, /class="pcard-name"/u);
-  assert.match(chats, /class="pcard-sub"/u);
+  assert.match(chats, /class="pcard-meta"/u);
   assert.match(chats, /class="pcard-section-label"/u);
+  assert.doesNotMatch(chats, /class="pcard-banner"|--pcard-accent/u);
+  const profile = chats.slice(
+    chats.indexOf("function profileCard(profile)"),
+    chats.indexOf("function profileAnchor(", chats.indexOf("function profileCard(profile)")),
+  );
+  assert.doesNotMatch(profile, /status-dot status-/u);
   assert.match(chats, /label: "View full profile"/u);
   assert.match(chats, /label: unread > 0 \? `Message · \$\{unread\} unread` : "Message"/u);
-  assert.match(chats, /<span class="pcard-pop"><span class="pcard" role="group"/u);
+  assert.match(chats, /class="pcard pcard-\$\{esc\(profile\.kind\)\}"/u);
   assert.match(chats, /<button type="button" class="pcard-open"/u);
   assert.doesNotMatch(chats, /class="pcard-open" role="button"/u);
   assert.match(browser, /case "agent-panel-open":/u);
   assert.match(browser, /case "dm-open":/u);
-  // A colour somebody chose reaches a `style` attribute, so it is matched
-  // against the shape a picker stores rather than escaped and hoped for.
-  assert.match(chats, /const HEX_COLOR = \/\^#\(\?:\[0-9a-f\]\{3\}\|\[0-9a-f\]\{6\}\)\$\/iu/u);
-  assert.match(chats, /style="--pcard-accent:\$\{profile\.accent\}"/u);
-
   // The card lives inside its own anchor and carries the gap as padding, which
   // is what makes it reachable at all: a pointer moving from the face to the
   // card never leaves the thing the hover is on.
@@ -6572,6 +6576,10 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.match(card, /opacity: 1/u);
   const body = /\n\.pcard-body \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
   assert.match(body, /background: var\(--surface-1\)/u);
+  assert.doesNotMatch(css, /\n\.pcard-banner \{/u);
+  const open = /\n\.pcard-open \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(open, /background: transparent/u);
+  assert.match(open, /border-top: 1px solid var\(--border-soft\)/u);
   assert.match(
     css,
     /\.cmsg-row:has\(\.pcard-anchor:is\(:hover, :focus-within\)\) \{[\s\S]*?z-index: 2;/u,
@@ -6601,7 +6609,7 @@ test("one profile card describes people and agents wherever a face is drawn", as
   assert.doesNotMatch(css, /\.pcard-anchor\[data-profile-dir=/u);
   assert.match(
     css,
-    /width: min\(246px, var\(--profile-max-width, calc\(100vw - 20px\)\)\);/u,
+    /width: min\(236px, var\(--profile-max-width, calc\(100vw - 20px\)\)\);/u,
   );
   assert.match(css, /max-height: var\(--profile-max-height/u);
   assert.match(css, /overflow-y: auto/u);

@@ -68,6 +68,36 @@ test("the profile card and the specification read one usage key", async () => {
   }
 });
 
+test("the popover shows quota windows without provider diagnostics", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const card = chats.slice(
+    chats.indexOf("function usageBlock("),
+    chats.indexOf("\n}\n", chats.indexOf("function usageBlock(")),
+  );
+
+  // Loading, unsupported providers, and empty reports are explanations for
+  // the full profile. A hover summary stays absent until it has a real quota
+  // window to show.
+  assert.match(card, /const windows = report\?\.windows \?\? \[\];/u);
+  assert.match(card, /report\.loading === true/u);
+  assert.match(card, /report\.unavailableReason !== undefined/u);
+  assert.match(card, /windows\.length === 0/u);
+  assert.match(card, /return "";/u);
+  assert.doesNotMatch(card, /Checking usage|No usage reported/u);
+  assert.doesNotMatch(
+    card,
+    /usageNoteLines|usageAccountLine|rr-usage-plan|rr-usage-src/u,
+  );
+
+  // A genuine window keeps the useful operational facts: label, percentage,
+  // meter and reset time.
+  assert.match(card, /class="pcard-section pcard-usage-section"/u);
+  assert.match(card, /class="rr-usage-label"/u);
+  assert.match(card, /class="rr-usage-bar"/u);
+  assert.match(card, /class="rr-usage-pct"/u);
+  assert.match(card, /usageResetText\(window\)/u);
+});
+
 test("a face that opens the card is the face that asks for the usage", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");

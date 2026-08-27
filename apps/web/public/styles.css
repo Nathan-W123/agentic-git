@@ -5670,13 +5670,18 @@ button.chip.lg:hover {
   align-items: center;
 }
 
-/* The usage figures are a section of the profile card now (see `.pcard`), so
-   what is left here is only how one window is drawn. */
+/* A quota window is the only operational detail kept in the compact card.
+   Label, meter and percentage share one line; the reset stays beneath it
+   because that is the part that says when an unavailable agent comes back. */
 .rr-usage-row {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 11px;
+}
+
+.rr-usage-row:not(:first-child) {
+  margin-top: 8px;
 }
 
 .rr-usage-label {
@@ -5709,22 +5714,12 @@ button.chip.lg:hover {
   font-variant-numeric: tabular-nums;
 }
 
-.rr-usage-reset,
-.rr-usage-plan,
-.rr-usage-src,
-.rr-usage-empty {
+.rr-usage-reset {
   display: block;
-  margin-top: 4px;
+  margin-top: 3px;
   font-size: 10.5px;
   line-height: 1.45;
   color: var(--text-3);
-}
-
-/* The plan and credit balance are the account's own facts, not a footnote
-   about where the numbers came from, so they read a shade louder than the
-   source line they sit above. */
-.rr-usage-plan {
-  color: var(--text-2);
 }
 
 /* Scaled to the roster's own face rather than in `.status-dot` itself, which
@@ -6645,17 +6640,14 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   }
 }
 
-/* Shaped after the reference profile popout: a coloured crown, the face
-   breaking out of it, the name and the one line that identifies it, then a
-   short column of labelled facts and the way through to the whole page.
-   Deliberately short — everything on it is what somebody needs *before*
-   deciding whether to open the rest. */
+/* A compact identity surface, not a second profile page. It holds the live
+   answer needed before opening an agent and leaves settings to that page. */
 .pcard {
   display: block;
-  width: min(246px, var(--profile-max-width, calc(100vw - 20px)));
+  width: min(236px, var(--profile-max-width, calc(100vw - 20px)));
   max-height: var(--profile-max-height, calc(100dvh - 34px));
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
+  border-radius: 12px;
   background: var(--surface-1);
   background-color: var(--surface-1);
   opacity: 1;
@@ -6670,48 +6662,36 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   cursor: default;
 }
 
-/* Whoever's colour this is: an agent carries its owner's, a person carries
-   their own, and anybody who has chosen none gets the theme's accent. The
-   only large block of colour on the card, which is what lets the rest of it
-   stay quiet. */
-.pcard-banner {
-  display: block;
-  height: 42px;
-  background: linear-gradient(
-    145deg,
-    color-mix(in srgb, var(--pcard-accent, var(--accent)) 42%, var(--surface-2)),
-    color-mix(in srgb, var(--pcard-accent, var(--accent)) 12%, var(--surface-2))
-  );
-}
-
 .pcard-body {
   display: block;
-  padding: 0 13px 13px;
+  padding: 12px;
   background: var(--surface-1);
 }
 
-/* Breaking out of the crown, as the reference does. The ring is the card's
-   own background, so the face reads as sitting on the card rather than
-   punched through it. */
+.pcard-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
 .pcard-face {
   position: relative;
-  /* A block-level flex box rather than an inline one: inline sits on a text
-     baseline, and the descender space under a 52px face is a band of empty
-     card nobody put there. */
   display: flex;
-  width: fit-content;
-  margin: -22px 0 6px;
-  padding: 3px;
-  border-radius: 50%;
-  background: var(--surface-1);
+  flex: none;
 }
 
 .pcard-face .status-dot {
-  right: 2px;
-  bottom: 2px;
-  width: 9px;
-  height: 9px;
-  border-width: 2px;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-width: 1.5px;
+}
+
+.pcard-identity {
+  display: block;
+  min-width: 0;
 }
 
 .pcard-name {
@@ -6725,12 +6705,24 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   white-space: nowrap;
 }
 
-/* The one line that tells two of them apart — an address for a person, the
-   vendor and owner for an agent. */
-.pcard-sub {
-  display: block;
-  margin-top: 1px;
+.pcard-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 5px;
+  margin-top: 3px;
   font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.pcard-meta .sep {
+  color: var(--text-4);
+}
+
+/* The provider or address identifies the subject; the adjacent words state
+   availability without adding a second status dot beside the one on the
+   face. */
+.pcard-sub {
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6738,37 +6730,26 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 .pcard-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 7px;
-  font-size: 11.5px;
   color: var(--text-2);
 }
 
-/* The dot means what it means everywhere else — the palette lives in
-   `.status-dot` and its colours, and only the placement changes: pinned
-   to the corner of a face, and simply sitting in a line of text here. */
-.pcard-status .status-dot {
-  position: static;
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border: 0;
-}
-
-.pcard-rule {
+.pcard-facts {
   display: block;
-  height: 1px;
-  margin: 11px 0 1px;
-  background: var(--border-soft);
+  margin-top: 12px;
 }
 
-/* One fact: what it is, then what it says. The small label is what keeps a
-   short column of these readable without a rule between every pair. */
 .pcard-section {
   display: block;
-  margin-top: 8px;
+  margin-top: 10px;
+}
+
+.pcard-facts .pcard-section:first-child,
+.pcard-usage-section {
+  margin-top: 0;
+}
+
+.pcard-usage-section {
+  padding-top: 11px;
 }
 
 .pcard-section-label {
@@ -6795,30 +6776,39 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 
 .pcard-usage {
   display: block;
-  margin-top: 4px;
+  margin-top: 6px;
 }
 
 /* The way through to everything this card left out, which is what lets it
    stay this short. */
 .pcard-open {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
-  margin-top: 12px;
-  padding: 7px 10px;
+  margin-top: 11px;
+  padding: 9px 0 0;
   border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  color: var(--text);
+  border-top: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
   font-family: inherit;
   font-size: 11.5px;
   font-weight: 500;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: color 0.12s ease;
+}
+
+.pcard-open::after {
+  content: "→";
+  color: var(--text-4);
 }
 
 .pcard-open:hover {
-  background: var(--bg-hover);
+  background: transparent;
+  color: var(--text);
 }
 
 .pcard-open:focus-visible {
@@ -13536,14 +13526,6 @@ dialog.modal[open]::backdrop {
   background: var(--accent);
   animation: none;
   transition: width 220ms var(--ease-motion);
-}
-
-.pcard-banner {
-  background: color-mix(
-    in srgb,
-    var(--pcard-accent, var(--accent)) 16%,
-    var(--surface-2)
-  );
 }
 
 .agent-spec .aspec-banner {

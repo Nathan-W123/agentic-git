@@ -345,24 +345,25 @@ function usageStateKey(agent) {
 /**
  * The usage figures for an agent, as one section of its profile card.
  *
- * Rendered from state rather than fetched on open, so the first hover shows
- * "Checking…" and every later one is instant.
+ * The full profile explains why a provider could not report usage. This
+ * summary has a smaller job: show real quota windows when they exist and
+ * otherwise stay out of the way. That keeps an unsupported provider or a
+ * transient CLI error from turning an identity card into a diagnostics pane.
  */
 function usageBlock(agent) {
   const report = state.providerUsage[usageStateKey(agent)];
-  let body;
-  if (report === undefined || report.loading === true) {
-    body = `<span class="rr-usage-empty">Checking usage…</span>`;
-  } else if (report.unavailableReason !== undefined) {
-    body = `<span class="rr-usage-empty">${esc(report.unavailableReason)}</span>`;
-  } else if (
-    (report.windows ?? []).length === 0 &&
-    usageNoteLines(report).length === 0 &&
-    usageAccountLine(report) === ""
+  const windows = report?.windows ?? [];
+  if (
+    report === undefined ||
+    report.loading === true ||
+    report.unavailableReason !== undefined ||
+    windows.length === 0
   ) {
-    body = `<span class="rr-usage-empty">No usage reported.</span>`;
-  } else {
-    body = `${(report.windows ?? [])
+    return "";
+  }
+  return `<span class="pcard-section pcard-usage-section">
+    <span class="pcard-section-label">Usage</span>
+    <span class="pcard-usage">${windows
       .map((window) => {
         const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
         return `<span class="rr-usage-row">
@@ -375,25 +376,7 @@ function usageBlock(agent) {
             : `<span class="rr-usage-reset">${esc(usageResetText(window))}</span>`
         }`;
       })
-      .join("")}
-      ${usageNoteLines(report)
-        .map((note) => `<span class="rr-usage-plan">${esc(note)}</span>`)
-        .join("")}
-      ${
-        usageAccountLine(report) === ""
-          ? ""
-          : `<span class="rr-usage-plan">${esc(usageAccountLine(report))}</span>`
-      }
-      ${
-        report.source === undefined ||
-        report.source === "Codex CLI session records (~/.codex/sessions)"
-          ? ""
-          : `<span class="rr-usage-src">${esc(report.source)}</span>`
-      }`;
-  }
-  return `<span class="pcard-section">
-    <span class="pcard-section-label">Usage</span>
-    <span class="pcard-usage">${body}</span>
+      .join("")}</span>
   </span>`;
 }
 
@@ -455,29 +438,20 @@ function agentProfile(agent, repositoryId) {
   const status = agentStatus(agent, repositoryId);
   const progress = agentWorkingProgress(agent, repositoryId);
   const providerId = usageProviderId(agent);
-  // A hover card is identification, not the full settings page. Keep the two
-  // execution choices people compare at a glance and leave role, task/path,
-  // ownership and access policy to the profile opened from the button below.
-  // The exact stored id is shown rather than replacing it with a provider
-  // name or the ambiguous word "Default".
-  const model = String(agent.model ?? "").trim();
-  const effort = String(agent.effort ?? "").trim();
-  const facts = [
-    { label: "Model", value: model || "Not reported" },
-    { label: "Reasoning", value: effort || "Provider default" },
-  ];
+  // A hover card answers only who this is, whether it can work now, and how
+  // much reported quota remains. Model, reasoning, ownership, activity and
+  // channel policy already have controls and context in the full profile.
   return {
     kind: "agent",
     name: agent.name,
-    face: statusAgentFace(agent, 52, repositoryId),
-    accent: safeAccent(agent.color),
+    face: statusAgentFace(agent, 42, repositoryId),
     subtitle: agentLabelOf(providerId),
     status,
     statusText:
       status === "working" && Number.isFinite(progress)
         ? `${AGENT_STATUS_TITLE[status]} · ${Math.round(progress)}%`
         : (AGENT_STATUS_TITLE[status] ?? ""),
-    facts,
+    facts: [],
     usage: usageBlock(agent),
     // What the card's usage section is keyed by, so whatever draws the face
     // can start the fetch that fills it. Every agent carries it, teammates'
@@ -535,11 +509,10 @@ function personProfile(userId, name, repositoryId) {
   return {
     kind: "person",
     name: `${name}${me ? " (you)" : ""}`,
-    face: `${avatar(name, 52, name, me ? myAvatar() : undefined)}${statusDot(
+    face: `${avatar(name, 42, name, me ? myAvatar() : undefined)}${statusDot(
       status,
       "",
     )}`,
-    accent: safeAccent(record?.user?.appearance?.accent),
     // The address is the one thing that tells two people with the same
     // display name apart, which is the whole job of a handle here.
     subtitle: String(record?.user?.email ?? "").trim(),
@@ -572,43 +545,47 @@ function personProfile(userId, name, repositoryId) {
  * the card without the hover ever lapsing, and the last line is the way
  * through to the full page when the summary is not enough.
  *
- * Shaped after the reference profile popout: a coloured crown, the face
- * breaking out of it, name and handle, then a short column of labelled facts
- * — the ones somebody actually needs before deciding whether to open the
- * whole thing.
+ * The surface stays deliberately neutral and compact. Identity and live state
+ * lead, optional operational facts follow, and the final control is the way
+ * through to the page that owns everything else.
  */
 function profileCard(profile) {
   if (profile === undefined) {
     return "";
   }
   const facts = profile.facts.filter(({ value }) => String(value ?? "") !== "");
-  const hasDetail = facts.length > 0 || profile.usage !== "";
-  return `<span class="pcard-pop"><span class="pcard" role="group"
-    aria-label="${esc(profile.name)} profile"${
-    profile.accent === undefined ? "" : ` style="--pcard-accent:${profile.accent}"`
-  }>
-    <span class="pcard-banner"></span>
+  const meta = [
+    { cls: "pcard-sub", value: profile.subtitle },
+    { cls: "pcard-status", value: profile.statusText },
+  ].filter(({ value }) => String(value ?? "") !== "");
+  return `<span class="pcard-pop"><span class="pcard pcard-${esc(profile.kind)}"
+    role="group" aria-label="${esc(profile.name)} profile">
     <span class="pcard-body">
-      <span class="pcard-face">${profile.face}</span>
-      <span class="pcard-name">${esc(profile.name)}</span>
-      ${
-        profile.subtitle === ""
-          ? ""
-          : `<span class="pcard-sub">${esc(profile.subtitle)}</span>`
-      }
-      <span class="pcard-status">
-        <span class="status-dot status-${esc(profile.status)}"></span>
-        ${esc(profile.statusText)}
+      <span class="pcard-head">
+        <span class="pcard-face">${profile.face}</span>
+        <span class="pcard-identity">
+          <span class="pcard-name">${esc(profile.name)}</span>
+          <span class="pcard-meta">${meta
+            .map(
+              (item, index) => `${
+                index === 0 ? "" : '<span class="sep" aria-hidden="true">·</span>'
+              }<span class="${item.cls}">${esc(item.value)}</span>`,
+            )
+            .join("")}</span>
+        </span>
       </span>
-      ${hasDetail ? `<span class="pcard-rule"></span>` : ""}
-      ${facts
-        .map(
-          (fact) => `<span class="pcard-section">
-            <span class="pcard-section-label">${esc(fact.label)}</span>
-            <span class="pcard-section-body">${esc(fact.value)}</span>
-          </span>`,
-        )
-        .join("")}
+      ${
+        facts.length === 0
+          ? ""
+          : `<span class="pcard-facts">${facts
+              .map(
+                (fact) => `<span class="pcard-section">
+                  <span class="pcard-section-label">${esc(fact.label)}</span>
+                  <span class="pcard-section-body">${esc(fact.value)}</span>
+                </span>`,
+              )
+              .join("")}</span>`
+      }
       ${profile.usage}
       ${
         profile.action === undefined
