@@ -7167,71 +7167,258 @@ function actionOf(event) {
   return { node: attachment, act: "image-preview", value: undefined };
 }
 
+/** How long a finger stays on a message before it offers its options. */
+const MESSAGE_HOLD_MS = 400;
+
+/** How far it may drift in that time before the press was really a scroll. */
+const MESSAGE_HOLD_SLOP = 10;
+
+/** The press being timed: the row under it, where it landed, and its timer. */
+let messageHold;
+
 /**
- * Gives a touch reader one message's controls at a time.
- *
- * A pointer reveals the action bar by hovering the row. Touch has no hover,
- * but permanently drawing every bar turns the transcript into a column of
- * controls. A tap on a message therefore selects that row; tapping it again
- * or anywhere outside a message clears the selection. Once the bar is open,
- * pressing one of its controls must not close it before the delegated action
- * below gets the same click.
+ * Set by a hold that opened a bar, so the click ending that same press does
+ * not close it again on the way up. The next press clears it either way, so a
+ * hold the platform never follows with a click cannot swallow a later tap.
  */
-function selectMobileChannelMessage(event) {
-  if (!window.matchMedia("(hover: none)").matches) {
-    return;
+let messageHoldOpened = false;
+
+/**
+ * Whether this press came from a finger rather than a pointer.
+ *
+ * A mouse already reveals a message's controls by hovering it, and holding a
+ * mouse button down over words is how somebody drags to select them — so the
+ * hold gesture is only ever touch's. `pointerType` answers for a press that
+ * carries one; a plain click event does not in every browser, and there the
+ * screen's own answer stands in.
+ */
+function isTouchInput(event) {
+  const kind = event?.pointerType;
+  if (kind !== undefined && kind !== "") {
+    return kind === "touch" || kind === "pen";
   }
-  const row = event.target.closest?.(".cmsg-row:not(.cmsg-system)") ?? null;
-  if (row !== null && event.target.closest?.(".cmsg-actions") !== null) {
-    return;
-  }
-  const shouldSelect =
-    row !== null && !row.classList.contains("cmsg-selected");
-  for (const selected of document.querySelectorAll(
-    ".cmsg-row.cmsg-selected",
-  )) {
-    selected.classList.remove("cmsg-selected");
-  }
-  if (shouldSelect) {
-    row.classList.add("cmsg-selected");
-  }
+  return window.matchMedia?.("(hover: none)").matches === true;
 }
 
 /**
- * Gives one private message its clock and its controls, and the rest none.
+ * Starts timing a press that may turn into a hold.
+ *
+ * Tapping a message used to be what asked for its options, so every stray
+ * press in the transcript — a finger landing while scrolling, a tap meant for
+ * the link beside it — put a toolbar over the words being read. Holding is
+ * the phone's own gesture for "tell me more about this", so the bar waits for
+ * one: the finger stays down, the row answers it, and at `MESSAGE_HOLD_MS`
+ * the options appear.
+ *
+ * A press on the open bar, on a link, on a picture or on a snippet of code is
+ * left alone. Those do something of their own already, including the
+ * platform's own long-press menus for saving an image, copying a destination,
+ * or selecting the command somebody posted so it can be pasted somewhere.
+ */
+function beginMessageHold(event) {
+  cancelMessageHold();
+  messageHoldOpened = false;
+  if (!isTouchInput(event) || event.isPrimary === false) {
+    return;
+  }
+  const row =
+    event.target?.closest?.(".cmsg-row:not(.cmsg-system), .dm-msg") ?? null;
+  if (
+    row === null ||
+    event.target.closest?.(
+      ".cmsg-actions, .dm-msg-actions, a, button, img, code, pre, input, textarea, select",
+    ) !== null
+  ) {
+    return;
+  }
+  messageHold = {
+    row,
+    x: event.clientX ?? 0,
+    y: event.clientY ?? 0,
+    timer: window.setTimeout(() => {
+      messageHold = undefined;
+      row.classList.remove("msg-holding");
+      commitMessageHoldSelection(row);
+    }, MESSAGE_HOLD_MS),
+  };
+  // The row answers the finger while the press is still deciding what it is,
+  // so a hold under way looks like one rather than like a press that did
+  // nothing for half a second.
+  row.classList.add("msg-holding");
+}
+
+/**
+ * Ends a press without opening anything: the finger lifted early, or moved
+ * far enough that it was scrolling the transcript, or the browser took the
+ * gesture over for a scroll of its own.
+ */
+function cancelMessageHold() {
+  const hold = messageHold;
+  messageHold = undefined;
+  if (hold === undefined) {
+    return;
+  }
+  window.clearTimeout(hold.timer);
+  hold.row.classList.remove("msg-holding");
+}
+
+/**
+ * Gives the held message its options, and takes them from whatever had them.
+ *
+ * One message at a time, on either surface: a transcript with every bar out
+ * is a column of controls rather than a conversation.
+ */
+function commitMessageHoldSelection(row) {
+  // A poll landing mid-press rebuilds the transcript under the finger, and a
+  // class added to the row that was there paints nothing at all. The message
+  // still under the finger is the one carrying the same id.
+  const held = row.isConnected ? row : document.getElementById(row.id);
+  if (held === null) {
+    return;
+  }
+  clearMessageHoldSelection();
+  messageHoldOpened = true;
+  if (held.classList.contains("dm-msg")) {
+    // A conversation is rebuilt on every poll, so the choice has to live in
+    // state to survive one — while the row in front of the reader is painted
+    // directly, because re-rendering here would replace the panel's scroller
+    // and send the conversation back to its first message.
+    state.dmSelectedMessageId = held.dataset.dmMessage;
+    held.classList.add("dm-selected");
+  } else {
+    held.classList.add("cmsg-selected");
+  }
+  // The tick a long press gets everywhere else on a phone, where the platform
+  // offers one. Silence is a fine answer on the ones that do not.
+  if (typeof navigator.vibrate === "function") {
+    navigator.vibrate(8);
+  }
+}
+
+/** Puts every message's options away, on both surfaces. */
+function clearMessageHoldSelection() {
+  for (const selected of document.querySelectorAll(".cmsg-row.cmsg-selected")) {
+    selected.classList.remove("cmsg-selected");
+  }
+  for (const selected of document.querySelectorAll(".dm-msg.dm-selected")) {
+    selected.classList.remove("dm-selected");
+  }
+  clearDirectMessageSelection();
+}
+
+/**
+ * Keeps the platform's long-press menu out of the way of this one.
+ *
+ * Holding message text otherwise raises the browser's own selection magnifier
+ * and copy bubble on top of the bar the same gesture just opened. Only over a
+ * message, and only for a finger: a right-click on a desktop keeps the menu
+ * it has always had, and a link, a picture or a snippet of code keeps its own.
+ */
+function suppressMessageHoldContextMenu(event) {
+  if (!isTouchInput(event)) {
+    return;
+  }
+  const row =
+    event.target?.closest?.(".cmsg-row:not(.cmsg-system), .dm-msg") ?? null;
+  if (
+    row === null ||
+    event.target.closest?.("a, img, code, pre, input, textarea") !== null
+  ) {
+    return;
+  }
+  event.preventDefault();
+}
+
+document.addEventListener("pointerdown", beginMessageHold, { passive: true });
+document.addEventListener(
+  "pointermove",
+  (event) => {
+    const hold = messageHold;
+    if (
+      hold !== undefined &&
+      (Math.abs(event.clientX - hold.x) > MESSAGE_HOLD_SLOP ||
+        Math.abs(event.clientY - hold.y) > MESSAGE_HOLD_SLOP)
+    ) {
+      cancelMessageHold();
+    }
+  },
+  { passive: true },
+);
+document.addEventListener("pointerup", cancelMessageHold, { passive: true });
+document.addEventListener("pointercancel", cancelMessageHold, {
+  passive: true,
+});
+// A transcript that moved under the finger was being scrolled, whatever the
+// pointer stream said about how far the finger itself travelled.
+document.addEventListener("scroll", cancelMessageHold, {
+  capture: true,
+  passive: true,
+});
+document.addEventListener("contextmenu", suppressMessageHoldContextMenu);
+
+/**
+ * Puts a touch reader's options away when they press somewhere else.
+ *
+ * Holding a message is now the whole of how they are asked for (see
+ * `beginMessageHold`), which leaves a tap one job: dismissal. Pressing a
+ * control on the open bar is that control's press rather than a dismissal,
+ * and has to reach the delegated action below with the bar still standing.
+ */
+function selectMobileChannelMessage(event) {
+  if (!isTouchInput(event)) {
+    return;
+  }
+  if (messageHoldOpened) {
+    // The click that ends the hold's own press, arriving just after it opened
+    // the bar this would otherwise close.
+    messageHoldOpened = false;
+    return;
+  }
+  if (event.target.closest?.(".cmsg-actions, .dm-msg-actions") !== null) {
+    return;
+  }
+  clearMessageHoldSelection();
+}
+
+/**
+ * Gives one private message its clock and its controls, for a pointer.
  *
  * A conversation is mostly short lines, and drawing a timestamp and a pair of
  * buttons under every one of them is most of the panel's height spent saying
- * the same two things over and over. A press on a message asks for them;
- * pressing it again, or anywhere else that does nothing, puts them away.
+ * the same two things over and over. A click asks for them; clicking again,
+ * or anywhere else that does nothing, puts them away. A finger has no click
+ * that means "tell me about this" any longer — it holds the message instead,
+ * and its taps are handled above — so touch turns back at the door.
  *
  * The choice lives in `state` rather than on the row: this panel is rebuilt
  * on every poll, and a class left straight on the DOM would not survive it.
  */
 function selectDirectMessage(event) {
+  if (isTouchInput(event)) {
+    return;
+  }
   const row = event.target.closest?.(".dm-msg") ?? null;
   const chosen = row === null ? undefined : row.dataset.dmMessage;
   const next = chosen === state.dmSelectedMessageId ? undefined : chosen;
   if (next === state.dmSelectedMessageId) {
     return;
   }
-  state.dmSelectedMessageId = next;
   // Selecting a message only changes two classes. Rebuilding the whole app
   // here also replaces the conversation's scroller; when another side panel
   // precedes this one, that scroller has no captured anchor and starts again
   // at the first message. Keep the durable choice in state for later polls,
   // and paint this interaction on the existing rows.
-  for (const selected of document.querySelectorAll(".dm-msg.dm-selected")) {
-    selected.classList.remove("dm-selected");
-  }
+  clearMessageHoldSelection();
   if (next !== undefined) {
+    state.dmSelectedMessageId = next;
     row.classList.add("dm-selected");
   }
 }
 
 document.addEventListener("click", (event) => {
   // This runs before action lookup because an ordinary message body has no
-  // `data-act`: selecting it is still a complete interaction on touch.
+  // `data-act`: on touch, a tap on one is still a complete interaction — it
+  // is what puts an open message bar away.
   selectMobileChannelMessage(event);
   const owningThread = event.target.closest?.("[data-thread-id]")?.dataset.threadId;
   if (owningThread !== undefined) {
@@ -7239,9 +7426,10 @@ document.addEventListener("click", (event) => {
   }
   const found = actionOf(event);
   if (found === undefined) {
-    // Nothing here does anything of its own, so a press on a private message
-    // is a complete interaction: it asks for that message's time and its
-    // controls, and a press anywhere else puts them away again.
+    // Nothing here does anything of its own, so a pointer's press on a
+    // private message is a complete interaction: it asks for that message's
+    // time and its controls, and a press anywhere else puts them away again.
+    // A finger holds the message for the same thing.
     selectDirectMessage(event);
     return;
   }
