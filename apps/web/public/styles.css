@@ -747,6 +747,14 @@ svg.ui-icon {
   flex: none;
 }
 
+/* The mark is the one piece of branding that is a colour rather than a shape
+   of text, so it takes the accent wherever it lands instead of the ink of
+   whatever is beside it. It draws itself in `currentColor`, so any surface
+   that needs it to match its own text can still say so. */
+.brand-mark {
+  color: var(--accent);
+}
+
 .brand-text {
   display: grid;
   line-height: 1.2;

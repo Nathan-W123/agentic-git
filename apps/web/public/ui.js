@@ -505,22 +505,54 @@ const BRAND_LETTERS = `<path d="M8.3 8V40"/>
     <path d="M158.3 8V40"/>`;
 
 /**
- * The supplied standalone mark, cropped from its wide source artwork.
+ * The mark itself: an isometric cube, drawn rather than photographed.
  *
- * The source has an opaque black field. Using its luminance as a mask removes
- * that field, then `currentColor` draws the mark in the theme's own text colour
- * so it remains legible on both dark and light backgrounds.
+ * The three visible faces meet at one interior vertex, and each carries a
+ * short facet stroke that catches the light — enough to read as a solid,
+ * without shading that would have to be redrawn for every theme.
+ *
+ * Every part of it is a stroked path in `currentColor`, so the whole mark is
+ * one colour the surface around it chooses. The previous mark was a 280 kB
+ * photograph of artwork with an opaque black field, keyed out at render time
+ * by using its own luminance as a mask. That worked, but it cost a network
+ * request before the first paint, it rasterised differently at different
+ * sizes, and the keying could only ever approximate the edge it was cutting.
+ * Paths have none of those problems: no request, no mask, and the same shape
+ * at 16px and 1024px.
  */
+const MARK_SHELL =
+  "M29.92 9.08A4.16 4.16 0 0 1 34.08 9.08L50.92 18.8" +
+  "A4.16 4.16 0 0 1 53 22.4L53 41.6A4.16 4.16 0 0 1 50.92 45.2" +
+  "L34.08 54.92A4.16 4.16 0 0 1 29.92 54.92L13.08 45.2" +
+  "A4.16 4.16 0 0 1 11 41.6L11 22.4A4.16 4.16 0 0 1 13.08 18.8Z";
+
+/** Where the three faces meet — two arms up, one stem down. */
+const MARK_SEAM = ["M12.25 20.72L32 32.12L51.75 20.72", "M32 32.12L32 54.68"];
+
+/** One facet stroke per face, each parallel to that face's outer edge. */
+const MARK_FACETS = [
+  "M24.16 19.07L30.39 15.47",
+  "M17.3 28.6L17.3 35.8",
+  "M39.38 45.13L45.62 41.53",
+];
+
+/**
+ * The stroke weight the mark is drawn at, as a share of its own box.
+ *
+ * Held here rather than in the stylesheet because it is geometry, not
+ * styling: the facet strokes are spaced to clear this weight, and a heavier
+ * one closes those gaps up rather than simply looking bolder.
+ */
+const MARK_STROKE = 3.52;
+
 export function brandMark(size = 34) {
   return `<svg class="brand-mark" width="${size}" height="${size}"
-    viewBox="0 0 48 48" overflow="hidden" aria-hidden="true">
-    <mask id="brand-mark-mask" maskUnits="userSpaceOnUse"
-      x="0" y="0" width="48" height="48" style="mask-type:luminance">
-      <image href="/kumi-logo.png" x="-33" y="-7" width="114" height="62"
-        preserveAspectRatio="xMidYMid meet"/>
-    </mask>
-    <rect width="48" height="48" fill="currentColor"
-      mask="url(#brand-mark-mask)"/>
+    viewBox="0 0 64 64" fill="none" stroke="currentColor"
+    stroke-width="${MARK_STROKE}" stroke-linecap="round"
+    stroke-linejoin="round" aria-hidden="true">
+    ${[MARK_SHELL, ...MARK_SEAM, ...MARK_FACETS]
+      .map((d) => `<path d="${d}"/>`)
+      .join("\n    ")}
   </svg>`;
 }
 

@@ -38,7 +38,15 @@ const PUBLIC_FILES = [
   ["screen-chats.js", "text/javascript; charset=utf-8"],
   ["screen-agents.js", "text/javascript; charset=utf-8"],
   ["screen-notifications.js", "text/javascript; charset=utf-8"],
+  // The mark, and then the sizes of it a browser cannot derive itself. The
+  // SVG is the mark; the rasters exist because an installed home-screen icon
+  // and an iOS touch icon are both asked for as PNGs at a fixed size, and
+  // because a handful of browsers still decline an SVG favicon.
+  ["kumi-mark.svg", "image/svg+xml"],
   ["kumi-logo.png", "image/png"],
+  ["apple-touch-icon.png", "image/png"],
+  ["icon-192.png", "image/png"],
+  ["icon-512.png", "image/png"],
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
 

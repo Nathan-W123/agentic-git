@@ -37,14 +37,27 @@ test("loads every control-room asset with an explicit content type", async () =>
     "89504e470d0a1a0a",
     "the served Kumi artwork should be a PNG",
   );
+  // The icon set the mark is installed as: the SVG is the mark, and each PNG
+  // exists because something asks for a raster at a fixed size — an iOS home
+  // screen, an installed web app, a browser that declines an SVG favicon.
+  assert.equal(assets.get("/kumi-mark.svg")?.contentType, "image/svg+xml");
   for (const icon of [
-    "/mark.svg",
     "/apple-touch-icon.png",
     "/icon-192.png",
     "/icon-512.png",
   ]) {
-    assert.equal(assets.get(icon), undefined, `${icon} should not be served`);
+    const body = assets.get(icon)?.body;
+    assert.ok(Buffer.isBuffer(body), `${icon} should be served as bytes`);
+    assert.equal(
+      body.subarray(0, 8).toString("hex"),
+      "89504e470d0a1a0a",
+      `${icon} should be a PNG`,
+    );
   }
+  // Still an allowlist and not a directory listing: a name nobody registered
+  // is not reachable just because it looks like it belongs to the set.
+  assert.equal(assets.get("/mark.svg"), undefined);
+  assert.equal(assets.get("/icon-1024.png"), undefined);
   for (const module of [
     "/app.js",
     "/ui.js",
@@ -65,14 +78,49 @@ test("loads every control-room asset with an explicit content type", async () =>
   }
 });
 
-test("uses the Kumi logo as the browser favicon", async () => {
+test("offers the mark as the favicon in both a vector and a raster, and as an iOS touch icon", async () => {
   const assets = await loadStaticAssets();
   const html = assets.get("/index.html")?.body.toString("utf8") ?? "";
 
-  assert.match(
-    html,
-    /<link rel="icon" type="image\/png" href="\/kumi-logo\.png">/u,
-  );
+  // The vector is declared first: a browser that understands an SVG icon
+  // should take the mark itself rather than one baked size of it.
+  const svg = html.indexOf('<link rel="icon" type="image/svg+xml" href="/kumi-mark.svg">');
+  const png = html.indexOf('<link rel="icon" type="image/png" href="/kumi-logo.png">');
+  assert.notEqual(svg, -1, "the SVG favicon was not declared");
+  assert.notEqual(png, -1, "the PNG favicon fallback was not declared");
+  assert.ok(svg < png, "the vector icon should be declared before the raster");
+  assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png">/u);
+
+  // The mark carries both themes itself, because an <img> cannot inherit a
+  // colour from the page that placed it.
+  const mark = assets.get("/kumi-mark.svg")?.body.toString("utf8") ?? "";
+  assert.match(mark, /prefers-color-scheme: dark/u);
+  assert.match(mark, /#D88973/u);
+  assert.match(mark, /#9A4C33/u);
+});
+
+test("the installable app declares the mark at the sizes a home screen asks for", async () => {
+  const assets = await loadStaticAssets();
+  const manifest = JSON.parse(
+    assets.get("/manifest.webmanifest")?.body.toString("utf8") ?? "{}",
+  ) as { icons?: { src: string; sizes: string; purpose: string }[] };
+
+  const icons = manifest.icons ?? [];
+  assert.ok(icons.length >= 3, "the manifest should declare an icon set");
+  for (const icon of icons) {
+    assert.notEqual(
+      assets.get(icon.src),
+      undefined,
+      `${icon.src} is declared in the manifest but not served`,
+    );
+  }
+  // `maskable` is what stops Android from drawing the mark inside a second
+  // shape of its own; the tiles are padded for it.
+  for (const size of ["192x192", "512x512"]) {
+    const icon = icons.find((candidate) => candidate.sizes === size);
+    assert.ok(icon !== undefined, `no ${size} icon was declared`);
+    assert.match(icon.purpose, /maskable/u);
+  }
 });
 
 test("every dashboard file also has a name that carries its own digest", async () => {
@@ -2908,11 +2956,31 @@ test("the standalone logo follows the theme without changing the wordmark or app
     "the standalone mark helper was not found in ui.js",
   );
   const mark = ui.slice(markStart, ui.indexOf("\n}", markStart));
-  assert.match(mark, /href="\/kumi-logo\.png"/u);
-  assert.match(mark, /overflow="hidden" aria-hidden="true"/u);
-  assert.match(mark, /style="mask-type:luminance"/u);
-  assert.match(mark, /fill="currentColor"/u);
-  assert.match(mark, /mask="url\(#brand-mark-mask\)"/u);
+  // Drawn, not photographed. The mark used to be a PNG keyed out by its own
+  // luminance, which cost a request before first paint and rasterised
+  // differently at every size; these assertions are what stop it coming back.
+  assert.doesNotMatch(mark, /kumi-logo|<image|mask/u);
+  assert.match(mark, /stroke="currentColor"/u);
+  assert.match(mark, /viewBox="0 0 64 64"/u);
+  assert.match(mark, /aria-hidden="true"/u);
+  assert.match(mark, /MARK_SHELL/u);
+  assert.match(mark, /MARK_SEAM/u);
+  assert.match(mark, /MARK_FACETS/u);
+
+  // The three visible faces of a cube: one silhouette, the seam where they
+  // meet, and one facet stroke per face.
+  const shell = ui.slice(ui.indexOf("const MARK_SHELL"), ui.indexOf("const MARK_SEAM"));
+  assert.match(shell, /M29\.92 9\.08/u);
+  assert.match(shell, /Z";/u);
+  const seam = ui.slice(ui.indexOf("const MARK_SEAM"), ui.indexOf("/** One facet"));
+  assert.equal(seam.match(/"M/gu)?.length, 2, "the seam is two strokes");
+  const facets = ui.slice(ui.indexOf("const MARK_FACETS"), ui.indexOf("const MARK_STROKE"));
+  assert.equal(facets.match(/"M/gu)?.length, 3, "one facet stroke per face");
+
+  // It draws in `currentColor`, and the stylesheet is what points that at the
+  // accent — so a surface that needs it to match its own ink still can.
+  assert.match(css, /\.brand-mark \{\n {2}color: var\(--accent\);\n\}/u);
+
   assert.doesNotMatch(chats, /channel-rail-brand|brandMark/u);
   assert.doesNotMatch(css, /channel-rail-brand/u);
 
@@ -2930,6 +2998,69 @@ test("the standalone logo follows the theme without changing the wordmark or app
 
   const width = Number(/brandWordmark\((\d+)\)/u.exec(app)?.[1]);
   assert.ok(width > 0 && width <= 160, `the auth wordmark is ${width}px wide`);
+});
+
+test("every surface that draws the mark draws the same one", async () => {
+  const assets = await loadStaticAssets();
+  const read = (name: string): string =>
+    assets.get(name)?.body.toString("utf8") ?? "";
+
+  // The mark is drawn in four places rather than fetched into them. The
+  // dashboard could share one helper, but `authorize.html` and
+  // `download.html` are their own documents with no bundler between them and
+  // the browser, and `kumi-mark.svg` is what a favicon and a home-screen
+  // install ask for as a file. Four copies is the honest cost of that; this
+  // is what stops them becoming four different cubes.
+  const shell =
+    "M29.92 9.08A4.16 4.16 0 0 1 34.08 9.08L50.92 18.8" +
+    "A4.16 4.16 0 0 1 53 22.4L53 41.6A4.16 4.16 0 0 1 50.92 45.2" +
+    "L34.08 54.92A4.16 4.16 0 0 1 29.92 54.92L13.08 45.2" +
+    "A4.16 4.16 0 0 1 11 41.6L11 22.4A4.16 4.16 0 0 1 13.08 18.8Z";
+  const paths = [
+    shell,
+    "M12.25 20.72L32 32.12L51.75 20.72",
+    "M32 32.12L32 54.68",
+    "M24.16 19.07L30.39 15.47",
+    "M17.3 28.6L17.3 35.8",
+    "M39.38 45.13L45.62 41.53",
+  ];
+
+  for (const name of [
+    "/ui.js",
+    "/authorize.html",
+    "/download.html",
+    "/kumi-mark.svg",
+  ]) {
+    const source = read(name);
+    assert.notEqual(source, "", `${name} was not served`);
+    // The dashboard names the weight and interpolates it; the three documents
+    // that cannot run code write it out.
+    assert.match(
+      source,
+      name === "/ui.js" ? /const MARK_STROKE = 3\.52;/u : /stroke-width="3\.52"/u,
+      `${name}: wrong weight`,
+    );
+    for (const path of paths) {
+      // ui.js holds the shell as a concatenation, so its copy is compared
+      // with the quotes and joins taken out rather than as one literal.
+      const haystack = name === "/ui.js" ? source.replaceAll('" +\n  "', "") : source;
+      assert.ok(
+        haystack.includes(path),
+        `${name} draws a different mark: missing ${path.slice(0, 24)}…`,
+      );
+    }
+  }
+
+  // The two standalone documents take the accent through the theme the app
+  // set, not through the desktop's own light/dark preference — those two
+  // disagree the moment a light app runs on a dark desktop.
+  assert.match(read("/authorize.html"), /\.authorize-mark \{[^}]*var\(--accent\)/u);
+  assert.match(read("/download.html"), /\.dl-logo \{[^}]*var\(--accent\)/u);
+  assert.doesNotMatch(read("/download.html"), /<img class="dl-logo"/u);
+
+  // The file, though, is the one copy nothing can hand a theme to: a favicon
+  // and an installed icon are drawn outside any page.
+  assert.match(read("/kumi-mark.svg"), /prefers-color-scheme/u);
 });
 
 test("sign-in uses the standalone Kumi mark without the live-codebase punchline while other authentication modes retain their branding and copy", async () => {
