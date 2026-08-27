@@ -1151,6 +1151,9 @@ strong {
   display: block;
   width: 100%;
   height: auto;
+  /* The whole group turns, so every line spends most of its life at an
+     angle; ask for real geometry rather than the fast hairline path. */
+  shape-rendering: geometricprecision;
 }
 
 .dark-in {
@@ -1184,6 +1187,56 @@ strong {
 
 .star.dim {
   opacity: 0.46;
+}
+
+/* The lesser sky is still: each grain's brightness is baked into its own
+   fill-opacity attribute, so nothing here may set opacity or the whole
+   field flattens to one value. */
+.dust circle {
+  fill: #fff;
+}
+
+/* Diffraction spikes on the anchor stars — two slim diamonds whose taper
+   does the fading, so they need no gradient of their own. They sit inside
+   the star group and breathe with it. */
+.glint {
+  fill: rgb(255 255 255 / 50%);
+}
+
+/* The traffic. Sparks and the ring-lap are a short dash run along the same
+   geometry as the lines they follow; they exist only in motion, so at rest
+   they are invisible rather than parked somewhere plausible. */
+.pulse {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-dasharray: 3 97;
+  stroke-dashoffset: 3;
+  opacity: 0;
+}
+
+.pulse.ring {
+  stroke-dasharray: 2.5 97.5;
+  stroke-dashoffset: 2.5;
+}
+
+/* The collision, as light: the contested star's own halo blown up for a
+   moment. Its box is its own geometry so the scale swells from the star
+   and not from some corner of the viewBox. */
+.flare {
+  fill: url(#star-glow);
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.meteor {
+  stroke: url(#meteor-tail);
+  stroke-width: 0.8;
+  stroke-linecap: round;
+  opacity: 0;
+  transform: translate(128px, 40px);
 }
 
 /* Drawn, and staying drawn: the resting sky. The beats below only take it
@@ -1276,6 +1329,34 @@ strong {
     --start: 8s;
   }
 
+  /* A spark leaves once its line has landed — the draw takes 1.08s of the
+     shared clock — and the flare peaks as the second spark arrives. The
+     ring pulse waits for the whole beat-three figure and completes its lap
+     before the figure begins to fade. */
+  .pulse {
+    animation: pulse-run 12s linear infinite backwards;
+    animation-delay: calc(var(--start, 0s) + 1.15s + var(--i, 0) * 0.12s);
+    filter: drop-shadow(0 0 4px rgb(255 255 255 / 55%));
+  }
+
+  .pulse[data-beat="2"] {
+    --start: 4s;
+  }
+
+  .pulse.ring {
+    --start: 8.4s;
+    animation-name: ring-run;
+  }
+
+  .flare {
+    animation: flare-up 12s ease-out infinite backwards;
+    animation-delay: 4s;
+  }
+
+  .meteor {
+    animation: meteor-fall 27s linear infinite;
+  }
+
   .say {
     animation: say-show 12s var(--ease-motion) infinite backwards;
   }
@@ -1356,6 +1437,94 @@ strong {
   27%,
   100% {
     stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes pulse-run {
+  0% {
+    stroke-dashoffset: 3;
+    opacity: 0;
+  }
+
+  1.5% {
+    opacity: 0.95;
+  }
+
+  8% {
+    opacity: 0.9;
+  }
+
+  9.5%,
+  100% {
+    stroke-dashoffset: -97;
+    opacity: 0;
+  }
+}
+
+@keyframes ring-run {
+  0% {
+    stroke-dashoffset: 2.5;
+    opacity: 0;
+  }
+
+  1.5% {
+    opacity: 0.9;
+  }
+
+  10.5% {
+    opacity: 0.85;
+  }
+
+  12%,
+  100% {
+    stroke-dashoffset: -97.5;
+    opacity: 0;
+  }
+}
+
+@keyframes flare-up {
+  0%,
+  17% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+
+  20.5% {
+    opacity: 0.9;
+    transform: scale(1.12);
+  }
+
+  24% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+
+  32%,
+  100% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes meteor-fall {
+  0%,
+  54% {
+    transform: translate(128px, 40px);
+    opacity: 0;
+  }
+
+  55.5% {
+    opacity: 0.8;
+  }
+
+  59.5% {
+    opacity: 0.6;
+  }
+
+  60.5%,
+  100% {
+    transform: translate(240px, 96px);
     opacity: 0;
   }
 }
