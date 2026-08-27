@@ -539,7 +539,7 @@ strong {
  * part of the particles.
  */
 .hero {
-  padding: 118px 0 30px;
+  padding: 92px 0 30px;
 }
 
 /*
@@ -567,6 +567,144 @@ strong {
 
 .hero h1 {
   max-width: 12ch;
+}
+
+/*
+ * The room, overheard.
+ *
+ * One line at a time above the name: a person asking, an agent answering,
+ * the coordinator ruling between two of them. Three voices, drawn the way
+ * the product draws them — people in a plain bubble, agents in a bubble
+ * their own colour, and the coordinator in the transcript's own centred
+ * pill rather than a bubble at all, because in the product it is a ruling
+ * and not a remark.
+ *
+ * The bubble's width follows its words, so the line grows as it is typed.
+ */
+
+.ticker {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  max-width: min(100%, 46ch);
+  transition: opacity 0.35s var(--ease-motion);
+}
+
+.bubble {
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  border-bottom-left-radius: 5px;
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+  backdrop-filter: blur(10px);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+  text-align: left;
+}
+
+/* An agent's line carries an agent's colour, the way its name does in the
+   product. */
+.ticker[data-kind="agent"] .bubble {
+  border-color: color-mix(in srgb, var(--lavender) 40%, var(--border));
+}
+
+/* The coordinator does not chat. Same pill the transcript gives a ruling. */
+.ticker[data-kind="coordinator"] .bubble {
+  border-radius: var(--radius);
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--surface-1) 78%, transparent);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* The caret only exists while a line is being typed; site.js owns the
+   class, so the resting markup never blinks. */
+.bubble-text.mid::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: -0.14em;
+  background: var(--salmon);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .bubble-text.mid::after {
+    animation: caret-blink 0.8s steps(1) infinite;
+  }
+}
+
+.ticker-who {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-left: 4px;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+/* Five speakers share one row; the ticker's own attribute says which of
+   them is talking. */
+.w-mark {
+  display: none;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  font-size: 8.5px;
+  font-weight: 640;
+  letter-spacing: 0.02em;
+}
+
+.ticker[data-who="ethan"] .w-ethan,
+.ticker[data-who="nathan"] .w-nathan,
+.ticker[data-who="rhea"] .w-rhea,
+.ticker[data-who="hera"] .w-hera,
+.ticker[data-who="coord"] .w-coord {
+  display: grid;
+}
+
+.w-ethan,
+.w-nathan {
+  border-radius: 50%;
+  background: var(--salmon);
+  color: var(--accent-ink);
+}
+
+.w-rhea,
+.w-hera {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.w-rhea svg,
+.w-hera svg {
+  width: 11px;
+  height: 11px;
+}
+
+.w-rhea {
+  color: var(--salmon);
+}
+
+.w-hera {
+  color: var(--lavender);
+}
+
+.w-coord {
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .ticker {
+    max-width: 100%;
+  }
+
+  .bubble {
+    font-size: 14px;
+  }
 }
 
 /* One word, so it gets to be enormous. The size lives on this class rather
@@ -839,6 +977,181 @@ strong {
 
   .card:hover::before {
     opacity: 1;
+  }
+}
+
+/* ----------------------------------------------------------------- room -- */
+
+/*
+ * The room as one orbit, seen at an angle.
+ *
+ * Six seats ride a single ring — three people, three agents — joined in two
+ * interlocking triangles, and a reach travels across the ring from one seat
+ * to another in turn: person to person, person to agent, agent to agent.
+ * Everything here is thin line and small dot on purpose. An earlier version
+ * of this drew the participants as avatars and chips, and a room full of
+ * furniture said far less than a room drawn as one weightless circle.
+ *
+ * site.js turns the ring and moves the reach. Without it the markup is still
+ * the picture: a ring, its seats, and the web between them.
+ */
+
+.orbit {
+  max-width: 760px;
+  margin-inline: auto;
+}
+
+.orbit-net {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.calm-in {
+  stop-color: var(--bg-deep);
+  stop-opacity: 0.74;
+}
+
+.calm-mid {
+  stop-color: var(--bg-deep);
+  stop-opacity: 0.36;
+}
+
+.calm-out {
+  stop-color: var(--bg-deep);
+  stop-opacity: 0;
+}
+
+.ring {
+  fill: none;
+  stroke: color-mix(in srgb, var(--muted) 42%, transparent);
+  stroke-width: 1;
+}
+
+/* Depth, in one declaration: the half of the ring running behind the seats
+   is the half you can barely see. */
+.ring.far {
+  stroke: color-mix(in srgb, var(--muted) 18%, transparent);
+}
+
+.web {
+  stroke: color-mix(in srgb, var(--muted) 16%, transparent);
+  stroke-width: 1;
+}
+
+.seat.person {
+  fill: var(--salmon);
+}
+
+/* Agents are the same size and the same orbit, drawn hollow — one shape
+   apart, which is all the difference the picture needs to make. */
+.seat.agent {
+  fill: none;
+  stroke: var(--lavender);
+  stroke-width: 1.8;
+}
+
+.reach {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-dasharray: 100 100;
+  stroke-dashoffset: 100;
+  opacity: 0;
+}
+
+.bead,
+.land {
+  opacity: 0;
+}
+
+.land {
+  fill: none;
+  stroke-width: 1.4;
+}
+
+.reach.from-person,
+.land.from-person {
+  stroke: var(--salmon);
+}
+
+.reach.from-person {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--salmon) 60%, transparent));
+}
+
+.reach.from-agent {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--lavender) 60%, transparent));
+}
+
+.bead.from-person {
+  fill: var(--text);
+  filter: drop-shadow(0 0 5px var(--salmon));
+}
+
+.reach.from-agent,
+.land.from-agent {
+  stroke: var(--lavender);
+}
+
+.bead.from-agent {
+  fill: var(--text);
+  filter: drop-shadow(0 0 5px var(--lavender));
+}
+
+.orbit-key {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 28px;
+  margin-top: 26px;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--faint) 78%, transparent);
+}
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.45s var(--ease-motion);
+}
+
+/* The legend is not a caption, it is a readout: the pairing being drawn on
+   the ring is the one that lights up down here. */
+.key.live {
+  color: var(--muted);
+}
+
+.k {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: 0.75;
+  transition: opacity 0.45s var(--ease-motion);
+}
+
+.k.person {
+  background: var(--salmon);
+}
+
+.k.agent {
+  background: none;
+  box-shadow: inset 0 0 0 1.4px var(--lavender);
+}
+
+.key.live .k {
+  opacity: 1;
+}
+
+.k + .k {
+  margin-right: 5px;
+}
+
+@media (max-width: 620px) {
+  .orbit-key {
+    gap: 8px 18px;
+    font-size: 11.5px;
   }
 }
 
@@ -1800,7 +2113,7 @@ strong {
   }
 
   .hero {
-    padding-top: 96px;
+    padding-top: 82px;
   }
 
   .cards,

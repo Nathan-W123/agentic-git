@@ -342,11 +342,17 @@ function typeInto(p, tick = 18) {
   undoers.push(() => {
     caret.remove();
   });
+  // Characters come from the clock rather than from the number of ticks
+  // that have fired. A timer is a request, not a promise: on a busy main
+  // thread — a large shader behind the page, a phone throttling a background
+  // tab — the interval arrives late and a counter-based typer slows to a
+  // crawl, which is how a line meant to take a second took twelve.
   return new Promise((resolve) => {
-    let shown = 0;
+    const started = performance.now();
+    const per = tick / 2;
     const interval = setInterval(() => {
-      shown += 2;
-      node.textContent = full.slice(0, shown);
+      const shown = Math.floor((performance.now() - started) / per);
+      node.textContent = full.slice(0, Math.min(shown, full.length));
       if (disarmed || shown >= full.length) {
         clearInterval(interval);
         node.textContent = full;
@@ -682,6 +688,12 @@ function wire() {
     }
   });
 
+  attempt("ticker", () => {
+    heroTicker();
+  });
+  attempt("room", () => {
+    roomOrbit(inView);
+  });
   attempt("channel", () => {
     channelStory(animate, inView);
   });
@@ -696,6 +708,352 @@ function wire() {
   if (broke.length > 0) {
     disarm();
   }
+}
+
+/* ---------------------------------------------------------- hero ticker -- */
+
+/**
+ * The room, overheard, above the name.
+ *
+ * Five lines in a loop, and the cast is the point: a person asks, an agent
+ * takes it, the coordinator rules between two agents that want the same
+ * file, the other agent reports, and a person ships. Nothing here is
+ * narration about the product — it is the product's own three voices, in the
+ * order they actually speak.
+ *
+ * The first line is in the HTML and every attribute this touches is put back
+ * by disarm(), so the resting page is a single quiet message rather than an
+ * empty bubble waiting on JavaScript.
+ */
+function heroTicker() {
+  const ticker = document.querySelector(".ticker");
+  if (ticker === null) {
+    return;
+  }
+  const line = ticker.querySelector(".bubble-text");
+  const name = ticker.querySelector(".who-name");
+  if (line === null || name === null) {
+    return;
+  }
+
+  const SCRIPT = [
+    {
+      who: "ethan",
+      name: "Ethan",
+      kind: "person",
+      text: "can we get Apple Pay into checkout this week?",
+    },
+    {
+      who: "hera",
+      name: "Hera",
+      kind: "agent",
+      text: "on it. filing a plan for five files.",
+    },
+    {
+      who: "coord",
+      name: "Coordinator",
+      kind: "coordinator",
+      text: "@Hera and @Rhea both want checkout.ts. @Hera goes first.",
+    },
+    {
+      who: "rhea",
+      name: "Rhea",
+      kind: "agent",
+      text: "done. promo codes trimmed, checkout.ts is free.",
+    },
+    {
+      who: "nathan",
+      name: "Nathan",
+      kind: "person",
+      text: "shipping tonight.",
+    },
+  ];
+
+  const resting = {
+    who: ticker.dataset.who,
+    kind: ticker.dataset.kind,
+    text: line.textContent,
+    name: name.textContent,
+  };
+  undoers.push(() => {
+    ticker.dataset.who = resting.who;
+    ticker.dataset.kind = resting.kind;
+    line.textContent = resting.text;
+    line.classList.remove("mid");
+    name.textContent = resting.name;
+    ticker.style.opacity = "";
+  });
+
+  // One interval per line rather than one timer per character: a page left
+  // open all afternoon should not collect a timer for every letter it typed.
+  const type = (full) =>
+    new Promise((resolve) => {
+      const started = performance.now();
+      line.classList.add("mid");
+      const interval = setInterval(() => {
+        const shown = Math.floor((performance.now() - started) / 26);
+        line.textContent = full.slice(0, Math.min(shown, full.length));
+        if (disarmed || shown >= full.length) {
+          clearInterval(interval);
+          line.textContent = full;
+          line.classList.remove("mid");
+          resolve();
+        }
+      }, 26);
+      intervals.push(interval);
+    });
+
+  let at = 0;
+  const run = async () => {
+    for (;;) {
+      const beat = SCRIPT[at % SCRIPT.length];
+      at += 1;
+      if (disarmed) {
+        return;
+      }
+      ticker.dataset.who = beat.who;
+      ticker.dataset.kind = beat.kind;
+      name.textContent = beat.name;
+      line.textContent = "";
+      ticker.style.opacity = "1";
+      await type(beat.text);
+      // Long enough to be read, short enough that the next voice feels like
+      // an answer rather than a new subject.
+      await later(2200);
+      if (disarmed) {
+        return;
+      }
+      ticker.style.opacity = "0";
+      await later(420);
+    }
+  };
+  void run();
+}
+
+/* ----------------------------------------------------------- room orbit -- */
+
+/**
+ * The room, turning.
+ *
+ * Six seats ride one ring — three people, three agents, alternating — and a
+ * reach is drawn across it from one seat to another in turn, covering every
+ * pairing the product allows: person to person, person to agent, agent to
+ * agent. The legend below is not a caption but a readout; the pairing being
+ * drawn is the one that lights up.
+ *
+ * Hand-rolled rather than handed to the library: this is one clock driving a
+ * slow rotation and a repeating four-beat exchange, and every frame's
+ * geometry is derived from that clock rather than tweened between states.
+ * Everything it writes is an attribute the HTML already carried, and every
+ * one of those is snapshotted here and put back by disarm(), so a motion
+ * preference flipped mid-visit leaves the ring exactly as the markup drew it.
+ */
+function roomOrbit(inView) {
+  const net = document.querySelector(".orbit-net");
+  if (net === null) {
+    return;
+  }
+  const seats = [...net.querySelectorAll(".seat")];
+  const webs = [...net.querySelectorAll(".web")];
+  const reach = net.querySelector(".reach");
+  const bead = net.querySelector(".bead");
+  const land = net.querySelector(".land");
+  if (seats.length < 2 || reach === null || bead === null || land === null) {
+    return;
+  }
+  const keys = new Map();
+  for (const el of document.querySelectorAll(".orbit-key .key")) {
+    keys.set(el.dataset.kind, el);
+  }
+
+  const far = net.querySelector(".ring.far");
+  const near = net.querySelector(".ring.near");
+  const calm = net.querySelector(".calm");
+
+  // The markup holds the wide resting shape; on a narrow screen that ellipse
+  // is a flat sliver, so the ring is drawn rounder and the box taller and
+  // everything else follows, because every position here is derived rather
+  // than written down.
+  const CX = 320;
+  const BASE = (-18 * Math.PI) / 180;
+  const WIDE = { rx: 248, ry: 62, cy: 120, height: 240 };
+  const TALL = { rx: 208, ry: 104, cy: 152, height: 304 };
+  const shape = () => (window.innerWidth <= 620 ? TALL : WIDE);
+  let drawn;
+  const N = seats.length;
+  const TURN = 46_000;
+  const CYCLE = 2600;
+  const DRAW = 1150;
+  const LAND = 360;
+  const FADE = 700;
+  // Sender first.
+  const PAIRS = [
+    [0, 2],
+    [1, 3],
+    [2, 3],
+    [4, 0],
+    [5, 1],
+    [0, 5],
+  ];
+
+  // What the HTML said, so disarm() can say it again.
+  const snapshot = [...seats, ...webs, reach, bead, land, far, near, calm, net]
+    .filter((el) => el !== null)
+    .map((el) => ({
+    el,
+    attrs: [...el.attributes].map((a) => [a.name, a.value]),
+  }));
+  undoers.push(() => {
+    for (const { el, attrs } of snapshot) {
+      while (el.attributes.length > 0) {
+        el.removeAttribute(el.attributes[0].name);
+      }
+      for (const [name, value] of attrs) {
+        el.setAttribute(name, value);
+      }
+    }
+    for (const el of keys.values()) {
+      el.classList.remove("live");
+    }
+  });
+
+  const seatAt = (i, spin, box) => {
+    const th = BASE + i * ((Math.PI * 2) / N) + spin;
+    return {
+      x: CX + box.rx * Math.cos(th),
+      y: box.cy + box.ry * Math.sin(th),
+      near: (Math.sin(th) + 1) / 2,
+    };
+  };
+  const kindOf = (i) => (i % 2 === 0 ? "person" : "agent");
+  const pairing = (a, b) =>
+    kindOf(a) === kindOf(b) ? (kindOf(a) === "person" ? "pp" : "aa") : "pa";
+
+  let started;
+  let leg = -1;
+  const paint = (now) => {
+    if (disarmed) {
+      return;
+    }
+    if (started === undefined) {
+      started = now;
+    }
+    const age = now - started;
+    const spin = (age / TURN) * Math.PI * 2;
+
+    const box = shape();
+    if (box !== drawn) {
+      drawn = box;
+      net.setAttribute("viewBox", `0 0 640 ${box.height}`);
+      if (far !== null) {
+        far.setAttribute(
+          "d",
+          `M${CX - box.rx},${box.cy} A${box.rx},${box.ry} 0 0 1 ${CX + box.rx},${box.cy}`,
+        );
+      }
+      if (near !== null) {
+        near.setAttribute(
+          "d",
+          `M${CX + box.rx},${box.cy} A${box.rx},${box.ry} 0 0 1 ${CX - box.rx},${box.cy}`,
+        );
+      }
+      if (calm !== null) {
+        calm.setAttribute("cy", String(box.cy));
+        calm.setAttribute("rx", String(box.rx + 92));
+        calm.setAttribute("ry", String(box.ry + 70));
+      }
+    }
+
+    for (const [i, seat] of seats.entries()) {
+      const p = seatAt(i, spin, box);
+      seat.setAttribute("cx", p.x.toFixed(1));
+      seat.setAttribute("cy", p.y.toFixed(1));
+      seat.setAttribute("r", (3.4 + 1.5 * p.near).toFixed(2));
+      seat.setAttribute("opacity", (0.55 + 0.45 * p.near).toFixed(2));
+    }
+    for (const web of webs) {
+      const a = seatAt(Number(web.dataset.a), spin, box);
+      const b = seatAt(Number(web.dataset.b), spin, box);
+      web.setAttribute("x1", a.x.toFixed(1));
+      web.setAttribute("y1", a.y.toFixed(1));
+      web.setAttribute("x2", b.x.toFixed(1));
+      web.setAttribute("y2", b.y.toFixed(1));
+    }
+
+    const index = Math.floor(age / CYCLE) % PAIRS.length;
+    const local = age % CYCLE;
+    const [from, to] = PAIRS[index];
+    const a = seatAt(from, spin, box);
+    const b = seatAt(to, spin, box);
+    // Bowed toward the middle of the room, so a reach reads as crossing the
+    // circle rather than cutting it.
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2;
+    const qx = mx + (CX - mx) * 0.32;
+    const qy = my + (box.cy - my) * 0.32;
+    reach.setAttribute(
+      "d",
+      `M${a.x.toFixed(1)},${a.y.toFixed(1)} Q${qx.toFixed(1)},${qy.toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}`,
+    );
+
+    if (index !== leg) {
+      leg = index;
+      const sender = "from-" + kindOf(from);
+      for (const el of [reach, bead, land]) {
+        el.classList.remove("from-person", "from-agent");
+        el.classList.add(sender);
+      }
+      for (const [kind, el] of keys) {
+        el.classList.toggle("live", kind === pairing(from, to));
+      }
+    }
+
+    let travel = 0;
+    let line = 0;
+    let dot = 0;
+    let landed = -1;
+    if (local < DRAW) {
+      travel = local / DRAW;
+      line = 1;
+      dot = 1;
+    } else if (local < DRAW + LAND) {
+      travel = 1;
+      line = 1;
+      landed = (local - DRAW) / LAND;
+    } else if (local < DRAW + LAND + FADE) {
+      travel = 1;
+      line = 1 - (local - DRAW - LAND) / FADE;
+    } else {
+      travel = 1;
+    }
+    const eased = travel * travel * (3 - 2 * travel);
+    // Written inline, not as attributes: the stylesheet's resting values for
+    // these two are what a page with no JavaScript shows, and a presentation
+    // attribute loses to a stylesheet every time. The geometry below stays
+    // attributes because CSS never claims it.
+    reach.style.strokeDashoffset = (100 - eased * 100).toFixed(1);
+    reach.style.opacity = line.toFixed(3);
+
+    const u = eased;
+    const v = 1 - u;
+    bead.setAttribute("cx", (v * v * a.x + 2 * v * u * qx + u * u * b.x).toFixed(1));
+    bead.setAttribute("cy", (v * v * a.y + 2 * v * u * qy + u * u * b.y).toFixed(1));
+    bead.setAttribute("r", dot === 0 ? "0" : "3.4");
+    bead.style.opacity = dot.toFixed(3);
+
+    land.setAttribute("cx", b.x.toFixed(1));
+    land.setAttribute("cy", b.y.toFixed(1));
+    land.setAttribute("r", landed < 0 ? "0" : (4 + 13 * landed).toFixed(1));
+    land.style.opacity = landed < 0 ? "0" : (0.5 * (1 - landed)).toFixed(3);
+
+    requestAnimationFrame(paint);
+  };
+
+  // The ring only starts turning once somebody has arrived at it.
+  pendingReveals.set(net, () => {
+    requestAnimationFrame(paint);
+  });
+  inView(net, () => fireReveal(net), { margin: "0px 0px -15% 0px" });
 }
 
 /* ------------------------------------------------------- channel replay -- */
