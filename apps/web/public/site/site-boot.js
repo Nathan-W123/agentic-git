@@ -23,12 +23,13 @@
  * a desktop shell showing the marketing page is always wrong, hash or no
  * hash, and gets sent to the dashboard.
  *
- * Job three: the motion gate's CSS half. Scroll reveals hide content until
- * JavaScript shows it, so the hidden initial state must never apply when the
- * JavaScript will not run — with scripts disabled this file never executes
- * and nothing is ever hidden, and with reduced motion requested the class is
- * withheld. Only when this line actually runs, for a visitor who accepts
- * motion, does `html.anim` arm the reveal styles that site.js then plays.
+ * There is no job three any more, and that is deliberate. This file used to
+ * arm the `anim` class that hides the hero and every reveal, trusting
+ * site.js to play them in — a trust a 404 anywhere in site.js's module
+ * graph silently broke, twice, leaving the page blank. The class is now
+ * added by site.js itself, first thing: the file that hides content is the
+ * file that animates it, so no version mix between the two can ever hide
+ * something nothing will show.
  */
 (function () {
   "use strict";
@@ -90,19 +91,4 @@
     }
   }
 
-  if (window.matchMedia("(prefers-reduced-motion: no-preference)").matches) {
-    document.documentElement.className += " anim";
-    // The fuse. Arming `anim` hides the hero and every reveal on the promise
-    // that site.js will play them in — a promise a 404 on any file in its
-    // module graph silently breaks, and a page that kept that promise-shaped
-    // hole was shipped: one stale checkout serving an old file list left the
-    // whole page blank down to the first unstaged section. site.js writes
-    // data-anim-live the moment it evaluates; if that mark has not appeared
-    // shortly, the animations are forfeit and the content is not.
-    setTimeout(function () {
-      if (!document.documentElement.hasAttribute("data-anim-live")) {
-        document.documentElement.classList.remove("anim");
-      }
-    }, 1500);
-  }
 })();

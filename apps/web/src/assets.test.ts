@@ -7131,11 +7131,7 @@ test("the marketing forwards only from the origin's front door", async () => {
    */
   const boot = await siteFile("site-boot.js");
   assert.match(boot, /window\.location\.pathname === "\/"/u);
-  // Every forward sits inside that guard, and the motion class does not —
-  // animations belong to the page wherever it is served from.
   const guard = boot.indexOf('window.location.pathname === "/"');
-  const armed = boot.indexOf('className += " anim"');
-  assert.ok(guard > 0 && armed > guard, "the motion gate must survive the guard");
   for (const forward of [...boot.matchAll(/location\.replace\("\/app"/gu)]) {
     assert.ok(
       (forward.index ?? 0) > guard,
@@ -7144,18 +7140,44 @@ test("the marketing forwards only from the origin's front door", async () => {
   }
 });
 
-test("marketing motion is an enhancement behind the reduced-motion gate", async () => {
+test("only the module that animates may hide anything", async () => {
+  /*
+   * The page went blank twice, both times the same way: the boot script
+   * armed the `anim` class that hides the hero and every reveal, on the
+   * promise that site.js would play them in — and a 404 anywhere in
+   * site.js's module graph silently broke that promise, leaving a page
+   * where nothing had loaded to show what nothing would ever reveal.
+   *
+   * The invariant that closed it: the file that hides content is the file
+   * that animates it. site.js adds the class, after its reduced-motion and
+   * library gates pass; the boot script never touches it. A stale checkout,
+   * a missing file, a parse error — any of them now cost the animations and
+   * never the content.
+   */
   const boot = await siteFile("site-boot.js");
+  assert.doesNotMatch(
+    boot,
+    /classList\.add\("anim"\)|className \+= " anim"/u,
+    "the boot script must never arm the motion class",
+  );
+  const site = await siteFile("site.js");
+  assert.match(site, /classList\.add\("anim"\)/u);
+  // Armed only after the gate: the add sits inside the else of the
+  // reduced-motion/missing-library check, textually after the disarm path.
+  assert.ok(
+    site.indexOf('classList.add("anim")') >
+      site.indexOf('classList.remove("anim")'),
+    "the arming must come after the gate that would refuse it",
+  );
+});
+
+test("marketing motion is an enhancement behind the reduced-motion gate", async () => {
   const site = await siteFile("site.js");
   const css = await siteFile("site.css");
 
   // The class that arms hidden reveal states exists only when JavaScript ran
   // AND motion is welcome — so no-JS visitors and reduced-motion visitors
   // never have content hidden from them.
-  assert.match(
-    boot,
-    /matchMedia\("\(prefers-reduced-motion: no-preference\)"\)\.matches/u,
-  );
   assert.match(site, /matchMedia\("\(prefers-reduced-motion: reduce\)"\)/u);
   // And the module strips the class rather than animating when the gate is
   // closed or the vendored library failed to load.

@@ -7,10 +7,12 @@
  * browser can resolve without a bundler, and this repo ships none.
  *
  * The gate is checked once, here, at the top — not sprinkled per effect.
- * Reduced motion, or a missing library, means this module wires nothing and
- * instead STRIPS the `anim` class the boot script added, so no element can
- * be left waiting for a reveal that will never come. The page reads
- * perfectly with this file absent; everything below is decoration.
+ * The `anim` class that hides reveal targets is added here too, and only
+ * here, after the gate passes: the file that hides content is the file that
+ * animates it, so a failure to load anywhere in this module's graph leaves
+ * the page fully visible rather than waiting on a reveal that will never
+ * come. The page reads perfectly with this file absent; everything below is
+ * decoration.
  *
  * Some effects here restyle real content — they empty a paragraph to retype
  * it, split a heading into word spans, zero a price to count it up. Every
@@ -26,11 +28,6 @@
  */
 
 import { startField } from "./field.js";
-
-// The other half of the boot script's fuse: this attribute existing is what
-// tells it the module graph loaded and someone is now responsible for the
-// `anim` class. Set before anything that could throw.
-document.documentElement.setAttribute("data-anim-live", "1");
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const motion = window.Motion;
@@ -83,6 +80,14 @@ function disarm() {
 if (reduceMotion.matches || motion === undefined) {
   disarm();
 } else {
+  // The `anim` class is added HERE, by the file that will animate what it
+  // hides — never by the boot script, and never on the promise that some
+  // other file will follow through. A 404 anywhere in this module's graph
+  // means this line never runs and nothing was ever hidden; the page simply
+  // appears, complete and unanimated. That invariant is the fix for a blank
+  // page that shipped twice, and it is load-bearing: do not move the arming
+  // anywhere earlier than the module that owns the animations.
+  document.documentElement.classList.add("anim");
   // A preference flipped mid-visit is honoured immediately: the CSS block in
   // site.css stops the continuous animations, dropping the class shows
   // anything still waiting on a scroll reveal, the undoers restore any text
