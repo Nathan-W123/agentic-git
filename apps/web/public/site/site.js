@@ -817,10 +817,14 @@ function channelStory(animate, inView) {
       if (el.dataset.clearsTyping !== undefined && typing !== null) {
         animate(typing, { opacity: [1, 0] }, { duration: 0.3, ease: "easeOut" });
       }
-      const resolves = statuses.get(el.dataset.resolves);
-      if (resolves !== undefined) {
-        resolves.el.textContent = resolves.done;
-        resolves.el.classList.remove("busy");
+      // One step can settle several chips at once — the channel's and the
+      // thread panel's copy of the same agent going quiet together.
+      for (const key of (el.dataset.resolves ?? "").split(" ")) {
+        const resolves = statuses.get(key);
+        if (resolves !== undefined) {
+          resolves.el.textContent = resolves.done;
+          resolves.el.classList.remove("busy");
+        }
       }
       const card = el.classList.contains("arb-card");
       animate(

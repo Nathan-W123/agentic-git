@@ -869,7 +869,7 @@ strong {
 
 .shot-cols {
   display: grid;
-  grid-template-columns: 60px 1fr;
+  grid-template-columns: 60px minmax(0, 1fr) 292px;
 }
 
 .shot-rail {
@@ -1325,15 +1325,133 @@ strong {
   color: var(--muted);
 }
 
+/* The thread panel beside the room, as threadPanel() builds it: a floating
+   card that leads with the thread's title, holds the root, and is where the
+   agent's reply arrives. */
+.shot-thread {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+  margin: 10px 10px 10px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface-1) 96%, transparent);
+  box-shadow: -14px 0 30px -24px rgb(0 0 0 / 60%);
+}
+
+.th-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 10px 10px 13px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.th-kind {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.th-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.th-spacer {
+  flex: 1;
+}
+
+.th-head .hicon.sm svg {
+  width: 14px;
+  height: 14px;
+}
+
+.th-close {
+  position: relative;
+  margin-left: 7px;
+}
+
+.th-close::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--border);
+}
+
+.th-body {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  padding: 12px 13px;
+}
+
+/* The elbow out of the root's avatar gutter, the way the open thread draws
+   it: the reply hangs off the message it answers. */
+.th-root {
+  position: relative;
+}
+
+.th-root::after {
+  content: "";
+  position: absolute;
+  left: 15px;
+  top: 42px;
+  bottom: -22px;
+  width: 11px;
+  border-left: 3px solid var(--border-strong);
+  border-bottom: 3px solid var(--border-strong);
+  border-bottom-left-radius: 11px;
+  pointer-events: none;
+}
+
+.th-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 34px;
+  font-size: 11.5px;
+}
+
+.th-composer {
+  margin: 0 10px 10px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
 /* The app keeps its rail on a phone, so the mock does too — it just gets a
-   narrower gutter. */
-@media (max-width: 620px) {
+   narrower gutter, and the thread panel docks below the room the way a
+   phone-width panel takes the screen for itself. */
+@media (max-width: 720px) {
   .shot-cols {
-    grid-template-columns: 52px 1fr;
+    grid-template-columns: 52px minmax(0, 1fr);
   }
 
   .shot-feed {
     padding: 14px 12px 8px;
+  }
+
+  .shot-thread {
+    grid-column: 1 / -1;
+    margin: 0 10px 10px;
   }
 }
 
