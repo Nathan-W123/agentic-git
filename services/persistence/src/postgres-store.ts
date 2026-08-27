@@ -1531,28 +1531,48 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : this.toPasswordReset(row);
   }
 
-  public async recordWaitlistSignup(
-    email: string,
-    at: string,
-  ): Promise<boolean> {
+  public async recordWaitlistSignup(signup: WaitlistSignup): Promise<boolean> {
     // `ON CONFLICT DO NOTHING` for the same reason SQLite uses OR IGNORE: two
     // simultaneous submissions of one address must not race on the key.
     const result = await this.query(
-      `INSERT INTO waitlist_signups (email, created_at)
-       VALUES ($1, $2)
+      `INSERT INTO waitlist_signups
+         (email, name, company, team_size, agents, note, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (email) DO NOTHING`,
-      [email, at],
+      [
+        signup.email,
+        signup.name ?? null,
+        signup.company ?? null,
+        signup.teamSize ?? null,
+        signup.agents ?? null,
+        signup.note ?? null,
+        signup.createdAt,
+      ],
     );
     return (result.rowCount ?? 0) > 0;
   }
 
   public async listWaitlistSignups(): Promise<readonly WaitlistSignup[]> {
     const result = await this.query(
-      `SELECT email, created_at FROM waitlist_signups ORDER BY created_at`,
+      `SELECT email, name, company, team_size, agents, note, created_at
+         FROM waitlist_signups ORDER BY created_at`,
     );
-    const rows = result.rows as { email: string; created_at: string }[];
+    const rows = result.rows as {
+      email: string;
+      name: string | null;
+      company: string | null;
+      team_size: string | null;
+      agents: string | null;
+      note: string | null;
+      created_at: string;
+    }[];
     return rows.map((row) => ({
       email: row.email,
+      name: row.name ?? undefined,
+      company: row.company ?? undefined,
+      teamSize: row.team_size ?? undefined,
+      agents: row.agents ?? undefined,
+      note: row.note ?? undefined,
       createdAt: row.created_at,
     }));
   }

@@ -223,9 +223,20 @@ export interface PasswordResetRecord {
  * an organization that exists, with no lookup table and no metadata written
  * back.
  */
-/** One address waiting for an invitation, and when it started waiting. */
+/**
+ * One person waiting for an invitation.
+ *
+ * Only the address is required, and it is the key. Everything else is what
+ * the form asked and they chose to answer: refusing a signup over a blank
+ * optional field would trade people for tidiness.
+ */
 export interface WaitlistSignup {
   email: string;
+  name: string | undefined;
+  company: string | undefined;
+  teamSize: string | undefined;
+  agents: string | undefined;
+  note: string | undefined;
   createdAt: string;
 }
 
@@ -1563,7 +1574,7 @@ export interface CoordinationStore {
    * the endpoint from being a way to find out who has already signed up,
    * since the answer it gives a stranger is the same either way.
    */
-  recordWaitlistSignup(email: string, at: string): Promise<boolean>;
+  recordWaitlistSignup(signup: WaitlistSignup): Promise<boolean>;
   /** The whole list, oldest first, for whoever is going to send the invites. */
   listWaitlistSignups(): Promise<readonly WaitlistSignup[]>;
 

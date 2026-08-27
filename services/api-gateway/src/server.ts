@@ -4138,6 +4138,15 @@ function waitlistPage(): string {
   ].join("");
 }
 
+/** An optional answer, trimmed and capped, or nothing if it was left blank. */
+function waitlistText(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const text = value.trim().slice(0, max);
+  return text.length === 0 ? undefined : text;
+}
+
 /**
  * The one address this endpoint will keep, or nothing.
  *
@@ -5325,7 +5334,8 @@ export class ApiGateway {
       // JSON, and the same form without JavaScript sends what every browser
       // sends, which `readJson` would refuse with a 415 before the page below
       // could ever be reached.
-      const email = normaliseWaitlistEmail(await this.readWaitlistField(request));
+      const fields = await this.readWaitlistFields(request);
+      const email = normaliseWaitlistEmail(fields["email"]);
       if (email === undefined) {
         throw new HttpError(
           400,
@@ -5333,10 +5343,17 @@ export class ApiGateway {
           "A valid email address is required",
         );
       }
-      const added = await this.options.store.recordWaitlistSignup(
+      // Everything else is optional and simply capped. A waitlist form is not
+      // a place to argue with somebody about how they described their team.
+      const added = await this.options.store.recordWaitlistSignup({
         email,
-        new Date().toISOString(),
-      );
+        name: waitlistText(fields["name"], 120),
+        company: waitlistText(fields["company"], 120),
+        teamSize: waitlistText(fields["teamSize"], 40),
+        agents: waitlistText(fields["agents"], 200),
+        note: waitlistText(fields["note"], 1000),
+        createdAt: new Date().toISOString(),
+      });
       // A browser that submitted the form itself gets a page, because the
       // alternative is a screenful of JSON. The site's script asks for JSON
       // explicitly; anything that says it wants HTML, or says nothing at all
@@ -21006,15 +21023,15 @@ export class ApiGateway {
    * public unauthenticated endpoint is exactly where an unbounded read would
    * matter, and there is no reason for this one to have its own.
    */
-  private async readWaitlistField(
+  private async readWaitlistFields(
     request: IncomingMessage,
-  ): Promise<unknown> {
+  ): Promise<Record<string, unknown>> {
     const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
     if (contentType === "application/x-www-form-urlencoded") {
-      const text = await this.readBodyText(request);
-      return new URLSearchParams(text).get("email") ?? undefined;
+      const params = new URLSearchParams(await this.readBodyText(request));
+      return Object.fromEntries(params.entries());
     }
-    return objectBody(await this.readJson(request))["email"];
+    return objectBody(await this.readJson(request));
   }
 
   /** The raw body, bounded the way `readJson` bounds it. */

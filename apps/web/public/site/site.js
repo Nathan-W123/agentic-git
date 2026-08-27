@@ -164,34 +164,41 @@ function disarm() {
  * Deliberately outside `wire()`. Everything in there is decoration and is
  * skipped when a reader asks for less motion; answering a form in place is
  * not decoration, and a reduced-motion visitor should not be the one who gets
- * a page of JSON. The form posts perfectly well on its own without this — the
- * server answers a browser with HTML — so this is still an enhancement, just
- * not one that belongs behind that particular gate.
+ * a page of JSON. The form posts perfectly well without this — the server
+ * answers a browser with HTML — so this is still an enhancement, just not one
+ * that belongs behind that particular gate.
  */
 function waitlist() {
-  const form = document.querySelector(".waitlist");
+  const form = document.querySelector(".join");
   if (form === null) {
     return;
   }
-  const field = form.querySelector(".waitlist-email");
-  const say = form.querySelector(".waitlist-say");
+  const say = form.querySelector(".join-say");
   const button = form.querySelector("button");
-  if (field === null || say === null || button === null) {
+  if (say === null || button === null) {
     return;
   }
   form.addEventListener("submit", (event) => {
-    const email = field.value.trim();
-    if (email === "") {
+    // Let the browser's own validation speak first: it has already marked the
+    // field and told the person why, and preventing the default here would
+    // silently swallow that.
+    if (typeof form.reportValidity === "function" && !form.reportValidity()) {
       return;
     }
     event.preventDefault();
     button.disabled = true;
     say.classList.remove("bad");
-    say.textContent = "Adding you...";
+    say.textContent = "Sending...";
+    // Read straight off the form, so a field added to the markup travels
+    // without a matching edit here.
+    const answers = Object.fromEntries(new FormData(form).entries());
     fetch(form.action, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ email }),
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(answers),
     })
       .then(async (reply) => {
         if (!reply.ok) {
@@ -204,11 +211,14 @@ function waitlist() {
           data.added === false
             ? "You are already on the list. We will be in touch."
             : "You are on the list. We will be in touch.";
-        field.value = "";
+        form.reset();
       })
       .catch(() => {
         say.classList.add("bad");
-        say.textContent = "That did not go through. Try again in a moment.";
+        // No invented support address here: there is not one to give yet, and
+        // a page that tells somebody to write to a mailbox nobody reads is
+        // worse than one that simply says it failed.
+        say.textContent = "That did not reach the server. Please try again.";
       })
       .finally(() => {
         button.disabled = false;

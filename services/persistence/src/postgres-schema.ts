@@ -1000,6 +1000,11 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     statements: [
       `CREATE TABLE waitlist_signups (
         email TEXT PRIMARY KEY,
+        name TEXT,
+        company TEXT,
+        team_size TEXT,
+        agents TEXT,
+        note TEXT,
         created_at TEXT NOT NULL
       )`,
       `CREATE TABLE signup_intents (

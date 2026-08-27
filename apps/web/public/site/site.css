@@ -607,44 +607,68 @@ strong {
   color: var(--muted);
 }
 
-/*
- * The one thing to do on this page.
- *
- * A row on a wide screen and a stack on a narrow one, which `wrap` gives for
- * free. The reply sits on its own line below both, so an answer never
- * changes the width of what is above it.
- */
-/* This stylesheet had no visually-hidden helper, because until now nothing
-   on the site needed a label a sighted reader does not: the field's
-   placeholder is not one, so the label is real and only its pixels are
-   gone. */
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
-}
-
-.waitlist {
+/* The two pills, centred under the lockup like everything above them. */
+.hero-cta {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 10px;
-  width: min(100%, 460px);
+  gap: 12px;
   margin-top: 6px;
 }
 
-.waitlist-email {
-  flex: 1 1 220px;
-  min-width: 0;
-  padding: 12px 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
+/*
+ * The waitlist form.
+ *
+ * Two columns on a wide screen and one on a narrow, from the same auto-fit
+ * the installer cards use, so the break happens when the fields stop fitting
+ * rather than at a width guessed in advance. The note and the button span the
+ * row, because a textarea in a half column is a scrollbar and a submit button
+ * that moves with the layout is one nobody finds twice.
+ */
+.join {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 22px 24px;
+  max-width: 760px;
+  margin-top: 44px;
+}
+
+.join-wide,
+.join-send {
+  grid-column: 1 / -1;
+}
+
+.join-field {
+  display: grid;
+  gap: 8px;
+}
+
+.join-field label {
+  font-family: var(--display);
+  font-variation-settings: "wght" 460, "wdth" 92;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+/* Marked on the one field that is, rather than marking the five that are not:
+   the shorter list is the one worth reading. */
+.join-need {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.join input,
+.join select,
+.join textarea {
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   background: color-mix(in srgb, var(--surface-1) 78%, transparent);
   color: var(--text);
   font-family: var(--font);
@@ -652,24 +676,37 @@ strong {
   transition: border-color 0.22s var(--ease-motion);
 }
 
-.waitlist-email::placeholder {
+.join textarea {
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.join ::placeholder {
   color: var(--faint);
 }
 
-.waitlist-email:focus-visible {
+.join input:focus-visible,
+.join select:focus-visible,
+.join textarea:focus-visible {
   outline: none;
   border-color: var(--salmon);
 }
 
-/* Empty until there is something to say, and it takes no room until then. */
-.waitlist-say {
-  flex-basis: 100%;
+.join-send {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+}
+
+/* Empty until there is something to say. */
+.join-say {
   font-size: 14px;
   line-height: 1.5;
   color: var(--muted);
 }
 
-.waitlist-say.bad {
+.join-say.bad {
   color: var(--salmon);
 }
 

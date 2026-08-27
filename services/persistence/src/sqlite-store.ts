@@ -1448,29 +1448,52 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : this.toPasswordReset(row);
   }
 
-  public async recordWaitlistSignup(
-    email: string,
-    at: string,
-  ): Promise<boolean> {
+  public async recordWaitlistSignup(signup: WaitlistSignup): Promise<boolean> {
     // `OR IGNORE` rather than a read then a write: two people submitting the
     // same address at once would both see it missing and one would fail on
     // the key. The row count says which call actually inserted.
     const result = this.db
       .prepare(
-        `INSERT OR IGNORE INTO waitlist_signups (email, created_at)
-         VALUES (?, ?)`,
+        `INSERT OR IGNORE INTO waitlist_signups
+           (email, name, company, team_size, agents, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(email, at);
+      .run(
+        signup.email,
+        signup.name ?? null,
+        signup.company ?? null,
+        signup.teamSize ?? null,
+        signup.agents ?? null,
+        signup.note ?? null,
+        signup.createdAt,
+      );
     return result.changes > 0;
   }
 
   public async listWaitlistSignups(): Promise<readonly WaitlistSignup[]> {
     const rows = this.db
       .prepare(
-        `SELECT email, created_at FROM waitlist_signups ORDER BY created_at`,
+        `SELECT email, name, company, team_size, agents, note, created_at
+           FROM waitlist_signups ORDER BY created_at`,
       )
-      .all() as { email: string; created_at: string }[];
-    return rows.map((row) => ({ email: row.email, createdAt: row.created_at }));
+      .all() as {
+      email: string;
+      name: string | null;
+      company: string | null;
+      team_size: string | null;
+      agents: string | null;
+      note: string | null;
+      created_at: string;
+    }[];
+    return rows.map((row) => ({
+      email: row.email,
+      name: row.name ?? undefined,
+      company: row.company ?? undefined,
+      teamSize: row.team_size ?? undefined,
+      agents: row.agents ?? undefined,
+      note: row.note ?? undefined,
+      createdAt: row.created_at,
+    }));
   }
 
   public async createSignupIntent(intent: SignupIntentRecord): Promise<void> {

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#121110">
+    <meta
+      name="description"
+      content="Join the KUMI waitlist. Tell us who you are and how your team works with coding agents, and we will be in touch when KUMI opens up."
+    >
+    <link rel="icon" href="kumi-mark.png">
+    <script src="site-boot.js"></script>
+    <link rel="stylesheet" href="site.css">
+    <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
+    <title>KUMI — join the waitlist</title>
+  </head>
+  <body>
+    <!-- No canvas: the front page's water carries the argument, and a form is
+         a place to concentrate. The stylesheet's own gradient is enough. -->
+    <div class="field" aria-hidden="true"></div>
+    <div class="field-veil" aria-hidden="true"></div>
+
+    <nav class="site-nav">
+      <div class="wrap">
+        <a class="nav-brand" href=".">
+          <img src="kumi-mark.png" alt="KUMI" width="26" height="26">
+        </a>
+        <div class="nav-links">
+          <a class="nav-link" href="pricing">Pricing</a>
+          <a class="nav-link optional" href="download">Download</a>
+        </div>
+        <div class="nav-end">
+          <a class="nav-link" href="/app#signin">Sign in</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="hero hero-short">
+      <div class="wrap hero-lede">
+        <h1>
+          <span class="w"><span>Join</span></span>
+          <span class="w"><span>the</span></span>
+          <span class="w"><span>waitlist.</span></span>
+        </h1>
+        <p class="hero-tag">
+          KUMI is not open yet. Tell us how your team works and we will be in
+          touch when it is.
+        </p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section section-close">
+        <div class="wrap">
+          <!-- A real form, posting on its own to the same origin. Everything
+               but the address is optional and says so, because a waitlist
+               that turns somebody away over their team size is a waitlist
+               with fewer people on it. site.js answers in place where it can;
+               without JavaScript the server answers with a page. -->
+          <form class="join" method="post" action="/api/v1/waitlist">
+            <div class="join-field">
+              <label for="join-name">Your name</label>
+              <input id="join-name" name="name" type="text" autocomplete="name" maxlength="120">
+            </div>
+
+            <div class="join-field">
+              <label for="join-email">Work email <span class="join-need">required</span></label>
+              <input id="join-email" name="email" type="email" required autocomplete="email" maxlength="254">
+            </div>
+
+            <div class="join-field">
+              <label for="join-company">Company</label>
+              <input id="join-company" name="company" type="text" autocomplete="organization" maxlength="120">
+            </div>
+
+            <div class="join-field">
+              <label for="join-team">How many people build with you?</label>
+              <select id="join-team" name="teamSize">
+                <option value="">Rather not say</option>
+                <option>Just me</option>
+                <option>2 to 5</option>
+                <option>6 to 20</option>
+                <option>21 to 100</option>
+                <option>More than 100</option>
+              </select>
+            </div>
+
+            <div class="join-field">
+              <label for="join-agents">Which agents do you use today?</label>
+              <input id="join-agents" name="agents" type="text" maxlength="200" placeholder="Claude, Codex, Cursor...">
+            </div>
+
+            <div class="join-field join-wide">
+              <label for="join-note">What would you point KUMI at first?</label>
+              <textarea id="join-note" name="note" rows="4" maxlength="1000"></textarea>
+            </div>
+
+            <div class="join-send">
+              <button class="btn btn-primary" type="submit">Join the waitlist</button>
+              <p class="join-say" role="status" aria-live="polite"></p>
+            </div>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <span class="tagline">KUMI — the coordination layer between your
+          agents and your codebase.</span>
+        <a href="/app">Product</a>
+        <a href="pricing">Pricing</a>
+        <a href="download">Download</a>
+        <span class="legal">© 2026 KUMI. Every promotion is a Git commit.</span>
+      </div>
+    </footer>
+
+    <script src="vendor/motion/motion.js"></script>
+    <script type="module" src="site.js"></script>
+  </body>
+</html>

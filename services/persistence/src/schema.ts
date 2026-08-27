@@ -1322,6 +1322,22 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    version: 49,
+    name: "waitlist-details",
+    statements: [
+      // Added rather than folded into 48, which has already run wherever this
+      // branch is deployed and is never re-applied. Every one of these is
+      // nullable: the form asks for them, and a waitlist that refuses an
+      // address because somebody skipped their team size is a waitlist with
+      // fewer people on it.
+      `ALTER TABLE waitlist_signups ADD COLUMN name TEXT`,
+      `ALTER TABLE waitlist_signups ADD COLUMN company TEXT`,
+      `ALTER TABLE waitlist_signups ADD COLUMN team_size TEXT`,
+      `ALTER TABLE waitlist_signups ADD COLUMN agents TEXT`,
+      `ALTER TABLE waitlist_signups ADD COLUMN note TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

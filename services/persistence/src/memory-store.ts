@@ -1014,23 +1014,20 @@ export class InMemoryCoordinationStore implements CoordinationStore {
 
   /* ---------------------------------------------------- password resets ---- */
 
-  private readonly waitlist = new Map<string, string>();
+  private readonly waitlist = new Map<string, WaitlistSignup>();
 
-  public async recordWaitlistSignup(
-    email: string,
-    at: string,
-  ): Promise<boolean> {
-    if (this.waitlist.has(email)) {
+  public async recordWaitlistSignup(signup: WaitlistSignup): Promise<boolean> {
+    if (this.waitlist.has(signup.email)) {
       return false;
     }
-    this.waitlist.set(email, at);
+    this.waitlist.set(signup.email, { ...signup });
     return true;
   }
 
   public async listWaitlistSignups(): Promise<readonly WaitlistSignup[]> {
-    return [...this.waitlist.entries()]
-      .map(([email, createdAt]) => ({ email, createdAt }))
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return [...this.waitlist.values()].sort((a, b) =>
+      a.createdAt.localeCompare(b.createdAt),
+    );
   }
 
   private readonly signupIntents = new Map<string, SignupIntentRecord>();

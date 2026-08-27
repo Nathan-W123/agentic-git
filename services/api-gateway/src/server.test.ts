@@ -18284,10 +18284,38 @@ test("the waitlist takes an address from a stranger, once, in either encoding", 
   const joined = await fetch(`${base}/api/v1/waitlist`, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ email: "Someone@Example.com " }),
+    body: JSON.stringify({
+      email: "Someone@Example.com ",
+      name: "  Ada  ",
+      company: "Relay",
+      teamSize: "2 to 5",
+      agents: "Claude, Codex",
+      note: "checkout",
+    }),
   });
   assert.equal(joined.status, 200);
   assert.deepEqual(await joined.json(), { status: "joined", added: true });
+
+  // Everything the form asks is kept, trimmed, beside the address.
+  const [first] = await store.listWaitlistSignups();
+  assert.deepEqual(
+    {
+      email: first?.email,
+      name: first?.name,
+      company: first?.company,
+      teamSize: first?.teamSize,
+      agents: first?.agents,
+      note: first?.note,
+    },
+    {
+      email: "someone@example.com",
+      name: "Ada",
+      company: "Relay",
+      teamSize: "2 to 5",
+      agents: "Claude, Codex",
+      note: "checkout",
+    },
+  );
 
   // Normalised on the way in, so the same address typed two ways is one row.
   const again = await fetch(`${base}/api/v1/waitlist`, {
@@ -18310,7 +18338,13 @@ test("the waitlist takes an address from a stranger, once, in either encoding", 
       "content-type": "application/x-www-form-urlencoded",
       accept: "text/html,application/xhtml+xml",
     },
-    body: new URLSearchParams({ email: "second@example.com" }).toString(),
+    body: new URLSearchParams({
+      email: "second@example.com",
+      name: "Grace",
+      // Left blank the way a person leaves an optional field blank: stored as
+      // nothing rather than as an empty string.
+      company: "",
+    }).toString(),
   });
   assert.equal(noScript.status, 200);
   assert.match(noScript.headers.get("content-type") ?? "", /text\/html/u);
@@ -18323,9 +18357,16 @@ test("the waitlist takes an address from a stranger, once, in either encoding", 
   });
   assert.equal(rejected.status, 400);
 
+  const rows = await store.listWaitlistSignups();
   assert.deepEqual(
-    (await store.listWaitlistSignups()).map((row) => row.email),
+    rows.map((row) => row.email),
     ["someone@example.com", "second@example.com"],
     "one row per address, in the order they arrived",
+  );
+  assert.equal(rows[1]?.name, "Grace", "a form post keeps its fields too");
+  assert.equal(
+    rows[1]?.company,
+    undefined,
+    "a field left blank is absent, not an empty string",
   );
 });

@@ -65,24 +65,13 @@
           </h1>
           <p class="hero-tag">Making development multiplayer.</p>
 
-          <!-- A real form rather than a link dressed as one: it posts to the
-               waitlist endpoint on its own, so it works with no JavaScript at
-               all. site.js upgrades it in place to answer without navigating
-               away; the no-script path lands on a plain confirmation. -->
-          <form class="waitlist" method="post" action="/api/v1/waitlist">
-            <label class="sr-only" for="waitlist-email">Email address</label>
-            <input
-              class="waitlist-email"
-              id="waitlist-email"
-              type="email"
-              name="email"
-              required
-              autocomplete="email"
-              placeholder="you@company.com"
-            >
-            <button class="btn btn-primary" type="submit">Join the waitlist</button>
-            <p class="waitlist-say" role="status" aria-live="polite"></p>
-          </form>
+          <!-- Two things to do, and only two: join, or find out why. The
+               second is an anchor, so it works before any script runs and
+               the browser's own smooth scrolling carries it. -->
+          <p class="hero-cta">
+            <a class="btn btn-primary" href="waitlist">Join the waitlist</a>
+            <a class="btn btn-ghost" href="#room">Why KUMI?</a>
+          </p>
         </div>
 
       </div>

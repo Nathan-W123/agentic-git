@@ -63,6 +63,7 @@ const PUBLIC_FILES = [
 const SITE_FILES = [
   ["index.html", "/", "text/html; charset=utf-8"],
   ["pricing.html", "/pricing", "text/html; charset=utf-8"],
+  ["waitlist.html", "/waitlist", "text/html; charset=utf-8"],
   // No marketing download page, deliberately. The dashboard already serves a
   // functional one at /download — real per-OS installer links that a test
   // holds in agreement with the release workflow — and the marketing draft
