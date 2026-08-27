@@ -995,26 +995,6 @@ strong {
  * filter would re-blur every star on every frame of that turn, where a
  * radial fill costs nothing to move.
  */
-.glow-in {
-  stop-color: #fff;
-  stop-opacity: 0.5;
-}
-
-.glow-mid {
-  stop-color: #fff;
-  stop-opacity: 0.2;
-}
-
-.glow-far {
-  stop-color: #fff;
-  stop-opacity: 0.06;
-}
-
-.glow-out {
-  stop-color: #fff;
-  stop-opacity: 0;
-}
-
 .halo {
   fill: url(#star-glow);
 }
@@ -1024,7 +1004,7 @@ strong {
 }
 
 .star.dim {
-  opacity: 0.55;
+  opacity: 0.46;
 }
 
 /* Drawn, and staying drawn: the resting sky. The beats below only take it
@@ -1067,16 +1047,30 @@ strong {
     animation: sky-turn 150s linear infinite;
   }
 
+  /* Stars come up and go down again, each on its own clock — four periods
+     against four offsets, so no two anywhere near each other are ever in
+     step and the sky never pulses as one thing. */
   .star {
-    animation: star-breathe 5.5s ease-in-out infinite;
+    animation: star-breathe 5.4s ease-in-out infinite;
   }
 
-  .star:nth-child(3n + 2) {
-    animation-delay: 1.9s;
+  .star.dim {
+    animation-name: star-breathe-dim;
   }
 
-  .star:nth-child(3n + 3) {
-    animation-delay: 3.7s;
+  .star:nth-child(4n + 2) {
+    animation-duration: 6.7s;
+    animation-delay: 1.3s;
+  }
+
+  .star:nth-child(4n + 3) {
+    animation-duration: 4.6s;
+    animation-delay: 2.7s;
+  }
+
+  .star:nth-child(4n + 4) {
+    animation-duration: 7.3s;
+    animation-delay: 3.9s;
   }
 
   /*
@@ -1141,11 +1135,22 @@ strong {
 @keyframes star-breathe {
   0%,
   100% {
-    opacity: 0.74;
+    opacity: 0.55;
   }
 
   50% {
     opacity: 1;
+  }
+}
+
+@keyframes star-breathe-dim {
+  0%,
+  100% {
+    opacity: 0.24;
+  }
+
+  50% {
+    opacity: 0.6;
   }
 }
 
