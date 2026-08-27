@@ -545,6 +545,12 @@ strong {
   max-width: 12ch;
 }
 
+/* One word, so it gets to be enormous. The size lives on this class rather
+   than on h1, because the pricing page's hero is still a sentence. */
+.hero-name {
+  font-size: clamp(76px, 13vw, 172px);
+}
+
 .hero-aside {
   display: grid;
   gap: 22px;
@@ -1216,158 +1222,5 @@ html.anim .reveal {
 @media (hover: hover) {
   .card:hover::after {
     opacity: 1;
-  }
-}
-
-/* ---------------------------------------------------- admission board -- */
-
-/*
- * Partial admission as physics: the file pills are real elements that travel
- * between the repository row and each plan's tray on springs, and the
- * contested one visibly waits — a dashed ghost holds its place in plan B's
- * tray until plan A's commit lands and the pill crosses over.
- *
- * Without JavaScript every pill sits in the repository row, the ghost stays
- * hidden, the commit chips read as labels, and the status line is the
- * diagram's caption. Nothing below assumes the play ever happens.
- */
-.admission {
-  display: grid;
-  gap: 14px;
-  margin-top: 16px;
-  padding: 26px 26px 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--surface-1) 84%, transparent);
-  backdrop-filter: blur(12px);
-  box-shadow: var(--shadow-card);
-}
-
-.adm-lane {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 14px;
-}
-
-.adm-plan {
-  flex: 0 0 136px;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.adm-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 7px;
-  border-radius: 2px;
-  vertical-align: -1px;
-}
-
-.adm-dot.a {
-  background: var(--salmon);
-}
-
-.adm-dot.b {
-  background: var(--lavender);
-}
-
-.adm-tray {
-  flex: 1 1 auto;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 5px;
-  border-radius: 12px;
-}
-
-/* The plans' trays are visibly places for things to land. */
-.adm-tray.claim {
-  border: 1px dashed var(--border);
-  background: color-mix(in srgb, var(--surface-2) 34%, transparent);
-}
-
-.adm-pill {
-  padding: 5px 13px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
-  background: var(--surface-2);
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  will-change: transform;
-  transition: border-color 0.3s var(--ease-motion),
-    background-color 0.3s var(--ease-motion), color 0.3s var(--ease-motion),
-    opacity 0.3s var(--ease-motion);
-}
-
-.adm-pill.claimed-a {
-  border-color: color-mix(in srgb, var(--salmon) 60%, transparent);
-  background: color-mix(in srgb, var(--salmon) 16%, var(--surface-2));
-  color: var(--text);
-}
-
-.adm-pill.claimed-b {
-  border-color: color-mix(in srgb, var(--lavender) 60%, transparent);
-  background: color-mix(in srgb, var(--lavender) 16%, var(--surface-2));
-  color: var(--text);
-}
-
-.adm-pill.dim {
-  opacity: 0.45;
-}
-
-/* The place-holder for the file plan B is waiting on. */
-.adm-held {
-  padding: 5px 13px;
-  border: 1px dashed color-mix(in srgb, var(--lavender) 55%, transparent);
-  border-radius: var(--radius-pill);
-  font-family: var(--mono);
-  font-size: 12px;
-  color: color-mix(in srgb, var(--lavender) 70%, var(--muted));
-  white-space: nowrap;
-  opacity: 0;
-}
-
-.adm-commit {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-}
-
-.adm-commit.a {
-  color: var(--salmon);
-}
-
-.adm-commit.b {
-  color: var(--lavender);
-}
-
-/* Two lines reserved, so the narration swapping never reflows the page. */
-.adm-status {
-  min-height: 2.6em;
-  margin-top: 6px;
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--muted);
-}
-
-@media (max-width: 720px) {
-  .adm-plan {
-    flex-basis: 100%;
-  }
-
-  .adm-commit {
-    margin-left: 0;
   }
 }

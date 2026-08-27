@@ -82,6 +82,30 @@ const EASE = [0.32, 0.72, 0, 1];
 let stopField;
 let disarmed = false;
 
+/**
+ * Every scroll-armed reveal, until it fires. The IntersectionObserver is
+ * the normal trigger, but it only reports elements that intersect on some
+ * frame — and a smooth programmatic scroll being retargeted mid-glide can
+ * carry an element straight past the viewport without one. Anything the
+ * reader has already scrolled beyond is owed its content immediately, so a
+ * sweep on every scroll fires whatever the observer missed. Content can be
+ * late to the party; it cannot fail to arrive.
+ */
+const pendingReveals = new Map();
+
+function fireReveal(el) {
+  const fire = pendingReveals.get(el);
+  if (fire === undefined || disarmed) {
+    return;
+  }
+  pendingReveals.delete(el);
+  try {
+    fire();
+  } catch (error) {
+    note("reveal", error);
+  }
+}
+
 /** What wire() changed and started, so disarm() can put all of it back. */
 const undoers = [];
 const timers = [];
@@ -107,6 +131,7 @@ function later(ms) {
 
 function disarm() {
   disarmed = true;
+  pendingReveals.clear();
   document.documentElement.classList.remove("anim");
   document.documentElement.classList.remove("field-live");
   for (const timer of timers) {
@@ -389,21 +414,20 @@ function wire() {
         span.style.filter = "blur(10px)";
         span.style.transform = "translateY(14px)";
       }
-      inView(
-        heading,
-        () => {
-          animate(
-            words,
-            {
-              opacity: [0, 1],
-              filter: ["blur(10px)", "blur(0px)"],
-              transform: ["translateY(14px)", "translateY(0px)"],
-            },
-            { delay: stagger(0.05), duration: 0.55, ease: EASE },
-          );
-        },
-        { margin: "0px 0px -12% 0px" },
-      );
+      pendingReveals.set(heading, () => {
+        animate(
+          words,
+          {
+            opacity: [0, 1],
+            filter: ["blur(10px)", "blur(0px)"],
+            transform: ["translateY(14px)", "translateY(0px)"],
+          },
+          { delay: stagger(0.05), duration: 0.55, ease: EASE },
+        );
+      });
+      inView(heading, () => fireReveal(heading), {
+        margin: "0px 0px -12% 0px",
+      });
     }
   });
 
@@ -474,9 +498,7 @@ function wire() {
         );
       }
     };
-    follow(".hero .chip", 0.15);
     follow(".hero-aside", 0.42);
-    follow(".scroll-cue", 0.62);
   });
 
   // -- Scroll reveals: one behaviour for every section heading, paragraph
@@ -485,40 +507,89 @@ function wire() {
   attempt("reveals", () => {
     for (const group of document.querySelectorAll("[data-reveal-group]")) {
       const items = group.querySelectorAll(".reveal");
-      inView(
-        group,
-        () => {
-          animate(
-            items,
-            {
-              opacity: [0, 1],
-              transform: ["translateY(24px)", "translateY(0px)"],
-            },
-            { duration: 0.6, delay: stagger(0.08), ease: EASE },
-          );
-        },
-        { margin: "0px 0px -12% 0px" },
-      );
+      /*
+       * The card rows arrive with a spring — risen and slightly scaled, each
+       * a beat behind its neighbour — because a row of surfaces landing has
+       * weight in a way a paragraph fading in should not. The orbit pills
+       * get the bounciest version; everything else keeps the quiet fade.
+       */
+      const springy = group.matches(".moves, .cards");
+      const bouncy = group.matches(".orbit");
+      pendingReveals.set(group, () => {
+        {
+          if (springy) {
+            animate(
+              items,
+              {
+                opacity: [0, 1],
+                transform: [
+                  "translateY(48px) scale(0.94)",
+                  "translateY(0px) scale(1)",
+                ],
+              },
+              { delay: stagger(0.1), type: "spring", stiffness: 150, damping: 19 },
+            );
+          } else if (bouncy) {
+            animate(
+              items,
+              {
+                opacity: [0, 1],
+                transform: [
+                  "translateY(20px) scale(0.75)",
+                  "translateY(0px) scale(1)",
+                ],
+              },
+              { delay: stagger(0.06), type: "spring", stiffness: 260, damping: 15 },
+            );
+          } else {
+            animate(
+              items,
+              {
+                opacity: [0, 1],
+                transform: ["translateY(24px)", "translateY(0px)"],
+              },
+              { duration: 0.6, delay: stagger(0.08), ease: EASE },
+            );
+          }
+        }
+      });
+      inView(group, () => fireReveal(group), { margin: "0px 0px -12% 0px" });
     }
     for (const el of document.querySelectorAll(".reveal")) {
       if (el.closest("[data-reveal-group]") !== null) {
         continue;
       }
-      inView(
-        el,
-        () => {
-          animate(
-            el,
-            {
-              opacity: [0, 1],
-              transform: ["translateY(24px)", "translateY(0px)"],
-            },
-            { duration: 0.6, ease: EASE },
-          );
-        },
-        { margin: "0px 0px -12% 0px" },
-      );
+      pendingReveals.set(el, () => {
+        animate(
+          el,
+          {
+            opacity: [0, 1],
+            transform: ["translateY(24px)", "translateY(0px)"],
+          },
+          { duration: 0.6, ease: EASE },
+        );
+      });
+      inView(el, () => fireReveal(el), { margin: "0px 0px -12% 0px" });
     }
+
+    /*
+     * The sweep: whatever the reader has already scrolled past is revealed
+     * on the spot, observer or no observer. Fast retargeted smooth scrolls
+     * can carry an element through the viewport without one intersecting
+     * frame, and an enter-only observer never looks back.
+     */
+    const sweep = () => {
+      if (disarmed) {
+        return;
+      }
+      for (const el of [...pendingReveals.keys()]) {
+        if (el.getBoundingClientRect().top < window.innerHeight * 0.4) {
+          fireReveal(el);
+        }
+      }
+    };
+    window.addEventListener("scroll", sweep, { passive: true });
+    sweep();
   });
 
   // -- Nav grows an edge once the page has left the hero, and carries the
@@ -614,9 +685,6 @@ function wire() {
   attempt("channel", () => {
     channelStory(animate, inView);
   });
-  attempt("board", () => {
-    admissionBoard(animate, inView);
-  });
   attempt("price", () => {
     priceCounter(inView);
   });
@@ -647,13 +715,10 @@ function channelStory(animate, inView) {
   for (const el of steps) {
     stage(el, { opacity: "0" });
   }
-  inView(
-    body,
-    () => {
-      void play();
-    },
-    { margin: "0px 0px -15% 0px" },
-  );
+  pendingReveals.set(body, () => {
+    void play();
+  });
+  inView(body, () => fireReveal(body), { margin: "0px 0px -15% 0px" });
   async function play() {
     for (const el of steps) {
       if (disarmed) {
@@ -678,199 +743,6 @@ function channelStory(animate, inView) {
         { duration: 0.5, ease: EASE },
       );
     }
-  }
-}
-
-/* ----------------------------------------------------- admission board -- */
-
-/**
- * Partial admission as physics.
- *
- * The file pills are real elements, and a claim is a journey: a pill leaves
- * the repository row and lands in a plan's tray on a spring. The move is a
- * FLIP — measure where it was, reparent it, measure where it is, start from
- * the difference — which is what lets the layout stay ordinary responsive
- * flow while the pill appears to fly between rows. The contested file
- * wobbles when the second plan asks for it, a dashed ghost holds its place
- * in plan B's tray, and the moment plan A's commit chip lands the pill
- * crosses over and the ghost pops away.
- *
- * It loops while it is on screen and stops when it is not. Without
- * JavaScript every pill sits in the repository row and the status line is
- * the diagram's caption.
- */
-function admissionBoard(animate, inView) {
-  const figure = document.querySelector("[data-admission]");
-  if (figure === null) {
-    return;
-  }
-  const tray = (name) => figure.querySelector(`[data-adm-tray="${name}"]`);
-  const repo = tray("repo");
-  const trayA = tray("a");
-  const trayB = tray("b");
-  const held = figure.querySelector("[data-adm-held]");
-  const commitA = figure.querySelector('[data-adm-commit="a"]');
-  const commitB = figure.querySelector('[data-adm-commit="b"]');
-  const status = figure.querySelector("[data-adm-status]");
-  if ([repo, trayA, trayB, held, commitA, commitB].some((el) => el === null)) {
-    return;
-  }
-  const pills = [...repo.querySelectorAll(".adm-pill")];
-  const pill = (file) =>
-    pills.find((el) => el.dataset.admFile === file) ?? pills[0];
-  const auth = pill("auth.ts");
-  const retry = pill("retry.ts");
-  const webhooks = pill("webhooks.ts");
-
-  // Everything this board moves goes back exactly where the HTML put it.
-  const restingStatus = status === null ? "" : status.textContent;
-  undoers.push(() => {
-    for (const el of pills) {
-      el.className = "adm-pill";
-      el.removeAttribute("style");
-      repo.append(el);
-    }
-    for (const el of [held, commitA, commitB]) {
-      el.removeAttribute("style");
-    }
-    if (status !== null) {
-      status.textContent = restingStatus;
-    }
-  });
-  stage(commitA, { opacity: "0" });
-  stage(commitB, { opacity: "0" });
-
-  /**
-   * Reinserts a pill into the repository row where it started, so a return
-   * journey never shuffles the order of the files still at home.
-   */
-  const home = (el) => {
-    const after = pills.slice(pills.indexOf(el) + 1);
-    const anchor = after.find((sibling) => sibling.parentElement === repo);
-    if (anchor === undefined) {
-      repo.append(el);
-    } else {
-      repo.insertBefore(el, anchor);
-    }
-  };
-
-  /** The FLIP move: reparent, then spring from where it used to be. */
-  const fly = (el, place) => {
-    const first = el.getBoundingClientRect();
-    place(el);
-    const last = el.getBoundingClientRect();
-    el.style.transform = `translate(${first.left - last.left}px, ${
-      first.top - last.top
-    }px)`;
-    animate(
-      el,
-      { transform: "translate(0px, 0px)" },
-      { type: "spring", stiffness: 220, damping: 24 },
-    );
-  };
-
-  const chipIn = (chip) => {
-    animate(
-      chip,
-      {
-        opacity: [0, 1],
-        transform: ["translateY(8px) scale(0.85)", "translateY(0px) scale(1)"],
-      },
-      { type: "spring", stiffness: 260, damping: 20 },
-    );
-  };
-
-  const say = (text) => {
-    if (status !== null && !disarmed) {
-      status.textContent = text;
-      animate(status, { opacity: [0, 1] }, { duration: 0.35 });
-    }
-  };
-
-  let visible = false;
-  let playing = false;
-  inView(figure, () => {
-    visible = true;
-    if (!playing) {
-      playing = true;
-      void loop();
-    }
-    return () => {
-      visible = false;
-    };
-  });
-
-  async function loop() {
-    while (visible && !disarmed) {
-      // Everything springs home rather than snapping, so the loop reads as
-      // the next request arriving instead of a video restarting.
-      for (const el of pills) {
-        el.classList.remove("claimed-a", "claimed-b", "dim");
-        if (el.parentElement !== repo) {
-          fly(el, home);
-        }
-      }
-      animate(commitA, { opacity: 0 }, { duration: 0.3 });
-      animate(commitB, { opacity: 0 }, { duration: 0.3 });
-      held.style.opacity = "0";
-      await later(1000);
-      if (!visible || disarmed) break;
-
-      say("plan A claims retry.ts and webhooks.ts");
-      retry.classList.add("claimed-a");
-      fly(retry, (el) => trayA.append(el));
-      await later(160);
-      webhooks.classList.add("claimed-a");
-      fly(webhooks, (el) => trayA.append(el));
-      await later(1100);
-      if (!visible || disarmed) break;
-
-      say("plan B wants auth.ts and webhooks.ts — granted auth.ts now, webhooks.ts held");
-      auth.classList.add("claimed-b");
-      fly(auth, (el) => trayB.append(el));
-      animate(
-        webhooks,
-        {
-          transform: [
-            "translate(0px, 0px)",
-            "translate(-4px, 0px)",
-            "translate(4px, 0px)",
-            "translate(-2px, 0px)",
-            "translate(0px, 0px)",
-          ],
-        },
-        { duration: 0.5, ease: EASE },
-      );
-      animate(
-        held,
-        { opacity: [0, 1], transform: ["scale(0.7)", "scale(1)"] },
-        { type: "spring", stiffness: 260, damping: 20 },
-      );
-      await later(1900);
-      if (!visible || disarmed) break;
-
-      say("plan A promoted — webhooks.ts released to plan B");
-      chipIn(commitA);
-      retry.classList.add("dim");
-      retry.classList.remove("claimed-a");
-      fly(retry, home);
-      await later(350);
-      animate(
-        held,
-        { opacity: 0, transform: "scale(0.6)" },
-        { duration: 0.25, ease: EASE },
-      );
-      webhooks.classList.remove("claimed-a");
-      webhooks.classList.add("claimed-b");
-      fly(webhooks, (el) => trayB.append(el));
-      await later(1000);
-      if (!visible || disarmed) break;
-
-      say("both plans ran the whole time — nothing waited that did not have to");
-      chipIn(commitB);
-      await later(3400);
-    }
-    playing = false;
   }
 }
 
@@ -903,7 +775,7 @@ function priceCounter(inView) {
     node.textContent = full;
   });
   node.textContent = full.replace(/\d+/u, "0");
-  inView(line, () => {
+  pendingReveals.set(line, () => {
     const started = performance.now();
     const duration = 1100;
     const tick = () => {
@@ -919,4 +791,5 @@ function priceCounter(inView) {
     };
     requestAnimationFrame(tick);
   });
+  inView(line, () => fireReveal(line));
 }

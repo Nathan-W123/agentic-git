@@ -127,9 +127,10 @@ float glowAt(vec2 q) {
   return g;
 }
 
-/* Closest distance between the view ray and the segment ab — how a falling
-   drop's streak is drawn without any geometry at all. */
-float segmentDistance(vec3 origin, vec3 ray, vec3 a, vec3 b) {
+/* Closest approach between the view ray and the segment ab: x is the
+   distance, y is where along the segment it lands (0 at a, 1 at b) — the
+   drop's streak tapers with it, so it is a comet and not a bar. */
+vec2 segmentApproach(vec3 origin, vec3 ray, vec3 a, vec3 b) {
   vec3 ab = b - a;
   vec3 ao = a - origin;
   float ab2 = dot(ab, ab);
@@ -140,7 +141,7 @@ float segmentDistance(vec3 origin, vec3 ray, vec3 a, vec3 b) {
     ? clamp((aor * abr - dot(ao, ab)) / denom, 0.0, 1.0)
     : 0.0;
   float t = max(aor + s * abr, 0.0);
-  return length(a + ab * s - (origin + ray * t));
+  return vec2(length(a + ab * s - (origin + ray * t)), s);
 }
 
 void main() {
@@ -234,19 +235,34 @@ void main() {
       continue;
     }
     float age = uTime - drop.z;
-    /* The streak: a capsule from the head back up along the fall, brighter
-       at the head, born high and dying into its own splash. */
-    if (age > -FALL && age < 0.04) {
+    /* The streak: a warm comet, bright at the head and tapering up the
+       tail, fading in as it enters so it never pops. Painted in the scene's
+       own palette — an earlier version lifted it toward white, and on a
+       dark screen that read as a grey smudge pasted over the page, not as
+       water falling. It also fades out as the camera rises: seen from
+       overhead a vertical streak projects as a shape hanging in space, and
+       from up there the splash and the ring are the event. */
+    float rise = smoothstep(0.0, 1.0, uCalmIn);
+    float streakVisible = 1.0 - 0.9 * rise;
+    if (age > -FALL && age < 0.04 && streakVisible > 0.02) {
       float f = clamp(1.0 + age / FALL, 0.0, 1.0);
-      float y = mix(1.15, PLANE, f * f);
+      float entered = smoothstep(0.0, 0.3, f);
+      float y = mix(0.95, PLANE, f * f);
       vec3 head = vec3(drop.x, y, drop.y);
-      vec3 tail = head + vec3(0.0, 0.20 + 0.10 * (1.0 - f), 0.0);
+      vec3 tail = head + vec3(0.0, 0.16 + 0.08 * (1.0 - f), 0.0);
+      vec2 approach = segmentApproach(origin, ray, head, tail);
+      float taper = (1.0 - approach.y) * (1.0 - approach.y);
+      /* A thin core inside a wide soft halo: the core alone is a few pixels
+         across, and a few bright pixels with a Gaussian edge read as a bar
+         pasted on the page — the halo is what makes it glow instead. */
       float streak =
-        exp(-pow(segmentDistance(origin, ray, head, tail) * 60.0, 2.0));
+        (exp(-pow(approach.x * 95.0, 2.0)) +
+          exp(-pow(approach.x * 26.0, 2.0)) * 0.4) * taper;
       float headGlow =
-        exp(-pow(length(cross(ray, head - origin)) * 100.0, 2.0));
-      colour += (uWarm * 0.7 + vec3(0.30)) * streak * 1.1 * drop.w;
-      colour += vec3(1.0, 0.97, 0.92) * headGlow * 1.3 * drop.w;
+        exp(-pow(length(cross(ray, head - origin)) * 140.0, 2.0));
+      float presence = entered * streakVisible * drop.w;
+      colour += mix(uWarm, vec3(1.0, 0.9, 0.8), 0.25) * streak * 0.9 * presence;
+      colour += mix(uWarm, vec3(1.0), 0.4) * headGlow * 0.9 * presence;
     }
     /* The splash: a fast bright flash on the surface where the ring is
        born, so an impact is an event rather than an inference. */
@@ -405,7 +421,7 @@ export function startField(canvas, options = {}) {
    * a still pond waiting for weather.
    */
   let nextDrop = 0.4;
-  for (const age of [-3.2, -2.1, -1.0, -0.2]) {
+  for (const age of [-3.4, -1.8, -0.3]) {
     const angle = Math.random() * Math.PI * 2;
     const radius = Math.sqrt(Math.random()) * 1.3;
     spawnDrop(
@@ -427,7 +443,7 @@ export function startField(canvas, options = {}) {
       );
       // Just under the ring's own lifetime, so the still pool always has
       // exactly one circle breathing outward — never none, never rain.
-      nextDrop = time + 3.2 + Math.random() * 0.4;
+      nextDrop = time + 4.2 + Math.random() * 0.6;
       return;
     }
     const angle = Math.random() * Math.PI * 2;
@@ -437,7 +453,7 @@ export function startField(canvas, options = {}) {
       x = 0.6 - (x - 0.6);
     }
     spawnDrop(x, Math.sin(angle) * radius, 0.75 + Math.random() * 0.55);
-    nextDrop = time + 0.9 + calm * 4.5 + Math.random() * 0.9;
+    nextDrop = time + 1.9 + calm * 5.5 + Math.random() * 1.6;
   }
 
   /**
@@ -449,7 +465,7 @@ export function startField(canvas, options = {}) {
   let lastDrip = 0;
   function drip(event) {
     const time = now();
-    if (time - lastDrip < 0.32) {
+    if (time - lastDrip < 0.55) {
       return;
     }
     const nx = (event.clientX / window.innerWidth) * 2 - 1;
