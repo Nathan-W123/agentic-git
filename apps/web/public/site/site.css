@@ -989,17 +989,42 @@ strong {
   stop-opacity: 0;
 }
 
-/* Two shadows rather than one: a tight core and a wide halo is what reads
-   as a star rather than as a dot somebody blurred. */
-.star {
+/*
+ * A star is a hard white core inside a soft disc of light. The halo is a
+ * drawn gradient rather than a blur filter: this whole group turns, and a
+ * filter would re-blur every star on every frame of that turn, where a
+ * radial fill costs nothing to move.
+ */
+.glow-in {
+  stop-color: #fff;
+  stop-opacity: 0.5;
+}
+
+.glow-mid {
+  stop-color: #fff;
+  stop-opacity: 0.2;
+}
+
+.glow-far {
+  stop-color: #fff;
+  stop-opacity: 0.06;
+}
+
+.glow-out {
+  stop-color: #fff;
+  stop-opacity: 0;
+}
+
+.halo {
+  fill: url(#star-glow);
+}
+
+.core {
   fill: #fff;
-  filter: drop-shadow(0 0 4px rgb(255 255 255 / 78%))
-    drop-shadow(0 0 12px rgb(255 255 255 / 34%));
 }
 
 .star.dim {
-  opacity: 0.5;
-  filter: drop-shadow(0 0 3px rgb(255 255 255 / 45%));
+  opacity: 0.55;
 }
 
 /* Drawn, and staying drawn: the resting sky. The beats below only take it

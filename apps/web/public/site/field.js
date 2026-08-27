@@ -147,7 +147,12 @@ void main() {
   vec2 ndc = (gl_FragCoord.xy / uViewport) * 2.0 - 1.0;
   float a = ndc.x * (uViewport.x / uViewport.y) / LENS;
   float b = ndc.y / LENS;
-  vec2 comp = uParallax * 0.08 + uShift;
+  /* And as it pitches down, the pool drifts out of the middle: by the time
+     the camera is overhead the rain is gathered into the bottom-left corner
+     rather than sitting behind whatever the section is saying. Carried on
+     the same rise as the flight, so it is one movement and not two. */
+  vec2 corner = vec2(-1.45, -0.88) * rise;
+  vec2 comp = uParallax * 0.08 + uShift + corner;
 
   /* The exact inverse of the point renderer's projection, compositional
      shift included: the ray's origin carries the shift, its direction

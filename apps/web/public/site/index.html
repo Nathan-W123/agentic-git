@@ -211,6 +211,12 @@
           <figure class="sky-fig reveal" aria-label="A constellation that draws itself three ways in turn: separate islands for agents working alone, two lines converging on one star for two agents reaching the same file, and one joined figure for a single channel that settles the overlap first">
             <svg class="sky-net" viewBox="0 0 560 300" aria-hidden="true">
               <defs>
+                <radialGradient id="star-glow" cx="50%" cy="50%" r="50%">
+                  <stop class="glow-in" offset="0%"/>
+                  <stop class="glow-mid" offset="26%"/>
+                  <stop class="glow-far" offset="58%"/>
+                  <stop class="glow-out" offset="100%"/>
+                </radialGradient>
                 <radialGradient id="sky-dark" cx="50%" cy="50%" r="50%">
                   <stop class="dark-in" offset="0%"/>
                   <stop class="dark-mid" offset="55%"/>
@@ -218,10 +224,11 @@
                 </radialGradient>
               </defs>
               <!-- Night behind the stars: the water runs bright through this
-                   band and a white hairline cannot win against it. Faded to
-                   nothing before the figure's edge, so the page's own
-                   surface still carries through. -->
-              <ellipse class="night" cx="280" cy="150" rx="330" ry="180" fill="url(#sky-dark)"/>
+                   band and a white hairline cannot win against it. Sized to
+                   the viewBox exactly, because an ellipse wider than its own
+                   viewport is clipped square by it and the cut edge reads as
+                   a translucent box around the whole figure. -->
+              <ellipse class="night" cx="280" cy="150" rx="280" ry="150" fill="url(#sky-dark)"/>
               <g class="sky">
                 <g class="links">
                   <line class="link" data-beat="1" style="--i:0" pathLength="100" x1="168" y1="100" x2="206" y2="148"/>
@@ -240,21 +247,21 @@
                   <line class="link" data-beat="3" style="--i:8" pathLength="100" x1="268" y1="150" x2="350" y2="96"/>
                 </g>
                 <g class="stars">
-                  <circle class="star dim" cx="300" cy="110" r="1.7"/>
-                  <circle class="star dim" cx="192" cy="206" r="1.7"/>
-                  <circle class="star dim" cx="380" cy="206" r="1.7"/>
-                  <circle class="star dim" cx="240" cy="112" r="1.7"/>
-                  <circle class="star dim" cx="334" cy="168" r="1.7"/>
-                  <circle class="star dim" cx="196" cy="118" r="1.7"/>
-                  <circle class="star" cx="168" cy="100" r="3.1"/>
-                  <circle class="star" cx="252" cy="68" r="3.1"/>
-                  <circle class="star" cx="350" cy="96" r="3.1"/>
-                  <circle class="star" cx="408" cy="166" r="3.1"/>
-                  <circle class="star" cx="330" cy="228" r="3.1"/>
-                  <circle class="star" cx="230" cy="238" r="3.1"/>
-                  <circle class="star" cx="150" cy="188" r="3.1"/>
-                  <circle class="star" cx="268" cy="150" r="3.1"/>
-                  <circle class="star" cx="206" cy="148" r="3.1"/>
+                  <g class="star dim" transform="translate(300,110)"><circle class="halo" r="8"/><circle class="core" r="1.35"/></g>
+                  <g class="star dim" transform="translate(192,206)"><circle class="halo" r="8"/><circle class="core" r="1.35"/></g>
+                  <g class="star dim" transform="translate(380,206)"><circle class="halo" r="8"/><circle class="core" r="1.35"/></g>
+                  <g class="star dim" transform="translate(240,112)"><circle class="halo" r="8"/><circle class="core" r="1.35"/></g>
+                  <g class="star dim" transform="translate(334,168)"><circle class="halo" r="8"/><circle class="core" r="1.35"/></g>
+                  <g class="star dim" transform="translate(196,118)"><circle class="halo" r="8"/><circle class="core" r="1.35"/></g>
+                  <g class="star" transform="translate(168,100)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(252,68)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(350,96)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(408,166)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(330,228)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(230,238)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(150,188)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(268,150)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(206,148)"><circle class="halo" r="17"/><circle class="core" r="2.7"/></g>
                 </g>
               </g>
             </svg>
