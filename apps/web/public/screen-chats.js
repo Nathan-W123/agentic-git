@@ -6415,12 +6415,16 @@ function threadReplies(root, repositoryId) {
         .join("")}`;
     })
     .join("");
+  // The count rides the section's accessible name and nothing else. It used
+  // to be printed over the replies as well — "2 REPLIES" in grey capitals,
+  // with a hairline trailing off the end of it — which is a caption for
+  // something already in full view directly underneath, and one more rule
+  // across a panel that is mostly rules by the time the header and the
+  // border have had theirs. A reader with the replies on screen can see how
+  // many there are; a reader who cannot see them still gets told.
   return `<section class="thread-replies" aria-label="${esc(
     threadSaidCount(said.length),
   )}">
-    <div class="thread-replies-head" aria-hidden="true">
-      <span>${esc(threadSaidCount(said.length))}</span>
-    </div>
     <div class="thread-replies-flow">${flow}</div>
   </section>`;
 }

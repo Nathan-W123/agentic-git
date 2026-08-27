@@ -1408,7 +1408,6 @@ test("a reply carries a quiet visual path back to its root", async () => {
     "the changed files should sit after the route endpoint",
   );
   assert.match(renderer, /class="thread-replies"/u);
-  assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
   // The panel never borrows the channel's avatar-to-thread path classes —
   // those belong to the room transcript only. Kept from the test this one
@@ -1565,7 +1564,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /top: 48px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
-  assert.match(css, /\.thread-replies-head::after \{/u);
+  // And the foot of that branch reaches into the air the replies keep above
+  // themselves rather than into a caption that no longer exists.
+  assert.match(panelBranch ?? "", /bottom: -8px;/u);
+  const repliesFlow = /\n\.thread-replies-flow \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(repliesFlow ?? "", /padding-top: 10px;/u);
 });
 
 test("a thread says what it is without a connector drawn to it", async () => {
@@ -1575,11 +1578,10 @@ test("a thread says what it is without a connector drawn to it", async () => {
   const rendererEnd = chats.indexOf("\n/**\n * How much summary", rendererStart);
   const renderer = chats.slice(rendererStart, rendererEnd);
 
-  // Inside the open thread panel the conversation names itself with a head and
-  // a flow of replies. That panel never borrows the channel's avatar-to-thread
-  // path classes — those belong to the room transcript only.
+  // Inside the open thread panel the conversation is a named section holding a
+  // flow of replies, and nothing else. That panel never borrows the channel's
+  // avatar-to-thread path classes — those belong to the room transcript only.
   assert.match(renderer, /class="thread-replies"/u);
-  assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
   assert.doesNotMatch(renderer, /cmsg-thread-path/u);
   assert.doesNotMatch(renderer, /cmsg-thread-route/u);
@@ -1596,7 +1598,10 @@ test("a thread says what it is without a connector drawn to it", async () => {
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /top: 48px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
-  assert.match(css, /\.thread-replies-head::after \{/u);
+  // The caption the branch used to end at is gone, and so is the hairline that
+  // trailed off the end of it — see the reply-count test in
+  // thread-panel-chrome.test.ts.
+  assert.doesNotMatch(css, /\.thread-replies-head/u);
 });
 
 test("user-rooted tasks promote when their first reply arrives", async () => {
@@ -1683,8 +1688,11 @@ test("a long thread name cannot push the panel's close out of reach", async () =
   // controls after it — including the close — leave the panel entirely.
   assert.match(head ?? "", /min-width: 0;/u);
   // And once the row is the panel's width, the tools hold their box rather
-  // than shrinking under the name.
-  assert.match(css, /\.thread-head \.icon-btn \{\s*flex: none;\s*\}/u);
+  // than shrinking under the name. That box is now also given a size of its
+  // own — see the compact-header test in thread-panel-chrome.test.ts — so it
+  // is the declaration that is pinned here, not the whole rule.
+  const tools = /\n\.thread-head \.icon-btn \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(tools ?? "", /flex: none;/u);
   // The title is the one thing in the row that gives way, by ellipsis.
   const title = /\n\.thread-head \.thread-title \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.match(title ?? "", /min-width: 0;/u);
