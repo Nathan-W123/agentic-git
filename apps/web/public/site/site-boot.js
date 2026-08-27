@@ -33,7 +33,19 @@
  */
 (function () {
   "use strict";
-  var BOOT_REV = "w9";
+  var BOOT_REV = "w10";
+
+  // Antidote for a stray line living in one deployment's fork of this site.
+  // A Kumi agent's commit there calls mountCoordinationShowcase() from
+  // site.js; the function exists nowhere, and the ReferenceError aborts the
+  // whole module before it can arm or draw anything — a night of blank
+  // pages and missing water, finally named by the ?why panel's error net.
+  // Defining it as a no-op lets that fork's file run the rest of its (real)
+  // code. Harmless anywhere the stray line never existed; delete once the
+  // fork's history is cleaned of the call.
+  if (typeof window.mountCoordinationShowcase === "undefined") {
+    window.mountCoordinationShowcase = function () {};
+  }
   var hash = window.location.hash;
 
   // Every resource that fails to arrive is recorded, so the ?why overlay

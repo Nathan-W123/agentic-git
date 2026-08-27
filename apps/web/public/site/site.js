@@ -31,7 +31,7 @@ import { startField } from "./field.js";
 
 // Read by the boot script's ?why diagnostics: proof this module's graph
 // loaded, and which revision of it.
-window.__kumiSiteRev = "w9";
+window.__kumiSiteRev = "w10";
 
 // A breadcrumb per top-level step, printed by the ?why panel. On one phone
 // the module provably ran its first statement and provably reached none of
