@@ -16,7 +16,7 @@
  *
  * Motion lives in three layers. The point field behind the page is field.js
  * and WebGL, and is simply absent where either is unavailable. Everything
- * continuous (the belt, the claims' hover sweep) is CSS and dies under
+ * continuous (the belt, the sky on /about, the claims' hover sweep) is CSS and dies under
  * `prefers-reduced-motion: reduce` below. Everything discrete (reveals,
  * springs) is site.js, which never wires itself when reduced motion is asked
  * for — and the hidden starting states for reveals are armed only by
@@ -279,6 +279,12 @@ main,
 #trust {
   padding-top: 66px;
   padding-bottom: 40px;
+}
+
+/* On /about the constellation makes the argument and the section under it
+   answers, so the two are set as one movement rather than two chapters. */
+#broken {
+  padding-bottom: 44px;
 }
 
 /* --------------------------------------------------------------- typography */
@@ -624,9 +630,12 @@ strong {
  * other heading on the site; the answer under it is body copy, because it is
  * read rather than scanned.
  */
+/* A reading measure, set against the page's left rail rather than centred
+   in the wrap: every heading on this site starts at that rail, and a
+   paragraph that starts somewhere else reads as a different page. */
 .prose {
   width: min(100%, 68ch);
-  margin-inline: auto;
+  margin-inline: 0;
 }
 
 .prose h2 {
@@ -1138,6 +1147,430 @@ strong {
   .belt-mark {
     width: 25px;
     height: 25px;
+  }
+}
+
+/* ------------------------------------------------------------------ sky -- */
+
+/*
+ * The argument, as a constellation.
+ *
+ * White stars on night, turning slowly about their own centre, and three
+ * beats of line-drawing that make a case rather than a diagram: separate
+ * islands, then two lines converging on one star, then a single joined
+ * figure. The caption underneath names each in turn.
+ *
+ * One twelve-second clock runs all of it. Every beat is the same pair of
+ * keyframes started four seconds after the last, and within a beat each line
+ * is nudged a further beat behind its neighbour by its own index, so a
+ * constellation builds rather than blinking on whole. At rest — which is
+ * what a reader who asked for less motion sees — the sky holds still with
+ * every line drawn and the first caption showing.
+ */
+
+.sky-fig {
+  max-width: min(1120px, 100%);
+  margin-inline: auto;
+}
+
+.sky-net {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* The whole group turns, so every line spends most of its life at an
+     angle; ask for real geometry rather than the fast hairline path. */
+  shape-rendering: geometricprecision;
+}
+
+.dark-in {
+  stop-color: var(--bg-deep);
+  stop-opacity: 0.9;
+}
+
+.dark-mid {
+  stop-color: var(--bg-deep);
+  stop-opacity: 0.6;
+}
+
+.dark-out {
+  stop-color: var(--bg-deep);
+  stop-opacity: 0;
+}
+
+/*
+ * A star is a hard white core inside a soft disc of light. The halo is a
+ * drawn gradient rather than a blur filter: this whole group turns, and a
+ * filter would re-blur every star on every frame of that turn, where a
+ * radial fill costs nothing to move.
+ */
+.halo {
+  fill: url(#star-glow);
+}
+
+.core {
+  fill: #fff;
+}
+
+.star.dim {
+  opacity: 0.46;
+}
+
+/* The lesser sky is still: each grain's brightness is baked into its own
+   fill-opacity attribute, so nothing here may set opacity or the whole
+   field flattens to one value. */
+.dust circle {
+  fill: #fff;
+}
+
+/* Diffraction spikes on the anchor stars — two slim diamonds whose taper
+   does the fading, so they need no gradient of their own. They sit inside
+   the star group and breathe with it. */
+.glint {
+  fill: rgb(255 255 255 / 50%);
+}
+
+/* The traffic. Sparks and the ring-lap are a short dash run along the same
+   geometry as the lines they follow; they exist only in motion, so at rest
+   they are invisible rather than parked somewhere plausible. */
+.pulse {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-dasharray: 3 97;
+  stroke-dashoffset: 3;
+  opacity: 0;
+}
+
+.pulse.ring {
+  stroke-dasharray: 2.5 97.5;
+  stroke-dashoffset: 2.5;
+}
+
+/* The collision, as light: the contested star's own halo blown up for a
+   moment. Its box is its own geometry so the scale swells from the star
+   and not from some corner of the viewBox. */
+.flare {
+  fill: url(#star-glow);
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.meteor {
+  stroke: url(#meteor-tail);
+  stroke-width: 0.8;
+  stroke-linecap: round;
+  opacity: 0;
+  transform: translate(128px, 40px);
+}
+
+/* Drawn, and staying drawn: the resting sky. The beats below only take it
+   over where motion is welcome. */
+.link {
+  stroke: rgb(255 255 255 / 72%);
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-dasharray: 100 100;
+  stroke-dashoffset: 0;
+  opacity: 0.4;
+}
+
+/* Every caption sits in one grid cell so they cross-fade in place rather
+   than pushing each other around. */
+.sky-say {
+  display: grid;
+  justify-items: center;
+  margin-top: 34px;
+  padding-inline: 12px;
+  font-size: clamp(18px, 1.5vw, 22px);
+  line-height: 1.5;
+  text-align: center;
+  color: var(--muted);
+}
+
+.say {
+  grid-area: 1 / 1;
+  opacity: 0;
+}
+
+.say[data-beat="1"] {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sky {
+    transform-box: view-box;
+    transform-origin: 280px 150px;
+    animation: sky-turn 150s linear infinite;
+  }
+
+  /* Stars come up and go down again, each on its own clock — four periods
+     against four offsets, so no two anywhere near each other are ever in
+     step and the sky never pulses as one thing. */
+  .star {
+    animation: star-breathe 5.4s ease-in-out infinite;
+  }
+
+  .star.dim {
+    animation-name: star-breathe-dim;
+  }
+
+  .star:nth-child(4n + 2) {
+    animation-duration: 6.7s;
+    animation-delay: 1.3s;
+  }
+
+  .star:nth-child(4n + 3) {
+    animation-duration: 4.6s;
+    animation-delay: 2.7s;
+  }
+
+  .star:nth-child(4n + 4) {
+    animation-duration: 7.3s;
+    animation-delay: 3.9s;
+  }
+
+  /*
+   * `backwards` matters: without it a delayed beat sits at its resting
+   * state — drawn, at rest opacity — for the four or eight seconds before
+   * its turn, so the sky opened with every line showing and then lost them
+   * one by one. With it, a beat is invisible until it is due.
+   *
+   * The index shifts each line inside its own beat; the hold ends early
+   * enough that even the last one has faded before the next beat opens.
+   */
+  .link {
+    animation: link-draw 12s ease-out infinite backwards;
+    animation-delay: calc(var(--start, 0s) + var(--i, 0) * 0.07s);
+    stroke: #fff;
+    filter: drop-shadow(0 0 5px rgb(255 255 255 / 45%));
+  }
+
+  .link[data-beat="2"] {
+    --start: 4s;
+  }
+
+  .link[data-beat="3"] {
+    --start: 8s;
+  }
+
+  /* A spark leaves once its line has landed — the draw takes 1.08s of the
+     shared clock — and the flare peaks as the second spark arrives. The
+     ring pulse waits for the whole beat-three figure and completes its lap
+     before the figure begins to fade. */
+  .pulse {
+    animation: pulse-run 12s linear infinite backwards;
+    animation-delay: calc(var(--start, 0s) + 1.15s + var(--i, 0) * 0.12s);
+    filter: drop-shadow(0 0 4px rgb(255 255 255 / 55%));
+  }
+
+  .pulse[data-beat="2"] {
+    --start: 4s;
+  }
+
+  .pulse.ring {
+    --start: 8.4s;
+    animation-name: ring-run;
+  }
+
+  .flare {
+    animation: flare-up 12s ease-out infinite backwards;
+    animation-delay: 4s;
+  }
+
+  .meteor {
+    animation: meteor-fall 27s linear infinite;
+  }
+
+  .say {
+    animation: say-show 12s var(--ease-motion) infinite backwards;
+  }
+
+  .say[data-beat="2"] {
+    animation-delay: 4s;
+  }
+
+  .say[data-beat="3"] {
+    animation-delay: 8s;
+  }
+}
+
+/* A phone shows the same band of water at a third of the width, so the
+   bloom behind the stars is proportionally far brighter. Deeper night. */
+@media (max-width: 620px) {
+  .dark-in {
+    stop-opacity: 0.93;
+  }
+
+  .dark-mid {
+    stop-opacity: 0.68;
+  }
+
+  .sky-say {
+    font-size: 16px;
+  }
+}
+
+@keyframes sky-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes star-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes star-breathe-dim {
+  0%,
+  100% {
+    opacity: 0.24;
+  }
+
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes link-draw {
+  0% {
+    stroke-dashoffset: 100;
+    opacity: 0;
+  }
+
+  2% {
+    opacity: 0.9;
+  }
+
+  9% {
+    stroke-dashoffset: 0;
+    opacity: 0.9;
+  }
+
+  22% {
+    stroke-dashoffset: 0;
+    opacity: 0.9;
+  }
+
+  27%,
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes pulse-run {
+  0% {
+    stroke-dashoffset: 3;
+    opacity: 0;
+  }
+
+  1.5% {
+    opacity: 0.95;
+  }
+
+  8% {
+    opacity: 0.9;
+  }
+
+  9.5%,
+  100% {
+    stroke-dashoffset: -97;
+    opacity: 0;
+  }
+}
+
+@keyframes ring-run {
+  0% {
+    stroke-dashoffset: 2.5;
+    opacity: 0;
+  }
+
+  1.5% {
+    opacity: 0.9;
+  }
+
+  10.5% {
+    opacity: 0.85;
+  }
+
+  12%,
+  100% {
+    stroke-dashoffset: -97.5;
+    opacity: 0;
+  }
+}
+
+@keyframes flare-up {
+  0%,
+  17% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+
+  20.5% {
+    opacity: 0.9;
+    transform: scale(1.12);
+  }
+
+  24% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+
+  32%,
+  100% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes meteor-fall {
+  0%,
+  54% {
+    transform: translate(128px, 40px);
+    opacity: 0;
+  }
+
+  55.5% {
+    opacity: 0.8;
+  }
+
+  59.5% {
+    opacity: 0.6;
+  }
+
+  60.5%,
+  100% {
+    transform: translate(240px, 96px);
+    opacity: 0;
+  }
+}
+
+@keyframes say-show {
+  0% {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+
+  4%,
+  26% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  31%,
+  100% {
+    opacity: 0;
+    transform: translateY(-7px);
   }
 }
 

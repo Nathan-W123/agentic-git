@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#121110">
-    <meta name="description" content="About KUMI: why a team of humans and coding agents needs a coordination layer, and what we are building.">
+    <meta name="description" content="About KUMI: why agentic coding is broken today, and what we are building to fix it.">
     <link rel="icon" href="kumi-mark.png">
     <script src="site-boot.js"></script>
     <link rel="stylesheet" href="site.css">
@@ -12,8 +12,9 @@
     <title>KUMI — about</title>
   </head>
   <body>
-    <!-- No canvas: the water carries the front page's argument, and a page of
-         prose is a place to read. The stylesheet's gradient is the ground. -->
+    <!-- No canvas: the front page's water is its own argument, and this page
+         has one of its own to make. The stylesheet's gradient is the ground,
+         and the constellation below is the only thing moving. -->
     <div class="field" aria-hidden="true"></div>
     <div class="field-veil" aria-hidden="true"></div>
 
@@ -45,29 +46,194 @@
     </header>
 
     <main>
-      <section class="section section-close">
+      <!-- The problem, and then the argument as a constellation. Three beats
+           on one twelve-second clock: today's islands, the collision they
+           cause, and the single joined figure this product makes of them —
+           with the line beneath saying which is which. Pure stylesheet, no
+           script, so it holds still and fully drawn for a reader who asked
+           for less motion. -->
+      <section class="section section-close" id="broken">
         <div class="wrap">
-          <div class="prose">
-            <p>Agents have gotten remarkably good at writing code. The way
-              we use them has not kept up. Each one gets its own task, its own
-              terminal, its own branch, its own copy of the codebase, and we
-              hope it all still fits together at the end. The more agents you
-              add, the more of your day goes on keeping them out of each
-              other's way.</p>
+          <div class="section-head" data-reveal-group>
+            <div class="section-title">
+              <h2 class="reveal">Agentic coding is broken.</h2>
+            </div>
+          </div>
 
-            <p>That is a coordination problem, and it is the one we are
-              working on. KUMI gives a team and its agents one shared
-              codebase, a channel on every repository, and a coordinator that
-              decides who touches what before anybody starts. Plans are filed
-              and checked. Files are leased. Overlaps are settled rather than
-              merged. Every change that lands is an ordinary Git commit, with
-              the history to read and revert like any other.</p>
+          <p class="manifesto reveal">
+            Agents have gotten incredibly good at writing code, but the way we
+            use them still looks strangely primitive. We give each agent its
+            own tasks, its own terminal, its own branch, its own copy of the
+            codebase. Then we hope everything still fits together when they're
+            done. The more agents you add, the more time you spend coordinating
+            them. That feels backwards. The future isn't one developer
+            working alongside one coding agent. It's entire teams of humans and
+            agents building software together.
+          </p>
+
+          <figure class="sky-fig reveal" aria-label="A constellation that draws itself three ways in turn: separate islands for agents working alone, two lines converging on one star for two agents reaching the same file, and one joined figure for a single channel that settles the overlap first">
+            <svg class="sky-net" viewBox="0 0 560 300" aria-hidden="true">
+              <defs>
+                <radialGradient id="star-glow" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stop-color="#fff" stop-opacity="0.4600"/>
+                  <stop offset="8%" stop-color="#fff" stop-opacity="0.4378"/>
+                  <stop offset="16%" stop-color="#fff" stop-opacity="0.3775"/>
+                  <stop offset="24%" stop-color="#fff" stop-opacity="0.2949"/>
+                  <stop offset="32%" stop-color="#fff" stop-opacity="0.2087"/>
+                  <stop offset="40%" stop-color="#fff" stop-opacity="0.1338"/>
+                  <stop offset="50%" stop-color="#fff" stop-opacity="0.0668"/>
+                  <stop offset="60%" stop-color="#fff" stop-opacity="0.0286"/>
+                  <stop offset="72%" stop-color="#fff" stop-opacity="0.0084"/>
+                  <stop offset="85%" stop-color="#fff" stop-opacity="0.0017"/>
+                  <stop offset="100%" stop-color="#fff" stop-opacity="0.0000"/>
+                </radialGradient>
+                <radialGradient id="sky-dark" cx="50%" cy="50%" r="50%">
+                  <stop class="dark-in" offset="0%"/>
+                  <stop class="dark-mid" offset="55%"/>
+                  <stop class="dark-out" offset="100%"/>
+                </radialGradient>
+                <!-- Bright at the head, nothing at the tail: the streak is
+                     one stroked line and this gradient is the whole of it. -->
+                <linearGradient id="meteor-tail" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="30" y2="15">
+                  <stop offset="0%" stop-color="#fff" stop-opacity="0"/>
+                  <stop offset="70%" stop-color="#fff" stop-opacity="0.5"/>
+                  <stop offset="100%" stop-color="#fff" stop-opacity="0.95"/>
+                </linearGradient>
+              </defs>
+              <!-- Night behind the stars: the water runs bright through this
+                   band and a white hairline cannot win against it. Sized to
+                   the viewBox exactly, because an ellipse wider than its own
+                   viewport is clipped square by it and the cut edge reads as
+                   a translucent box around the whole figure. -->
+              <ellipse class="night" cx="280" cy="150" rx="280" ry="150" fill="url(#sky-dark)"/>
+              <!-- The lesser sky. A still field of faint stars behind the
+                   turning figures, each with its brightness baked in as
+                   fill-opacity so no stylesheet rule can flatten the
+                   variety; the figures rotate over it, which is all the
+                   depth the scene needs. -->
+              <g class="dust">
+                <circle cx="257.1" cy="165.5" r="0.83" fill-opacity="0.33"/>
+                <circle cx="283.8" cy="172.7" r="0.55" fill-opacity="0.19"/>
+                <circle cx="85.2" cy="98.9" r="0.52" fill-opacity="0.2"/>
+                <circle cx="353.9" cy="180.0" r="0.54" fill-opacity="0.15"/>
+                <circle cx="293.6" cy="35.5" r="0.55" fill-opacity="0.17"/>
+                <circle cx="251.5" cy="239.0" r="0.64" fill-opacity="0.25"/>
+                <circle cx="279.9" cy="192.2" r="0.62" fill-opacity="0.21"/>
+                <circle cx="443.3" cy="204.0" r="0.58" fill-opacity="0.18"/>
+                <circle cx="407.8" cy="124.1" r="0.77" fill-opacity="0.29"/>
+                <circle cx="476.9" cy="142.2" r="0.89" fill-opacity="0.35"/>
+                <circle cx="75.1" cy="183.7" r="0.74" fill-opacity="0.27"/>
+                <circle cx="96.6" cy="84.1" r="0.52" fill-opacity="0.14"/>
+                <circle cx="422.6" cy="66.2" r="0.65" fill-opacity="0.24"/>
+                <circle cx="131.5" cy="210.3" r="0.53" fill-opacity="0.19"/>
+                <circle cx="95.9" cy="129.4" r="0.55" fill-opacity="0.17"/>
+                <circle cx="186.0" cy="250.1" r="0.55" fill-opacity="0.18"/>
+                <circle cx="450.1" cy="186.9" r="0.52" fill-opacity="0.21"/>
+                <circle cx="142.4" cy="87.2" r="0.74" fill-opacity="0.27"/>
+                <circle cx="218.4" cy="137.8" r="0.86" fill-opacity="0.34"/>
+                <circle cx="315.8" cy="245.3" r="0.55" fill-opacity="0.16"/>
+                <circle cx="159.8" cy="69.3" r="0.72" fill-opacity="0.31"/>
+                <circle cx="242.3" cy="47.0" r="0.49" fill-opacity="0.2"/>
+                <circle cx="163.4" cy="234.2" r="0.67" fill-opacity="0.23"/>
+                <circle cx="124.6" cy="115.9" r="0.66" fill-opacity="0.22"/>
+                <circle cx="213.8" cy="251.6" r="0.89" fill-opacity="0.37"/>
+                <circle cx="371.8" cy="172.0" r="0.53" fill-opacity="0.14"/>
+                <circle cx="271.5" cy="209.9" r="0.58" fill-opacity="0.24"/>
+                <circle cx="76.1" cy="162.0" r="0.72" fill-opacity="0.31"/>
+                <circle cx="208.9" cy="198.1" r="0.81" fill-opacity="0.35"/>
+                <circle cx="240.2" cy="225.5" r="0.78" fill-opacity="0.31"/>
+                <circle cx="340.0" cy="119.4" r="0.66" fill-opacity="0.25"/>
+                <circle cx="389.5" cy="121.0" r="0.72" fill-opacity="0.28"/>
+                <circle cx="270.9" cy="79.9" r="0.7" fill-opacity="0.26"/>
+                <circle cx="335.0" cy="259.3" r="0.56" fill-opacity="0.16"/>
+              </g>
+              <!-- One meteor, on its own twenty-seven-second clock: against
+                   the twelve-second sky it lands at a different phase every
+                   pass, so it reads as weather rather than choreography.
+                   Drawn under the figures and resting invisible. -->
+              <line class="meteor" x1="0" y1="0" x2="30" y2="15"/>
+              <g class="sky">
+                <g class="links">
+                  <line class="link" data-beat="1" style="--i:0" pathLength="100" x1="168" y1="100" x2="206" y2="148"/>
+                  <line class="link" data-beat="1" style="--i:1" pathLength="100" x1="350" y1="96" x2="408" y2="166"/>
+                  <line class="link" data-beat="1" style="--i:2" pathLength="100" x1="230" y1="238" x2="150" y2="188"/>
+                  <line class="link" data-beat="2" style="--i:0" pathLength="100" x1="252" y1="68" x2="268" y2="150"/>
+                  <line class="link" data-beat="2" style="--i:1" pathLength="100" x1="408" y1="166" x2="268" y2="150"/>
+                  <line class="link" data-beat="3" style="--i:0" pathLength="100" x1="168" y1="100" x2="252" y2="68"/>
+                  <line class="link" data-beat="3" style="--i:1" pathLength="100" x1="252" y1="68" x2="350" y2="96"/>
+                  <line class="link" data-beat="3" style="--i:2" pathLength="100" x1="350" y1="96" x2="408" y2="166"/>
+                  <line class="link" data-beat="3" style="--i:3" pathLength="100" x1="408" y1="166" x2="330" y2="228"/>
+                  <line class="link" data-beat="3" style="--i:4" pathLength="100" x1="330" y1="228" x2="230" y2="238"/>
+                  <line class="link" data-beat="3" style="--i:5" pathLength="100" x1="230" y1="238" x2="150" y2="188"/>
+                  <line class="link" data-beat="3" style="--i:6" pathLength="100" x1="150" y1="188" x2="206" y2="148"/>
+                  <line class="link" data-beat="3" style="--i:7" pathLength="100" x1="206" y1="148" x2="268" y2="150"/>
+                  <line class="link" data-beat="3" style="--i:8" pathLength="100" x1="268" y1="150" x2="350" y2="96"/>
+                </g>
+                <!-- The story's own motion, resting invisible. Two sparks
+                     race the beat-two lines into the contested star and the
+                     flare is the moment they land; one pulse laps the ring
+                     while the beat-three figure holds, which is the channel
+                     carrying its traffic. -->
+                <line class="pulse" data-beat="2" style="--i:0" pathLength="100" x1="252" y1="68" x2="268" y2="150"/>
+                <line class="pulse" data-beat="2" style="--i:1" pathLength="100" x1="408" y1="166" x2="268" y2="150"/>
+                <path class="pulse ring" pathLength="100" d="M 168 100 L 252 68 L 350 96 L 408 166 L 330 228 L 230 238 L 150 188 L 206 148 Z"/>
+                <circle class="flare" cx="268" cy="150" r="30"/>
+                <g class="stars">
+                  <g class="star dim" transform="translate(300,110)"><circle class="halo" r="9.5"/><circle class="core" r="1.15"/></g>
+                  <g class="star dim" transform="translate(192,206)"><circle class="halo" r="8"/><circle class="core" r="1.0"/></g>
+                  <g class="star dim" transform="translate(380,206)"><circle class="halo" r="11"/><circle class="core" r="1.5"/></g>
+                  <g class="star dim" transform="translate(240,112)"><circle class="halo" r="9"/><circle class="core" r="1.3"/></g>
+                  <g class="star dim" transform="translate(334,168)"><circle class="halo" r="10"/><circle class="core" r="1.4"/></g>
+                  <g class="star dim" transform="translate(196,118)"><circle class="halo" r="7.5"/><circle class="core" r="1.0"/></g>
+                  <g class="star" transform="translate(168,100)"><circle class="halo" r="22"/><path class="glint" d="M -12 0 L 0 -0.75 L 12 0 L 0 0.75 Z M 0 -8.5 L 0.75 0 L 0 8.5 L -0.75 0 Z"/><circle class="core" r="3.0"/></g>
+                  <g class="star" transform="translate(252,68)"><circle class="halo" r="23"/><path class="glint" d="M -13 0 L 0 -0.75 L 13 0 L 0 0.75 Z M 0 -9.5 L 0.75 0 L 0 9.5 L -0.75 0 Z"/><circle class="core" r="3.2"/></g>
+                  <g class="star" transform="translate(350,96)"><circle class="halo" r="19"/><circle class="core" r="2.6"/></g>
+                  <g class="star" transform="translate(408,166)"><circle class="halo" r="22"/><path class="glint" d="M -12.5 0 L 0 -0.75 L 12.5 0 L 0 0.75 Z M 0 -9 L 0.75 0 L 0 9 L -0.75 0 Z"/><circle class="core" r="3.0"/></g>
+                  <g class="star" transform="translate(330,228)"><circle class="halo" r="17"/><circle class="core" r="2.3"/></g>
+                  <g class="star" transform="translate(230,238)"><circle class="halo" r="21"/><path class="glint" d="M -11.5 0 L 0 -0.75 L 11.5 0 L 0 0.75 Z M 0 -8.5 L 0.75 0 L 0 8.5 L -0.75 0 Z"/><circle class="core" r="2.9"/></g>
+                  <g class="star" transform="translate(150,188)"><circle class="halo" r="19"/><circle class="core" r="2.6"/></g>
+                  <g class="star" transform="translate(268,150)"><circle class="halo" r="20"/><circle class="core" r="2.7"/></g>
+                  <g class="star" transform="translate(206,148)"><circle class="halo" r="16"/><circle class="core" r="2.2"/></g>
+                </g>
+              </g>
+            </svg>
+            <figcaption class="sky-say">
+              <span class="say" data-beat="1">Today, each agent works alone in its own tool.</span>
+              <span class="say" data-beat="2">Two reach for the same file, and an edit is lost.</span>
+              <span class="say" data-beat="3">KUMI puts them in one channel, and settles it first.</span>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- What we are doing about it. The constellation has just shown the
+           shape of the answer; this says it in words. -->
+      <section class="section section-tight" id="answer">
+        <div class="wrap">
+          <div class="section-head" data-reveal-group>
+            <div class="section-title">
+              <h2 class="reveal">We are the solution.</h2>
+            </div>
+          </div>
+
+          <div class="prose reveal">
+            <p>KUMI gives a team and its agents one shared codebase, a channel
+              on every repository, and a coordinator that decides who touches
+              what before anybody starts. Plans are filed and checked before a
+              line is written. Files are leased, so two agents never overwrite
+              each other. Overlaps are settled in the open rather than merged
+              after the fact.</p>
+
+            <p>You still get the whole history — every change that lands is a
+              real commit you can read, review and revert. But the work that
+              makes multiplayer development possible happens before the commit,
+              not in the cleanup afterwards.</p>
 
             <p>The thing we are trying not to build is another place you have
               to manage. You should not have to become the project manager for
               a team of machines.</p>
 
-            <p>KUMI is not open yet. If that sounds like your problem, the
+            <p>KUMI is not open yet. If this sounds like your problem, the
               waitlist is the way to hear when it is.</p>
           </div>
         </div>
