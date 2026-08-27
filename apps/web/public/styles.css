@@ -3,7 +3,7 @@
  *
  * A warm, restrained surface system — near-black browns rather than blue
  * greys — with the clay accent reserved for primary and active states, and
- * the same muted salmon for the quieter agent/thread layer. Spacing and surface
+ * the muted lilac for the quieter agent/thread layer. Spacing and surface
  * contrast carry the structure; borders are only a subtle fallback.
  */
 
@@ -15,33 +15,33 @@
   /* The eight shared design tokens. Compatibility aliases below keep every
      existing component on this ramp while the names stay semantic at the
      call site. */
-  --bg: #0E0E0D;
-  --surface-1: #131312;
-  --surface-2: #1D1C19;
+  --bg: #121110;
+  --surface-1: #1A1817;
+  --surface-2: #24211F;
   /* One step above the second surface and just under the border, so a card
      lifted off a card still reads as lighter than the line around it. */
-  --surface-3: #27251F;
-  --text: #F0EDE8;
-  --muted: #A29E97;
-  --salmon: #D79A81;
-  --lavender: #D79A81;
+  --surface-3: #2C2926;
+  --text: #F3EFE8;
+  --muted: #B5AEA5;
+  --salmon: #D88973;
+  --lavender: #A894B6;
 
   --bg-panel: var(--surface-1);
   --bg-card: var(--surface-2);
-  --bg-card-2: var(--surface-2);
+  --bg-card-2: var(--surface-3);
   --bg-inset: var(--bg);
   --bg-hover: color-mix(in srgb, var(--surface-3) 94%, var(--text));
   --bg-active: color-mix(in srgb, var(--surface-3) 89%, var(--text));
-  --bg-chat: #171715;
+  --bg-chat: var(--bg);
   --room-tint: var(--bg-chat);
 
   /* The one border with a value of its own: the palette names a line colour,
      and 18% of the warm grey landed a shade under it. The soft and strong
      variants stay translucent so they keep following whatever surface they
      are drawn on — a rule several components already lean on. */
-  --border: rgba(255, 255, 255, 0.06);
-  --border-soft: rgba(255, 255, 255, 0.06);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --border: #34302D;
+  --border-soft: color-mix(in srgb, var(--muted) 10%, transparent);
+  --border-strong: color-mix(in srgb, var(--muted) 28%, transparent);
 
   --text-2: var(--muted);
   --text-3: color-mix(in srgb, var(--muted) 74%, var(--bg));
@@ -85,12 +85,12 @@
   --diff-del: rgba(210, 60, 70, 0.16);
   --diff-del-strong: rgba(210, 60, 70, 0.3);
 
-  --radius-sm: 8px;
-  --radius: 8px;
+  --radius-sm: 10px;
+  --radius: 10px;
   --radius-lg: 12px;
-  /* Contextual drawers and composers sit one step above cards. The outer
-     workspace shell owns its separate 24px curve. */
-  --radius-xl: 20px;
+  /* Major surfaces should read as distinct cards rather than straight slices
+     of the viewport. Keep their curve a step above controls and small cards. */
+  --radius-xl: 16px;
 
   --tree-w: 232px;
   --chat-w: 380px;
@@ -100,19 +100,19 @@
      is only drawn when there is more than one channel to switch between — see
      `showsChannelRail` — so on a single-channel account those sixty pixels go
      back to the conversation. */
-  --rail-w: 76px;
-  --chan-sidebar-w: 296px;
+  --rail-w: 60px;
+  --chan-sidebar-w: 256px;
 
   /* Let the conversation use the room it owns. `--room-column` sizes message
      rows to the chat panel, so long posts do not wrap beside a large empty
      area and centered coordinator notices span the same width as day rules.
      `--message-max` lets the words use the row they sit in rather than a
      tighter character measure that stopped copy short of the available width. */
-  --room-column: 960px;
-  --message-max: 960px;
+  --room-column: 100%;
+  --message-max: 100%;
 
-  --shadow-pop: 0 12px 28px rgb(0 0 0 / 24%);
-  --shadow-card: none;
+  --shadow-pop: 0 18px 46px rgb(0 0 0 / 38%);
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 2%), 0 8px 24px rgb(0 0 0 / 12%);
 
   /* Motion. Three durations and one curve, named because a surface arriving
      and the same surface leaving have to take the same time to read as one
@@ -134,7 +134,7 @@
   --motion-pop: 0.14s;
   /* A panel crosses real distance, so it gets long enough to be seen doing
      it — still short enough that nobody opening one waits for it. */
-  --motion-panel: 0.22s;
+  --motion-panel: 0.2s;
   --motion-scrim: 0.18s;
 
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -646,11 +646,6 @@ svg.ui-icon {
   transition:
     gap 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
     padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.chan-brand .brand-text,
-.chan-head .ch-hash {
-  display: none;
 }
 
 /* The picture control that stands in for the rail's own when there is no
@@ -7440,10 +7435,6 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   animation: thread-activity-sweep 2.4s ease-in-out infinite;
 }
 
-.thread-thinking {
-  display: none;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .text-reveal-word {
     animation: none;
@@ -10280,42 +10271,6 @@ dialog.modal[open]::backdrop {
   line-height: 1.5;
 }
 
-/* Finished-work file links use the same compact language as the digest's
-   attribution pills, but remain part of the outcome they explain. */
-.cmsg-outcome-files {
-  margin-top: 6px;
-}
-
-.cmsg-outcome-file {
-  appearance: none;
-  min-width: 0;
-  font: inherit;
-  cursor: pointer;
-}
-
-.cmsg-outcome-file .ui-icon {
-  width: 14px;
-  height: 14px;
-}
-
-.cmsg-outcome-file:hover,
-.cmsg-outcome-file:focus-visible {
-  border-color: var(--accent);
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.cmsg-outcome-file.deleted {
-  cursor: default;
-  color: var(--text-4);
-}
-
-.cmsg-outcome-file.deleted:hover {
-  border-color: var(--border);
-  background: var(--bg-card);
-  color: var(--text-4);
-}
-
 .pill-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -13006,698 +12961,4 @@ dialog.modal[open]::backdrop {
   font-size: 11.5px;
   color: var(--text-3);
   text-align: center;
-}
-
-/* ----------------------------------------- calm technical workspace ---- */
-
-/* One continuous shell. Permanent columns are separated by tone and space;
-   only contextual surfaces keep an edge of their own. */
-.app {
-  padding: 18px;
-  background: var(--bg);
-}
-
-.chats-shell {
-  gap: 0;
-  padding: 0;
-  background: var(--surface-1);
-  border: 1px solid var(--border-soft);
-  border-radius: 24px;
-  overflow: hidden;
-}
-
-.channel-rail {
-  width: var(--rail-w);
-  gap: 10px;
-  padding: 16px 12px;
-  background: #151513;
-  border: 0;
-  border-radius: 0;
-}
-
-.channel-rail-toggle,
-.channel-rail-new,
-.channel-rail-button {
-  width: 42px;
-  height: 42px;
-  border-radius: var(--radius-sm);
-  transition:
-    background 120ms ease,
-    color 120ms ease,
-    transform 120ms ease;
-}
-
-.channel-rail-toggle:hover,
-.channel-rail-new:hover,
-.channel-rail-button:hover {
-  border-radius: var(--radius-sm);
-  transform: translateY(-1px);
-}
-
-.channel-rail-entry.active .channel-rail-button {
-  border-radius: var(--radius-sm);
-  background: var(--accent-wash);
-}
-
-.channel-rail-entry.active::before {
-  left: -12px;
-  width: 3px;
-  height: 22px;
-  background: var(--accent);
-}
-
-.chan-sidebar {
-  width: var(--chan-sidebar-w);
-  background: #151513;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.chan-sidebar-top,
-.chan-sidebar-foot {
-  border: 0;
-  background: transparent;
-}
-
-.chan-sidebar-top {
-  min-height: 64px;
-  padding: 12px 14px 8px;
-}
-
-.chan-sidebar-head.chan-quick-links {
-  gap: 2px;
-  margin: 4px 10px 6px;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.chan-quick-link {
-  min-height: 40px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  box-shadow: none;
-}
-
-.chan-quick-link.on {
-  background: var(--accent-wash);
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-
-.chan-sec {
-  padding: 16px 12px 7px;
-  background: #151513;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.chan-roster-inner {
-  padding-inline: 10px;
-}
-
-.roster-row {
-  min-height: 40px;
-  border: 0;
-  border-radius: var(--radius-sm);
-}
-
-.roster-row-main {
-  min-height: 40px;
-  gap: 10px;
-  padding: 5px 8px;
-}
-
-.roster-row .rr-name {
-  font-size: 13px;
-}
-
-.roster-row .rr-role {
-  font-size: 11px;
-}
-
-.chan-main {
-  background: var(--room-tint);
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.chan-head {
-  min-height: 76px;
-  padding: 16px 24px;
-  background: var(--room-tint);
-  border-bottom: 0;
-}
-
-.chan-head .ch-name {
-  font-size: 16px;
-}
-
-.chan-head .ch-desc {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.chan-head .ch-desc > [aria-hidden="true"] {
-  display: none;
-}
-
-.chan-messages {
-  padding: 18px 28px 28px;
-}
-
-.cmsg-row {
-  --cmsg-body-x: 56px;
-  --cmsg-stem-x: 22px;
-  max-width: var(--room-column);
-  margin-right: auto;
-  margin-left: auto;
-  padding: 14px 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-}
-
-.cmsg-row:not(.cmsg-compact) + .cmsg-row:not(.cmsg-compact) {
-  margin-top: 4px;
-}
-
-.cmsg-row.cmsg-compact {
-  padding-top: 3px;
-  padding-bottom: 3px;
-}
-
-.cmsg-row .cmsg-name {
-  font-size: 14px;
-}
-
-.cmsg-row .cmsg-time {
-  font-size: 12px;
-}
-
-.cmsg-row .cmsg-text {
-  max-width: var(--message-max);
-  margin-top: 4px;
-  font-size: 15px;
-  line-height: 24px;
-}
-
-.cmsg-row .cmsg-name.agent-name,
-.cmsg-thread-replies {
-  color: var(--accent);
-}
-
-/* Dates and orchestration updates read as annotations, never as rules that
-   split the conversation into card-like bands. */
-.transcript-separator,
-.coordination-event {
-  justify-content: flex-start;
-  width: min(100%, var(--message-max));
-  margin: 8px auto;
-  color: var(--muted);
-  opacity: 0.82;
-  font-size: 12px;
-  line-height: 18px;
-  text-align: left;
-}
-
-.transcript-separator::before,
-.transcript-separator::after,
-.thread-replies-head::after,
-.thread-root.has-replies::after {
-  display: none;
-}
-
-.transcript-separator > span {
-  min-height: 0;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.cmsg-row.cmsg-system {
-  justify-content: flex-start;
-  padding-block: 6px;
-}
-
-.coordination-event {
-  display: block;
-  padding-left: 56px;
-}
-
-/* The selected path is enough context. Other task connectors stay out of the
-   transcript until a pointer or keyboard focus asks where the thread goes. */
-.cmsg-row.cmsg-thread-path-through::before,
-.cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before,
-.cmsg-row.cmsg-threaded .cmsg-thread-link::before,
-.cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
-.cmsg-row:hover.cmsg-thread-path-through::before,
-.cmsg-row:focus-within.cmsg-thread-path-through::before,
-.cmsg-row:hover.cmsg-thread-path-end .cmsg-thread-route::before,
-.cmsg-row:focus-within.cmsg-thread-path-end .cmsg-thread-route::before,
-.cmsg-row:hover.cmsg-threaded .cmsg-thread-link::before,
-.cmsg-row:focus-within.cmsg-threaded .cmsg-thread-link::before,
-.cmsg-row:hover.cmsg-thread-path-end .cmsg-thread-link::after,
-.cmsg-row:focus-within.cmsg-thread-path-end .cmsg-thread-link::after,
-.cmsg-thread-link[aria-current="true"]::before,
-.cmsg-thread-link[aria-current="true"]::after {
-  opacity: 1;
-}
-
-.cmsg-thread-link {
-  gap: 10px;
-  min-height: 28px;
-  margin-top: 8px;
-  padding: 3px 6px 3px 0;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  transition:
-    background 120ms ease,
-    color 120ms ease,
-    transform 120ms ease;
-}
-
-.cmsg-thread-link:hover,
-.cmsg-thread-link:focus-visible,
-.cmsg-thread-link[aria-current="true"] {
-  background: color-mix(in srgb, var(--surface-3) 68%, transparent);
-  color: var(--text);
-}
-
-.cmsg-thread-link:hover {
-  transform: translateY(-1px);
-}
-
-.cmsg-thread-link .ctl-copy {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  font-size: 12.5px;
-  white-space: nowrap;
-}
-
-.cmsg-thread-link .ctl-agent {
-  color: var(--text-2);
-  font-weight: 600;
-}
-
-.cmsg-thread-link .ctl-separator {
-  color: var(--text-4);
-}
-
-.cmsg-thread-link .ctl-activity,
-.cmsg-thread-replies {
-  max-width: 220px;
-  color: var(--muted);
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 1.35;
-  background: none;
-  -webkit-text-fill-color: currentColor;
-  animation: none;
-}
-
-.cmsg-thread-link:hover .cmsg-thread-replies {
-  text-decoration: none;
-}
-
-/* Finished work is the transcript's compact artifact: concrete, actionable,
-   and closed until somebody asks for the detail. */
-.thread-summary,
-.cmsg-changes {
-  overflow: hidden;
-  border: 1px solid var(--border-soft);
-  border-radius: 16px;
-  background: var(--surface-2);
-}
-
-.thread-summary {
-  margin: 8px 0;
-  padding-left: 0;
-}
-
-.thread-summary > summary,
-.cmsg-changes > summary {
-  min-height: 40px;
-  padding: 8px 12px;
-  background: transparent;
-}
-
-.thread-summary .ts-body {
-  padding: 0 10px 10px;
-}
-
-.pill,
-.cmsg-outcome-file {
-  border-radius: var(--radius-sm);
-}
-
-/* Context drawers are the one elevated column in the workspace. */
-.thread-panel {
-  width: var(--panel-w, 440px);
-  min-width: min(420px, 100%);
-  max-width: 100%;
-  margin: 16px 16px 16px 0;
-  background: var(--surface-2);
-  border: 1px solid var(--border-soft);
-  border-radius: 20px;
-  box-shadow: none;
-  overflow: hidden;
-}
-
-.thread-panel[data-thread-id] {
-  width: var(--panel-w, 440px);
-  min-width: 420px;
-  max-width: 460px;
-}
-
-.chats-shell.panels-2 .thread-panel,
-.chats-shell.panels-3 .thread-panel {
-  width: var(--panel-w, 440px);
-}
-
-.thread-head {
-  min-height: 64px;
-  padding: 12px 12px 12px 18px;
-  border-bottom: 0;
-}
-
-.thread-head .thread-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.thread-head .panel-close {
-  margin-left: 0;
-}
-
-.thread-head .panel-close::before {
-  display: none;
-}
-
-.thread-body {
-  padding: 8px 16px 18px;
-}
-
-.thread-replies-head {
-  min-height: 24px;
-  padding-left: 56px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.thread-active-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0 8px 8px;
-}
-
-.thread-stop-task {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 5px 9px;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.thread-stop-task:hover,
-.thread-stop-task:focus-visible {
-  background: var(--red-wash);
-  color: var(--red);
-}
-
-.thread-stop-task svg {
-  width: 13px;
-  height: 13px;
-}
-
-/* Composers are compact raised tools: no resting outline, one clear focus
-   ring, and room to grow only when text or attachments require it. */
-.composer {
-  --composer-shape: 18px;
-  background: var(--surface-2);
-  border: 1px solid transparent;
-  border-radius: var(--composer-shape);
-  box-shadow: none;
-  transition:
-    border-color 140ms ease,
-    background 140ms ease,
-    box-shadow 140ms ease;
-}
-
-.chan-composer-wrap {
-  margin: 0 20px 20px;
-}
-
-.chan-composer-wrap::after {
-  display: none;
-}
-
-.chan-composer-wrap .composer {
-  min-height: 72px;
-  margin: 0;
-}
-
-.composer:has(.composer-field):not(.is-multiline),
-.composer:has(.composer-field):not(.is-multiline) .composer-field,
-.composer:has(.composer-field):not(.is-multiline) .composer-field textarea,
-.composer:has(.composer-field):not(.is-multiline) .composer-mirror {
-  min-height: 70px;
-}
-
-.thread-composer-wrap .composer {
-  min-height: 64px;
-  margin: 0 12px 12px;
-}
-
-.thread-composer-wrap .composer:has(.composer-field):not(.is-multiline),
-.thread-composer-wrap .composer:has(.composer-field):not(.is-multiline) .composer-field,
-.thread-composer-wrap .composer:has(.composer-field):not(.is-multiline) .composer-field textarea,
-.thread-composer-wrap .composer:has(.composer-field):not(.is-multiline) .composer-mirror {
-  min-height: 62px;
-}
-
-.composer:focus-within,
-.chan-composer-wrap.mention-active .composer,
-.thread-composer-wrap.mention-active .composer {
-  border-color: var(--accent-line);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.chan-jump {
-  bottom: 112px;
-  min-height: 32px;
-  padding: 6px 10px 6px 12px;
-  background: var(--surface-2);
-  border-color: var(--border-soft);
-  border-radius: 12px;
-  box-shadow: var(--shadow-pop);
-}
-
-.chan-jump.has-new {
-  background: var(--surface-3);
-  border-color: var(--accent-line);
-  color: var(--text);
-}
-
-.chan-jump-count:empty {
-  display: inline;
-}
-
-/* Structural loading only. The surface change is enough motion; a bright
-   shimmer would make idle layout look like active work. */
-.skeleton {
-  background: color-mix(in srgb, var(--surface-3) 72%, var(--surface-2));
-  animation: none;
-}
-
-/* Progress reads as progress, without a travelling highlight. Character
-   marks stay still so the only continuous movement denotes live state. */
-.bar > i {
-  background: var(--accent);
-  animation: none;
-  transition: width 220ms var(--ease-motion);
-}
-
-.pcard-banner {
-  background: color-mix(
-    in srgb,
-    var(--pcard-accent, var(--accent)) 16%,
-    var(--surface-2)
-  );
-}
-
-.agent-spec .aspec-banner {
-  background: color-mix(
-    in srgb,
-    var(--aspec-accent, var(--accent)) 18%,
-    var(--surface-2)
-  );
-}
-
-.agent-face svg :is(.sp-bob, .sp-twinkle, .sp-sway, .sp-glow, .sp-blink),
-.doodle-chip .doodle :is(.sp-bob, .sp-twinkle, .sp-sway, .sp-glow, .sp-blink) {
-  animation: none;
-  transform: none;
-}
-
-.agent-face svg .sp-blink,
-.doodle-chip .doodle .sp-blink {
-  opacity: 0;
-}
-
-/* A message arrives as one thought, not as independently moving tokens. */
-.text-reveal-word,
-.text-reveal-media {
-  animation: none;
-}
-
-.text-sweep {
-  background: none;
-  -webkit-text-fill-color: currentColor;
-  animation: none;
-}
-
-.popover,
-.modal-card,
-.qs-card {
-  background: var(--surface-2);
-  border-color: var(--border-soft);
-  border-radius: 12px;
-  box-shadow: var(--shadow-pop);
-}
-
-/* When an inset thread would leave less than a readable transcript, the
-   workspace list folds away while the workspace rail stays put. */
-@media (min-width: 601px) and (max-width: 1650px) {
-  .chats-shell.thread-context-open:not(.no-rail) > .chan-sidebar {
-    width: 0;
-  }
-
-  .chats-shell.thread-context-open.no-rail > .chan-sidebar {
-    width: var(--rail-w);
-  }
-
-  .chats-shell.thread-context-open.no-rail .chan-sidebar
-    > :not(.chan-sidebar-top) {
-    display: none;
-  }
-
-  .chats-shell.thread-context-open.no-rail .chan-sidebar-top {
-    justify-content: center;
-    padding-inline: 8px;
-  }
-
-  .chats-shell.thread-context-open.no-rail .chan-brand {
-    flex: none;
-    width: 44px;
-    justify-content: center;
-    padding: 0;
-  }
-
-  .chats-shell.thread-context-open.no-rail .chan-brand .brand-text,
-  .chats-shell.thread-context-open.no-rail
-    :is(.chan-collapse-btn, .chan-crown-picture, .chan-crown-new) {
-    display: none;
-  }
-
-  .chats-shell.thread-context-open:not(.panels-2):not(.panels-3) .chan-main {
-    min-width: 760px;
-  }
-}
-
-/* On the narrowest laptop tier the drawer floats over the room. The room
-   keeps more than 760px beside the 420px drawer without horizontal overflow. */
-@media (min-width: 601px) and (max-width: 1340px) {
-  .chats-shell.thread-context-open:not(.panels-2):not(.panels-3)
-    > .thread-panel[data-thread-id] {
-    position: absolute;
-    top: 16px;
-    right: 16px;
-    bottom: 16px;
-    margin: 0;
-  }
-
-  .chats-shell.thread-context-open:not(.panels-2):not(.panels-3) .chan-main {
-    min-width: 0;
-  }
-}
-
-@media (max-width: 600px) {
-  .app {
-    padding: 0;
-  }
-
-  .chats-shell {
-    padding-top: var(--chan-head-h);
-    border: 0;
-    border-radius: 0;
-  }
-
-  .thread-panel,
-  .chats-shell.thread-context-open:not(.panels-2):not(.panels-3)
-    > .thread-panel[data-thread-id] {
-    position: fixed;
-    inset: 0;
-    width: 100%;
-    min-width: 0;
-    max-width: none;
-    margin: 0;
-    border-width: 0;
-    border-radius: 0;
-  }
-
-  .chan-head {
-    min-height: 52px;
-  }
-
-  .chan-messages {
-    padding-inline: 14px;
-  }
-
-  .cmsg-row {
-    padding-inline: 4px;
-  }
-
-  .chan-composer-wrap {
-    margin: 0 10px calc(10px + var(--safe-bottom));
-  }
-
-  .coordination-event {
-    padding-left: 48px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .channel-rail-toggle,
-  .channel-rail-new,
-  .channel-rail-button,
-  .cmsg-thread-link,
-  .composer,
-  .cmsg-row.cmsg-thread-path-through::before,
-  .cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before,
-  .cmsg-row.cmsg-threaded .cmsg-thread-link::before,
-  .cmsg-row.cmsg-thread-path-end .cmsg-thread-link::after {
-    transition: none;
-    transform: none;
-  }
 }
