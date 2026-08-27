@@ -263,7 +263,7 @@
                they need. -->
           <div class="claims" data-reveal-group>
             <div class="claim">
-              <span class="claim-rule" aria-hidden="true"></span>
+              <span class="claim-rule" aria-hidden="true"><span class="claim-lit"></span></span>
               <h3>Agents read the room first.</h3>
               <p>
                 Before an agent touches a file, it knows what everyone else is
@@ -271,7 +271,7 @@
               </p>
             </div>
             <div class="claim">
-              <span class="claim-rule" aria-hidden="true"></span>
+              <span class="claim-rule" aria-hidden="true"><span class="claim-lit"></span></span>
               <h3>Context is shared.</h3>
               <p>
                 When one task changes the assumptions of another, KUMI passes
@@ -279,7 +279,7 @@
               </p>
             </div>
             <div class="claim">
-              <span class="claim-rule" aria-hidden="true"></span>
+              <span class="claim-rule" aria-hidden="true"><span class="claim-lit"></span></span>
               <h3>Overlaps get settled, not merged.</h3>
               <p>
                 Two agents reaching for the same file is a conversation, not a
@@ -503,29 +503,34 @@
 
       <!-- The question every developer asks about a thing that sits between
            their agents and their codebase, answered before the ask rather
-           than after it. Every sentence here is a fact from the README and
-           the overlay-workspace design, not a posture: the canonical
-           repository lives on the control-plane host, overlays are detached
-           git worktrees owned by one principal, promotion writes a real
-           commit, and the export to GitHub is one-way, explicit, and on its
-           own branch. -->
+           than after it.
+           
+           Deliberately silent on WHERE the code lives. Two earlier drafts
+           claimed the machine running KUMI, then "your own cloud"; both are
+           false for a hosted deployment, where the repository sits on the
+           server KUMI runs on and not on anything the reader owns. Until
+           there is a hosting guarantee that can actually be made, this
+           section argues durability instead, which is true everywhere:
+           overlays are detached git worktrees owned by one principal
+           (docs/architecture/overlay-workspaces.md), promotion writes a real
+           canonical commit (docs/architecture/current-state.md), and the
+           GitHub export is one-way, explicit, and on its own branch. -->
       <section class="section section-tight" id="trust">
         <div class="wrap">
           <div class="section-head" data-reveal-group>
             <div class="section-title">
-              <h2 class="reveal">Your code stays where you put it.</h2>
+              <h2 class="reveal">Underneath, it is just Git.</h2>
             </div>
           </div>
 
           <p class="manifesto reveal">
-            There is one copy of your repository, and it lives wherever you
-            run KUMI: your own machine, your own server, your own cloud.
-            Agents never edit that copy directly. Each one works in an
-            isolated git worktree of its own, and changes reach the shared
-            codebase one at a time, after validation. Underneath it is
-            ordinary Git, so every change that lands is a real commit in a
-            real repository. Nothing goes back to GitHub unless you send it,
-            on a branch of its own.
+            There is one copy of your repository, not one per agent. No agent
+            edits it directly. Each works in an isolated git worktree of its
+            own, and changes reach the shared copy one at a time, after
+            validation. Underneath it is ordinary Git, so every change that
+            lands is a real commit in a real repository, with the history to
+            read and revert like any other. Nothing goes back to GitHub
+            unless you send it, on a branch of its own.
           </p>
         </div>
       </section>
@@ -540,42 +545,59 @@
             </div>
           </div>
 
-          <p class="manifesto reveal">
-            An app you install, or the same room in a browser when you would
-            rather not install anything.
-          </p>
-
-          <!-- The four installations as a person picks between them. The
-               release actually builds five files — the two Linux formats are
-               one choice here and the download page still offers both, which
-               is also the only place that resolves real file names, so these
-               all point at it rather than duplicating that logic. -->
-          <ul class="installs reveal" aria-label="Desktop installers">
-            <li>
-              <a href="download">
-                <span class="install-os">macOS</span>
-                <span class="install-kind">Apple silicon</span>
-              </a>
-            </li>
-            <li>
-              <a href="download">
-                <span class="install-os">macOS</span>
-                <span class="install-kind">Intel</span>
-              </a>
-            </li>
-            <li>
-              <a href="download">
-                <span class="install-os">Windows</span>
-                <span class="install-kind">64-bit</span>
-              </a>
-            </li>
-            <li>
-              <a href="download">
-                <span class="install-os">Linux</span>
-                <span class="install-kind">AppImage or .deb</span>
-              </a>
-            </li>
-          </ul>
+          <!-- The download page's own four cards, brought onto the landing
+               page so the installers are a thing you take rather than a
+               page you are sent to. The filenames are the ones
+               electron-builder actually produces — productName is `Kumi`
+               and artifactName is ${productName}-${os}-${arch}.${ext} —
+               and release asset paths are case sensitive, so the case here
+               is load-bearing. download-links.test.ts reads this file for
+               exactly that reason. -->
+          <div class="dl-cards" data-reveal-group>
+            <div class="dl-card reveal">
+              <h3>macOS <span class="soon">Apple silicon</span></h3>
+              <p>
+                Every Mac sold since 2020. If yours is older, take the Intel
+                build beside this one.
+              </p>
+              <p class="dl-get">
+                <a class="btn btn-ghost btn-small"
+                   href="https://github.com/Nathan-W123/Kumi/releases/latest/download/Kumi-mac-arm64.dmg">Download .dmg</a>
+              </p>
+            </div>
+            <div class="dl-card reveal">
+              <h3>macOS <span class="soon">Intel</span></h3>
+              <p>For Macs made before the Apple silicon transition.</p>
+              <p class="dl-get">
+                <a class="btn btn-ghost btn-small"
+                   href="https://github.com/Nathan-W123/Kumi/releases/latest/download/Kumi-mac-x64.dmg">Download .dmg</a>
+              </p>
+            </div>
+            <div class="dl-card reveal">
+              <h3>Windows <span class="soon">64-bit</span></h3>
+              <p>
+                An installer. Windows SmartScreen will ask once, because the
+                build is not signed yet.
+              </p>
+              <p class="dl-get">
+                <a class="btn btn-ghost btn-small"
+                   href="https://github.com/Nathan-W123/Kumi/releases/latest/download/Kumi-win-x64.exe">Download .exe</a>
+              </p>
+            </div>
+            <div class="dl-card reveal">
+              <h3>Linux <span class="soon">x86-64</span></h3>
+              <p>
+                An AppImage that runs anywhere, or a .deb for Debian and
+                Ubuntu.
+              </p>
+              <p class="dl-get">
+                <a class="btn btn-ghost btn-small"
+                   href="https://github.com/Nathan-W123/Kumi/releases/latest/download/Kumi-linux-x86_64.AppImage">AppImage</a>
+                <a class="btn btn-ghost btn-small"
+                   href="https://github.com/Nathan-W123/Kumi/releases/latest/download/Kumi-linux-amd64.deb">.deb</a>
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 

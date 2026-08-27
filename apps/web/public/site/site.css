@@ -1068,10 +1068,41 @@ strong {
    simply a hairline, which is what a reader with JavaScript off or motion
    turned down sees. */
 .claim-rule {
+  position: relative;
   height: 1px;
   margin-bottom: 11px;
   background: var(--border);
   transform-origin: left center;
+}
+
+/*
+ * The hover line, a second rule lying exactly over the first.
+ *
+ * It exists so the hover has something of its own to move: the reveal owns
+ * the transform of .claim-rule and the opacity and transform of the heading
+ * and the paragraph, and an effect that reached for any of those would
+ * fight it mid-flight. This element nothing else touches, so the sweep is
+ * always safe to run. At rest it is scaled to nothing, which is what a
+ * reader with no JavaScript or no pointer sees.
+ */
+.claim-lit {
+  position: absolute;
+  inset: 0;
+  background: var(--salmon);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+/* The body copy lifts a shade with it. In CSS rather than in the sweep,
+   because a colour is the one part of this that needs no choreography. */
+@media (hover: hover) and (pointer: fine) {
+  .claim p {
+    transition: color 0.42s var(--ease-motion);
+  }
+
+  .claim:hover p {
+    color: color-mix(in srgb, var(--muted) 45%, var(--text));
+  }
 }
 
 .claim h3 {
@@ -1091,58 +1122,14 @@ strong {
   text-wrap: pretty;
 }
 
-/*
- * The four installations, as a row of things to pick rather than one button
- * that hides the choice. Auto-fit rather than a fixed four columns: the row
- * folds to two and then to one on its own, at whatever width the names stop
- * fitting, instead of at a breakpoint guessed in advance.
- */
-.installs {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
-  gap: 12px;
-  margin-top: 36px;
-  max-width: 860px;
-  /* This stylesheet has no list reset of its own — the one `list-style` in
-     it belongs to a component — so the markers are cleared here. */
-  padding: 0;
-  list-style: none;
+/* The download cards carry their own buttons, which sit in a row. */
+.dl-get {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
 }
 
-.installs a {
-  display: grid;
-  gap: 3px;
-  padding: 15px 18px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--surface-1) 62%, transparent);
-  transition: border-color 0.22s var(--ease-motion),
-    background-color 0.22s var(--ease-motion),
-    transform 0.22s var(--ease-motion);
-}
-
-.install-os {
-  font-family: var(--display);
-  font-variation-settings: "wght" 400, "wdth" 94;
-  font-size: 17px;
-  letter-spacing: -0.012em;
-  color: var(--text);
-}
-
-.install-kind {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
-
-@media (hover: hover) {
-  .installs a:hover {
-    border-color: var(--border-strong);
-    background: color-mix(in srgb, var(--surface-2) 76%, transparent);
-    transform: translateY(-2px);
-  }
 }
 
 /* ----------------------------------------------------------------- belt -- */

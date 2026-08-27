@@ -643,6 +643,42 @@ function wire() {
     }
   });
 
+  /*
+   * -- Claims: the accent sweeps the rule the reveal drew.
+   *
+   * In from the left on enter and out to the right on leave, rather than
+   * rewinding — a line that retreats the way it came reads as a mistake
+   * being undone, where one that carries on through reads as a pass. The
+   * only moving part is .claim-lit, which nothing else animates, so this
+   * can never collide with the reveal still playing above it.
+   */
+  attempt("claims-hover", () => {
+    if (!fine) {
+      return;
+    }
+    const stop = hover(".claim", (el) => {
+      const line = el.querySelector(".claim-lit");
+      if (line === null) {
+        return undefined;
+      }
+      line.style.transformOrigin = "left center";
+      animate(line, { transform: "scaleX(1)" }, { duration: 0.42, ease: EASE });
+      return () => {
+        line.style.transformOrigin = "right center";
+        animate(
+          line,
+          { transform: "scaleX(0)" },
+          { duration: 0.34, ease: EASE },
+        );
+      };
+    });
+    /* A motion preference flipped mid-visit has to take the listener with
+       it, or a hover would keep animating a page that asked for stillness. */
+    if (typeof stop === "function") {
+      undoers.push(stop);
+    }
+  });
+
   // -- Cards: a spring lift on hover, and a spotlight that follows the
   //    cursor across the row. Desktop-only by capability, not user-agent.
   attempt("cards", () => {
