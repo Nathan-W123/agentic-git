@@ -10263,6 +10263,42 @@ dialog.modal[open]::backdrop {
   line-height: 1.5;
 }
 
+/* Finished-work file links use the same compact language as the digest's
+   attribution pills, but remain part of the outcome they explain. */
+.cmsg-outcome-files {
+  margin-top: 6px;
+}
+
+.cmsg-outcome-file {
+  appearance: none;
+  min-width: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.cmsg-outcome-file .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.cmsg-outcome-file:hover,
+.cmsg-outcome-file:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.cmsg-outcome-file.deleted {
+  cursor: default;
+  color: var(--text-4);
+}
+
+.cmsg-outcome-file.deleted:hover {
+  border-color: var(--border);
+  background: var(--bg-card);
+  color: var(--text-4);
+}
+
 .pill-label {
   overflow: hidden;
   text-overflow: ellipsis;

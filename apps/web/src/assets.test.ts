@@ -4034,6 +4034,105 @@ test("pasted web addresses are safe clickable message links", async () => {
   );
 });
 
+test("finished task paths become compact links into the file drawer", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const start = chats.indexOf("function outcomeFilePresentation");
+  const end = chats.indexOf("\nfunction messageBodyWithIcons", start);
+  assert.notEqual(start, -1, "the outcome file presenter should exist");
+  assert.notEqual(end, -1, "the outcome file presenter should be testable alone");
+
+  const entities: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+  const esc = (value: unknown): string =>
+    String(value ?? "").replace(
+      /[&<>"']/gu,
+      (character) => entities[character] ?? character,
+    );
+  const root = {
+    id: "root-1",
+    taskId: "task-1",
+    changedFiles: [
+      { path: "apps/web/public/data.js", status: "modified" },
+      { path: "apps/web/src/navigation-entry-points.test.ts", status: "modified" },
+    ],
+  };
+  const present = new Function(
+    "channelMessagesFor",
+    "esc",
+    "icon",
+    "ATTACHMENT_PATTERN",
+    `${chats.slice(start, end)}\nreturn outcomeFilePresentation;`,
+  )(
+    () => [root],
+    esc,
+    (name: string) => `<i>${name}</i>`,
+    /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu,
+  ) as (
+    entry: Record<string, unknown>,
+    repositoryId: string,
+  ) => { content: string; pills: string };
+
+  const result = present(
+    {
+      kind: "outcome",
+      messageId: root.id,
+      content:
+        "Invite links now open the join flow. " +
+        "(apps/web/public/data.js, apps/web/src/navigation-entry-points.test.ts)",
+    },
+    "repo-1",
+  );
+  assert.equal(result.content, "Invite links now open the join flow.");
+  assert.match(result.pills, /class="pill-bar cmsg-outcome-files"/u);
+  assert.equal((result.pills.match(/data-act="chan-file-open"/gu) ?? []).length, 2);
+  assert.match(result.pills, /data-value="apps\/web\/public\/data\.js"/u);
+  assert.match(
+    result.pills,
+    /data-value="apps\/web\/src\/navigation-entry-points\.test\.ts"/u,
+  );
+  assert.equal((result.pills.match(/data-task="task-1"/gu) ?? []).length, 2);
+  assert.equal(
+    present(
+      {
+        kind: "outcome",
+        taskId: "task-quick",
+        changedFiles: [{ path: "retry.ts", status: "modified" }],
+        content: "Raised the retry ceiling. (1 file changed)",
+      },
+      "repo-1",
+    ).content,
+    "Raised the retry ceiling.",
+  );
+
+  // Parenthetical prose is not a file suffix merely because the outcome also
+  // changed a file. Only names confirmed by the structured list are removed.
+  assert.equal(
+    present(
+      {
+        kind: "outcome",
+        messageId: root.id,
+        content: "Invite links now open the join flow (for signed-out guests).",
+      },
+      "repo-1",
+    ).content,
+    "Invite links now open the join flow (for signed-out guests).",
+  );
+
+  const bodyStart = chats.indexOf("function messageBodyWithIcons");
+  const bodyEnd = chats.indexOf("\n/** Root kinds", bodyStart);
+  const body = chats.slice(bodyStart, bodyEnd);
+  assert.match(body, /outcomeFilePresentation\(entry, repositoryId\)/u);
+  assert.match(body, /presentation\.pills/u);
+  assert.match(css, /\.cmsg-outcome-files \{/u);
+  assert.match(css, /\.cmsg-outcome-file:hover,/u);
+});
+
 test("channel messages compact only an uninterrupted run from one person", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");

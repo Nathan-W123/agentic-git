@@ -2126,18 +2126,97 @@ const NOTICE_ICONS = [
   { prefix: PLAN_LAPSED_PREFIX, marker: "⌛ ", iconName: "clock" },
 ];
 
-function messageBodyWithIcons(entry, repositoryId) {
+/**
+ * A finished task's prose and the files that belong beside it.
+ *
+ * New endings carry files only as structured message data. Older endings also
+ * named one or two paths (or a count) in parentheses, so that suffix is
+ * removed when it agrees with the structured list; the same saved message
+ * then gains the compact controls without repeating every path in prose.
+ *
+ * A thread reply inherits the files and task id from its root. A quick task is
+ * itself a root and now carries those fields directly. Both therefore open
+ * the existing file drawer on the exact changeset the ending describes.
+ */
+function outcomeFilePresentation(entry, repositoryId) {
   const content = String(entry.content ?? "");
-  const notice = NOTICE_ICONS.find(({ prefix }) => content.startsWith(prefix));
-  if (notice === undefined) {
-    return messageBody(content, repositoryId, entry.mentions);
+  if (entry.kind !== "outcome") {
+    return { content, pills: "" };
   }
-  return `<div class="cmsg-library-notice">${icon(notice.iconName)}
-    <div>${messageBody(
-      content.slice(notice.marker.length),
-      repositoryId,
-      entry.mentions,
-    )}</div></div>`;
+  const source =
+    entry.messageId === undefined
+      ? entry
+      : channelMessagesFor(repositoryId).find(
+          (candidate) => candidate.id === entry.messageId,
+        );
+  const files = (Array.isArray(source?.changedFiles) ? source.changedFiles : [])
+    .filter(
+      (file) =>
+        typeof file === "object" &&
+        file !== null &&
+        typeof file.path === "string" &&
+        file.path.trim() !== "",
+    );
+  if (files.length === 0) {
+    return { content, pills: "" };
+  }
+
+  // Attachments follow the sentence as their own marker. Match a legacy
+  // suffix against only the prose so an outcome with a screenshot is upgraded
+  // too, then put the untouched marker back for `messageBody` to render.
+  const attachmentAt = content.search(ATTACHMENT_PATTERN);
+  const prose = attachmentAt < 0 ? content : content.slice(0, attachmentAt);
+  const attachments = attachmentAt < 0 ? "" : content.slice(attachmentAt);
+  const suffix = /\s+\(([^()\n]+)\)\s*$/u.exec(prose);
+  const knownPaths = new Set(files.map((file) => file.path));
+  const legacyNames = (suffix?.[1] ?? "")
+    .split(/,\s+/u)
+    .filter((path) => path !== "");
+  const legacyCount = /^\d+ files? changed$/u.test(suffix?.[1] ?? "");
+  const legacyPaths =
+    legacyNames.length > 0 && legacyNames.every((path) => knownPaths.has(path));
+  const displayContent =
+    suffix !== null && (legacyCount || legacyPaths)
+      ? `${prose.slice(0, suffix.index)}${attachments}`
+      : content;
+  const taskId = source?.taskId;
+  const controls = files
+    .map((file) => {
+      const path = String(file.path);
+      const label = `${icon("file")}<span class="pill-label">${esc(path)}</span>`;
+      // A deleted path has no working-copy file to open. It still belongs in
+      // the compact set, but presenting a button that can only end in the
+      // editor's not-found state would not be a useful link.
+      if (file.status === "deleted") {
+        return `<span class="pill cmsg-outcome-file deleted"
+          title="Deleted ${esc(path)}">${label}</span>`;
+      }
+      return `<button type="button" class="pill cmsg-outcome-file"
+        data-act="chan-file-open" data-value="${esc(path)}"${
+          taskId === undefined ? "" : ` data-task="${esc(taskId)}"`
+        } title="Open ${esc(path)}">${label}</button>`;
+    })
+    .join("");
+  return {
+    content: displayContent,
+    pills: `<span class="pill-bar cmsg-outcome-files" aria-label="Files changed">${controls}</span>`,
+  };
+}
+
+function messageBodyWithIcons(entry, repositoryId) {
+  const presentation = outcomeFilePresentation(entry, repositoryId);
+  const content = presentation.content;
+  const notice = NOTICE_ICONS.find(({ prefix }) => content.startsWith(prefix));
+  const body =
+    notice === undefined
+      ? messageBody(content, repositoryId, entry.mentions)
+      : `<div class="cmsg-library-notice">${icon(notice.iconName)}
+          <div>${messageBody(
+            content.slice(notice.marker.length),
+            repositoryId,
+            entry.mentions,
+          )}</div></div>`;
+  return `${body}${presentation.pills}`;
 }
 
 /** Root kinds spoken by an agent rather than a person or the coordinator. */

@@ -6337,26 +6337,24 @@ test("a finished task says what it did, not that the pipeline worked", () => {
         "Repointed six test imports at their new modules; collection passes.",
       files: ["a.py", "b.py"],
     }),
-    "Repointed six test imports at their new modules; collection passes. " +
-      "(a.py, b.py)",
+    "Repointed six test imports at their new modules; collection passes.",
   );
-  // Named while there are few enough to name: "(1 file changed)" says
-  // something landed without saying what, which is the one thing a reader
-  // cannot check against the repository in front of them.
-  assert.match(
+  // Paths and counts are structured channel-message data now. Keeping them
+  // out of the sentence lets the browser draw links without duplicating text,
+  // and leaves non-browser clients with a clean account of the work.
+  assert.equal(
     narrateTaskEvent("canonical_promoted", {
       agentExplanation: "Raised the retry ceiling to five.",
       files: ["retry.ts"],
-    }) ?? "",
-    /\(retry\.ts\)$/u,
+    }),
+    "Raised the retry ceiling to five.",
   );
-  // Past two, a count again — an ending that lists a dozen paths is not one.
-  assert.match(
+  assert.equal(
     narrateTaskEvent("canonical_promoted", {
       agentExplanation: "Split the module.",
       files: ["a.py", "b.py", "c.py"],
-    }) ?? "",
-    /\(3 files changed\)$/u,
+    }),
+    "Split the module.",
   );
   // No files recorded is not a reason to withhold the summary.
   assert.equal(
@@ -12467,11 +12465,23 @@ test("a quick task keeps its outcome inline after acknowledging the handoff", as
   const messages = await runtime.store.listChannelMessages(repo, ownerId);
   // The ending stays flat in the room.
   const ending = messages.find((message) => message.kind === "outcome");
-  assert.match(
-    String(ending?.content),
-    /Changed the retry count to 2\./u,
-    `the ending did not carry the agent's own words: ${JSON.stringify(ending)}`,
+  assert.equal(
+    ending?.content,
+    "Changed the retry count to 2.",
+    `the ending did not carry clean agent-authored prose: ${JSON.stringify(ending)}`,
   );
+  assert.equal(ending?.taskId, task.id, "the inline ending lost its task link");
+  // The public channel read decorates the quick outcome from the same audit
+  // records as a thread root. That structured path is what the browser turns
+  // into a link; it no longer has to recover one from prose.
+  const listed = await owner.request(`${base}/messages`);
+  const listedEnding = listed.data.messages.find(
+    (message: any) => message.kind === "outcome",
+  );
+  assert.equal(listedEnding?.taskId, task.id);
+  assert.deepEqual(listedEnding?.changedFiles, [
+    { path: "retry.ts", status: "modified", added: 1, removed: 1 },
+  ]);
   // The request has only the immediate handoff reply; routine run ceremony is
   // still held back and the concise outcome stays in the room.
   const root = messages.find(
