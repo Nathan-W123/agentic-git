@@ -506,27 +506,41 @@
            false for a hosted deployment, where the repository sits on the
            server KUMI runs on and not on anything the reader owns. Until
            there is a hosting guarantee that can actually be made, this
-           section argues durability instead, which is true everywhere:
-           overlays are detached git worktrees owned by one principal
-           (docs/architecture/overlay-workspaces.md), promotion writes a real
-           canonical commit (docs/architecture/current-state.md), and the
+           section stays off the subject of where.
+
+           It also stopped arguing only durability. "Just Git" undersold the
+           thing: a reader who takes that at face value thinks this is a
+           wrapper around a version control system rather than the scheduling
+           that happens above one. So the paragraph leads with the work — a
+           validated plan before a workspace, leases on the files it names,
+           a workspace kept current with canonical, validation, and one
+           atomic promotion at a time — and lands Git as what that work
+           leaves behind rather than as the product.
+
+           Every clause is in the repository: validated plans gate execution
+           and expiring leases carry file ownership
+           (docs/architecture/current-state.md), overlays are detached git
+           worktrees owned by one principal
+           (docs/architecture/overlay-workspaces.md), promotion is a
+           compare-and-swap that writes a real canonical commit, and the
            GitHub export is one-way, explicit, and on its own branch. -->
       <section class="section section-tight" id="trust">
         <div class="wrap">
           <div class="section-head" data-reveal-group>
             <div class="section-title">
-              <h2 class="reveal">Underneath, it is just Git.</h2>
+              <h2 class="reveal">Coordinated, then committed.</h2>
             </div>
           </div>
 
           <p class="manifesto reveal">
-            There is one copy of your repository, not one per agent. No agent
-            edits it directly. Each works in an isolated git worktree of its
-            own, and changes reach the shared copy one at a time, after
-            validation. Underneath it is ordinary Git, so every change that
-            lands is a real commit in a real repository, with the history to
-            read and revert like any other. Nothing goes back to GitHub
-            unless you send it, on a branch of its own.
+            Before an agent writes a line, KUMI has planned the work, checked
+            the plan, and leased the files it touches. While it works, it is
+            kept current with whatever else has landed. When it finishes, the
+            change is validated and promoted into the shared codebase one at a
+            time, so two agents never overwrite each other. What comes out the
+            other side is ordinary Git: a real commit in a real repository,
+            with the history to read and revert like any other. Nothing
+            reaches GitHub unless you send it.
           </p>
         </div>
       </section>
