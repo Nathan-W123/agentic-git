@@ -382,10 +382,14 @@ strong {
   background: color-mix(in srgb, var(--bg) 84%, transparent);
 }
 
+/* The bar is wider than the column beneath it, so the brand sits close to
+   the edge of the window rather than lining up with the prose. Same 24px
+   gutter as everything else until the viewport passes 1648. */
 .site-nav .wrap {
   display: flex;
   align-items: center;
   gap: 24px;
+  width: min(1600px, calc(100% - 48px));
 }
 
 /* The name and the mark together, since this is now the only place the
@@ -581,8 +585,14 @@ strong {
   justify-items: start;
 }
 
-.hero h1 {
-  max-width: 17ch;
+/* Only the pricing hero needs a measure: its headline is centred with
+   nothing beside it, so without one it would run the full 1200. The landing
+   headline is bounded by its own grid column, and a `ch` cap on top of that
+   was the thing breaking it after "Making" rather than after
+   "development". */
+.hero-short h1 {
+  max-width: 12ch;
+  margin-inline: auto;
 }
 
 /*
@@ -595,7 +605,12 @@ strong {
  * rather than as separate sentences.
  */
 .hero-name {
-  font-size: clamp(38px, 4.5vw, 66px);
+  /* Capped at 60 rather than 66 so the claim breaks after "development"
+     instead of after "Making". The column stops widening at the 1200px wrap
+     while a vw size does not, so it is the ceiling that decides this: the
+     two words need 10.23% of the column's width per pixel of type, which is
+     62px at the 606px column this layout gives them. */
+  font-size: clamp(38px, 4.4vw, 60px);
   font-variation-settings: "wght" 700, "wdth" 100;
   line-height: 1.06;
   letter-spacing: -0.028em;
