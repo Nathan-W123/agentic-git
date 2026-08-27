@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#121110">
+    <meta name="description" content="Common questions about KUMI: what it is, which agents it runs, where your code lives, and what happens to a change before it lands.">
+    <link rel="icon" href="kumi-mark.png">
+    <script src="site-boot.js"></script>
+    <link rel="stylesheet" href="site.css">
+    <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
+    <title>KUMI — questions</title>
+  </head>
+  <body>
+    <!-- No canvas: the water carries the front page's argument, and a page of
+         prose is a place to read. The stylesheet's gradient is the ground. -->
+    <div class="field" aria-hidden="true"></div>
+    <div class="field-veil" aria-hidden="true"></div>
+
+    <nav class="site-nav">
+      <div class="wrap">
+        <a class="nav-brand" href=".">
+          <img src="kumi-mark.png" alt="KUMI" width="26" height="26">
+        </a>
+        <div class="nav-end">
+          <a class="nav-link" href="/app#signin">Sign in</a>
+          <a class="btn btn-primary btn-small" href="waitlist">Join the waitlist</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="hero hero-short">
+      <div class="wrap hero-lede">
+        <h1>
+          <span class="w"><span>Questions.</span></span>
+        </h1>
+        <p class="hero-tag">What KUMI is, what it does with your code, and what it does not do yet.</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section section-close">
+        <div class="wrap">
+          <div class="prose">
+            <h2>What is KUMI?</h2>
+            <p>A coordination layer between the people on a team, the coding
+              agents working with them, and one shared codebase. It is not
+              another coding agent: it runs the ones you already use, decides
+              who touches what, and carries context between them.</p>
+
+            <h2>Which agents does it run?</h2>
+            <p>Claude, Codex, Gemini, Cursor, Copilot and Kiro have adapters
+              today, and there is a generic JSONL protocol for anything else
+              that can speak it. You sign in with the accounts and
+              subscriptions you already pay for.</p>
+
+            <h2>Where does my code live?</h2>
+            <p>With the deployment. KUMI keeps one copy of the repository on
+              the machine it runs on, and agents never edit that copy: each
+              works in an isolated git worktree of its own. Underneath it is
+              ordinary Git, so every change that lands is a real commit in a
+              real repository.</p>
+
+            <h2>Does it push to my GitHub?</h2>
+            <p>Only when you ask. Import is a clone. The one path back out is
+              an explicit, one-way export onto a branch of its own, and it
+              refuses if the upstream has moved since the import.</p>
+
+            <h2>What happens before a change lands?</h2>
+            <p>An agent files a plan, which is validated before it is allowed
+              a workspace. Files are leased, so two agents cannot quietly edit
+              the same one. Changes are validated, reviewed at the gates you
+              configure, and promoted one at a time.</p>
+
+            <h2>What if two agents want the same file?</h2>
+            <p>The coordinator settles it rather than letting both proceed and
+              merging afterwards. One gets the file, the other is told, and a
+              plan that has gone stale is replanned against the new head.</p>
+
+            <h2>Is it open yet?</h2>
+            <p>Not yet. The waitlist is how you hear when it is.</p>
+
+            <h2>What will it cost?</h2>
+            <p>The plan is one price per seat, and a seat is a person who can
+              start work. People who only watch do not count, and agents are
+              not seats.</p>
+
+            <h2>Can I run it myself?</h2>
+            <p>That is the intended shape: one control plane you run, with
+              workers able to execute on other machines. Hosting is not open
+              yet either.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <span class="tagline">KUMI — the coordination layer between your
+          agents and your codebase.</span>
+        <a href="about">About</a>
+        <a href="faq">FAQ</a>
+        <a href="security">Security</a>
+        <span class="legal">© 2026 KUMI.</span>
+      </div>
+    </footer>
+
+    <script src="vendor/motion/motion.js"></script>
+    <script type="module" src="site.js"></script>
+  </body>
+</html>

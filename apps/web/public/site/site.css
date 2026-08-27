@@ -614,6 +614,42 @@ strong {
 }
 
 /*
+ * The pages that are only words: about, questions, security.
+ *
+ * One measure, centred under the centred heading these pages share with the
+ * pricing hero. A section's heading is set in the display face like every
+ * other heading on the site; the answer under it is body copy, because it is
+ * read rather than scanned.
+ */
+.prose {
+  width: min(100%, 68ch);
+  margin-inline: auto;
+}
+
+.prose h2 {
+  margin-top: 46px;
+  font-family: var(--display);
+  font-size: clamp(20px, 1.7vw, 25px);
+  font-variation-settings: "wght" 420, "wdth" 92;
+  line-height: 1.24;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  text-wrap: balance;
+}
+
+.prose h2:first-child {
+  margin-top: 0;
+}
+
+.prose p {
+  margin-top: 14px;
+  font-size: clamp(15.5px, 1.2vw, 17.5px);
+  line-height: 1.68;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+/*
  * The waitlist form.
  *
  * One column, centred under a centred heading. It was two while there were

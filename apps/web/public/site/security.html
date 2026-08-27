@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#121110">
+    <meta name="description" content="How KUMI isolates agent work: one canonical repository, per-agent git worktrees, a deny-by-default sandbox, gated promotion, and an append-only audit trail.">
+    <link rel="icon" href="kumi-mark.png">
+    <script src="site-boot.js"></script>
+    <link rel="stylesheet" href="site.css">
+    <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
+    <title>KUMI — security</title>
+  </head>
+  <body>
+    <!-- No canvas: the water carries the front page's argument, and a page of
+         prose is a place to read. The stylesheet's gradient is the ground. -->
+    <div class="field" aria-hidden="true"></div>
+    <div class="field-veil" aria-hidden="true"></div>
+
+    <nav class="site-nav">
+      <div class="wrap">
+        <a class="nav-brand" href=".">
+          <img src="kumi-mark.png" alt="KUMI" width="26" height="26">
+        </a>
+        <div class="nav-end">
+          <a class="nav-link" href="/app#signin">Sign in</a>
+          <a class="btn btn-primary btn-small" href="waitlist">Join the waitlist</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="hero hero-short">
+      <div class="wrap hero-lede">
+        <h1>
+          <span class="w"><span>Security.</span></span>
+        </h1>
+        <p class="hero-tag">What is isolated from what, and what has to happen before a change lands.</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section section-close">
+        <div class="wrap">
+          <div class="prose">
+            <h2>One copy of the repository</h2>
+            <p>The canonical repository lives with the deployment, on the
+              machine the control plane runs on. There is one copy, not one
+              per agent, and nothing is automatically pushed anywhere else.</p>
+
+            <h2>Agents do not touch it</h2>
+            <p>Every agent and every person editing through the dashboard
+              works in a detached git worktree owned by exactly one principal.
+              Ownership is checked on every access against the authenticated
+              caller, and a workspace identifier is never accepted from the
+              client.</p>
+
+            <h2>Execution is sandboxed</h2>
+            <p>Agent commands run inside an optional Docker boundary that is
+              deny-by-default on the network, can write only inside its own
+              workspace, has a read-only root, and has the repository's Git
+              metadata masked from it.</p>
+
+            <h2>Changes are gated</h2>
+            <p>A plan is validated before a workspace is granted. Files are
+              leased, so overlapping work is scheduled rather than merged
+              afterwards. Validation commands run in a temporary snapshot, and
+              promotion into the canonical repository is one atomic
+              compare-and-swap at a time. Plan, scope and changeset approvals
+              are available as gates.</p>
+
+            <h2>Everything is recorded</h2>
+            <p>The audit timeline is append-only and hash-chained, scoped by
+              tenant, project and run, and verifiable across both archived and
+              live events. Access is role-based: owner, admin, developer,
+              reviewer and viewer.</p>
+
+            <h2>Nothing leaves without you</h2>
+            <p>Repositories are imported over HTTPS or SSH with credentials
+              kept out of the stored configuration. The only path back to
+              GitHub is an explicit one-way export onto a dedicated branch,
+              which refuses to run if the upstream has moved since import.</p>
+
+            <h2>Reporting a problem</h2>
+            <p>KUMI is pre-launch and has not been through an external
+              security audit. If you find something, we would rather hear it
+              early: say so on the waitlist form and we will come back to
+              you.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <span class="tagline">KUMI — the coordination layer between your
+          agents and your codebase.</span>
+        <a href="about">About</a>
+        <a href="faq">FAQ</a>
+        <a href="security">Security</a>
+        <span class="legal">© 2026 KUMI.</span>
+      </div>
+    </footer>
+
+    <script src="vendor/motion/motion.js"></script>
+    <script type="module" src="site.js"></script>
+  </body>
+</html>

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#121110">
+    <meta name="description" content="About KUMI: why a team of humans and coding agents needs a coordination layer, and what we are building.">
+    <link rel="icon" href="kumi-mark.png">
+    <script src="site-boot.js"></script>
+    <link rel="stylesheet" href="site.css">
+    <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
+    <title>KUMI — about</title>
+  </head>
+  <body>
+    <!-- No canvas: the water carries the front page's argument, and a page of
+         prose is a place to read. The stylesheet's gradient is the ground. -->
+    <div class="field" aria-hidden="true"></div>
+    <div class="field-veil" aria-hidden="true"></div>
+
+    <nav class="site-nav">
+      <div class="wrap">
+        <a class="nav-brand" href=".">
+          <img src="kumi-mark.png" alt="KUMI" width="26" height="26">
+        </a>
+        <div class="nav-end">
+          <a class="nav-link" href="/app#signin">Sign in</a>
+          <a class="btn btn-primary btn-small" href="waitlist">Join the waitlist</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="hero hero-short">
+      <div class="wrap hero-lede">
+        <h1>
+          <span class="w"><span>About</span></span>\n          <span class="w"><span>KUMI.</span></span>
+        </h1>
+        <p class="hero-tag">Why we think the next bottleneck is coordination, not code.</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section section-close">
+        <div class="wrap">
+          <div class="prose">
+            <p>Agents have gotten remarkably good at writing code. The way
+              we use them has not kept up. Each one gets its own task, its own
+              terminal, its own branch, its own copy of the codebase, and we
+              hope it all still fits together at the end. The more agents you
+              add, the more of your day goes on keeping them out of each
+              other's way.</p>
+
+            <p>That is a coordination problem, and it is the one we are
+              working on. KUMI gives a team and its agents one shared
+              codebase, a channel on every repository, and a coordinator that
+              decides who touches what before anybody starts. Plans are filed
+              and checked. Files are leased. Overlaps are settled rather than
+              merged. Every change that lands is an ordinary Git commit, with
+              the history to read and revert like any other.</p>
+
+            <p>The thing we are trying not to build is another place you have
+              to manage. You should not have to become the project manager for
+              a team of machines.</p>
+
+            <p>KUMI is not open yet. If that sounds like your problem, the
+              waitlist is the way to hear when it is.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <span class="tagline">KUMI — the coordination layer between your
+          agents and your codebase.</span>
+        <a href="about">About</a>
+        <a href="faq">FAQ</a>
+        <a href="security">Security</a>
+        <span class="legal">© 2026 KUMI.</span>
+      </div>
+    </footer>
+
+    <script src="vendor/motion/motion.js"></script>
+    <script type="module" src="site.js"></script>
+  </body>
+</html>
