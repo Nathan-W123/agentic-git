@@ -423,32 +423,26 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
 
 test("pinned messages can be hidden and shown without being unpinned", async () => {
   const data = await publicFile("data.js");
-  const ui = await publicFile("ui.js");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
   const styles = await publicFile("styles.css");
-  const enhancement = ui.slice(
-    ui.indexOf("S.showPinnedMessages ="),
-    ui.indexOf("/**\n * The product mark"),
+  const header = chats.slice(
+    chats.indexOf("function conversationHeader(repositoryId)"),
+    chats.indexOf("/** Compatibility for callers while the conversation header"),
   );
 
-  // The shortcut belongs after both channel counts and is visually separated
-  // from them. It uses the shared pin glyph and exposes the state in words as
-  // well as through the pressed state.
-  assert.match(enhancement, /querySelector\("\.chan-head \.ch-desc"\)/u);
-  assert.match(enhancement, /textContent = "\|"/u);
-  assert.match(enhancement, /className = `ch-count ch-pins-toggle/u);
-  assert.match(enhancement, /button\.innerHTML = icon\("pin"\)/u);
-  assert.match(enhancement, /Hide pinned messages/u);
-  assert.match(enhancement, /Show pinned messages/u);
-  assert.match(enhancement, /"aria-pressed", String\(open\)/u);
+  // Main chat owns the shortcut directly, so a header hierarchy change cannot
+  // strand it behind a selector for markup that no longer exists. Other
+  // destinations do not offer pins from the workspace's main transcript.
+  assert.match(header, /const pinsOpen = main && activeSecondaryContext\(\) === "pins";/u);
+  assert.match(header, /main\s*\? `<button type="button" class="icon-btn ch-pins-toggle/u);
+  assert.match(header, /data-act="channel-pins-toggle"/u);
+  assert.match(header, /pinsOpen \? "Hide pinned messages" : "Show pinned messages"/u);
+  assert.match(header, /aria-pressed="\$\{pinsOpen\}"/u);
+  assert.match(header, /\$\{icon\("pin"\)\}<\/button>/u);
 
-  // Header redraws must not duplicate the control. The observer puts it back
-  // after a redraw, while the delegated action uses the one secondary slot
-  // and never calls the pin/unpin operation.
-  assert.match(enhancement, /querySelector\("\.ch-pins-toggle"\)/u);
-  assert.match(enhancement, /new MutationObserver\(sync\)/u);
-  assert.match(enhancement, /dataset\.act = "channel-pins-toggle"/u);
+  // The delegated action uses the one secondary slot and never calls the
+  // pin/unpin operation.
   const toggle = app.slice(
     app.indexOf('case "channel-pins-toggle"'),
     app.indexOf('case "channel-pinned-open"'),
@@ -3091,6 +3085,13 @@ test("the standalone logo follows the theme without changing the wordmark or app
   // It draws in `currentColor`, and the stylesheet is what points that at the
   // accent — so a surface that needs it to match its own ink still can.
   assert.match(css, /\.brand-mark \{\n {2}color: var\(--accent\);\n\}/u);
+
+  // The corner of the global bar is one such surface: there the mark leads a
+  // row of plain ink, so it is white with it. A literal white would be a hole
+  // on the light theme, which is why this is the theme's own text token — the
+  // point of drawing in `currentColor` in the first place.
+  assert.match(css, /\.topbar-brand \.brand-mark \{\n {2}color: var\(--text\);\n\}/u);
+  assert.match(css, /--text: #F3EFE8;/u);
 
   assert.doesNotMatch(chats, /channel-rail-brand|brandMark/u);
   assert.doesNotMatch(css, /channel-rail-brand/u);
