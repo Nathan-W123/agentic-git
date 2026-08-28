@@ -4252,9 +4252,27 @@ export class SqliteCoordinationStore implements CoordinationStore {
           .prepare("DELETE FROM channel_message_replies WHERE message_id = ?")
           .run(id);
       }
+      // Scoped the same way the id query above is. Without the channel
+      // clause this deleted every message in the repository whichever room
+      // was asked for, so removing one room emptied all of them — including
+      // #general, which cannot be deleted precisely so that it survives.
+      // The reply and reaction sweeps above were already scoped, so the rows
+      // this over-deleted lost their message and kept nothing to be found by.
+      //
+      // Postgres and the in-memory store both scope it; only this one did
+      // not, and SQLite is what a self-hosted deployment runs by default.
       this.db
-        .prepare("DELETE FROM channel_messages WHERE repository_id = ?")
-        .run(repositoryId);
+        .prepare(
+          `DELETE FROM channel_messages
+            WHERE repository_id = ?
+              AND (? IS NULL OR COALESCE(channel_id, ?) = ?)`,
+        )
+        .run(
+          repositoryId,
+          channelId ?? null,
+          generalChannelId(repositoryId),
+          channelId ?? null,
+        );
       this.commit(owned);
       return ids.length;
     } catch (error) {
