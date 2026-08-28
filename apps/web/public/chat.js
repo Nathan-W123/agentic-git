@@ -4,8 +4,8 @@
  * One user, one agent. Nothing here is shared with the rest of the project:
  * a conversation is held against that person's own provider connection, and
  * the only thing collaborators ever see is the work it produces, once that
- * work has been through the coordinator. The same component serves the Code
- * screen's side panel and the My Agents detail pane.
+ * work has been through the coordinator. The same component serves the
+ * private-agent side panel wherever it is opened.
  */
 
 import {
@@ -142,7 +142,7 @@ export function chatThread(agent) {
       <p class="msg system transcript-separator"><span>${
         agent.connected
           ? "This conversation is private to you."
-          : `${esc(agent.name)} is not connected yet. Connect it from My Agents to start talking.`
+          : `${esc(agent.name)} is not connected yet. Connect it from Settings → Agents to start talking.`
       }</span></p>
     </div>`;
   }

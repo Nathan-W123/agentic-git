@@ -63,8 +63,18 @@ import {
   loadChannelFile,
   moveChannelFile,
   saveChannelFile,
+  createSubChannel,
+  deleteSubChannel,
   ensureChannelMessages,
   ensureChannelRoster,
+  ensureSubChannels,
+  loadSubChannelMembers,
+  loadSubChannels,
+  activeSubChannelId,
+  selectSubChannel,
+  setSubChannelMember,
+  subChannelsFor,
+  updateSubChannel,
   ensureProviderUsage,
   ensureRepositoryGrants,
   markChannelRead,
@@ -194,9 +204,9 @@ import {
   cancelTask,
   connectAgent,
   connectGitHubAccount,
-  renderAgents,
+  pauseTask,
+  resumeTask,
   retryTask,
-  selectAgent,
   startAddAgentFlow,
 } from "./screen-agents.js";
 import {
@@ -238,6 +248,7 @@ import {
   captureChannelScroll,
   channelMessageHasTaskThread,
   channelInfoPopoverHtml,
+  subChannelManagePopoverHtml,
   closeComposerAutocomplete,
   copyMessageText,
   handleComposerKeydown,
@@ -1503,7 +1514,6 @@ async function submitInviteSignIn(form) {
  */
 
 function topbar() {
-  const user = currentUserName();
   // The upper-left corner, over the workspace switcher, which held nothing.
   // The mark belongs to the application rather than to any one workspace, so
   // this is where it goes — and it goes alone: the shell is still
@@ -1536,8 +1546,6 @@ function topbar() {
           ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
           : ""
       }
-      <button class="account-btn topbar-account-btn" data-act="user-menu" title="${esc(user)}"
-        >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
     </div>
   </header>`;
 }
@@ -1545,17 +1553,16 @@ function topbar() {
 /**
  * The screens the account menu is the way into.
  *
- * Both account buttons — the topbar avatar and the channel sidebar's foot —
- * open the same menu, so this is one change point for both.
+ * The channel sidebar foot opens this menu, so this is the single change
+ * point for account destinations.
  *
  * Notifications is deliberately not one of them any more. Pressing your own
  * name is how you reach your own things, and a backlog of everything every
  * agent has done is not that; it remains reachable by name in the quick
  * switcher.
  *
- * My Agents is absent for the same reason it always was: a roster of agent
- * connections is not the account's own things either, and it keeps the quick
- * switcher and the channel agent menu's "Connect agents" as its doors.
+ * Agent connections live in Settings, while the channel roster remains the
+ * place to add a connected agent to a repository.
  *
  * The count is read here rather than carried in state, so a number in this
  * menu cannot disagree with the list it sits above.
@@ -1570,20 +1577,6 @@ function accountDestinations() {
       ...(dms === 0 ? {} : { hint: `${dms} unread` }),
     },
   ];
-}
-
-/**
- * Everything waiting in direct messages, on the account button.
- *
- * A DM from somebody who is not in the room on screen had no signal anywhere:
- * the count was loaded with the conversation list and only ever rendered
- * beside a person already in this channel's roster.
- */
-function dmBadge() {
-  const unread = dmUnreadTotal();
-  return unread === 0
-    ? ""
-    : `<span class="dot-badge">${esc(String(unread > 99 ? "99+" : unread))}</span>`;
 }
 
 /* ----------------------------------------------------------- settings ---- */
@@ -4494,7 +4487,6 @@ function accentInk(accent) {
 
 const ROUTES = new Set([
   "chats",
-  "agents",
   "notifications",
 ]);
 
@@ -4505,8 +4497,6 @@ function currentAgent() {
 
 function screen() {
   switch (state.route) {
-    case "agents":
-      return renderAgents();
     case "notifications":
       return renderNotifications();
     default:
@@ -4906,7 +4896,6 @@ function switcherEntries(query) {
       })),
     ...[
       { route: "chats", label: "Chats" },
-      { route: "agents", label: "My agents" },
       { route: "notifications", label: "Notifications" },
     ].map((screen) => ({
       kind: "Screen",
@@ -4970,7 +4959,7 @@ function openSwitcher() {
   switcherIndex = 0;
   const layer = document.createElement("div");
   layer.id = "qs-layer";
-  layer.className = "qs-layer";
+  layer.className = "qs-layer qs-layer-search";
   layer.innerHTML = `<div class="pop-scrim" data-act="switch-close"></div>
     <div class="qs-card" role="dialog" aria-label="Go to">
       <input class="qs-input" data-act="switch-input" type="text"
@@ -6416,7 +6405,7 @@ function restoreFocus(saved) {
   }
 }
 
-/** One question for every way of stopping a run — see `task-cancel`. */
+/** The one question in front of ending a run for good — see `task-cancel`. */
 function confirmTaskCancel(taskId) {
   const task = state.tasks.find((entry) => entry.id === taskId);
   return window.confirm(
@@ -7459,7 +7448,6 @@ function renderNow() {
   void ensureAgentOptions(state.selectedAgent, () => {
     if (
       state.route === "code" ||
-      state.route === "agents" ||
       (state.route === "chats" &&
         primaryDestinationForWorkspace(activeChannelId()).kind === "agent")
     ) {
@@ -7492,6 +7480,13 @@ function renderNow() {
         });
       }
     }
+    // The rooms inside this workspace, once per visit. Everything that draws
+    // them reads `subChannelsFor` synchronously, so this only has to fill it.
+    void ensureSubChannels(activeChannelId(), () => {
+      if (state.route === "chats") {
+        render();
+      }
+    });
     void ensureChannelRoster(activeChannelId(), () => {
       if (state.route === "chats") {
         render();
@@ -7548,8 +7543,8 @@ function renderNow() {
         render();
       }
     });
-    // The roster's model/effort pickers read the same real options My Agents
-    // and Code load — loaded here too, rather than invented for this screen.
+    // The roster's model/effort pickers read the provider's real options,
+    // loaded here rather than invented for this screen.
     //
     // By vendor, and for everyone's agents. The options route answers about
     // the CLI installed on this host and takes no per-user argument, so one
@@ -7782,10 +7777,17 @@ function parseChatLocation(hash = window.location.hash) {
       : ["threads", "files"].includes(kind)
         ? { kind }
         : { kind: "main" };
+  const params = new URLSearchParams(query);
   return {
     workspaceId: decode(parts[1]),
     primary,
-    secondary: new URLSearchParams(query).get("context") ?? undefined,
+    // The room inside the workspace. A query parameter rather than a path
+    // segment: the path already means "which destination", and a link written
+    // before sub-channels existed has to keep opening the same workspace —
+    // which it does, at `#general`, because an absent value means "let the
+    // server decide" and the server decides `#general`.
+    channelId: params.get("channel") ?? undefined,
+    secondary: params.get("context") ?? undefined,
   };
 }
 
@@ -7809,6 +7811,12 @@ function writeChatLocation() {
     secondary = `plan:${state.activePlan}`;
   }
   const query = new URLSearchParams();
+  // Only when there is more than one room to be in. A repository nobody has
+  // divided keeps the exact URL it has always had.
+  const channelId = activeSubChannelId(workspaceId);
+  if (channelId !== undefined && subChannelsFor(workspaceId).length > 1) {
+    query.set("channel", channelId);
+  }
   if (secondary !== undefined) {
     query.set("context", secondary);
   }
@@ -7917,6 +7925,13 @@ function applyHash() {
       chatLocation.primary,
       chatLocation.workspaceId || activeChannelId(),
     );
+    if (chatLocation.channelId !== undefined) {
+      // Recorded rather than selected: `selectSubChannel` clears the room's
+      // transcript, which is exactly wrong on the first paint of a link — the
+      // list has not loaded yet, so there is nothing to switch away from.
+      state.activeSubChannel[chatLocation.workspaceId || activeChannelId()] =
+        chatLocation.channelId;
+    }
     if (chatLocation.primary.kind === "file") {
       state.chanFileView = chatLocation.primary.id;
       state.chanFileMode = "edit";
@@ -9913,33 +9928,7 @@ document.addEventListener("click", (event) => {
     case "chat-toggle":
       toggleChat(render);
       return;
-    /* Agents */
-    case "agent-pick":
-      selectAgent(value, render);
-      return;
-    case "agent-tab":
-      state.agentTab = value;
-      render();
-      // The Files tab is scoped to this agent's own work now, which means it
-      // needs that work's changeset — one fetch per task, cached. Without
-      // this the tab would be honest and permanently empty, which is only
-      // half the fix.
-      if (value === "files") {
-        const task = currentAgent()?.task;
-        if (task !== undefined) {
-          void ensureChangeSetForTask(task.id, render);
-        }
-      }
-      return;
-    case "agent-filter":
-      state.agentFilter = value;
-      render();
-      return;
-    case "agent-view":
-      state.agentView = value;
-      persist("ag.agentview", value);
-      render();
-      return;
+    /* Agent connections */
     case "agent-connect":
       void connectAgent(value, render);
       return;
@@ -9969,11 +9958,7 @@ document.addEventListener("click", (event) => {
         })
         .catch((error) => toast(error.message, "error"));
       return;
-    case "agent-switch":
-    case "agent-menu": {
-      // Was folded in with the navigation cases below, so the three dots on
-      // an agent row did nothing except change screen — including on the
-      // Agents screen itself, where it changed nothing at all.
+    case "agent-switch": {
       const agent = myAgents().find((entry) => entry.id === value);
       const provider = state.providers.find((entry) => entry.id === value);
       const mine = provider?.ownCredential !== undefined;
@@ -9998,14 +9983,9 @@ document.addEventListener("click", (event) => {
               : `Connect ${agentLabelOf(value)}`,
           iconName: "robot",
         },
-        { act: "agent-usage", value, label: "Usage", iconName: "chart" },
       ]);
       return;
     }
-    case "agent-info":
-    case "agent-usage":
-      navigate("agents");
-      return;
     // Asks the vendor again rather than reading the kept answer. A usage card
     // that said "no session has recorded rate limits yet" would otherwise go
     // on saying it for the rest of the session, including after the run that
@@ -10017,22 +9997,45 @@ document.addEventListener("click", (event) => {
       void refreshProviderUsage(value, render, node.dataset.owner);
       return;
     /**
-     * Stopping a run, asked about first.
+     * Stopping a run for good, asked about first.
      *
      * Cancelling ends work that is mid-flight and holding a workspace, and
      * this fired straight through on one click from a plain button sitting
-     * beside Retry. One confirm helper serves every entry point — the agent
-     * detail's button and the thread header's — so the two cannot come to
-     * disagree about how much of a decision this is.
+     * beside Retry. The confirm is what that costs. A thread stops its own
+     * work with the pause below instead — reversible, and so not a decision
+     * worth a dialog — which leaves this the destructive one.
      */
-    case "thread-task-cancel":
     case "task-cancel": {
-      // A thread whose task id is missing renders no control at all, so this
-      // is a belt-and-braces guard rather than a state anybody can reach.
+      // A row whose task id is missing renders no control at all, so this is
+      // a belt-and-braces guard rather than a state anybody can reach.
       if (!value || !confirmTaskCancel(value)) {
         return;
       }
       void cancelTask(value, render);
+      return;
+    }
+    /**
+     * Pausing and resuming, from the thread header.
+     *
+     * No confirm on either half, unlike the cancel above, and that is the
+     * point of them: the question in front of a cancel is owed because the
+     * work is about to be thrown away. Pausing keeps it — the agent stops
+     * where it is, its workspace is kept, and play picks the same work back
+     * up — so asking would be asking about nothing, and asking about nothing
+     * is how people learn to click past the questions that matter.
+     */
+    case "thread-task-pause": {
+      if (!value) {
+        return;
+      }
+      void pauseTask(value, render);
+      return;
+    }
+    case "thread-task-resume": {
+      if (!value) {
+        return;
+      }
+      void resumeTask(value, render);
       return;
     }
     // Only work that has actually stopped. Retry was offered whatever state a
@@ -10214,6 +10217,139 @@ document.addEventListener("click", (event) => {
      * account's agents are offerable: membership is managed per caller, and
      * the server's membership route refuses a teammate's agent anyway.
      */
+    /* ------------------------------------------------ sub-channels ---- */
+    case "sub-channel-open": {
+      const repositoryId = activeChannelId();
+      selectSubChannel(repositoryId, value);
+      closePopover();
+      writeChatLocation();
+      render();
+      // The transcript, roster and unread cursor are all keyed by repository,
+      // so `selectSubChannel` dropped them; this is what fills them back in
+      // for the room that is now open.
+      void ensureChannelMessages(repositoryId, render);
+      void ensureChannelRoster(repositoryId, render);
+      return;
+    }
+    case "sub-channel-new": {
+      const repositoryId = value || activeChannelId();
+      const name = window.prompt(
+        "Name the channel. It will be addressed as #name.",
+        "",
+      );
+      if (name === null || name.trim() === "") {
+        return;
+      }
+      const isPrivate = window.confirm(
+        "Make this channel private?\n\nOK: only members can see it or post in it.\nCancel: everyone in the project can read it, members can post.",
+      );
+      void createSubChannel(repositoryId, name, isPrivate ? "private" : "open")
+        .then(() => {
+          render();
+          void ensureChannelMessages(repositoryId, render);
+        })
+        .catch((error) =>
+          toast(`Could not create that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-menu": {
+      const repositoryId = activeChannelId();
+      state.subChannelMenu = value;
+      // Fetched on open rather than with the channel list: a member list is
+      // only ever looked at from here, and loading one per room on every
+      // render would be a request per room per paint.
+      void loadSubChannelMembers(repositoryId, value).then(() => {
+        const layer = document.querySelector(".pop-layer .sub-channel-manage");
+        if (layer !== null && state.subChannelMenu === value) {
+          layer.outerHTML = subChannelManagePopoverHtml(repositoryId, value);
+        }
+      });
+      showPopover(node, subChannelManagePopoverHtml(repositoryId, value), {
+        width: 280,
+      });
+      return;
+    }
+    case "sub-channel-rename": {
+      const repositoryId = activeChannelId();
+      const current = subChannelsFor(repositoryId).find(
+        (channel) => channel.id === value,
+      );
+      const name = window.prompt("Rename this channel", current?.slug ?? "");
+      if (name === null || name.trim() === "") {
+        return;
+      }
+      closePopover();
+      void updateSubChannel(repositoryId, value, { name })
+        .then(render)
+        .catch((error) =>
+          toast(`Could not rename that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-visibility": {
+      const repositoryId = activeChannelId();
+      const current = subChannelsFor(repositoryId).find(
+        (channel) => channel.id === value,
+      );
+      const next = current?.visibility === "private" ? "open" : "private";
+      closePopover();
+      void updateSubChannel(repositoryId, value, { visibility: next })
+        .then(render)
+        .catch((error) =>
+          toast(`Could not change that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-delete": {
+      const repositoryId = activeChannelId();
+      const current = subChannelsFor(repositoryId).find(
+        (channel) => channel.id === value,
+      );
+      if (
+        !window.confirm(
+          `Delete #${current?.slug ?? "this channel"} and everything said in it? This cannot be undone.`,
+        )
+      ) {
+        return;
+      }
+      closePopover();
+      void deleteSubChannel(repositoryId, value)
+        .then(() => {
+          render();
+          void ensureChannelMessages(repositoryId, render);
+        })
+        .catch((error) =>
+          toast(`Could not delete that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-member-toggle": {
+      const repositoryId = activeChannelId();
+      const [channelId = "", userId = "", direction = "in"] = value.split("|");
+      void setSubChannelMember(
+        repositoryId,
+        channelId,
+        userId,
+        direction === "in",
+      )
+        .then(() => {
+          const layer = document.querySelector(".pop-layer .sub-channel-manage");
+          if (layer !== null) {
+            layer.outerHTML = subChannelManagePopoverHtml(
+              repositoryId,
+              channelId,
+            );
+          }
+          // The person's own view of the room changes with their membership,
+          // so the list has to be re-read rather than patched from here.
+          void loadSubChannels(repositoryId).then(render);
+        })
+        .catch((error) =>
+          toast(`Could not change that membership: ${error.message}`, "error"),
+        );
+      return;
+    }
     case "channel-agent-menu": {
       // Anchor to the channel's own dots button, not to the menu item that
       // was clicked: `showMenu` closes the open popover first, which detaches
@@ -10859,17 +10995,6 @@ document.addEventListener("input", (event) => {
     render();
     if (focused) {
       const next = $("[data-act='repo-search']");
-      next?.focus();
-      next?.setSelectionRange(next.value.length, next.value.length);
-    }
-    return;
-  }
-  if (act === "agent-search") {
-    state.agentQuery = node.value;
-    const focused = document.activeElement === node;
-    render();
-    if (focused) {
-      const next = $("[data-act='agent-search']");
       next?.focus();
       next?.setSelectionRange(next.value.length, next.value.length);
     }

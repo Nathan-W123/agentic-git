@@ -61,6 +61,10 @@ import type {
   DirectMessageFilter,
   ChannelReaction,
   ChannelReply,
+  CreateSubChannelInput,
+  SubChannel,
+  SubChannelMember,
+  UpdateSubChannelInput,
   AuditArchiveResult,
   AuditEventFilter,
   AuditorCursor,
@@ -99,7 +103,11 @@ import type {
   UserAccount,
   UserAppearance,
 } from "./store.js";
-import { directPairKey, repositoryConflicts } from "./store.js";
+import {
+  GENERAL_SUB_CHANNEL_SLUG,
+  directPairKey,
+  repositoryConflicts,
+} from "./store.js";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
@@ -135,6 +143,7 @@ interface StoredChannelReply {
 interface StoredChannelMessage {
   id: string;
   repositoryId: string;
+  channelId: string;
   projectId: ProjectId;
   kind: ChannelEntryKind;
   authorId: string;
@@ -239,13 +248,17 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly directMessages = new Map<string, DirectMessage>();
   /** Keyed by `repositoryId\0agentId`. */
   private readonly channelAgentOverrides = new Map<string, ChannelAgentOverride>();
-  /** Keyed by `repositoryId\0userId\0provider`. */
+  /** Keyed by `channelId\0userId\0provider`. */
   private readonly channelAgentMembers = new Map<string, ChannelAgentMember>();
+  /** Every sub-channel, keyed by its id. */
+  private readonly subChannels = new Map<string, SubChannel>();
+  /** Keyed by `channelId\0userId`. */
+  private readonly subChannelMembers = new Map<string, SubChannelMember>();
   /** Keyed by `userId\0provider` — the name an agent answers to everywhere. */
   private readonly agentCallSigns = new Map<string, AgentCallSign>();
   /** Repository ids whose one-time membership backfill has already run. */
   private readonly channelMembershipBackfilled = new Set<string>();
-  /** Keyed by `repositoryId\0userId`. */
+  /** Keyed by `repositoryId\0channelId\0userId`. */
   private readonly channelReadCursors = new Map<string, string>();
   /** Keyed by `projectId\0userId`. */
   private readonly catchUpCursors = new Map<string, string>();
@@ -722,7 +735,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
             task.repositoryId === input.repositoryId) &&
           (input.projectId === undefined || task.projectId === input.projectId) &&
           (task.afterTaskId === undefined ||
-            !["submitted", "claimed", "planned"].includes(
+            !["submitted", "claimed", "planned", "paused"].includes(
               this.submitted.get(task.afterTaskId)?.status ?? "integrated",
             )) &&
           activeLeases(task.repositoryId) < parallelism,
@@ -1341,9 +1354,20 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         this.channelAgentOverrides.delete(key);
       }
     }
-    for (const key of [...this.channelAgentMembers.keys()]) {
-      if (key.startsWith(`${id}\0`)) {
-        this.channelAgentMembers.delete(key);
+    for (const [channelId, channel] of [...this.subChannels]) {
+      if (channel.repositoryId !== id) {
+        continue;
+      }
+      this.subChannels.delete(channelId);
+      for (const key of [...this.subChannelMembers.keys()]) {
+        if (key.startsWith(`${channelId}\0`)) {
+          this.subChannelMembers.delete(key);
+        }
+      }
+      for (const key of [...this.channelAgentMembers.keys()]) {
+        if (key.startsWith(`${channelId}\0`)) {
+          this.channelAgentMembers.delete(key);
+        }
       }
     }
     for (const key of [...this.channelReadCursors.keys()]) {
@@ -1476,7 +1500,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       if (
         stored?.status === "submitted" &&
         (predecessor === undefined ||
-          !["submitted", "claimed", "planned"].includes(predecessor.status))
+          !["submitted", "claimed", "planned", "paused"].includes(predecessor.status))
       ) {
         stored.status = "claimed";
         stored.claimedAt = new Date().toISOString();
@@ -1514,7 +1538,10 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       // Dropping a plan you decided against is the ordinary way one ends.
       task.status !== "planned" &&
       // "That's it, we're done" is exactly how an open conversation ends.
-      task.status !== "open"
+      task.status !== "open" &&
+      // Changing your mind about paused work is abandoning it, not resuming
+      // it: without this a paused task could only ever be un-paused.
+      task.status !== "paused"
     ) {
       throw new Error(
         `Task ${taskId} cannot be cancelled from status ${task.status}`,
@@ -1522,6 +1549,39 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     }
     task.status = "cancelled";
     task.completedAt = new Date().toISOString();
+    return copy(task);
+  }
+
+  public async pauseSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const task = this.submitted.get(taskId);
+    // Only live work pauses. A settled task, a held plan and an open
+    // conversation all answer "nothing to pause" rather than erroring: the
+    // button that sent this may simply have been a frame behind the run.
+    if (
+      task === undefined ||
+      (task.status !== "submitted" && task.status !== "claimed")
+    ) {
+      return undefined;
+    }
+    task.status = "paused";
+    return copy(task);
+  }
+
+  public async resumePausedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const task = this.submitted.get(taskId);
+    if (task === undefined || task.status !== "paused") {
+      return undefined;
+    }
+    task.status = "submitted";
+    // Back to the shape of work nobody has claimed: the resumed turn is
+    // leased afresh, and a stale claim stamp would make it read as running
+    // for however long it waited in the queue.
+    task.claimedAt = undefined;
+    task.runId = undefined;
     return copy(task);
   }
 
@@ -2255,6 +2315,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return {
       id: message.id,
       repositoryId: message.repositoryId,
+      channelId: message.channelId,
       projectId: message.projectId,
       kind: message.kind,
       authorId: message.authorId,
@@ -2359,15 +2420,30 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   private channelMemberKey(
-    repositoryId: string,
+    channelId: string,
     userId: string,
     provider: string,
   ): string {
-    return `${repositoryId}\0${userId}\0${provider}`;
+    return `${channelId}\0${userId}\0${provider}`;
   }
 
-  private channelReadKey(repositoryId: string, userId: string): string {
-    return `${repositoryId}\0${userId}`;
+  private channelReadKey(
+    repositoryId: string,
+    userId: string,
+    channelId: string,
+  ): string {
+    return `${repositoryId}\0${channelId}\0${userId}`;
+  }
+
+  /**
+   * The `#general` id every writer that names no channel falls back to.
+   *
+   * Derived from the repository id rather than looked up, matching the shape
+   * the `repository-sub-channels` migration mints in the SQL backends, so the
+   * three stores agree on what an unqualified write means.
+   */
+  private generalChannelId(repositoryId: string): string {
+    return `subchan_general_${repositoryId}`;
   }
 
   public async listChannelMessages(
@@ -2383,6 +2459,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     const rows = [...this.channelMessages.values()]
       .filter((message) => message.repositoryId === repositoryId)
       .filter(
+        (message) =>
+          filter.channelId === undefined ||
+          message.channelId === filter.channelId,
+      )
+      .filter(
         (message) => filter.before === undefined || at(message) < filter.before,
       )
       .sort((left, right) => at(left).localeCompare(at(right)));
@@ -2393,11 +2474,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
 
   public async countChannelMessages(
     repositoryId: string,
+    channelId?: string,
   ): Promise<ChannelMessageCounts> {
     let messages = 0;
     let replies = 0;
     for (const message of this.channelMessages.values()) {
       if (message.repositoryId !== repositoryId) {
+        continue;
+      }
+      if (channelId !== undefined && message.channelId !== channelId) {
         continue;
       }
       messages += 1;
@@ -2478,10 +2563,16 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return reply === undefined ? undefined : copy(reply);
   }
 
-  public async deleteChannelMessages(repositoryId: string): Promise<number> {
+  public async deleteChannelMessages(
+    repositoryId: string,
+    channelId?: string,
+  ): Promise<number> {
     let removed = 0;
     for (const [id, message] of [...this.channelMessages]) {
-      if (message.repositoryId === repositoryId) {
+      if (
+        message.repositoryId === repositoryId &&
+        (channelId === undefined || message.channelId === channelId)
+      ) {
         this.channelMessages.delete(id);
         removed += 1;
       }
@@ -2496,6 +2587,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A channel message must have content");
     }
+    let referencedChannelId: string | undefined;
     if (input.referencedMessageId !== undefined) {
       const target = this.channelMessages.get(input.referencedMessageId);
       if (target === undefined || target.repositoryId !== input.repositoryId) {
@@ -2503,10 +2595,20 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           "A channel message reference must target the same repository",
         );
       }
+      referencedChannelId = target.channelId;
     }
+    // An answer belongs in the room the question was asked in, so a writer
+    // that names no channel inherits the referenced message's before it falls
+    // back to `#general`.
+    const channelId =
+      input.channelId ??
+      referencedChannelId ??
+      (await this.ensureGeneralSubChannel(input.repositoryId, input.projectId))
+        .id;
     const message: StoredChannelMessage = {
       id: createId("chanmsg"),
       repositoryId: input.repositoryId,
+      channelId,
       projectId: input.projectId,
       kind: input.kind ?? "user",
       authorId: input.authorId,
@@ -2800,11 +2902,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   public async listPinnedChannelMessages(
     repositoryId: string,
     viewerId: string,
+    channelId?: string,
   ): Promise<ChannelMessage[]> {
     return [...this.channelMessages.values()]
       .filter(
         (message) =>
           message.repositoryId === repositoryId &&
+          (channelId === undefined || message.channelId === channelId) &&
           message.pinnedAt !== undefined,
       )
       .sort(
@@ -2900,14 +3004,198 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     this.agentCallSigns.delete(`${userId}\0${provider}`);
   }
 
+  /* ------------------------------------------------- sub-channels ---- */
+
+  public async listSubChannels(repositoryId: string): Promise<SubChannel[]> {
+    return [...this.subChannels.values()]
+      .filter((channel) => channel.repositoryId === repositoryId)
+      .sort(
+        (left, right) =>
+          Number(right.slug === GENERAL_SUB_CHANNEL_SLUG) -
+            Number(left.slug === GENERAL_SUB_CHANNEL_SLUG) ||
+          left.slug.localeCompare(right.slug),
+      )
+      .map((channel) => ({ ...channel }));
+  }
+
+  public async getSubChannel(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannel | undefined> {
+    const channel = this.subChannels.get(channelId);
+    return channel === undefined || channel.repositoryId !== repositoryId
+      ? undefined
+      : { ...channel };
+  }
+
+  public async ensureGeneralSubChannel(
+    repositoryId: string,
+    projectId: ProjectId,
+  ): Promise<SubChannel> {
+    const id = this.generalChannelId(repositoryId);
+    const existing = this.subChannels.get(id);
+    if (existing !== undefined) {
+      return { ...existing };
+    }
+    const channel: SubChannel = {
+      id,
+      repositoryId,
+      projectId,
+      slug: GENERAL_SUB_CHANNEL_SLUG,
+      name: GENERAL_SUB_CHANNEL_SLUG,
+      visibility: "open",
+      createdAt: new Date().toISOString(),
+    };
+    this.subChannels.set(id, channel);
+    return { ...channel };
+  }
+
+  public async createSubChannel(
+    input: CreateSubChannelInput,
+  ): Promise<SubChannel> {
+    const slug = input.slug.trim().toLowerCase();
+    if (slug.length === 0) {
+      throw new Error("A sub-channel needs a name");
+    }
+    for (const channel of this.subChannels.values()) {
+      if (channel.repositoryId === input.repositoryId && channel.slug === slug) {
+        throw new Error("A sub-channel with that name already exists");
+      }
+    }
+    const channel: SubChannel = {
+      id: createId("subchan"),
+      repositoryId: input.repositoryId,
+      projectId: input.projectId,
+      slug,
+      name: input.name?.trim() === "" ? slug : (input.name?.trim() ?? slug),
+      visibility: input.visibility ?? "open",
+      createdAt: new Date().toISOString(),
+      ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
+    };
+    this.subChannels.set(channel.id, channel);
+    return { ...channel };
+  }
+
+  public async updateSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: UpdateSubChannelInput,
+  ): Promise<SubChannel> {
+    const channel = this.subChannels.get(channelId);
+    if (channel === undefined || channel.repositoryId !== repositoryId) {
+      throw new Error("Sub-channel was not found");
+    }
+    if (input.slug !== undefined) {
+      const slug = input.slug.trim().toLowerCase();
+      if (slug.length === 0) {
+        throw new Error("A sub-channel needs a name");
+      }
+      for (const other of this.subChannels.values()) {
+        if (
+          other.id !== channelId &&
+          other.repositoryId === repositoryId &&
+          other.slug === slug
+        ) {
+          throw new Error("A sub-channel with that name already exists");
+        }
+      }
+      channel.slug = slug;
+    }
+    if (input.name !== undefined) {
+      channel.name = input.name.trim() === "" ? channel.slug : input.name.trim();
+    }
+    if (input.visibility !== undefined) {
+      channel.visibility = input.visibility;
+    }
+    return { ...channel };
+  }
+
+  public async deleteSubChannel(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<void> {
+    const channel = this.subChannels.get(channelId);
+    if (channel === undefined || channel.repositoryId !== repositoryId) {
+      return;
+    }
+    if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+      throw new Error("The #general channel cannot be deleted");
+    }
+    await this.deleteChannelMessages(repositoryId, channelId);
+    this.subChannels.delete(channelId);
+    for (const key of [...this.subChannelMembers.keys()]) {
+      if (key.startsWith(`${channelId}\0`)) {
+        this.subChannelMembers.delete(key);
+      }
+    }
+    for (const key of [...this.channelAgentMembers.keys()]) {
+      if (key.startsWith(`${channelId}\0`)) {
+        this.channelAgentMembers.delete(key);
+      }
+    }
+    for (const key of [...this.channelReadCursors.keys()]) {
+      if (key.includes(`\0${channelId}\0`)) {
+        this.channelReadCursors.delete(key);
+      }
+    }
+  }
+
+  public async listSubChannelMembers(
+    channelId: string,
+  ): Promise<SubChannelMember[]> {
+    return [...this.subChannelMembers.values()]
+      .filter((member) => member.channelId === channelId)
+      .sort((left, right) => left.userId.localeCompare(right.userId))
+      .map((member) => ({ ...member }));
+  }
+
+  public async setSubChannelMember(
+    channelId: string,
+    userId: string,
+    isMember: boolean,
+  ): Promise<void> {
+    const key = `${channelId}\0${userId}`;
+    if (isMember) {
+      if (!this.subChannelMembers.has(key)) {
+        this.subChannelMembers.set(key, {
+          channelId,
+          userId,
+          addedAt: new Date().toISOString(),
+        });
+      }
+    } else {
+      this.subChannelMembers.delete(key);
+    }
+  }
+
+  public async isSubChannelMember(
+    channelId: string,
+    userId: string,
+  ): Promise<boolean> {
+    return this.subChannelMembers.has(`${channelId}\0${userId}`);
+  }
+
   public async listChannelAgentMembers(
     repositoryId: string,
-  ): Promise<Array<{ userId: string; provider: string }>> {
-    const result: Array<{ userId: string; provider: string }> = [];
+    channelId?: string,
+  ): Promise<Array<{ userId: string; provider: string; channelId: string }>> {
+    const result: Array<{
+      userId: string;
+      provider: string;
+      channelId: string;
+    }> = [];
     for (const member of this.channelAgentMembers.values()) {
-      if (member.repositoryId === repositoryId) {
-        result.push({ userId: member.userId, provider: member.provider });
+      if (member.repositoryId !== repositoryId) {
+        continue;
       }
+      if (channelId !== undefined && member.channelId !== channelId) {
+        continue;
+      }
+      result.push({
+        userId: member.userId,
+        provider: member.provider,
+        channelId: member.channelId,
+      });
     }
     return result;
   }
@@ -2917,10 +3205,17 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     userId: string,
     provider: string,
     isMember: boolean,
+    channelId?: string,
   ): Promise<void> {
-    const key = this.channelMemberKey(repositoryId, userId, provider);
+    const target = channelId ?? this.generalChannelId(repositoryId);
+    const key = this.channelMemberKey(target, userId, provider);
     if (isMember) {
-      this.channelAgentMembers.set(key, { repositoryId, userId, provider });
+      this.channelAgentMembers.set(key, {
+        repositoryId,
+        channelId: target,
+        userId,
+        provider,
+      });
     } else {
       this.channelAgentMembers.delete(key);
     }
@@ -2942,10 +3237,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     repositoryId: string,
     userId: string,
     at: string,
+    channelId?: string,
   ): Promise<void> {
     // Forward only, matching the persistent stores: a request that arrives
     // out of order must not hand back messages the reader has already seen.
-    const key = this.channelReadKey(repositoryId, userId);
+    const key = this.channelReadKey(
+      repositoryId,
+      userId,
+      channelId ?? this.generalChannelId(repositoryId),
+    );
     const current = this.channelReadCursors.get(key);
     if (current === undefined || current < at) {
       this.channelReadCursors.set(key, at);
@@ -2955,8 +3255,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   public async getChannelReadCursor(
     repositoryId: string,
     userId: string,
+    channelId?: string,
   ): Promise<string | undefined> {
-    return this.channelReadCursors.get(this.channelReadKey(repositoryId, userId));
+    return this.channelReadCursors.get(
+      this.channelReadKey(
+        repositoryId,
+        userId,
+        channelId ?? this.generalChannelId(repositoryId),
+      ),
+    );
   }
 
   public async setChannelMuted(

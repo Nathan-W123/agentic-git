@@ -958,16 +958,14 @@ svg.ui-icon {
 }
 
 /* Anything that carries a count in its corner. `.bell` is the notifications
-   button; the two account buttons wear the direct-message total, for
+   button; the sidebar account control wears the direct-message total, for
    conversations with people who are not in the room on screen. */
 .bell,
-.account-btn,
 .chan-account {
   position: relative;
 }
 
 .bell .dot-badge,
-.account-btn .dot-badge,
 .chan-account .dot-badge {
   position: absolute;
   top: 1px;
@@ -3571,384 +3569,9 @@ svg.ui-icon {
   gap: 7px;
 }
 
-/* -------------------------------------------------------------- agents ---- */
-
-.agents-split {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-
-.agent-list-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.agent-list-head .tabs {
-  border-bottom: none;
-  flex: none;
-}
-
-.agent-list-head .tab {
-  padding: 6px 10px;
-  font-size: 12.5px;
-}
-
-/* Was an inline `style="width:190px"` on the search box's wrapper — moved
-   to a class so the phone breakpoint can override it below. */
-.agent-search-wrap {
-  width: 190px;
-  flex: none;
-}
-
-.agent-rows {
-  padding: 6px;
-  display: grid;
-  gap: 2px;
-}
-
-.agent-row {
-  display: grid;
-  /* Face, everything else, progress, menu.
-     Six columns stood here: the provider, the status, the objective and the
-     repository each claimed one, so a single connection was four lines of
-     type arranged across the width and a reader had to sweep sideways to
-     assemble one sentence. They are now that sentence, under the name. The
-     trailing column is still sized explicitly: left as `auto` it collapses to
-     zero once the flexible columns claim the row, and the menu overflows. */
-  grid-template-columns: auto minmax(0, 1fr) auto 28px;
-  align-items: center;
-  gap: 11px;
-  width: 100%;
-  padding: 9px 11px;
-  border-radius: var(--radius);
-  text-align: left;
-  border: 1px solid transparent;
-  transition: background 0.14s ease, border-color 0.14s ease;
-}
-
-.agent-row:hover {
-  background: var(--bg-hover);
-}
-
-.agent-row.active {
-  background: var(--bg-active);
-  border-color: var(--border-strong);
-}
-
-.agent-row .ar-id {
-  min-width: 0;
-}
-
-.agent-row .ar-name {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.agent-row .ar-name > span {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.agent-row .ar-name .badge {
-  flex: none;
-}
-
-/* Provider, what it is doing, and where — one quiet line. */
-.agent-row .ar-sub {
-  font-size: 11.5px;
-  color: var(--text-3);
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Shared by the row and the card foot, so a run reads the same in both. It
-   collapses when there is nothing running: a 0% bar beside every idle
-   connection is a column of furniture that all says the same nothing. */
-.ar-prog {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ar-prog:empty {
-  display: none;
-}
-
-.ar-prog .bar {
-  width: 58px;
-  flex: none;
-}
-
-.ar-prog .ar-pct {
-  font-size: 11px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-  min-width: 26px;
-  text-align: right;
-}
-
-.agent-panel {
-  display: grid;
-  /* Hero, specs, tabs, body, composer. */
-  grid-template-rows: auto auto auto 1fr auto;
-  min-height: 0;
-  height: calc(100vh - 320px);
-  min-height: 500px;
-}
-
-.agent-panel .tabs {
-  padding: 0 12px;
-}
-
-/* The selected agent's identity, given the room the reference gives a title:
-   the face large enough to recognise, the name at heading size, and the
-   facts about the connection stated underneath rather than crowded beside
-   it. This replaces a 14px name on one line with the controls — which read
-   as another row of the list rather than as the subject of the panel. */
-.agent-hero {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  padding: 16px 12px 14px 18px;
-}
-
-.agent-hero .ah-face {
-  flex: none;
-}
-
-.agent-hero .ah-id {
-  min-width: 0;
-}
-
-.agent-hero .ah-name {
-  font-size: 19px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.agent-hero .ah-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-3);
-  margin-top: 3px;
-  min-width: 0;
-}
-
-/* The dot-separators between provider, presence and visibility. Quieter than
-   the words they part, so the line reads as one fact with qualifiers rather
-   than as three of equal weight. Carried on a class rather than a positional
-   selector: whether the presence dot is drawn depends on the agent, so the
-   separators are not at fixed positions in the row. */
-.agent-hero .ah-meta .sep {
-  color: var(--text-4);
-}
-
-.agent-hero .spacer {
-  flex: 1;
-}
-
-/* What the connection is set to, as a grid of labelled values.
-   This was three `sectionRail`s of chips: nine outlined pills, each with its
-   own glyph and ground, stacked in a column beside a label column — more
-   drawing than the nine short facts inside them were worth, and busier than
-   the conversation it sits above. A micro-label over a plain value states
-   the same thing and lets the values line up in columns, which is what makes
-   them comparable between one agent and the next. */
-.agent-specs {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-  gap: 12px 16px;
-  padding: 2px 18px 16px;
-}
-
-/* The same grid, dropped into a tab body that already has its own padding. */
-.agent-specs.bare {
-  padding: 0;
-}
-
-.agent-specs .spec {
-  min-width: 0;
-}
-
-/* The full-width one: the objective is a sentence, not a value, and wrapping
-   it into a 112px column is how it became an ellipsis in every panel. */
-.agent-specs .spec.wide {
-  grid-column: 1 / -1;
-}
-
-.agent-specs .spec-k {
-  display: block;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--text-4);
-}
-
-.agent-specs .spec-v {
-  display: block;
-  margin-top: 3px;
-  font-size: 12.5px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* The objective is the one value that is prose, so it wraps rather than
-   ellipsising at the first column edge — two lines, then a clamp, which is
-   the length the reference cards give a description. */
-.agent-specs .spec.wide .spec-v {
-  font-size: 13px;
-  line-height: 1.45;
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-}
-
-.agent-specs .spec-v.quiet {
-  color: var(--text-3);
-}
-
-.agent-specs .spec-v.green {
-  color: var(--green);
-}
-
-.agent-specs .spec-v.blue {
-  color: var(--blue);
-}
-
-.agent-specs .spec-v.orange {
-  color: var(--orange);
-}
-
-.task-body {
-  display: grid;
-  gap: 14px;
-  padding: 16px 18px;
-}
-
-.task-body .task-objective {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.4;
-}
-
-.task-body > .bar {
-  width: 100%;
-}
-
-/* The deck: the same connections as the list, laid out as cards. The head
-   above it keeps the filter tabs and the search box it always had, plus the
-   grid/list switch — the list is still the right shape for twenty agents,
-   so it stays rather than being replaced. */
-.agent-deck {
-  padding: 14px;
-}
-
-.agent-deck .tile-face {
-  flex: none;
-}
-
-/* The provider names the maker before the line says what the agent is doing,
-   the way the reference cards do. */
-.agent-deck .tile-sub .tile-by {
-  flex: none;
-  color: var(--text-2);
-  max-width: 45%;
-}
-
-/* The separator between the two hangs off the *second* half, not the first:
-   an ellipsis clips the end of a span, so an `::after` on the provider would
-   disappear exactly when the provider is long enough to need one. */
-.agent-deck .tile-sub .tile-say {
-  flex: 1;
-}
-
-.agent-deck .tile-sub .tile-say::before {
-  content: "· ";
-  color: var(--text-4);
-}
-
-.agent-deck-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* The heading of the connections list, with the roster's five counts set on
-   the same line. They were four `statTile` cards — four bordered boxes, four
-   icons and four lines of encouragement above a list whose own filter tabs
-   already carry the same numbers. The numbers were worth keeping; the boxes
-   were the bloat. */
-.agent-summary {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px 20px;
-  margin-bottom: 12px;
-}
-
-.agent-summary h2 {
-  font-size: 14.5px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.agent-summary .spacer {
-  flex: 1;
-}
-
-.agent-summary .asum {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  white-space: nowrap;
-}
-
-.agent-summary .asum-value {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-}
-
-.agent-summary .asum-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-3);
-}
-
 /* ------------------------------------------------------------- tiles ---- */
 
-/* The card grid, the labelled rail and the chip run below are one set: a
-   surface says what it holds with a quiet label, lays the things out as
-   tiles rather than as rows, and states the small facts about each as chips.
-   Kept general on purpose — My Agents uses all three, the repository grid
-   uses the add tile, and nothing here knows what an agent is. */
+/* Shared card grid primitives used by repository and connection surfaces. */
 
 .tile-grid {
   display: grid;
@@ -5311,6 +4934,7 @@ button.chip.lg:hover {
    rather than a grid row because a heading is one line of small caps beside a
    20px button — a ceiling the content cannot reach is near enough to the real
    height that the fold reads as immediate at either end. */
+.chan-sec-channels,
 .chan-sec-people,
 .chan-sec-agents {
   max-height: 60px;
@@ -5547,7 +5171,6 @@ button.chip.lg:hover {
   .chan-row:active,
   .menu-item:active,
   .mention-item:active,
-  .agent-row:active,
   .tree-row:active,
   .roster-row-main:active,
   .icon-btn:active,
@@ -7178,7 +6801,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: 2px;
 }
 
 .message-fold-body {
@@ -7195,7 +6818,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   left: 0;
   right: 0;
   bottom: 0;
-  height: 2.4em;
+  height: 2em;
   pointer-events: none;
   background: linear-gradient(
     to bottom,
@@ -7205,6 +6828,11 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 .message-fold-toggle {
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
+  margin-left: -3px;
+  margin-top: -1px;
   border: none;
   background: transparent;
   color: var(--accent);
@@ -7212,10 +6840,20 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   font-weight: 500;
   padding: 0;
   cursor: pointer;
+  text-align: left;
+  text-decoration: none;
 }
 
 .message-fold-toggle:hover {
-  text-decoration: underline;
+  text-decoration: none;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-size: 100% 1px;
+  background-position: 0 calc(100% - 1px);
+  background-repeat: no-repeat;
+}
+
+.cmsg-thread-route:has(.message-fold) .cmsg-thread-link {
+  margin-top: 2px;
 }
 
 .message-fold-toggle:focus-visible {
@@ -11187,16 +10825,11 @@ dialog.modal[open]::backdrop {
 }
 
 @media (max-width: 1180px) {
-  .agents-split,
   .coord-grid,
   .coord-cols-3 {
     grid-template-columns: 1fr;
   }
 
-  .agent-panel {
-    height: auto;
-    min-height: 520px;
-  }
 
   .code-shell {
     grid-template-columns: var(--tree-w) 1fr;
@@ -11348,7 +10981,7 @@ dialog.modal[open]::backdrop {
     width: 256px;
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents),
+  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents),
   .chats-shell.chan-collapsed .chan-roster {
     opacity: 0;
     visibility: hidden;
@@ -11356,7 +10989,7 @@ dialog.modal[open]::backdrop {
     transform: translateY(-10px);
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents) {
+  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents) {
     max-height: 0;
     padding-top: 0;
     padding-bottom: 0;
@@ -11371,6 +11004,7 @@ dialog.modal[open]::backdrop {
      `chan-collapsed` is removed first and the base transitions above remain in
      force, so the sections still unfold downward. */
   .chats-shell.chan-folding.chan-collapsed :is(
+      .chan-sec-channels,
       .chan-sec-people,
       .chan-sec-agents,
       .chan-roster
@@ -11696,23 +11330,12 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
-  /* The row no longer needs a tablet layout of its own. It was six columns
-     wide and had to be folded into three stacked areas here; two columns of
-     content and a menu fit at any width this tier covers, so the desktop
-     shape simply holds. */
-  .agent-row .ar-prog .bar {
-    width: 44px;
-  }
 }
 
 /* ----------------------------------------------------------- phone ---- */
 /* Real phone widths — iPhone SE (375) through Pro Max (430), common Android
-   widths down to 360. The 900px tier above stays tablet-shaped (it already
-   does real work collapsing the outer nav, the Code chat drawer, and the
-   agent-row layout); this tier is additive rather than a lower number for
-   the same rules, because "channel list + roster fixed at 268px" and
-   "message composer with two inline mini-selects" are still fine at 820px
-   and are not fine at 380px. */
+   widths down to 360. The 900px tier above stays tablet-shaped because its
+   outer navigation and Code chat drawer still fit at 820px and not at 380px. */
 @media (max-width: 600px) {
   .channel-rail {
     width: 52px;
@@ -12147,42 +11770,12 @@ dialog.modal[open]::backdrop {
 
   .chan-row,
   .roster-row-main,
-  .agent-row,
   .tree-row,
   .mention-item,
   .menu-item {
     min-height: 44px;
   }
 
-  /* My Agents' list header: four filter tabs, a spacer, and a 190px-wide
-     search box, all on one row on desktop. The tabs alone can run past a
-     phone's width before the search box is even considered, so the whole
-     row wraps and the search box — the widest, least essential-to-see-first
-     item — drops to a full-width row of its own. */
-  .agent-list-head {
-    flex-wrap: wrap;
-    row-gap: 8px;
-  }
-
-  .agent-search-wrap {
-    flex: 1 0 100%;
-    width: auto;
-  }
-
-  /* The panel's hero and its specs, at a width where a 19px name and three
-     icon buttons no longer fit on one line. The hero wraps its controls under
-     the name; the spec grid holds two columns rather than letting `auto-fit`
-     put four 112px values across a 375px screen. */
-  .agent-hero {
-    flex-wrap: wrap;
-    row-gap: 10px;
-    padding: 16px 14px 12px;
-  }
-
-  .agent-specs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 2px 14px 14px;
-  }
 
   .rail {
     grid-template-columns: minmax(0, 1fr);
@@ -12193,15 +11786,6 @@ dialog.modal[open]::backdrop {
     padding-top: 0;
   }
 
-  /* The bar goes; the percentage beside it says the same thing in a quarter
-     of the width, and a phone row needs that width for the name. */
-  .agent-row .ar-prog .bar {
-    display: none;
-  }
-
-  .agent-deck {
-    padding: 12px;
-  }
 
   /* Every screen's title row (`.page-head`) — icon, heading, and a trailing
      primary action like "Add Agent" or "Create new repository" — is a
@@ -12848,6 +12432,35 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
+/* Parked work, drawn like the held state it is a cousin of — same wash, same
+   leading edge — because both mean "stopped, and waiting on you". The glyph
+   is what tells them apart at a glance, and it is the same pause mark the
+   thread header's own button carries, so the list and the control agree
+   about what the reader is looking at. */
+.thread-item-paused {
+  background: var(--orange-wash);
+  box-shadow: inset 2px 0 0 var(--orange);
+}
+
+.thread-item-paused:hover {
+  background: var(--orange-wash);
+}
+
+.ti-paused {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  color: var(--orange);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ti-paused svg {
+  width: 11px;
+  height: 11px;
+}
+
 /* The same fact on the channel row the thread hangs off, where a reader who
    never opens the thread still meets it — as one dot beside the reply count,
    not the bordered amber banner that used to take the line underneath. The
@@ -13058,7 +12671,7 @@ dialog.modal[open]::backdrop {
   padding-top: var(--safe-top);
 }
 
-/* The generic screen header — Settings, Repositories, Agents. It sat out
+/* The generic screen header respects the top safe area. It sat out
    the first safe-area pass because browser chrome kept it clear; installed
    to a home screen (standalone, translucent status bar) the page draws
    under the clock on every screen, not only the chat ones. */
@@ -13177,12 +12790,6 @@ dialog.modal[open]::backdrop {
   min-height: 100dvh;
 }
 
-/* The `vh` straggler, for the same reason as the shell above. `.chan-list` is
-   no longer here: it has no height of its own to mis-size now that the whole
-   sidebar scrolls as one — see `.chan-scroll`. */
-.agent-panel {
-  height: calc(100dvh - 320px);
-}
 
 /* A flick that reaches the end of a drawer or the transcript must stop
    there, not hand its momentum to whatever scroller is behind it — a
@@ -13253,12 +12860,11 @@ dialog.modal[open]::backdrop {
   gap: 4px;
 }
 
-/* The two right-hand controls share one optical box. The generic icon and
-   avatar primitives intentionally size their contents differently; owning
-   the button geometry here keeps those contents centred and prevents flex
-   shrink from distorting either control when the window gets narrow. */
-.topbar-icon-btn,
-.topbar-account-btn {
+/* The help control owns its optical box. The generic icon primitive sizes
+   its contents differently from the bar around it; owning the button
+   geometry here keeps the glyph centred and prevents flex shrink from
+   distorting the control when the window gets narrow. */
+.topbar-icon-btn {
   flex: 0 0 34px;
   width: 34px;
   height: 34px;
@@ -13270,15 +12876,6 @@ dialog.modal[open]::backdrop {
 .topbar-icon-btn svg {
   width: 18px;
   height: 18px;
-}
-
-.topbar-account-btn {
-  overflow: visible;
-}
-
-.topbar-account-btn .avatar {
-  width: 30px !important;
-  height: 30px !important;
 }
 
 .topbar-actions .health {
@@ -13359,20 +12956,47 @@ dialog.modal[open]::backdrop {
   padding-top: 0;
 }
 
+/* The switcher is not a region of the workspace below it — it is the bottom of
+   the application bar, turned on its side. It carries the bar's own surface
+   and, like the bar, draws no boundary of its own: the two are one continuous
+   L of chrome down the left of the window, which is why the mark in the bar
+   stands on this column's centre line rather than near it.
+
+   No right-hand hairline here any more. The seam between the switcher and the
+   navigation belongs to the navigation now, so that it can turn the corner
+   into the line under the bar instead of running past it. */
 .channel-rail {
   border: 0;
-  border-right: 1px solid var(--border-soft);
   border-radius: 0;
   background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg));
 }
 
+/* Where the workspace starts. This is the top-left corner of everything that
+   is not chrome, so it owns three edges of one boundary: the hairline down its
+   left, the hairline across its top — which the conversation continues to the
+   far side of the window — and the rounding where the two meet. The bar above
+   draws no bottom border precisely so that this is the only line there is; a
+   bar with its own would have made two, a pixel apart, which is the seam that
+   left the navigation and the bar reading as separate slabs.
+
+   Its right-hand hairline is the other thing this panel owns: the one line
+   that says where navigation ends and the conversation begins. Square at that
+   corner, and square at both corners along the bottom — the rounding is the
+   start of the boundary, not decoration applied to a column. */
 .chan-sidebar {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   border: 0;
+  border-top: 1px solid var(--border-soft);
+  border-left: 1px solid var(--border-soft);
   border-right: 1px solid var(--border-soft);
-  border-radius: 0;
+  border-radius: var(--radius-xl) 0 0 0;
 }
 
+/* With one workspace there is no switcher to stand beside, so the navigation
+   is against the window itself. A rounded corner needs something to be
+   rounded away from and an edge needs something to be an edge of; against the
+   frame of the window there is neither, so the boundary is the top line alone,
+   run straight across from the corner. */
 .chats-shell.no-rail > .chan-sidebar,
 .chats-shell.no-rail > .chan-main {
   border-radius: 0;
@@ -13422,8 +13046,14 @@ dialog.modal[open]::backdrop {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* The conversation is the rest of that same surface: the sidebar's line
+   across its top, carried on to the far edge of the window, and no corner or
+   edge of its own — the hairline on its left is the navigation's, and the
+   window is its right. One line under the bar, from the rounded corner to the
+   end of the screen. */
 .chan-main {
   border: 0;
+  border-top: 1px solid var(--border-soft);
   border-radius: 0;
 }
 
@@ -13571,15 +13201,33 @@ dialog.modal[open]::backdrop {
   to { opacity: 0; }
 }
 
-/* One secondary context. It may be resized only while the primary
-   conversation can keep its usable floor; intermediate layouts overlay it. */
+/* One secondary context, and the one surface here that is not part of the
+   frame. A thread is opened, dragged wider and closed again; a region of the
+   boundary cannot come and go, so this is a card instead — its own gutter on
+   every side, its own outline, and the rounding on all four corners. Stripped
+   of them it was a fourth column butted against the conversation, which is
+   what made stepping aside into a thread read as the channel changing.
+
+   The gutter is why the conversation's top line stops short of the window
+   whenever a thread is open: the line belongs to the frame, and the card is
+   in front of it.
+
+   It may be resized only while the primary conversation can keep its usable
+   floor; intermediate layouts overlay it instead. */
 .chats-shell > .thread-panel {
-  margin-left: 0;
-  border-block: 0;
-  border-right: 0;
-  border-radius: 0;
+  margin: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
   padding-top: 0;
   box-shadow: -14px 0 30px -24px rgb(0 0 0 / 55%);
+}
+
+/* Cards share the gutter rather than each bringing one: the first panel's
+   right margin is already the whole gap to the second, so a left margin there
+   as well would set the pair twice as far apart as either is from the
+   conversation. */
+.chats-shell > .thread-panel + .thread-panel {
+  margin-left: 0;
 }
 
 .thread-head {
@@ -13661,6 +13309,11 @@ dialog.modal[open]::backdrop {
 }
 
 @media (max-width: 1180px) and (min-width: 601px) {
+  /* No room to set a card down in. Here the panel slides over the conversation
+     and holds the whole height of the window against its right edge, so the
+     gutter and the rounding go: a card cropped by three sides of the screen is
+     not a card, and rounded corners against the window frame are just chips
+     out of it. One straight edge where it meets what it covers. */
   .chats-shell > .thread-panel {
     position: absolute;
     top: 0;
@@ -13669,7 +13322,10 @@ dialog.modal[open]::backdrop {
     width: min(var(--panel-w, 420px), calc(100% - 72px));
     max-width: calc(100% - 72px);
     z-index: 20;
+    margin: 0;
+    border: 0;
     border-left: 1px solid var(--border-soft);
+    border-radius: 0;
   }
 }
 
@@ -13706,8 +13362,7 @@ dialog.modal[open]::backdrop {
     height: 44px;
   }
 
-  .topbar-icon-btn,
-  .topbar-account-btn {
+  .topbar-icon-btn {
     flex-basis: 44px;
     width: 44px;
     height: 44px;
@@ -13759,11 +13414,17 @@ dialog.modal[open]::backdrop {
     transform: none;
   }
 
+  /* A drawer rather than a column of the frame: it slides in over the
+     conversation and slides out again, so it draws none of the boundary the
+     desktop navigation carries — no corner, no top line, and no left edge
+     against a switcher that is itself off-canvas here. */
   .chats-shell .chan-sidebar {
     top: calc(54px + var(--safe-top));
     left: 52px;
     width: calc(100vw - 52px);
     max-width: none;
+    border-top: 0;
+    border-left: 0;
     border-radius: 0;
     transform: translateX(calc(-100% - 52px));
     z-index: 77;
@@ -13795,6 +13456,7 @@ dialog.modal[open]::backdrop {
     grid-row: 1 / span 3;
   }
 
+  /* The thread is the screen here, so it has no edges of its own at all. */
   .chats-shell > .thread-panel {
     position: fixed;
     inset: calc(54px + var(--safe-top)) 0 0;
@@ -13802,7 +13464,9 @@ dialog.modal[open]::backdrop {
     max-width: 100vw;
     min-width: 0;
     z-index: 80;
+    margin: 0;
     border: 0;
+    border-radius: 0;
   }
 
   .thread-panel.panel-entering {
@@ -13814,8 +13478,12 @@ dialog.modal[open]::backdrop {
     width: 100%;
   }
 
+  /* The line under the bar stays whether or not there is a switcher: on a
+     phone the conversation is the only thing under it, so that hairline is the
+     whole of the boundary. */
   .chats-shell.no-rail > .chan-main {
     border: 0;
+    border-top: 1px solid var(--border-soft);
     border-radius: 0;
   }
 }
@@ -14398,6 +14066,12 @@ dialog.modal[open]::backdrop {
   padding-top: 12vh;
 }
 
+/* Search opens from the top bar, so its results continue directly beneath
+   that bar instead of appearing as a detached modal halfway down the screen. */
+.qs-layer-search {
+  padding-top: calc(48px + var(--safe-top));
+}
+
 .qs-card {
   position: relative;
   width: min(560px, calc(100vw - 32px));
@@ -14509,4 +14183,184 @@ dialog.modal[open]::backdrop {
   font-size: 11.5px;
   color: var(--text-3);
   text-align: center;
+}
+
+/* ------------------------------------------------------- sub-channels ---- */
+
+/* One room in the sidebar's channel list.
+   A row rather than a single button, because an administrator gets a gear
+   beside the name and everybody else does not — and the name must stay one
+   full-width target in both cases rather than shrinking when the gear
+   appears. The gear is only revealed on hover or focus, so a list of rooms
+   reads as a list of names. */
+.chan-channel-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+
+.chan-channel-row.on,
+.chan-channel-row:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+
+.chan-channel {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chan-channel-row.on .chan-channel {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The hash and the lock occupy the same box, so a private room's name starts
+   exactly where an open one's does and the column of names stays straight. */
+.chan-channel-sigil {
+  flex: 0 0 auto;
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.62;
+  font-size: 13px;
+}
+
+.chan-channel-sigil svg {
+  width: 13px;
+  height: 13px;
+}
+
+.chan-channel-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-channel-note {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.chan-channel-menu {
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity var(--motion-pop, 0.12s) ease;
+}
+
+.chan-channel-row:hover .chan-channel-menu,
+.chan-channel-menu:focus-visible {
+  opacity: 0.8;
+}
+
+/* The composer's replacement in a room somebody can read but not post in.
+   Sized like the bar it stands in for so opening such a channel does not move
+   the transcript above it. */
+.chan-composer-locked {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  margin: 0 12px 12px;
+  padding: 0 14px;
+  border: 1px solid var(--border, #34302d);
+  border-radius: 14px;
+  background: var(--surface-1, #2c2926);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.chan-composer-locked svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  opacity: 0.7;
+}
+
+/* The channel settings popover. */
+.sub-channel-manage .pop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 8px;
+}
+
+.chan-channel-vis {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sub-channel-manage .pop-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 8px;
+}
+
+.sub-channel-manage .pop-sec {
+  padding: 6px 2px 4px;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.sub-channel-members {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.sub-channel-member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sub-channel-member:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.05));
+}
+
+.sub-channel-member-state {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.sub-channel-member.on .sub-channel-member-state {
+  color: var(--accent, currentColor);
 }

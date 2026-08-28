@@ -877,6 +877,110 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: paused work is unleasable, resumable, and abandonable`, async () => {
+    // Pause has to live in the status for the same reason the hold does:
+    // every lease query selects on `submitted`, so anything short of a real
+    // status change leaves the "stopped" task free to be picked up by the
+    // next unrelated dispatch in the repository.
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "pauser@example.com",
+        displayName: "Pauser",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "worker-pause",
+        adapters: ["codex"],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const submit = async (objective: string) =>
+        await store.submitTask({
+          repositoryId: REPOSITORY.id,
+          objective,
+          agentId: "codex",
+          validationCommands: [],
+        });
+
+      // Queued work pauses.
+      const queued = await submit("tidy the imports");
+      const pausedQueued = await store.pauseSubmittedTask(queued.id);
+      assert.equal(pausedQueued?.status, "paused");
+      // Non-terminal: a paused task has not completed, and saying it did
+      // would put it in everyone's history of finished work.
+      assert.equal(pausedQueued?.completedAt, undefined);
+
+      // The queue cannot see it, even when it is the only task there is,
+      // and not by name either.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          repositoryId: REPOSITORY.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          taskId: queued.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+
+      // Resuming is the test as well as the write, so two presses of play
+      // produce one queued task rather than two runs of the same work.
+      const resumed = await store.resumePausedTask(queued.id);
+      assert.equal(resumed?.status, "submitted");
+      assert.equal(resumed?.claimedAt, undefined);
+      assert.equal(await store.resumePausedTask(queued.id), undefined);
+      assert.equal(await store.resumePausedTask("task_missing"), undefined);
+
+      // Running work pauses too — that is the case the button exists for.
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: "rev_1",
+        ttlMs: 60_000,
+      });
+      assert.equal(leased?.task.id, queued.id);
+      assert.equal((await store.pauseSubmittedTask(queued.id))?.status, "paused");
+
+      // A paused task can still be given up on, which is the one ending it
+      // has left; without it, pausing would be a way to strand work forever.
+      const abandoned = await store.cancelSubmittedTask(queued.id);
+      assert.equal(abandoned.status, "cancelled");
+
+      // Nothing settled is pausable: a pause racing a task's own ending is
+      // answered as "there was nothing to pause", not as an error.
+      assert.equal(await store.pauseSubmittedTask(queued.id), undefined);
+      assert.equal(await store.pauseSubmittedTask("task_missing"), undefined);
+
+      // Nor is a held plan, which is already stopped and waiting on a person.
+      const held = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "rewrite the parser",
+        agentId: "codex",
+        validationCommands: [],
+        planOnly: true,
+      });
+      assert.equal(await store.pauseSubmittedTask(held.id), undefined);
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "planned" })).length,
+        1,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a thread remembers that its ending went elsewhere`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -4890,6 +4994,244 @@ for (const backend of backends) {
       assert.equal(
         (await store.getCatchUpCursor(DEFAULT_PROJECT_ID, alice.id))?.seenAt,
         "2026-02-01T12:00:00.000Z",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a repository's rooms divide its channel without losing anything`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_rooms",
+        path: "/rooms.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "rooms-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+
+      // A message written by anything that predates sub-channels names no
+      // room. It has to land somewhere real, and that somewhere is #general.
+      const first = await store.appendChannelMessage({
+        repositoryId: "repo_rooms",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Said before there was more than one room.",
+      });
+      const general = await store.ensureGeneralSubChannel(
+        "repo_rooms",
+        DEFAULT_PROJECT_ID,
+      );
+      assert.equal(general.slug, "general");
+      assert.equal(general.visibility, "open");
+      assert.equal(first.channelId, general.id);
+
+      // Asking twice is the same room, not a second one with the same name.
+      assert.equal(
+        (await store.ensureGeneralSubChannel("repo_rooms", DEFAULT_PROJECT_ID))
+          .id,
+        general.id,
+      );
+      assert.deepEqual(
+        (await store.listSubChannels("repo_rooms")).map(
+          (channel) => channel.slug,
+        ),
+        ["general"],
+      );
+
+      const design = await store.createSubChannel({
+        repositoryId: "repo_rooms",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "design",
+        visibility: "private",
+        createdBy: alice.id,
+      });
+      assert.equal(design.visibility, "private");
+      // #general sorts first however the rooms were created, so opening a
+      // repository always lands somewhere everybody can be.
+      assert.deepEqual(
+        (await store.listSubChannels("repo_rooms")).map(
+          (channel) => channel.slug,
+        ),
+        ["general", "design"],
+      );
+      await assert.rejects(
+        store.createSubChannel({
+          repositoryId: "repo_rooms",
+          projectId: DEFAULT_PROJECT_ID,
+          slug: "design",
+        }),
+        /already exists/u,
+      );
+
+      const said = await store.appendChannelMessage({
+        repositoryId: "repo_rooms",
+        channelId: design.id,
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Said in the second room.",
+      });
+      assert.equal(said.channelId, design.id);
+
+      // Each room reads only its own lines; the repository as a whole still
+      // reads all of them, which is what the task narrator and the socket
+      // fan-out mean when they ask without naming one.
+      assert.deepEqual(
+        (
+          await store.listChannelMessages("repo_rooms", alice.id, {
+            channelId: general.id,
+          })
+        ).map((message) => message.id),
+        [first.id],
+      );
+      assert.deepEqual(
+        (
+          await store.listChannelMessages("repo_rooms", alice.id, {
+            channelId: design.id,
+          })
+        ).map((message) => message.id),
+        [said.id],
+      );
+      assert.equal(
+        (await store.listChannelMessages("repo_rooms", alice.id)).length,
+        2,
+      );
+      assert.equal(
+        (await store.countChannelMessages("repo_rooms", design.id)).messages,
+        1,
+      );
+      assert.equal(
+        (await store.countChannelMessages("repo_rooms")).messages,
+        2,
+      );
+
+      // An answer belongs beside the question, so a writer that names no room
+      // inherits the room of what it is answering rather than falling back to
+      // #general and taking a private conversation with it.
+      const answer = await store.appendChannelMessage({
+        repositoryId: "repo_rooms",
+        projectId: DEFAULT_PROJECT_ID,
+        kind: "agent",
+        authorId: "user_1:anthropic",
+        content: "On it.",
+        referencedMessageId: said.id,
+      });
+      assert.equal(answer.channelId, design.id);
+
+      // Pins, read cursors and agent assignment are all per room.
+      await store.toggleChannelMessagePin("repo_rooms", said.id, alice.id);
+      assert.deepEqual(
+        (
+          await store.listPinnedChannelMessages(
+            "repo_rooms",
+            alice.id,
+            general.id,
+          )
+        ).map((message) => message.id),
+        [],
+      );
+      assert.deepEqual(
+        (
+          await store.listPinnedChannelMessages(
+            "repo_rooms",
+            alice.id,
+            design.id,
+          )
+        ).map((message) => message.id),
+        [said.id],
+      );
+
+      await store.markChannelRead(
+        "repo_rooms",
+        alice.id,
+        "2026-03-01T10:00:00.000Z",
+        general.id,
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_rooms", alice.id, general.id),
+        "2026-03-01T10:00:00.000Z",
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_rooms", alice.id, design.id),
+        undefined,
+      );
+
+      await store.setChannelAgentMember(
+        "repo_rooms",
+        alice.id,
+        "anthropic",
+        true,
+        design.id,
+      );
+      assert.deepEqual(
+        (await store.listChannelAgentMembers("repo_rooms", general.id)).map(
+          (member) => member.provider,
+        ),
+        [],
+      );
+      assert.deepEqual(
+        (await store.listChannelAgentMembers("repo_rooms", design.id)).map(
+          (member) => member.provider,
+        ),
+        ["anthropic"],
+      );
+
+      // Membership is per person and per room, and is what "private" is
+      // enforced on.
+      assert.equal(await store.isSubChannelMember(design.id, alice.id), false);
+      await store.setSubChannelMember(design.id, alice.id, true);
+      assert.equal(await store.isSubChannelMember(design.id, alice.id), true);
+      assert.deepEqual(
+        (await store.listSubChannelMembers(design.id)).map(
+          (member) => member.userId,
+        ),
+        [alice.id],
+      );
+      await store.setSubChannelMember(design.id, alice.id, false);
+      assert.equal(await store.isSubChannelMember(design.id, alice.id), false);
+
+      const renamed = await store.updateSubChannel(
+        "repo_rooms",
+        design.id,
+        { slug: "Design Review", visibility: "open" },
+      );
+      assert.equal(renamed.slug, "design review");
+      assert.equal(renamed.visibility, "open");
+
+      // #general is where every unaddressed message falls back to, so a
+      // repository must never be left without one.
+      await assert.rejects(
+        store.deleteSubChannel("repo_rooms", general.id),
+        /cannot be deleted/u,
+      );
+
+      // Deleting a room takes its transcript with it and leaves the rest of
+      // the repository exactly as it was.
+      await store.deleteSubChannel("repo_rooms", design.id);
+      assert.deepEqual(
+        (await store.listSubChannels("repo_rooms")).map(
+          (channel) => channel.slug,
+        ),
+        ["general"],
+      );
+      assert.deepEqual(
+        (await store.listChannelMessages("repo_rooms", alice.id)).map(
+          (message) => message.id,
+        ),
+        [first.id],
+      );
+      assert.deepEqual(
+        await store.listChannelAgentMembers("repo_rooms"),
+        [],
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_rooms", alice.id, general.id),
+        "2026-03-01T10:00:00.000Z",
       );
     } finally {
       await store.close();

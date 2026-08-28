@@ -18,6 +18,11 @@
 
 import {
   activeChannelId,
+  activeSubChannelId,
+  canManageSubChannels,
+  canPostInActiveSubChannel,
+  subChannelLabel,
+  subChannelsFor,
   activeTasks,
   agentForTask,
   agentStatus,
@@ -82,7 +87,9 @@ api,
   taskBelongsToAgent,
   taskProgress,
   threadAwaitsGoAhead,
+  threadIsPaused,
   threadIsWorking,
+  threadTask,
   threadTitle,
   threadTitleReply,
   typingOn,
@@ -106,6 +113,7 @@ import {
 import {
   agentFace,
   agentLabelOf,
+  animateMotion,
   avatar,
   chime,
   clockTime,
@@ -1711,6 +1719,47 @@ function chanCrown(activeRepositoryId) {
   </header>`;
 }
 
+/**
+ * One room in the channel list.
+ *
+ * A lock instead of a hash for a private room, which is the one thing the
+ * name alone cannot say — and the only place the distinction is drawn, since
+ * a private room the reader is not in never reaches this function at all.
+ * The gear only appears for somebody who can actually administer it, so the
+ * row stays a single target for everybody else.
+ */
+function subChannelRow(repositoryId, channel, active) {
+  const manage = canManageSubChannels(repositoryId);
+  const label = `#${channel.slug}`;
+  return `<div class="chan-channel-row${active ? " on" : ""}">
+    <button type="button" class="chan-channel"
+      data-act="sub-channel-open" data-value="${esc(channel.id)}"
+      aria-current="${active ? "page" : "false"}"
+      title="Open ${esc(label)}">
+      <span class="chan-channel-sigil" aria-hidden="true">${
+        channel.visibility === "private" ? icon("lock") : "#"
+      }</span>
+      <span class="chan-channel-name">${esc(channel.slug)}</span>
+      ${
+        channel.canPost === false
+          ? `<span class="chan-channel-note" title="You can read this channel but not post in it">read&nbsp;only</span>`
+          : ""
+      }
+    </button>
+    ${
+      manage
+        ? `<button type="button" class="icon-btn chan-channel-menu"
+             data-act="sub-channel-menu" data-value="${esc(channel.id)}"
+             aria-haspopup="dialog"
+             aria-expanded="${state.subChannelMenu === channel.id}"
+             title="Channel settings" aria-label="Settings for ${esc(label)}">
+             ${icon("gear")}
+           </button>`
+        : ""
+    }
+  </div>`;
+}
+
 function chanSidebar(activeRepositoryId) {
   const roster = channelAgentsFor(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
@@ -1722,6 +1771,8 @@ function chanSidebar(activeRepositoryId) {
   const user = currentUserName();
 
   const channel = esc(activeRepositoryId ?? "");
+  const channels = subChannelsFor(activeRepositoryId);
+  const openChannelId = activeSubChannelId(activeRepositoryId);
   const destination = primaryDestinationForWorkspace(activeRepositoryId);
   const hidden = phoneLayout() && state.chanSidebarOpen !== true;
   return `<aside class="chan-sidebar" aria-label="${esc(
@@ -1765,6 +1816,27 @@ function chanSidebar(activeRepositoryId) {
            height nobody has measured: the row of the grid goes to zero, the
            block inside it keeps its own height, and the box crops the
            difference. -->
+      ${
+        // The room list, above the people in them — a reader picks where to
+        // be before they look at who is there. Drawn only once the list has
+        // arrived and only when there is more than one room, so a repository
+        // nobody has divided looks exactly as it did before sub-channels
+        // existed: no heading, no list, one conversation.
+        channels.length > 1 || canManageSubChannels(activeRepositoryId)
+          ? `${section("Channels", "sub-channel-new", channel, "Create a channel", "chan-sec-channels", "channels", channels.length)}
+      <div class="chan-roster chan-roster-channels${
+        state.rosterSectionsOpen.channels === false ? " chan-roster-closed" : ""
+      }">
+        <div class="chan-roster-inner">
+          ${channels
+            .map((entry) =>
+              subChannelRow(activeRepositoryId, entry, entry.id === openChannelId),
+            )
+            .join("")}
+        </div>
+      </div>`
+          : ""
+      }
       ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people", "people", people.length)}
       <div class="chan-roster chan-roster-people${
         state.rosterSectionsOpen.people === false ? " chan-roster-closed" : ""
@@ -2215,10 +2287,17 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
       <span class="ctl-copy">
         <span class="ctl-summary-main">
           <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
-            threadAwaitsGoAhead(entry)
-              ? `<span class="ctl-held" aria-hidden="true"></span>
+            threadIsPaused(entry)
+              ? // A thread somebody parked reads, from the room, exactly like
+                // one nobody has looked at yet: no dots, no ending, nothing.
+                // The same dot the hold uses, because both mean the thread is
+                // stopped until this reader does something about it.
+                `<span class="ctl-held" aria-hidden="true"></span>
+          <span class="sr-only">Paused</span>`
+              : threadAwaitsGoAhead(entry)
+                ? `<span class="ctl-held" aria-hidden="true"></span>
           <span class="sr-only">Waiting for your go-ahead</span>`
-              : ""
+                : ""
           }${
             // Beside the count rather than under it: a phase line that comes
             // and goes with the run took a second row of the message with it,
@@ -4355,6 +4434,25 @@ function composer(repositoryId) {
       : channelMessagesFor(repositoryId).find(
           (entry) => entry.id === state.composerThreadId,
         );
+  // Whether the arrow has anything to act on. Drawn disabled rather than
+  // merely drawn quieter, so the state is programmatic as well as visible —
+  // and kept true between renders by `syncComposerControls`, since typing
+  // deliberately does not rebuild this screen.
+  const sendable =
+    draftText().trim() !== "" || draftAttachments(repositoryId).length > 0;
+  // Reading and posting come apart in an open channel: everybody in the
+  // project can follow it, only its members can speak in it. The bar is
+  // replaced rather than disabled, because a disabled composer says "not
+  // right now" and this is "not you" — with the thing to do about it.
+  if (!canPostInActiveSubChannel(repositoryId)) {
+    const label = subChannelLabel(repositoryId, activeSubChannelId(repositoryId));
+    return `<div class="chan-composer-wrap">
+      <div class="chan-composer-locked">
+        ${icon("lock")}
+        <span>You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.</span>
+      </div>
+    </div>`;
+  }
   return `<div class="chan-composer-wrap${mentionActiveFor("channel") ? " mention-active" : ""}">
     <div data-composer-suggestions>${composerSuggestions(repositoryId, "channel")}</div>
     ${composerThreadChip(repositoryId)}
@@ -4378,7 +4476,17 @@ function composer(repositoryId) {
           enterkeyhint="send"
           placeholder="${
             state.composerThreadId === undefined
-              ? "Message Main chat"
+              ? esc(
+                  // The room, when the workspace has more than one; the
+                  // workspace itself when it does not, so an undivided
+                  // repository reads exactly as it always did.
+                  subChannelsFor(repositoryId).length > 1
+                    ? `Message ${subChannelLabel(
+                        repositoryId,
+                        activeSubChannelId(repositoryId),
+                      )}`
+                    : `Message #${repositoryLabel(repositoryId)}`,
+                )
               : replyTarget?.kind === "user" &&
                   replyTarget.taskId === undefined
                 ? "Write a reply..."
@@ -4402,7 +4510,9 @@ function composer(repositoryId) {
           : ""}
         <span class="spacer"></span>
         ${composerCount("channel", state.chatDraft)}
-        <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+        <button class="send-btn" type="submit" title="Send"${
+          sendable ? "" : " disabled"
+        }>${icon("arrowRight")}</button>
       </div>
     </form>
   </div>`;
@@ -4975,18 +5085,24 @@ function threadListPanel(repositoryId) {
   const summaries = threads.map((entry) => {
     const working = threadIsWorking(entry);
     const waiting = threadAwaitsGoAhead(entry);
+    const paused = threadIsPaused(entry);
     const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+    // Paused work is emphatically not over — it is waiting on the person who
+    // parked it — so it stays in the live half of the list where they will
+    // find it again. Without this it fell into "Completed" the moment its
+    // first turn had landed, which is where paused work goes to be forgotten.
     const ended =
       !working &&
       !waiting &&
+      !paused &&
       (["integrated", "failed", "cancelled"].includes(task?.status) ||
         (entry.replies ?? []).some(isThreadEnding));
-    return { entry, working, waiting, ended };
+    return { entry, working, waiting, paused, ended };
   });
   const active = summaries.filter((summary) => !summary.ended);
   const ended = summaries.filter((summary) => summary.ended);
   const manageable = canManageRepository(repositoryId);
-  const renderThread = ({ entry, working, waiting }, finished = false) => {
+  const renderThread = ({ entry, working, waiting, paused }, finished = false) => {
     const replies = planTranscriptReplies(entry);
     const titled = threadTitleReply(entry);
     const count = replies.filter(
@@ -5025,16 +5141,18 @@ function threadListPanel(repositoryId) {
     const title = threadTitle(entry);
     const status = working
       ? threadActivityLabel(entry)
-      : waiting
-        ? "Waiting for you"
-        : finished
-          ? "Completed"
-          : "Pending";
+      : paused
+        ? "Paused"
+        : waiting
+          ? "Waiting for you"
+          : finished
+            ? "Completed"
+            : "Pending";
     const said = threadSaidCount(count);
     const updated = relativeTime(lastActivity(entry));
     const context = `${status} — ${title} — started by ${creator.name}, ${said}, updated ${updated}`;
     return `<div class="thread-item-row">
-      <button type="button" class="thread-item${finished ? " thread-item-ended" : ""}${!finished && working ? " thread-item-active" : ""}${!finished && waiting ? " thread-item-held" : ""}${!finished && !working && !waiting ? " thread-item-pending" : ""}"
+      <button type="button" class="thread-item${finished ? " thread-item-ended" : ""}${!finished && working ? " thread-item-active" : ""}${!finished && !working && paused ? " thread-item-paused" : ""}${!finished && !working && !paused && waiting ? " thread-item-held" : ""}${!finished && !working && !paused && !waiting ? " thread-item-pending" : ""}"
         title="${esc(context)}"
         aria-label="${esc(finished ? `Open completed thread: ${title}. Started by ${creator.name}, ${said}, updated ${updated}.` : `Open thread: ${title}. ${status}. Started by ${creator.name}, ${said}, updated ${updated}.`)}"
         data-act="channel-thread-open" data-value="${esc(entry.id)}">
@@ -5048,9 +5166,11 @@ function threadListPanel(repositoryId) {
                 : working
                   ? `<span class="ti-activity phase-slot"
                       data-phase-slot="thread-item:${esc(entry.id)}">${esc(status)}</span>`
-                  : waiting
-                    ? `<span class="ti-held">Waiting for you</span>`
-                    : `<span class="ti-pending">Pending</span>`
+                  : paused
+                    ? `<span class="ti-paused">${icon("pause")}Paused</span>`
+                    : waiting
+                      ? `<span class="ti-held">Waiting for you</span>`
+                      : `<span class="ti-pending">Pending</span>`
             }
             <span class="ti-count">${esc(said)}</span>
             <span class="ti-time">${esc(updated)}</span>
@@ -5297,6 +5417,9 @@ const TASK_ICON = {
   awaiting_approval: "helpCircle",
   // A conversation between turns: the last turn landed, more may come.
   open: "dotsHorizontal",
+  // Stopped on purpose, and coming back — the same mark the thread header's
+  // own button carries, so the two places agree about what parked work is.
+  paused: "pause",
 };
 
 /** Statuses that no longer need attention in the history list. */
@@ -5339,6 +5462,8 @@ function historyStatusLabel(status) {
       return "Failed";
     case "cancelled":
       return "Cancelled";
+    case "paused":
+      return "Paused";
     case "awaiting_approval":
       return "Waiting";
     case "open":
@@ -5357,6 +5482,10 @@ function historyStatusTone(status) {
       return "bad";
     case "cancelled":
       return "muted";
+    // Amber, like the go-ahead hold: both mean the work has stopped and is
+    // waiting on this reader, which is the one thing worth colouring for.
+    case "paused":
+      return "warn";
     case "awaiting_approval":
       return "warn";
     default:
@@ -6584,6 +6713,52 @@ function primaryConversation(repositoryId) {
   return mainChatConversation(repositoryId);
 }
 
+/**
+ * The thread header's one control over the run it is watching: pause, or play.
+ *
+ * This was a cross, and a cross in a header full of crosses meant one thing
+ * in the two places it appeared — the panel's own close is the other — and
+ * anybody reading quickly had to work out which one closed the thread and
+ * which one killed the work. Worse, the answer was destructive: the cross
+ * ended the task outright, so the safe reading of an ambiguous button was the
+ * expensive one.
+ *
+ * Pause and play instead, because that is what the control now does and
+ * because everybody already knows what those two mean. They are one button in
+ * one place that swaps its face with the state, the way a transport control
+ * has always worked — never both at once, so there is nothing to choose
+ * between and no second cross to mistake for the first. The auditor toggle in
+ * the roster reads the same pair for the same reason.
+ *
+ * No confirm on either. Asking "are you sure?" is what you owe somebody
+ * before you throw their work away; pausing keeps it, and a question in front
+ * of a reversible act only teaches people to click through questions.
+ */
+function threadTaskControl(root) {
+  const task = threadTask(root);
+  const taskId = task?.id ?? root.taskId;
+  // Nothing to act on. A thread whose task the browser has never seen renders
+  // no control rather than a button that would post an empty id.
+  if (taskId === undefined || taskId === null || taskId === "") {
+    return "";
+  }
+  if (threadIsPaused(root)) {
+    return iconButton("play", {
+      act: "thread-task-resume",
+      value: taskId,
+      title: "Resume this task",
+    });
+  }
+  if (!threadIsWorking(root)) {
+    return "";
+  }
+  return iconButton("pause", {
+    act: "thread-task-pause",
+    value: taskId,
+    title: "Pause this task",
+  });
+}
+
 function threadPanel(repositoryId, selectedMessageId) {
   const messageId = selectedMessageId ?? state.activeChannelThread;
   if (messageId === undefined) {
@@ -6618,26 +6793,16 @@ function threadPanel(repositoryId, selectedMessageId) {
     state.threadAttaching > 0 ||
     threadReplyTarget !== undefined ||
     draftAttachments(repositoryId, state.threadDraft).length > 0;
+  const threadSendable =
+    draftText(state.threadDraft).trim() !== "" ||
+    draftAttachments(repositoryId, state.threadDraft).length > 0;
   return `<aside class="thread-panel" data-thread-id="${esc(messageId)}">
     ${panelGrip()}
     <header class="thread-head">
       ${panelKind("Thread", "channel-threads-toggle", `thread:${messageId}`)}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
-      ${
-        // Stopping the run, where somebody watching it decides it has gone
-        // wrong. The thread header already owns this thread's task, and there
-        // was no clickable way to stop an agent anywhere in the product —
-        // `/cancel` typed into the composer was the whole of it. The handler
-        // asks first: this ends work that is mid-run and holding a workspace.
-        threadIsWorking(root)
-          ? iconButton("close", {
-              act: "thread-task-cancel",
-              value: root.taskId ?? "",
-              title: "Stop this task",
-            })
-          : ""
-      }
+      ${threadTaskControl(root)}
       ${iconButton("pin", {
         act: "channel-pin",
         value: messageId,
@@ -6670,10 +6835,11 @@ function threadPanel(repositoryId, selectedMessageId) {
         removeAct: "thread-attachment-remove",
       })}
       <!-- composer-lite is the thread's own resting shape: shorter and
-           squarer than the room's pill, and showing nothing but the words
-           until it is written in. Opt-in rather than inherited, because the
-           private chat and the direct-message panel sit in this same wrapper
-           and keep their full toolbars. -->
+           squarer than the room's pill, and at rest nothing but the words —
+           the plus and the arrow are drawn back in by the stylesheet the
+           moment the box is entered or written in. Opt-in rather than
+           inherited, because the private chat and the direct-message panel
+           sit in this same wrapper and keep their full toolbars. -->
       <form class="composer composer-lite${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit" data-value="${esc(messageId)}">
         <div class="composer-field">
           <div class="composer-mirror" data-composer-mirror aria-hidden="true"
@@ -6683,7 +6849,7 @@ function threadPanel(repositoryId, selectedMessageId) {
             )}</div>
           <textarea data-act="channel-thread-input" rows="1" spellcheck="true"
             enterkeyhint="send"
-            placeholder="Reply in thread...">${esc(draftText(state.threadDraft))}</textarea>
+            placeholder="Add to this thread...">${esc(draftText(state.threadDraft))}</textarea>
         </div>
         <div class="composer-bar">
           <!-- Same arrangement as the channel bar: the input is the control
@@ -6704,7 +6870,9 @@ function threadPanel(repositoryId, selectedMessageId) {
             : ""}
           <span class="spacer"></span>
           ${composerCount("thread", state.threadDraft)}
-          <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+          <button class="send-btn" type="submit" title="Send"${
+            threadSendable ? "" : " disabled"
+          }>${icon("arrowRight")}</button>
         </div>
       </form>
     </div>
@@ -7434,6 +7602,83 @@ export function coOwnerPanelHtml(repositoryId) {
 }
 
 /** The repository's own record, for the info popover's small facts. */
+/**
+ * Who is in one room, and the controls for changing that.
+ *
+ * Only reached from the gear on a channel row, which only an administrator
+ * sees. Membership is what an `open` room gates posting on and what a
+ * `private` room gates existing on, so both are edited in the one place
+ * rather than split between a settings panel and an invite dialog.
+ */
+export function subChannelManagePopoverHtml(repositoryId, channelId) {
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+  if (channel === undefined) {
+    return `<div class="pop-body"><div class="util-empty">This channel is gone.</div></div>`;
+  }
+  const members = state.subChannelMembers[channelId];
+  const inRoom = new Set((members ?? []).map((member) => member.userId));
+  const people = channelPeopleFor(repositoryId);
+  const general = channel.slug === "general";
+  return `<div class="pop-body sub-channel-manage">
+    <div class="pop-head">
+      <b>#${esc(channel.slug)}</b>
+      <span class="chan-channel-vis">${
+        channel.visibility === "private" ? "Private" : "Open to the project"
+      }</span>
+    </div>
+    ${
+      general
+        ? `<div class="util-hint">Everybody in the project is in #general, and it is always open. Add another channel to have a room with its own list.</div>`
+        : `<div class="pop-row">
+             <button type="button" class="btn-quiet" data-act="sub-channel-rename"
+               data-value="${esc(channelId)}">Rename</button>
+             <button type="button" class="btn-quiet" data-act="sub-channel-visibility"
+               data-value="${esc(channelId)}">${
+                 channel.visibility === "private"
+                   ? "Make open to the project"
+                   : "Make private"
+               }</button>
+             <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
+               data-value="${esc(channelId)}">Delete</button>
+           </div>
+           <div class="pop-sec">Members</div>
+           <div class="sub-channel-members">
+             ${
+               members === undefined
+                 ? `<div class="util-empty">Loading…</div>`
+                 : people.length === 0
+                   ? `<div class="util-empty">Nobody else in this workspace yet.</div>`
+                   : people
+                       .map((person) => {
+                         // Two shapes reach here, exactly as `personRow`
+                         // documents: the organization list nests the account
+                         // under `user`, the room's own list flattens it.
+                         const id =
+                           person.user?.id ?? person.userId ?? person.id ?? "";
+                         const on = inRoom.has(id);
+                         return `<button type="button" class="sub-channel-member${
+                           on ? " on" : ""
+                         }" data-act="sub-channel-member-toggle"
+                           data-value="${esc(`${channelId}|${id}|${on ? "out" : "in"}`)}"
+                           aria-pressed="${on}">
+                           <span>${esc(
+                             person.user?.displayName ??
+                               person.user?.email ??
+                               person.name ??
+                               id,
+                           )}</span>
+                           <span class="sub-channel-member-state">${on ? "In" : "Add"}</span>
+                         </button>`;
+                       })
+                       .join("")
+             }
+           </div>`
+    }
+  </div>`;
+}
+
 export function channelInfoPopoverHtml(repositoryId) {
   const repository = state.repositories.find((repo) => repo.id === repositoryId);
   const roster = channelAgentsFor(repositoryId);
@@ -8494,15 +8739,213 @@ function autocompleteSnapshot() {
 }
 
 /**
+ * How tall this box is allowed to get, read from the box itself.
+ *
+ * The room's bar and the thread's are the same component at two densities,
+ * and the ceiling is part of the density: a reply that has run past five
+ * lines in a column this narrow belongs in the room. The number lives in the
+ * stylesheet beside the rest of the variant — `--composer-max-height` — so
+ * the `max-height` the textarea scrolls at and the height this stops growing
+ * to are one value rather than two that drifted apart, which is what they had
+ * already done (164px in CSS, 148px here).
+ */
+function composerHeightLimit(node) {
+  const composer = node?.closest?.(".composer");
+  const declared =
+    composer === null || composer === undefined
+      ? ""
+      : getComputedStyle(composer).getPropertyValue("--composer-max-height");
+  const limit = Number.parseFloat(declared);
+  return Number.isFinite(limit) && limit > 0 ? limit : 164;
+}
+
+/** The height animation each box currently has in flight, if any. */
+const composerHeightMotion = new WeakMap();
+
+/**
+ * Plays the box growing by a line, rather than jumping by one.
+ *
+ * Only ever called when the measured height actually crossed a line boundary
+ * — a keystroke that adds a character to a line that already exists changes
+ * nothing here and plays nothing. The previous run is cancelled first, so a
+ * fast typist who fills three lines in a second gets one continuous movement
+ * to the current height rather than three fighting over the same property.
+ *
+ * `fill: "none"`, so there is nothing to restore afterwards: the inline
+ * height the resize has already written is what the box holds when this ends,
+ * and that is `auto` again the moment the text comes back to one line.
+ */
+function animateComposerHeight(node, from, to) {
+  if (Math.abs(to - from) < 1) {
+    return;
+  }
+  composerHeightMotion.get(node)?.cancel();
+  const motion = animateMotion(
+    node,
+    [{ height: `${from}px` }, { height: `${to}px` }],
+    150,
+  );
+  if (motion !== undefined) {
+    composerHeightMotion.set(node, motion);
+  }
+}
+
+/** The press an icon button on the row answers with. See `--motion-press`. */
+export function playComposerPress(node) {
+  animateMotion(
+    node,
+    [
+      { transform: "scale(1)" },
+      { transform: "scale(0.94)" },
+      { transform: "scale(1)" },
+    ],
+    90,
+  );
+}
+
+/**
+ * What each composer's controls last looked like, so a change can be played.
+ *
+ * Keyed by what the form is for rather than by the element, because the
+ * element does not survive a render and the state has to: a background frame
+ * arriving while somebody has the reply box open and empty would otherwise
+ * look like the row appearing again, and play it, every thirty seconds.
+ */
+const composerControlState = new Map();
+
+/** Threads visited in one session are unbounded; the two live ones are not. */
+const COMPOSER_STATE_MEMORY = 32;
+
+/** Opacity and a few pixels of travel, in whichever direction this is going. */
+function revealComposerControl(control, shown, offset) {
+  const hidden = { opacity: 0, transform: `translateX(${offset}px)` };
+  const here = { opacity: 1, transform: "none" };
+  animateMotion(control, shown ? [hidden, here] : [here, hidden], shown ? 120 : 100);
+}
+
+/**
+ * The send arrow's enabled state, and the thread row's presence.
+ *
+ * Two jobs, because they answer the same question — is there anything to act
+ * on yet — and reading it twice is how they would come to disagree.
+ *
+ * The arrow is genuinely disabled while there is nothing to send, rather than
+ * only being drawn quieter: a control that looks unavailable and answers a
+ * press anyway is wrong for everybody, and a state carried in colour alone is
+ * no state at all to a reader who cannot see the difference. Enter is
+ * untouched — it does not go through the button, and an empty message is
+ * already refused where it is posted.
+ *
+ * The thread's row is hidden by the stylesheet while the box is empty and
+ * unfocused, which is the state that panel is in nearly all of the time. All
+ * this adds is the movement between the two: nothing is played on the render
+ * that first draws a box, only on a change to one already on screen.
+ */
+export function syncComposerControls(node, focused) {
+  const composer = node?.closest?.(".composer") ?? undefined;
+  const field = composer?.querySelector?.(".composer-field") ?? undefined;
+  if (composer === undefined || field === null || field === undefined) {
+    // The private-agent and direct-message boxes are a different component
+    // and hold their own send state — see `chatComposer` in chat.js.
+    return;
+  }
+  const send = composer.querySelector(".send-btn");
+  const attach = composer.querySelector(".composer-bar .icon-btn");
+  const wrap = composer.closest(".chan-composer-wrap, .thread-composer-wrap");
+  // A picture staged for this message is something to send even with no
+  // words, and it is drawn above the box rather than inside it.
+  const staged = (wrap?.querySelectorAll(".composer-attachment").length ?? 0) > 0;
+  const sendable = node.value.trim() !== "" || staged;
+  const lite = composer.classList.contains("composer-lite");
+  const key = `${composer.dataset?.act ?? ""}:${composer.dataset?.value ?? ""}`;
+  const was = composerControlState.get(key);
+  // Callers that know where focus is say so. A resize does not: it runs on
+  // the render that has just thrown the focused element away and before the
+  // replacement is focused again, so reading the document there says "nobody
+  // is in this box" about a box somebody is in. Unknown carries the last
+  // answer forward instead, which is the only one that was ever measured.
+  const focusIn =
+    focused === undefined
+      ? (was?.focusIn ?? false)
+      : focused !== null && composer.contains(focused);
+  const rowShown = !lite || staged || node.value !== "" || focusIn;
+  const sendShown = rowShown && (!lite || sendable);
+
+  if (send !== null && send.disabled !== !sendable) {
+    send.disabled = !sendable;
+  }
+
+  composerControlState.set(key, { rowShown, sendShown, sendable, focusIn });
+  if (composerControlState.size > COMPOSER_STATE_MEMORY) {
+    composerControlState.delete(composerControlState.keys().next().value);
+  }
+  if (was === undefined) {
+    // First sight of this box. It is drawn in the state it belongs in, and a
+    // render is not something to animate.
+    return;
+  }
+  if (rowShown !== was.rowShown && attach !== null) {
+    revealComposerControl(attach, rowShown, -4);
+  }
+  if (sendShown !== was.sendShown && send !== null) {
+    revealComposerControl(send, sendShown, 4);
+  } else if (sendable && !was.sendable && sendShown && send !== null) {
+    // Already on screen and now usable: the arrow comes up to full strength
+    // rather than appearing. Going quiet again needs no play — the disabled
+    // state is on it the moment the last character goes.
+    animateMotion(
+      send,
+      [
+        { opacity: 0.42, transform: "translateY(1px)" },
+        { opacity: 1, transform: "none" },
+      ],
+      110,
+    );
+  }
+}
+
+/**
+ * Focus arriving in or leaving a composer, which is what reveals the thread's
+ * row. Bound to `focusin` and `focusout` in app.js.
+ *
+ * `relatedTarget` rather than `document.activeElement`, because on `focusout`
+ * focus has left the old element and not yet reached the new one: reading the
+ * document there says "nothing is focused" for one frame, and the row would
+ * play itself out and back in every time somebody tabbed from the box to the
+ * plus beside it.
+ */
+export function handleComposerFocusShift(event) {
+  const from = event.target?.closest?.(".composer") ?? undefined;
+  const to = event.relatedTarget?.closest?.(".composer") ?? undefined;
+  const focused = event.type === "focusout" ? event.relatedTarget : event.target;
+  for (const composer of new Set([from, to])) {
+    if (composer === undefined || composer === null) {
+      continue;
+    }
+    const node = composer.querySelector(".composer-field textarea");
+    if (node !== null) {
+      syncComposerControls(node, focused);
+    }
+  }
+}
+
+/**
  * Fits a composer to its message, up to a small scrolling window.
  *
  * Highlighted channel and thread fields share their first row with the two
  * controls. Once their text wraps, `.is-multiline` restores the normal
  * stacked layout and the field grows with it. Measuring from the live node is
  * important: the wrap point changes with the width of the thread panel.
+ *
+ * The height is measured before and after, and the difference is what decides
+ * whether anything is played: a character added to a line that already fits
+ * moves nothing, so only a wrap — a real line boundary being crossed — is
+ * ever animated. Typing is not an animation.
  */
 function resizeComposer(node) {
   const composer = node.closest?.(".composer");
+  const limit = composerHeightLimit(node);
+  const from = node.offsetHeight;
   node.style.height = "auto";
   const field = composer?.querySelector?.(".composer-field");
   const compact = field !== null && field !== undefined;
@@ -8516,10 +8959,12 @@ function resizeComposer(node) {
   composer?.classList.toggle("is-multiline", multiline);
 
   if (node.value !== "" && (!compact || multiline)) {
-    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+    node.style.height = `${Math.min(node.scrollHeight, limit)}px`;
   }
-  node.style.overflowY = node.scrollHeight > 148 ? "auto" : "hidden";
+  node.style.overflowY = node.scrollHeight > limit ? "auto" : "hidden";
+  animateComposerHeight(node, from, node.offsetHeight);
   paintComposerMirror(node);
+  syncComposerControls(node);
 }
 
 /** Sizes every newly rendered composer, including drafts restored from state. */

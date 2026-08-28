@@ -1,12 +1,9 @@
 /**
- * My Agents — the signed-in user's own agent connections, and their private
- * detail pane.
+ * Personal agent and GitHub connection flows shared by Settings and chat.
  *
- * Scoped to one person on purpose. An agent connection is a personal
- * credential and a personal conversation; two people working the same
- * repository each bring their own Claude or Codex, and neither should appear
- * in the other's list. Everything genuinely shared — what the agents are
- * doing to the codebase — lives on the Coordinator screen instead.
+ * Connections remain scoped to the signed-in person. This module owns only
+ * credential setup and task actions; agent activity is shown in the channel
+ * where the work happens.
  */
 
 import {
@@ -17,609 +14,28 @@ import {
   connectGitHub,
   connectProviderCredential,
   gitHubSignInStatus,
-  heldFiles,
-  loadContext,
   loadGitHub,
   loadProviders,
-  myAgents,
-  persist,
   providerSignInStatus,
-  repositoryLabel,
   startGitHubSignIn,
   startProviderSignIn,
   state,
   submitProviderSignInCode,
-  taskBelongsToAgent,
-  taskProgress,
-  taskStarted,
 } from "./data.js";
-import { chatComposer, chatThread } from "./chat.js";
 import {
-  addTile,
-  agentFace,
   agentLabelOf,
-  badge,
-  bar,
   esc,
-  icon,
-  iconButton,
-  emptyState,
-  searchBox,
-  segmented,
   showModal,
-  tabs,
-  tileCard,
   toast,
   vendorMark,
 } from "./ui.js";
 
-/**
- * The statuses a task can be retried from — the ones where it has stopped.
- *
- * The rest (`submitted`, `claimed`, `planned`, `open`) all mean the work is
- * still somebody's, and the server refuses a retry on them. Exported so the
- * handler in `app.js` guards on the same set this screen draws from: two
- * copies of this rule is how a button and its refusal come to disagree.
- */
+/** Task states from which a stopped run may be retried. */
 export const TERMINAL_TASK_STATUS = new Set([
   "integrated",
   "failed",
   "cancelled",
 ]);
-
-function filtered(agents) {
-  const query = state.agentQuery.trim().toLowerCase();
-  return agents.filter((agent) => {
-    if (state.agentFilter === "working" && agent.status !== "working") {
-      return false;
-    }
-    if (state.agentFilter === "idle" && agent.status !== "idle") {
-      return false;
-    }
-    if (state.agentFilter === "offline" && agent.status !== "offline") {
-      return false;
-    }
-    return query === "" || agent.name.toLowerCase().includes(query);
-  });
-}
-
-/**
- * Everything about a connection that is not its name, on one line.
- *
- * The row used to spend three lines of type and two columns on this — the
- * provider under the name, the objective in a column of its own, and the
- * repository (or a "Ready for new assignment" filler invented to fill the
- * slot) under that — so a reader had to sweep sideways to assemble one
- * sentence about one agent. It is that sentence: provider, what it is doing,
- * and where. Missing parts simply do not appear, which is why this joins a
- * filtered list rather than interpolating a fixed template.
- */
-function rowSubtitle(agent) {
-  const task = agent.task;
-  return [
-    agent.role,
-    taskLine(agent),
-    task?.repositoryId === undefined || task.repositoryId === ""
-      ? undefined
-      : repositoryLabel(task.repositoryId),
-  ]
-    .filter((part) => part !== undefined && part !== "")
-    .join(" · ");
-}
-
-/**
- * The progress a row shows, or nothing at all.
- *
- * An idle connection has no run to report, and a 0% bar beside every idle
- * agent is four bars of furniture saying the same nothing. The column is left
- * genuinely empty instead — the subtitle already said "No task assigned".
- */
-function rowProgress(agent, key) {
-  const task = agent.task;
-  if (task === undefined) {
-    return "";
-  }
-  if (!taskStarted(task)) {
-    return `<span class="mt-stage">Queued</span>`;
-  }
-  return `${bar(
-    agent.progress,
-    agent.status === "working" ? "" : "grey",
-    true,
-    `${key}:${agent.id}:${task.id}`,
-  )}<span class="ar-pct">${Math.round(agent.progress)}%</span>`;
-}
-
-function agentRow(agent, active) {
-  // A div, not a button: the row carries its own menu button, and a nested
-  // <button> makes the parser close the outer one and hoist the inner out of
-  // the row entirely.
-  return `<div class="agent-row${active ? " active" : ""}" role="button" tabindex="0"
-    data-act="agent-pick" data-value="${esc(agent.id)}">
-    <span class="ar-face">${agentFace(agent, 32)}</span>
-    <span class="ar-id">
-      <div class="ar-name"><span>${esc(agent.name)}</span>${badge(agent.status)}</div>
-      <div class="ar-sub">${esc(rowSubtitle(agent))}</div>
-    </span>
-    <span class="ar-prog">${rowProgress(agent, "agent-row")}</span>
-    <span class="ar-more">${iconButton("dots", {
-      act: "agent-menu",
-      value: agent.id,
-      title: "Agent actions",
-      small: true,
-    })}</span>
-  </div>`;
-}
-
-/** What an agent is doing, in one line, for a card or a row. */
-function taskLine(agent) {
-  return (
-    agent.task?.objective ??
-    (agent.connected
-      ? "No task assigned"
-      : agent.detail !== undefined && agent.detail !== ""
-        ? agent.detail
-        : "Not connected")
-  );
-}
-
-/**
- * One connection as a card.
- *
- * The same facts the row carries, arranged so they can be taken in without
- * reading across: face and name first, what it is doing under them, and the
- * state — badge and progress — along the bottom edge of every card at the
- * same height, so a deck of them compares at a glance.
- */
-function agentCard(agent, active) {
-  return tileCard({
-    glyph: `<span class="tile-face">${agentFace(agent, 36)}</span>`,
-    trailing: iconButton("dots", {
-      act: "agent-menu",
-      value: agent.id,
-      title: "Agent actions",
-      small: true,
-    }),
-    title: agent.name,
-    // The provider leads the line, the way the reference names a maker before
-    // describing what the thing does. No icon in front of it: a card in a deck
-    // of six carried six glyphs that all meant "there is a task here", which
-    // the sentence says better and quieter.
-    subtitle: `<span class="tile-by">${esc(agent.role)}</span>
-      <span class="tile-say">${esc(taskLine(agent))}</span>`,
-    foot: `${badge(agent.status)}<span class="tile-spacer"></span>
-      <span class="ar-prog">${rowProgress(agent, "agent-card")}</span>`,
-    act: "agent-pick",
-    value: agent.id,
-    active,
-  });
-}
-
-/** The deck of connections, with the tile that adds another one last. */
-function connectionGrid(agents, selected) {
-  return `<div class="tile-grid agent-deck">
-    ${agents.map((agent) => agentCard(agent, agent.id === selected?.id)).join("")}
-    ${addTile({
-      title: "Add agent",
-      subtitle: "Connect a coding agent",
-      act: "agent-add",
-    })}
-  </div>`;
-}
-
-/** The selected agent, at the size of the thing the panel is about. */
-function agentHero(agent) {
-  const presence =
-    agent.presence === "offline"
-      ? "Offline"
-      : agent.presence === "idle"
-        ? "Idle"
-        : "Online";
-  // The dot has to agree with the word beside it: green is working, amber is
-  // connected and doing nothing. One green dot for both is how an idle agent
-  // came to read as a busy one.
-  const tone =
-    agent.presence === "offline"
-      ? ""
-      : agent.presence === "idle"
-        ? "orange"
-        : "green";
-  // One statement of state, not two. The name carried a status badge while
-  // the line under it carried a coloured dot and a status word, so a panel
-  // about one connection opened by saying "idle" twice in two shapes.
-  return `<header class="agent-hero">
-    <span class="ah-face">${agentFace(agent, 46)}</span>
-    <div class="ah-id">
-      <div class="ah-name">${esc(agent.name)}</div>
-      <div class="ah-meta"><span>${esc(agent.role)}</span><span class="sep">·</span>${
-        tone === "" ? "" : `<span class="dot ${tone}"></span>`
-      }<span>${esc(presence)}</span><span class="sep">·</span><span>${esc(
-        agent.visibility === "org" ? "Shared with the project" : "Yours only",
-      )}</span></div>
-    </div>
-    <span class="spacer"></span>
-    ${iconButton("info", { act: "agent-info", title: "Connection details" })}
-    ${iconButton("chart", { act: "agent-usage", title: "Usage" })}
-    ${iconButton("dots", { act: "agent-menu", value: agent.id, title: "More" })}
-  </header>`;
-}
-
-/**
- * The changeset belonging to the agent on screen, or nothing.
- *
- * Resolved through the per-task cache (`state.changeSets`, keyed by taskId —
- * see `ensureChangeSetForTask`) so this answers for *this* agent's work. The
- * global is deliberately not the fallback: falling back to it is exactly the
- * behaviour that put another agent's files under this agent's name.
- */
-function agentChangeSet(agent) {
-  const own = state.tasks.filter((task) =>
-    taskBelongsToAgent(task, agent),
-  );
-  for (const task of own) {
-    const changeSet = state.changeSets[task.id];
-    if (changeSet !== undefined) {
-      return changeSet;
-    }
-  }
-  return undefined;
-}
-
-/**
- * One labelled fact about the connection.
- *
- * A micro-label above a plain value, the way the reference states a channel
- * or a profile — no border, no icon, no pill. The chips these replace each
- * cost an outline, a glyph and a background to say a word, and nine of them
- * stacked into three rails made the top of the panel busier than the
- * conversation underneath it.
- */
-function spec(label, value, { tone = "", wide = false, title = "" } = {}) {
-  return `<div class="spec${wide ? " wide" : ""}">
-    <span class="spec-k">${esc(label)}</span>
-    <span class="spec-v${tone === "" ? "" : ` ${tone}`}"${
-      title === "" ? "" : ` title="${esc(title)}"`
-    }>${esc(value)}</span>
-  </div>`;
-}
-
-/**
- * The connection's properties, as a grid of labelled values.
- *
- * The same three questions the rails answered — what it thinks with, what it
- * is on, what it has touched — split into single facts so they line up in
- * columns and can be read down rather than swept across. What it is working
- * on spans the width, because it is the one that is a sentence.
- */
-function agentSpecs(agent) {
-  const task = agent.task;
-  const patches = agentChangeSet(agent)?.patches ?? [];
-  const held =
-    task === undefined
-      ? []
-      : heldFiles().filter((file) => file.taskId === task.id);
-  const progress = task === undefined ? agent.progress : taskProgress(task);
-  const files =
-    patches.length === 0
-      ? held.length === 0
-        ? "None yet"
-        : `0 of ${held.length} planned`
-      : held.length > 0
-        ? `${patches.length} of ${held.length} planned`
-        : `${patches.length} file${patches.length === 1 ? "" : "s"}`;
-  return `<div class="agent-specs">
-    ${spec(
-      "Working on",
-      task === undefined
-        ? agent.connected
-          ? "Nothing — ready for a new assignment"
-          : "Not connected"
-        : task.objective,
-      { wide: true, title: task?.objective ?? "", tone: task === undefined ? "quiet" : "" },
-    )}
-    ${spec("Model", agent.model === "" ? "Not set" : agent.model, {
-      title: "The model this agent answers with",
-    })}
-    ${spec("Reasoning", agent.effort === "" ? "Default" : agent.effort)}
-    ${spec(
-      "Context",
-      agent.contextPercent > 0 ? `${agent.contextPercent}%` : "—",
-      {
-        tone: agent.contextPercent > 80 ? "orange" : "",
-        title: "How full the last exchange left the context window",
-      },
-    )}
-    ${spec(
-      "Progress",
-      task === undefined
-        ? "—"
-        : taskStarted(task)
-          ? `${progress}%`
-          : "Queued",
-      { tone: task === undefined ? "" : taskStarted(task) ? "blue" : "orange" },
-    )}
-    ${spec(
-      "Repository",
-      task?.repositoryId === undefined || task.repositoryId === ""
-        ? "—"
-        : repositoryLabel(task.repositoryId),
-    )}
-    ${spec("Files", files, { tone: patches.length > 0 ? "green" : "" })}
-  </div>`;
-}
-
-function detailPane(agent) {
-  if (agent === undefined) {
-    return `<section class="card agent-panel">${emptyState(
-      "robot",
-      "No agent selected",
-      "Connect an agent to start a private conversation about this repository.",
-    )}</section>`;
-  }
-  const tab = state.agentTab ?? "chat";
-  return `<section class="card agent-panel">
-    ${agentHero(agent)}
-    ${agentSpecs(agent)}
-
-    ${tabs(
-      "agent-tab",
-      [
-        { value: "chat", label: "Chat" },
-        { value: "task", label: "Task" },
-        { value: "files", label: "Files" },
-        { value: "metrics", label: "Metrics" },
-      ],
-      tab,
-    )}
-
-    ${tab === "chat" ? chatThread(agent) : `<div class="scroll">${tabBody(tab, agent)}</div>`}
-    ${tab === "chat" ? chatComposer(agent, `Message ${agent.name.split(" ")[0]}...`) : ""}
-  </section>`;
-}
-
-function tabBody(tab, agent) {
-  if (tab === "task") {
-    const task = agent.task;
-    if (task === undefined) {
-      return `<div style="padding:18px">${emptyState(
-        "pause",
-        "No task assigned",
-        "This agent is connected and waiting for work.",
-      )}</div>`;
-    }
-    // The same labelled values the panel head uses, so a fact does not change
-    // shape between the summary above and the tab below it. The objective
-    // leads at reading size; the meter is its own full-width row rather than
-    // a stub beside a percentage.
-    return `<div class="task-body">
-      <div class="task-objective">${esc(task.objective)}</div>
-      <div class="agent-specs bare">
-        ${spec(
-          "Repository",
-          task.repositoryId === undefined || task.repositoryId === ""
-            ? "—"
-            : repositoryLabel(task.repositoryId),
-        )}
-        ${spec("Status", String(task.status).replace(/_/gu, " "))}
-        ${spec(
-          "Progress",
-          taskStarted(task) ? `${taskProgress(task)}%` : "Queued",
-          { tone: taskStarted(task) ? "blue" : "orange" },
-        )}
-      </div>
-      ${
-        taskStarted(task)
-          ? bar(
-              taskProgress(task),
-              "",
-              false,
-              `agent-task:${agent.id}:${task.id}`,
-            )
-          : `<span class="mt-stage">Queued — waiting for a free slot</span>`
-      }
-      <div class="sum-actions">
-        ${
-          // Cancel only while there is something to stop, and Retry only once
-          // there is not. The two used to be offered side by side whatever
-          // state the task was in, so one of them was always the one the
-          // server would refuse. Both now go through the same confirm and the
-          // same guard in `app.js`.
-          TERMINAL_TASK_STATUS.has(task.status)
-            ? `<button class="btn btn-sm" data-act="task-retry" data-value="${esc(task.id)}">
-                Retry
-              </button>`
-            : `<button class="btn btn-sm" data-act="task-cancel" data-value="${esc(task.id)}">
-                Cancel task
-              </button>`
-        }
-      </div>
-    </div>`;
-  }
-  if (tab === "files") {
-    // Only this agent's work. `state.changeSet` is one global filled from
-    // whichever run `ensureCodeData` found first for the repository, so this
-    // panel showed whatever the Code screen was holding under the heading
-    // "Files this agent changes" — including, routinely, another agent's
-    // files. Until the per-task cache has an entry for work belonging to the
-    // agent on screen, the honest answer is the empty state: an empty panel
-    // is a smaller lie than somebody else's changes.
-    const files = agentChangeSet(agent)?.patches ?? [];
-    if (files.length === 0) {
-      return `<div style="padding:18px">${emptyState(
-        "file",
-        "No files touched yet",
-        "Files this agent changes appear here once a changeset is collected.",
-      )}</div>`;
-    }
-    return `<div style="padding:12px 18px">${files
-      .map(
-        (patch) =>
-          `<div class="sum-file"><b class="flag-${
-            patch.status === "added" ? "A" : patch.status === "deleted" ? "D" : "M"
-          }">${patch.status === "added" ? "A" : patch.status === "deleted" ? "D" : "M"}</b>
-          <span class="sf-name">${esc(patch.path)}</span></div>`,
-      )
-      .join("")}</div>`;
-  }
-  const conversation = state.conversations[agent.id] ?? [];
-  const replies = conversation.filter((entry) => entry.role === "assistant");
-  const totals = replies.reduce(
-    (sum, entry) => ({
-      input: sum.input + Number(entry.usage?.inputTokens ?? 0),
-      output: sum.output + Number(entry.usage?.outputTokens ?? 0),
-      cost: sum.cost + Number(entry.usage?.costUsd ?? 0),
-    }),
-    { input: 0, output: 0, cost: 0 },
-  );
-  return `<div style="padding:16px 18px;display:grid;gap:11px">
-    <div class="set-row" style="padding:0 0 11px">
-      <span class="sr-body"><div class="sr-title">Replies this session</div></span>
-      <span class="sr-ctl">${replies.length}</span>
-    </div>
-    <div class="set-row" style="padding:0 0 11px">
-      <span class="sr-body"><div class="sr-title">Tokens in / out</div></span>
-      <span class="sr-ctl">${totals.input.toLocaleString()} / ${totals.output.toLocaleString()}</span>
-    </div>
-    <div class="set-row" style="padding:0">
-      <span class="sr-body"><div class="sr-title">Context used</div></span>
-      <span class="sr-ctl">${agent.contextPercent}%</span>
-    </div>
-    ${
-      totals.cost > 0
-        ? `<div class="set-row" style="padding:11px 0 0"><span class="sr-body">
-            <div class="sr-title">Reported spend</div></span>
-            <span class="sr-ctl">$${totals.cost.toFixed(2)}</span></div>`
-        : ""
-    }
-  </div>`;
-}
-
-/**
- * One number about the whole roster, stated on the line that introduces it.
- *
- * These were four `statTile` cards: four bordered boxes, four icons and four
- * lines of encouragement ("All systems go", "Ready for tasks") above a list
- * whose own filter tabs already carry the same counts. The numbers are worth
- * keeping and the furniture is not, so they are set as plain figures on the
- * section's own heading row — five facts in the height one heading was
- * already spending.
- */
-function summaryCount({ value, label, tone }) {
-  return `<span class="asum">
-    <span class="asum-value">${esc(String(value))}</span>
-    <span class="asum-label"><span class="dot ${tone}"></span>${esc(label)}</span>
-  </span>`;
-}
-
-export function renderAgents() {
-  const agents = myAgents();
-  const shown = filtered(agents);
-  const selected =
-    agents.find((agent) => agent.id === state.selectedAgent) ?? agents[0];
-  const working = agents.filter((agent) => agent.status === "working").length;
-  const idle = agents.filter((agent) => agent.status === "idle").length;
-  const offline = agents.filter((agent) => agent.status === "offline").length;
-  const done = state.tasks.filter((task) => task.status === "integrated").length;
-  // The deck is the default; the list stays for the reader who wants density
-  // rather than cards, and which one somebody chose is kept across sessions.
-  const view = state.agentView === "list" ? "list" : "grid";
-
-  return `<div class="scroll"><div class="page">
-    <div class="page-head">
-      <span class="ph-icon">${icon("robot")}</span>
-      <div>
-        <h1>My Agents</h1>
-        <p>Manage your agents, their assignments, and performance.</p>
-      </div>
-      <span class="spacer"></span>
-      <button class="btn btn-primary" data-act="agent-add">${icon("plus")} Add Agent</button>
-    </div>
-
-    <div class="agent-summary">
-      <h2>Your connections</h2>
-      <span class="spacer"></span>
-      ${
-        // Counted on `connected`, so this is how many agents this account has
-        // a working sign-in for — not how many are doing anything, which is
-        // the Working count beside it. It was labelled "Active agents", and a
-        // row that opens by calling four idle connections active is the first
-        // thing a reader believes about the screen.
-        summaryCount({
-          value: agents.filter((agent) => agent.connected).length,
-          label: "Connected agents",
-          tone: "green",
-        })
-      }
-      ${summaryCount({ value: working, label: "Working", tone: "blue" })}
-      ${summaryCount({ value: idle, label: "Idle", tone: "orange" })}
-      ${summaryCount({ value: offline, label: "Offline", tone: "grey" })}
-      ${summaryCount({ value: done, label: "Completed", tone: "purple" })}
-    </div>
-
-    <div class="agents-split">
-      <section class="card">
-        <div class="agent-list-head">
-          ${tabs(
-            "agent-filter",
-            [
-              { value: "all", label: "All Agents", count: agents.length },
-              { value: "working", label: "Working", count: working },
-              { value: "idle", label: "Idle", count: idle },
-              { value: "offline", label: "Offline", count: offline },
-            ],
-            state.agentFilter,
-          )}
-          <span class="spacer" style="flex:1"></span>
-          <span class="agent-deck-tools">${segmented(
-            "agent-view",
-            [
-              { value: "grid", label: "Grid view", iconName: "grid" },
-              { value: "list", label: "List view", iconName: "list" },
-            ],
-            view,
-          )}</span>
-          <span class="agent-search-wrap">${searchBox(
-            "Search agents...",
-            state.agentQuery,
-            "agent-search",
-          )}</span>
-        </div>
-        ${
-          shown.length === 0
-            ? `${emptyState(
-                "robot",
-                agents.length === 0 ? "No agents connected" : "No agents match",
-                agents.length === 0
-                  ? "Connect Cursor, Kiro, Claude, or Codex to give yourself an agent on this project."
-                  : "Try another filter or search term.",
-                agents.length === 0
-                  ? `<button class="btn btn-primary" data-act="agent-add">${icon(
-                      "plus",
-                    )} Add Agent</button>`
-                  : "",
-              )}`
-            : view === "grid"
-              ? connectionGrid(shown, selected)
-              : `<div class="agent-rows">
-                  ${shown
-                    .map((agent) => agentRow(agent, agent.id === selected?.id))
-                    .join("")}
-                </div>`
-        }
-      </section>
-
-      ${detailPane(selected)}
-    </div>
-  </div></div>`;
-}
-
-/* ------------------------------------------------------------ actions ---- */
-
-export function selectAgent(agentId, rerender) {
-  state.selectedAgent = agentId;
-  persist("ag.agent", agentId);
-  rerender();
-}
 
 /** How somebody gets a credential we can accept, per provider. */
 const CREDENTIAL_HELP = {
@@ -1345,6 +761,41 @@ export async function cancelTask(taskId, rerender) {
   }
 }
 
+/**
+ * Pausing and resuming one task, from the thread header that owns it.
+ *
+ * Two thin wrappers rather than one with a flag, because the two say
+ * different things when they are refused: "that task is no longer running"
+ * and "that task is not paused" are the two races this control has, and both
+ * are ordinary — a run can finish in the moment between the render and the
+ * press. The server's own message is what the toast carries.
+ */
+export async function pauseTask(taskId, rerender) {
+  try {
+    await api(`/tasks/${encodeURIComponent(taskId)}/pause`, {
+      method: "POST",
+      body: {},
+    });
+    toast("Task paused", "ok");
+    rerender();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+export async function resumeTask(taskId, rerender) {
+  try {
+    await api(`/tasks/${encodeURIComponent(taskId)}/resume`, {
+      method: "POST",
+      body: {},
+    });
+    toast("Task resumed", "ok");
+    rerender();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 export async function retryTask(taskId, rerender) {
   try {
     await api(`/tasks/${encodeURIComponent(taskId)}/retry`, {
@@ -1357,3 +808,4 @@ export async function retryTask(taskId, rerender) {
     toast(error.message, "error");
   }
 }
+

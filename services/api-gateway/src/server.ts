@@ -27,6 +27,8 @@ import type {
   ChannelMessage,
   ChannelReply,
   CoordinationStore,
+  SubChannel,
+  SubChannelVisibility,
   Organization,
   OrganizationRole,
   ProjectRecord,
@@ -39,6 +41,7 @@ import type {
   SubmittedTaskStatus,
   TokenUsageRecord,
 } from "@coord/persistence";
+import { GENERAL_SUB_CHANNEL_SLUG } from "@coord/persistence";
 import {
   buildAuditPrompt,
   findingsReferencedBy,
@@ -992,6 +995,16 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
 const CHANNEL_HOLD_PREFIX = "⏸ Waiting on you";
 const CHANNEL_RELEASE_PREFIX = "▶ Go-ahead received";
 /**
+ * How work somebody parked says so, and how it is found again.
+ *
+ * Its own opening rather than {@link CHANNEL_HOLD_PREFIX} because the two
+ * mean different things to the reader: a hold is the agent waiting for an
+ * answer, a pause is the reader having stopped the agent. They retire the
+ * same way, though — both are answered by {@link CHANNEL_RELEASE_PREFIX} —
+ * so a thread paused across a deploy still knows to say when it restarts.
+ */
+const CHANNEL_PAUSED_PREFIX = "⏸ Paused";
+/**
  * How a plan that nobody started in time says so.
  *
  * Deliberately not {@link CHANNEL_HOLD_PREFIX}: the browser recognises a
@@ -1677,9 +1690,9 @@ const IS_AUTH_FAILURE_RE =
  * Whether an error is the agent's own vendor sign-in failing — as opposed
  * to some other credential the run touched. The push path fails in GitHub's
  * name when the *submitter's* GitHub token is refused, and those failures
- * speak the same auth vocabulary ("401", "unauthorized"); but "reconnect me
- * from My Agents" is the wrong door for them — that fix lives in Settings →
- * GitHub, and the push failure's own words already point there. Anything
+ * speak the same auth vocabulary ("401", "unauthorized"); but reconnecting
+ * an agent is the wrong door for them — that fix lives in Settings → GitHub,
+ * and the push failure's own words already point there. Anything
  * naming GitHub keeps those words.
  */
 function isVendorSignInFailure(error: string): boolean {
@@ -1715,7 +1728,7 @@ export function explainAnswerFailure(error?: string): string {
   if (isVendorSignInFailure(error ?? "")) {
     return (
       "I could not answer that — my sign-in has expired. Reconnect me from " +
-      "My Agents."
+      "Settings → Agents."
     );
   }
   const cleaned = (error ?? "").replace(/\s+/gu, " ").trim();
@@ -1851,7 +1864,7 @@ function explainTaskFailure(error: string, status?: string): string {
   if (isVendorSignInFailure(error)) {
     return (
       "I could not finish this — my sign-in has expired. Reconnect me from " +
-      "My Agents and send this again."
+      "Settings → Agents and send this again."
     );
   }
   // Split before collapsing whitespace: the alarm is one sentence and reads
@@ -3511,6 +3524,39 @@ export interface ApiOperations {
     }>;
   }>;
   /**
+   * Stops work in a way that can be undone.
+   *
+   * The reversible sibling of {@link cancelTasks}, and everything said there
+   * applies: the row flip alone is not the job. What differs is that the row
+   * goes to a non-terminal `paused` and the live run keeps the directory the
+   * agent was editing, so resuming continues rather than starts over.
+   *
+   * Absent on deployments that cannot reach running work, where the pause
+   * button is simply not offered — a pause that could not stop the agent
+   * would be worse than no pause at all.
+   */
+  pauseTasks?(input: {
+    projectId: string;
+    repositoryId: string;
+    taskIds: string[];
+    reason: string;
+    actorId: string;
+  }): Promise<{
+    paused: Array<{
+      id: string;
+      agentId: string;
+      objective: string;
+      was: "running" | "queued";
+    }>;
+  }>;
+  /** Puts one paused task back in the queue. See {@link pauseTasks}. */
+  resumeTask?(input: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string;
+    actorId: string;
+  }): Promise<{ resumed: boolean }>;
+  /**
    * The unified diff between two canonical revisions.
    *
    * The auditor's whole input. It is an operation rather than a direct
@@ -4276,6 +4322,30 @@ function isOwnChannelEntry(authorId: string, viewerId: string): boolean {
  * carries the task it is *about*, not a run it narrates, so a reader tidying
  * one out of their room would otherwise stop the work it names.
  */
+/**
+ * The `#handle` a typed channel name becomes.
+ *
+ * Slack's rules, and for Slack's reason: the name is addressed as `#name` in
+ * running text, so it cannot contain the spaces or punctuation that would
+ * make where it ends ambiguous. Empty after squeezing means the caller typed
+ * something with no letters or digits in it at all, which the route rejects
+ * rather than silently naming a room "-".
+ */
+function subChannelSlug(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/gu, "-")
+    .replace(/-{2,}/gu, "-")
+    .replace(/^-|-$/gu, "")
+    .slice(0, 60);
+}
+
+/** `private` only when it says so; anything else is an open room. */
+function subChannelVisibility(raw: unknown): SubChannelVisibility {
+  return raw === "private" ? "private" : "open";
+}
+
 function isCoordinatorNotice(message: {
   kind: string;
   authorId: string;
@@ -6392,8 +6462,8 @@ export class ApiGateway {
       // Commands belong to every authenticated conversation surface, not only
       // to a channel that happened to have loaded its first page of messages.
       // Sending the catalogue with the session makes it available to a private
-      // agent chat opened directly from My Agents or Code, while the channel
-      // response continues to carry it for older clients.
+      // agent chat opened directly from a channel, while the channel response
+      // continues to carry it for older clients.
       this.sendJson(response, 200, {
         ...principal,
         slashCommands: SLASH_COMMANDS,
@@ -8485,7 +8555,7 @@ export class ApiGateway {
 
     const taskActionMatch = matchPath(
       path,
-      new RegExp(`^${API_PREFIX}/tasks/([^/]+)/(retry|cancel)$`, "u"),
+      new RegExp(`^${API_PREFIX}/tasks/([^/]+)/(retry|cancel|pause|resume)$`, "u"),
     );
     if (taskActionMatch !== undefined && method === "POST") {
       const [taskId = "", action = ""] = taskActionMatch;
@@ -8513,6 +8583,14 @@ export class ApiGateway {
         this.sendJson(response, 200, {
           task: await this.options.store.retrySubmittedTask(taskId),
         });
+        return;
+      }
+      if (action === "pause" || action === "resume") {
+        this.sendJson(
+          response,
+          200,
+          await this.pauseOrResumeTask(task, action, principal.user.id),
+        );
         return;
       }
       const cancelOperation = this.options.operations.cancelTasks;
@@ -9385,6 +9463,327 @@ export class ApiGateway {
     // surface only ever writes `kind: "user"` with the caller's own id, so a
     // signed-in person can never post a message that impersonates someone
     // else's agent.
+    // The sub-channels inside one repository, and their administration.
+    //
+    // `/channels` rather than `/channel/...`: this is the list of rooms, not
+    // something inside one, and keeping it off the `/channel/` prefix means
+    // no existing route has to grow a special case for a path segment that
+    // would otherwise look like a message id.
+    const subChannelsMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels$`,
+        "u",
+      ),
+    );
+    if (subChannelsMatch !== undefined) {
+      const [projectId = "", repositoryId = ""] = subChannelsMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        method === "GET" ? "view" : "manage_project",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      // Every repository has a `#general`, including one created before
+      // sub-channels existed and one created since. Asked for here so the
+      // list is never empty and the browser always has somewhere to open.
+      await this.options.store.ensureGeneralSubChannel(repositoryId, projectId);
+      if (method === "GET") {
+        const channels = await this.options.store.listSubChannels(repositoryId);
+        const admin = await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        ).then(
+          () => true,
+          () => false,
+        );
+        const visible: Array<
+          SubChannel & { member: boolean; canPost: boolean }
+        > = [];
+        for (const channel of channels) {
+          const member =
+            channel.slug === GENERAL_SUB_CHANNEL_SLUG ||
+            (await this.options.store.isSubChannelMember(
+              channel.id,
+              principal.user.id,
+            ));
+          // A private room the caller is not in is simply absent — not
+          // listed-but-locked, which would disclose that it exists and what
+          // it is called. An admin sees everything, because administering
+          // them is their job.
+          if (channel.visibility === "private" && !member && !admin) {
+            continue;
+          }
+          visible.push({ ...channel, member, canPost: member });
+        }
+        this.sendJson(response, 200, { channels: visible, canManage: admin });
+        return;
+      }
+      if (method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const slug = subChannelSlug(
+          stringField(body["slug"] ?? body["name"], "name", {
+            min: 1,
+            max: 60,
+          }) ?? "",
+        );
+        if (slug.length === 0) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "A channel name must contain a letter or a number",
+          );
+        }
+        const visibility = subChannelVisibility(body["visibility"]);
+        const name = stringField(body["name"], "name", { max: 60 });
+        const existing = (
+          await this.options.store.listSubChannels(repositoryId)
+        ).find((channel) => channel.slug === slug);
+        if (existing !== undefined) {
+          throw new HttpError(
+            409,
+            "channel_exists",
+            "A channel with that name already exists",
+          );
+        }
+        const channel = await this.options.store.createSubChannel({
+          repositoryId,
+          projectId,
+          slug,
+          ...(name === undefined ? {} : { name }),
+          visibility,
+          createdBy: principal.user.id,
+        });
+        // Whoever made the room is in it, so a private channel is never
+        // created into a state where nobody — including its author — can
+        // read or post in it.
+        await this.options.store.setSubChannelMember(
+          channel.id,
+          principal.user.id,
+          true,
+        );
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_created",
+          data: {
+            projectId,
+            repositoryId,
+            channelId: channel.id,
+            slug: channel.slug,
+            visibility: channel.visibility,
+            actorId: principal.user.id,
+          },
+        });
+        this.sendJson(response, 201, {
+          channel: { ...channel, member: true, canPost: true },
+        });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
+    const subChannelMemberMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels/([^/]+)/members(?:/([^/]+))?$`,
+        "u",
+      ),
+    );
+    if (subChannelMemberMatch !== undefined) {
+      const [projectId = "", repositoryId = "", channelId = "", memberId] =
+        subChannelMemberMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        method === "GET" ? "view" : "manage_project",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const channel = await this.authorizeSubChannel({
+        projectId,
+        repositoryId,
+        channelId,
+        principal,
+      });
+      if (method === "GET") {
+        const members = await this.options.store.listSubChannelMembers(
+          channel.id,
+        );
+        this.sendJson(response, 200, { members });
+        return;
+      }
+      if (method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const userId =
+          stringField(body["userId"], "userId", { min: 1, max: 200 }) ?? "";
+        await this.options.store.setSubChannelMember(channel.id, userId, true);
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_member_changed",
+          data: {
+            projectId,
+            repositoryId,
+            channelId: channel.id,
+            userId,
+            isMember: true,
+            actorId: principal.user.id,
+          },
+        });
+        this.sendJson(response, 200, { member: true });
+        return;
+      }
+      if (method === "DELETE") {
+        const userId = memberId ?? "";
+        await this.options.store.setSubChannelMember(channel.id, userId, false);
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_member_changed",
+          data: {
+            projectId,
+            repositoryId,
+            channelId: channel.id,
+            userId,
+            isMember: false,
+            actorId: principal.user.id,
+          },
+        });
+        this.sendJson(response, 200, { member: false });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
+    const subChannelMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channels/([^/]+)$`,
+        "u",
+      ),
+    );
+    if (
+      subChannelMatch !== undefined &&
+      (method === "PATCH" || method === "DELETE")
+    ) {
+      const [projectId = "", repositoryId = "", channelId = ""] =
+        subChannelMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const channel = await this.authorizeSubChannel({
+        projectId,
+        repositoryId,
+        channelId,
+        principal,
+      });
+      if (method === "DELETE") {
+        if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+          throw new HttpError(
+            409,
+            "general_channel",
+            "The #general channel cannot be deleted",
+          );
+        }
+        await this.options.store.deleteSubChannel(repositoryId, channel.id);
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_deleted",
+          data: {
+            projectId,
+            repositoryId,
+            channelId: channel.id,
+            slug: channel.slug,
+            actorId: principal.user.id,
+          },
+        });
+        this.sendJson(response, 200, { removed: true });
+        return;
+      }
+      const body = objectBody(await this.readJson(request));
+      const rawName = stringField(body["name"] ?? body["slug"], "name", {
+        max: 60,
+      });
+      const update: {
+        slug?: string;
+        name?: string;
+        visibility?: SubChannelVisibility;
+      } = {};
+      if (rawName !== undefined) {
+        const slug = subChannelSlug(rawName);
+        if (slug.length === 0) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "A channel name must contain a letter or a number",
+          );
+        }
+        if (
+          slug !== channel.slug &&
+          (await this.options.store.listSubChannels(repositoryId)).some(
+            (other) => other.id !== channel.id && other.slug === slug,
+          )
+        ) {
+          throw new HttpError(
+            409,
+            "channel_exists",
+            "A channel with that name already exists",
+          );
+        }
+        update.slug = slug;
+        update.name = slug;
+      }
+      if (body["visibility"] !== undefined) {
+        // `#general` is the room every project member is in and the one every
+        // unaddressed message falls back to. Making it private would hide the
+        // repository's whole history from everybody who is not on a member
+        // list that has never existed.
+        if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+          throw new HttpError(
+            409,
+            "general_channel",
+            "The #general channel is always open to the project",
+          );
+        }
+        update.visibility = subChannelVisibility(body["visibility"]);
+      }
+      const updated = await this.options.store.updateSubChannel(
+        repositoryId,
+        channel.id,
+        update,
+      );
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_updated",
+        data: {
+          projectId,
+          repositoryId,
+          channelId: channel.id,
+          slug: updated.slug,
+          visibility: updated.visibility,
+          actorId: principal.user.id,
+        },
+      });
+      this.sendJson(response, 200, { channel: updated });
+      return;
+    }
+
     const channelMessagesMatch = matchPath(
       path,
       new RegExp(
@@ -9419,8 +9818,16 @@ export class ApiGateway {
       // Counted in the store, not measured off a page. Reading the newest
       // two hundred roots and taking their length reported "200+" for every
       // busier room, which is the one number a stats line must not guess at.
-      const counts =
-        await this.options.store.countChannelMessages(repositoryId);
+      const channel = await this.authorizeSubChannel({
+        projectId,
+        repositoryId,
+        channelId: this.requestedChannelId(url),
+        principal,
+      });
+      const counts = await this.options.store.countChannelMessages(
+        repositoryId,
+        channel.id,
+      );
       // Fresh tokens, not the billed total. A cached prompt prefix is re-read
       // every turn, so summing `totalTokens` counted the same context once per
       // turn of every task in the room and the line read in the millions
@@ -9845,6 +10252,15 @@ export class ApiGateway {
           type: "channel-typing",
           projectId,
           repositoryId,
+          // Which room, so a "…is typing" only shows to the people looking
+          // at it. Absent from a caller that predates sub-channels, which the
+          // browser reads as `#general`.
+          ...(() => {
+            const typingChannelId = this.requestedChannelId(url, body);
+            return typingChannelId === undefined
+              ? {}
+              : { channelId: typingChannelId };
+          })(),
           ...(threadId === undefined ? {} : { threadId }),
           userId: principal.user.id,
           userName: principal.user.displayName,
@@ -9876,6 +10292,15 @@ export class ApiGateway {
           Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "50", 10)),
         );
         const before = url.searchParams.get("before") ?? undefined;
+        // Which room. Absent means `#general`, so a client that predates
+        // sub-channels reads exactly what it always did; a private room the
+        // caller is not in answers 404 here rather than an empty page.
+        const channel = await this.authorizeSubChannel({
+          projectId,
+          repositoryId,
+          channelId: this.requestedChannelId(url),
+          principal,
+        });
         const [
           messages,
           agentOverrides,
@@ -9886,15 +10311,25 @@ export class ApiGateway {
         ] = await Promise.all([
           this.options.store.listChannelMessages(repositoryId, principal.user.id, {
             limit,
+            channelId: channel.id,
             ...(before === undefined ? {} : { before }),
           }),
           this.options.store.listChannelAgentOverrides(repositoryId),
-          this.options.store.getChannelReadCursor(repositoryId, principal.user.id),
+          this.options.store.getChannelReadCursor(
+            repositoryId,
+            principal.user.id,
+            channel.id,
+          ),
           this.options.store.listPinnedChannelMessages(
             repositoryId,
             principal.user.id,
+            channel.id,
           ),
-          this.resolveChannelMentionCandidates(projectId, repositoryId),
+          this.resolveChannelMentionCandidates(
+            projectId,
+            repositoryId,
+            channel.id,
+          ),
           this.resolveChannelPeople(projectId, repositoryId),
         ]);
         // Sent with the messages rather than on a route of its own: the
@@ -9908,6 +10343,10 @@ export class ApiGateway {
         // `withChangedFiles` — the banner wants a title and a target, and
         // any on-page copy already carries its file summary.
         this.sendJson(response, 200, {
+          channel: {
+            ...channel,
+            canPost: await this.canPostInSubChannel(channel, principal.user.id),
+          },
           messages: (
             await this.withChangedFiles(repositoryId, messages)
           ).map((message) =>
@@ -9936,8 +10375,26 @@ export class ApiGateway {
           stringField(body["content"], "content", {
             max: CHANNEL_MESSAGE_MAX_CHARS,
           }) ?? "";
+        const channel = await this.authorizeSubChannel({
+          projectId,
+          repositoryId,
+          channelId: this.requestedChannelId(url, body),
+          principal,
+        });
+        // Reading and posting come apart in an open room: anybody in the
+        // project can follow it, only its members can speak in it. 403 here
+        // rather than 404 — the caller can already see this room, so there
+        // is nothing left to conceal by pretending it is absent.
+        if (!(await this.canPostInSubChannel(channel, principal.user.id))) {
+          throw new HttpError(
+            403,
+            "not_a_member",
+            "You are not a member of this channel",
+          );
+        }
         const message = await this.options.store.appendChannelMessage({
           repositoryId,
+          channelId: channel.id,
           projectId,
           kind: "user",
           authorId: principal.user.id,
@@ -9945,7 +10402,12 @@ export class ApiGateway {
         });
         await this.options.store.appendAudit(undefined, {
           type: "channel_message_posted",
-          data: { projectId, repositoryId, messageId: message.id },
+          data: {
+            projectId,
+            repositoryId,
+            channelId: channel.id,
+            messageId: message.id,
+          },
         });
         // Best-effort and after the user's own message is durably posted: a
         // mention that fails to dispatch must not un-send what they typed.
@@ -9958,6 +10420,7 @@ export class ApiGateway {
           command = await this.dispatchChannelMentions({
             projectId,
             repositoryId,
+            channelId: channel.id,
             content,
             senderId: principal.user.id,
             referencedMessageId: message.id,
@@ -9976,7 +10439,11 @@ export class ApiGateway {
           );
         }
         const [mentionAgents, mentionPeople] = await Promise.all([
-          this.resolveChannelMentionCandidates(projectId, repositoryId),
+          this.resolveChannelMentionCandidates(
+            projectId,
+            repositoryId,
+            channel.id,
+          ),
           this.resolveChannelPeople(projectId, repositoryId),
         ]);
         this.sendJson(response, 201, {
@@ -10023,6 +10490,33 @@ export class ApiGateway {
         "referencedMessageId",
         { optional: true },
       );
+      // A thread lives in a room, and a reply into it is a post in that room:
+      // the same visibility and membership rules apply, taken from the root
+      // rather than from the request so a reply cannot address a channel its
+      // thread is not in.
+      const replyRoot = await this.options.store.getChannelMessage(
+        repositoryId,
+        messageId,
+        principal.user.id,
+      );
+      if (replyRoot === undefined) {
+        throw new HttpError(404, "not_found", "Channel message was not found");
+      }
+      const replyChannel = await this.authorizeSubChannel({
+        projectId,
+        repositoryId,
+        channelId: replyRoot.channelId,
+        principal,
+      });
+      if (
+        !(await this.canPostInSubChannel(replyChannel, principal.user.id))
+      ) {
+        throw new HttpError(
+          403,
+          "not_a_member",
+          "You are not a member of this channel",
+        );
+      }
       let reply;
       try {
         reply = await this.options.store.addChannelReply({
@@ -10044,7 +10538,16 @@ export class ApiGateway {
       }
       await this.options.store.appendAudit(undefined, {
         type: "channel_message_replied",
-        data: { projectId, repositoryId, messageId, replyId: reply.id },
+        // A reply belongs to its root, so the room comes from the root
+        // rather than the request — a thread cannot be answered into a
+        // different channel than the one it is in.
+        data: {
+          projectId,
+          repositoryId,
+          channelId: replyChannel.id,
+          messageId,
+          replyId: reply.id,
+        },
       });
       // Answered after the reply is stored, never before it is acknowledged:
       // the person typing should see their own message land at once, and the
@@ -10202,8 +10705,22 @@ export class ApiGateway {
       ) {
         throw new HttpError(404, "not_found", "Repository was not found");
       }
+      const channel = await this.authorizeSubChannel({
+        projectId,
+        repositoryId,
+        channelId: this.requestedChannelId(
+          url,
+          await this.optionalJsonBody(request),
+        ),
+        principal,
+      });
       const at = new Date().toISOString();
-      await this.options.store.markChannelRead(repositoryId, principal.user.id, at);
+      await this.options.store.markChannelRead(
+        repositoryId,
+        principal.user.id,
+        at,
+        channel.id,
+      );
       // Read back rather than echoed: the cursor only moves forward, so a
       // request that arrived after a later one leaves the stored mark where it
       // was, and the answer has to say where that is.
@@ -10211,6 +10728,7 @@ export class ApiGateway {
         (await this.options.store.getChannelReadCursor(
           repositoryId,
           principal.user.id,
+          channel.id,
         )) ?? at;
       this.sendJson(response, 200, { readAt });
       return;
@@ -10343,9 +10861,16 @@ export class ApiGateway {
       // this one — deduplicated, since somebody can hold both. Factored into
       // `channelAgentConnections` because @mention dispatch on the message
       // route below needs the identical set.
+      const rosterChannel = await this.authorizeSubChannel({
+        projectId,
+        repositoryId,
+        channelId: this.requestedChannelId(url),
+        principal,
+      });
       const connections = await this.channelAgentConnections(
         projectId,
         repositoryId,
+        rosterChannel.id,
       );
       const rosterOverrides =
         await this.options.store.listChannelAgentOverrides(repositoryId);
@@ -10594,11 +11119,28 @@ export class ApiGateway {
         throw new HttpError(404, "not_found", "Repository was not found");
       }
       if (messageId === undefined || messageId.length === 0) {
-        const removed =
-          await this.options.store.deleteChannelMessages(repositoryId);
+        // "Clear the channel" now means the room that is open, not every room
+        // in the repository — emptying #general is not a reason to empty
+        // #design, and a client that names no room still means #general.
+        const cleared = await this.authorizeSubChannel({
+          projectId,
+          repositoryId,
+          channelId: this.requestedChannelId(url),
+          principal,
+        });
+        const removed = await this.options.store.deleteChannelMessages(
+          repositoryId,
+          cleared.id,
+        );
         await this.options.store.appendAudit(undefined, {
           type: "channel_message_deleted",
-          data: { projectId, repositoryId, removed, all: true },
+          data: {
+            projectId,
+            repositoryId,
+            channelId: cleared.id,
+            removed,
+            all: true,
+          },
         });
         this.sendJson(response, 200, { removed });
         return;
@@ -11051,6 +11593,15 @@ export class ApiGateway {
       ) {
         throw new HttpError(404, "not_found", "Repository was not found");
       }
+      const membershipChannel = await this.authorizeSubChannel({
+        projectId,
+        repositoryId,
+        channelId: this.requestedChannelId(
+          url,
+          method === "POST" ? await this.optionalJsonBody(request) : undefined,
+        ),
+        principal,
+      });
       const isMember = method === "POST";
       const targetUserId = principal.user.id;
       if (!isMember) {
@@ -11072,12 +11623,14 @@ export class ApiGateway {
         targetUserId,
         agentId,
         isMember,
+        membershipChannel.id,
       );
       await this.options.store.appendAudit(undefined, {
         type: "channel_agent_membership_changed",
         data: {
           projectId,
           repositoryId,
+          channelId: membershipChannel.id,
           provider: agentId,
           isMember,
           userId: targetUserId,
@@ -12964,6 +13517,95 @@ export class ApiGateway {
    * true: nothing predates this repository, so there is nothing to
    * grandfather, and its roster is empty until somebody chooses.
    */
+  /**
+   * Which sub-channel a `/channel/*` request is about, and whether the caller
+   * is allowed to know it exists.
+   *
+   * Callers name one with `?channelId=` or `body.channelId`; leaving it out
+   * means `#general`, which is where the `repository-sub-channels` migration
+   * put everything that predates sub-channels — so a client that has never
+   * heard of them addresses exactly the room it always did.
+   *
+   * A private sub-channel the caller is not in answers 404 rather than 403,
+   * for every verb. A 403 would confirm the room exists and name it, which is
+   * the one thing "invisible to non-members" has to not do. `manage_project`
+   * sees every room, because it is what creates and administers them.
+   */
+  private async authorizeSubChannel(input: {
+    projectId: string;
+    repositoryId: string;
+    channelId: string | undefined;
+    principal: AuthenticatedPrincipal;
+  }): Promise<SubChannel> {
+    const { projectId, repositoryId, channelId, principal } = input;
+    const channel =
+      channelId === undefined || channelId === ""
+        ? await this.options.store.ensureGeneralSubChannel(
+            repositoryId,
+            projectId,
+          )
+        : await this.options.store.getSubChannel(repositoryId, channelId);
+    if (channel === undefined) {
+      throw new HttpError(404, "not_found", "Channel was not found");
+    }
+    if (channel.visibility === "open") {
+      return channel;
+    }
+    if (
+      await this.options.store.isSubChannelMember(channel.id, principal.user.id)
+    ) {
+      return channel;
+    }
+    const admin = await authorizeRepository(
+      this.options.store,
+      principal,
+      projectId,
+      repositoryId,
+      "manage_project",
+    ).then(
+      () => true,
+      () => false,
+    );
+    if (admin) {
+      return channel;
+    }
+    throw new HttpError(404, "not_found", "Channel was not found");
+  }
+
+  /**
+   * Whether this person may say something here.
+   *
+   * Reading and posting come apart in an `open` channel: everybody in the
+   * project can read it, only its members can write to it. `#general` is the
+   * room everybody in the project belongs to, so it never asks — a
+   * membership row for every collaborator would be a table that has to be
+   * kept in step with the project's own list forever.
+   */
+  private async canPostInSubChannel(
+    channel: SubChannel,
+    userId: string,
+  ): Promise<boolean> {
+    if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+      return true;
+    }
+    return await this.options.store.isSubChannelMember(channel.id, userId);
+  }
+
+  /** The channel id a request names, from its query string or its body. */
+  private requestedChannelId(
+    url: URL,
+    body?: Record<string, unknown>,
+  ): string | undefined {
+    const fromBody = body?.["channelId"];
+    if (typeof fromBody === "string" && fromBody.trim().length > 0) {
+      return fromBody.trim();
+    }
+    const fromQuery = url.searchParams.get("channelId")?.trim();
+    return fromQuery === undefined || fromQuery.length === 0
+      ? undefined
+      : fromQuery;
+  }
+
   private async markChannelMembershipChosen(repositoryId: string): Promise<void> {
     await this.options.store
       .markChannelMembershipBackfilled(repositoryId)
@@ -12973,6 +13615,7 @@ export class ApiGateway {
   private async channelAgentConnections(
     projectId: string,
     repositoryId: string,
+    channelId?: string,
   ): Promise<
     Array<{
       userId: string;
@@ -13035,6 +13678,14 @@ export class ApiGateway {
       });
     });
     if (!(await this.options.store.hasBackfilledChannelMembership(repositoryId))) {
+      // The grandfather backfill lands in `#general`, which is where the
+      // migration put everything that predates sub-channels. A room created
+      // since starts empty and stays that way until somebody adds an agent
+      // to it — an agent is assigned per room, not per repository.
+      const general = await this.options.store.ensureGeneralSubChannel(
+        repositoryId,
+        projectId,
+      );
       await Promise.all(
         reachable.map((connection) =>
           this.options.store.setChannelAgentMember(
@@ -13042,15 +13693,21 @@ export class ApiGateway {
             connection.userId,
             connection.provider,
             true,
+            general.id,
           ),
         ),
       );
       await this.options.store.markChannelMembershipBackfilled(repositoryId);
-      // Freshly backfilled: everything reachable just became a member, so
-      // there is nothing further to filter this call.
-      return reachable;
+      // Freshly backfilled: everything reachable just became a member of
+      // `#general`, so only a request about another room still has to filter.
+      if (channelId === undefined || channelId === general.id) {
+        return reachable;
+      }
     }
-    const members = await this.options.store.listChannelAgentMembers(repositoryId);
+    const members = await this.options.store.listChannelAgentMembers(
+      repositoryId,
+      channelId,
+    );
     const memberKeys = new Set(
       members.map((member) => `${member.userId}\0${member.provider}`),
     );
@@ -13078,9 +13735,10 @@ export class ApiGateway {
   private async resolveChannelMentionCandidates(
     projectId: string,
     repositoryId: string,
+    channelId?: string,
   ): Promise<ChannelMentionCandidate[]> {
     const [connections, overrides] = await Promise.all([
-      this.channelAgentConnections(projectId, repositoryId),
+      this.channelAgentConnections(projectId, repositoryId, channelId),
       this.options.store.listChannelAgentOverrides(repositoryId),
     ]);
     const candidates = connections.flatMap((connection) => {
@@ -13449,12 +14107,22 @@ export class ApiGateway {
   private async dispatchChannelMentions(input: {
     projectId: string;
     repositoryId: string;
+    /**
+     * The sub-channel the message was posted in.
+     *
+     * What narrows the roster below: an @mention can only name an agent
+     * assigned to *this* room, so a name that resolves in one channel is
+     * simply not a mention in another. Left out by internal callers that
+     * predate sub-channels, which means the repository's whole roster.
+     */
+    channelId?: string;
     content: string;
     senderId: string;
     /** The stored channel root that caused this dispatch. */
     referencedMessageId: string;
   }): Promise<ChannelCommandResponse | undefined> {
-    const { projectId, repositoryId, senderId, referencedMessageId } = input;
+    const { projectId, repositoryId, channelId, senderId, referencedMessageId } =
+      input;
     // A command says *how* to treat the request; an "@" says who it is for.
     // Different questions, so they compose: the command word is taken out
     // here — wherever in the message it was written — and everything left
@@ -13475,7 +14143,7 @@ export class ApiGateway {
       }
     }
     const [candidates, people] = await Promise.all([
-      this.resolveChannelMentionCandidates(projectId, repositoryId),
+      this.resolveChannelMentionCandidates(projectId, repositoryId, channelId),
       this.resolveChannelPeople(projectId, repositoryId),
     ]);
     if (content.includes("@")) {
@@ -13504,6 +14172,7 @@ export class ApiGateway {
             repositoryId,
             "No agents here can answer a broadcast — connect one, or ask " +
               "their owners to make theirs org-wide.",
+            channelId,
           );
           return;
         }
@@ -13513,6 +14182,7 @@ export class ApiGateway {
             repositoryId,
             "`/ask` works with one agent at a time — mention the agent who " +
               "should ask the questions.",
+            channelId,
           );
           return;
         }
@@ -13538,6 +14208,7 @@ export class ApiGateway {
             repositoryId,
             "@agents is for questions — a broadcast task would run the same " +
               "job once per agent. Mention one agent to dispatch work.",
+            channelId,
           );
           return;
         }
@@ -13589,7 +14260,8 @@ export class ApiGateway {
           repositoryId,
           "`/ask` needs exactly one reachable agent — mention the agent who " +
             "should ask the questions.",
-        );
+            channelId,
+          );
         return;
       }
       if (parsed?.command.name === "queue" && mentioned.length !== 1) {
@@ -13604,7 +14276,8 @@ export class ApiGateway {
                   `${candidates
                     .map((candidate) => `@${candidate.name}`)
                     .join(", ")}.`,
-        );
+            channelId,
+          );
         return;
       }
       if (
@@ -13615,7 +14288,8 @@ export class ApiGateway {
           projectId,
           repositoryId,
           "`/queue` needs a task to run later — use `/queue @agent what should run next`.",
-        );
+            channelId,
+          );
         return;
       }
       if (
@@ -13651,7 +14325,8 @@ export class ApiGateway {
                 `then add it to this channel from the roster.`
             : `Nobody here answers to that. In this channel you can mention: ` +
                 `${candidates.map((candidate) => `@${candidate.name}`).join(", ")}.`,
-        );
+            channelId,
+          );
         return;
       }
       for (const candidate of mentioned) {
@@ -13700,7 +14375,8 @@ export class ApiGateway {
           ? `\`/ask\` needs one agent and a task: it asks you about the parts ` +
               `it would have to guess at, then does the work. \`${parsed.command.usage}\`.`
           : `\`/dnc\` answers without starting work — mention the agent you are asking: \`${parsed.command.usage}\`.`,
-      );
+            channelId,
+          );
       return;
     }
     // "Yes" answers the offer below before it is read as anything else — an
@@ -15706,8 +16382,8 @@ export class ApiGateway {
       if (!connections.some((connection) => connection.provider === provider)) {
         return (
           `${who}'s ${label} is not connected any more — the sign-in behind ` +
-          `it has been removed or has expired. Only ${who} can reconnect it, ` +
-          `from My Agents; until then, mention another agent by name.`
+          `it has been removed or has expired. Only ${who} can reconnect it ` +
+          `from Settings → Agents; until then, mention another agent by name.`
         );
       }
       if (PROVIDER_TO_VENDOR[provider] === undefined) {
@@ -19604,6 +20280,10 @@ export class ApiGateway {
       data: {
         projectId: input.projectId,
         repositoryId: input.repositoryId,
+        // Taken off the stored row rather than the input: an agent's answer
+        // inherits the room of the message it answers, and the browser needs
+        // to know which room to refresh.
+        channelId: message.channelId,
         messageId: message.id,
         ...(message.referencedMessageId === undefined
           ? {}
@@ -19654,6 +20334,205 @@ export class ApiGateway {
             `running. Read it here, then reply "go ahead" and I'll start.`
           : `${CHANNEL_HOLD_PREFIX} — this needs a review before it can ` +
             `land. Reply "go ahead" here to approve it.`,
+    }).catch(() => undefined);
+  }
+
+  /**
+   * Pause or resume one task, and say so in the thread it belongs to.
+   *
+   * One method for both because they are one control: the button in a thread
+   * header is a pause while work is running and a play while it is parked,
+   * and the two halves must agree about what a thread is told and when. Both
+   * refuse loudly rather than silently — a pause that finds nothing to pause
+   * has almost always raced the task's own ending, and answering 200 would
+   * leave a play button standing over work that finished.
+   */
+  private async pauseOrResumeTask(
+    task: SubmittedTask,
+    action: "pause" | "resume",
+    actorId: string,
+  ): Promise<{ task: SubmittedTask }> {
+    const projectId = task.projectId ?? "";
+    if (action === "pause") {
+      const operation = this.options.operations.pauseTasks;
+      if (operation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot pause running work",
+        );
+      }
+      const { paused } = await operation({
+        projectId,
+        repositoryId: task.repositoryId,
+        taskIds: [task.id],
+        reason: "Paused from the thread",
+        actorId,
+      });
+      if (paused.length === 0) {
+        throw new HttpError(
+          409,
+          "not_pausable",
+          `Task ${task.id} is not running`,
+        );
+      }
+      // Stop following it. The watcher gives up on a run that stops
+      // reporting and says so out loud — "I stopped hearing back from the
+      // run" — which is exactly what parked work looks like from the outside,
+      // and would put an abandonment notice under a thread somebody paused on
+      // purpose. The resume below starts a fresh watch.
+      this.watchedChannelTasks.delete(task.id);
+      await this.announceTaskPaused(task, actorId);
+      return { task: await this.rereadTask(task) };
+    }
+    const operation = this.options.operations.resumeTask;
+    if (operation === undefined) {
+      throw new HttpError(
+        501,
+        "not_supported",
+        "This deployment cannot resume paused work",
+      );
+    }
+    const { resumed } = await operation({
+      projectId,
+      repositoryId: task.repositoryId,
+      taskId: task.id,
+      actorId,
+    });
+    if (!resumed) {
+      throw new HttpError(
+        409,
+        "not_resumable",
+        `Task ${task.id} is not paused`,
+      );
+    }
+    const messageId = task.conversationId;
+    if (messageId !== undefined) {
+      // The same release line a held plan's go-ahead writes, because to a
+      // reader they are the same event: the thread starts moving again.
+      await this.announceHoldReleased({
+        projectId,
+        repositoryId: task.repositoryId,
+        messageId,
+        authorId: actorId,
+        viewerId: actorId,
+        taskId: task.id,
+        resumed: true,
+      });
+      // Narration has to be re-attached by hand: pausing stopped the watch,
+      // so a resumed run would otherwise do its work in silence. The cursor
+      // is read from the log rather than remembered, because a pause can sit
+      // across a deploy and nothing in this process survives that — starting
+      // at zero would narrate the whole of the task's history into the thread
+      // a second time.
+      const agent = await this.watchedTaskAgent(task);
+      this.watchChannelTask({
+        taskId: task.id,
+        projectId,
+        repositoryId: task.repositoryId,
+        messageId,
+        authorId: actorId,
+        ownerId: agent?.ownerId ?? task.submittedBy ?? actorId,
+        provider: agent?.provider ?? "",
+        cursor: await this.latestTaskSequence(task.id),
+        pending: [],
+        // The thread exists and is what the reader is looking at, so
+        // narration goes straight into it.
+        threaded: true,
+      });
+    }
+    void Promise.resolve(
+      this.options.operations.runRepository?.({
+        projectId,
+        repositoryId: task.repositoryId,
+        actorId: task.submittedBy ?? actorId,
+      }),
+    ).catch(() => undefined);
+    return { task: await this.rereadTask(task) };
+  }
+
+  /**
+   * Everything this task has already said, so a resumed watch says none of it
+   * again. Zero when the log has nothing, which is also the right answer.
+   */
+  private async latestTaskSequence(taskId: string): Promise<number> {
+    const events: SequencedAuditEvent[] = await this.options.store
+      .listAuditEvents({ taskId })
+      .catch(() => []);
+    return events.reduce(
+      (highest, record) => Math.max(highest, record.sequence),
+      0,
+    );
+  }
+
+  /**
+   * Whose account a resumed watch reports against, and on which provider.
+   *
+   * The browser matches its "working" dots on exactly this pair, so getting
+   * it wrong puts somebody else's agent up as the one working — which is why
+   * an unmatched agent answers with nothing rather than a guess, costing a
+   * dot instead of misattributing the run. Matched against the room's roster
+   * the way every other agent-id lookup here does: an agent id is either
+   * `owner:provider` or the bare provider.
+   */
+  private async watchedTaskAgent(
+    task: SubmittedTask,
+  ): Promise<{ ownerId: string; provider: string } | undefined> {
+    if (task.projectId === undefined) {
+      return undefined;
+    }
+    const candidates: ChannelMentionCandidate[] =
+      await this.resolveChannelMentionCandidates(
+        task.projectId,
+        task.repositoryId,
+      ).catch(() => []);
+    const candidate = candidates.find(
+      (entry) =>
+        `${entry.userId}:${entry.provider}` === task.agentId ||
+        entry.provider === task.agentId,
+    );
+    return candidate === undefined
+      ? undefined
+      : { ownerId: candidate.userId, provider: candidate.provider };
+  }
+
+  /** The task row as it stands now, falling back to what the caller had. */
+  private async rereadTask(task: SubmittedTask): Promise<SubmittedTask> {
+    const rows = await this.options.store
+      .listSubmittedTasks({ repositoryId: task.repositoryId })
+      .catch(() => [] as SubmittedTask[]);
+    return rows.find((entry) => entry.id === task.id) ?? task;
+  }
+
+  /**
+   * Marks a thread as parked, once.
+   *
+   * Written into the thread rather than the room because it is a fact about
+   * this task, and read back by {@link threadIsHolding} so the resume line
+   * knows there is something to answer even after a deploy. Silent for a task
+   * with no thread — a one-shot dispatch that never opened one has nowhere to
+   * say this and nothing that would read it.
+   */
+  private async announceTaskPaused(
+    task: SubmittedTask,
+    actorId: string,
+  ): Promise<void> {
+    const messageId = task.conversationId;
+    if (messageId === undefined) {
+      return;
+    }
+    // The hold marker and the pause marker answer to the same release, so a
+    // pause standing in the thread is remembered the same way.
+    this.announcedChannelHolds.add(task.id);
+    await this.appendChannelThreadReply({
+      projectId: task.projectId ?? "",
+      repositoryId: task.repositoryId,
+      messageId,
+      kind: "outcome",
+      authorId: actorId,
+      content:
+        `${CHANNEL_PAUSED_PREFIX} — stopped here, and nothing is running. ` +
+        `Press play in this thread when you want it picked back up.`,
     }).catch(() => undefined);
   }
 
@@ -19724,7 +20603,13 @@ export class ApiGateway {
     const replies = root?.replies ?? [];
     for (let index = replies.length - 1; index >= 0; index -= 1) {
       const content = replies[index]?.content ?? "";
-      if (content.startsWith(CHANNEL_HOLD_PREFIX)) {
+      if (
+        content.startsWith(CHANNEL_HOLD_PREFIX) ||
+        // A pause is the other thing a thread can be stopped on, and it is
+        // answered by the same release line — so the walk has to stop at it
+        // too, or a resumed pause would say nothing.
+        content.startsWith(CHANNEL_PAUSED_PREFIX)
+      ) {
         return true;
       }
       if (content.startsWith(CHANNEL_RELEASE_PREFIX)) {
@@ -20879,17 +21764,29 @@ export class ApiGateway {
     projectId: string,
     repositoryId: string,
     content: string,
+    /**
+     * The room to say it in. Left out, the store falls back to `#general`,
+     * which is right for every caller that is not answering something said in
+     * a particular channel.
+     */
+    channelId?: string,
   ): Promise<void> {
     const message = await this.options.store.appendChannelMessage({
       repositoryId,
       projectId,
+      ...(channelId === undefined ? {} : { channelId }),
       kind: "system",
       authorId: "system",
       content,
     });
     await this.options.store.appendAudit(undefined, {
       type: "channel_message_posted",
-      data: { projectId, repositoryId, messageId: message.id },
+      data: {
+        projectId,
+        repositoryId,
+        channelId: message.channelId,
+        messageId: message.id,
+      },
     });
   }
 
@@ -21486,6 +22383,29 @@ export class ApiGateway {
   }
 
 
+
+  /**
+   * A JSON body when there is one, and an empty object when there is not.
+   *
+   * `readJson` refuses a request that does not declare `application/json`,
+   * which is right for a route whose body carries the request. Routes that
+   * merely *allow* one — `channelId` on read cursors and agent membership —
+   * still have to work for the callers that send nothing at all, which is
+   * every client written before sub-channels existed.
+   */
+  private async optionalJsonBody(
+    request: IncomingMessage,
+  ): Promise<Record<string, unknown>> {
+    const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
+    if (contentType !== "application/json") {
+      return {};
+    }
+    try {
+      return objectBody(await this.readJson(request));
+    } catch {
+      return {};
+    }
+  }
 
   private async readJson(request: IncomingMessage): Promise<unknown> {
     const contentType = request.headers["content-type"]?.split(";")[0]?.trim();

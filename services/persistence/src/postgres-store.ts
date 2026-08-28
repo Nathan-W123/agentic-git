@@ -58,6 +58,11 @@ import type {
   ChangesetComment,
   ChannelAgentOverride,
   ChannelEntryKind,
+  CreateSubChannelInput,
+  SubChannel,
+  SubChannelMember,
+  SubChannelVisibility,
+  UpdateSubChannelInput,
   ChannelMessage,
   ChannelChangedFile,
   ChannelMessageCounts,
@@ -117,6 +122,7 @@ import type {
   WorkerRecord,
 } from "./store.js";
 import {
+  GENERAL_SUB_CHANNEL_SLUG,
   directPairKey,
   parseChangedFiles,
   repositoryConflicts,
@@ -128,6 +134,17 @@ type PoolClient = pg.PoolClient;
 type QueryResult = pg.QueryResult;
 
 type Row = Record<string, unknown>;
+
+/**
+ * The id of the `#general` a repository falls back to.
+ *
+ * Identical to the SQLite store's helper and to what the
+ * `repository-sub-channels` migration minted, so an unqualified write lands
+ * in the same room whichever backend is underneath.
+ */
+function generalChannelId(repositoryId: string): string {
+  return `subchan_general_${repositoryId}`;
+}
 
 function text(row: Row, column: string): string {
   const value = row[column];
@@ -959,7 +976,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
           `NOT EXISTS (
             SELECT 1 FROM submitted_tasks predecessor
             WHERE predecessor.id = submitted_tasks.after_task_id
-              AND predecessor.status IN ('submitted', 'claimed', 'planned')
+              AND predecessor.status IN ('submitted', 'claimed', 'planned', 'paused')
           )`,
         );
         if (input.taskId !== undefined) {
@@ -1918,6 +1935,16 @@ export class PostgresCoordinationStore implements CoordinationStore {
         id,
       ]);
       await client.query(
+        `DELETE FROM sub_channel_members
+           WHERE channel_id IN (
+             SELECT id FROM sub_channels WHERE repository_id = $1
+           )`,
+        [id],
+      );
+      await client.query("DELETE FROM sub_channels WHERE repository_id = $1", [
+        id,
+      ]);
+      await client.query(
         "DELETE FROM channel_membership_backfills WHERE repository_id = $1",
         [id],
       );
@@ -2144,7 +2171,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
                AND NOT EXISTS (
                  SELECT 1 FROM submitted_tasks predecessor
                  WHERE predecessor.id = submitted_tasks.after_task_id
-                   AND predecessor.status IN ('submitted', 'claimed', 'planned')
+                   AND predecessor.status IN ('submitted', 'claimed', 'planned', 'paused')
                )
              ORDER BY submitted_at, seq`,
             values,
@@ -2203,7 +2230,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const result = await this.query(
       `UPDATE submitted_tasks
        SET status = 'cancelled', completed_at = $1
-       WHERE id = $2 AND status IN ('submitted', 'claimed', 'planned', 'open')`,
+       WHERE id = $2 AND status IN ('submitted', 'claimed', 'planned', 'open', 'paused')`,
       [completedAt, taskId],
     );
     if ((result.rowCount ?? 0) === 0) {
@@ -2228,6 +2255,33 @@ export class PostgresCoordinationStore implements CoordinationStore {
       );
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async pauseSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // Returning the row from the UPDATE itself, so the pause and the read of
+    // what was paused cannot straddle another writer.
+    const row = await this.row(
+      `UPDATE submitted_tasks SET status = 'paused'
+       WHERE id = $1 AND status IN ('submitted', 'claimed')
+       RETURNING *`,
+      [taskId],
+    );
+    return row === undefined ? undefined : this.toSubmittedTask(row);
+  }
+
+  public async resumePausedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const row = await this.row(
+      `UPDATE submitted_tasks
+       SET status = 'submitted', claimed_at = NULL, run_id = NULL
+       WHERE id = $1 AND status = 'paused'
+       RETURNING *`,
+      [taskId],
+    );
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async releasePlannedTask(
@@ -3438,6 +3492,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
     const values: unknown[] = [];
     const clauses = [`repository_id = ${bind(values, repositoryId)}`];
+    if (filter.channelId !== undefined) {
+      clauses.push(
+        `COALESCE(channel_id, ${bind(values, generalChannelId(repositoryId))}) = ${bind(values, filter.channelId)}`,
+      );
+    }
     if (filter.before !== undefined) {
       clauses.push(
         `COALESCE(bumped_at, created_at) < ${bind(values, filter.before)}`,
@@ -3457,20 +3516,26 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   public async countChannelMessages(
     repositoryId: string,
+    channelId?: string,
   ): Promise<ChannelMessageCounts> {
     // Two counts rather than a join: a LEFT JOIN would have to count DISTINCT
     // roots to avoid multiplying them by their own replies, and this reads as
     // what it is. Both int8 results are parsed to numbers by `queryTypes`.
+    const scope = [generalChannelId(repositoryId), channelId ?? null];
+    const scopeSql =
+      " AND ($3::text IS NULL OR COALESCE(channel_id, $2) = $3)";
     const roots = await this.row(
-      "SELECT COUNT(*) AS total FROM channel_messages WHERE repository_id = $1",
-      [repositoryId],
+      `SELECT COUNT(*) AS total FROM channel_messages
+        WHERE repository_id = $1${scopeSql}`,
+      [repositoryId, ...scope],
     );
     const replies = await this.row(
       `SELECT COUNT(*) AS total FROM channel_message_replies
         WHERE message_id IN (
-          SELECT id FROM channel_messages WHERE repository_id = $1
+          SELECT id FROM channel_messages
+           WHERE repository_id = $1${scopeSql}
         )`,
-      [repositoryId],
+      [repositoryId, ...scope],
     );
     return {
       messages: roots === undefined ? 0 : integer(roots, "total"),
@@ -3574,12 +3639,18 @@ export class PostgresCoordinationStore implements CoordinationStore {
     });
   }
 
-  public async deleteChannelMessages(repositoryId: string): Promise<number> {
+  public async deleteChannelMessages(
+    repositoryId: string,
+    channelId?: string,
+  ): Promise<number> {
+    const scope = [generalChannelId(repositoryId), channelId ?? null];
+    const scopeSql = " AND ($3::text IS NULL OR COALESCE(channel_id, $2) = $3)";
     return await this.transaction(async (client) => {
       const ids = (
         await client.query(
-          "SELECT id FROM channel_messages WHERE repository_id = $1",
-          [repositoryId],
+          `SELECT id FROM channel_messages
+            WHERE repository_id = $1${scopeSql}`,
+          [repositoryId, ...scope],
         )
       ).rows.map((row) => String((row as Row)["id"]));
       for (const id of ids) {
@@ -3597,8 +3668,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
         );
       }
       await client.query(
-        "DELETE FROM channel_messages WHERE repository_id = $1",
-        [repositoryId],
+        `DELETE FROM channel_messages WHERE repository_id = $1${scopeSql}`,
+        [repositoryId, ...scope],
       );
       return ids.length;
     });
@@ -3611,9 +3682,10 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A channel message must have content");
     }
+    let referencedChannelId: string | undefined;
     if (input.referencedMessageId !== undefined) {
       const target = await this.row(
-        "SELECT repository_id FROM channel_messages WHERE id = $1",
+        "SELECT repository_id, channel_id FROM channel_messages WHERE id = $1",
         [input.referencedMessageId],
       );
       if (
@@ -3624,10 +3696,20 @@ export class PostgresCoordinationStore implements CoordinationStore {
           "A channel message reference must target the same repository",
         );
       }
+      referencedChannelId = optionalText(target, "channel_id");
     }
+    // An answer belongs in the room the question was asked in, so a writer
+    // that names no channel inherits the referenced message's before it falls
+    // back to `#general`.
+    const channelId =
+      input.channelId ??
+      referencedChannelId ??
+      (await this.ensureGeneralSubChannel(input.repositoryId, input.projectId))
+        .id;
     const message = {
       id: createId("chanmsg"),
       repositoryId: input.repositoryId,
+      channelId,
       projectId: input.projectId,
       kind: input.kind ?? "user",
       authorId: input.authorId,
@@ -3636,12 +3718,13 @@ export class PostgresCoordinationStore implements CoordinationStore {
     };
     await this.query(
       `INSERT INTO channel_messages
-         (id, repository_id, project_id, kind, author_id, content, created_at,
-          task_id, referenced_message_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         (id, repository_id, channel_id, project_id, kind, author_id, content,
+          created_at, task_id, referenced_message_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         message.id,
         message.repositoryId,
+        message.channelId,
         message.projectId,
         message.kind,
         message.authorId,
@@ -3993,12 +4076,14 @@ export class PostgresCoordinationStore implements CoordinationStore {
   public async listPinnedChannelMessages(
     repositoryId: string,
     viewerId: string,
+    channelId?: string,
   ): Promise<ChannelMessage[]> {
     const rows = await this.rows(
       `SELECT * FROM channel_messages
        WHERE repository_id = $1 AND pinned_at IS NOT NULL
+         AND ($3::text IS NULL OR COALESCE(channel_id, $2) = $3)
        ORDER BY pinned_at, id`,
-      [repositoryId],
+      [repositoryId, generalChannelId(repositoryId), channelId ?? null],
     );
     return await this.hydrateChannelMessages(
       rows.map((row) => this.toChannelMessageBase(row)),
@@ -4133,16 +4218,238 @@ export class PostgresCoordinationStore implements CoordinationStore {
     );
   }
 
+  /* ------------------------------------------------- sub-channels ---- */
+
+  private toSubChannel(row: Row): SubChannel {
+    const createdBy = optionalText(row, "created_by");
+    return {
+      id: text(row, "id"),
+      repositoryId: text(row, "repository_id"),
+      projectId: text(row, "project_id") as ProjectId,
+      slug: text(row, "slug"),
+      name: text(row, "name"),
+      visibility: text(row, "visibility") as SubChannelVisibility,
+      createdAt: text(row, "created_at"),
+      ...(createdBy === undefined ? {} : { createdBy }),
+    };
+  }
+
+  public async listSubChannels(repositoryId: string): Promise<SubChannel[]> {
+    const rows = await this.rows(
+      `SELECT * FROM sub_channels WHERE repository_id = $1
+        ORDER BY (slug = $2) DESC, slug`,
+      [repositoryId, GENERAL_SUB_CHANNEL_SLUG],
+    );
+    return rows.map((row) => this.toSubChannel(row));
+  }
+
+  public async getSubChannel(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannel | undefined> {
+    const row = await this.row(
+      "SELECT * FROM sub_channels WHERE id = $1 AND repository_id = $2",
+      [channelId, repositoryId],
+    );
+    return row === undefined ? undefined : this.toSubChannel(row);
+  }
+
+  public async ensureGeneralSubChannel(
+    repositoryId: string,
+    projectId: ProjectId,
+  ): Promise<SubChannel> {
+    await this.query(
+      `INSERT INTO sub_channels
+         (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
+       VALUES ($1, $2, $3, $4, $4, 'open', $5, NULL)
+       ON CONFLICT (repository_id, slug) DO NOTHING`,
+      [
+        generalChannelId(repositoryId),
+        repositoryId,
+        projectId,
+        GENERAL_SUB_CHANNEL_SLUG,
+        new Date().toISOString(),
+      ],
+    );
+    const row = await this.row(
+      "SELECT * FROM sub_channels WHERE repository_id = $1 AND slug = $2",
+      [repositoryId, GENERAL_SUB_CHANNEL_SLUG],
+    );
+    if (row === undefined) {
+      throw new Error("Sub-channel was not found");
+    }
+    return this.toSubChannel(row);
+  }
+
+  public async createSubChannel(
+    input: CreateSubChannelInput,
+  ): Promise<SubChannel> {
+    const slug = input.slug.trim().toLowerCase();
+    if (slug.length === 0) {
+      throw new Error("A sub-channel needs a name");
+    }
+    const trimmed = input.name?.trim();
+    const channel: SubChannel = {
+      id: createId("subchan"),
+      repositoryId: input.repositoryId,
+      projectId: input.projectId,
+      slug,
+      name: trimmed === undefined || trimmed === "" ? slug : trimmed,
+      visibility: input.visibility ?? "open",
+      createdAt: new Date().toISOString(),
+      ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
+    };
+    const existing = await this.row(
+      "SELECT id FROM sub_channels WHERE repository_id = $1 AND slug = $2",
+      [input.repositoryId, slug],
+    );
+    if (existing !== undefined) {
+      throw new Error("A sub-channel with that name already exists");
+    }
+    await this.query(
+      `INSERT INTO sub_channels
+         (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        channel.id,
+        channel.repositoryId,
+        channel.projectId,
+        channel.slug,
+        channel.name,
+        channel.visibility,
+        channel.createdAt,
+        input.createdBy ?? null,
+      ],
+    );
+    return channel;
+  }
+
+  public async updateSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: UpdateSubChannelInput,
+  ): Promise<SubChannel> {
+    const current = await this.getSubChannel(repositoryId, channelId);
+    if (current === undefined) {
+      throw new Error("Sub-channel was not found");
+    }
+    const slug =
+      input.slug === undefined ? current.slug : input.slug.trim().toLowerCase();
+    if (slug.length === 0) {
+      throw new Error("A sub-channel needs a name");
+    }
+    if (slug !== current.slug) {
+      const clash = await this.row(
+        "SELECT id FROM sub_channels WHERE repository_id = $1 AND slug = $2",
+        [repositoryId, slug],
+      );
+      if (clash !== undefined) {
+        throw new Error("A sub-channel with that name already exists");
+      }
+    }
+    const trimmed = input.name?.trim();
+    const name =
+      input.name === undefined
+        ? current.name
+        : trimmed === undefined || trimmed === ""
+          ? slug
+          : trimmed;
+    const visibility = input.visibility ?? current.visibility;
+    await this.query(
+      `UPDATE sub_channels SET slug = $1, name = $2, visibility = $3
+        WHERE id = $4 AND repository_id = $5`,
+      [slug, name, visibility, channelId, repositoryId],
+    );
+    return { ...current, slug, name, visibility };
+  }
+
+  public async deleteSubChannel(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<void> {
+    const channel = await this.getSubChannel(repositoryId, channelId);
+    if (channel === undefined) {
+      return;
+    }
+    if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+      throw new Error("The #general channel cannot be deleted");
+    }
+    await this.deleteChannelMessages(repositoryId, channelId);
+    await this.transaction(async (client) => {
+      await client.query(
+        "DELETE FROM sub_channel_members WHERE channel_id = $1",
+        [channelId],
+      );
+      await client.query(
+        "DELETE FROM channel_agent_members WHERE channel_id = $1",
+        [channelId],
+      );
+      await client.query(
+        "DELETE FROM channel_read_cursors WHERE channel_id = $1",
+        [channelId],
+      );
+      await client.query("DELETE FROM sub_channels WHERE id = $1", [channelId]);
+    });
+  }
+
+  public async listSubChannelMembers(
+    channelId: string,
+  ): Promise<SubChannelMember[]> {
+    const rows = await this.rows(
+      "SELECT * FROM sub_channel_members WHERE channel_id = $1 ORDER BY user_id",
+      [channelId],
+    );
+    return rows.map((row) => ({
+      channelId: text(row, "channel_id"),
+      userId: text(row, "user_id"),
+      addedAt: text(row, "added_at"),
+    }));
+  }
+
+  public async setSubChannelMember(
+    channelId: string,
+    userId: string,
+    isMember: boolean,
+  ): Promise<void> {
+    if (isMember) {
+      await this.query(
+        `INSERT INTO sub_channel_members (channel_id, user_id, added_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (channel_id, user_id) DO NOTHING`,
+        [channelId, userId, new Date().toISOString()],
+      );
+    } else {
+      await this.query(
+        "DELETE FROM sub_channel_members WHERE channel_id = $1 AND user_id = $2",
+        [channelId, userId],
+      );
+    }
+  }
+
+  public async isSubChannelMember(
+    channelId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const row = await this.row(
+      "SELECT user_id FROM sub_channel_members WHERE channel_id = $1 AND user_id = $2",
+      [channelId, userId],
+    );
+    return row !== undefined;
+  }
+
   public async listChannelAgentMembers(
     repositoryId: string,
-  ): Promise<Array<{ userId: string; provider: string }>> {
+    channelId?: string,
+  ): Promise<Array<{ userId: string; provider: string; channelId: string }>> {
     const rows = await this.rows(
-      "SELECT user_id, provider FROM channel_agent_members WHERE repository_id = $1",
-      [repositoryId],
+      `SELECT user_id, provider, channel_id FROM channel_agent_members
+        WHERE repository_id = $1 AND ($2::text IS NULL OR channel_id = $2)`,
+      [repositoryId, channelId ?? null],
     );
     return rows.map((row) => ({
       userId: text(row, "user_id"),
       provider: text(row, "provider"),
+      channelId: text(row, "channel_id"),
     }));
   }
 
@@ -4151,18 +4458,21 @@ export class PostgresCoordinationStore implements CoordinationStore {
     userId: string,
     provider: string,
     isMember: boolean,
+    channelId?: string,
   ): Promise<void> {
+    const target = channelId ?? generalChannelId(repositoryId);
     if (isMember) {
       await this.query(
-        `INSERT INTO channel_agent_members (repository_id, user_id, provider, created_at)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (repository_id, user_id, provider) DO NOTHING`,
-        [repositoryId, userId, provider, new Date().toISOString()],
+        `INSERT INTO channel_agent_members
+           (repository_id, channel_id, user_id, provider, created_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (channel_id, user_id, provider) DO NOTHING`,
+        [repositoryId, target, userId, provider, new Date().toISOString()],
       );
     } else {
       await this.query(
-        "DELETE FROM channel_agent_members WHERE repository_id = $1 AND user_id = $2 AND provider = $3",
-        [repositoryId, userId, provider],
+        "DELETE FROM channel_agent_members WHERE channel_id = $1 AND user_id = $2 AND provider = $3",
+        [target, userId, provider],
       );
     }
   }
@@ -4192,25 +4502,28 @@ export class PostgresCoordinationStore implements CoordinationStore {
     repositoryId: string,
     userId: string,
     at: string,
+    channelId?: string,
   ): Promise<void> {
     await this.query(
       // Forward only, exactly as the SQLite store keeps it: a late write must
       // not move a cursor backwards and un-read messages somebody has seen.
-      `INSERT INTO channel_read_cursors (repository_id, user_id, read_at)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (repository_id, user_id) DO UPDATE SET
+      `INSERT INTO channel_read_cursors (repository_id, channel_id, user_id, read_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (repository_id, channel_id, user_id) DO UPDATE SET
          read_at = GREATEST(channel_read_cursors.read_at, excluded.read_at)`,
-      [repositoryId, userId, at],
+      [repositoryId, channelId ?? generalChannelId(repositoryId), userId, at],
     );
   }
 
   public async getChannelReadCursor(
     repositoryId: string,
     userId: string,
+    channelId?: string,
   ): Promise<string | undefined> {
     const row = await this.row(
-      "SELECT read_at FROM channel_read_cursors WHERE repository_id = $1 AND user_id = $2",
-      [repositoryId, userId],
+      `SELECT read_at FROM channel_read_cursors
+        WHERE repository_id = $1 AND channel_id = $2 AND user_id = $3`,
+      [repositoryId, channelId ?? generalChannelId(repositoryId), userId],
     );
     return row === undefined ? undefined : text(row, "read_at");
   }
@@ -4332,9 +4645,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const referencedMessageId = optionalText(row, "referenced_message_id");
     const deletedAt = optionalText(row, "deleted_at");
     const deletedBy = optionalText(row, "deleted_by");
+    const repositoryId = text(row, "repository_id");
     return {
       id: text(row, "id"),
-      repositoryId: text(row, "repository_id"),
+      repositoryId,
+      channelId:
+        optionalText(row, "channel_id") ?? generalChannelId(repositoryId),
       projectId: text(row, "project_id") as ProjectId,
       kind: text(row, "kind") as ChannelEntryKind,
       authorId: text(row, "author_id"),

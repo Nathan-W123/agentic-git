@@ -29,6 +29,48 @@ export function motionIsUnwanted() {
   );
 }
 
+/**
+ * The stylesheet's one curve, for the movements CSS cannot express.
+ *
+ * Motion's `animate` from `motion/mini` is the shape this is written to, and
+ * it is a thin wrapper over exactly this API. The dashboard ships as plain ES
+ * modules straight from `public/` with no bundler and no vendored packages,
+ * so there is nowhere to import it from that would not mean adding one — and
+ * the values are the same either way.
+ *
+ * The string is `--ease-motion`, written out because a keyframe timing cannot
+ * read a custom property. Nothing else in the browser code may hold a second
+ * curve; this is the one place it is spelled.
+ */
+export const EASE_MOTION = "cubic-bezier(0.32, 0.72, 0, 1)";
+
+/**
+ * One movement on that curve, or nothing at all.
+ *
+ * Nothing at all is the point of the helper: a reader who has asked for less
+ * movement gets no animation object back, and every caller is written so that
+ * the element is already where it belongs when this returns `undefined`.
+ * `fill: "none"` is what makes that true — the animation only ever plays over
+ * a state the document is already in, so an interrupted or unplayed one
+ * leaves nothing stuck.
+ */
+export function animateMotion(node, keyframes, duration, options = {}) {
+  if (
+    node === null ||
+    node === undefined ||
+    typeof node.animate !== "function" ||
+    motionIsUnwanted()
+  ) {
+    return undefined;
+  }
+  return node.animate(keyframes, {
+    duration,
+    easing: EASE_MOTION,
+    fill: "none",
+    ...options,
+  });
+}
+
 /* ---------------------------------------------------------------- dom ---- */
 
 export const $ = (selector, root = document) => root.querySelector(selector);

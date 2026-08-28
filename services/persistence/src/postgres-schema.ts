@@ -1050,4 +1050,75 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON waitlist_entries(created_at)`,
     ],
   },
+  {
+    // Mirrors schema.ts's migration 49 — see its comment for why every
+    // repository gets a `#general` and why the pre-existing rows are moved
+    // into it. This dialect can widen a primary key in place, so the cursor
+    // and agent-membership tables are altered rather than rebuilt.
+    version: 49,
+    name: "repository-sub-channels",
+    statements: [
+      `CREATE TABLE sub_channels (
+        id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL REFERENCES repositories(id),
+        project_id TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        name TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        UNIQUE (repository_id, slug)
+      )`,
+      `CREATE TABLE sub_channel_members (
+        channel_id TEXT NOT NULL REFERENCES sub_channels(id),
+        user_id TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (channel_id, user_id)
+      )`,
+      `CREATE INDEX sub_channels_by_repository
+         ON sub_channels(repository_id, slug)`,
+      // A repository's project comes from `project_repositories`, which is
+      // where the link lives; a repository linked to nothing at all — a
+      // fixture, or a row from before projects existed — falls back to the
+      // default project rather than failing the migration on a NULL.
+      `INSERT INTO sub_channels
+         (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
+       SELECT 'subchan_general_' || r.id,
+              r.id,
+              COALESCE(
+                (SELECT pr.project_id FROM project_repositories pr
+                  WHERE pr.repository_id = r.id
+                  ORDER BY pr.linked_at LIMIT 1),
+                'project_local'
+              ),
+              'general', 'general', 'open', r.first_seen_at, NULL
+         FROM repositories r`,
+      `ALTER TABLE channel_messages ADD COLUMN channel_id TEXT`,
+      `ALTER TABLE channel_agent_members ADD COLUMN channel_id TEXT`,
+      `ALTER TABLE channel_read_cursors ADD COLUMN channel_id TEXT`,
+      `UPDATE channel_messages
+          SET channel_id = 'subchan_general_' || repository_id
+        WHERE channel_id IS NULL`,
+      `UPDATE channel_agent_members
+          SET channel_id = 'subchan_general_' || repository_id
+        WHERE channel_id IS NULL`,
+      `UPDATE channel_read_cursors
+          SET channel_id = 'subchan_general_' || repository_id
+        WHERE channel_id IS NULL`,
+      `CREATE INDEX channel_messages_by_channel
+         ON channel_messages(channel_id, created_at)`,
+      `ALTER TABLE channel_read_cursors
+         ALTER COLUMN channel_id SET NOT NULL`,
+      `ALTER TABLE channel_read_cursors
+         DROP CONSTRAINT IF EXISTS channel_read_cursors_pkey`,
+      `ALTER TABLE channel_read_cursors
+         ADD PRIMARY KEY (repository_id, channel_id, user_id)`,
+      `ALTER TABLE channel_agent_members
+         ALTER COLUMN channel_id SET NOT NULL`,
+      `ALTER TABLE channel_agent_members
+         DROP CONSTRAINT IF EXISTS channel_agent_members_pkey`,
+      `ALTER TABLE channel_agent_members
+         ADD PRIMARY KEY (channel_id, user_id, provider)`,
+    ],
+  },
 ];

@@ -30,7 +30,7 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(globalChrome, /class="global-search"/u);
   assert.match(globalChrome, /class="topbar-actions"/u);
   assert.match(globalChrome, /class="icon-btn topbar-icon-btn"[\s\S]*icon\("info"\)/u);
-  assert.match(globalChrome, /class="account-btn topbar-account-btn"/u);
+  assert.doesNotMatch(globalChrome, /topbar-account-btn|data-act="user-menu"/u);
   // The mark leads the bar from the corner the workspace switcher runs down.
   // What must not come back beside it is the product's *name*: this shell is
   // workspace-led, and the crown below is what says whose workspace this is.
@@ -45,15 +45,45 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(chats, /function conversationHeader\(repositoryId\)/u);
   assert.match(conversationChrome, /class="conversation-tools"/u);
   assert.doesNotMatch(conversationChrome, /ch-hash|icon\("chatBubble"/u);
-  assert.match(chats, /<main class="chan-main" aria-label="Primary conversation" aria-current="page">/u);
+  // Open-ended: the tag carries a phone-only `aria-hidden`/`inert` pair after
+  // these attributes, so pinning the closing bracket here asserted a shape the
+  // markup stopped having.
+  assert.match(chats, /<main class="chan-main" aria-label="Primary conversation" aria-current="page"/u);
   assert.match(chats, /function secondaryPanel\(repositoryId\)/u);
   assert.match(hierarchyCss, /\.topbar \{[^}]*display: grid;[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);[^}]*border-bottom: 0;/u);
   assert.match(hierarchyCss, /grid-template-columns: minmax\(76px, 1fr\) minmax\(240px, 640px\) minmax\(76px, 1fr\);/u);
-  assert.match(hierarchyCss, /\.topbar-icon-btn,[\s\S]*?\.topbar-account-btn \{[\s\S]*?flex: 0 0 34px;[\s\S]*?width: 34px;[\s\S]*?height: 34px;/u);
+  assert.match(hierarchyCss, /\.topbar-icon-btn \{[\s\S]*?flex: 0 0 34px;[\s\S]*?width: 34px;[\s\S]*?height: 34px;/u);
+  assert.doesNotMatch(hierarchyCss, /\.topbar-account-btn/u);
   // Sized and offset to the rail rather than to the bar's padding, so the mark
   // stands on the switcher's centre line instead of near it.
   assert.match(hierarchyCss, /\.topbar-brand \{[\s\S]*?width: var\(--rail-w\);[\s\S]*?margin-inline-start: -12px;/u);
   assert.match(hierarchyCss, /\.channel-rail \{[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);/u);
+  // The bar and the switcher are one L of chrome: same surface, and no line
+  // between them or down the switcher's far side. The seam beside it belongs
+  // to the navigation, which is what lets it turn the corner into the line
+  // under the bar rather than run past it.
+  assert.match(hierarchyCss, /\.channel-rail \{[^}]*border: 0;[^}]*border-radius: 0;/u);
+  assert.doesNotMatch(hierarchyCss, /\.channel-rail \{[^}]*border-right:/u);
+  // One boundary, started by the navigation's rounded corner and carried to
+  // the far edge of the window by the conversation.
+  assert.match(
+    hierarchyCss,
+    /\n\.chan-sidebar \{[^}]*border-top: 1px solid var\(--border-soft\);[^}]*border-left: 1px solid var\(--border-soft\);[^}]*border-right: 1px solid var\(--border-soft\);[^}]*border-radius: var\(--radius-xl\) 0 0 0;/u,
+  );
+  assert.match(hierarchyCss, /\n\.chan-main \{[^}]*border-top: 1px solid var\(--border-soft\);[^}]*border-radius: 0;/u);
+  // With no switcher the navigation is against the window, where there is
+  // nothing to be rounded away from and no edge to draw.
+  assert.match(
+    hierarchyCss,
+    /\.chats-shell\.no-rail > \.chan-sidebar,\s*\.chats-shell\.no-rail > \.chan-main \{\s*border-radius: 0;/u,
+  );
+  assert.match(hierarchyCss, /\.chats-shell\.no-rail > \.chan-sidebar \{\s*border-left: 0;/u);
+  // The drawer on a phone slides over the conversation, so it carries none of
+  // that boundary.
+  assert.match(
+    hierarchyCss,
+    /@media \(max-width: 600px\)[\s\S]*?\.chats-shell \.chan-sidebar \{[\s\S]*?border-top: 0;[\s\S]*?border-left: 0;[\s\S]*?border-radius: 0;/u,
+  );
   assert.match(css, /\.global-search svg \{[\s\S]*?width: 16px;/u);
   assert.match(css, /\.workspace-sidebar-header \{[\s\S]*?border-bottom:/u);
   assert.match(css, /\.chan-sidebar-head\.chan-quick-links \{[\s\S]*?margin: 4px 8px 2px;/u);

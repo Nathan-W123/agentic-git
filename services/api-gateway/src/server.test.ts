@@ -232,6 +232,9 @@ interface TestRuntime {
     reason: string;
     actorId: string;
   }>;
+  /** Every pause and every resume, so the thread control can be watched. */
+  pauseCalls: Array<{ taskIds: string[]; reason: string; actorId: string }>;
+  resumeCalls: Array<{ taskId: string; actorId: string }>;
 }
 
 /**
@@ -496,6 +499,8 @@ async function startRuntime(
   let rollbackOutcome: { status: string; explanation: string } | undefined;
   const runCalls: TestRuntime["runCalls"] = [];
   const cancelCalls: TestRuntime["cancelCalls"] = [];
+  const pauseCalls: TestRuntime["pauseCalls"] = [];
+  const resumeCalls: TestRuntime["resumeCalls"] = [];
   // Models canonical mirrors independently from persistence. Deleting only
   // the store record must not make this name reusable in the fixture: the
   // production bug was precisely that the mirror survived that deletion.
@@ -862,6 +867,59 @@ async function startRuntime(
       }
       return { cancelled };
     },
+    // The store half of apps/cli's `pauseTasks` / `resumeTasks`, which is
+    // everything the gateway's own behaviour depends on: the row moves to a
+    // status nothing can lease, and moves back.
+    async pauseTasks(input) {
+      pauseCalls.push({
+        taskIds: [...input.taskIds],
+        reason: input.reason,
+        actorId: input.actorId,
+      });
+      const wanted = new Set(input.taskIds);
+      const paused: Array<{
+        id: string;
+        agentId: string;
+        objective: string;
+        was: "running" | "queued";
+      }> = [];
+      for (const task of await store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      })) {
+        if (!wanted.has(task.id)) {
+          continue;
+        }
+        const was = task.status === "claimed" ? "running" : "queued";
+        if ((await store.pauseSubmittedTask(task.id)) === undefined) {
+          continue;
+        }
+        await store.appendAudit(undefined, {
+          type: "task_paused",
+          taskId: task.id,
+          data: { actorId: input.actorId, reason: input.reason },
+        });
+        paused.push({
+          id: task.id,
+          agentId: task.agentId,
+          objective: task.objective,
+          was,
+        });
+      }
+      return { paused };
+    },
+    async resumeTask(input) {
+      resumeCalls.push({ taskId: input.taskId, actorId: input.actorId });
+      const resumed = await store.resumePausedTask(input.taskId);
+      if (resumed === undefined) {
+        return { resumed: false };
+      }
+      await store.appendAudit(undefined, {
+        type: "task_resumed",
+        taskId: input.taskId,
+        data: { actorId: input.actorId },
+      });
+      return { resumed: true };
+    },
     async canonicalDiff(input) {
       canonicalDiffs.push(input);
       return canonicalDiff;
@@ -1092,6 +1150,8 @@ async function startRuntime(
     },
     runCalls,
     cancelCalls,
+    pauseCalls,
+    resumeCalls,
     canonicalDiff,
     canonicalState,
     runFailure,
@@ -6485,7 +6545,7 @@ test("a failed task says why, whichever shape the failure was recorded in", () =
         error: "OAuth session expired and could not be refreshed",
       }),
     ),
-    /sign-in has expired\. Reconnect me from My Agents/u,
+    /sign-in has expired\. Reconnect me from Settings → Agents/u,
   );
 
   // Nothing to say at all is still the honest fallback.
@@ -6545,7 +6605,7 @@ test("a clipped failure detail still ends on a whole word", () => {
 test("a refused GitHub push keeps GitHub's remedy, not the agent's", () => {
   // The push path fails in GitHub's name when the *submitter's* token is
   // refused. It speaks the same auth vocabulary — "401", "unauthorized" —
-  // but "Reconnect me from My Agents" is the wrong door: it sends somebody
+  // but reconnecting an agent is the wrong door: it sends somebody
   // off to reconnect an agent that is working fine, while the actual fix
   // lives in Settings → GitHub and the failure's own words point there.
   const said = String(
@@ -6555,19 +6615,19 @@ test("a refused GitHub push keeps GitHub's remedy, not the agent's", () => {
         "Reconnect GitHub in Settings and ask again.",
     }),
   );
-  assert.doesNotMatch(said, /Reconnect me from My Agents/u);
+  assert.doesNotMatch(said, /Settings → Agents/u);
   assert.match(said, /Reconnect GitHub in Settings/u);
 
   // The same guard where a question failed rather than a task.
   assert.doesNotMatch(
     explainAnswerFailure("GitHub answered 401 for the stored token"),
-    /My Agents/u,
+    /Settings → Agents/u,
   );
 
   // And a genuine vendor sign-in failure still gets its remedy.
   assert.match(
     explainAnswerFailure("OAuth session expired and could not be refreshed"),
-    /Reconnect me from My Agents/u,
+    /Reconnect me from Settings → Agents/u,
   );
 });
 
@@ -6839,7 +6899,7 @@ test("a reply whose agent is no longer connected says so, and says who can fix i
   ).find((message) => message.id === root.id);
   const said = (thread?.replies ?? []).find((reply) => reply.kind === "system");
   assert.match(String(said?.content), /not connected any more/u);
-  assert.match(String(said?.content), /My Agents/u);
+  assert.match(String(said?.content), /Settings → Agents/u);
   // Not in the missing agent's voice: the news is that nobody answered, and
   // attributing it to the absent participant reads as though somebody did.
   assert.equal(said?.authorId, "system");
@@ -6899,7 +6959,7 @@ test("a reply whose agent has left the channel says that, not that it is disconn
   // The sign-in is fine. Telling somebody to reconnect it sends them to a
   // screen where nothing is wrong.
   assert.match(String(said?.content), /left this channel/u);
-  assert.doesNotMatch(String(said?.content), /My Agents/u);
+  assert.doesNotMatch(String(said?.content), /Settings → Agents/u);
 });
 
 test("animation work asked for inside a thread is dispatched with its context", async (t) => {
@@ -14717,6 +14777,141 @@ test("/stop on a task that changed nothing cancels without a rollback", async (t
   );
 });
 
+test("pausing a task parks it, and playing it puts the same work back", async (t) => {
+  // The thread header's transport control, end to end. What it must not be
+  // is a cancel wearing a different glyph: the row has to come back, and the
+  // same task has to be the one that runs again.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "pausable");
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rewrite the importer",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+    conversationId: "thread-root",
+  });
+
+  const paused = await owner.request(`/api/v1/tasks/${task.id}/pause`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(paused.status, 200);
+  assert.equal(paused.data.task.status, "paused");
+  assert.deepEqual(
+    runtime.pauseCalls.map((call) => call.taskIds),
+    [[task.id]],
+  );
+  assert.equal(runtime.pauseCalls[0]?.actorId, ownerId);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (entry) => entry.id === task.id,
+    )?.status,
+    "paused",
+  );
+
+  const runsBefore = runtime.runCalls.length;
+  const resumed = await owner.request(`/api/v1/tasks/${task.id}/resume`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(resumed.status, 200);
+  assert.equal(resumed.data.task.status, "submitted");
+  assert.deepEqual(
+    runtime.resumeCalls.map((call) => call.taskId),
+    [task.id],
+  );
+  // Queueing the row is only half of resuming: something has to come and run
+  // it, or play would leave the work sitting exactly as paused as before.
+  await waitFor(
+    async () => runtime.runCalls.length > runsBefore,
+    "resuming did not start the repository's work again",
+  );
+  // The same task, not a new one — resuming must not fork the work.
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).length,
+    1,
+  );
+});
+
+test("pausing finished work is refused, and so is resuming what is not paused", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "unpausable");
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "already done",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: bootstrapped.user.id,
+  });
+
+  // Resuming work that is merely queued would put a play button over
+  // something that is already going to run.
+  const early = await owner.request(`/api/v1/tasks/${task.id}/resume`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(early.status, 409);
+
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  await runtime.store.completeSubmittedTask(task.id, "integrated");
+  const late = await owner.request(`/api/v1/tasks/${task.id}/pause`, {
+    method: "POST",
+    body: {},
+  });
+  // A pause that races the task's own ending is ordinary, and answering 200
+  // would leave a play button standing over work that finished.
+  assert.equal(late.status, 409);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (entry) => entry.id === task.id,
+    )?.status,
+    "integrated",
+  );
+});
+
+test("pausing somebody else's project is refused like every other task action", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "guarded-pause");
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "not yours",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: bootstrapped.user.id,
+  });
+
+  const stranger = new TestClient(runtime.origin);
+  await registerAccount(runtime.store, stranger, {
+    email: "stranger-pause@example.com",
+    displayName: "Stranger",
+    password: "correct horse battery staple",
+  });
+  const refused = await stranger.request(`/api/v1/tasks/${task.id}/pause`, {
+    method: "POST",
+    body: {},
+  });
+  // The same authorization every task action runs through — a new verb on the
+  // route is a new way in if it is not guarded like the old ones.
+  assert.ok(
+    refused.status === 403 || refused.status === 404,
+    `pausing another tenant's task answered ${refused.status}`,
+  );
+  assert.deepEqual(runtime.pauseCalls, []);
+});
+
 test("'/cancel' in the channel stops the room's work and says so", async (t) => {
   // The failure mode this exists for: agents running, and nothing a person
   // could type that reached them. The channel verb has to stop the work AND
@@ -18793,5 +18988,250 @@ test("with payments off nothing is billed, gated, or reachable at Stripe", async
     invited.status,
     200,
     `a cancelled subscription must not gate anything: ${JSON.stringify(invited.data)}`,
+  );
+});
+
+test("a repository's rooms are listed, gated and addressed one at a time", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "rooms");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}`;
+
+  // A repository nobody has divided has exactly one room, and it is the one
+  // every message written without a destination lands in — so the interface
+  // in front of it is unchanged.
+  const listed = await owner.request(`${base}/channels`);
+  assert.equal(listed.status, 200, JSON.stringify(listed.data));
+  assert.deepEqual(
+    listed.data.channels.map((channel: { slug: string }) => channel.slug),
+    ["general"],
+  );
+  assert.equal(listed.data.canManage, true);
+  const general = listed.data.channels[0].id as string;
+
+  const said = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { content: "Said before there was a second room." },
+  });
+  assert.equal(said.status, 201, JSON.stringify(said.data));
+  assert.equal(said.data.message.channelId, general);
+
+  // A typed name becomes a #handle: no spaces, no punctuation, because the
+  // name is addressed inside running text.
+  const created = await owner.request(`${base}/channels`, {
+    method: "POST",
+    body: { name: "Design Review", visibility: "private" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.channel.slug, "design-review");
+  const design = created.data.channel.id as string;
+
+  // Whoever made it is in it, so a private room is never created into a state
+  // where nobody at all can read or post in it.
+  const members = await owner.request(`${base}/channels/${design}/members`);
+  assert.equal(members.status, 200);
+  assert.equal(members.data.members.length, 1);
+
+  const inDesign = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Only for the people in here." },
+  });
+  assert.equal(inDesign.status, 201, JSON.stringify(inDesign.data));
+
+  // Each room reads only its own lines.
+  const generalRead = await owner.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(general)}`,
+  );
+  assert.deepEqual(
+    generalRead.data.messages.map((message: { content: string }) => message.content),
+    ["Said before there was a second room."],
+  );
+  const designRead = await owner.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(design)}`,
+  );
+  assert.deepEqual(
+    designRead.data.messages.map((message: { content: string }) => message.content),
+    ["Only for the people in here."],
+  );
+  // No channelId at all still means #general, so a client that predates
+  // sub-channels reads exactly what it always did.
+  const unqualified = await owner.request(`${base}/channel/messages`);
+  assert.deepEqual(
+    unqualified.data.messages.map((message: { content: string }) => message.content),
+    ["Said before there was a second room."],
+  );
+
+  // Somebody with a repository grant and no membership of the private room.
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: inviteBody("roomless@example.com", "developer", repo) },
+  );
+  assert.equal(invited.status, 201);
+  const outsider = new TestClient(runtime.origin);
+  const accepted = await outsider.request(
+    `/api/v1/invitations/${invited.data.token as string}/accept`,
+    { method: "POST", body: { displayName: "Roomless", password: PASSWORD } },
+  );
+  assert.equal(accepted.status, 200);
+  const outsiderId = accepted.data.user.id as string;
+
+  // Private means invisible, not forbidden: it is absent from the list, and
+  // reading it answers 404 rather than a 403 that would confirm it exists and
+  // name it.
+  const outsiderList = await outsider.request(`${base}/channels`);
+  assert.equal(outsiderList.status, 200);
+  assert.deepEqual(
+    outsiderList.data.channels.map((channel: { slug: string }) => channel.slug),
+    ["general"],
+  );
+  assert.equal(outsiderList.data.canManage, false);
+  const peeked = await outsider.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(design)}`,
+  );
+  assert.equal(peeked.status, 404);
+  assert.equal(peeked.data.error?.code ?? peeked.data.code, "not_found");
+  const posted = await outsider.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Can I get in?" },
+  });
+  assert.equal(posted.status, 404);
+
+  // Opened to the project, the same room becomes readable by everybody and
+  // postable only by its members.
+  const opened = await owner.request(`${base}/channels/${design}`, {
+    method: "PATCH",
+    body: { visibility: "open" },
+  });
+  assert.equal(opened.status, 200, JSON.stringify(opened.data));
+  const nowListed = await outsider.request(`${base}/channels`);
+  assert.deepEqual(
+    nowListed.data.channels.map((channel: { slug: string; canPost: boolean }) => [
+      channel.slug,
+      channel.canPost,
+    ]),
+    [
+      ["general", true],
+      ["design-review", false],
+    ],
+  );
+  const nowRead = await outsider.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(design)}`,
+  );
+  assert.equal(nowRead.status, 200);
+  assert.equal(nowRead.data.channel.canPost, false);
+  const stillRefused = await outsider.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Can I get in?" },
+  });
+  assert.equal(stillRefused.status, 403);
+  assert.equal(
+    stillRefused.data.error?.code ?? stillRefused.data.code,
+    "not_a_member",
+  );
+
+  // Added, they can post — and only an administrator could have added them.
+  const refusedAdd = await outsider.request(`${base}/channels/${design}/members`, {
+    method: "POST",
+    body: { userId: outsiderId },
+  });
+  assert.ok(
+    refusedAdd.status === 403 || refusedAdd.status === 404,
+    `only an administrator may edit a room's membership: ${refusedAdd.status}`,
+  );
+  const added = await owner.request(`${base}/channels/${design}/members`, {
+    method: "POST",
+    body: { userId: outsiderId },
+  });
+  assert.equal(added.status, 200, JSON.stringify(added.data));
+  const nowPosted = await outsider.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Thanks." },
+  });
+  assert.equal(nowPosted.status, 201, JSON.stringify(nowPosted.data));
+
+  // #general is the fallback for every unaddressed message, so it can be
+  // neither hidden nor removed.
+  const hideGeneral = await owner.request(`${base}/channels/${general}`, {
+    method: "PATCH",
+    body: { visibility: "private" },
+  });
+  assert.equal(hideGeneral.status, 409);
+  const dropGeneral = await owner.request(`${base}/channels/${general}`, {
+    method: "DELETE",
+  });
+  assert.equal(dropGeneral.status, 409);
+
+  // Deleting a room takes its transcript with it and leaves the rest alone.
+  const dropped = await owner.request(`${base}/channels/${design}`, {
+    method: "DELETE",
+  });
+  assert.equal(dropped.status, 200);
+  const after = await owner.request(`${base}/channels`);
+  assert.deepEqual(
+    after.data.channels.map((channel: { slug: string }) => channel.slug),
+    ["general"],
+  );
+  const survivors = await owner.request(`${base}/channel/messages`);
+  assert.deepEqual(
+    survivors.data.messages.map((message: { content: string }) => message.content),
+    ["Said before there was a second room."],
+  );
+});
+
+test("an @mention only reaches agents assigned to the room it was said in", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id as string;
+  const repo = await invitableRepository(owner, "roomed-mentions");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}`;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  const created = await owner.request(`${base}/channels`, {
+    method: "POST",
+    body: { name: "backlog" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const backlog = created.data.channel.id as string;
+
+  // The agent was added to #general, so the new room's roster is empty. An
+  // agent is assigned per room, not per repository.
+  const backlogRoster = await owner.request(
+    `${base}/channel/agents?channelId=${encodeURIComponent(backlog)}`,
+  );
+  assert.equal(backlogRoster.status, 200, JSON.stringify(backlogRoster.data));
+  assert.deepEqual(backlogRoster.data.agents, []);
+  const generalRoster = await owner.request(`${base}/channel/agents`);
+  assert.equal(generalRoster.data.agents.length, 1);
+
+  // So the same words that would start work in #general start none here.
+  const inBacklog = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: backlog, content: `@${mention} can you audit the codebase` },
+  });
+  assert.equal(inBacklog.status, 201, JSON.stringify(inBacklog.data));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.deepEqual(runtime.submittedTasks, []);
+
+  // Assigned to this room, the same message is work.
+  const joined = await owner.request(
+    `${base}/channel/agents/openai/membership?channelId=${encodeURIComponent(backlog)}`,
+    { method: "POST" },
+  );
+  assert.equal(joined.status, 200, JSON.stringify(joined.data));
+  const again = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: backlog, content: `@${mention} can you audit the codebase` },
+  });
+  assert.equal(again.status, 201, JSON.stringify(again.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "asking an agent that is in this room never became work",
   );
 });

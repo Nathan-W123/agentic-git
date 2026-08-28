@@ -6,15 +6,13 @@ import test from "node:test";
 import { defaultPublicDirectory } from "./assets.js";
 
 /**
- * Ways back into the screens that were already there.
+ * Ways back into the screens that remain.
  *
  * Three of the friction audit's findings were the same shape: a route, a
  * screen, its state and even its action handler all existed and shipped, and
  * nothing anywhere on any screen navigated to them. Notifications could only
- * be reached by typing its hash; My Agents was offered only while you had no
- * agents (it is reached by name from the quick switcher now, and no longer
- * sits in the account menu); and a notification, once clicked, marked itself
- * read and left finding the failure to you.
+ * be reached by typing its hash, and a notification, once clicked, marked
+ * itself read and left finding the failure to you.
  *
  * Pinned the way the rest of the browser surface is pinned — by the shape of
  * the source — because the dashboard ships as plain ES modules with no
@@ -37,8 +35,7 @@ test("the account menu carries account destinations", async () => {
   const app = await publicFile("app.js");
 
   // The destinations that were live and unreachable. One list, because the
-  // topbar avatar and the channel sidebar's foot open the same menu — a
-  // single change point for both.
+  // channel sidebar foot is the sole account menu entry.
   const destinations = slice(
     app,
     "function accountDestinations() {",
@@ -49,8 +46,8 @@ test("the account menu carries account destinations", async () => {
   // your own things, and the backlog of everything every agent has done is not
   // that — it keeps the topbar bell and the quick switcher.
   assert.doesNotMatch(destinations, /act: "go-notifications"/u);
-  // My Agents is not one of them either: this menu is who is writing to you,
-  // not a roster of agent connections.
+  // Agent connections are managed in Settings, not exposed as a product
+  // route from this menu.
   assert.doesNotMatch(destinations, /value: "agents"/u);
 
   // The count is read at the moment the menu is built, not carried in state:
@@ -76,7 +73,7 @@ test("the account menu carries account destinations", async () => {
     app,
     /case "agent-add":\s*\n\s*closePopover\(\);\s*\n\s*void startAddAgentFlow\(render\);/u,
   );
-  // Still not a second door into the My Agents roster screen.
+  // Still not a second product route for agent connections.
   assert.doesNotMatch(agentMenu, /value: "agents"/u);
 });
 
@@ -114,7 +111,7 @@ test("an unread direct message has a number somewhere on screen", async () => {
   // Agent private-chat threads do not count toward the account badge.
   assert.match(total, /isDirectMessagePerson\(conversation\.userId\)/u);
 
-  assert.match(app, /function dmBadge\(\)/u);
+  assert.doesNotMatch(app, /function dmBadge\(\)/u);
   assert.match(chats, /countBadge\(dmUnreadTotal\(\)\)/u);
 
   // The menu row opens the conversations themselves, each with its own count.
@@ -161,11 +158,20 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(entries, /kind: "Workspace"/u);
   assert.match(entries, /state\.dmPeople/u);
   assert.match(entries, /route: "notifications"/u);
+  assert.doesNotMatch(entries, /route: "agents"|My agents/iu);
 
   // Drawn in `#layer-root`, outside the shell the poll replaces — an overlay
   // inside the app root would be swept away mid-search.
   assert.match(app, /document\.querySelector\("#layer-root"\)\.append\(layer\)/u);
   assert.match(css, /\.qs-layer \{/u);
+  const switcher = slice(app, "function openSwitcher() {", "/** What the keys do");
+  const shortcuts = slice(app, "function openShortcutSheet() {", "/** Whether the keyboard");
+  assert.match(switcher, /layer\.className = "qs-layer qs-layer-search"/u);
+  assert.doesNotMatch(shortcuts, /qs-layer-search/u);
+  assert.match(
+    css,
+    /\.qs-layer-search \{[^}]*padding-top: calc\(48px \+ var\(--safe-top\)\);/u,
+  );
 
   // The single-key shortcuts must never eat a character out of somebody's
   // sentence.
@@ -192,8 +198,8 @@ test("settings is visible beside the account menu", async () => {
   assert.match(menu, /\.\.\.accountDestinations\(\)/u);
   assert.doesNotMatch(menu, /value: "settings"|label: "Settings"/u);
 
-  // Direct messages comes from the shared list, so both account buttons offer
-  // the same door — and neither offers Notifications or My Agents.
+  // Direct messages comes from the shared list, and the menu offers neither
+  // Notifications nor an agent roster.
   const destinations = slice(app, "function accountDestinations() {", "\n/**");
   assert.match(destinations, /act: "dm-list"/u);
   assert.doesNotMatch(destinations, /act: "go-notifications"/u);

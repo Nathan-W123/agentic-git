@@ -17,9 +17,11 @@ import {
 } from "@coord/coordinator";
 import {
   cancelTasks,
+  pauseTasks,
   repoCreate,
   repoImportGitHub,
   repoRemove,
+  resumeTasks,
   runPendingTasks,
   taskSubmit,
 } from "@coord/cli/commands";
@@ -581,6 +583,29 @@ async function serve(
         cancellations,
       });
       return { cancelled };
+    },
+    async pauseTasks(input) {
+      const paused = await pauseTasks(store, {
+        repositoryId: input.repositoryId,
+        projectId: input.projectId,
+        taskIds: input.taskIds,
+        reason: input.reason,
+        ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+        // The same registry the cancel path uses: one bridge to the live
+        // session, so a pause and a stop cannot reach different runs.
+        cancellations,
+      });
+      return { paused };
+    },
+    async resumeTask(input) {
+      const resumed = await resumeTasks(store, {
+        repositoryId: input.repositoryId,
+        projectId: input.projectId,
+        taskIds: [input.taskId],
+        reason: "Resumed from the thread",
+        ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+      });
+      return { resumed: resumed.length > 0 };
     },
     async runRepository(input) {
       // A run claims the work eligible at its start. Explicit follow-ups

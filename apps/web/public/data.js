@@ -201,9 +201,13 @@ export function messageFoldOpen(key) {
 function rememberedRosterSections() {
   try {
     const saved = JSON.parse(stored("ag.rosterSectionsOpen", "{}"));
-    return { people: saved?.people !== false, agents: saved?.agents !== false };
+    return {
+      channels: saved?.channels !== false,
+      people: saved?.people !== false,
+      agents: saved?.agents !== false,
+    };
   } catch {
-    return { people: true, agents: true };
+    return { channels: true, people: true, agents: true };
   }
 }
 
@@ -359,13 +363,6 @@ export const state = {
   repoQuery: "",
   repoSort: "recent",
   repoView: "grid",
-  agentFilter: "all",
-  agentQuery: "",
-  /* Whether My Agents draws its connections as a deck of cards or as rows.
-     Cards are the default because a handful of agents reads better as things
-     than as a table; the list is still the better shape for a screenful, so
-     the choice is the reader's and is kept across sessions. */
-  agentView: window.localStorage.getItem("ag.agentview") ?? "grid",
   coordinatorTab: "overview",
 
   /* Chats screen — one group channel per repository, backed by
@@ -476,6 +473,25 @@ export const state = {
   repositoryGrants: {},
   /** Entitlement and seat count — see `ensureBilling`. */
   billing: undefined,
+  /**
+   * The rooms inside each repository, keyed by repository id.
+   *
+   * Every repository has at least a `#general`; a private room the viewer is
+   * not in never appears here, because the server does not send it. Undefined
+   * means "not asked yet", which is different from the one-room answer an
+   * ordinary repository gives, so the sidebar can stay quiet until it knows.
+   */
+  subChannels: {},
+  /** Repository ids whose channel list has been fetched at least once. */
+  subChannelsLoaded: new Set(),
+  /** The open room per repository, keyed by repository id. */
+  activeSubChannel: {},
+  /** Whether the viewer may administer each repository's rooms. */
+  subChannelsManageable: {},
+  /** Who is in each room, keyed by channel id — only fetched when asked. */
+  subChannelMembers: {},
+  /** The room whose settings popover is open, if any. */
+  subChannelMenu: undefined,
   /** Everybody waiting to be let in — see `loadWaitlist`. Admin only. */
   waitlist: undefined,
   /** Deployment counts and coordination metrics — see `ensureDeployment`. */
@@ -821,7 +837,6 @@ export function forgetOtherAccount(storage, userId) {
     "ag.project",
     "ag.repo",
     "ag.agent",
-    "ag.agentview",
     "ag.avatar",
     "ag.chanCollapsed",
     "ag.chandrafts",
@@ -1702,7 +1717,7 @@ export function sendTyping(repositoryId, threadId, draft) {
     return;
   }
   typingLastSent.set(key, now);
-  void api(channelPath(repositoryId, "/typing"), {
+  void api(scopedChannelPath(repositoryId, "/typing"), {
     method: "POST",
     body: { ...(threadId === undefined ? {} : { threadId }) },
   }).catch(() => {
@@ -1928,7 +1943,10 @@ export function threadTask(entry) {
     (candidate) =>
       conversationId !== undefined &&
       candidate.conversationId === conversationId &&
-      taskIsWorking(candidate),
+      // Paused counts as current for the same reason working does: it is the
+      // turn this thread is on, and it is the one a play button has to name.
+      // Without it the header would offer to resume the completed first turn.
+      (taskIsWorking(candidate) || candidate.status === "paused"),
   );
   if (current !== undefined) {
     return current;
@@ -1950,6 +1968,19 @@ export function threadIsWorking(entry) {
     busyIsLive(taskId, state.agentBusy[taskId], Date.now()) ||
     taskIsWorking(task)
   );
+}
+
+/**
+ * Is this thread's task stopped by somebody who means to come back to it?
+ *
+ * The counterpart of {@link threadIsWorking}, and mutually exclusive with it
+ * by construction: `paused` is not a working status, and no busy frame
+ * survives its task going paused. Read from the task list rather than from a
+ * frame because a pause is durable — it outlives the tab that made it, and
+ * the play button has to still be there on the next reload.
+ */
+export function threadIsPaused(entry) {
+  return threadTask(entry)?.status === "paused";
 }
 
 /**
@@ -2000,8 +2031,24 @@ export function channelAwaitsGoAhead(repositoryId) {
   );
 }
 
-/** Records a `channel-typing` frame from somebody else. */
+/**
+ * Records a `channel-typing` frame from somebody else.
+ *
+ * Dropped when it names a room other than the one open, so somebody typing in
+ * `#design` does not put dots under a `#general` transcript. A frame with no
+ * room at all is `#general` by the same rule the routes use, and a frame that
+ * arrives before this browser knows the room list is kept — there is only one
+ * room it can be.
+ */
 export function noteTyping(frame) {
+  const open = activeSubChannelId(frame.repositoryId);
+  if (
+    frame.channelId !== undefined &&
+    open !== undefined &&
+    frame.channelId !== open
+  ) {
+    return;
+  }
   const key = typingKey(frame.repositoryId, frame.threadId);
   const surface = state.typing[key] ?? {};
   surface[frame.userId] = {
@@ -3561,6 +3608,217 @@ export function threadTitle(entry, { fallbackToContent = true } = {}) {
 const channelPath = (repositoryId, suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
 
+/** The `/channels` administration surface, which is not inside one channel. */
+const channelsPath = (repositoryId, suffix = "") =>
+  `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channels${suffix}`;
+
+/**
+ * The same path with `channelId` appended, so every read and write says
+ * which room it means.
+ *
+ * The server treats an absent `channelId` as `#general`, so this is belt and
+ * braces for the ordinary single-room repository — and the whole of what
+ * makes a second room address itself correctly.
+ */
+const scopedChannelPath = (repositoryId, suffix = "") => {
+  const channelId = activeSubChannelId(repositoryId);
+  if (channelId === undefined) {
+    return channelPath(repositoryId, suffix);
+  }
+  const joiner = suffix.includes("?") ? "&" : "?";
+  return `${channelPath(repositoryId, suffix)}${joiner}channelId=${encodeURIComponent(channelId)}`;
+};
+
+/**
+ * The rooms in one repository, as the sidebar knows them.
+ *
+ * Empty until `loadSubChannels` has answered. Deliberately not synthesised
+ * into a fake `#general` in the meantime: a list of one that turns into a
+ * list of four is a sidebar that moves under the reader's cursor, and the
+ * section simply does not draw until it knows.
+ */
+export function subChannelsFor(repositoryId) {
+  return state.subChannels[repositoryId] ?? [];
+}
+
+/**
+ * The room currently open in one repository.
+ *
+ * The remembered choice when it is still in the list, and otherwise the first
+ * room the viewer can see — which is `#general` for everybody, since the
+ * server sorts it first. Undefined only before the list has loaded, where it
+ * means "let the server decide", and the server decides `#general`.
+ */
+export function activeSubChannelId(
+  repositoryId = activeChannelId(),
+) {
+  const channels = subChannelsFor(repositoryId);
+  if (channels.length === 0) {
+    return undefined;
+  }
+  const chosen = state.activeSubChannel[repositoryId];
+  if (channels.some((channel) => channel.id === chosen)) {
+    return chosen;
+  }
+  return channels[0]?.id;
+}
+
+/** The open room's record, when the list has loaded. */
+export function activeSubChannel(repositoryId = activeChannelId()) {
+  const channelId = activeSubChannelId(repositoryId);
+  return subChannelsFor(repositoryId).find(
+    (channel) => channel.id === channelId,
+  );
+}
+
+/** `#slug` for a room, for placeholders and headings. */
+export function subChannelLabel(repositoryId, channelId) {
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+  return channel === undefined ? "" : `#${channel.slug}`;
+}
+
+/** Whether the viewer may post in the room that is open. */
+export function canPostInActiveSubChannel(repositoryId = activeChannelId()) {
+  const channel = activeSubChannel(repositoryId);
+  // Before the list loads there is only one room it can be — `#general`,
+  // which everybody may post in — so the composer stays available rather than
+  // flickering into a "you are not a member" note and back out again.
+  return channel === undefined ? true : channel.canPost !== false;
+}
+
+/** Whether the viewer may create, rename and delete this repository's rooms. */
+export function canManageSubChannels(repositoryId = activeChannelId()) {
+  return state.subChannelsManageable[repositoryId] === true;
+}
+
+/**
+ * Reads one repository's room list, replacing whatever it held.
+ *
+ * The server has already dropped every private room the viewer is not in, so
+ * what comes back is exactly what may be drawn — there is no client-side
+ * filtering to get wrong, and no way for a name somebody kept private to
+ * appear in a list because a check was missed.
+ */
+export async function loadSubChannels(repositoryId) {
+  if (!repositoryId || !state.projectId) {
+    return false;
+  }
+  const response = await apiOptional(channelsPath(repositoryId), undefined);
+  if (response === undefined) {
+    return false;
+  }
+  state.subChannels[repositoryId] = response.channels ?? [];
+  state.subChannelsManageable[repositoryId] = response.canManage === true;
+  state.subChannelsLoaded.add(repositoryId);
+  return true;
+}
+
+/** Loads the room list once per repository visit. */
+export async function ensureSubChannels(repositoryId, rerender) {
+  if (
+    !repositoryId ||
+    !state.projectId ||
+    state.subChannelsLoaded.has(repositoryId)
+  ) {
+    return;
+  }
+  // Marked before the request, not after: two renders in the same tick would
+  // otherwise both see "not loaded" and both fetch.
+  state.subChannelsLoaded.add(repositoryId);
+  const loaded = await loadSubChannels(repositoryId).catch(() => false);
+  if (loaded) {
+    rerender?.();
+  }
+}
+
+/** Opens one room, remembering it for this repository. */
+export function selectSubChannel(repositoryId, channelId) {
+  if (!repositoryId || !channelId) {
+    return;
+  }
+  if (state.activeSubChannel[repositoryId] === channelId) {
+    return;
+  }
+  state.activeSubChannel[repositoryId] = channelId;
+  // Everything below is keyed by repository, so switching rooms has to clear
+  // it or the new room opens showing the old one's transcript.
+  delete state.channelMessages[repositoryId];
+  delete state.channelEarlier[repositoryId];
+  delete state.channelHasMore[repositoryId];
+  delete state.channelFailed[repositoryId];
+  delete state.channelPinned[repositoryId];
+  state.channelLoaded.delete(repositoryId);
+  state.channelRosterLoaded.delete(repositoryId);
+}
+
+/** Creates a room. `name` is squeezed into a `#handle` by the server. */
+export async function createSubChannel(repositoryId, name, visibility) {
+  const response = await api(channelsPath(repositoryId), {
+    method: "POST",
+    body: { name, visibility: visibility === "private" ? "private" : "open" },
+  });
+  await loadSubChannels(repositoryId);
+  const created = response?.channel;
+  if (created?.id !== undefined) {
+    selectSubChannel(repositoryId, created.id);
+  }
+  return created;
+}
+
+/** Renames a room, or changes whether it is listed to the whole project. */
+export async function updateSubChannel(repositoryId, channelId, patch) {
+  await api(channelsPath(repositoryId, `/${encodeURIComponent(channelId)}`), {
+    method: "PATCH",
+    body: patch,
+  });
+  await loadSubChannels(repositoryId);
+}
+
+/** Removes a room and everything said in it. Never `#general`. */
+export async function deleteSubChannel(repositoryId, channelId) {
+  await api(channelsPath(repositoryId, `/${encodeURIComponent(channelId)}`), {
+    method: "DELETE",
+  });
+  if (state.activeSubChannel[repositoryId] === channelId) {
+    delete state.activeSubChannel[repositoryId];
+  }
+  delete state.subChannelMembers[channelId];
+  await loadSubChannels(repositoryId);
+  selectSubChannel(repositoryId, activeSubChannelId(repositoryId));
+}
+
+/** Who is in one room. */
+export async function loadSubChannelMembers(repositoryId, channelId) {
+  const response = await apiOptional(
+    channelsPath(repositoryId, `/${encodeURIComponent(channelId)}/members`),
+    undefined,
+  );
+  if (response === undefined) {
+    return;
+  }
+  state.subChannelMembers[channelId] = response.members ?? [];
+}
+
+/** Adds or removes one person from one room. */
+export async function setSubChannelMember(
+  repositoryId,
+  channelId,
+  userId,
+  isMember,
+) {
+  const base = channelsPath(
+    repositoryId,
+    `/${encodeURIComponent(channelId)}/members`,
+  );
+  await api(
+    isMember ? base : `${base}/${encodeURIComponent(userId)}`,
+    isMember ? { method: "POST", body: { userId } } : { method: "DELETE" },
+  );
+  await loadSubChannelMembers(repositoryId, channelId);
+}
+
 /**
  * The open questions this account is being asked in one repository.
  *
@@ -3647,7 +3905,7 @@ export async function answerAgentQuestion(repositoryId, requestId, answers) {
 
 /** Channel stats for the Settings wrapped recap, keyed by repository id. */
 export async function loadChannelStats(repositoryId) {
-  const stats = await apiOptional(channelPath(repositoryId, "/stats"), undefined);
+  const stats = await apiOptional(scopedChannelPath(repositoryId, "/stats"), undefined);
   if (stats !== undefined) {
     state.channelStats[repositoryId] = stats;
   }
@@ -4355,7 +4613,7 @@ async function loadChannel(repositoryId) {
       // read `limit` and `before` all along; the client asked for neither, so
       // the transcript was permanently the newest fifty roots with no way to
       // reach anything older.
-      channelPath(repositoryId, `/messages?limit=${CHANNEL_PAGE}`),
+      scopedChannelPath(repositoryId, `/messages?limit=${CHANNEL_PAGE}`),
     );
   } catch (error) {
     state.channelFailed[repositoryId] = {
@@ -4482,7 +4740,7 @@ export async function loadEarlierChannelMessages(repositoryId, rerender) {
   rerender?.();
   try {
     const response = await apiOptional(
-      channelPath(
+      scopedChannelPath(
         repositoryId,
         `/messages?limit=${CHANNEL_PAGE}&before=${encodeURIComponent(cursor)}`,
       ),
@@ -4528,7 +4786,10 @@ export async function loadEarlierChannelMessages(repositoryId, rerender) {
  * whatever it held before.
  */
 async function loadChannelRoster(repositoryId) {
-  const response = await apiOptional(channelPath(repositoryId, "/agents"), undefined);
+  const response = await apiOptional(
+    scopedChannelPath(repositoryId, "/agents"),
+    undefined,
+  );
   if (response === undefined) {
     return false;
   }
@@ -4804,7 +5065,7 @@ export function sendChannelMessage(
   };
   channelMessagesFor(repositoryId).push(message);
   if (kind === "user" && state.projectId) {
-    void api(channelPath(repositoryId, "/messages"), {
+    void api(scopedChannelPath(repositoryId, "/messages"), {
       method: "POST",
       body: { content: trimmed },
     })
@@ -4853,7 +5114,7 @@ export function resendChannelMessage(repositoryId, entryId, rerender) {
   rerender?.();
   const request =
     parentId === undefined
-      ? api(channelPath(repositoryId, "/messages"), {
+      ? api(scopedChannelPath(repositoryId, "/messages"), {
           method: "POST",
           body: { content: entry.content },
         })
@@ -5304,7 +5565,10 @@ export function addChannelAgent(repositoryId, agentId) {
   }
   if (state.projectId) {
     void api(
-      channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}/membership`),
+      scopedChannelPath(
+        repositoryId,
+        `/agents/${encodeURIComponent(agentId)}/membership`,
+      ),
       { method: "POST" },
     ).catch((error) => toast(`Could not add agent to this chat: ${error.message}`, "error"));
   }
@@ -5770,7 +6034,7 @@ export async function editChannelReplyEntry(
 }
 
 export async function deleteAllChannelThreads(repositoryId) {
-  const response = await api(channelPath(repositoryId, "/messages"), {
+  const response = await api(scopedChannelPath(repositoryId, "/messages"), {
     method: "DELETE",
   });
   state.channelMessages[repositoryId] = [];
@@ -6097,7 +6361,9 @@ export function markChannelRead(repositoryId) {
   if (state.projectId) {
     // Best-effort: the badge is already correct from the local write above,
     // and the server's copy of "read" catches up next time this succeeds.
-    void api(channelPath(repositoryId, "/read"), { method: "POST" }).catch(() => undefined);
+    void api(scopedChannelPath(repositoryId, "/read"), { method: "POST" }).catch(
+      () => undefined,
+    );
   }
 }
 

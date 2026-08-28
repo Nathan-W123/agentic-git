@@ -1287,22 +1287,26 @@ export class Coordinator {
               continue;
             }
             pending.splice(pending.indexOf(entry), 1);
-            const cleanupFailure = await this.cleanupTask(
-              entry,
-              entry.resumed?.workspace,
-              recorder,
-              runAudit,
-            );
+            const paused = this.cancellations.intentFor(entry.task.id) === "pause";
+            const cleanupFailure = paused
+              ? await this.parkTask(entry, entry.resumed?.workspace, recorder, runAudit)
+              : await this.cleanupTask(
+                  entry,
+                  entry.resumed?.workspace,
+                  recorder,
+                  runAudit,
+                );
             const explanation =
               cleanupFailure === undefined
                 ? reason
                 : `${reason}; ${cleanupFailure}`;
-            await recorder?.status(entry.task.id, "cancelled", explanation);
+            const ending = paused ? "paused" : "cancelled";
+            await recorder?.status(entry.task.id, ending, explanation);
             taskResults.push({
               task: entry.task,
               plan: entry.plan,
               decision: entry.decision,
-              status: "cancelled",
+              status: ending,
               explanation,
             });
           }
@@ -3793,31 +3797,46 @@ export class Coordinator {
       };
     } catch (error) {
       const failures = [errorMessage(error)];
-      // A failed turn tears down completely, resumed conversation included.
-      // Before the advance ran, the held directory is the only workspace to
-      // destroy; after it, `workspace` is the same directory under its new
-      // record — `??` picks exactly one so nothing is destroyed twice.
-      const cleanupFailure = await this.cleanupTask(
-        entry,
-        workspace ?? entry.resumed?.workspace,
-        recorder,
-        runAudit,
-      );
-      if (cleanupFailure !== undefined) {
-        failures.push(cleanupFailure);
-      }
       // A stop delivered mid-session surfaces here as whatever error the
       // torn-down session produced. That ending is not a failure: whoever
       // stopped the task already settled its row and its audit trail, and a
       // task_failed on top would hand the thread two contradictory endings.
+      //
+      // Read before the teardown, because the two stops tear down different
+      // amounts: a pause is meant to be undone, so it keeps the directory the
+      // agent was working in rather than destroying it.
       const stopReason = this.cancellations?.reasonFor(entry.task.id);
+      const paused =
+        stopReason !== undefined &&
+        this.cancellations?.intentFor(entry.task.id) === "pause";
+      // A failed turn tears down completely, resumed conversation included.
+      // Before the advance ran, the held directory is the only workspace to
+      // destroy; after it, `workspace` is the same directory under its new
+      // record — `??` picks exactly one so nothing is destroyed twice.
+      const cleanupFailure = paused
+        ? await this.parkTask(
+            entry,
+            workspace ?? entry.resumed?.workspace,
+            recorder,
+            runAudit,
+          )
+        : await this.cleanupTask(
+            entry,
+            workspace ?? entry.resumed?.workspace,
+            recorder,
+            runAudit,
+          );
+      if (cleanupFailure !== undefined) {
+        failures.push(cleanupFailure);
+      }
       if (stopReason !== undefined) {
-        await recorder?.status(entry.task.id, "cancelled", stopReason);
+        const ending = paused ? "paused" : "cancelled";
+        await recorder?.status(entry.task.id, ending, stopReason);
         return {
           task: entry.task,
           plan: entry.plan,
           decision: entry.decision,
-          status: "cancelled",
+          status: ending,
           explanation: stopReason,
         };
       }
@@ -5550,6 +5569,69 @@ export class Coordinator {
       }
     }
     await this.releaseTurnLeases(taskId, recorder, runAudit, failures);
+    return await this.finishCleanup(taskId, recorder, runAudit, failures);
+  }
+
+  /**
+   * Stands a paused turn down without throwing its work away.
+   *
+   * The difference between this and {@link cleanupTask} is the whole of what
+   * pause buys over stop. Both close the agent session — it was already
+   * aborted by whoever pressed pause, and a dead session is not worth
+   * keeping — and both release the ownership leases, because a paused turn
+   * holding a file would make one person's pause into everybody else's wait.
+   * Neither of those is what somebody is afraid of losing.
+   *
+   * The workspace is. It is the directory the agent has been editing, and
+   * destroying it is what makes a stopped task restart from nothing. So a
+   * pause keeps it: a turn continuing an open conversation puts that
+   * conversation back exactly as it took it, minus the session, which is the
+   * documented warm-directory / cold-session trade `takeConversation`
+   * already makes. A first turn has no conversation to put anything back
+   * into, so its directory is released like any other — its objective and
+   * thread context are what the resumed run starts from.
+   */
+  private async parkTask(
+    entry: {
+      task: TaskDefinition;
+      adapter: AgentAdapter;
+      session: AgentSession;
+      conversationId?: string;
+      resumed?: OpenConversation;
+    },
+    workspace: TaskWorkspace | undefined,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<string | undefined> {
+    const taskId = entry.task.id;
+    const held = entry.resumed;
+    if (entry.conversationId === undefined || held === undefined) {
+      return await this.cleanupTask(entry, workspace, recorder, runAudit);
+    }
+    const failures: string[] = [];
+    this.cancellations?.release(taskId);
+    this.taskWorkspacePaths.delete(taskId);
+    this.taskWorkspaces.delete(taskId);
+    try {
+      await entry.adapter.cancel(entry.session.id);
+    } catch (error) {
+      failures.push(`agent session: ${errorMessage(error)}`);
+    }
+    await this.releaseTurnLeases(taskId, recorder, runAudit, failures);
+    // Put back without a session, so the next turn starts cold in a warm
+    // directory. `workspace` is the same directory as the held one once the
+    // advance has run; preferring it keeps the conversation pointing at the
+    // record that describes the directory as it is now.
+    const parked: OpenConversation = {
+      ...held,
+      ...(workspace === undefined ? {} : { workspace }),
+    };
+    delete parked.session;
+    try {
+      await this.conversations.retain(entry.conversationId, parked);
+    } catch (error) {
+      failures.push(`conversation: ${errorMessage(error)}`);
+    }
     return await this.finishCleanup(taskId, recorder, runAudit, failures);
   }
 

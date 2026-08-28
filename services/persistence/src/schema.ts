@@ -1337,6 +1337,121 @@ export const MIGRATIONS: readonly Migration[] = [
          ON waitlist_entries(created_at)`,
     ],
   },
+  {
+    // Sub-channels: the level beneath a repository, so one workspace can hold
+    // several rooms the way a Slack workspace does instead of exactly one.
+    //
+    // Nothing is lost and nothing changes shape for an existing deployment.
+    // Every repository gets a `#general`, and every message, agent assignment
+    // and read cursor already in the database is moved into it — which is why
+    // the backfills below run before the columns are made to matter. A
+    // repository nobody ever adds a second room to therefore looks and
+    // behaves exactly as it did.
+    //
+    // `channel_id` is nullable rather than NOT NULL on purpose: SQLite cannot
+    // add a NOT NULL column without a default, and a default here would be a
+    // lie (there is no one right channel id across repositories). The stores
+    // COALESCE to `#general` on read, and every writer sets it.
+    //
+    // Membership is per (channel, user); visibility is per channel. `open`
+    // means listed and readable by everybody in the project but postable only
+    // by members; `private` means members only, and invisible to everyone
+    // else — enforced in the gateway, which is the only layer that knows who
+    // is asking.
+    version: 49,
+    name: "repository-sub-channels",
+    statements: [
+      `CREATE TABLE sub_channels (
+        id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL REFERENCES repositories(id),
+        project_id TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        name TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        UNIQUE (repository_id, slug)
+      )`,
+      `CREATE TABLE sub_channel_members (
+        channel_id TEXT NOT NULL REFERENCES sub_channels(id),
+        user_id TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        PRIMARY KEY (channel_id, user_id)
+      )`,
+      `CREATE INDEX sub_channels_by_repository
+         ON sub_channels(repository_id, slug)`,
+      // One #general per repository that already exists. Its id is derived
+      // from the repository's so the backfills below can name it without a
+      // second pass, and so re-running this on a restored dump is a no-op.
+      //
+      // A repository's project comes from `project_repositories`, which is
+      // where the link lives; a repository linked to nothing at all — a
+      // fixture, or a row from before projects existed — falls back to the
+      // default project rather than failing the migration on a NULL.
+      `INSERT INTO sub_channels
+         (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
+       SELECT 'subchan_general_' || r.id,
+              r.id,
+              COALESCE(
+                (SELECT pr.project_id FROM project_repositories pr
+                  WHERE pr.repository_id = r.id
+                  ORDER BY pr.linked_at LIMIT 1),
+                'project_local'
+              ),
+              'general', 'general', 'open', r.first_seen_at, NULL
+         FROM repositories r`,
+      `ALTER TABLE channel_messages ADD COLUMN channel_id TEXT`,
+      `ALTER TABLE channel_agent_members ADD COLUMN channel_id TEXT`,
+      `ALTER TABLE channel_read_cursors ADD COLUMN channel_id TEXT`,
+      `UPDATE channel_messages
+          SET channel_id = 'subchan_general_' || repository_id
+        WHERE channel_id IS NULL`,
+      `UPDATE channel_agent_members
+          SET channel_id = 'subchan_general_' || repository_id
+        WHERE channel_id IS NULL`,
+      `UPDATE channel_read_cursors
+          SET channel_id = 'subchan_general_' || repository_id
+        WHERE channel_id IS NULL`,
+      `CREATE INDEX channel_messages_by_channel
+         ON channel_messages(channel_id, created_at)`,
+      // The read cursor is now per (repository, channel, user). SQLite cannot
+      // widen a primary key in place, so the table is rebuilt around the new
+      // one rather than left keyed on a pair that two rooms would collide on.
+      `CREATE TABLE channel_read_cursors_next (
+        repository_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        read_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, channel_id, user_id)
+      )`,
+      `INSERT INTO channel_read_cursors_next
+         (repository_id, channel_id, user_id, read_at)
+       SELECT repository_id,
+              COALESCE(channel_id, 'subchan_general_' || repository_id),
+              user_id, read_at
+         FROM channel_read_cursors`,
+      `DROP TABLE channel_read_cursors`,
+      `ALTER TABLE channel_read_cursors_next RENAME TO channel_read_cursors`,
+      // Same widening for agent assignment: an agent is now in a room, not in
+      // a repository, so (repository, user, provider) is no longer unique.
+      `CREATE TABLE channel_agent_members_next (
+        repository_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (channel_id, user_id, provider)
+      )`,
+      `INSERT INTO channel_agent_members_next
+         (repository_id, channel_id, user_id, provider, created_at)
+       SELECT repository_id,
+              COALESCE(channel_id, 'subchan_general_' || repository_id),
+              user_id, provider, created_at
+         FROM channel_agent_members`,
+      `DROP TABLE channel_agent_members`,
+      `ALTER TABLE channel_agent_members_next RENAME TO channel_agent_members`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),
