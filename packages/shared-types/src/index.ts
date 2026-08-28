@@ -1807,9 +1807,14 @@ export function claimOccupiesPath(
     return false;
   }
   if (plan.claim.kind === "blanket") {
-    return !(plan.claim.released ?? []).includes(file);
+    return !uniqueRepositoryPaths(plan.claim.released ?? []).includes(file);
   }
-  return plan.expectedFiles.includes(file);
+  // Normalized, like every other reader of `expectedFiles` in an admission
+  // decision. This was the one comparing raw strings, and it is the one that
+  // decides whether a claim exempts a file from being shared — so `./src/x.js`
+  // against `src/x.js` did not merely miss a match, it silently withdrew the
+  // exemption and offered a claimed file's lines to somebody else.
+  return uniqueRepositoryPaths(plan.expectedFiles).includes(file);
 }
 
 function isTouchedFileRanges(value: unknown): value is TouchedFileRanges[] {
@@ -2124,6 +2129,39 @@ export function mergePlanScope(
       ...(plan.expectedServices ?? []),
       ...request.additionalServices,
     ]),
+    // The agent's own words have to widen with the approval.
+    //
+    // `declared` is the pre-enrichment snapshot, written once — "the first
+    // enrichment wins" — and it is what partial admission reads to decide how
+    // much of a file a holder occupies. Left alone here, a plan that asked for
+    // another function and was granted it went on being read as the smaller
+    // plan it arrived as, and the lines it had just been given permission to
+    // write were handed to somebody else as free ground. An approved expansion
+    // is as much the agent's word as anything it opened with.
+    // Absent stays absent: `declared.symbols` undefined means the plan was
+    // never enriched, so `expectedSymbols` is already the agent's own words
+    // and widening those above is the whole job. Only a snapshot that exists
+    // is extended, because only then is there a narrower list to go stale.
+    //
+    // An empty list stays empty, and that is the whole of the care needed
+    // here. Empty means the agent named the file and no functions in it,
+    // which partial admission reads as the whole file being its own — so
+    // widening `[]` to the one symbol an expansion asked for would not
+    // enlarge that claim, it would *replace* it, turning a holder of every
+    // line into a holder of one function and handing the rest to somebody
+    // else. The expansion is still recorded in `expectedSymbols` above.
+    ...(plan.declared?.symbols === undefined ||
+    plan.declared.symbols.length === 0
+      ? {}
+      : {
+          declared: {
+            ...plan.declared,
+            symbols: uniqueStrings([
+              ...plan.declared.symbols,
+              ...request.additionalSymbols,
+            ]),
+          },
+        }),
   };
   assertAgentPlan(revised);
   return revised;
