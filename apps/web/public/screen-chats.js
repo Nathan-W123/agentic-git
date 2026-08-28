@@ -2006,6 +2006,7 @@ function conversationHeader(repositoryId) {
             ? "Workspace files"
             : "Workspace threads";
   const main = destination.kind === "main";
+  const pinsOpen = main && activeSecondaryContext() === "pins";
   return `<header class="chan-head conversation-header" aria-label="${esc(label)} conversation header">
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       aria-expanded="${state.chanSidebarOpen === true}"
@@ -2021,6 +2022,15 @@ function conversationHeader(repositoryId) {
           ? `<span class="ch-count ch-muted" title="Muted — no badges or sounds from this workspace">${icon(
               "bellOff",
             )}Muted</span>`
+          : ""
+      }
+      ${
+        main
+          ? `<button type="button" class="icon-btn ch-pins-toggle${pinsOpen ? " on" : ""}"
+              data-act="channel-pins-toggle"
+              title="${pinsOpen ? "Hide pinned messages" : "Show pinned messages"}"
+              aria-label="${pinsOpen ? "Hide pinned messages" : "Show pinned messages"}"
+              aria-pressed="${pinsOpen}">${icon("pin")}</button>`
           : ""
       }
       ${main ? previewControl(repositoryId) : ""}
