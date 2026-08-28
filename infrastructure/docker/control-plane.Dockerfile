@@ -2,7 +2,18 @@
 # integration engine, in one container. State lives outside the image — the
 # coordination store in Postgres (COORD_DATABASE_URL) and canonical
 # repository mirrors on the /data volume.
-FROM node:24-bookworm-slim AS build
+# Pinned to a patch, for the same reason every CLI below is pinned: this
+# image installs software at build time, so an unpinned base means npm itself
+# floats. `node:24` resolved to v24.20.0 on 2026-08-26, which bundles npm
+# 11.19.0 — a release that reworked `--allow-scripts` internals (a new
+# allow-scripts writer, trusted-source checks in `script-allowed.js`) — and
+# the next deploy of unchanged code failed on the one step that uses that
+# flag. Every CLI version in this file was already pinned against exactly
+# this failure; the base was the hole left in it.
+#
+# Bump deliberately, the same way: change the version, redeploy, and the
+# failure (if any) belongs to that bump.
+FROM node:24.19.0-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json turbo.json tsconfig.base.json ./
 # Manifests before source, and only the manifests. `npm ci` reads every
@@ -90,7 +101,8 @@ RUN node -e "import('@coord/local-triage').then(async (m) => { \
       } \
     })"
 
-FROM node:24-bookworm-slim
+# Same pin as the build stage; see the note there.
+FROM node:24.19.0-bookworm-slim
 # git drives repository import, worktrees, bundles, and integration.
 #
 # Everything after it is here because an agent works in a checkout of somebody
