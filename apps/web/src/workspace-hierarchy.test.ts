@@ -91,18 +91,37 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(css, /\.chan-head \{[\s\S]*?position: static;/u);
 });
 
-test("Main chat is a persistent selectable workspace destination", async () => {
+test("a room is the workspace destination, and opening one claims the pane", async () => {
   const [data, chats, app] = await Promise.all([
     publicFile("data.js"),
     publicFile("screen-chats.js"),
     publicFile("app.js"),
   ]);
 
-  assert.match(chats, /data-act="workspace-main-open"/u);
-  assert.match(chats, />Main chat<\/span>/u);
-  assert.match(chats, /destination\.kind === "main" \? " on"/u);
-  assert.match(chats, /aria-current="\$\{destination\.kind === "main" \? "page" : "false"\}"/u);
-  assert.match(app, /case "workspace-main-open":[\s\S]*?selectPrimaryDestination\(\{ kind: "main" \}/u);
+  // "Main chat" was a quick-link above a Channels list that already held
+  // #general: two entries into one conversation, and only the quick-link
+  // owned the pane. #general is Main chat now, so the entry is gone and
+  // nothing dispatches its action any more.
+  assert.doesNotMatch(chats, /data-act="workspace-main-open"/u);
+  assert.doesNotMatch(chats, />Main chat<\/span>/u);
+  assert.doesNotMatch(app, /case "workspace-main-open":/u);
+
+  // The bug that removal fixes: selecting a room recorded the room and left
+  // the pane wherever it was, so a room chosen from a DM or the file tree
+  // looked like a click that did nothing.
+  const open = app.indexOf('case "sub-channel-open":');
+  assert.notEqual(open, -1, "the room-open handler was not found");
+  const handler = app.slice(open, app.indexOf("return;", open));
+  assert.match(handler, /selectPrimaryDestination\(\{ kind: "main" \}/u);
+  assert.match(handler, /selectSubChannel\(repositoryId, value\)/u);
+  assert.ok(
+    handler.indexOf("selectPrimaryDestination") <
+      handler.indexOf("selectSubChannel"),
+    "the pane has to be claimed before the room's caches are dropped",
+  );
+
+  // The destination itself still exists and is still remembered per
+  // workspace — other paths (closing a DM, opening a file) select it.
   assert.match(data, /workspaceDestinations: initialWorkspaceDestinations/u);
   assert.match(data, /persist\([\s\S]*?"ag\.workspaceDestinations"/u);
 });

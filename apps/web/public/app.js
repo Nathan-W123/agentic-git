@@ -5759,12 +5759,12 @@ function returnFocusFromSecondaryContext(kind, value) {
       : document.querySelector(
           `[data-act="roster-person-menu"][data-value="${CSS.escape(personId)}"]`,
         )) ??
-    $('[data-act="workspace-main-open"]');
+    $("[data-act='channel-input']");
   const focusTarget =
     target !== null && target !== undefined && target.closest("[inert]") === null
       ? target
       : $('[data-act="chan-sidebar-toggle"]') ??
-        $('[data-act="workspace-main-open"]');
+        $("[data-act='channel-input']");
   focusTarget?.focus({ preventScroll: true });
 }
 
@@ -5798,7 +5798,6 @@ function returnFocusFromPrimaryDestination(destination) {
     source !== null && source.closest("[inert]") === null
       ? source
       : $("[data-act='channel-input']") ??
-        $('[data-act="workspace-main-open"]') ??
         $('[data-act="chan-sidebar-toggle"]');
   target?.focus({ preventScroll: true });
 }
@@ -8666,14 +8665,6 @@ document.addEventListener("click", (event) => {
         }
       }
       return;
-    case "workspace-main-open":
-      if (channelFileEdited() && !confirmDiscardEdit()) {
-        return;
-      }
-      selectPrimaryDestination({ kind: "main" }, activeChannelId());
-      setChanDrawer(false);
-      render();
-      return;
     case "composer-plus": {
       // The one control on the left of the bar. Everything that adds something
       // to a message hangs off it: a picture, a command, a name. Ordering is
@@ -10265,6 +10256,11 @@ document.addEventListener("click", (event) => {
     /* ------------------------------------------------ sub-channels ---- */
     case "sub-channel-open": {
       const repositoryId = activeChannelId();
+      // Opening a room has to claim the pane, not just record which room is
+      // current. Without this a room picked while a DM, an agent thread or the
+      // file tree owned the pane changed the selection and nothing else, which
+      // read exactly as the click being ignored.
+      selectPrimaryDestination({ kind: "main" }, repositoryId);
       selectSubChannel(repositoryId, value);
       closePopover();
       writeChatLocation();
