@@ -209,22 +209,25 @@ import {
   answerAgentQuestion,
   applyProviderSetting,
   channelFileEdited,
+  activeSecondaryContext,
+  closeSecondaryContext,
   clearDirectMessageSelection,
   clearRightPanel,
   createInvitation,
   invitationLink,
-  keptRightPanels,
   createApiToken,
   loadApiTokens,
   loadInvitations,
   revokeApiToken,
   loadPendingQuestions,
-  newestRightPanel,
   pendingQuestionFor,
+  openSecondaryContext,
+  primaryDestinationForWorkspace,
   putAwayRightPanel,
   readInvitation,
   revokeInvitation,
   saveAppearance,
+  selectPrimaryDestination,
   signInForInvitation,
 } from "./data.js";
 import {
@@ -1499,7 +1502,11 @@ async function submitInviteSignIn(form) {
 
 function topbar() {
   const user = currentUserName();
-  return `<header class="topbar">
+  return `<header class="topbar" aria-label="Global">
+    <button type="button" class="global-brand" data-act="nav" data-value="chats"
+      aria-label="Kumi home" title="Kumi home">
+      ${brandMark(24)}<span>Kumi</span>
+    </button>
     ${
       // Off the Chats screen there is no channel sidebar and so no brand to
       // click home with — this is the way back.
@@ -1509,6 +1516,12 @@ function topbar() {
              title="Back to chats" aria-label="Back to chats">${icon("chatBubble")}</button>`
     }
     <span class="spacer"></span>
+    <button type="button" class="global-search" data-act="switch-open"
+      aria-label="Search and commands" title="Search and commands (Ctrl or Command K)">
+      ${icon("search")}<span>Search</span><kbd>⌘K</kbd>
+    </button>
+    <button type="button" class="icon-btn" data-act="shortcuts-open"
+      aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts">${icon("info")}</button>
     ${
       // Same reasoning as the sidebar's line: a status that is always the same
       // is not a status. Only the failure is worth the space.
@@ -1598,10 +1611,10 @@ function channelStatsCard() {
           </div>
         </div>`;
   return `<section class="card channel-stats-card">
-    <div class="panel-head"><div><h3>Channel wrapped</h3>
+    <div class="panel-head"><div><h3>Main chat activity</h3>
       <p>${
         repositoryId === ""
-          ? "Open a channel to see how this room has been used."
+          ? "Open a workspace to see how its Main chat has been used."
           : `A look back at #${esc(repositoryId)} — the work this room has held.`
       }</p></div></div>
     ${tiles}
@@ -1778,7 +1791,7 @@ const SETTINGS_SECTIONS = [
     id: "workspace",
     label: "Workspace",
     iconName: "users",
-    description: "People and activity in the channel you have open.",
+    description: "People and activity in the workspace you have open.",
   },
   {
     id: "billing",
@@ -2749,7 +2762,7 @@ async function deleteChannelMessageAction(repositoryId, messageId) {
         ? "The replies under it stay — they are the agent's account of the " +
           "work, and other people have read them. The message itself is " +
           "replaced with a note that it was deleted."
-        : "It goes for everyone in this channel.",
+        : "It goes for everyone in this workspace.",
       running
         ? "The task it asked for is still going, so it will be stopped."
         : "",
@@ -2917,7 +2930,7 @@ async function clearThreadsAction(repositoryId) {
   const confirmed = await showModal({
     title: `Delete all ${String(threads)} thread${threads === 1 ? "" : "s"}?`,
     subtitle:
-      "This clears the whole channel — every message and every thread in it. " +
+      "This clears Main chat — every message and every thread in it. " +
       "There is no undo.",
     confirm: "Delete everything",
   });
@@ -3423,7 +3436,7 @@ async function renameRepositoryAction(repositoryId) {
   const current = repositoryLabel(repositoryId);
   const values = await showModal({
     title: "Rename this repository",
-    subtitle: `Changes what ${repositoryId} is called here. Its id keeps addressing the channel, its tasks and its files.`,
+    subtitle: `Changes what ${repositoryId} is called here. Its id keeps addressing the workspace, its tasks and its files.`,
     confirm: "Rename",
     body: `<label class="field">
         <span>Name</span>
@@ -4588,7 +4601,7 @@ function banner() {
 }
 
 /** Screens that bring their own header do not also get the global topbar. */
-const BARE = new Set(["code", "coordinator", "chats"]);
+const BARE = new Set(["code", "coordinator"]);
 
 /* --------------------------------------------------------- panel width ---- */
 
@@ -4604,7 +4617,7 @@ const PANEL_MIN = 280;
  * not most of it. The channel list stays put, so there is always a way back,
  * and double-clicking the edge restores the default.
  */
-const MAIN_MIN = 0;
+const MAIN_MIN = 480;
 
 /**
  * How wide the side panel is allowed to get, right now.
@@ -4616,8 +4629,11 @@ const MAIN_MIN = 0;
 function panelMax() {
   const shell = $(".chats-shell");
   const sidebar = $(".chan-sidebar");
+  const rail = $(".workspace-rail");
   const available =
-    (shell?.clientWidth ?? window.innerWidth) - (sidebar?.offsetWidth ?? 0);
+    (shell?.clientWidth ?? window.innerWidth) -
+    (sidebar?.offsetWidth ?? 0) -
+    (rail?.offsetWidth ?? 0);
   return Math.max(PANEL_MIN, available - MAIN_MIN);
 }
 
@@ -4672,26 +4688,24 @@ const RIGHT_PANEL_DRAG_TYPE = "application/x-coord-right-panel";
  * that, so the press also reconciles the column before joining it.
  */
 function moveRightPanel(kind, edge) {
-  const kept = keptRightPanels();
-  if (!kept.includes(kind)) {
-    return;
+  const current = activeSecondaryContext();
+  if (
+    current === "file" &&
+    kind !== "file" &&
+    channelFileEdited() &&
+    !confirmDiscardEdit()
+  ) {
+    return false;
   }
-  const rest = kept.filter((open) => open !== kind);
-  state.rightPanelStack =
-    edge === "left" ? [kind, ...rest] : [...rest, kind];
+  void edge;
+  openSecondaryContext(kind);
+  return true;
 }
 
 /** Add a thread as its own side tab and make it the active composer target. */
 function openThreadPanel(messageId) {
-  const current = state.activeChannelThread;
-  const open = state.activeChannelThreads ?? [];
-  const withCurrent =
-    open.length === 0 && current !== undefined ? [current] : open;
   state.activeChannelThread = messageId;
-  state.activeChannelThreads = [
-    ...withCurrent.filter((id) => id !== messageId),
-    messageId,
-  ];
+  state.activeChannelThreads = [messageId];
   moveRightPanel(`thread:${messageId}`, "right");
 }
 
@@ -4867,8 +4881,8 @@ function switcherEntries(query) {
   const term = query.trim().toLowerCase();
   const rows = [
     ...state.repositories.map((repo) => ({
-      kind: "Channel",
-      label: `# ${repo.id}`,
+      kind: "Workspace",
+      label: repositoryLabel(repo.id),
       act: "switch-channel",
       value: repo.id,
       iconName: "chatBubble",
@@ -4952,7 +4966,7 @@ function openSwitcher() {
   layer.innerHTML = `<div class="pop-scrim" data-act="switch-close"></div>
     <div class="qs-card" role="dialog" aria-label="Go to">
       <input class="qs-input" data-act="switch-input" type="text"
-        placeholder="Go to a channel, a person, or a screen…"
+        placeholder="Go to a workspace, conversation, or screen…"
         aria-label="Go to" autocomplete="off">
       <div class="qs-list" role="listbox"></div>
     </div>`;
@@ -4964,7 +4978,7 @@ function openSwitcher() {
 /** What the keys do, said in one place rather than learned by accident. */
 function openShortcutSheet() {
   const pairs = [
-    ["Ctrl / ⌘ + K", "Go to a channel, a person, or a screen"],
+    ["Ctrl / ⌘ + K", "Go to a workspace, conversation, or screen"],
     ["?", "This list"],
     ["Esc", "Close whatever is stacked over the conversation"],
     ["Enter", "Send; Shift + Enter starts a new line"],
@@ -5588,6 +5602,27 @@ function setChanDrawer(open) {
   shell
     .querySelector(".chan-sidebar-btn")
     ?.setAttribute("aria-expanded", String(next));
+  for (const navigation of shell.querySelectorAll(
+    ".workspace-rail, .chan-sidebar",
+  )) {
+    if (phoneLayout()) {
+      navigation.toggleAttribute("inert", !next);
+      navigation.setAttribute("aria-hidden", String(!next));
+    } else {
+      navigation.removeAttribute("inert");
+      navigation.removeAttribute("aria-hidden");
+    }
+  }
+  const conversation = shell.querySelector(".chan-main");
+  const conversationHidden =
+    phoneLayout() &&
+    (next || activeSecondaryContext() !== undefined);
+  conversation?.toggleAttribute("inert", conversationHidden);
+  if (conversationHidden) {
+    conversation?.setAttribute("aria-hidden", "true");
+  } else {
+    conversation?.removeAttribute("aria-hidden");
+  }
 }
 
 /**
@@ -5601,7 +5636,7 @@ function setChanDrawer(open) {
  * eight surfaces were competing for one place.
  */
 function closeSidePanel() {
-  const showing = newestRightPanel();
+  const showing = activeSecondaryContext();
   if (showing === undefined) {
     return false;
   }
@@ -5609,6 +5644,7 @@ function closeSidePanel() {
   // says it has read the work it lists.
   if (showing === "catch-up") {
     dismissSinceYouLeft();
+    clearRightPanel("catch-up");
     return true;
   }
   // The same question the close button asks. A swipe is easy to do by
@@ -5616,7 +5652,7 @@ function closeSidePanel() {
   if (showing === "file" && !confirmDiscardEdit()) {
     return false;
   }
-  putAwayRightPanel(showing);
+  closeSecondaryContext();
   return true;
 }
 
@@ -5654,6 +5690,40 @@ function returnFocusFromThread(messageId) {
     return;
   }
   $("[data-act='channel-input']")?.focus({ preventScroll: true });
+}
+
+/** Return focus to the control that owns the context which just closed. */
+function returnFocusFromSecondaryContext(kind, value) {
+  if (kind?.startsWith("thread:")) {
+    returnFocusFromThread(kind.slice("thread:".length));
+    return;
+  }
+  const selectors = {
+    agent: `[data-act="agent-panel-open"][data-value="${CSS.escape(String(value ?? ""))}"]`,
+    threads: '[data-act="channel-threads-toggle"]',
+    tree: '[data-act="chan-tree-toggle"]',
+    pins: '[data-act="channel-pins-toggle"]',
+    "conversation-info": '[data-act="channel-info"]',
+  };
+  const personId = kind?.startsWith("person:")
+    ? kind.slice("person:".length)
+    : undefined;
+  const selector =
+    personId === undefined ? selectors[kind] : '[data-act="person-profile-open"]';
+  const target =
+    (selector === undefined ? undefined : document.querySelector(selector)) ??
+    (personId === undefined
+      ? undefined
+      : document.querySelector(
+          `[data-act="roster-person-menu"][data-value="${CSS.escape(personId)}"]`,
+        )) ??
+    $('[data-act="workspace-main-open"]');
+  const focusTarget =
+    target !== null && target !== undefined && target.closest("[inert]") === null
+      ? target
+      : $('[data-act="chan-sidebar-toggle"]') ??
+        $('[data-act="workspace-main-open"]');
+  focusTarget?.focus({ preventScroll: true });
 }
 
 /**
@@ -5704,16 +5774,7 @@ function returnFocusToAgentPanelTrigger(view, fromHead) {
 }
 
 function sidePanelOpen() {
-  return (
-    state.catchUp !== undefined ||
-    state.activePlan !== undefined ||
-    state.activeAgentPanel !== undefined ||
-    state.activeDm !== undefined ||
-    state.chanFileView !== undefined ||
-    state.chanTree === true ||
-    state.activeChannelThread !== undefined ||
-    state.chanThreadList === true
-  );
+  return activeSecondaryContext() !== undefined;
 }
 
 /**
@@ -5751,6 +5812,8 @@ function openPromptedThread(repositoryId) {
     messageId === undefined ||
     phoneLayout() ||
     state.route !== "chats" ||
+    (activeSecondaryContext() !== undefined &&
+      activeSecondaryContext() !== `thread:${state.autoOpenedThread}`) ||
     (state.activeChannelThread !== undefined &&
       state.activeChannelThread !== state.autoOpenedThread)
   ) {
@@ -5758,6 +5821,7 @@ function openPromptedThread(repositoryId) {
   }
   state.activeChannelThread = messageId;
   state.autoOpenedThread = messageId;
+  openSecondaryContext(`thread:${messageId}`);
 }
 
 /**
@@ -5785,6 +5849,8 @@ function openReadyPlan(repositoryId) {
     messageId === undefined ||
     phoneLayout() ||
     state.route !== "chats" ||
+    (activeSecondaryContext() !== undefined &&
+      activeSecondaryContext() !== `thread:${state.autoOpenedThread}`) ||
     state.activePlan !== undefined ||
     (state.activeChannelThread !== undefined &&
       state.activeChannelThread !== state.autoOpenedThread)
@@ -5794,6 +5860,7 @@ function openReadyPlan(repositoryId) {
   state.activePlan = messageId;
   state.activeChannelThread = undefined;
   state.autoOpenedThread = undefined;
+  openSecondaryContext("plan");
 }
 
 /** Keep keyboard focus inside the settings surface while it is modal. */
@@ -5868,12 +5935,12 @@ document.addEventListener("keydown", (event) => {
   // The thread the press is about, taken before it is closed: afterwards
   // there is nothing left to name it, and Escape has to leave the reader
   // somewhere as much as the close button does.
-  const closing = state.activeChannelThread;
+  const closing = activeSecondaryContext();
+  const closingValue =
+    closing === "agent" ? state.activeAgentPanel : undefined;
   if (sidePanelOpen() && closeSidePanel()) {
     render();
-    if (state.activeChannelThread === undefined) {
-      returnFocusFromThread(closing);
-    }
+    returnFocusFromSecondaryContext(closing, closingValue);
   }
 });
 
@@ -6345,6 +6412,13 @@ function renameFieldFocused() {
  * anybody knows it closed it is already gone from the new tree.
  */
 const MOTION_SURFACES = [
+  {
+    selector: ".primary-conversation-surface",
+    parent: ".chan-main",
+    enter: "primary-entering",
+    leave: "primary-leaving",
+    key: (node) => node.dataset.primaryKey ?? "",
+  },
   // Thread, thread list, DM, agent profile and the file view share one column
   // that holds up to three of them, and each of them is tracked by name
   // through `key` — so this is "which surfaces are in the column", not "is
@@ -7259,6 +7333,7 @@ function renderNow() {
   // flow, over a layout that has already settled — so this order costs it
   // nothing.
   playSurfaceMotion(root);
+  writeChatLocation();
 
   // What the swap turned out to have *said*: the words that were not in the
   // room a moment ago come in one at a time, and everything already there
@@ -7299,7 +7374,12 @@ function renderNow() {
   // keeps an open list open across the render an arrow key causes.
   paintComposerSuggestions(activeChannelId());
   void ensureAgentOptions(state.selectedAgent, () => {
-    if (state.route === "code" || state.route === "agents") {
+    if (
+      state.route === "code" ||
+      state.route === "agents" ||
+      (state.route === "chats" &&
+        primaryDestinationForWorkspace(activeChannelId()).kind === "agent")
+    ) {
       render();
     }
   });
@@ -7433,13 +7513,14 @@ function renderNow() {
  * entry is only for people.
  */
 function openUserDirectMessage(userId) {
-  state.activeDm = userId;
-  state.activeAgentPanel = undefined;
-  clearRightPanel("agent");
+  if (channelFileEdited() && !confirmDiscardEdit()) {
+    return false;
+  }
+  selectPrimaryDestination({ kind: "dm", id: userId }, activeChannelId());
   state.dmDraft = "";
   state.dmReplyMessageId = undefined;
-  moveRightPanel("dm", "right");
   setChanDrawer(false);
+  return true;
 }
 
 /**
@@ -7587,10 +7668,112 @@ function navigate(route) {
   // coming back to Settings should not find it still open on an old value.
   state.settingsRenamingId = undefined;
   closePopover();
-  if (window.location.hash !== `#${route}`) {
+  if (route === "chats") {
+    writeChatLocation();
+  } else if (window.location.hash !== `#${route}`) {
     window.location.hash = `#${route}`;
   }
   render();
+}
+
+/** Decode an addressable workspace conversation without trusting its shape. */
+function parseChatLocation(hash = window.location.hash) {
+  const raw = String(hash).replace(/^#/u, "");
+  const [path, query = ""] = raw.split("?");
+  const parts = path.split("/");
+  if (parts[0] !== "chats") {
+    return undefined;
+  }
+  const decode = (value) => {
+    try {
+      return decodeURIComponent(value ?? "");
+    } catch {
+      return "";
+    }
+  };
+  const kind = decode(parts[2]) || "main";
+  const id = decode(parts.slice(3).join("/"));
+  const primary =
+    ["dm", "agent", "file"].includes(kind) && id !== ""
+      ? { kind, id }
+      : ["threads", "files"].includes(kind)
+        ? { kind }
+        : { kind: "main" };
+  return {
+    workspaceId: decode(parts[1]),
+    primary,
+    secondary: new URLSearchParams(query).get("context") ?? undefined,
+  };
+}
+
+/** Keep refreshable chat state in the fragment without adding history noise. */
+function writeChatLocation() {
+  if (state.route !== "chats") {
+    return;
+  }
+  const workspaceId = activeChannelId();
+  const primary = primaryDestinationForWorkspace(workspaceId);
+  const path = ["chats", encodeURIComponent(workspaceId), primary.kind];
+  if (primary.id !== undefined) {
+    path.push(encodeURIComponent(primary.id));
+  }
+  let secondary = activeSecondaryContext();
+  if (secondary === "agent" && state.activeAgentPanel !== undefined) {
+    secondary = `agent:${state.activeAgentPanel}`;
+  } else if (secondary === "file" && state.chanFileView !== undefined) {
+    secondary = `file:${state.chanFileView}`;
+  } else if (secondary === "plan" && state.activePlan !== undefined) {
+    secondary = `plan:${state.activePlan}`;
+  }
+  const query = new URLSearchParams();
+  if (secondary !== undefined) {
+    query.set("context", secondary);
+  }
+  const next = `#${path.join("/")}${query.size === 0 ? "" : `?${query}`}`;
+  if (window.location.hash !== next) {
+    window.history.replaceState(null, "", next);
+  }
+}
+
+/** Restore the one secondary context named by a direct chat URL. */
+function restoreChatSecondaryContext(context) {
+  if (context === undefined || context === "") {
+    closeSecondaryContext();
+    return;
+  }
+  if (context.startsWith("thread:")) {
+    const messageId = context.slice("thread:".length);
+    state.activeChannelThread = messageId;
+    state.activeChannelThreads = [messageId];
+    openSecondaryContext(context);
+    return;
+  }
+  if (context.startsWith("agent:")) {
+    state.activeAgentPanel = context.slice("agent:".length);
+    state.agentPanelTab = "spec";
+    openSecondaryContext("agent");
+    return;
+  }
+  if (context.startsWith("file:")) {
+    state.chanFileView = context.slice("file:".length);
+    openSecondaryContext("file");
+    return;
+  }
+  if (context.startsWith("plan:")) {
+    state.activePlan = context.slice("plan:".length);
+    openSecondaryContext("plan");
+    return;
+  }
+  if (["threads", "tree", "pins", "conversation-info"].includes(context)) {
+    state.chanThreadList = context === "threads";
+    state.chanTree = context === "tree";
+    state.pinsOpen = context === "pins";
+    openSecondaryContext(context);
+    return;
+  }
+  if (context.startsWith("person:")) {
+    openSecondaryContext(context);
+  }
 }
 
 function applyHash() {
@@ -7639,6 +7822,35 @@ function applyHash() {
     void signOutForAuthLink(linked);
     return;
   }
+  const chatLocation = parseChatLocation();
+  if (chatLocation !== undefined) {
+    state.settingsOpen = false;
+    state.route = "chats";
+    if (chatLocation.workspaceId !== "") {
+      state.repositoryId = chatLocation.workspaceId;
+      persist("ag.repo", chatLocation.workspaceId);
+    }
+    selectPrimaryDestination(
+      chatLocation.primary,
+      chatLocation.workspaceId || activeChannelId(),
+    );
+    if (chatLocation.primary.kind === "file") {
+      state.chanFileView = chatLocation.primary.id;
+      state.chanFileMode = "edit";
+    }
+    restoreChatSecondaryContext(chatLocation.secondary);
+    render();
+    if (chatLocation.primary.kind === "dm") {
+      loadOpenedDirectMessage(chatLocation.primary.id);
+    }
+    if (chatLocation.primary.kind === "file") {
+      void loadChannelFile(chatLocation.primary.id, render);
+    }
+    if (chatLocation.secondary?.startsWith("file:")) {
+      void loadChannelFile(state.chanFileView, render);
+    }
+    return;
+  }
   const route = window.location.hash.replace(/^#/u, "") || "chats";
   if (route === "settings" || route === "advanced") {
     state.settingsOpen = true;
@@ -7653,6 +7865,15 @@ function applyHash() {
     state.settingsOpen = false;
     state.route = route;
     render();
+  }
+  if (route === "chats") {
+    const destination = primaryDestinationForWorkspace(activeChannelId());
+    if (destination.kind === "dm") {
+      loadOpenedDirectMessage(destination.id);
+    }
+    if (destination.kind === "file") {
+      void loadChannelFile(destination.id, render);
+    }
   }
 }
 
@@ -8191,18 +8412,29 @@ document.addEventListener("click", (event) => {
         { act: "logout", label: "Sign out", iconName: "logout" },
       ]);
       return;
+    case "switch-open":
+      openSwitcher();
+      return;
+    case "shortcuts-open":
+      openShortcutSheet();
+      return;
     case "switch-close":
       closeSwitcher();
       return;
     case "switch-channel":
+      if (channelFileEdited() && !confirmDiscardEdit()) {
+        return;
+      }
       closeSwitcher();
       navigate("chats");
       openChannel(value, render);
       return;
     case "switch-person":
+      if (!openUserDirectMessage(value)) {
+        return;
+      }
       closeSwitcher();
       navigate("chats");
-      openUserDirectMessage(value);
       render();
       loadOpenedDirectMessage(value);
       return;
@@ -8277,7 +8509,27 @@ document.addEventListener("click", (event) => {
       ]);
       return;
     case "channel-open":
+      if (channelFileEdited() && !confirmDiscardEdit()) {
+        return;
+      }
       openChannel(value, render);
+      {
+        const destination = primaryDestinationForWorkspace(value);
+        if (destination.kind === "dm") {
+          loadOpenedDirectMessage(destination.id);
+        }
+        if (destination.kind === "file") {
+          void loadChannelFile(destination.id, render);
+        }
+      }
+      return;
+    case "workspace-main-open":
+      if (channelFileEdited() && !confirmDiscardEdit()) {
+        return;
+      }
+      selectPrimaryDestination({ kind: "main" }, activeChannelId());
+      setChanDrawer(false);
+      render();
       return;
     case "composer-plus": {
       // The one control on the left of the bar. Everything that adds something
@@ -8302,7 +8554,7 @@ document.addEventListener("click", (event) => {
                 // means in a private chat is an instruction to the agent
                 // reading it rather than something the room carries out, so
                 // the hint says whose list it is rather than promising more.
-                hint: "The same list the channel offers",
+                hint: "The same list the workspace offers",
                 iconName: "terminal",
               },
               { act: "chat-mention", label: "Mention a file or agent", iconName: "at" },
@@ -8312,7 +8564,7 @@ document.addEventListener("click", (event) => {
               {
                 act: "channel-slash-key",
                 label: "Run a command",
-                hint: "Everything this channel answers to",
+                hint: "Everything Main chat answers to",
                 iconName: "terminal",
               },
               { act: "channel-mention-key", label: "Mention someone", iconName: "at" },
@@ -8453,7 +8705,14 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "channel-pins-toggle":
-      setPinnedMessagesOpen(state.pinsOpen !== true);
+      if (activeSecondaryContext() === "pins") {
+        state.pinsOpen = false;
+        closeSecondaryContext();
+      } else {
+        state.pinsOpen = true;
+        moveRightPanel("pins", "right");
+      }
+      render();
       return;
     // A pin is a durable doorway into its conversation. Even a person's
     // root with no replies yet opens in the thread panel, and the one-shot
@@ -8502,12 +8761,18 @@ document.addEventListener("click", (event) => {
     // The tree and a file opened out of it are two surfaces, and the column
     // holds both: reading a change is usually reading the next file after it.
     case "chan-tree-toggle":
-      state.chanTree = state.chanTree !== true;
-      moveRightPanel("tree", "right");
+      if (channelFileEdited() && !confirmDiscardEdit()) {
+        return;
+      }
+      selectPrimaryDestination({ kind: "files" }, activeChannelId());
+      state.chanTree = false;
+      setChanDrawer(false);
       render();
       return;
     case "chan-tree-close":
       state.chanTree = false;
+      clearRightPanel("tree");
+      selectPrimaryDestination({ kind: "main" }, activeChannelId());
       render();
       return;
     // Both of these change a class rather than redrawing the screen, so the
@@ -8671,11 +8936,10 @@ document.addEventListener("click", (event) => {
       // to draw it, and on a phone while a newer surface covers it. Toggle
       // only when it is the thing the reader is looking at; from anywhere
       // else this control is navigation back to the library.
-      const listVisible = phoneLayout()
-        ? newestRightPanel() === "threads"
-        : keptRightPanels().includes("threads");
+      const listVisible = activeSecondaryContext() === "threads";
       if (listVisible) {
         state.chanThreadList = false;
+        closeSecondaryContext();
         render();
         return;
       }
@@ -8729,6 +8993,7 @@ document.addEventListener("click", (event) => {
       return;
     case "channel-threads-close":
       state.chanThreadList = false;
+      clearRightPanel("threads");
       render();
       return;
     case "channel-message-reply":
@@ -8784,10 +9049,12 @@ document.addEventListener("click", (event) => {
       return;
     case "plan-close":
       state.activePlan = undefined;
+      clearRightPanel("plan");
       render();
       return;
     case "catch-up-close":
       dismissSinceYouLeft();
+      clearRightPanel("catch-up");
       render();
       return;
     case "catch-up-task-open": {
@@ -8907,15 +9174,33 @@ document.addEventListener("click", (event) => {
       target?.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
+    case "person-profile-open":
+      closePopover();
+      moveRightPanel(`person:${value}`, "right");
+      setChanDrawer(false);
+      render();
+      return;
+    case "secondary-context-close": {
+      const closing = activeSecondaryContext();
+      const closingValue =
+        closing === "agent" ? state.activeAgentPanel : undefined;
+      if (closing === "pins") {
+        state.pinsOpen = false;
+      }
+      closeSecondaryContext();
+      render();
+      returnFocusFromSecondaryContext(closing, closingValue);
+      return;
+    }
     // Tapping somebody opens the conversation with them. Rendered before the
     // fetch so the panel is there immediately, with whatever was already
     // loaded — a private message is the one surface where waiting to see
     // anything reads as the message having gone nowhere.
     case "dm-open":
-      state.activeDm = value;
-      state.dmDraft = "";
+      if (!openUserDirectMessage(value)) {
+        return;
+      }
       clearDirectMessageSelection();
-      openUserDirectMessage(value);
       render();
       loadOpenedDirectMessage(value);
       return;
@@ -8951,8 +9236,7 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "dm-close":
-      clearRightPanel("dm");
-      state.activeDm = undefined;
+      selectPrimaryDestination({ kind: "main" }, activeChannelId());
       state.dmDraft = "";
       state.dmReplyMessageId = undefined;
       clearDirectMessageSelection();
@@ -8975,15 +9259,13 @@ document.addEventListener("click", (event) => {
         toast("Org agents work in the room — @mention them in the channel.");
         return;
       }
+      if (channelFileEdited() && !confirmDiscardEdit()) {
+        return;
+      }
       // Also offered by the roster row's menu, which has nothing to say once
       // the panel it opens is on screen.
       closePopover();
-      state.selectedAgent = value;
-      state.activeAgentPanel = value;
-      // This entry point is "talk to my agent", so it lands on the chat half
-      // rather than making somebody who clicked the avatar choose a tab.
-      state.agentPanelTab = "chat";
-      moveRightPanel("agent", "right");
+      selectPrimaryDestination({ kind: "agent", id: value }, activeChannelId());
       setChanDrawer(false);
       render();
       return;
@@ -9061,6 +9343,18 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "agent-panel-tab": {
+      if (value === "chat" && state.activeAgentPanel !== undefined) {
+        if (channelFileEdited() && !confirmDiscardEdit()) {
+          return;
+        }
+        selectPrimaryDestination(
+          { kind: "agent", id: state.activeAgentPanel },
+          activeChannelId(),
+        );
+        setChanDrawer(false);
+        render();
+        return;
+      }
       // Which control this came from, taken before the render throws it away.
       // Profile and history each offer a way back in the header, and the
       // profile offers a second one beside the work it is about; focus goes
@@ -9087,14 +9381,13 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "agent-panel-close":
-      clearRightPanel("agent");
-      state.activeAgentPanel = undefined;
-      render();
-      // The profile was over the conversation, and the conversation is where
-      // an org agent is actually tasked — the work zone's own primary action
-      // is this one for exactly that reason. Same landing the thread panel
-      // gives back when the message it was opened from is out of the page.
-      $("[data-act='channel-input']")?.focus({ preventScroll: true });
+      {
+        const closingAgent = state.activeAgentPanel;
+        clearRightPanel("agent");
+        state.activeAgentPanel = undefined;
+        render();
+        returnFocusFromSecondaryContext("agent", closingAgent);
+      }
       return;
     // Expanding a file happens where it is read — in the transcript — so this
     // only toggles which paths are open, with no route change to lose the
@@ -9113,7 +9406,7 @@ document.addEventListener("click", (event) => {
       if (state.chanFileTaskId !== undefined) {
         void ensureChangeSetForTask(state.chanFileTaskId, render);
       }
-      moveRightPanel("file", "right");
+      selectPrimaryDestination({ kind: "file", id: value }, activeChannelId());
       // Opening a file opens it editable. Making Edit a second click meant the
       // answer to "can I fix this here" was no until you found a tab, which is
       // the wrong default for a file you are already looking at. The diff is
@@ -9135,7 +9428,9 @@ document.addEventListener("click", (event) => {
         return;
       }
       closeChannelFile();
-      state.chanTree = true;
+      state.chanTree = false;
+      clearRightPanel("file");
+      selectPrimaryDestination({ kind: "files" }, activeChannelId());
       render();
       return;
     // The X leaves the code behind entirely: file and folder both, back to the
@@ -9147,6 +9442,8 @@ document.addEventListener("click", (event) => {
       }
       closeChannelFile();
       state.chanTree = false;
+      clearRightPanel("file");
+      selectPrimaryDestination({ kind: "main" }, activeChannelId());
       render();
       return;
     case "chan-file-mode": {
@@ -9263,7 +9560,9 @@ document.addEventListener("click", (event) => {
       void toggleAuditingAction(activeChannelId(), value !== "true");
       return;
     case "channel-info":
-      showPopover(node, channelInfoPopoverHtml(value));
+      moveRightPanel("conversation-info", "right");
+      setChanDrawer(false);
+      render();
       return;
     /**
      * The provider caveat that used to be a permanent paragraph.

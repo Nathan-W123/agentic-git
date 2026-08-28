@@ -149,7 +149,7 @@ test("a notification opens what it is about", async () => {
   assert.match(open, /state\.activeChannelThread = root\.id;/u);
 });
 
-test("the keyboard can reach a room, a person, or a screen", async () => {
+test("the keyboard can reach a workspace, a conversation, or a screen", async () => {
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
 
@@ -158,6 +158,7 @@ test("the keyboard can reach a room, a person, or a screen", async () => {
   assert.match(app, /function switcherEntries\(query\)/u);
   const entries = slice(app, "function switcherEntries(query) {", "function paintSwitcher()");
   assert.match(entries, /state\.repositories\.map/u);
+  assert.match(entries, /kind: "Workspace"/u);
   assert.match(entries, /state\.dmPeople/u);
   assert.match(entries, /route: "notifications"/u);
 
@@ -172,6 +173,7 @@ test("the keyboard can reach a room, a person, or a screen", async () => {
   assert.match(app, /input, textarea, select, \[contenteditable='true'\]/u);
   assert.match(app, /if \(event\.key === "\?"\)/u);
   assert.match(app, /function openShortcutSheet\(\)/u);
+  assert.match(app, /class="global-search" data-act="switch-open"/u);
 });
 
 test("settings is visible beside the account menu", async () => {
@@ -230,14 +232,16 @@ test("direct messages are offered with people and with nobody else", async () =>
   assert.match(list, /isDirectMessagePerson\(conversation\.userId\)/u);
   assert.match(list, /isDirectMessagePerson\(person\.id\)/u);
 
-  // Opening a person closes any agent private-chat panel that was beside it.
+  // Opening a person selects a primary conversation and clears secondary
+  // context through the shared destination contract.
   const open = slice(
     app,
     "function openUserDirectMessage(userId) {",
     "\n/**\n * Who this account can write to privately",
   );
-  assert.match(open, /state\.activeAgentPanel = undefined/u);
-  assert.match(open, /clearRightPanel\("agent"\)/u);
+  assert.match(open, /selectPrimaryDestination\(\{ kind: "dm", id: userId \}/u);
+  assert.match(data, /export function selectPrimaryDestination/u);
+  assert.match(data, /closeSecondaryContext\(\)/u);
 
   // The half that makes it a way to start one: everybody reachable who is not
   // already in a thread with this account. "No conversations yet" used to be
@@ -254,8 +258,10 @@ test("direct messages are offered with people and with nobody else", async () =>
   // conversation's selected message does not stay chosen in the next one.
   assert.match(
     app,
-    /case "dm-open":\s*\n\s*state\.activeDm = value;\s*\n\s*state\.dmDraft = "";\s*\n\s*clearDirectMessageSelection\(\);\s*\n\s*openUserDirectMessage\(value\);/u,
+    /case "dm-open":[\s\S]{0,160}if \(!openUserDirectMessage\(value\)\)[\s\S]{0,100}clearDirectMessageSelection\(\);/u,
   );
+  assert.match(app, /function parseChatLocation\(/u);
+  assert.match(app, /function writeChatLocation\(/u);
 });
 
 test("settings dialog enter animation only plays when the dialog opens", async () => {

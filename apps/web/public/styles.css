@@ -13044,6 +13044,453 @@ dialog.modal[open]::backdrop {
   overscroll-behavior: contain;
 }
 
+/* ------------------------------------------------ workspace hierarchy ---- */
+/* Kumi is stable application chrome. Repositories are workspaces beneath it;
+   their identity never leaks into this bar. */
+.topbar {
+  min-width: 0;
+  gap: 10px;
+  padding-inline: 14px 18px;
+}
+
+.global-brand,
+.global-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.global-brand {
+  padding: 4px 8px 4px 4px;
+  font-weight: 750;
+}
+
+.global-brand svg {
+  width: 24px;
+  height: 24px;
+}
+
+.global-search {
+  min-width: min(300px, 32vw);
+  justify-content: flex-start;
+  padding: 7px 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  color: var(--text-3);
+}
+
+.global-search span {
+  flex: 1;
+  text-align: left;
+}
+
+.global-search kbd {
+  color: var(--text-4);
+  font: inherit;
+  font-size: 11px;
+}
+
+.global-brand:hover,
+.global-search:hover {
+  background: var(--bg-hover);
+}
+
+/* One contiguous application boundary: workspace rail, workspace navigation,
+   and conversation are structural columns, not inset cards. */
+.chats-shell {
+  --thread-head-h: 48px;
+  --workspace-switch-ms: 120ms;
+  --secondary-panel-ms: 200ms;
+  padding: 0;
+  padding-top: 0;
+  background: var(--bg);
+}
+
+.chats-shell.no-banner {
+  padding-top: 0;
+}
+
+.channel-rail {
+  border: 0;
+  border-right: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg));
+}
+
+.chan-sidebar {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  border: 0;
+  border-right: 1px solid var(--border-soft);
+  border-radius: 0;
+}
+
+.chats-shell.no-rail > .chan-sidebar,
+.chats-shell.no-rail > .chan-main {
+  border-radius: 0;
+}
+
+.chats-shell.no-rail > .chan-sidebar {
+  border-left: 0;
+}
+
+.workspace-sidebar-header {
+  width: 100%;
+  min-width: 0;
+  height: var(--thread-head-h);
+  padding: 0 8px 0 10px;
+  border-right: 0;
+  border-bottom: 1px solid var(--border-soft);
+  transition: none;
+}
+
+.workspace-sidebar-header .chan-brand {
+  min-width: 0;
+}
+
+.chan-sidebar-head.chan-quick-links {
+  margin-top: 6px;
+}
+
+.chan-quick-link,
+.channel-rail-entry::before {
+  transition-duration: 160ms;
+}
+
+.roster-row-main.selected {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.chan-main {
+  border: 0;
+  border-radius: 0;
+}
+
+.chan-head {
+  position: static;
+  inset: auto;
+  z-index: 2;
+  flex: none;
+  height: var(--thread-head-h);
+  min-height: var(--thread-head-h);
+  padding: 0 12px;
+  background: color-mix(in srgb, var(--room-tint) 94%, var(--surface-1));
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.chan-head .ch-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-head .ch-destination-kind {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.primary-conversation-surface {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.primary-conversation-surface > .chan-messages,
+.primary-private-conversation > :is(.thread-body, .chat-thread) {
+  flex: 1;
+  min-height: 0;
+}
+
+.primary-conversation-surface > .chan-composer-wrap {
+  flex: none;
+}
+
+.primary-private-conversation {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.primary-private-conversation > .chat-progress,
+.primary-private-conversation > :is(.composer, .thread-composer-wrap) {
+  flex: none;
+}
+
+.primary-file-toolbar {
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.primary-file-conversation > :is(.thread-body, .fp-editor-wrap) {
+  flex: 1;
+  min-height: 0;
+}
+
+.primary-entering {
+  animation: primary-swap-in var(--workspace-switch-ms) ease-out;
+}
+
+.primary-leaving {
+  position: absolute;
+  inset: var(--thread-head-h) 0 0;
+  z-index: 1;
+  animation: primary-swap-out var(--workspace-switch-ms) ease-out forwards;
+  pointer-events: none;
+}
+
+@keyframes primary-swap-in {
+  from { opacity: 0; }
+}
+
+@keyframes primary-swap-out {
+  to { opacity: 0; }
+}
+
+/* One secondary context. It may be resized only while the primary
+   conversation can keep its usable floor; intermediate layouts overlay it. */
+.chats-shell > .thread-panel {
+  margin-left: 0;
+  border-block: 0;
+  border-right: 0;
+  border-radius: 0;
+  padding-top: 0;
+  box-shadow: -14px 0 30px -24px rgb(0 0 0 / 55%);
+}
+
+.thread-head {
+  min-height: var(--thread-head-h);
+}
+
+.thread-panel.panel-entering {
+  animation: hierarchy-panel-in var(--secondary-panel-ms) var(--ease-motion);
+}
+
+.thread-panel.panel-leaving {
+  animation: hierarchy-panel-out var(--secondary-panel-ms) var(--ease-motion) forwards;
+}
+
+@keyframes hierarchy-panel-in {
+  from { opacity: 0; transform: translateX(10px); }
+}
+
+@keyframes hierarchy-panel-out {
+  to { opacity: 0; transform: translateX(10px); }
+}
+
+.secondary-info-body,
+.secondary-profile-body {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.secondary-profile-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.secondary-profile-face :is(.avatar, .agent-face) {
+  width: 64px !important;
+  height: 64px !important;
+}
+
+.secondary-profile-body h2,
+.secondary-profile-body p {
+  margin: 0;
+}
+
+.secondary-facts {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.secondary-fact {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.secondary-fact span {
+  color: var(--text-3);
+}
+
+.pins-panel .chan-pins {
+  display: block;
+  visibility: visible;
+  opacity: 1;
+  border: 0;
+}
+
+@media (max-width: 1180px) and (min-width: 601px) {
+  .chats-shell > .thread-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(var(--panel-w, 420px), calc(100% - 72px));
+    max-width: calc(100% - 72px);
+    z-index: 20;
+    border-left: 1px solid var(--border-soft);
+  }
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    height: calc(54px + var(--safe-top));
+    padding: var(--safe-top) 8px 0;
+  }
+
+  .global-search {
+    min-width: 44px;
+    width: 44px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .topbar > .icon-btn,
+  .conversation-header > .icon-btn,
+  .thread-head .icon-btn,
+  .channel-rail-new,
+  .channel-rail-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .global-search span,
+  .global-search kbd,
+  .topbar > .icon-btn[title="Back to chats"] {
+    display: none;
+  }
+
+  .chats-shell {
+    --thread-head-h: 54px;
+    padding: 0;
+  }
+
+  .chats-shell .chan-head {
+    position: static;
+    inset: auto;
+    height: var(--thread-head-h);
+    min-height: var(--thread-head-h);
+    padding: 0 8px;
+    border-radius: 0;
+  }
+
+  .workspace-rail {
+    position: fixed;
+    top: calc(54px + var(--safe-top));
+    bottom: 0;
+    left: 0;
+    z-index: 78;
+    width: 52px;
+    padding-inline: 4px;
+    transform: translateX(-100%);
+    transition: transform var(--secondary-panel-ms) var(--ease-motion);
+  }
+
+  .chats-shell.roster-open .workspace-rail {
+    transform: none;
+  }
+
+  .chats-shell .chan-sidebar {
+    top: calc(54px + var(--safe-top));
+    left: 52px;
+    width: calc(100vw - 52px);
+    max-width: none;
+    border-radius: 0;
+    transform: translateX(calc(-100% - 52px));
+    z-index: 77;
+  }
+
+  .chats-shell.no-rail .chan-sidebar {
+    left: 0;
+    width: 100vw;
+  }
+
+  .chats-shell.roster-open .chan-sidebar {
+    transform: none;
+  }
+
+  .chan-sidebar-scrim {
+    inset: calc(54px + var(--safe-top)) 0 0;
+  }
+
+  .workspace-sidebar-header {
+    height: var(--thread-head-h);
+    min-height: var(--thread-head-h);
+  }
+
+  .chan-quick-links {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .chan-quick-links .drawer-close {
+    grid-row: 1 / span 3;
+  }
+
+  .chats-shell > .thread-panel {
+    position: fixed;
+    inset: calc(54px + var(--safe-top)) 0 0;
+    width: 100vw;
+    max-width: 100vw;
+    min-width: 0;
+    z-index: 80;
+    border: 0;
+  }
+
+  .thread-panel.panel-entering {
+    animation: hierarchy-panel-in var(--secondary-panel-ms) var(--ease-motion);
+  }
+
+  .chan-main,
+  .primary-conversation-surface {
+    width: 100%;
+  }
+
+  .chats-shell.no-rail > .chan-main {
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary-entering,
+  .primary-leaving,
+  .thread-panel.panel-entering,
+  .thread-panel.panel-leaving {
+    animation: none;
+  }
+}
+
 /* ------------------------------------------------- thread summary ---- */
 /* One thread in the pullout: who started it, what the work is called, and a
    quiet second line saying who is in it and how much was actually said. This
