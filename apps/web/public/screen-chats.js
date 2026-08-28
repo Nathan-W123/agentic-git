@@ -223,15 +223,20 @@ function workspaceRail(activeRepositoryId) {
   const repositories = [...state.repositories].sort((left, right) =>
     left.id.localeCompare(right.id),
   );
-  // No collapse control at the head of this column any more. There was one
-  // here and a second one in the crown directly beside it, both drawn with
-  // the same glyph and both doing the same thing — the crown's is the only
-  // one now, and it keeps its place in the crown whether the sidebar is open
-  // or folded away. See `chanCrown`.
+  const fold = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
+  // While the sidebar is open its crown owns the collapse control. Once the
+  // multi-workspace layout folds that panel to zero width, the crown goes with
+  // it; this matching control is already in the persistent rail so CSS can
+  // reveal the way back without redrawing the screen. The shared action keeps
+  // both copies' labels and pressed state synchronized.
   const hidden = phoneLayout() && state.chanSidebarOpen !== true;
   return `<nav class="channel-rail workspace-rail" aria-label="Workspaces"${
     hidden ? ' aria-hidden="true" inert' : ""
   }>
+    <button type="button" class="icon-btn channel-rail-collapse"
+      data-act="chan-collapse-toggle" title="${fold}"
+      aria-pressed="${state.chanCollapsed === true}"
+      aria-label="${fold}">${icon("columns")}</button>
     <div class="channel-rail-list">
       ${repositories
         .map((repo) => {
