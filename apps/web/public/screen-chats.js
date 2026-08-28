@@ -242,7 +242,7 @@ function channelRail(activeRepositoryId) {
           return `<div class="channel-rail-entry${active ? " active" : ""}${muted ? " muted" : ""}">
             <button type="button" class="channel-rail-button" data-act="channel-open"
               data-value="${esc(repo.id)}" title="#${esc(label)}${muted ? " (muted)" : ""}"
-              aria-label="Open channel ${esc(label)}${muted ? ", muted" : ""}"${active ? ' aria-current="page"' : ""}>
+              aria-label="Switch to channel ${esc(label)}${muted ? ", muted" : ""}"${active ? ' aria-current="page"' : ""}>
               ${channelPictureMarkup(repo.id, 36)}
               ${
                 unread > 0
@@ -1554,15 +1554,37 @@ export function rosterMenuItems(agentId) {
  * behind the other, and a rule cannot stagger two elements it cannot tell
  * apart.
  *
+ * The number after the label is how long that list is. It used to be a chip
+ * in the conversation's header, two rooms away from the thing it counted;
+ * here it is on the heading of the list it is the length of.
+ *
  * The label is also the control that rolls its own list up. Two lists share
  * one scroller, so a long roster of agents pushes the people out of sight and
  * the other way about; closing the one you are not reading is the only way to
  * see both ends at once. `key` is what the handler and the stored preference
  * both name the section by — the class is the stylesheet's, not the state's.
  */
-function section(label, act, value, title, cls, key) {
+function section(label, act, value, title, cls, key, count) {
   const open = state.rosterSectionsOpen[key] !== false;
   const fold = open ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`;
+  // "3", after the word it counts. The two figures used to be chips in the
+  // conversation's header — a bust and a number, then a robot and another
+  // number, two rooms away from the lists they were counting and separated
+  // from the channel's own controls by a literal "|". They say the same thing
+  // on the heading of the list they are the length of, where somebody
+  // wondering how many people are in the room is already looking, and they
+  // cost the header nothing.
+  //
+  // Outside the fold button on purpose: that button carries an explicit
+  // accessible name ("Hide people"), which would swallow any number put
+  // inside it. Out here it is read as its own text, and the title spells the
+  // noun out for anyone hovering.
+  const tally =
+    count === undefined || count === null
+      ? ""
+      : `<span class="chan-sec-count" title="${count} ${esc(
+          label.toLowerCase(),
+        )}"><span class="chan-sec-dot" aria-hidden="true">\u00b7</span>${count}</span>`;
   return `<div class="chan-sec ${cls}${open ? "" : " chan-sec-closed"}">
     <button type="button" class="chan-sec-toggle"
       data-act="roster-section-toggle" data-value="${key}"
@@ -1570,6 +1592,7 @@ function section(label, act, value, title, cls, key) {
       ${icon("chevronDown")}
       <span class="chan-sec-label">${esc(label)}</span>
     </button>
+    ${tally}
     <button type="button" class="chan-sec-add" data-act="${act}"
       data-value="${value}" title="${esc(title)}" aria-label="${esc(title)}">
       ${icon("plus")}
@@ -1703,7 +1726,7 @@ function chanSidebar(activeRepositoryId) {
            height nobody has measured: the row of the grid goes to zero, the
            block inside it keeps its own height, and the box crops the
            difference. -->
-      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people", "people")}
+      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people", "people", people.length)}
       <div class="chan-roster chan-roster-people${
         state.rosterSectionsOpen.people === false ? " chan-roster-closed" : ""
       }">
@@ -1719,7 +1742,7 @@ function chanSidebar(activeRepositoryId) {
           }
         </div>
       </div>
-      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents", "agents")}
+      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents", "agents", roster.length)}
       <div class="chan-roster chan-roster-agents${
         state.rosterSectionsOpen.agents === false ? " chan-roster-closed" : ""
       }">
@@ -1914,18 +1937,18 @@ function previewLink(repositoryId) {
  * thread opening narrows the conversation, not the bar. What changed is who
  * owns which part of it. The first zone is the navigation's, exactly as wide
  * as the columns below it, and it is where the channel is named (see
- * `chanCrown`). The rest is the conversation's own header: how many people
- * and agents are in the room, whether it is muted, whether a preview is up,
- * and the actions on the room itself.
+ * `chanCrown`). The rest is the conversation's own header: whether the room
+ * is muted, whether a preview is up, what is pinned in it, and the actions on
+ * the room itself.
  *
  * Which is why there is no name in it any more. The crown three hundred
  * pixels to the left already says which room this is, and a second copy of
  * the same word on the same line was the loudest thing in a bar whose job is
- * to be quiet.
+ * to be quiet. Nor are there counts: how many people and how many agents are
+ * in the room is said on the headings of the two lists that hold them, in the
+ * navigation this bar begins with — see `section`.
  */
 function chanHeader(repositoryId) {
-  const roster = channelAgentsFor(repositoryId);
-  const people = channelPeopleFor(repositoryId);
   return `<header class="chan-head">
     ${chanCrown(repositoryId)}
     <!-- No hamburger. It opened the outer app rail, which stopped being
@@ -1959,16 +1982,17 @@ function chanHeader(repositoryId) {
          One line, because with the name gone there is only ever one. -->
     <div class="ch-title">
       <div class="ch-desc">
-        <!-- Counted, not spelled out. "3 agents, 2 teammates" is six words
-             for two numbers, and it grew or shrank with the plural — the two
-             figures are easier to read as figures. The titles carry the
-             words for anyone hovering or using a screen reader. -->
-        <span class="ch-count" title="${people.length} ${
-          people.length === 1 ? "person" : "people"
-        }">${icon("personBust")}${people.length}</span>
-        <span class="ch-count" title="${roster.length} agent${
-          roster.length === 1 ? "" : "s"
-        }">${icon("robotBust")}${roster.length}</span>
+        <!-- No counts here any more. A bust and a number, a robot and another
+             number, and then a literal "|" holding them apart from the room's
+             own controls: five glyphs of furniture on the busiest line of the
+             screen, counting two lists that are drawn in full three hundred
+             pixels to the left. The figures are on those lists' own headings
+             now — see \`section\` — where the eye is already counting. What is
+             left in here is what only this line can say: why the room is
+             quiet, whether its app is up, and what is pinned in it.
+
+             The backticks are escaped because this comment is inside a
+             template literal, where a bare one would close the string. -->
         ${
           // Why this room is quiet, said in the one place somebody wondering
           // about it is already looking. Without it a muted channel simply
@@ -1986,10 +2010,9 @@ function chanHeader(repositoryId) {
              both are one-press channel controls that say something about this
              room rather than about the message in front of you.
 
-             The backticks are escaped for the reason the sidebar button's
-             comment above gives: a bare one ends this template literal, and
-             what follows parses as code. -->
-        <span aria-hidden="true">|</span>
+             The separator that used to stand here divided the counts from
+             these controls. With the counts gone it divided the controls from
+             nothing at all. -->
         ${previewControl(repositoryId)}
       </div>
     </div>

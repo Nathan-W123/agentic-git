@@ -54,8 +54,10 @@ test("the channel is named once, by the crown, and the crown belongs to the navi
   assert.match(crown, /const label = repositoryLabel\(activeRepositoryId \?\? ""\);/u);
   assert.match(crown, /<span class="brand-text" title="\$\{channel\}"><b>\$\{esc\(label\)\}<\/b>/u);
 
-  // The conversation's header says what the room is — its counts, its muted
-  // state, its preview and its actions — and no longer what it is called.
+  // The conversation's header says what state the room is in — muted, its
+  // preview, what is pinned, its actions — and no longer what it is called.
+  // Nor how many are in it: those two figures are on the headings of the
+  // lists that hold them, in the navigation this bar begins with.
   const header = chats.slice(
     chats.indexOf("function chanHeader("),
     chats.indexOf("function threadParticipants"),
@@ -90,10 +92,14 @@ test("the channel is named once, by the crown, and the crown belongs to the navi
   // Cut to the navigation's own width, so the crown stands over the columns
   // it names and the conversation's header begins where they end. One number,
   // published on the shell, and narrowed in the two states where one of those
-  // columns is away.
+  // columns is away. It carries the shell's own outer inset and the two
+  // column widths and nothing else — the eight pixels that used to sit
+  // between the rail and the sidebar are not there to pay for any more, and
+  // paying for them anyway would land the crown's edge a pixel past the
+  // sidebar's.
   assert.match(
     rule(css, ".chats-shell"),
-    /--nav-w: calc\(8px \+ var\(--rail-w\) \+ 8px \+ var\(--chan-sidebar-w\)\);/u,
+    /--nav-w: calc\(8px \+ var\(--rail-w\) \+ var\(--chan-sidebar-w\)\);/u,
   );
   assert.match(
     rule(css, ".chats-shell.no-rail"),

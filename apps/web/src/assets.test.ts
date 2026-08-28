@@ -477,8 +477,10 @@ test("one play control beside the pin runs whatever the channel's app is", async
   const data = await publicFile("data.js");
   const css = await publicFile("styles.css");
 
-  // Beside the pin, in the header line the counts live on — and drawn like
-  // them, because the tool tray it used to sit in no longer exists.
+  // Beside the pin, on the one line that says what state this room is in —
+  // and drawn as a count rather than a tool button, because the tray it used
+  // to sit in no longer exists and a boxed icon among these would read as a
+  // control that arrived by accident.
   const headerStart = chats.indexOf("function chanHeader(repositoryId)");
   const header = chats.slice(
     headerStart,
@@ -488,13 +490,20 @@ test("one play control beside the pin runs whatever the channel's app is", async
   assert.match(header, /\$\{previewControl\(repositoryId\)\}/u);
   assert.match(
     header,
-    /icon\("robotBust"\)[\s\S]*?<span aria-hidden="true">\|<\/span>[\s\S]*?\$\{previewControl\(repositoryId\)\}/u,
+    /ch-count ch-muted[\s\S]*?\$\{previewControl\(repositoryId\)\}/u,
+    "the muted mark and the preview control share the room's own line",
   );
+  // And nothing stands between them. The separator existed to hold the two
+  // roster counts apart from these controls; with the counts on the lists
+  // they count, it divided the controls from nothing at all.
+  assert.doesNotMatch(header, /<span aria-hidden="true">\|<\/span>/u);
   const control = chats.slice(
     chats.indexOf("function previewControl(repositoryId)"),
     chats.indexOf("function previewLink(repositoryId)"),
   );
-  assert.match(control, /class="ch-count ch-preview-toggle on"/u);
+  // The running state carries the "on" class; a build that did not finish
+  // adds " warn" after it, so the class list does not end there.
+  assert.match(control, /class="ch-count ch-preview-toggle on/u);
   assert.match(control, /data-act="preview-stop"/u);
   assert.match(control, /data-act="preview-start"/u);
   assert.match(control, /icon\("play"\)/u);
@@ -1232,6 +1241,29 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
   assert.match(chats, /class="chan-sec-toggle"\s*\n?\s*data-act="roster-section-toggle"/u);
   assert.match(chats, /aria-expanded="\$\{open\}"/u);
   assert.match(chats, /class="chan-sec-add" data-act="\$\{act\}"/u);
+
+  // "People · 3": the length of the list, on its heading. Outside the fold
+  // button, because that button carries an explicit accessible name and
+  // anything put inside it would never be read out; the separator beside the
+  // figure is hidden from the accessibility tree because it says nothing.
+  const heading = chats.slice(
+    chats.indexOf("function section(label, act, value, title, cls, key, count)"),
+    chats.indexOf("function chanCrown"),
+  );
+  assert.notEqual(heading, "", "section still takes a count");
+  assert.match(heading, /class="chan-sec-count" title="\$\{count\} \$\{esc\(/u);
+  assert.match(heading, /class="chan-sec-dot" aria-hidden="true"/u);
+  assert.ok(
+    heading.indexOf("</button>") < heading.indexOf("${tally}"),
+    "the count is read as its own text, not swallowed by the fold button",
+  );
+  assert.match(
+    heading,
+    /count === undefined \|\| count === null\s*\?\s*""/u,
+    "a section with nothing to count draws no figure",
+  );
+  assert.match(css, /\.chan-sec-count \{[\s\S]{0,220}margin-right: auto;/u);
+  assert.match(css, /\.chan-sec-toggle \{[\s\S]{0,300}flex: 0 1 auto;/u);
   assert.match(
     css,
     /\.chan-roster\.chan-roster-closed \{[\s\S]{0,160}grid-template-rows: 0fr;/u,
@@ -5754,8 +5786,14 @@ test("people and agents render directly without a main branch node", async () =>
   );
   assert.doesNotMatch(header, /repository\?\.branch/u);
   assert.doesNotMatch(header, /class="ch-sep"/u);
-  assert.match(header, /class="ch-count" title="\$\{people\.length\}/u);
-  assert.match(header, /class="ch-count" title="\$\{roster\.length\}/u);
+
+  // How many of each is said on the heading of the list it is the length of,
+  // not as a chip in a header three hundred pixels away from both lists. The
+  // header no longer counts anything, and neither figure is read from there.
+  assert.match(sidebar, /"chan-sec-people", "people", people\.length\)/u);
+  assert.match(sidebar, /"chan-sec-agents", "agents", roster\.length\)/u);
+  assert.doesNotMatch(header, /icon\("personBust"\)|icon\("robotBust"\)/u);
+  assert.doesNotMatch(header, /people\.length|roster\.length/u);
 });
 
 test("clicking an agent opens its details while chat and history stay explicit", async () => {

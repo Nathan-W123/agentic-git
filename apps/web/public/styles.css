@@ -4863,17 +4863,31 @@ button.chip.lg:hover {
      takes the whole screen. */
   --chan-head-h: calc(56px + var(--safe-top));
   /* And how wide the navigation is, from the shell's left edge to the right
-     edge of the sidebar: the padding this shell starts with, the rail, the
-     gutter between them and the sidebar itself. The crown at the head of the
-     banner is cut to this, so the one place the channel is named stands in
-     the same column as the navigation it names — and folds with it. Written
-     as one number here because four rules need to agree about it. */
-  --nav-w: calc(8px + var(--rail-w) + 8px + var(--chan-sidebar-w));
+     edge of the sidebar: the padding this shell starts with, the rail, and
+     the sidebar itself. The crown at the head of the banner is cut to this,
+     so the one place the channel is named stands in the same column as the
+     navigation it names — and folds with it. Written as one number here
+     because four rules need to agree about it.
+
+     No gutter inside it any more. The rail and the sidebar used to be two
+     cards eight pixels apart, so this had to carry that gap as well; they are
+     one continuous surface now, divided by a hairline, and what is left is
+     the shell's own outer inset plus the two widths. Get the number wrong and
+     the crown's edge stops landing on the sidebar's. */
+  --nav-w: calc(8px + var(--rail-w) + var(--chan-sidebar-w));
   /* And how tall a side panel's own header is — one short row of tools, set
      once here because every panel shares `.thread-head`. */
   --thread-head-h: 38px;
   display: flex;
-  gap: 8px;
+  /* Nothing between the regions. The rail, the navigation and the
+     conversation were three rounded, separately outlined cards floating eight
+     pixels apart on the background — three boundaries to read past before
+     reaching the one thing on this screen anybody came for. They are one
+     surface now: a single outer boundary around the group, and a hairline
+     where one region ends and the next begins. The panels on the right keep
+     their gutter and their own card — they arrive and leave, and a surface
+     that comes and goes is not part of the frame. */
+  gap: 0;
   height: 100%;
   min-height: 0;
   padding: 8px;
@@ -4912,6 +4926,17 @@ button.chip.lg:hover {
   .chats-shell.no-rail.chan-collapsed {
     --nav-w: calc(8px + var(--rail-w));
   }
+
+  /* With no rail there is nothing to the sidebar's left, so the group's left
+     edge and its rounding fall to it — the same two things the rail carries
+     when it is there. A boundary the whole surface shares cannot go missing
+     because one of the regions inside it did. Above the phone tier only:
+     below it this panel is an off-canvas drawer against the left of the
+     screen, which has no left edge to draw. */
+  .chats-shell.no-rail > .chan-sidebar {
+    border-left: 1px solid var(--border-soft);
+    border-radius: var(--radius-xl) 0 0 var(--radius-xl);
+  }
 }
 
 /* A dedicated channel switcher stays narrow while the adjacent sidebar is
@@ -4925,8 +4950,12 @@ button.chip.lg:hover {
   gap: 9px;
   padding: 12px 7px;
   background: var(--bg-panel);
+  /* Not a card of its own. This is the left end of one continuous surface, so
+     it carries the group's left edge and its rounding, and its right border
+     is the hairline between the switcher and the panel beside it — the same
+     line the crown draws above them both. */
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-xl) 0 0 var(--radius-xl);
 }
 
 /* No collapse control at the head of this column any more — it is in the
@@ -5108,14 +5137,21 @@ button.chip.lg:hover {
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xl);
-  overflow-x: hidden;
-  transition: width var(--motion-content) var(--ease-motion);
-  /* The quiet edge matches the reference's nested panes and remains subtle
-     because the neighbouring surfaces already provide most of the separation.
+  /* The middle of the group, so it has no edge of its own on the left: the
+     rail's right border is already the line between them, and a second one
+     drawn a pixel away is the seam that made these read as two cards. What it
+     does own is the right-hand hairline — the one the crown continues up
+     through the banner, and the only thing on the screen that says where the
+     navigation ends and the conversation begins. The two ends of the group
+     carry the rounding; this one is square at both corners.
+
      Off-canvas on a phone the drawer also carries `--shadow-pop`, where the
      edge becomes a crisp boundary between the drawer and its scrim. */
+  border: 1px solid var(--border-soft);
+  border-left: 0;
+  border-radius: 0;
+  overflow-x: hidden;
+  transition: width var(--motion-content) var(--ease-motion);
 }
 
 .chan-sidebar-head {
@@ -5129,23 +5165,29 @@ button.chip.lg:hover {
   flex: 1;
 }
 
+/* Two places to go, and no card around them. The outline and the sunken fill
+   made a nested pane out of two links — a box inside the panel, inside the
+   boundary around the whole application — and every row in it then had to be
+   read as a row inside something. They are what they are without it: two
+   rows at the top of the column, held apart from the roster below by their
+   own spacing rather than by a line. */
 .chan-sidebar-head.chan-quick-links {
   display: grid;
   gap: 2px;
-  margin: 7px 8px 5px;
-  padding: 4px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-inset) 58%, transparent);
+  margin: 8px 8px 4px;
+  padding: 0;
 }
 
+/* Full-height rows rather than the compressed ones a nested card had room
+   for: the target is the row, and 38px is the height every other list row in
+   this column stands at. */
 .chan-quick-link {
   display: flex;
   align-items: center;
   gap: 9px;
-  min-height: 34px;
-  padding: 6px 8px;
-  border-radius: 7px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 8px;
   color: var(--text-2);
   font-size: 13px;
   font-weight: 500;
@@ -5243,7 +5285,10 @@ button.chip.lg:hover {
    ends be seen at once. The "+" stays outside this button, so adding to a
    list never doubles as folding it away. */
 .chan-sec-toggle {
-  flex: 1;
+  /* Only as wide as the word, so the count that follows reads as part of the
+     heading — "People · 3" — rather than as a figure stranded against the
+     "+" at the far edge. */
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -5276,6 +5321,31 @@ button.chip.lg:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* How long the list under this heading is. It replaces a pair of chips in the
+   conversation's header, which counted these two lists from the other side of
+   the screen. Outside the fold button because that button has an accessible
+   name of its own and would have swallowed the number; `margin-right: auto`
+   is what keeps the "+" at the edge now that the heading no longer stretches
+   to push it there. */
+.chan-sec-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  flex: none;
+  margin-right: auto;
+  min-width: 0;
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* The separator, and only that: it carries no meaning a reader would miss if
+   it never rendered, which is why it is hidden from the accessibility tree in
+   the markup. */
+.chan-sec-dot {
+  color: var(--text-4);
 }
 
 .chan-sec-add {
@@ -5978,8 +6048,14 @@ button.chip.lg:hover {
      conversation too, instead of the transcript reading as a panel floating
      inside a darker frame. */
   background: var(--room-tint);
-  border-radius: var(--radius-xl);
-  box-shadow: inset 0 0 0 1px var(--border-soft);
+  /* The right end of the same surface. The ring that used to be drawn all the
+     way round it is down to the three edges the group actually has here: the
+     hairline on the left is the sidebar's, already there, and drawing a
+     second one against it was what boxed the conversation off from the
+     navigation it belongs to. */
+  border: 1px solid var(--border-soft);
+  border-left: 0;
+  border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
   overflow: hidden;
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
@@ -9355,6 +9431,16 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   z-index: 4;
 }
 
+/* The gutter the shell used to hand out to everybody. The navigation and the
+   conversation gave theirs up to become one surface; a panel keeps its, and
+   its card with it, because it is not part of that surface — it is opened, it
+   is dragged wider, it is closed again, and a frame with a hole in it
+   whenever a thread is shut is not a frame. Applies between two panels as
+   well, which is the gap they already had. */
+.chats-shell > .thread-panel {
+  margin-left: 8px;
+}
+
 /* A panel kind is the draggable tab: it names its own surface, and dragging
    it is how a reader reorders the column. */
 .panel-kind[draggable="true"] {
@@ -10986,6 +11072,11 @@ dialog.modal[open]::backdrop {
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
     width: 0;
+    /* Folded to nothing, and its hairline with it. A border is drawn whatever
+       the width, so what was left of this panel was a line standing a pixel
+       from the rail's own — the seam the single boundary exists to remove.
+       The rail's right border is the navigation's edge while it is away. */
+    border-right-width: 0;
   }
 
   /* Except when it is the last column standing. The control that expands the
@@ -10995,6 +11086,9 @@ dialog.modal[open]::backdrop {
      laid out as while collapsed. */
   .chats-shell.no-rail.chan-collapsed > .chan-sidebar {
     width: var(--rail-w);
+    /* Here it is the whole navigation rather than a fold beside the rail, so
+       it keeps the edge the rule above takes away. */
+    border-right-width: 1px;
   }
 
   /* The crown's two stand-in controls fold away with the rest of it: sixty
@@ -11719,6 +11813,11 @@ dialog.modal[open]::backdrop {
     min-width: 0;
     border: 0;
     border-radius: 0;
+    /* No gutter beside a surface that has nothing beside it. The desktop
+       margin is what keeps a panel off the conversation it opened from;
+       pinned to both edges of the phone, it would only push the panel eight
+       pixels off the screen. */
+    margin-left: 0;
     /* Pinned to the viewport, so the shell's padding does not reach it: it
        covers the banner here rather than starting below it, which is what
        gives a thread the whole phone. */
@@ -11727,6 +11826,17 @@ dialog.modal[open]::backdrop {
 
   .chats-shell.panel-splitting .chan-main {
     box-shadow: none;
+  }
+
+  /* The whole boundary, on the one region that is left. The navigation is a
+     drawer here, so with no rail beside it the conversation is the entire
+     surface and takes back the left edge and the rounding the group's right
+     end had given up. With a rail it is still a group of two, and the pair is
+     drawn exactly as it is on a desk: the rail carries the left end, this
+     carries the right, and the hairline between them is the rail's. */
+  .chats-shell.no-rail > .chan-main {
+    border-left: 1px solid var(--border-soft);
+    border-radius: var(--radius-xl);
   }
 
   /* Nothing to drag full-screen wider than the screen. */

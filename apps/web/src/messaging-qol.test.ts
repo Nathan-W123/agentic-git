@@ -90,13 +90,21 @@ test("channel messages and workspace links use compact, bounded surfaces", async
     chats,
     /<nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">/u,
   );
+  // A group, not a card. The outline and the sunken fill around them made a
+  // pane inside the panel inside the boundary around the whole application —
+  // three nested edges to read before two links — so the group keeps its
+  // spacing and gives up its box.
+  const quickLinks =
+    /\n\.chan-sidebar-head\.chan-quick-links \{(?<rule>[^}]*)\}/u.exec(css)?.groups
+      ?.rule ?? "";
+  assert.notEqual(quickLinks, "", "the quick links still have a rule of their own");
+  assert.match(quickLinks, /margin: 8px 8px 4px;/u);
+  assert.doesNotMatch(quickLinks, /(?:^|\s)(?:border|background):/u);
+  // And the rows are the height every other row in this column is, rather
+  // than the compressed height a nested card had room for.
   assert.match(
     css,
-    /\.chan-sidebar-head\.chan-quick-links \{[\s\S]{0,320}margin: 7px 8px 5px;[\s\S]{0,180}border: 1px solid var\(--border-soft\);/u,
-  );
-  assert.match(
-    css,
-    /\.chan-quick-link \{[\s\S]{0,220}min-height: 34px;[\s\S]{0,100}padding: 6px 8px;/u,
+    /\.chan-quick-link \{[\s\S]{0,260}min-height: 38px;[\s\S]{0,100}padding: 8px 10px;/u,
   );
 
   // Channel messages stay fitted so their hover tools remain nearby, but the
