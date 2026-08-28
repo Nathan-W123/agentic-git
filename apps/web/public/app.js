@@ -1503,12 +1503,18 @@ async function submitInviteSignIn(form) {
 
 function topbar() {
   const user = currentUserName();
+  // The upper-left corner, over the workspace switcher, which held nothing.
+  // The mark belongs to the application rather than to any one workspace, so
+  // this is where it goes — and it goes alone: the shell is still
+  // workspace-led, so the name beside it stays the crown's to say, not this
+  // bar's.
+  const brand = `<span class="topbar-brand">${brandMark(24)}</span>`;
   return `<header class="topbar" aria-label="Global">
     <div class="topbar-start">
+      ${brand}
       ${
-        // The authenticated shell is workspace-led, so it does not repeat the
-        // product mark above the workspace name. Screens without workspace
-        // navigation keep one explicit route back to it in the same slot.
+        // Screens without workspace navigation keep one explicit route back to
+        // it, beside the mark.
         state.route === "chats"
           ? ""
           : `<button class="icon-btn" data-act="nav" data-value="chats"

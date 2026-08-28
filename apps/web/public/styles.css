@@ -13125,6 +13125,26 @@ dialog.modal[open]::backdrop {
 
 .topbar-start {
   justify-content: flex-start;
+  gap: 4px;
+}
+
+/* The mark stands over the workspace switcher, so it shares that column's
+   centre line rather than the bar's padding: the box is the rail's width,
+   pulled back across the padding to start where the rail does. Anything less
+   deliberate reads as a logo sitting near the corner instead of leading the
+   column under it. */
+.topbar-brand {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: var(--rail-w);
+  margin-inline-start: -12px;
+}
+
+/* White, not the accent. Everywhere else the mark is the one piece of branding
+   that is a colour; here it leads a bar of plain ink and belongs to it. */
+.topbar-brand .brand-mark {
+  color: var(--text);
 }
 
 .topbar-actions {
@@ -13521,6 +13541,14 @@ dialog.modal[open]::backdrop {
     grid-template-columns: minmax(44px, 1fr) 44px minmax(88px, 1fr);
     height: calc(54px + var(--safe-top));
     padding: var(--safe-top) 8px 0;
+  }
+
+  /* The switcher is in the drawer here, so there is no column to stand over
+     and nothing to reach back across. The mark keeps the bar's own padding
+     rather than sitting against the edge of the screen. */
+  .topbar-brand {
+    width: auto;
+    margin-inline-start: 0;
   }
 
   .global-search {
