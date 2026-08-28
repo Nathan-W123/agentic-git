@@ -106,6 +106,7 @@ import {
 import {
   agentFace,
   agentLabelOf,
+  animateMotion,
   avatar,
   chime,
   clockTime,
@@ -4355,6 +4356,12 @@ function composer(repositoryId) {
       : channelMessagesFor(repositoryId).find(
           (entry) => entry.id === state.composerThreadId,
         );
+  // Whether the arrow has anything to act on. Drawn disabled rather than
+  // merely drawn quieter, so the state is programmatic as well as visible —
+  // and kept true between renders by `syncComposerControls`, since typing
+  // deliberately does not rebuild this screen.
+  const sendable =
+    draftText().trim() !== "" || draftAttachments(repositoryId).length > 0;
   return `<div class="chan-composer-wrap${mentionActiveFor("channel") ? " mention-active" : ""}">
     <div data-composer-suggestions>${composerSuggestions(repositoryId, "channel")}</div>
     ${composerThreadChip(repositoryId)}
@@ -4378,7 +4385,7 @@ function composer(repositoryId) {
           enterkeyhint="send"
           placeholder="${
             state.composerThreadId === undefined
-              ? "Message Main chat"
+              ? esc(`Message #${repositoryLabel(repositoryId)}`)
               : replyTarget?.kind === "user" &&
                   replyTarget.taskId === undefined
                 ? "Write a reply..."
@@ -4402,7 +4409,9 @@ function composer(repositoryId) {
           : ""}
         <span class="spacer"></span>
         ${composerCount("channel", state.chatDraft)}
-        <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+        <button class="send-btn" type="submit" title="Send"${
+          sendable ? "" : " disabled"
+        }>${icon("arrowRight")}</button>
       </div>
     </form>
   </div>`;
@@ -6618,6 +6627,9 @@ function threadPanel(repositoryId, selectedMessageId) {
     state.threadAttaching > 0 ||
     threadReplyTarget !== undefined ||
     draftAttachments(repositoryId, state.threadDraft).length > 0;
+  const threadSendable =
+    draftText(state.threadDraft).trim() !== "" ||
+    draftAttachments(repositoryId, state.threadDraft).length > 0;
   return `<aside class="thread-panel" data-thread-id="${esc(messageId)}">
     ${panelGrip()}
     <header class="thread-head">
@@ -6670,10 +6682,11 @@ function threadPanel(repositoryId, selectedMessageId) {
         removeAct: "thread-attachment-remove",
       })}
       <!-- composer-lite is the thread's own resting shape: shorter and
-           squarer than the room's pill, with its leading "+" present before
-           focus so the reply caret never has to move around it. Opt-in rather
-           than inherited, because the private chat and the direct-message
-           panel sit in this same wrapper and keep their full toolbars. -->
+           squarer than the room's pill, and at rest nothing but the words —
+           the plus and the arrow are drawn back in by the stylesheet the
+           moment the box is entered or written in. Opt-in rather than
+           inherited, because the private chat and the direct-message panel
+           sit in this same wrapper and keep their full toolbars. -->
       <form class="composer composer-lite${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit" data-value="${esc(messageId)}">
         <div class="composer-field">
           <div class="composer-mirror" data-composer-mirror aria-hidden="true"
@@ -6683,7 +6696,7 @@ function threadPanel(repositoryId, selectedMessageId) {
             )}</div>
           <textarea data-act="channel-thread-input" rows="1" spellcheck="true"
             enterkeyhint="send"
-            placeholder="Reply in thread...">${esc(draftText(state.threadDraft))}</textarea>
+            placeholder="Add to this thread...">${esc(draftText(state.threadDraft))}</textarea>
         </div>
         <div class="composer-bar">
           <!-- Same arrangement as the channel bar: the input is the control
@@ -6704,7 +6717,9 @@ function threadPanel(repositoryId, selectedMessageId) {
             : ""}
           <span class="spacer"></span>
           ${composerCount("thread", state.threadDraft)}
-          <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+          <button class="send-btn" type="submit" title="Send"${
+            threadSendable ? "" : " disabled"
+          }>${icon("arrowRight")}</button>
         </div>
       </form>
     </div>
@@ -8494,15 +8509,213 @@ function autocompleteSnapshot() {
 }
 
 /**
+ * How tall this box is allowed to get, read from the box itself.
+ *
+ * The room's bar and the thread's are the same component at two densities,
+ * and the ceiling is part of the density: a reply that has run past five
+ * lines in a column this narrow belongs in the room. The number lives in the
+ * stylesheet beside the rest of the variant — `--composer-max-height` — so
+ * the `max-height` the textarea scrolls at and the height this stops growing
+ * to are one value rather than two that drifted apart, which is what they had
+ * already done (164px in CSS, 148px here).
+ */
+function composerHeightLimit(node) {
+  const composer = node?.closest?.(".composer");
+  const declared =
+    composer === null || composer === undefined
+      ? ""
+      : getComputedStyle(composer).getPropertyValue("--composer-max-height");
+  const limit = Number.parseFloat(declared);
+  return Number.isFinite(limit) && limit > 0 ? limit : 164;
+}
+
+/** The height animation each box currently has in flight, if any. */
+const composerHeightMotion = new WeakMap();
+
+/**
+ * Plays the box growing by a line, rather than jumping by one.
+ *
+ * Only ever called when the measured height actually crossed a line boundary
+ * — a keystroke that adds a character to a line that already exists changes
+ * nothing here and plays nothing. The previous run is cancelled first, so a
+ * fast typist who fills three lines in a second gets one continuous movement
+ * to the current height rather than three fighting over the same property.
+ *
+ * `fill: "none"`, so there is nothing to restore afterwards: the inline
+ * height the resize has already written is what the box holds when this ends,
+ * and that is `auto` again the moment the text comes back to one line.
+ */
+function animateComposerHeight(node, from, to) {
+  if (Math.abs(to - from) < 1) {
+    return;
+  }
+  composerHeightMotion.get(node)?.cancel();
+  const motion = animateMotion(
+    node,
+    [{ height: `${from}px` }, { height: `${to}px` }],
+    150,
+  );
+  if (motion !== undefined) {
+    composerHeightMotion.set(node, motion);
+  }
+}
+
+/** The press an icon button on the row answers with. See `--motion-press`. */
+export function playComposerPress(node) {
+  animateMotion(
+    node,
+    [
+      { transform: "scale(1)" },
+      { transform: "scale(0.94)" },
+      { transform: "scale(1)" },
+    ],
+    90,
+  );
+}
+
+/**
+ * What each composer's controls last looked like, so a change can be played.
+ *
+ * Keyed by what the form is for rather than by the element, because the
+ * element does not survive a render and the state has to: a background frame
+ * arriving while somebody has the reply box open and empty would otherwise
+ * look like the row appearing again, and play it, every thirty seconds.
+ */
+const composerControlState = new Map();
+
+/** Threads visited in one session are unbounded; the two live ones are not. */
+const COMPOSER_STATE_MEMORY = 32;
+
+/** Opacity and a few pixels of travel, in whichever direction this is going. */
+function revealComposerControl(control, shown, offset) {
+  const hidden = { opacity: 0, transform: `translateX(${offset}px)` };
+  const here = { opacity: 1, transform: "none" };
+  animateMotion(control, shown ? [hidden, here] : [here, hidden], shown ? 120 : 100);
+}
+
+/**
+ * The send arrow's enabled state, and the thread row's presence.
+ *
+ * Two jobs, because they answer the same question — is there anything to act
+ * on yet — and reading it twice is how they would come to disagree.
+ *
+ * The arrow is genuinely disabled while there is nothing to send, rather than
+ * only being drawn quieter: a control that looks unavailable and answers a
+ * press anyway is wrong for everybody, and a state carried in colour alone is
+ * no state at all to a reader who cannot see the difference. Enter is
+ * untouched — it does not go through the button, and an empty message is
+ * already refused where it is posted.
+ *
+ * The thread's row is hidden by the stylesheet while the box is empty and
+ * unfocused, which is the state that panel is in nearly all of the time. All
+ * this adds is the movement between the two: nothing is played on the render
+ * that first draws a box, only on a change to one already on screen.
+ */
+export function syncComposerControls(node, focused) {
+  const composer = node?.closest?.(".composer") ?? undefined;
+  const field = composer?.querySelector?.(".composer-field") ?? undefined;
+  if (composer === undefined || field === null || field === undefined) {
+    // The private-agent and direct-message boxes are a different component
+    // and hold their own send state — see `chatComposer` in chat.js.
+    return;
+  }
+  const send = composer.querySelector(".send-btn");
+  const attach = composer.querySelector(".composer-bar .icon-btn");
+  const wrap = composer.closest(".chan-composer-wrap, .thread-composer-wrap");
+  // A picture staged for this message is something to send even with no
+  // words, and it is drawn above the box rather than inside it.
+  const staged = (wrap?.querySelectorAll(".composer-attachment").length ?? 0) > 0;
+  const sendable = node.value.trim() !== "" || staged;
+  const lite = composer.classList.contains("composer-lite");
+  const key = `${composer.dataset?.act ?? ""}:${composer.dataset?.value ?? ""}`;
+  const was = composerControlState.get(key);
+  // Callers that know where focus is say so. A resize does not: it runs on
+  // the render that has just thrown the focused element away and before the
+  // replacement is focused again, so reading the document there says "nobody
+  // is in this box" about a box somebody is in. Unknown carries the last
+  // answer forward instead, which is the only one that was ever measured.
+  const focusIn =
+    focused === undefined
+      ? (was?.focusIn ?? false)
+      : focused !== null && composer.contains(focused);
+  const rowShown = !lite || staged || node.value !== "" || focusIn;
+  const sendShown = rowShown && (!lite || sendable);
+
+  if (send !== null && send.disabled !== !sendable) {
+    send.disabled = !sendable;
+  }
+
+  composerControlState.set(key, { rowShown, sendShown, sendable, focusIn });
+  if (composerControlState.size > COMPOSER_STATE_MEMORY) {
+    composerControlState.delete(composerControlState.keys().next().value);
+  }
+  if (was === undefined) {
+    // First sight of this box. It is drawn in the state it belongs in, and a
+    // render is not something to animate.
+    return;
+  }
+  if (rowShown !== was.rowShown && attach !== null) {
+    revealComposerControl(attach, rowShown, -4);
+  }
+  if (sendShown !== was.sendShown && send !== null) {
+    revealComposerControl(send, sendShown, 4);
+  } else if (sendable && !was.sendable && sendShown && send !== null) {
+    // Already on screen and now usable: the arrow comes up to full strength
+    // rather than appearing. Going quiet again needs no play — the disabled
+    // state is on it the moment the last character goes.
+    animateMotion(
+      send,
+      [
+        { opacity: 0.42, transform: "translateY(1px)" },
+        { opacity: 1, transform: "none" },
+      ],
+      110,
+    );
+  }
+}
+
+/**
+ * Focus arriving in or leaving a composer, which is what reveals the thread's
+ * row. Bound to `focusin` and `focusout` in app.js.
+ *
+ * `relatedTarget` rather than `document.activeElement`, because on `focusout`
+ * focus has left the old element and not yet reached the new one: reading the
+ * document there says "nothing is focused" for one frame, and the row would
+ * play itself out and back in every time somebody tabbed from the box to the
+ * plus beside it.
+ */
+export function handleComposerFocusShift(event) {
+  const from = event.target?.closest?.(".composer") ?? undefined;
+  const to = event.relatedTarget?.closest?.(".composer") ?? undefined;
+  const focused = event.type === "focusout" ? event.relatedTarget : event.target;
+  for (const composer of new Set([from, to])) {
+    if (composer === undefined || composer === null) {
+      continue;
+    }
+    const node = composer.querySelector(".composer-field textarea");
+    if (node !== null) {
+      syncComposerControls(node, focused);
+    }
+  }
+}
+
+/**
  * Fits a composer to its message, up to a small scrolling window.
  *
  * Highlighted channel and thread fields share their first row with the two
  * controls. Once their text wraps, `.is-multiline` restores the normal
  * stacked layout and the field grows with it. Measuring from the live node is
  * important: the wrap point changes with the width of the thread panel.
+ *
+ * The height is measured before and after, and the difference is what decides
+ * whether anything is played: a character added to a line that already fits
+ * moves nothing, so only a wrap — a real line boundary being crossed — is
+ * ever animated. Typing is not an animation.
  */
 function resizeComposer(node) {
   const composer = node.closest?.(".composer");
+  const limit = composerHeightLimit(node);
+  const from = node.offsetHeight;
   node.style.height = "auto";
   const field = composer?.querySelector?.(".composer-field");
   const compact = field !== null && field !== undefined;
@@ -8516,10 +8729,12 @@ function resizeComposer(node) {
   composer?.classList.toggle("is-multiline", multiline);
 
   if (node.value !== "" && (!compact || multiline)) {
-    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+    node.style.height = `${Math.min(node.scrollHeight, limit)}px`;
   }
-  node.style.overflowY = node.scrollHeight > 148 ? "auto" : "hidden";
+  node.style.overflowY = node.scrollHeight > limit ? "auto" : "hidden";
+  animateComposerHeight(node, from, node.offsetHeight);
   paintComposerMirror(node);
+  syncComposerControls(node);
 }
 
 /** Sizes every newly rendered composer, including drafts restored from state. */
