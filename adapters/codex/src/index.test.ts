@@ -2227,3 +2227,166 @@ test("a second symbol-less plan stands, narrated as claiming its files whole", a
     JSON.stringify(messages),
   );
 });
+
+test("the conversation a task was asked inside reaches the rounds that act on it", async (t) => {
+  // The failure this closes was visible to everybody except the code. A
+  // request made inside a thread is a sentence that leans entirely on what
+  // came before it, the coordinator has carried that conversation beside the
+  // objective all along, and execution was handed the sentence alone — so the
+  // agent reported it had no context and asked to be pointed somewhere, and
+  // the person pasted back what the run already held.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const conversation = [
+    "Nathan: the uploader gives up after one failed retry",
+    "Codex: raised it to five attempts with backoff",
+    "Nathan: now do the same for the downloader",
+  ].join("\n");
+  const task: TaskDefinition = {
+    ...TASK,
+    objective: "now do the same for the downloader",
+    context: conversation,
+  };
+  const prompts: string[] = [];
+  const runner: CodexProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    prompts.push(options.input ?? "");
+    if (args[args.indexOf("--sandbox") + 1] === "read-only") {
+      return output(JSON.stringify({ ...PLAN, objective: task.objective }));
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "The downloader retries five times now.",
+        requestId: "",
+        additionalFiles: [],
+        additionalSymbols: [],
+        additionalApis: [],
+        additionalSchemas: [],
+        additionalConfigKeys: [],
+        additionalTests: [],
+        additionalServices: [],
+        reason: "",
+      }),
+    );
+  };
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner,
+  });
+  const baseVersion = await fixture.repositories.getCanonicalVersion(
+    fixture.repository,
+  );
+  const session = await adapter.startTask({
+    task,
+    canonicalVersion: baseVersion,
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+
+  // Replanning first, because a session cannot replan once execution context
+  // has been sent. It is the round that decides what a follow-up turn will
+  // touch, and it was every bit as blind as execution.
+  await adapter.requestReplan(session.id, {
+    taskId: task.id,
+    previousPlan: { ...PLAN, objective: task.objective },
+    canonicalChange: {
+      previousVersion: baseVersion,
+      canonicalVersion: baseVersion,
+      changedFiles: ["src/value.js"],
+      changedSymbols: [],
+      changedApis: [],
+      changedSchemas: [],
+      changedConfigKeys: [],
+      changedTests: [],
+      changedServices: [],
+      reason: "another task integrated",
+    },
+    constraints: [],
+  });
+  const replanning = prompts.at(-1) ?? "";
+  assert.match(replanning, /raised it to five attempts with backoff/u);
+  assert.match(replanning, /never answer that you lack context/u);
+
+  const workspace = await fixture.workspaces.create({
+    taskId: task.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion,
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+  await adapter.collectChanges(session.id);
+
+  const execution = prompts.at(-1) ?? "";
+  assert.match(execution, /now do the same for the downloader/u);
+  assert.match(execution, /raised it to five attempts with backoff/u);
+  // The standing order that goes with it: the transcript is the answer to
+  // "what does 'the same' mean", so asking is asking for what is already here.
+  assert.match(execution, /never answer that you lack context/u);
+  assert.match(execution, /never ask to be pointed in the right direction/u);
+
+  await fixture.workspaces.destroy(workspace);
+});
+
+test("a task asked with no conversation still carries the order not to ask for one", async (t) => {
+  // A task submitted outside a thread has nothing to render, and that is the
+  // case where the temptation to ask is strongest — so the standing order is
+  // unconditional, while the transcript heading appears only when there is a
+  // transcript to head.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(options.input ?? "");
+      return output(JSON.stringify(PLAN));
+    },
+  });
+  const baseVersion = await fixture.repositories.getCanonicalVersion(
+    fixture.repository,
+  );
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: baseVersion,
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  await adapter.requestReplan(session.id, {
+    taskId: TASK.id,
+    previousPlan: PLAN,
+    canonicalChange: {
+      previousVersion: baseVersion,
+      canonicalVersion: baseVersion,
+      changedFiles: [],
+      changedSymbols: [],
+      changedApis: [],
+      changedSchemas: [],
+      changedConfigKeys: [],
+      changedTests: [],
+      changedServices: [],
+      reason: "nothing moved",
+    },
+    constraints: [],
+  });
+  const replanning = prompts.at(-1) ?? "";
+  assert.match(replanning, /never answer that you lack context/u);
+  assert.doesNotMatch(replanning, /The conversation this was asked inside/u);
+});

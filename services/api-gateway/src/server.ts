@@ -14530,7 +14530,11 @@ export class ApiGateway {
       const openingPromise =
         input.planOnly === true || task.afterTaskId !== undefined
           ? Promise.resolve([] as string[])
-          : this.planOpening(candidate, visibleObjective);
+          : // The same conversation the task itself carries. Without it the
+            // opening line is written from the request alone, which is how an
+            // agent came to answer a thread it had been given with "I don't
+            // have the context — can you point me in the right direction?"
+            this.planOpening(candidate, visibleObjective, taskContext);
       if (input.planOnly === true) {
         // Planned, and stopped there.
         //
@@ -14851,6 +14855,17 @@ export class ApiGateway {
   private async planOpening(
     candidate: ChannelMentionCandidate,
     objective: string,
+    /**
+     * The room this was asked in — the same text the task itself carries.
+     *
+     * This call is the agent's visible first words, and it used to be made
+     * with the request alone: a request typed inside a thread ("and do this
+     * one too") arrived here as that sentence and nothing else, so the model
+     * answered that it had no context and asked to be pointed somewhere,
+     * which replaced the acknowledgement and was the first thing the person
+     * read. The run underneath had the whole conversation the entire time.
+     */
+    context?: string,
   ): Promise<string[]> {
     const answer = await this.askAgent(
       candidate,
@@ -14858,7 +14873,20 @@ export class ApiGateway {
         "Reply with one or two concise first-person lines that tell the " +
         "person what you are going to inspect, change, and " +
         "verify. Be specific to their request, use future-tense action rather " +
-        "than restating the request, and use no bullets or numbering.\n\nRequest: " +
+        "than restating the request, and use no bullets or numbering.\n" +
+        // Not a style note. These lines are posted as the agent's first
+        // words in the thread, and the work is already running underneath
+        // them — so an opening that asks for context stops nothing, it just
+        // tells the person their request was not understood when it was.
+        "Never say you lack context and never ask to be pointed in the right " +
+        "direction: you are not being asked a question here, the work is " +
+        "already starting, and everything known about it reaches it. If the " +
+        "request is short or refers back to something, read the conversation " +
+        "below and say what you will look at first.\n" +
+        (context === undefined || context.trim() === ""
+          ? ""
+          : `\nThe conversation this was asked inside:\n${context.trim()}\n`) +
+        "\nRequest: " +
         objective,
       OPENING_TIMEOUT_MS,
       true,
