@@ -13102,9 +13102,38 @@ dialog.modal[open]::backdrop {
 /* Kumi is stable application chrome. Repositories are workspaces beneath it;
    their identity never leaks into this bar. */
 .topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 640px) minmax(0, 1fr);
+  align-items: center;
   min-width: 0;
   gap: 10px;
-  padding-inline: 14px 18px;
+  height: calc(48px + var(--safe-top));
+  padding: var(--safe-top) 12px 0;
+  background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg));
+  border-bottom: 0;
+}
+
+.topbar-start,
+.topbar-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.topbar-start {
+  justify-content: flex-start;
+}
+
+.topbar-actions {
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.topbar-actions .health {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .global-brand,
@@ -13132,12 +13161,19 @@ dialog.modal[open]::backdrop {
 }
 
 .global-search {
-  min-width: min(300px, 32vw);
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
   justify-content: flex-start;
-  padding: 7px 10px;
+  padding: 5px 10px;
   background: var(--bg-inset);
   border: 1px solid var(--border-soft);
   color: var(--text-3);
+}
+
+.global-search svg {
+  width: 16px;
+  height: 16px;
 }
 
 .global-search span {
@@ -13206,10 +13242,22 @@ dialog.modal[open]::backdrop {
 
 .workspace-sidebar-header .chan-brand {
   min-width: 0;
+  padding: 4px 2px;
 }
 
 .chan-sidebar-head.chan-quick-links {
-  margin-top: 6px;
+  gap: 0;
+  margin: 4px 8px 2px;
+}
+
+.chan-quick-link {
+  min-height: 32px;
+  padding: 5px 8px;
+}
+
+.chan-quick-link svg {
+  width: 14px;
+  height: 14px;
 }
 
 .chan-quick-link,
@@ -13254,6 +13302,26 @@ dialog.modal[open]::backdrop {
   font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-tools {
+  min-width: 0;
+  max-width: min(68%, 560px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.conversation-tools .preview-live {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.conversation-tools .preview-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .primary-conversation-surface {
@@ -13419,6 +13487,7 @@ dialog.modal[open]::backdrop {
 
 @media (max-width: 600px) {
   .topbar {
+    grid-template-columns: minmax(44px, 1fr) 44px minmax(88px, 1fr);
     height: calc(54px + var(--safe-top));
     padding: var(--safe-top) 8px 0;
   }
@@ -13426,11 +13495,13 @@ dialog.modal[open]::backdrop {
   .global-search {
     min-width: 44px;
     width: 44px;
+    min-height: 44px;
     justify-content: center;
     padding: 0;
   }
 
-  .topbar > .icon-btn,
+  .topbar-start > .icon-btn,
+  .topbar-actions > .icon-btn,
   .conversation-header > .icon-btn,
   .thread-head .icon-btn,
   .channel-rail-new,
@@ -13441,7 +13512,7 @@ dialog.modal[open]::backdrop {
 
   .global-search span,
   .global-search kbd,
-  .topbar > .icon-btn[title="Back to chats"] {
+  .topbar-actions .health {
     display: none;
   }
 
@@ -13457,6 +13528,16 @@ dialog.modal[open]::backdrop {
     min-height: var(--thread-head-h);
     padding: 0 8px;
     border-radius: 0;
+  }
+
+  .conversation-tools {
+    max-width: 58%;
+  }
+
+  .conversation-tools .preview-live,
+  .conversation-tools .preview-starting,
+  .conversation-tools .ch-muted {
+    display: none;
   }
 
   .workspace-rail {
