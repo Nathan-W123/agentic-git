@@ -10863,6 +10863,13 @@ async function pickChannelPictureFile(repositoryId, file) {
   ) {
     return;
   }
+  // Checked here as well as where the pencil is drawn. Hiding a control is a
+  // statement about what to offer, not about what is allowed, and this
+  // handler is reachable from a file input somebody kept a reference to.
+  if (!canManageRepository(repositoryId)) {
+    toast("Only a workspace administrator can change its picture.", "error");
+    return;
+  }
   try {
     const bitmap = await createImageBitmap(file);
     const side = Math.min(bitmap.width, bitmap.height);

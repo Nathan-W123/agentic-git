@@ -286,11 +286,19 @@ function workspaceRail(activeRepositoryId) {
                   : ""
               }
             </button>
-            <label class="channel-rail-edit" title="Change picture for ${esc(label)}"
+            ${
+              // The picture is the workspace's, not the viewer's, so only
+              // somebody who administers it is offered the pencil. It used to
+              // be drawn for everybody, which read as an invitation to change
+              // a thing that is not yours to change.
+              canManageRepository(repo.id)
+                ? `<label class="channel-rail-edit" title="Change picture for ${esc(label)}"
               aria-label="Change picture for ${esc(label)}">${icon("pencil")}
               <input type="file" accept="image/*" data-act="channel-picture-pick"
                 data-repository="${esc(repo.id)}" hidden>
-            </label>
+            </label>`
+                : ""
+            }
           </div>`;
         })
         .join("")}
