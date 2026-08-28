@@ -35,8 +35,7 @@ test("the account menu carries account destinations", async () => {
   const app = await publicFile("app.js");
 
   // The destinations that were live and unreachable. One list, because the
-  // topbar avatar and the channel sidebar's foot open the same menu — a
-  // single change point for both.
+  // channel sidebar foot is the sole account menu entry.
   const destinations = slice(
     app,
     "function accountDestinations() {",
@@ -112,7 +111,7 @@ test("an unread direct message has a number somewhere on screen", async () => {
   // Agent private-chat threads do not count toward the account badge.
   assert.match(total, /isDirectMessagePerson\(conversation\.userId\)/u);
 
-  assert.match(app, /function dmBadge\(\)/u);
+  assert.doesNotMatch(app, /function dmBadge\(\)/u);
   assert.match(chats, /countBadge\(dmUnreadTotal\(\)\)/u);
 
   // The menu row opens the conversations themselves, each with its own count.
@@ -191,8 +190,8 @@ test("settings is visible beside the account menu", async () => {
   assert.match(menu, /\.\.\.accountDestinations\(\)/u);
   assert.doesNotMatch(menu, /value: "settings"|label: "Settings"/u);
 
-  // Direct messages comes from the shared list, so both account buttons offer
-  // the same door — and neither offers Notifications or an agent roster.
+  // Direct messages comes from the shared list, and the menu offers neither
+  // Notifications nor an agent roster.
   const destinations = slice(app, "function accountDestinations() {", "\n/**");
   assert.match(destinations, /act: "dm-list"/u);
   assert.doesNotMatch(destinations, /act: "go-notifications"/u);

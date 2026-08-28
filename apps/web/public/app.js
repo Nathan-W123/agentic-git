@@ -1501,7 +1501,6 @@ async function submitInviteSignIn(form) {
  */
 
 function topbar() {
-  const user = currentUserName();
   // The upper-left corner, over the workspace switcher, which held nothing.
   // The mark belongs to the application rather than to any one workspace, so
   // this is where it goes — and it goes alone: the shell is still
@@ -1534,8 +1533,6 @@ function topbar() {
           ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
           : ""
       }
-      <button class="account-btn topbar-account-btn" data-act="user-menu" title="${esc(user)}"
-        >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
     </div>
   </header>`;
 }
@@ -1543,8 +1540,8 @@ function topbar() {
 /**
  * The screens the account menu is the way into.
  *
- * Both account buttons — the topbar avatar and the channel sidebar's foot —
- * open the same menu, so this is one change point for both.
+ * The channel sidebar foot opens this menu, so this is the single change
+ * point for account destinations.
  *
  * Notifications is deliberately not one of them any more. Pressing your own
  * name is how you reach your own things, and a backlog of everything every
@@ -1567,20 +1564,6 @@ function accountDestinations() {
       ...(dms === 0 ? {} : { hint: `${dms} unread` }),
     },
   ];
-}
-
-/**
- * Everything waiting in direct messages, on the account button.
- *
- * A DM from somebody who is not in the room on screen had no signal anywhere:
- * the count was loaded with the conversation list and only ever rendered
- * beside a person already in this channel's roster.
- */
-function dmBadge() {
-  const unread = dmUnreadTotal();
-  return unread === 0
-    ? ""
-    : `<span class="dot-badge">${esc(String(unread > 99 ? "99+" : unread))}</span>`;
 }
 
 /* ----------------------------------------------------------- settings ---- */

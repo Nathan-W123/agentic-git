@@ -958,16 +958,14 @@ svg.ui-icon {
 }
 
 /* Anything that carries a count in its corner. `.bell` is the notifications
-   button; the two account buttons wear the direct-message total, for
+   button; the sidebar account control wears the direct-message total, for
    conversations with people who are not in the room on screen. */
 .bell,
-.account-btn,
 .chan-account {
   position: relative;
 }
 
 .bell .dot-badge,
-.account-btn .dot-badge,
 .chan-account .dot-badge {
   position: absolute;
   top: 1px;
@@ -12816,12 +12814,11 @@ dialog.modal[open]::backdrop {
   gap: 4px;
 }
 
-/* The two right-hand controls share one optical box. The generic icon and
-   avatar primitives intentionally size their contents differently; owning
-   the button geometry here keeps those contents centred and prevents flex
-   shrink from distorting either control when the window gets narrow. */
-.topbar-icon-btn,
-.topbar-account-btn {
+/* The help control owns its optical box. The generic icon primitive sizes
+   its contents differently from the bar around it; owning the button
+   geometry here keeps the glyph centred and prevents flex shrink from
+   distorting the control when the window gets narrow. */
+.topbar-icon-btn {
   flex: 0 0 34px;
   width: 34px;
   height: 34px;
@@ -12833,15 +12830,6 @@ dialog.modal[open]::backdrop {
 .topbar-icon-btn svg {
   width: 18px;
   height: 18px;
-}
-
-.topbar-account-btn {
-  overflow: visible;
-}
-
-.topbar-account-btn .avatar {
-  width: 30px !important;
-  height: 30px !important;
 }
 
 .topbar-actions .health {
@@ -13269,8 +13257,7 @@ dialog.modal[open]::backdrop {
     height: 44px;
   }
 
-  .topbar-icon-btn,
-  .topbar-account-btn {
+  .topbar-icon-btn {
     flex-basis: 44px;
     width: 44px;
     height: 44px;
