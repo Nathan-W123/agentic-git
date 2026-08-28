@@ -1236,6 +1236,21 @@ const CONFIG_DIRECTORY_VARIABLES: Partial<Record<VendorCliKind, string>> = {
 };
 
 /**
+ * Where per-task credential homes are created.
+ *
+ * The Codex CLI refuses to create PATH-alias helper binaries when
+ * `CODEX_HOME` sits under a temporary directory such as `/tmp`, which makes
+ * `codex exec --sandbox read-only` fail even when authentication succeeds.
+ * Staging homes on a writable path outside `/tmp` avoids that refusal.
+ */
+export function credentialStagingRoot(): string {
+  const configured = process.env["COORD_CREDENTIAL_STAGING"];
+  return configured !== undefined && configured.length > 0
+    ? configured
+    : os.tmpdir();
+}
+
+/**
  * Where the Copilot CLI may unpack itself: shared, stable, and outside every
  * staged home.
  *
@@ -1461,7 +1476,9 @@ export async function openCredentialHome(input: {
     assertSessionFile(vendor, credential.secret);
   }
 
-  const directory = await mkdtemp(path.join(os.tmpdir(), "coord-cred-"));
+  const stagingRoot = credentialStagingRoot();
+  await mkdir(stagingRoot, { recursive: true }).catch(() => undefined);
+  const directory = await mkdtemp(path.join(stagingRoot, "coord-cred-"));
 
   const env: NodeJS.ProcessEnv = { ...(input.baseEnv ?? process.env) };
   for (const name of ALL_CREDENTIAL_VARIABLES) {
