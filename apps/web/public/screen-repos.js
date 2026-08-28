@@ -133,109 +133,6 @@ function repositoryCard(repo) {
   </article>`;
 }
 
-export function renderRepositories() {
-  const repositories = visibleRepositories();
-  const region = state.health?.region ?? "control plane";
-  const secure = window.location.protocol === "https:";
-
-  return `<div class="scroll"><div class="page">
-    <div class="page-head">
-      <div>
-        <h1>Connect to a repository</h1>
-        <p>Work in the same live codebase as your team and agents.</p>
-      </div>
-    </div>
-
-    <div class="repo-actions">
-      <button class="repo-action accent" data-act="repo-create">
-        <span class="ra-icon">${icon("cloud")}</span>
-        <span>
-          <b>Create new repository</b>
-          <span>Create a new cloud repository and start coding.</span>
-        </span>
-        <span class="ra-chev">${icon("chevronRight")}</span>
-      </button>
-      <button class="repo-action accent-2" data-act="repo-connect">
-        <span class="ra-icon">${icon("link")}</span>
-        <span>
-          <b>Import from GitHub</b>
-          <span>Import an existing GitHub repository and its history.</span>
-        </span>
-        <span class="ra-chev">${icon("chevronRight")}</span>
-      </button>
-    </div>
-
-    <div class="filter-row">
-      ${searchBox("Search repositories...", state.repoQuery, "repo-search")}
-      ${selectBox(
-        "repo-sort",
-        [
-          // "Last opened" was a lie: nothing records opens, and this orders by
-          // the newest run or task the repository has.
-          { value: "recent", label: "Recent activity" },
-          { value: "name", label: "Name" },
-        ],
-        state.repoSort,
-      )}
-      ${segmented(
-        "repo-view",
-        [
-          { value: "grid", label: "Grid view", iconName: "grid" },
-          { value: "list", label: "List view", iconName: "list" },
-        ],
-        state.repoView,
-      )}
-    </div>
-
-    <h2 class="section-title">Your connected repositories</h2>
-    ${
-      repositories.length === 0
-        ? emptyState(
-            "folder",
-            state.repositories.length === 0
-              ? "No repositories yet"
-              : "Nothing matches that search",
-            state.repositories.length === 0
-              ? "Create a cloud repository, or connect one you already have. Everyone on the project works against the same canonical copy."
-              : "Try a different name or branch.",
-          )
-        : `<div class="repo-grid ${state.repoView === "list" ? "list" : ""}">
-            ${repositories.map(repositoryCard).join("")}
-            ${
-              // The same trailing tile the agent deck ends with: the grid says
-              // what it holds and how to add one more to it, rather than
-              // sending the reader back up to the buttons above.
-              state.repoView === "list"
-                ? ""
-                : addTile({
-                    title: "Add repository",
-                    subtitle: "Create one, or import from GitHub",
-                    act: "repo-create",
-                  })
-            }
-          </div>`
-    }
-
-    <div class="info-strip">
-      <div class="is-cell">
-        <span class="is-icon">${icon("globe")}</span>
-        <span><div class="is-label">Region</div>
-        <div class="is-value">${esc(region)}</div></span>
-      </div>
-      <div class="is-cell">
-        <span class="is-icon">${icon("shield")}</span>
-        <span><div class="is-label">Security</div>
-        <div class="is-value">${secure ? "Encrypted" : "Loopback"}</div></span>
-      </div>
-      <div class="is-cell">
-        <span class="is-icon">${icon("sync")}</span>
-        <span><div class="is-label">Sync status</div>
-        <div class="is-value">Real-time</div></span>
-      </div>
-    </div>
-  </div></div>`;
-}
-
 /* ------------------------------------------------------------ actions ---- */
 
 export async function createRepository(rerender) {
@@ -513,8 +410,4 @@ export function openRepository(repositoryId, navigate) {
   state.files = [];
   state.workspace = undefined;
   navigate("code");
-}
-
-export function repositoryOwnerLabel() {
-  return currentUserName();
 }

@@ -1332,27 +1332,6 @@ export async function connectGitHubAccount(rerender) {
   }
 }
 
-/**
- * The old behaviour, kept for whoever owns the host.
- *
- * Signing in through the vendor CLI authenticates as the host account, so it
- * is useful exactly once — for the administrator who wants this deployment to
- * have a shared login — and is refused for everybody else by the server.
- */
-export async function connectAgentViaCli(providerId, rerender) {
-  try {
-    const response = await api(
-      `/chat/providers/${encodeURIComponent(providerId)}`,
-      { method: "POST", body: {} },
-    );
-    state.providers = response.providers ?? state.providers;
-    toast(`${providerId} connected on the host account`, "ok");
-    rerender();
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
 export async function cancelTask(taskId, rerender) {
   try {
     await api(`/tasks/${encodeURIComponent(taskId)}/cancel`, {

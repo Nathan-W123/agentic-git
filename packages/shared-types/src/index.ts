@@ -3,7 +3,6 @@ import path from "node:path";
 
 export type TaskId = string;
 export type AgentId = string;
-export type SessionId = string;
 export type WorkspaceId = string;
 export type ChangeSetId = string;
 export type LeaseId = string;
@@ -1751,13 +1750,6 @@ export function arbitrationSymbols(plan: AgentPlan): string[] {
 /** Whether this plan is a repository-wide claim nobody has narrowed yet. */
 export function isBlanketClaim(plan: Pick<AgentPlan, "claim">): boolean {
   return plan.claim?.kind === "blanket";
-}
-
-/** The directories a frozen claim covers, or nothing for any other plan. */
-export function claimedDirectories(
-  plan: Pick<AgentPlan, "claim">,
-): readonly string[] {
-  return plan.claim?.kind === "frozen" ? plan.claim.directories : [];
 }
 
 /**

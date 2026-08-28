@@ -899,13 +899,6 @@ export function credentialSourcesFor(
   return CREDENTIAL_SOURCES[vendor] ?? [vendor];
 }
 
-/** The service a connect screen should point at for this CLI. */
-export function credentialSourceFor(
-  vendor: VendorCliKind,
-): CredentialService {
-  return vendor;
-}
-
 /**
  * Writes the API-key credential file the Codex CLI actually reads.
  *
