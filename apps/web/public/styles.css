@@ -14189,7 +14189,10 @@ dialog.modal[open]::backdrop {
 .qs-layer {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  /* Above the phone's channel header, drawers and full-screen panels. The
+     switcher is the active overlay and its input must not disappear beneath
+     the channel chrome that launched it. */
+  z-index: 85;
   display: grid;
   place-items: start center;
   padding-top: 12vh;

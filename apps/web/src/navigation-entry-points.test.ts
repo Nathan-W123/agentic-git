@@ -161,9 +161,10 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.doesNotMatch(entries, /route: "agents"|My agents/iu);
 
   // Drawn in `#layer-root`, outside the shell the poll replaces — an overlay
-  // inside the app root would be swept away mid-search.
+  // inside the app root would be swept away mid-search. It also stays above
+  // the phone's channel header and full-screen panels, whose stack reaches 80.
   assert.match(app, /document\.querySelector\("#layer-root"\)\.append\(layer\)/u);
-  assert.match(css, /\.qs-layer \{/u);
+  assert.match(css, /\.qs-layer \{[^}]*z-index: 85;/u);
   const switcher = slice(app, "function openSwitcher() {", "/** What the keys do");
   const shortcuts = slice(app, "function openShortcutSheet() {", "/** Whether the keyboard");
   assert.match(switcher, /layer\.className = "qs-layer qs-layer-search"/u);
