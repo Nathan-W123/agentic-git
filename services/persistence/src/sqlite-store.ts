@@ -265,8 +265,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO repositories
            (id, path, branch, first_seen_at, provider, remote_url, created_by,
-            display_name)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            display_name, picture)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO NOTHING`,
       )
       .run(
@@ -278,6 +278,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         repository.remoteUrl ?? null,
         repository.createdBy ?? null,
         repository.displayName ?? null,
+        repository.picture ?? null,
       );
     const existing = await this.getRepository(repository.id);
     if (existing === undefined || repositoryConflicts(existing, repository)) {
@@ -1966,6 +1967,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
     this.db
       .prepare("UPDATE repositories SET display_name = ? WHERE id = ?")
       .run(displayName ?? null, id);
+  }
+
+  public async setRepositoryPicture(
+    id: string,
+    picture: string | undefined,
+  ): Promise<void> {
+    this.db
+      .prepare("UPDATE repositories SET picture = ? WHERE id = ?")
+      .run(picture ?? null, id);
   }
 
   public async listRepositories(): Promise<StoredRepository[]> {
@@ -5049,6 +5059,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     const remoteUrl = optionalText(row, "remote_url");
     const createdBy = optionalText(row, "created_by");
     const displayName = optionalText(row, "display_name");
+    const picture = optionalText(row, "picture");
     return {
       id: text(row, "id"),
       path: text(row, "path"),
@@ -5059,6 +5070,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       ...(remoteUrl === undefined ? {} : { remoteUrl }),
       ...(createdBy === undefined ? {} : { createdBy }),
       ...(displayName === undefined ? {} : { displayName }),
+      ...(picture === undefined ? {} : { picture }),
     };
   }
 

@@ -1386,7 +1386,13 @@ export type AuditEventType =
    * A repository was given a new display name. The id it is keyed by never
    * changes, so this records only what people call it.
    */
-  | "repository_renamed";
+  | "repository_renamed"
+  /**
+   * A repository's picture was set or cleared. The picture is the workspace's
+   * rather than any one reader's, so changing it changes what colleagues see,
+   * and is worth a record of who changed it.
+   */
+  | "repository_picture_changed";
 
 export interface AuditEvent {
   id: string;

@@ -46,6 +46,7 @@ import {
   myAvatar,
   setMyAvatar,
   setChannelPicture,
+  ensureChannelPictureShared,
   myTheme,
   myThemePreference,
   setMyTheme,
@@ -7544,6 +7545,14 @@ function renderNow() {
         render();
       }
     });
+    // One-time: a workspace picture set before pictures were shared lives in
+    // this browser and nowhere else. Hand it to the server so the colleagues
+    // it was always meant for can see it too.
+    void ensureChannelPictureShared(activeChannelId(), () => {
+      if (state.route === "chats") {
+        render();
+      }
+    });
     // Once per channel, then only when the stream says the set changed. A
     // question is put to one person and lives in the control plane's memory,
     // so there is nothing in the transcript that would bring it back after a
@@ -10870,6 +10879,7 @@ async function pickChannelPictureFile(repositoryId, file) {
     toast("Only a workspace administrator can change its picture.", "error");
     return;
   }
+  let square;
   try {
     const bitmap = await createImageBitmap(file);
     const side = Math.min(bitmap.width, bitmap.height);
@@ -10889,10 +10899,19 @@ async function pickChannelPictureFile(repositoryId, file) {
         128,
         128,
       );
-    setChannelPicture(repositoryId, canvas.toDataURL("image/jpeg", 0.82));
-    render();
+    square = canvas.toDataURL("image/jpeg", 0.82);
   } catch (error) {
     toast(`That image could not be read: ${error.message}`, "error");
+    return;
+  }
+  // Saved separately from the resize so the two failures do not share a
+  // sentence: an unreadable file and a refused upload are different problems
+  // and want different things done about them.
+  try {
+    await setChannelPicture(repositoryId, square);
+    render();
+  } catch (error) {
+    toast(`That picture could not be saved: ${error.message}`, "error");
   }
 }
 

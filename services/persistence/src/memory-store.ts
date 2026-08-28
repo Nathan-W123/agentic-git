@@ -1313,6 +1313,21 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     repository.displayName = displayName;
   }
 
+  public async setRepositoryPicture(
+    id: string,
+    picture: string | undefined,
+  ): Promise<void> {
+    const repository = this.repositories.get(id);
+    if (repository === undefined) {
+      return;
+    }
+    if (picture === undefined) {
+      delete repository.picture;
+      return;
+    }
+    repository.picture = picture;
+  }
+
   public async removeRepository(id: string): Promise<void> {
     // Execution history goes with the repository — see the SQLite store's doc
     // comment. The refusal this used to throw surfaced in production as a raw
