@@ -16,16 +16,37 @@ test("global, workspace, conversation, and secondary chrome have separate owners
     publicFile("styles.css"),
   ]);
 
+  const globalChrome = app.slice(
+    app.indexOf("function topbar()"),
+    app.indexOf("/**\n * The screens the account menu is the way into."),
+  );
+  const conversationChrome = chats.slice(
+    chats.indexOf("function conversationHeader(repositoryId)"),
+    chats.indexOf("/** Compatibility for callers while the conversation header takes ownership. */"),
+  );
+  const hierarchyCss = css.slice(css.indexOf("/* ------------------------------------------------ workspace hierarchy ---- */"));
   assert.match(app, /<header class="topbar" aria-label="Global">/u);
-  assert.match(app, /class="global-brand"[\s\S]*?<span>Kumi<\/span>/u);
+  assert.match(globalChrome, /class="topbar-start"/u);
+  assert.match(globalChrome, /class="global-search"/u);
+  assert.match(globalChrome, /class="topbar-actions"/u);
+  assert.doesNotMatch(globalChrome, /global-brand|brandMark|>Kumi</u);
   assert.doesNotMatch(app, /const BARE = new Set\(\[[^\]]*"chats"/u);
   assert.match(chats, /<nav class="channel-rail workspace-rail" aria-label="Workspaces"/u);
   assert.match(chats, /aria-label="Switch to workspace /u);
   assert.match(chats, /function chanSidebar[\s\S]*\$\{chanCrown\(activeRepositoryId\)\}/u);
+  assert.match(chats, /class="chan-brand"[\s\S]*class="brand-text"/u);
+  assert.match(chats, /function chanCrown[\s\S]*act: "chan-sidebar-close"/u);
   assert.match(chats, /function conversationHeader\(repositoryId\)/u);
+  assert.match(conversationChrome, /class="conversation-tools"/u);
+  assert.doesNotMatch(conversationChrome, /ch-hash|icon\("chatBubble"/u);
   assert.match(chats, /<main class="chan-main" aria-label="Primary conversation" aria-current="page">/u);
   assert.match(chats, /function secondaryPanel\(repositoryId\)/u);
+  assert.match(hierarchyCss, /\.topbar \{[^}]*display: grid;[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);[^}]*border-bottom: 0;/u);
+  assert.match(hierarchyCss, /\.channel-rail \{[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);/u);
+  assert.match(css, /\.global-search svg \{[\s\S]*?width: 16px;/u);
   assert.match(css, /\.workspace-sidebar-header \{[\s\S]*?border-bottom:/u);
+  assert.match(css, /\.chan-sidebar-head\.chan-quick-links \{[\s\S]*?margin: 4px 8px 2px;/u);
+  assert.match(css, /\.chan-quick-link \{[\s\S]*?min-height: 32px;/u);
   assert.match(css, /\.chan-head \{[\s\S]*?position: static;/u);
 });
 
