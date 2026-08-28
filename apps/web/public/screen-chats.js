@@ -5201,12 +5201,23 @@ function agentHistorySections(rows) {
 }
 
 /**
- * One history card: outcome pill, what was asked for and when, whose agent
- * ran it, what it left behind, and the two things a reader does next.
+ * One history row: outcome, what was asked for, when, and how much it touched.
  *
- * The row itself still opens the conversation the work was discussed in — the
- * eye repeats that as a control a touch reader can find, and retry is offered
- * only where the server would accept it.
+ * It used to be a card of five columns — the same agent's face repeated on
+ * every line, and an "Output preview" column of prose beside a request that
+ * had already been cut to one line — which made each entry 74px tall and gave
+ * a panel-height list room for six of them. The face is the panel's header,
+ * the preview is the conversation the row opens, and what is left is the four
+ * facts somebody scanning a history is actually scanning for.
+ *
+ * The row still opens the conversation the work was discussed in; the eye
+ * repeats that as a control a touch reader can find, and retry is offered
+ * only where the server would accept it. Both wait for hover or focus, so a
+ * resting list is a list rather than a column of buttons.
+ *
+ * `agent` and `repositoryId` stay in the signature: they are the context this
+ * row belongs to, every caller has them, and the next fact this row needs to
+ * state about the agent that ran it will want them back.
  */
 function agentHistoryRow({ task, message }, agent, repositoryId) {
   // A description of the work, not the words that asked for it. The
@@ -5215,6 +5226,7 @@ function agentHistoryRow({ task, message }, agent, repositoryId) {
   const line = taskSummaryLine(task, message);
   const full = withoutRolePreamble(task.objective).trim();
   const preview = taskOutputPreview(task);
+  const changed = Array.isArray(task.changedFiles) ? task.changedFiles : [];
   const open =
     message === undefined
       ? ""
@@ -5225,14 +5237,19 @@ function agentHistoryRow({ task, message }, agent, repositoryId) {
     ${historyStatusPill(task.status)}
     <span class="ah-main">
       <span class="ah-objective">${esc(line)}</span>
-      <span class="ah-when">${esc(historyWhen(task.submittedAt))}</span>
-    </span>
-    <span class="ah-face">${statusAgentFace(agent, 26, repositoryId)}</span>
-    <span class="ah-preview">
-      <span class="ah-preview-label">Output preview</span>
-      <span class="ah-preview-text">${esc(
-        preview === "" ? historyStatusLabel(task.status) : preview,
-      )}</span>
+      <span class="ah-meta">
+        <span class="ah-when">${esc(historyWhen(task.submittedAt))}</span>
+        ${
+          changed.length === 0
+            ? ""
+            : `<span class="ah-files" title="${esc(changed.join(", "))}">${
+                changed.length
+              } file${changed.length === 1 ? "" : "s"}</span>`
+        }
+        <span class="ah-preview-text" title="${esc(preview)}">${esc(
+          preview === "" ? historyStatusLabel(task.status) : preview,
+        )}</span>
+      </span>
     </span>
     <span class="ah-actions">
       ${
@@ -5385,7 +5402,78 @@ function specPill(text, { dot = "", title = "" } = {}) {
   }${esc(text)}</span>`;
 }
 
-/** The profile-like landing surface for an agent panel. */
+/**
+ * The small circled "i" that stands where a paragraph used to.
+ *
+ * The provider caveat — Codex reporting no model list because its local cache
+ * is missing — was a permanent three-line block of prose under the settings,
+ * on every visit, for a condition that changes what one field accepts and
+ * nothing else. Beside the field it is one 32px target that says there is
+ * something to know; the words are still a click away, and the height they
+ * used to hold is the height the rest of the profile needed.
+ */
+function specInfoButton(act, value, title) {
+  return `<button type="button" class="aspec-info" data-act="${esc(act)}"${
+    value === "" ? "" : ` data-value="${esc(value)}"`
+  } title="${esc(title)}" aria-label="${esc(title)}"
+    aria-haspopup="dialog">${icon("info")}</button>`;
+}
+
+/**
+ * What the provider had to say about this account's options, in full.
+ *
+ * Only ever opened deliberately, so it is allowed to be as long as it is.
+ * The connection it describes is named here too — that used to be a fifth
+ * read-only field competing with the four that can actually be changed.
+ */
+export function agentProviderNotePopoverHtml(agent, providerId) {
+  const note = providerOptionsNote(providerId);
+  return `<div class="aspec-note-pop">
+    <h4>${esc(agentLabelOf(providerId))}</h4>
+    <p>${esc(
+      note === ""
+        ? "This account reports its own models and reasoning levels; nothing further to report."
+        : note,
+    )}</p>
+    <dl>
+      <div><dt>Connection</dt><dd>${esc(providerId)}</dd></div>
+      <div><dt>Owner</dt><dd>${esc(
+        agent.mine === true ? "You" : memberName(agent.userId ?? ""),
+      )}</dd></div>
+    </dl>
+  </div>`;
+}
+
+/** Every channel this agent works in, for the rooms the strip could not hold. */
+export function agentChannelsPopoverHtml(agent, repositoryId) {
+  const assignments = agentChannelAssignments(agent, repositoryId);
+  const rooms =
+    assignments.length > 0
+      ? assignments.map(({ repository }) => repository.id)
+      : [repositoryId];
+  return `<div class="aspec-channels-pop">
+    <h4>${esc(agent.name)} works in</h4>
+    <ul>${rooms
+      .map(
+        (id) =>
+          `<li${id === repositoryId ? ` class="here"` : ""}>#${esc(
+            repositoryLabel(id),
+          )}${id === repositoryId ? `<span>this channel</span>` : ""}</li>`,
+      )
+      .join("")}</ul>
+  </div>`;
+}
+
+/**
+ * The profile-like landing surface for an agent panel.
+ *
+ * Four zones on one surface — who it is, what it is doing, what it runs on,
+ * where it works — separated by space rather than by a border each. It used
+ * to be a banner-topped identity card beside a column of five outlined panes,
+ * which came to roughly 744px of content in a 523px panel: the development
+ * information the panel exists for was below the fold on the size of window
+ * it is normally read in.
+ */
 function agentSpec(agent, repositoryId) {
   const assignments = agentChannelAssignments(agent, repositoryId);
   const agentTasks = [...activeTasks(), ...waitingTasks()].filter((candidate) =>
@@ -5411,12 +5499,179 @@ function agentSpec(agent, repositoryId) {
   // account, so only that owner picks them; a teammate reads what was chosen.
   const providerId = agent.provider ?? agent.id;
   const canChatPrivately = agent.mine === true && agent.visibility !== "org";
+  const accent = safeAccent(agent.color);
+  const progress = agentWorkingProgress(agent, repositoryId);
+  const statusText =
+    status === "working" && Number.isFinite(progress)
+      ? `${AGENT_STATUS_TITLE[status]} · ${Math.round(progress)}%`
+      : (AGENT_STATUS_TITLE[status] ?? "");
+  return `<div class="agent-spec"${
+    accent === undefined ? "" : ` style="--aspec-accent:${accent}"`
+  }>
+    <div class="aspec-content">
+      ${agentIdentityZone(agent, repositoryId, { status, statusText, providerId })}
+      ${agentCurrentWorkZone(agent, repositoryId, {
+        task,
+        taskMessage,
+        taskRepositoryId,
+        canChatPrivately,
+        statusText,
+      })}
+      ${agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId })}
+      ${agentContextZone(agent, repositoryId, { assignments, allChannelsLoaded })}
+    </div>
+  </div>`;
+}
+
+/**
+ * Zone one: who this is.
+ *
+ * Face, name, and the four facts that identify it — state, connection,
+ * ownership, room — on one wrapping line rather than as a strip of bordered
+ * chips repeating what the header already says. The banner it used to sit
+ * under was a ninth of the panel carrying nothing; what is left of it is a
+ * wash behind this zone alone.
+ */
+function agentIdentityZone(agent, repositoryId, { status, statusText, providerId }) {
+  const facts = [
+    { text: statusText, dot: status },
+    { text: agentLabelOf(providerId), title: providerId },
+    {
+      text:
+        agent.mine === true
+          ? "Your agent"
+          : `${memberName(agent.userId ?? "")}'s agent`,
+    },
+    {
+      text: `#${repositoryLabel(repositoryId)}`,
+      title: "The channel this panel was opened from",
+    },
+  ].filter((fact) => fact.text !== "");
+  return `<section class="aspec-zone aspec-identity" aria-label="Identity">
+    <span class="aspec-face">${statusAgentFace(agent, 52, repositoryId)}</span>
+    <div class="aspec-identity-id">
+      <h2 title="${esc(agent.name)}">${esc(agent.name)}</h2>
+      <div class="aspec-identity-facts">
+        ${facts
+          .map(
+            (fact, index) =>
+              `${index === 0 ? "" : `<span class="aspec-sep" aria-hidden="true">·</span>`}
+              <span class="aspec-fact"${
+                fact.title === undefined ? "" : ` title="${esc(fact.title)}"`
+              }>${
+                fact.dot === undefined
+                  ? ""
+                  : `<span class="status-dot status-${esc(fact.dot)}"></span>`
+              }${esc(fact.text)}</span>`,
+          )
+          .join("")}
+      </div>
+    </div>
+    ${iconButton("dotsHorizontal", {
+      act: "roster-agent-menu",
+      value: agent.id,
+      title: `More for ${agent.name}`,
+      small: true,
+      cls: "aspec-more",
+    })}
+  </section>`;
+}
+
+/**
+ * Zone two: what it is doing, and the one control that continues it.
+ *
+ * The only tinted surface on the page, because it is the only part of it that
+ * changes on its own. Its height is reserved for the shape it has — a phase
+ * arriving, a percentage moving — so nothing under it slides while a run
+ * narrates itself. The phase line is an ordinary `phase-slot`, so the render
+ * loop's coalescing owns the crossfade exactly as it does in the transcript.
+ */
+function agentCurrentWorkZone(agent, repositoryId, { task, taskMessage, taskRepositoryId, canChatPrivately, statusText }) {
+  const first = agent.name.split(" ")[0];
+  const room = repositoryLabel(repositoryId);
+  // Both readings of this line are "state, and where": running work names its
+  // status, its room and its age; idle names the room it is idle in. The one
+  // slot, the one shape, so a run starting changes the words and nothing else.
+  const phase =
+    task === undefined
+      ? `Nothing running in #${esc(repositoryLabel(repositoryId))}`
+      : esc(
+          [
+            String(task.status ?? "working").replaceAll("_", " "),
+            `#${repositoryLabel(taskRepositoryId)}`,
+            relativeTime(task.submittedAt),
+          ].join(" · "),
+        );
+  // Whatever "carry on with this agent" means for the agent in front of you:
+  // the thread it is narrating, the private chat it answers in, or the room
+  // it is waiting in. There is always one, and it is always the loud one —
+  // the History button that used to be the whole width of the page is a way
+  // of looking at work rather than a way of doing any.
+  const primary =
+    task !== undefined && taskMessage !== undefined
+      ? `<button type="button" class="aspec-action aspec-action-primary"
+          data-act="channel-thread-open" data-value="${esc(taskMessage.id)}">
+          ${icon("chatBubble")}<span>Open thread</span></button>`
+      : canChatPrivately
+        ? `<button type="button" class="aspec-action aspec-action-primary"
+            data-act="agent-panel-tab" data-value="chat">
+            ${icon("chatBubble")}<span>Message ${esc(first)}</span></button>`
+        : // An org agent's whole point is that its work happens where the
+          // team can see it, so there is no private chat to offer and the way
+          // to task it is the channel composer. Closing the profile is what
+          // gets you there, and the handler puts the caret in it.
+          `<button type="button" class="aspec-action aspec-action-primary"
+            data-act="agent-panel-close">
+            ${icon("chatBubble")}<span>Message in #${esc(room)}</span></button>`;
+  return `<section class="aspec-zone aspec-work${
+    task === undefined ? "" : " is-active"
+  }" aria-label="Current work">
+    <div class="aspec-work-copy">
+      <strong class="aspec-work-title" title="${esc(
+        task === undefined
+          ? `Available in #${room} — ${statusText}`
+          : taskSummaryLine(task, taskMessage),
+      )}">${
+        task === undefined
+          ? `Available in #${esc(room)}`
+          : esc(taskSummaryLine(task, taskMessage))
+      }</strong>
+      <span class="aspec-work-phase phase-slot"
+        data-phase-slot="agent-profile:${esc(agent.id)}">${phase}</span>
+    </div>
+    <div class="aspec-work-actions">
+      ${primary}
+      <button type="button" class="aspec-action aspec-action-quiet"
+        data-act="agent-panel-tab" data-value="history">
+        ${icon("history")}<span>History</span></button>
+    </div>
+  </section>`;
+}
+
+/**
+ * Zone three: the four things this agent runs on, two by two.
+ *
+ * Editable in place for the account that pays for it, read-only for everybody
+ * else, and never announced as either — the "Editable" badge that used to sit
+ * beside the heading told a reader what the presence of a dropdown already
+ * tells them.
+ *
+ * The one zone that does not read `repositoryId`: what is set here is set on
+ * the assignment the caller has already resolved for this room, and the four
+ * zones keep one signature so the profile reads as four of the same thing.
+ */
+function agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId }) {
   const models = agent.mine === true ? providerModelOptions(providerId) : [];
   const efforts =
     agent.mine === true
       ? providerEffortOptions(providerId, currentAssignment.model ?? "")
       : [];
   const optionsNote = agent.mine === true ? providerOptionsNote(providerId) : "";
+  // A deployment that could not answer at all is a fault, not a caveat, and a
+  // fault stays on the page. Everything else — Codex naming the local cache
+  // its model list comes from — is one press away behind the "i".
+  const blocking =
+    agent.mine === true && state.providerOptions[providerId] === null;
   // No list is not the same as no choice. Codex reports models from a cache
   // its CLI writes locally, and where that file is absent the server sends an
   // empty list beside `allowCustomModel` — which this field used to answer
@@ -5456,202 +5711,160 @@ function agentSpec(agent, repositoryId) {
   // fields each carrying a label, a control and a whispered line of prose
   // made the settings block twice as tall to repeat what the labels said, and
   // the captions were the first thing to be ellipsised anyway.
-  const field = (label, control, hint = "") => `<label class="aspec-field"${
+  const field = (label, control, hint = "", aside = "") => `<label class="aspec-field"${
     hint === "" ? "" : ` title="${esc(hint)}"`
   }>
-    <span class="aspec-field-label">${esc(label)}</span>
+    <span class="aspec-field-label">${esc(label)}${aside}</span>
     ${control}
   </label>`;
   const modelValue = String(currentAssignment.model ?? "").trim();
   const effortValue = String(currentAssignment.effort ?? "").trim();
-  const settings = `<div class="aspec-settings" data-agent="${esc(agent.id)}">
-    ${field(
-      "Model",
-      agent.mine === true && models.length > 0
-        ? nativeSelect(
-            "channel-agent-model",
-            models,
-            modelValue,
-            "Model in this channel",
-          )
-        : customModel
-          ? miniEditable(
+  return `<section class="aspec-zone aspec-runtime" aria-label="Runtime">
+    <div class="aspec-settings" data-agent="${esc(agent.id)}">
+      ${field(
+        "Model",
+        agent.mine === true && models.length > 0
+          ? nativeSelect(
               "channel-agent-model",
+              models,
               modelValue,
-              "Model",
-              "Nothing lists what this account may use, so a model id " +
-                "typed here is passed through as given; empty runs the " +
-                "CLI's own default.",
+              "Model in this channel",
             )
-          : readOnly(modelValue),
-      "Used for work in this channel",
-    )}
-    ${field(
-      "Reasoning",
-      agent.mine === true && efforts.length > 0
-        ? nativeSelect(
-            "channel-agent-effort",
-            efforts,
-            effortValue,
-            "Reasoning effort in this channel",
-          )
-        : readOnly(effortValue || "Provider default"),
-      "Thinking depth for new work",
-    )}
-    ${field(
-      "Visibility",
-      agent.mine === true
-        ? nativeSelect(
-            "channel-agent-visibility",
-            [
-              { value: "personal", label: "Only me" },
-              { value: "org", label: "Anyone in the org" },
-            ],
-            visibility,
-            "Who may use this agent",
-          )
-        : readOnly(visibility === "org" ? "Organization" : "Owner only"),
-      "Applies in every channel",
-    )}
-    ${field("Connection", readOnly(agentLabelOf(providerId)), providerId)}
-  </div>`;
-  // Same doorway as a history row: the live assignment opens its thread.
-  // Idle ("Available for new work") stays inert — there is nowhere to go.
-  const openCurrentTask =
-    taskMessage === undefined
-      ? ""
-      : ` role="button" tabindex="0" data-act="channel-thread-open"
-          data-value="${esc(taskMessage.id)}" title="Open this task's thread"`;
-  const accent = safeAccent(agent.color);
+          : customModel
+            ? miniEditable(
+                "channel-agent-model",
+                modelValue,
+                "Model",
+                "Nothing lists what this account may use, so a model id " +
+                  "typed here is passed through as given; empty runs the " +
+                  "CLI's own default.",
+              )
+            : readOnly(modelValue),
+        "Used for work in this channel",
+        optionsNote === "" && !blocking
+          ? ""
+          : specInfoButton(
+              "agent-provider-note",
+              agent.id,
+              `What ${agentLabelOf(providerId)} reports about models`,
+            ),
+      )}
+      ${field(
+        "Reasoning",
+        agent.mine === true && efforts.length > 0
+          ? nativeSelect(
+              "channel-agent-effort",
+              efforts,
+              effortValue,
+              "Reasoning effort in this channel",
+            )
+          : readOnly(effortValue || "Provider default"),
+        "Thinking depth for new work",
+      )}
+      ${field("Connection", readOnly(agentLabelOf(providerId)), providerId)}
+      ${field(
+        "Visibility",
+        agent.mine === true
+          ? nativeSelect(
+              "channel-agent-visibility",
+              [
+                { value: "personal", label: "Only me" },
+                { value: "org", label: "Anyone in the org" },
+              ],
+              visibility,
+              "Who may use this agent",
+            )
+          : readOnly(visibility === "org" ? "Organization" : "Owner only"),
+        "Applies in every channel",
+      )}
+    </div>
+    ${
+      blocking
+        ? `<p class="aspec-alert" role="status">${icon("info")}<span>${esc(
+            providerOptionsNote(providerId),
+          )}</span></p>`
+        : ""
+    }
+  </section>`;
+}
+
+/**
+ * Zone four: where it works and what it has spent, side by side.
+ *
+ * Two facts of one line each. As two bordered panes stacked with headings
+ * they cost a third of the panel to say "#KUMI" and "34%".
+ */
+function agentContextZone(agent, repositoryId, { assignments, allChannelsLoaded }) {
   const channels =
     assignments.length > 0
       ? assignments.map(({ repository }) => repository)
       : [{ id: repositoryId }];
-  const progress = agentWorkingProgress(agent, repositoryId);
-  const statusText =
-    status === "working" && Number.isFinite(progress)
-      ? `${AGENT_STATUS_TITLE[status]} · ${Math.round(progress)}%`
-      : (AGENT_STATUS_TITLE[status] ?? "");
-  return `<div class="agent-spec"${
-    accent === undefined ? "" : ` style="--aspec-accent:${accent}"`
-  }>
-    <div class="aspec-content">
-      <section class="aspec-identity-card">
-        <div class="aspec-banner"></div>
-        <div class="aspec-identity-body">
-          <div class="aspec-identity-head">
-            <span class="aspec-face">${statusAgentFace(agent, 76, repositoryId)}</span>
-            <div class="aspec-identity-id">
-              <h2>${esc(agent.name)}</h2>
-              <div class="aspec-handle">${esc(agentLabelOf(providerId))}</div>
-            </div>
-          </div>
-          <div class="aspec-pills">
-            ${statusText === "" ? "" : specPill(statusText, { dot: status })}
-            ${specPill(`#${repositoryLabel(repositoryId)}`, {
-              title: "The channel this panel was opened from",
-            })}
-            ${specPill(
-              agent.mine
-                ? "Your agent"
-                : `${memberName(agent.userId ?? "")}'s agent`,
-            )}
-          </div>
-          <div class="aspec-actions">
-            ${
-              canChatPrivately
-                ? `<button type="button" class="aspec-action aspec-action-primary"
-                    data-act="agent-panel-tab" data-value="chat">
-                    ${icon("chatBubble")}<span>Message</span></button>`
-                : ""
-            }
-            <button type="button" class="aspec-action" data-act="agent-panel-tab"
-              data-value="history">${icon("history")}<span>History</span></button>
-          </div>
-        </div>
-      </section>
-
-      <div class="aspec-main">
-        <section class="aspec-pane aspec-activity-pane">
-          <h3 class="aspec-pane-title">Activity</h3>
-          <div class="aspec-activity${task === undefined ? "" : " is-active"}"${openCurrentTask}>
-            <span class="aspec-activity-mark">${icon(
-              task === undefined ? "check" : "robot",
-            )}</span>
-            <span class="aspec-activity-copy">
-              <strong>${
-                task === undefined
-                  ? "Available for new work"
-                  : esc(taskSummaryLine(task, taskMessage))
-              }</strong>
-              <span>${
-                task === undefined
-                  ? `Nothing running in #${esc(repositoryLabel(repositoryId))}`
-                  : `${esc(String(task.status ?? "working").replaceAll("_", " "))} · #${esc(
-                      repositoryLabel(taskRepositoryId),
-                    )} · ${esc(relativeTime(task.submittedAt))}`
-              }</span>
-            </span>
-          </div>
-        </section>
-
-        <section class="aspec-pane aspec-settings-pane">
-          <div class="aspec-pane-head">
-            <h3 class="aspec-pane-title">Agent settings</h3>
-            ${agent.mine === true ? `<span class="aspec-editing">Editable</span>` : ""}
-          </div>
-          ${settings}
-          ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
-        </section>
-
-        <div class="aspec-bottom-grid">
-          <section class="aspec-pane aspec-channels-pane">
-            <div class="aspec-pane-head">
-              <h3 class="aspec-pane-title">Channels</h3>
-              <span class="aspec-count">${channels.length}</span>
-            </div>
-            <div class="aspec-channel-list">${channels
-              .map((repository) =>
-                specPill(`#${repositoryLabel(repository.id)}`, {
-                  title: repository.id,
-                }),
-              )
-              .join("")}</div>
-            ${
-              allChannelsLoaded
-                ? ""
-                : `<div class="aspec-note">Checking remaining channels…</div>`
-            }
-          </section>
-
-          <section class="aspec-pane aspec-usage-section">
-            <div class="aspec-pane-head">
-              <h3 class="aspec-pane-title">Usage</h3>
-              ${
-                // Every agent's card can ask again, not only one's own. The
-                // owner rides along so the second reading is of the same
-                // account the first one was of.
-                iconButton("refresh", {
-                  act: "agent-usage-refresh",
-                  // The same vendor id the card reads its figures under, so
-                  // asking again refills the entry that is on screen.
-                  value: usageProviderId(agent),
-                  title: "Check usage again",
-                  small: true,
-                  data: {
-                    ...(usageOwner(agent) === undefined
-                      ? {}
-                      : { owner: usageOwner(agent) }),
-                  },
-                })
-              }
-            </div>
-            <div class="aspec-usage-card">${agentUsage(agent)}</div>
-          </section>
-        </div>
+  // The room the panel was opened from is always named, because it is the one
+  // the rest of the page is about. One more fits beside it at the width this
+  // panel is read at; the rest are a press away rather than clipped by an
+  // overflow rule that would hide them without saying so.
+  const elsewhere = channels.filter((repository) => repository.id !== repositoryId);
+  const named = elsewhere.slice(0, 1);
+  const extra = elsewhere.slice(1);
+  return `<section class="aspec-zone aspec-context" aria-label="Context">
+    <div class="aspec-context-cell">
+      <div class="aspec-cell-head">
+        <span class="aspec-cell-label">Channels</span>
+        <span class="aspec-count">${channels.length}</span>
       </div>
+      <div class="aspec-channel-list">
+        ${specPill(`#${repositoryLabel(repositoryId)}`, {
+          title: "The channel this panel was opened from",
+        })}
+        ${named
+          .map((repository) =>
+            specPill(`#${repositoryLabel(repository.id)}`, {
+              title: repository.id,
+            }),
+          )
+          .join("")}
+        ${
+          extra.length === 0
+            ? ""
+            : `<button type="button" class="aspec-pill aspec-pill-more"
+                data-act="agent-channels-more" data-value="${esc(agent.id)}"
+                aria-haspopup="dialog"
+                title="${esc(
+                  extra.map((repository) => `#${repositoryLabel(repository.id)}`).join(", "),
+                )}">+${extra.length} more</button>`
+        }
+      </div>
+      ${
+        allChannelsLoaded
+          ? ""
+          : `<div class="aspec-note">Checking remaining channels…</div>`
+      }
     </div>
-  </div>`;
+    <div class="aspec-context-cell">
+      <div class="aspec-cell-head">
+        <span class="aspec-cell-label">Usage</span>
+        ${
+          // Every agent's card can ask again, not only one's own. The owner
+          // rides along so the second reading is of the same account the
+          // first one was of.
+          iconButton("refresh", {
+            act: "agent-usage-refresh",
+            // The same vendor id the card reads its figures under, so asking
+            // again refills the entry that is on screen.
+            value: usageProviderId(agent),
+            title: "Check usage again",
+            small: true,
+            data: {
+              ...(usageOwner(agent) === undefined
+                ? {}
+                : { owner: usageOwner(agent) }),
+            },
+          })
+        }
+      </div>
+      <div class="aspec-usage-card">${agentUsage(agent)}</div>
+    </div>
+  </section>`;
 }
 
 function agentPanel() {
@@ -5718,19 +5931,27 @@ function agentPanel() {
       ${panelClose("agent-panel-close", "Close agent panel (Esc)")}
     </header>
     ${
-      tab === "chat"
-        ? // Progress and transcript share one row, as they do in `chatPanel`.
-          // `.thread-panel` is a three-row grid and the middle row is the one
-          // that stretches: left as siblings, a visible progress bar would take
-          // the stretch and the transcript would stop scrolling — but only
-          // while a task was running, which is exactly when it is being read.
-          `<div style="display:grid;grid-template-rows:auto 1fr;min-height:0">
-            ${chatProgress(agent)}
-            ${chatThread(agent)}
-          </div>`
-        : tab === "history"
-          ? agentHistory(agent, repositoryId)
-          : agentSpec(agent, repositoryId)
+      // One wrapper, named by which view it holds. Profile and history are two
+      // states of the same surface rather than two panels, so a swap between
+      // them is a change of this element's contents and nothing else: the
+      // shell, its width, its grip and its header all stay exactly where they
+      // are. `data-agent-view` is what `agent-panel-tab` reads to know a real
+      // swap happened — a poll tick redraws the same view and plays nothing.
+      `<div class="agent-panel-view" data-agent-view="${esc(tab)}">${
+        tab === "chat"
+          ? // Progress and transcript share one row, as they do in `chatPanel`.
+            // `.thread-panel` is a three-row grid and the middle row is the one
+            // that stretches: left as siblings, a visible progress bar would take
+            // the stretch and the transcript would stop scrolling — but only
+            // while a task was running, which is exactly when it is being read.
+            `<div style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+              ${chatProgress(agent)}
+              ${chatThread(agent)}
+            </div>`
+          : tab === "history"
+            ? agentHistory(agent, repositoryId)
+            : agentSpec(agent, repositoryId)
+      }</div>`
     }
     ${
       // The composer belongs to the private chat and nothing else. Under a

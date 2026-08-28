@@ -103,6 +103,44 @@ test("a running task carries one signal, and a stopped one carries none", async 
   );
   assert.match(list, /finished\s*\? ""/u, "an ended thread shows no live state");
   assert.doesNotMatch(list, /text-sweep/u);
+
+  // The agent profile is the one place the same running task is described
+  // three times over — as a face, as a work zone and as a row in its own
+  // history — so it is the easiest place to end up with three rhythms for
+  // one thing. The face keeps the sweep. The work zone states the phase in a
+  // reserved slot and holds still; its history rows never move at all.
+  const work = /\n\.agent-spec \.aspec-work \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(work, undefined, "the profile should still say what is running");
+  assert.doesNotMatch(work ?? "", /animation/u);
+  const active =
+    /\n\.agent-spec \.aspec-work\.is-active \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(active, undefined, "running work should still be marked");
+  assert.doesNotMatch(active ?? "", /animation/u);
+  // Reserved, so the one thing that does change — the phase — changes without
+  // moving the settings under it.
+  assert.match(work ?? "", /min-height: 56px;/u);
+  assert.match(active ?? "", /min-height: 72px;/u);
+  // And it is the transcript's own slot, not a second phase mechanism.
+  const spec = chats.slice(
+    chats.indexOf("function agentCurrentWorkZone("),
+    chats.indexOf("function agentRuntimeZone("),
+  );
+  assert.match(spec, /class="aspec-work-phase phase-slot"/u);
+  assert.match(spec, /data-phase-slot="agent-profile:\$\{esc\(agent\.id\)\}"/u);
+
+  // A history is a list of things that have already happened, and the rows
+  // that have not are still queued or running somewhere else. None of them
+  // move — least of all on a keystroke in the search box above them.
+  const row = /\n\.agent-history-row \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(row ?? "", /animation: none;/u);
+  const historyStart = chats.indexOf("function agentHistoryRow(");
+  const history = chats.slice(
+    historyStart,
+    chats.indexOf("function agentHistory(agent, repositoryId)", historyStart),
+  );
+  // The face was a second sweep per running row, on top of the one the panel
+  // header already carries for the same agent.
+  assert.doesNotMatch(history, /statusAgentFace/u);
 });
 
 test("a phase changes in place, once, however many arrive at once", async () => {
