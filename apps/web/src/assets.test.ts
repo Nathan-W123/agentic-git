@@ -1835,6 +1835,46 @@ test("agent settings sign in first, but can fall back to a credential", async ()
   assert.match(source, /Use a credential instead/u);
 });
 
+test("connect buttons show a busy state until the server answers or a modal opens", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const chat = await publicFile("chat.js");
+  const css = await publicFile("styles.css");
+
+  assert.match(app, /const providerConnecting = new Set\(\)/u);
+  assert.match(app, /state\.providerConnecting = providerConnecting/u);
+  assert.match(agents, /providerConnecting\?\.add\(providerId\)/u);
+  assert.match(agents, /providerConnecting\?\.delete\(providerId\)/u);
+  assert.match(agents, /providerConnecting\?\.add\("github"\)/u);
+  assert.match(agents, /providerConnecting\?\.delete\("github"\)/u);
+
+  const agentsCard = app.slice(
+    app.indexOf("function agentsCard()"),
+    app.indexOf("function commitAgentRename"),
+  );
+  assert.match(agentsCard, /providerConnecting\?\.has\(agent\.id\)/u);
+  assert.match(agentsCard, /connecting/u);
+  assert.match(agentsCard, /disabled/u);
+  assert.match(agentsCard, /aria-busy="true"/u);
+
+  const githubCard = app.slice(
+    app.indexOf("function githubCard()"),
+    app.indexOf("function agentsCard()"),
+  );
+  assert.match(githubCard, /providerConnecting\?\.has\("github"\)/u);
+  assert.match(githubCard, /connecting/u);
+
+  const composer = chat.slice(
+    chat.indexOf("export function chatComposer"),
+    chat.indexOf("export function chatPanel"),
+  );
+  assert.match(composer, /providerConnecting\?\.has\(agent\.id\)/u);
+  assert.match(composer, /connecting/u);
+
+  assert.match(css, /\.btn\.connecting \{/u);
+  assert.match(css, /animation: pulse 2\.4s ease-in-out infinite/u);
+});
+
 test("adding another agent always begins with a provider choice", async () => {
   const app = await publicFile("app.js");
   const agents = await publicFile("screen-agents.js");

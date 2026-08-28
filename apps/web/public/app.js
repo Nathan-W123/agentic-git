@@ -2153,6 +2153,16 @@ function githubCard() {
   }
   const broken = github?.credential?.unusableReason;
   const connected = github?.connected === true;
+  const canConnect = !connected || broken !== undefined;
+  const connecting =
+    canConnect && state.providerConnecting?.has("github") === true;
+  const githubLabel = connecting
+    ? "Connecting…"
+    : broken
+      ? "Reconnect"
+      : connected
+        ? "Disconnect"
+        : "Connect";
   return `<section class="card">
     <div class="panel-head"><div><h3>GitHub</h3></div></div>
     <div class="set-row">
@@ -2164,10 +2174,10 @@ function githubCard() {
         }</div>
       </span>
       <span class="sr-ctl">
-        <button class="btn btn-sm" data-act="${
+        <button class="btn btn-sm${connecting ? " connecting" : ""}" data-act="${
           connected && !broken ? "github-disconnect" : "github-connect"
-        }">
-          ${broken ? "Reconnect" : connected ? "Disconnect" : "Connect"}
+        }"${connecting ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"' : ""}>
+          ${githubLabel}
         </button>
       </span>
     </div>
@@ -2284,15 +2294,26 @@ function agentsCard() {
                       ? `<button type="button" class="btn btn-sm"
                           data-act="agent-disconnect"
                           data-value="${esc(agent.id)}">Disconnect</button>`
-                      : `<button type="button" class="btn btn-sm btn-primary"
-                          data-act="agent-connect"
-                          data-value="${esc(agent.id)}">${
-                            agent.needsReconnect
+                      : (() => {
+                          const connecting =
+                            state.providerConnecting?.has(agent.id) === true;
+                          const connectLabel = connecting
+                            ? "Connecting…"
+                            : agent.needsReconnect
                               ? "Reconnect"
                               : agent.hostAccount
                                 ? "Connect yours"
-                                : "Connect"
-                          }</button>`
+                                : "Connect";
+                          return `<button type="button" class="btn btn-sm btn-primary${
+                            connecting ? " connecting" : ""
+                          }"
+                            data-act="agent-connect"
+                            data-value="${esc(agent.id)}"${
+                            connecting
+                              ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"'
+                              : ""
+                          }>${connectLabel}</button>`;
+                        })()
                   }
                 </span>
               </div>`;
@@ -3094,6 +3115,18 @@ const previewsWatched = new Set();
  */
 const previewsStarting = new Set();
 state.previewsStarting = previewsStarting;
+
+/**
+ * A Connect press that has not yet heard back from the server, or that has
+ * not yet opened its modal. Without something visible the button reads as
+ * dead weight for the seconds a sign-in start can take.
+ *
+ * Shared through `state`, because the buttons that have to look busy are
+ * drawn in `agentsCard`, `githubCard`, and `chatComposer`, which cannot
+ * import this file back.
+ */
+const providerConnecting = new Set();
+state.providerConnecting = providerConnecting;
 
 /**
  * Follows a preview that is up but not answering yet.

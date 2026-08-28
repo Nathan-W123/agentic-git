@@ -574,6 +574,21 @@ svg.ui-icon {
   border-color: var(--accent-dim);
 }
 
+/* Connect pressed, server not yet answered. The sign-in start can take a few
+   seconds and a button that reads as untouched gets pressed again. Breathing
+   rather than spinning: it is saying "still working", not "wait for me". */
+.btn.connecting {
+  cursor: progress;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn.connecting {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 .btn-ghost {
   background: transparent;
   border-color: transparent;

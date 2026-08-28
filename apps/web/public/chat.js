@@ -240,12 +240,19 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
   // says so and stays out of the way rather than accepting a message and
   // failing it into a toast a moment later.
   if (agent !== undefined && agent.connected !== true) {
+    const connecting = state.providerConnecting?.has(agent.id) === true;
     return `<div class="composer composer-blocked">
       <p>${esc(agent.name)} is not connected, so it cannot be messaged yet.</p>
-      <button class="btn btn-sm" data-act="agent-connect"
-        data-value="${esc(agent.id)}">Connect ${esc(
-          agent.name.split(" ")[0],
-        )}</button>
+      <button class="btn btn-sm${connecting ? " connecting" : ""}" data-act="agent-connect"
+        data-value="${esc(agent.id)}"${
+          connecting
+            ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"'
+            : ""
+        }>${
+          connecting
+            ? "Connecting…"
+            : `Connect ${esc(agent.name.split(" ")[0])}`
+        }</button>
     </div>`;
   }
   // The same two helpers the channel roster's pickers read. They used to be
