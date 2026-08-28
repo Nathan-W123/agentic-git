@@ -1900,6 +1900,22 @@ export function showModal({
       }
       const values = {};
       for (const field of $$("[name]", dialog)) {
+        // A radio group is several fields sharing one name, and only the
+        // checked one is the answer. Assigning every match in turn left the
+        // last in document order winning whatever the person picked — so a
+        // three-way choice always returned its bottom option, and a dialog
+        // that compared the result against the current value decided nothing
+        // had changed and did nothing at all.
+        if (field.type === "radio") {
+          if (field.checked) {
+            values[field.name] = field.value;
+          } else if (!(field.name in values)) {
+            // Recorded so a group with nothing checked resolves to a field
+            // that exists and is empty, rather than to `undefined`.
+            values[field.name] = "";
+          }
+          continue;
+        }
         values[field.name] =
           field.type === "checkbox" ? field.checked : field.value;
       }
