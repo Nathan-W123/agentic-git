@@ -50,39 +50,6 @@ const PUBLIC_FILES = [
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
 
-/**
- * The marketing site, served from `public/site` at hand-picked URLs.
- *
- * A separate allowlist rather than more PUBLIC_FILES entries because the two
- * sets obey different rules. The dashboard's files are keyed by bare name and
- * fed through `withDigestedNames`, which could never hold a second
- * `index.html`; these are registered straight into the finished asset map
- * under explicit URL keys, after digesting, so the marketing front page can
- * own `/` while the dashboard's document keeps its `/index.html` key — which
- * is also what `serveStatic` falls back to for the extensionless client
- * routes under `/app`. The page keys are extensionless on the same precedent
- * as `/authorize`: they are addresses people see, not files.
- *
- * The Motion bundle is served under `/vendor/` deliberately: it is a minified
- * UMD build, and the tests that hold every served dashboard module to
- * ES-module rules skip the vendor prefix. Its licence ships beside it — MIT
- * requires the notice to travel with the code.
- */
-const SITE_FILES = [
-  ["index.html", "/", "text/html; charset=utf-8"],
-  ["pricing.html", "/pricing", "text/html; charset=utf-8"],
-  // No marketing download page, deliberately. The dashboard already serves a
-  // functional one at /download — real per-OS installer links that a test
-  // holds in agreement with the release workflow — and the marketing draft
-  // duplicated that address with placeholders. The site's nav links to
-  // /download and gets the page that actually downloads things; the two
-  // colliding here is exactly what the shadow check below exists to catch.
-  ["site.css", "/site.css", "text/css; charset=utf-8"],
-  ["site.js", "/site.js", "text/javascript; charset=utf-8"],
-  ["site-boot.js", "/site-boot.js", "text/javascript; charset=utf-8"],
-  ["motion.js", "/vendor/motion/motion.js", "text/javascript; charset=utf-8"],
-  ["motion.LICENSE.md", "/vendor/motion/LICENSE.md", "text/plain; charset=utf-8"],
-] as const;
 
 /**
  * Content types for the vendored Monaco tree. Anything not listed here is
@@ -318,24 +285,5 @@ export async function loadStaticAssets(
       // dashboard: the editor falls back to the single-user save path.
     }
   }
-  // Last, so the collision check below sees everything already registered: a
-  // marketing file must never silently shadow a dashboard asset, a digested
-  // alias, or a vendor file. Shadowing `/index.html` in particular would
-  // replace the application with its own advertisement.
-  const siteRoot = path.resolve(root, "site");
-  await Promise.all(
-    SITE_FILES.map(async ([name, key, contentType]) => {
-      const filePath = path.resolve(siteRoot, name);
-      if (path.dirname(filePath) !== siteRoot) {
-        throw new Error(`Site asset escapes the site directory: ${name}`);
-      }
-      if (assets.has(key)) {
-        throw new Error(
-          `Site asset ${name} would shadow the asset already at ${key}`,
-        );
-      }
-      assets.set(key, { body: await readFile(filePath), contentType });
-    }),
-  );
   return assets;
 }
