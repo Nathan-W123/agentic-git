@@ -14051,6 +14051,12 @@ dialog.modal[open]::backdrop {
   padding-top: 12vh;
 }
 
+/* Search opens from the top bar, so its results continue directly beneath
+   that bar instead of appearing as a detached modal halfway down the screen. */
+.qs-layer-search {
+  padding-top: calc(48px + var(--safe-top));
+}
+
 .qs-card {
   position: relative;
   width: min(560px, calc(100vw - 32px));

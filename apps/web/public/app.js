@@ -4959,7 +4959,7 @@ function openSwitcher() {
   switcherIndex = 0;
   const layer = document.createElement("div");
   layer.id = "qs-layer";
-  layer.className = "qs-layer";
+  layer.className = "qs-layer qs-layer-search";
   layer.innerHTML = `<div class="pop-scrim" data-act="switch-close"></div>
     <div class="qs-card" role="dialog" aria-label="Go to">
       <input class="qs-input" data-act="switch-input" type="text"
