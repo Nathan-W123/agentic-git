@@ -11222,6 +11222,22 @@ dialog.modal[open]::backdrop {
   }
 }
 
+/* The rail's copy is dormant while the sidebar crown is present. A
+   multi-workspace collapse takes that crown to zero width, so the persistent
+   rail reveals this control and leaves a labelled way to expand the panel. */
+.channel-rail-collapse {
+  display: none;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+}
+
+.channel-rail-collapse svg {
+  width: 18px;
+  height: 18px;
+}
+
 /* The desktop collapse leaves a real navigation rail behind. Channel links
    and the profile menu keep their icons; search, roster detail and labels fold
    away. The brand fades out and the collapse control takes the crown on the
@@ -11230,6 +11246,10 @@ dialog.modal[open]::backdrop {
    than as four things that happen to be near each other. Phones use the
    full-width drawer below, so none of these compact-rail rules apply there. */
 @media (min-width: 601px) {
+  .chats-shell.chan-collapsed .channel-rail-collapse {
+    display: inline-grid;
+  }
+
   .chats-shell.chan-collapsed > .chan-sidebar {
     width: 0;
     /* Folded to nothing, and its hairline with it. A border is drawn whatever

@@ -1065,23 +1065,31 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
     chats.indexOf("function chanCrown"),
     chats.indexOf("function chanSidebar"),
   );
+  const rail = chats.slice(
+    chats.indexOf("function workspaceRail"),
+    chats.indexOf("function channelRail"),
+  );
   const header = chats.slice(
     chats.indexOf("function conversationHeader"),
     chats.indexOf("function threadParticipants"),
   );
 
-  // The control belongs to the crown, which stands in the navigation's own
-  // width in both states — so it neither moves nor multiplies when the
-  // sidebar folds. There is exactly one of it in the screen; the rail's copy
-  // of the same button, beside it and drawn with the same glyph, is gone. The
-  // sidebar keeps only the phone button that opens the off-canvas drawer.
+  // The crown owns the desktop control while the sidebar is open. In a
+  // multi-workspace layout that whole panel becomes zero-width when folded,
+  // so a synchronized copy in the persistent rail is revealed as the way
+  // back. A single-workspace layout has no rail and keeps the crown itself at
+  // icon width; the phone keeps its separate off-canvas drawer button.
   assert.match(crown, /class="chan-crown workspace-sidebar-header"/u);
   assert.match(crown, /data-act="chan-collapse-toggle"/u);
+  assert.match(rail, /class="icon-btn channel-rail-collapse"/u);
+  assert.match(rail, /data-act="chan-collapse-toggle"/u);
+  assert.match(rail, /aria-pressed="\$\{state\.chanCollapsed === true\}"/u);
+  assert.match(rail, /aria-label="\$\{fold\}"/u);
   assert.match(sidebar, /\$\{chanCrown\(activeRepositoryId\)\}/u);
   assert.equal(
     chats.split('data-act="chan-collapse-toggle"').length - 1,
-    1,
-    "one collapse control, in one place, in both states",
+    2,
+    "the crown and persistent workspace rail share the collapse action",
   );
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
@@ -1133,6 +1141,18 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
     css,
     /\.chats-shell\.chan-collapsed > \.chan-sidebar \{\s*width: 0;/u,
   );
+  assert.match(
+    css,
+    /\.channel-rail-collapse \{\s*display: none;[\s\S]{0,160}width: 40px;[\s\S]{0,80}height: 40px;/u,
+  );
+  assert.match(
+    css,
+    /@media \(min-width: 601px\) \{\s*\.chats-shell\.chan-collapsed \.channel-rail-collapse \{\s*display: inline-grid;/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.no-rail\.chan-collapsed > \.chan-sidebar \{\s*width: var\(--rail-w\);/u,
+  );
   assert.doesNotMatch(
     css,
     /\.chats-shell\.chan-collapsed[^}]*\.channel-rail[^}]*display: none;/u,
@@ -1176,7 +1196,10 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
   );
   assert.match(collapseAction, /classList\.toggle\(\s*"chan-collapsed"/u);
   assert.match(collapseAction, /persist\("ag\.chanCollapsed"/u);
+  assert.match(collapseAction, /querySelectorAll\('\[data-act="chan-collapse-toggle"\]'\)/u);
   assert.match(collapseAction, /setAttribute\("aria-pressed"/u);
+  assert.match(collapseAction, /setAttribute\("aria-label", label\)/u);
+  assert.match(collapseAction, /setAttribute\("title", label\)/u);
   assert.doesNotMatch(collapseAction, /\brender\(\)/u);
   assert.match(
     css,
