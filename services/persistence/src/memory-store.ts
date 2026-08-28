@@ -2436,6 +2436,22 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   /**
+   * Muting is per repository, not per sub-channel.
+   *
+   * Its own key rather than {@link channelReadKey}'s, because that one gained
+   * a channel when sub-channels landed and this did not: the interface takes
+   * no channel here, and the SQL backends key `channel_mutes` on
+   * `(repository_id, user_id)` alone. Sharing the helper compiled only while
+   * the two shapes agreed, and the fix that silences the arity error by
+   * passing `#general` is worse than the error — `listMutedChannels` splits
+   * this key into exactly two parts, so a three-part one reads the channel id
+   * as the owner, matches nobody, and drops every mute from the list.
+   */
+  private channelMuteKey(repositoryId: string, userId: string): string {
+    return `${repositoryId}\0${userId}`;
+  }
+
+  /**
    * The `#general` id every writer that names no channel falls back to.
    *
    * Derived from the repository id rather than looked up, matching the shape
@@ -3271,7 +3287,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     userId: string,
     muted: boolean,
   ): Promise<void> {
-    const key = this.channelReadKey(repositoryId, userId);
+    const key = this.channelMuteKey(repositoryId, userId);
     if (muted) {
       this.channelMutes.set(key, new Date().toISOString());
     } else {
