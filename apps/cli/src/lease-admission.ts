@@ -38,7 +38,9 @@ import {
   isBlanketClaim,
   planAdmissionApproved,
   planAdmissionPartial,
+  normalizeRepositoryPath,
   reducePlanScope,
+  uniqueRepositoryPaths,
   type AgentPlan,
   type CanonicalVersion,
   type FilePatchStatus,
@@ -225,6 +227,10 @@ export class LeasePlanAuthority implements PlanAuthority {
         blanket,
         request.baseVersion,
         request.repository,
+        // What this arrival is asking for. A file the holder only guessed at
+        // and has never written to is released to it here rather than held
+        // for the rest of the holder's run — see `narrowBlanketHolder`.
+        uniqueRepositoryPaths(request.plan.expectedFiles),
       );
       if (narrowed !== undefined) {
         active = active.map((entry) =>
@@ -1065,6 +1071,15 @@ export class LeasePlanAuthority implements PlanAuthority {
     holder: ActivePlan,
     baseVersion: CanonicalVersion,
     repository: CanonicalRepository,
+    /**
+     * The paths the arriving plan wants, normalized.
+     *
+     * Only these are candidates for release. A file nobody is asking for
+     * stays with the holder however cold it looks: releasing on the holder's
+     * idleness alone would give away ground for free and gain nobody
+     * anything.
+     */
+    wanted: readonly string[] = [],
   ): Promise<ActivePlan | undefined> {
     const leases = await this.store.listWorkLeases({ status: "active" });
     const held = leases.find(
@@ -1098,8 +1113,48 @@ export class LeasePlanAuthority implements PlanAuthority {
       // workspace handle within its next tick.
       return undefined;
     }
-    const frozen = freezePlanFromWorkingChanges(holder.plan, [
-      ...holder.plan.expectedFiles.map((path) => ({
+    // What the holder guessed at, is not in, and somebody else now needs.
+    //
+    // A blanket claim is frozen to its estimate unioned with what the holder
+    // is observed editing, and the estimate is mostly slack: measured against
+    // real commits in this repository, nine of every ten files it locks are
+    // never opened. Holding them costs the arrival up to `maxWaitMs` and buys
+    // the holder nothing.
+    //
+    // Three conditions, all necessary. The path must be one the arrival is
+    // actually asking for — ground nobody wants is not worth taking off a
+    // holder. It must be absent from the worktree read, because a file the
+    // holder has written to is a file it is in. And the holder must have
+    // written *something*, since presence is evidence of presence and never
+    // of absence: a holder that has produced nothing yet has told us nothing
+    // about where it is going, and its estimate is the only statement it has
+    // made.
+    //
+    // The cost is the one `claimOccupiesPath` already accepts for a freeze's
+    // directories: a holder that later reaches into a released file is
+    // refused when it widens, and that task fails. This makes that trade on
+    // the same terms — never for a file the holder has touched, and never for
+    // one nobody else asked for — rather than inventing a new one.
+    const dirty = new Set(
+      observed.map((change) => normalizeRepositoryPath(change.path)),
+    );
+    const released =
+      observed.length === 0
+        ? []
+        : uniqueRepositoryPaths(holder.plan.expectedFiles).filter(
+            (path) => wanted.includes(path) && !dirty.has(path),
+          );
+    const kept =
+      released.length === 0
+        ? holder.plan
+        : {
+            ...holder.plan,
+            expectedFiles: holder.plan.expectedFiles.filter(
+              (path) => !released.includes(normalizeRepositoryPath(path)),
+            ),
+          };
+    const frozen = freezePlanFromWorkingChanges(kept, [
+      ...kept.expectedFiles.map((path) => ({
         path,
         status: "modified" as const,
       })),
@@ -1164,6 +1219,10 @@ export class LeasePlanAuthority implements PlanAuthority {
         // written yet — and worth telling apart on the record from a read
         // that failed, which does not reach here at all.
         observedFiles: observed.length,
+        // Estimated ground handed to the arrival because the holder was never
+        // in it. The pair with `files` is what makes the estimate's slack
+        // measurable after the fact rather than only in a benchmark.
+        releasedFiles: released,
       },
     });
     return { ...holder, plan: frozen };

@@ -31,6 +31,7 @@ import {
   drainInFlightWork,
   reapStrandedWork,
   recoverCoordinationState,
+  type StrandedWorkReport,
 } from "@coord/cli/recovery";
 import { rollbackCanonical } from "@coord/cli/rollback";
 import { workerOperations } from "@coord/cli/worker-operations";
@@ -983,6 +984,31 @@ async function serve(
     // does what the waiter would have done on its next poll, for the waiters
     // that are no longer there.
     await store.expireApprovals(sweptAt).catch(() => undefined);
+    // Work that is claimed by nothing. `reapStrandedWork` was written to be a
+    // sweep a serving process repeats — its own doc says so — and it was
+    // imported here and never called, so the only pass over it was the one at
+    // boot. A task abandoned after boot therefore stayed `claimed` forever:
+    // lease expiry cannot see it, because the lease it would expire was
+    // already settled, and the resume below reads only `submitted`.
+    //
+    // Guarded by `CLAIMED_GRACE_MS` inside, so a claim this process made
+    // moments ago is never mistaken for debris.
+    const stranded = await reapStrandedWork(store).catch(
+      (error: unknown): StrandedWorkReport => {
+        console.error(
+          `Stranded-work sweep failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return { requeuedTasks: [], warnings: [] };
+      },
+    );
+    for (const taskId of stranded.requeuedTasks) {
+      console.log(`Requeued stranded task ${taskId}`);
+    }
+    for (const warning of stranded.warnings) {
+      console.warn(warning);
+    }
     const pending = await store.listSubmittedTasks({ status: "submitted" });
     const repositories = new Map(
       pending.map((task) => [

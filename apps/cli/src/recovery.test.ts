@@ -13,7 +13,11 @@ import { RepositoryService } from "@coord/repository-service";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
 import { CoordinatorProject } from "./project.js";
-import { reapStrandedWork, recoverCoordinationState } from "./recovery.js";
+import {
+  drainInFlightWork,
+  reapStrandedWork,
+  recoverCoordinationState,
+} from "./recovery.js";
 
 /**
  * Crash recovery is exercised the way a crash actually leaves things: state
@@ -530,4 +534,96 @@ test("the stranded sweep leaves a claim with a live lease behind it alone", asyn
   });
   assert.deepEqual(report.requeuedTasks, []);
   assert.equal((await store.listSubmittedTasks()).at(0)?.status, "claimed");
+});
+
+test("a restart only promises a restart to work it actually requeued", async () => {
+  // The bug this pins: releasing a lease and requeueing its task are two
+  // different events, and the drain treated them as one. `finishWorkLease`
+  // answers for the *lease*; it only returns the task to the queue when the
+  // row is `claimed`. A task that had moved on — `open` because a
+  // conversational turn had landed, `paused` because a person stopped it —
+  // had its lease released and was then told in its thread that it would
+  // "start again shortly". Nothing was ever going to start it: no sweep reads
+  // those statuses and the queue resume reads only `submitted`.
+  for (const [label, advance, expected] of [
+    ["claimed", async () => {}, "submitted"],
+    [
+      "open",
+      async (store: InMemoryCoordinationStore, taskId: string) => {
+        await store.openSubmittedTask(taskId);
+      },
+      "open",
+    ],
+  ] as const) {
+    const store = new InMemoryCoordinationStore();
+    await store.saveRepository({
+      id: "repo_drain",
+      path: "/tmp/repo_drain.git",
+      branch: "main",
+    });
+    const user = await store.createUser({
+      email: `drain-${label}@example.com`,
+      displayName: "Drain",
+      passwordDigest: "digest",
+    });
+    // The name the web control plane's in-process runner registers under,
+    // which is the only worker the drain hands work back for.
+    const worker = await store.registerWorker({
+      userId: user.id,
+      organizationId: DEFAULT_ORGANIZATION_ID,
+      name: "in-process-runner",
+      adapters: ["generic-cli"],
+      version: "1",
+    });
+    const task = await store.submitTask({
+      repositoryId: "repo_drain",
+      projectId: DEFAULT_PROJECT_ID,
+      objective: "an agent is on this right now",
+      agentId: "generic-cli",
+      validationCommands: [],
+      submittedBy: user.id,
+    });
+    const thread = await store.appendChannelMessage({
+      repositoryId: "repo_drain",
+      projectId: DEFAULT_PROJECT_ID,
+      kind: "user",
+      authorId: user.id,
+      content: "@claude do the thing",
+    });
+    await store.setChannelMessageTask("repo_drain", thread.id, task.id);
+    assert.ok(
+      await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: "0".repeat(40),
+        ttlMs: 5 * 60 * 1000,
+      }),
+      `${label}: the runner should have taken the task`,
+    );
+    await advance(store, task.id);
+
+    const requeued = await drainInFlightWork(store);
+
+    const after = (await store.listSubmittedTasks()).at(0)?.status;
+    assert.equal(after, expected, label);
+    const [root] = await store.listChannelMessages("repo_drain", user.id);
+    const notices = (root?.replies ?? []).filter(
+      (reply) => reply.kind === "system",
+    );
+    if (expected === "submitted") {
+      // Genuinely queued again, so the thread is told and the queue resume —
+      // which reads `submitted` and nothing else — will find it.
+      assert.deepEqual(requeued, [task.id], label);
+      assert.equal(notices.length, 1, label);
+      assert.match(notices[0]?.content ?? "", /start again shortly/u, label);
+    } else {
+      // Left where it was, so nothing is claimed on its behalf. Silence is
+      // the honest answer: from the reader's side nothing about it changed.
+      assert.deepEqual(requeued, [], label);
+      assert.deepEqual(
+        notices.map((notice) => notice.content),
+        [],
+        `${label}: a task that was not requeued was promised a restart`,
+      );
+    }
+  }
 });

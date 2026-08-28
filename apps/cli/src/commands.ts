@@ -189,19 +189,47 @@ export async function releaseLocalRunnerLeases(
   }
   const requeued: string[] = [];
   const at = new Date().toISOString();
-  for (const lease of await store.listWorkLeases({
+  const leases = await store.listWorkLeases({
     workerId: worker.id,
     status: "active",
-  })) {
+  });
+  if (leases.length === 0) {
+    return requeued;
+  }
+  for (const lease of leases) {
     // A lease already past its expiry is refused by the store — expiry is its
     // own transition — and the sweep that expires it requeues the task the
     // same way. Either path ends with the task queued, so a refusal here is
     // not a failure.
-    if (await store.finishWorkLease(lease.id, "released", at, detail)) {
-      requeued.push(lease.taskId);
+    if (!(await store.finishWorkLease(lease.id, "released", at, detail))) {
+      continue;
     }
+    // Releasing the lease is not the same event as requeueing the task, and
+    // this used to treat them as one. `finishWorkLease` returns true for the
+    // *lease* transition, but only returns the task to the queue when its row
+    // is `claimed` — so a task that had moved on to `open` (a conversational
+    // turn had landed) or `paused` (somebody stopped it) had its lease
+    // released, was reported here as requeued, and was then told in its
+    // thread that it would "start again shortly". Nothing was ever going to
+    // start it: no sweep looks at those statuses and the queue resume reads
+    // only `submitted`. The thread's last word was a promise the control
+    // plane had no way to keep.
+    //
+    // So the task is read back, and only a row that actually reached the
+    // queue is reported. A task that stayed where it was is left to whatever
+    // owns that state — a person, for a pause; the next message, for an open
+    // conversation — and its thread is told nothing, which is correct: from
+    // the reader's side nothing about it changed.
+    requeued.push(lease.taskId);
   }
-  return requeued;
+  // Read back once rather than per lease: a shutdown path should not pay a
+  // query per task to find out what it just did.
+  const queued = new Set(
+    (await store.listSubmittedTasks({ status: "submitted" })).map(
+      (task) => task.id,
+    ),
+  );
+  return requeued.filter((taskId) => queued.has(taskId));
 }
 
 /**
