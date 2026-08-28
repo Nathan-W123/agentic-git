@@ -13,6 +13,21 @@
  * `lease_lost` and the worker cancels its own session — which is the kill
  * switch that path has always had. Callers do both; whichever applies acts.
  */
+/**
+ * Whether a stop is meant to be undone.
+ *
+ * Public because it is what {@link TaskCancellationRegistry.intentFor}
+ * answers, and a run checkpoint reading that answer has to be able to name
+ * the two cases it is choosing between.
+ */
+export type StopIntent = "cancel" | "pause";
+
+/** A recorded stop: why, and which kind. */
+interface RecordedStop {
+  reason: string;
+  intent: StopIntent;
+}
+
 export class TaskCancellationRegistry {
   /** Live aborts, registered while a task has a session to reach. */
   private readonly handlers = new Map<
@@ -25,7 +40,7 @@ export class TaskCancellationRegistry {
    * or while it waits, blocked, between waves — is still honoured. Bounded
    * because entries for tasks no run was holding are never read back.
    */
-  private readonly reasons = new Map<string, string>();
+  private readonly reasons = new Map<string, RecordedStop>();
 
   private static readonly MAX_REASONS = 512;
 
@@ -36,7 +51,29 @@ export class TaskCancellationRegistry {
    * mid-run" and "removed from the queue" read differently in a channel.
    */
   public async cancel(taskId: string, reason: string): Promise<boolean> {
-    this.reasons.set(taskId, reason);
+    return await this.stop(taskId, reason, "cancel");
+  }
+
+  /**
+   * The same stop, meant to be undone.
+   *
+   * Identical mechanics — record the reason, abort the live session — and a
+   * different intent, which is the only thing the run's checkpoints read
+   * differently: a paused task keeps its conversation session and workspace
+   * so resuming continues the work, where a cancelled one tears both down.
+   * Sharing the machinery is deliberate; two registries would be two places
+   * for a stop to be lost.
+   */
+  public async pause(taskId: string, reason: string): Promise<boolean> {
+    return await this.stop(taskId, reason, "pause");
+  }
+
+  private async stop(
+    taskId: string,
+    reason: string,
+    intent: StopIntent,
+  ): Promise<boolean> {
+    this.reasons.set(taskId, { reason, intent });
     for (const key of this.reasons.keys()) {
       if (this.reasons.size <= TaskCancellationRegistry.MAX_REASONS) {
         break;
@@ -47,7 +84,7 @@ export class TaskCancellationRegistry {
     if (abort === undefined) {
       return false;
     }
-    // The handler's own failure must not fail the cancel: the reason is
+    // The handler's own failure must not fail the stop: the reason is
     // recorded either way, and the run's checkpoints will still honour it.
     await abort(reason).catch(() => undefined);
     return true;
@@ -55,7 +92,18 @@ export class TaskCancellationRegistry {
 
   /** Why this task was stopped, or nothing if nobody stopped it. */
   public reasonFor(taskId: string): string | undefined {
-    return this.reasons.get(taskId);
+    return this.reasons.get(taskId)?.reason;
+  }
+
+  /**
+   * Whether this task was stopped for good or only for now.
+   *
+   * Separate from {@link reasonFor} so the reason keeps its old shape — a
+   * plain string every existing caller reads — while a checkpoint that has
+   * to choose between teardown and keeping the work can ask.
+   */
+  public intentFor(taskId: string): StopIntent | undefined {
+    return this.reasons.get(taskId)?.intent;
   }
 
   /**

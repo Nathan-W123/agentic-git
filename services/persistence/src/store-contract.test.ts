@@ -877,6 +877,110 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: paused work is unleasable, resumable, and abandonable`, async () => {
+    // Pause has to live in the status for the same reason the hold does:
+    // every lease query selects on `submitted`, so anything short of a real
+    // status change leaves the "stopped" task free to be picked up by the
+    // next unrelated dispatch in the repository.
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "pauser@example.com",
+        displayName: "Pauser",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "worker-pause",
+        adapters: ["codex"],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const submit = async (objective: string) =>
+        await store.submitTask({
+          repositoryId: REPOSITORY.id,
+          objective,
+          agentId: "codex",
+          validationCommands: [],
+        });
+
+      // Queued work pauses.
+      const queued = await submit("tidy the imports");
+      const pausedQueued = await store.pauseSubmittedTask(queued.id);
+      assert.equal(pausedQueued?.status, "paused");
+      // Non-terminal: a paused task has not completed, and saying it did
+      // would put it in everyone's history of finished work.
+      assert.equal(pausedQueued?.completedAt, undefined);
+
+      // The queue cannot see it, even when it is the only task there is,
+      // and not by name either.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          repositoryId: REPOSITORY.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          taskId: queued.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+
+      // Resuming is the test as well as the write, so two presses of play
+      // produce one queued task rather than two runs of the same work.
+      const resumed = await store.resumePausedTask(queued.id);
+      assert.equal(resumed?.status, "submitted");
+      assert.equal(resumed?.claimedAt, undefined);
+      assert.equal(await store.resumePausedTask(queued.id), undefined);
+      assert.equal(await store.resumePausedTask("task_missing"), undefined);
+
+      // Running work pauses too — that is the case the button exists for.
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: "rev_1",
+        ttlMs: 60_000,
+      });
+      assert.equal(leased?.task.id, queued.id);
+      assert.equal((await store.pauseSubmittedTask(queued.id))?.status, "paused");
+
+      // A paused task can still be given up on, which is the one ending it
+      // has left; without it, pausing would be a way to strand work forever.
+      const abandoned = await store.cancelSubmittedTask(queued.id);
+      assert.equal(abandoned.status, "cancelled");
+
+      // Nothing settled is pausable: a pause racing a task's own ending is
+      // answered as "there was nothing to pause", not as an error.
+      assert.equal(await store.pauseSubmittedTask(queued.id), undefined);
+      assert.equal(await store.pauseSubmittedTask("task_missing"), undefined);
+
+      // Nor is a held plan, which is already stopped and waiting on a person.
+      const held = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "rewrite the parser",
+        agentId: "codex",
+        validationCommands: [],
+        planOnly: true,
+      });
+      assert.equal(await store.pauseSubmittedTask(held.id), undefined);
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "planned" })).length,
+        1,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a thread remembers that its ending went elsewhere`, async () => {
     const { store, cleanup } = await backend.open();
     try {

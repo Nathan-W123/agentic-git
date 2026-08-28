@@ -761,6 +761,41 @@ export async function cancelTask(taskId, rerender) {
   }
 }
 
+/**
+ * Pausing and resuming one task, from the thread header that owns it.
+ *
+ * Two thin wrappers rather than one with a flag, because the two say
+ * different things when they are refused: "that task is no longer running"
+ * and "that task is not paused" are the two races this control has, and both
+ * are ordinary — a run can finish in the moment between the render and the
+ * press. The server's own message is what the toast carries.
+ */
+export async function pauseTask(taskId, rerender) {
+  try {
+    await api(`/tasks/${encodeURIComponent(taskId)}/pause`, {
+      method: "POST",
+      body: {},
+    });
+    toast("Task paused", "ok");
+    rerender();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+export async function resumeTask(taskId, rerender) {
+  try {
+    await api(`/tasks/${encodeURIComponent(taskId)}/resume`, {
+      method: "POST",
+      body: {},
+    });
+    toast("Task resumed", "ok");
+    rerender();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 export async function retryTask(taskId, rerender) {
   try {
     await api(`/tasks/${encodeURIComponent(taskId)}/retry`, {

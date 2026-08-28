@@ -852,7 +852,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         `NOT EXISTS (
           SELECT 1 FROM submitted_tasks predecessor
           WHERE predecessor.id = submitted_tasks.after_task_id
-            AND predecessor.status IN ('submitted', 'claimed', 'planned')
+            AND predecessor.status IN ('submitted', 'claimed', 'planned', 'paused')
         )`,
       );
       if (input.taskId !== undefined) {
@@ -2093,7 +2093,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
              AND NOT EXISTS (
                SELECT 1 FROM submitted_tasks predecessor
                WHERE predecessor.id = submitted_tasks.after_task_id
-                 AND predecessor.status IN ('submitted', 'claimed', 'planned')
+                 AND predecessor.status IN ('submitted', 'claimed', 'planned', 'paused')
              )
            ORDER BY submitted_at, rowid`,
         )
@@ -2156,7 +2156,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `UPDATE submitted_tasks
          SET status = 'cancelled', completed_at = ?
-         WHERE id = ? AND status IN ('submitted', 'claimed', 'planned', 'open')`,
+         WHERE id = ? AND status IN ('submitted', 'claimed', 'planned', 'open', 'paused')`,
       )
       .run(completedAt, taskId);
     if (result.changes === 0) {
@@ -2177,6 +2177,45 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw new Error(`Submitted task disappeared after cancellation: ${taskId}`);
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async pauseSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // One statement, so a pause racing the task's own ending loses cleanly:
+    // the row is no longer queued or claimed and nothing is written.
+    const result = this.db
+      .prepare(
+        `UPDATE submitted_tasks SET status = 'paused'
+         WHERE id = ? AND status IN ('submitted', 'claimed')`,
+      )
+      .run(taskId);
+    if (result.changes === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM submitted_tasks WHERE id = ?")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubmittedTask(row);
+  }
+
+  public async resumePausedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const result = this.db
+      .prepare(
+        `UPDATE submitted_tasks
+         SET status = 'submitted', claimed_at = NULL, run_id = NULL
+         WHERE id = ? AND status = 'paused'`,
+      )
+      .run(taskId);
+    if (result.changes === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM submitted_tasks WHERE id = ?")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async releasePlannedTask(

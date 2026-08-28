@@ -556,6 +556,19 @@ export type SubmittedTaskStatus =
    * work and now says so.
    */
   | "planned"
+  /**
+   * Stopped by a person who means to continue it.
+   *
+   * Non-terminal, like `planned`, and for the same reason: no lease query
+   * mentions it, so a paused row cannot be picked up by the next dispatch in
+   * the repository. It differs from `planned` in where it came from — held
+   * work never started, paused work did and is being kept mid-flight, with
+   * its conversation session and workspace retained so resuming continues
+   * rather than restarts. It leaves `paused` only through
+   * {@link CoordinationStore.resumePausedTask} (back to `submitted`) or an
+   * ordinary cancel.
+   */
+  | "paused"
   | "open"
   | "integrated"
   | "failed"
@@ -1695,6 +1708,30 @@ export interface CoordinationStore {
   /** Explicitly returns a claimed or failed task to the pending queue. */
   retrySubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
   cancelSubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
+  /**
+   * Parks live or queued work as `paused`, because a person means to come
+   * back to it.
+   *
+   * The reversible sibling of {@link cancelSubmittedTask}, and guarded the
+   * same way: only work that has not settled can be paused. `planned` and
+   * `open` are excluded deliberately — a held plan and a waiting conversation
+   * are already stopped, and offering to pause them would be offering to do
+   * nothing.
+   *
+   * Returns undefined rather than throwing when the row is not pausable, so
+   * a pause racing a task's own ending is answered as "it already finished"
+   * instead of as an error. Nothing else about the row moves: `completedAt`
+   * stays unset, because a paused task has not completed.
+   */
+  pauseSubmittedTask(taskId: TaskId): Promise<SubmittedTask | undefined>;
+  /**
+   * Puts a `paused` task back in the queue, because a person said continue.
+   *
+   * Modelled on {@link releasePlannedTask}, including its undefined return:
+   * the status test and the write are one step, so two resumes racing produce
+   * one queued task rather than two runs of the same work.
+   */
+  resumePausedTask(taskId: TaskId): Promise<SubmittedTask | undefined>;
   /**
    * Releases a `planned` task into the queue, because a person said go.
    *

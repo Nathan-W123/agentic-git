@@ -194,6 +194,8 @@ import {
   cancelTask,
   connectAgent,
   connectGitHubAccount,
+  pauseTask,
+  resumeTask,
   retryTask,
   startAddAgentFlow,
 } from "./screen-agents.js";
@@ -6392,7 +6394,7 @@ function restoreFocus(saved) {
   }
 }
 
-/** One question for every way of stopping a run — see `task-cancel`. */
+/** The one question in front of ending a run for good — see `task-cancel`. */
 function confirmTaskCancel(taskId) {
   const task = state.tasks.find((entry) => entry.id === taskId);
   return window.confirm(
@@ -9957,22 +9959,45 @@ document.addEventListener("click", (event) => {
       void refreshProviderUsage(value, render, node.dataset.owner);
       return;
     /**
-     * Stopping a run, asked about first.
+     * Stopping a run for good, asked about first.
      *
      * Cancelling ends work that is mid-flight and holding a workspace, and
      * this fired straight through on one click from a plain button sitting
-     * beside Retry. One confirm helper serves every entry point — the agent
-     * detail's button and the thread header's — so the two cannot come to
-     * disagree about how much of a decision this is.
+     * beside Retry. The confirm is what that costs. A thread stops its own
+     * work with the pause below instead — reversible, and so not a decision
+     * worth a dialog — which leaves this the destructive one.
      */
-    case "thread-task-cancel":
     case "task-cancel": {
-      // A thread whose task id is missing renders no control at all, so this
-      // is a belt-and-braces guard rather than a state anybody can reach.
+      // A row whose task id is missing renders no control at all, so this is
+      // a belt-and-braces guard rather than a state anybody can reach.
       if (!value || !confirmTaskCancel(value)) {
         return;
       }
       void cancelTask(value, render);
+      return;
+    }
+    /**
+     * Pausing and resuming, from the thread header.
+     *
+     * No confirm on either half, unlike the cancel above, and that is the
+     * point of them: the question in front of a cancel is owed because the
+     * work is about to be thrown away. Pausing keeps it — the agent stops
+     * where it is, its workspace is kept, and play picks the same work back
+     * up — so asking would be asking about nothing, and asking about nothing
+     * is how people learn to click past the questions that matter.
+     */
+    case "thread-task-pause": {
+      if (!value) {
+        return;
+      }
+      void pauseTask(value, render);
+      return;
+    }
+    case "thread-task-resume": {
+      if (!value) {
+        return;
+      }
+      void resumeTask(value, render);
       return;
     }
     // Only work that has actually stopped. Retry was offered whatever state a

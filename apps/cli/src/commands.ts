@@ -952,6 +952,11 @@ const CANCELLED_WAS: Record<string, CancelledTaskReport["was"]> = {
   claimed: "running",
   submitted: "queued",
   planned: "held",
+  // Paused work is stopped and waiting on the person who paused it, which is
+  // exactly what "held" already means here. Named so an explicit "cancel this
+  // task" can still reach work somebody parked and then thought better of;
+  // sweeps skip it below, beside `open`, for the same reason they skip that.
+  paused: "held",
   open: "waiting",
 };
 
@@ -998,7 +1003,9 @@ export async function cancelTasks(
     // An open conversation is not burning anything — it is a thread waiting
     // for its person to reply — so a sweep leaves it alone. Ending one is a
     // deliberate act on that one task, which is the explicit-ids shape.
-    if (task.status === "open") {
+    // Paused work is the same: somebody deliberately parked it, and a sweep
+    // of "stop what is running" has no business discarding it.
+    if (task.status === "open" || task.status === "paused") {
       return false;
     }
     return (
@@ -1053,6 +1060,171 @@ export async function cancelTasks(
       agentId: task.agentId,
       objective: task.objective,
       was: CANCELLED_WAS[task.status] ?? "queued",
+    });
+  }
+  return reports;
+}
+
+export interface PauseTasksInput {
+  repositoryId: string;
+  projectId?: string;
+  /** Pause exactly these tasks. */
+  taskIds: string[];
+  /** Why, in the pauser's words — recorded on the lease and the audit. */
+  reason: string;
+  /** Who asked, for the audit trail. */
+  actorId?: string;
+  /** The live-run bridge; absent on a bare CLI, where nothing is running. */
+  cancellations?: TaskCancellationRegistry;
+}
+
+export interface PausedTaskReport {
+  id: string;
+  agentId: string;
+  objective: string;
+  /** What the task was doing when it was paused. */
+  was: "running" | "queued";
+}
+
+/**
+ * Stops work in a way that can be undone.
+ *
+ * The same four steps as {@link cancelTasks}, with one changed and one
+ * removed, and the difference in both is "this is coming back":
+ *
+ * 1. the row goes `paused` rather than `cancelled` — non-terminal, and no
+ *    lease query mentions it, so nothing can pick the task up meanwhile;
+ * 2. the live session, if this process holds one, is aborted through the
+ *    {@link TaskCancellationRegistry}'s pause — which records the intent as
+ *    well as the reason, so the run's own checkpoints keep the workspace the
+ *    agent was editing instead of destroying it;
+ * 3. the active work lease is released, exactly as a cancel releases it. A
+ *    pause that kept its lease would make one person's pause into every other
+ *    agent's wait, and the lease is re-taken on resume;
+ * 4. a `task_paused` audit event, which is what the channel narrates from.
+ *
+ * There is deliberately no agent-wide or repository-wide sweep here. Stopping
+ * everything is a thing people mean; pausing everything is not, and a sweep
+ * would be a way to park work nobody then remembers to restart.
+ */
+export async function pauseTasks(
+  store: CoordinationStore,
+  input: PauseTasksInput,
+): Promise<PausedTaskReport[]> {
+  const wanted = new Set(input.taskIds);
+  if (wanted.size === 0) {
+    return [];
+  }
+  const candidates = (
+    await store.listSubmittedTasks({
+      repositoryId: input.repositoryId,
+      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+    })
+  ).filter(
+    (task) =>
+      wanted.has(task.id) &&
+      (task.status === "submitted" || task.status === "claimed"),
+  );
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const activeLeases = candidates.some((task) => task.status === "claimed")
+    ? await store.listWorkLeases({
+        repositoryId: input.repositoryId,
+        status: "active",
+      })
+    : [];
+
+  const reports: PausedTaskReport[] = [];
+  for (const task of candidates) {
+    // The store's own status test is the race guard: a task that settled
+    // between the listing and now answers undefined rather than being forced
+    // back out of an ending it already reached.
+    const paused = await store.pauseSubmittedTask(task.id);
+    if (paused === undefined) {
+      continue;
+    }
+    await input.cancellations?.pause(task.id, input.reason);
+    const lease = activeLeases.find(
+      (candidate) => candidate.taskId === task.id,
+    );
+    if (lease !== undefined) {
+      await store.finishWorkLease(
+        lease.id,
+        "released",
+        new Date().toISOString(),
+        input.reason,
+      );
+    }
+    await store.appendAudit(undefined, {
+      type: "task_paused",
+      taskId: task.id,
+      data: {
+        repositoryId: input.repositoryId,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+        reason: input.reason,
+      },
+    });
+    reports.push({
+      id: task.id,
+      agentId: task.agentId,
+      objective: task.objective,
+      was: task.status === "claimed" ? "running" : "queued",
+    });
+  }
+  return reports;
+}
+
+/**
+ * Puts paused work back in the queue.
+ *
+ * Deliberately thin: the row going back to `submitted` is the whole of it,
+ * because that is what makes the task leasable again, and the coordinator
+ * that leases it finds the conversation the pause parked and continues in
+ * the directory the agent was already working in.
+ *
+ * Returns only what it actually resumed, so a second press of play — or a
+ * press against work that was cancelled in the meantime — reports nothing
+ * rather than starting a second run of the same task.
+ */
+export async function resumeTasks(
+  store: CoordinationStore,
+  input: Omit<PauseTasksInput, "cancellations">,
+): Promise<PausedTaskReport[]> {
+  const wanted = new Set(input.taskIds);
+  // Scoped before the write, not after: `resumePausedTask` takes an id alone,
+  // and resuming first and checking the repository second would queue another
+  // tenant's work and then merely decline to mention it.
+  const candidates = (
+    await store.listSubmittedTasks({
+      repositoryId: input.repositoryId,
+      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+    })
+  ).filter((task) => wanted.has(task.id) && task.status === "paused");
+  const reports: PausedTaskReport[] = [];
+  for (const task of candidates) {
+    const taskId = task.id;
+    const resumed = await store.resumePausedTask(taskId);
+    if (resumed === undefined) {
+      continue;
+    }
+    await store.appendAudit(undefined, {
+      type: "task_resumed",
+      taskId,
+      data: {
+        repositoryId: input.repositoryId,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+        reason: input.reason,
+      },
+    });
+    reports.push({
+      id: resumed.id,
+      agentId: resumed.agentId,
+      objective: resumed.objective,
+      was: "queued",
     });
   }
   return reports;
@@ -1660,11 +1832,13 @@ export async function runPendingTasks(
         }
         continue;
       }
-      if (entry.status === "cancelled") {
+      if (entry.status === "cancelled" || entry.status === "paused") {
         // Whoever stopped it already settled the row and released the lease
         // — that is how the run came to notice at all. Writing a completion
-        // here would throw against the terminal row, and re-finishing the
-        // lease is refused as inactive; the run only stops tracking it.
+        // here would throw against the row somebody else moved, and
+        // re-finishing the lease is refused as inactive; the run only stops
+        // tracking it. A pause is counted with the stops because that is
+        // what the run saw: work that ended before it produced anything.
         cancelled += 1;
         leases.delete(entry.task.id);
         continue;

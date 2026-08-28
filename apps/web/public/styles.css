@@ -12415,6 +12415,35 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
+/* Parked work, drawn like the held state it is a cousin of — same wash, same
+   leading edge — because both mean "stopped, and waiting on you". The glyph
+   is what tells them apart at a glance, and it is the same pause mark the
+   thread header's own button carries, so the list and the control agree
+   about what the reader is looking at. */
+.thread-item-paused {
+  background: var(--orange-wash);
+  box-shadow: inset 2px 0 0 var(--orange);
+}
+
+.thread-item-paused:hover {
+  background: var(--orange-wash);
+}
+
+.ti-paused {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  color: var(--orange);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ti-paused svg {
+  width: 11px;
+  height: 11px;
+}
+
 /* The same fact on the channel row the thread hangs off, where a reader who
    never opens the thread still meets it — as one dot beside the reply count,
    not the bordered amber banner that used to take the line underneath. The

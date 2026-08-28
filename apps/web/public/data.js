@@ -1920,7 +1920,10 @@ export function threadTask(entry) {
     (candidate) =>
       conversationId !== undefined &&
       candidate.conversationId === conversationId &&
-      taskIsWorking(candidate),
+      // Paused counts as current for the same reason working does: it is the
+      // turn this thread is on, and it is the one a play button has to name.
+      // Without it the header would offer to resume the completed first turn.
+      (taskIsWorking(candidate) || candidate.status === "paused"),
   );
   if (current !== undefined) {
     return current;
@@ -1942,6 +1945,19 @@ export function threadIsWorking(entry) {
     busyIsLive(taskId, state.agentBusy[taskId], Date.now()) ||
     taskIsWorking(task)
   );
+}
+
+/**
+ * Is this thread's task stopped by somebody who means to come back to it?
+ *
+ * The counterpart of {@link threadIsWorking}, and mutually exclusive with it
+ * by construction: `paused` is not a working status, and no busy frame
+ * survives its task going paused. Read from the task list rather than from a
+ * frame because a pause is durable — it outlives the tab that made it, and
+ * the play button has to still be there on the next reload.
+ */
+export function threadIsPaused(entry) {
+  return threadTask(entry)?.status === "paused";
 }
 
 /**

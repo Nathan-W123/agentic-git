@@ -232,6 +232,9 @@ interface TestRuntime {
     reason: string;
     actorId: string;
   }>;
+  /** Every pause and every resume, so the thread control can be watched. */
+  pauseCalls: Array<{ taskIds: string[]; reason: string; actorId: string }>;
+  resumeCalls: Array<{ taskId: string; actorId: string }>;
 }
 
 /**
@@ -496,6 +499,8 @@ async function startRuntime(
   let rollbackOutcome: { status: string; explanation: string } | undefined;
   const runCalls: TestRuntime["runCalls"] = [];
   const cancelCalls: TestRuntime["cancelCalls"] = [];
+  const pauseCalls: TestRuntime["pauseCalls"] = [];
+  const resumeCalls: TestRuntime["resumeCalls"] = [];
   // Models canonical mirrors independently from persistence. Deleting only
   // the store record must not make this name reusable in the fixture: the
   // production bug was precisely that the mirror survived that deletion.
@@ -862,6 +867,59 @@ async function startRuntime(
       }
       return { cancelled };
     },
+    // The store half of apps/cli's `pauseTasks` / `resumeTasks`, which is
+    // everything the gateway's own behaviour depends on: the row moves to a
+    // status nothing can lease, and moves back.
+    async pauseTasks(input) {
+      pauseCalls.push({
+        taskIds: [...input.taskIds],
+        reason: input.reason,
+        actorId: input.actorId,
+      });
+      const wanted = new Set(input.taskIds);
+      const paused: Array<{
+        id: string;
+        agentId: string;
+        objective: string;
+        was: "running" | "queued";
+      }> = [];
+      for (const task of await store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      })) {
+        if (!wanted.has(task.id)) {
+          continue;
+        }
+        const was = task.status === "claimed" ? "running" : "queued";
+        if ((await store.pauseSubmittedTask(task.id)) === undefined) {
+          continue;
+        }
+        await store.appendAudit(undefined, {
+          type: "task_paused",
+          taskId: task.id,
+          data: { actorId: input.actorId, reason: input.reason },
+        });
+        paused.push({
+          id: task.id,
+          agentId: task.agentId,
+          objective: task.objective,
+          was,
+        });
+      }
+      return { paused };
+    },
+    async resumeTask(input) {
+      resumeCalls.push({ taskId: input.taskId, actorId: input.actorId });
+      const resumed = await store.resumePausedTask(input.taskId);
+      if (resumed === undefined) {
+        return { resumed: false };
+      }
+      await store.appendAudit(undefined, {
+        type: "task_resumed",
+        taskId: input.taskId,
+        data: { actorId: input.actorId },
+      });
+      return { resumed: true };
+    },
     async canonicalDiff(input) {
       canonicalDiffs.push(input);
       return canonicalDiff;
@@ -1092,6 +1150,8 @@ async function startRuntime(
     },
     runCalls,
     cancelCalls,
+    pauseCalls,
+    resumeCalls,
     canonicalDiff,
     canonicalState,
     runFailure,
@@ -14715,6 +14775,141 @@ test("/stop on a task that changed nothing cancels without a rollback", async (t
     before,
     "a task that promoted nothing must not trigger a rollback",
   );
+});
+
+test("pausing a task parks it, and playing it puts the same work back", async (t) => {
+  // The thread header's transport control, end to end. What it must not be
+  // is a cancel wearing a different glyph: the row has to come back, and the
+  // same task has to be the one that runs again.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "pausable");
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rewrite the importer",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+    conversationId: "thread-root",
+  });
+
+  const paused = await owner.request(`/api/v1/tasks/${task.id}/pause`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(paused.status, 200);
+  assert.equal(paused.data.task.status, "paused");
+  assert.deepEqual(
+    runtime.pauseCalls.map((call) => call.taskIds),
+    [[task.id]],
+  );
+  assert.equal(runtime.pauseCalls[0]?.actorId, ownerId);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (entry) => entry.id === task.id,
+    )?.status,
+    "paused",
+  );
+
+  const runsBefore = runtime.runCalls.length;
+  const resumed = await owner.request(`/api/v1/tasks/${task.id}/resume`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(resumed.status, 200);
+  assert.equal(resumed.data.task.status, "submitted");
+  assert.deepEqual(
+    runtime.resumeCalls.map((call) => call.taskId),
+    [task.id],
+  );
+  // Queueing the row is only half of resuming: something has to come and run
+  // it, or play would leave the work sitting exactly as paused as before.
+  await waitFor(
+    async () => runtime.runCalls.length > runsBefore,
+    "resuming did not start the repository's work again",
+  );
+  // The same task, not a new one — resuming must not fork the work.
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).length,
+    1,
+  );
+});
+
+test("pausing finished work is refused, and so is resuming what is not paused", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "unpausable");
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "already done",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: bootstrapped.user.id,
+  });
+
+  // Resuming work that is merely queued would put a play button over
+  // something that is already going to run.
+  const early = await owner.request(`/api/v1/tasks/${task.id}/resume`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(early.status, 409);
+
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  await runtime.store.completeSubmittedTask(task.id, "integrated");
+  const late = await owner.request(`/api/v1/tasks/${task.id}/pause`, {
+    method: "POST",
+    body: {},
+  });
+  // A pause that races the task's own ending is ordinary, and answering 200
+  // would leave a play button standing over work that finished.
+  assert.equal(late.status, 409);
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (entry) => entry.id === task.id,
+    )?.status,
+    "integrated",
+  );
+});
+
+test("pausing somebody else's project is refused like every other task action", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "guarded-pause");
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "not yours",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: bootstrapped.user.id,
+  });
+
+  const stranger = new TestClient(runtime.origin);
+  await registerAccount(runtime.store, stranger, {
+    email: "stranger-pause@example.com",
+    displayName: "Stranger",
+    password: "correct horse battery staple",
+  });
+  const refused = await stranger.request(`/api/v1/tasks/${task.id}/pause`, {
+    method: "POST",
+    body: {},
+  });
+  // The same authorization every task action runs through — a new verb on the
+  // route is a new way in if it is not guarded like the old ones.
+  assert.ok(
+    refused.status === 403 || refused.status === 404,
+    `pausing another tenant's task answered ${refused.status}`,
+  );
+  assert.deepEqual(runtime.pauseCalls, []);
 });
 
 test("'/cancel' in the channel stops the room's work and says so", async (t) => {

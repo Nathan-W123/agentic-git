@@ -722,7 +722,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
             task.repositoryId === input.repositoryId) &&
           (input.projectId === undefined || task.projectId === input.projectId) &&
           (task.afterTaskId === undefined ||
-            !["submitted", "claimed", "planned"].includes(
+            !["submitted", "claimed", "planned", "paused"].includes(
               this.submitted.get(task.afterTaskId)?.status ?? "integrated",
             )) &&
           activeLeases(task.repositoryId) < parallelism,
@@ -1476,7 +1476,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       if (
         stored?.status === "submitted" &&
         (predecessor === undefined ||
-          !["submitted", "claimed", "planned"].includes(predecessor.status))
+          !["submitted", "claimed", "planned", "paused"].includes(predecessor.status))
       ) {
         stored.status = "claimed";
         stored.claimedAt = new Date().toISOString();
@@ -1514,7 +1514,10 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       // Dropping a plan you decided against is the ordinary way one ends.
       task.status !== "planned" &&
       // "That's it, we're done" is exactly how an open conversation ends.
-      task.status !== "open"
+      task.status !== "open" &&
+      // Changing your mind about paused work is abandoning it, not resuming
+      // it: without this a paused task could only ever be un-paused.
+      task.status !== "paused"
     ) {
       throw new Error(
         `Task ${taskId} cannot be cancelled from status ${task.status}`,
@@ -1522,6 +1525,39 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     }
     task.status = "cancelled";
     task.completedAt = new Date().toISOString();
+    return copy(task);
+  }
+
+  public async pauseSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const task = this.submitted.get(taskId);
+    // Only live work pauses. A settled task, a held plan and an open
+    // conversation all answer "nothing to pause" rather than erroring: the
+    // button that sent this may simply have been a frame behind the run.
+    if (
+      task === undefined ||
+      (task.status !== "submitted" && task.status !== "claimed")
+    ) {
+      return undefined;
+    }
+    task.status = "paused";
+    return copy(task);
+  }
+
+  public async resumePausedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const task = this.submitted.get(taskId);
+    if (task === undefined || task.status !== "paused") {
+      return undefined;
+    }
+    task.status = "submitted";
+    // Back to the shape of work nobody has claimed: the resumed turn is
+    // leased afresh, and a stale claim stamp would make it read as running
+    // for however long it waited in the queue.
+    task.claimedAt = undefined;
+    task.runId = undefined;
     return copy(task);
   }
 

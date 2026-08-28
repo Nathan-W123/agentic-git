@@ -25,6 +25,15 @@ export type TaskStatus =
   | "validating"
   | "integrated"
   | "failed"
+  /**
+   * Stopped on purpose, and resumable.
+   *
+   * Not `cancelled`: a paused run is one somebody intends to continue, and
+   * reporting it as cancelled made the thread say the work was thrown away
+   * when the workspace and the agent's session were being kept for it. The
+   * distinction is the whole of what pause buys over stop.
+   */
+  | "paused"
   | "cancelled";
 
 export interface ValidationCommand {
@@ -1283,6 +1292,14 @@ export type AuditEventType =
   | "canonical_changed"
   | "task_failed"
   | "task_cancelled"
+  /**
+   * Work stopped by somebody who means to continue it, and the moment it
+   * was continued. A pair, and deliberately not `task_cancelled` /
+   * `task_submitted`: the channel narrates from these, and a pause narrated
+   * as a cancellation tells a reader their work is gone.
+   */
+  | "task_paused"
+  | "task_resumed"
   /**
    * One task's landed work was put back. Recorded against the *reverted*
    * task, not the revert's own, so anything reconstructing what that task

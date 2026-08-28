@@ -82,7 +82,9 @@ api,
   taskBelongsToAgent,
   taskProgress,
   threadAwaitsGoAhead,
+  threadIsPaused,
   threadIsWorking,
+  threadTask,
   threadTitle,
   threadTitleReply,
   typingOn,
@@ -2216,10 +2218,17 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
       <span class="ctl-copy">
         <span class="ctl-summary-main">
           <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
-            threadAwaitsGoAhead(entry)
-              ? `<span class="ctl-held" aria-hidden="true"></span>
+            threadIsPaused(entry)
+              ? // A thread somebody parked reads, from the room, exactly like
+                // one nobody has looked at yet: no dots, no ending, nothing.
+                // The same dot the hold uses, because both mean the thread is
+                // stopped until this reader does something about it.
+                `<span class="ctl-held" aria-hidden="true"></span>
+          <span class="sr-only">Paused</span>`
+              : threadAwaitsGoAhead(entry)
+                ? `<span class="ctl-held" aria-hidden="true"></span>
           <span class="sr-only">Waiting for your go-ahead</span>`
-              : ""
+                : ""
           }${
             // Beside the count rather than under it: a phase line that comes
             // and goes with the run took a second row of the message with it,
@@ -4984,18 +4993,24 @@ function threadListPanel(repositoryId) {
   const summaries = threads.map((entry) => {
     const working = threadIsWorking(entry);
     const waiting = threadAwaitsGoAhead(entry);
+    const paused = threadIsPaused(entry);
     const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+    // Paused work is emphatically not over — it is waiting on the person who
+    // parked it — so it stays in the live half of the list where they will
+    // find it again. Without this it fell into "Completed" the moment its
+    // first turn had landed, which is where paused work goes to be forgotten.
     const ended =
       !working &&
       !waiting &&
+      !paused &&
       (["integrated", "failed", "cancelled"].includes(task?.status) ||
         (entry.replies ?? []).some(isThreadEnding));
-    return { entry, working, waiting, ended };
+    return { entry, working, waiting, paused, ended };
   });
   const active = summaries.filter((summary) => !summary.ended);
   const ended = summaries.filter((summary) => summary.ended);
   const manageable = canManageRepository(repositoryId);
-  const renderThread = ({ entry, working, waiting }, finished = false) => {
+  const renderThread = ({ entry, working, waiting, paused }, finished = false) => {
     const replies = planTranscriptReplies(entry);
     const titled = threadTitleReply(entry);
     const count = replies.filter(
@@ -5034,16 +5049,18 @@ function threadListPanel(repositoryId) {
     const title = threadTitle(entry);
     const status = working
       ? threadActivityLabel(entry)
-      : waiting
-        ? "Waiting for you"
-        : finished
-          ? "Completed"
-          : "Pending";
+      : paused
+        ? "Paused"
+        : waiting
+          ? "Waiting for you"
+          : finished
+            ? "Completed"
+            : "Pending";
     const said = threadSaidCount(count);
     const updated = relativeTime(lastActivity(entry));
     const context = `${status} — ${title} — started by ${creator.name}, ${said}, updated ${updated}`;
     return `<div class="thread-item-row">
-      <button type="button" class="thread-item${finished ? " thread-item-ended" : ""}${!finished && working ? " thread-item-active" : ""}${!finished && waiting ? " thread-item-held" : ""}${!finished && !working && !waiting ? " thread-item-pending" : ""}"
+      <button type="button" class="thread-item${finished ? " thread-item-ended" : ""}${!finished && working ? " thread-item-active" : ""}${!finished && !working && paused ? " thread-item-paused" : ""}${!finished && !working && !paused && waiting ? " thread-item-held" : ""}${!finished && !working && !paused && !waiting ? " thread-item-pending" : ""}"
         title="${esc(context)}"
         aria-label="${esc(finished ? `Open completed thread: ${title}. Started by ${creator.name}, ${said}, updated ${updated}.` : `Open thread: ${title}. ${status}. Started by ${creator.name}, ${said}, updated ${updated}.`)}"
         data-act="channel-thread-open" data-value="${esc(entry.id)}">
@@ -5057,9 +5074,11 @@ function threadListPanel(repositoryId) {
                 : working
                   ? `<span class="ti-activity phase-slot"
                       data-phase-slot="thread-item:${esc(entry.id)}">${esc(status)}</span>`
-                  : waiting
-                    ? `<span class="ti-held">Waiting for you</span>`
-                    : `<span class="ti-pending">Pending</span>`
+                  : paused
+                    ? `<span class="ti-paused">${icon("pause")}Paused</span>`
+                    : waiting
+                      ? `<span class="ti-held">Waiting for you</span>`
+                      : `<span class="ti-pending">Pending</span>`
             }
             <span class="ti-count">${esc(said)}</span>
             <span class="ti-time">${esc(updated)}</span>
@@ -5306,6 +5325,9 @@ const TASK_ICON = {
   awaiting_approval: "helpCircle",
   // A conversation between turns: the last turn landed, more may come.
   open: "dotsHorizontal",
+  // Stopped on purpose, and coming back — the same mark the thread header's
+  // own button carries, so the two places agree about what parked work is.
+  paused: "pause",
 };
 
 /** Statuses that no longer need attention in the history list. */
@@ -5348,6 +5370,8 @@ function historyStatusLabel(status) {
       return "Failed";
     case "cancelled":
       return "Cancelled";
+    case "paused":
+      return "Paused";
     case "awaiting_approval":
       return "Waiting";
     case "open":
@@ -5366,6 +5390,10 @@ function historyStatusTone(status) {
       return "bad";
     case "cancelled":
       return "muted";
+    // Amber, like the go-ahead hold: both mean the work has stopped and is
+    // waiting on this reader, which is the one thing worth colouring for.
+    case "paused":
+      return "warn";
     case "awaiting_approval":
       return "warn";
     default:
@@ -6593,6 +6621,52 @@ function primaryConversation(repositoryId) {
   return mainChatConversation(repositoryId);
 }
 
+/**
+ * The thread header's one control over the run it is watching: pause, or play.
+ *
+ * This was a cross, and a cross in a header full of crosses meant one thing
+ * in the two places it appeared — the panel's own close is the other — and
+ * anybody reading quickly had to work out which one closed the thread and
+ * which one killed the work. Worse, the answer was destructive: the cross
+ * ended the task outright, so the safe reading of an ambiguous button was the
+ * expensive one.
+ *
+ * Pause and play instead, because that is what the control now does and
+ * because everybody already knows what those two mean. They are one button in
+ * one place that swaps its face with the state, the way a transport control
+ * has always worked — never both at once, so there is nothing to choose
+ * between and no second cross to mistake for the first. The auditor toggle in
+ * the roster reads the same pair for the same reason.
+ *
+ * No confirm on either. Asking "are you sure?" is what you owe somebody
+ * before you throw their work away; pausing keeps it, and a question in front
+ * of a reversible act only teaches people to click through questions.
+ */
+function threadTaskControl(root) {
+  const task = threadTask(root);
+  const taskId = task?.id ?? root.taskId;
+  // Nothing to act on. A thread whose task the browser has never seen renders
+  // no control rather than a button that would post an empty id.
+  if (taskId === undefined || taskId === null || taskId === "") {
+    return "";
+  }
+  if (threadIsPaused(root)) {
+    return iconButton("play", {
+      act: "thread-task-resume",
+      value: taskId,
+      title: "Resume this task",
+    });
+  }
+  if (!threadIsWorking(root)) {
+    return "";
+  }
+  return iconButton("pause", {
+    act: "thread-task-pause",
+    value: taskId,
+    title: "Pause this task",
+  });
+}
+
 function threadPanel(repositoryId, selectedMessageId) {
   const messageId = selectedMessageId ?? state.activeChannelThread;
   if (messageId === undefined) {
@@ -6636,20 +6710,7 @@ function threadPanel(repositoryId, selectedMessageId) {
       ${panelKind("Thread", "channel-threads-toggle", `thread:${messageId}`)}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
-      ${
-        // Stopping the run, where somebody watching it decides it has gone
-        // wrong. The thread header already owns this thread's task, and there
-        // was no clickable way to stop an agent anywhere in the product —
-        // `/cancel` typed into the composer was the whole of it. The handler
-        // asks first: this ends work that is mid-run and holding a workspace.
-        threadIsWorking(root)
-          ? iconButton("close", {
-              act: "thread-task-cancel",
-              value: root.taskId ?? "",
-              title: "Stop this task",
-            })
-          : ""
-      }
+      ${threadTaskControl(root)}
       ${iconButton("pin", {
         act: "channel-pin",
         value: messageId,

@@ -959,7 +959,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
           `NOT EXISTS (
             SELECT 1 FROM submitted_tasks predecessor
             WHERE predecessor.id = submitted_tasks.after_task_id
-              AND predecessor.status IN ('submitted', 'claimed', 'planned')
+              AND predecessor.status IN ('submitted', 'claimed', 'planned', 'paused')
           )`,
         );
         if (input.taskId !== undefined) {
@@ -2144,7 +2144,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
                AND NOT EXISTS (
                  SELECT 1 FROM submitted_tasks predecessor
                  WHERE predecessor.id = submitted_tasks.after_task_id
-                   AND predecessor.status IN ('submitted', 'claimed', 'planned')
+                   AND predecessor.status IN ('submitted', 'claimed', 'planned', 'paused')
                )
              ORDER BY submitted_at, seq`,
             values,
@@ -2203,7 +2203,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const result = await this.query(
       `UPDATE submitted_tasks
        SET status = 'cancelled', completed_at = $1
-       WHERE id = $2 AND status IN ('submitted', 'claimed', 'planned', 'open')`,
+       WHERE id = $2 AND status IN ('submitted', 'claimed', 'planned', 'open', 'paused')`,
       [completedAt, taskId],
     );
     if ((result.rowCount ?? 0) === 0) {
@@ -2228,6 +2228,33 @@ export class PostgresCoordinationStore implements CoordinationStore {
       );
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async pauseSubmittedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // Returning the row from the UPDATE itself, so the pause and the read of
+    // what was paused cannot straddle another writer.
+    const row = await this.row(
+      `UPDATE submitted_tasks SET status = 'paused'
+       WHERE id = $1 AND status IN ('submitted', 'claimed')
+       RETURNING *`,
+      [taskId],
+    );
+    return row === undefined ? undefined : this.toSubmittedTask(row);
+  }
+
+  public async resumePausedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const row = await this.row(
+      `UPDATE submitted_tasks
+       SET status = 'submitted', claimed_at = NULL, run_id = NULL
+       WHERE id = $1 AND status = 'paused'
+       RETURNING *`,
+      [taskId],
+    );
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async releasePlannedTask(

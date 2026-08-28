@@ -25,6 +25,7 @@ type ThreadLiveness = {
     | ThreadTask
     | undefined;
   threadIsWorking: (entry: { id?: string; taskId?: string }) => boolean;
+  threadIsPaused: (entry: { id?: string; taskId?: string }) => boolean;
 };
 
 async function threadLiveness(): Promise<ThreadLiveness> {
@@ -71,6 +72,39 @@ test("re-tasked thread resolves the active task sharing its conversationId while
 
   data.state.tasks = [task("first-task", "claimed")];
   assert.equal(data.threadTask(thread)?.id, "first-task");
+  assert.equal(data.threadIsWorking(thread), true);
+});
+
+test("a paused conversation turn is the thread's current task, and reads as paused rather than working", async () => {
+  const data = await threadLiveness();
+  data.state.agentBusy = {};
+  // The shape a pause actually leaves behind: the first turn landed long ago,
+  // and the turn somebody parked is the newest one on the same conversation.
+  // Reading the root's own `taskId` would answer about the finished turn and
+  // put a play button over work that is not paused.
+  data.state.tasks = [
+    task("first-task", "integrated", "thread-1"),
+    task("follow-up-task", "paused", "thread-1"),
+  ];
+
+  const thread = { id: "thread-1", taskId: "first-task" };
+  assert.equal(data.threadTask(thread)?.id, "follow-up-task");
+  assert.equal(data.threadIsPaused(thread), true);
+  // Mutually exclusive: a paused thread showing the working dots would be the
+  // room saying an agent is thinking about work it has been told to stop.
+  assert.equal(data.threadIsWorking(thread), false);
+
+  // A stale busy frame must not resurrect it either — the task's own status
+  // is what retires the dots, and paused is not a working status.
+  data.state.agentBusy = {
+    "follow-up-task": { expiresAt: Date.now() + 60_000, at: Date.now() },
+  };
+  assert.equal(data.threadIsWorking(thread), false);
+  assert.equal(data.threadIsPaused(thread), true);
+
+  data.state.agentBusy = {};
+  data.state.tasks = [task("first-task", "claimed", "thread-1")];
+  assert.equal(data.threadIsPaused(thread), false);
   assert.equal(data.threadIsWorking(thread), true);
 });
 
