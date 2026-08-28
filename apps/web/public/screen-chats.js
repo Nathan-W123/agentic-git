@@ -7279,6 +7279,18 @@ export function channelInfoPopoverHtml(repositoryId) {
 
 /* -------------------------------------------------------------- screen ---- */
 
+/**
+ * Before the shell is drawn: close anything pushed past the column ceiling,
+ * and say how many panels the stylesheet should lay out beside the room.
+ *
+ * The header's own buttons — Files, Thread — read the reconciled state to
+ * say whether they are lit, so this runs before any of them is drawn.
+ */
+function reconcileNavigationForPanels() {
+  const panels = keptRightPanels();
+  return phoneLayout() ? 1 : panels.length;
+}
+
 export function renderChats() {
   if (state.repositories.length === 0) {
     return `<div class="chats-shell no-banner"><div class="scroll" style="flex:1"><div class="page">
@@ -7296,15 +7308,7 @@ export function renderChats() {
     </div></div></div>`;
   }
   const repositoryId = activeChannelId();
-  // Before anything else is drawn. Reconciling the column is what closes a
-  // surface pushed past its ceiling, and the header's own buttons — Files,
-  // Thread — read that state to say whether they are lit.
-  //
-  // How many columns end up beside the room is also something the stylesheet
-  // has to know: two or three of them cannot each keep the width a reader
-  // dragged for one, or the conversation they are all about would be squeezed
-  // out of its own screen. A phone draws one however many are being held.
-  const columns = phoneLayout() ? 1 : keptRightPanels().length;
+  const columns = reconcileNavigationForPanels();
 
   const rail = showsChannelRail();
 
