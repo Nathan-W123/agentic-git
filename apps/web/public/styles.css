@@ -6801,7 +6801,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: 2px;
 }
 
 .message-fold-body {
@@ -6818,7 +6818,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   left: 0;
   right: 0;
   bottom: 0;
-  height: 2.4em;
+  height: 2em;
   pointer-events: none;
   background: linear-gradient(
     to bottom,
@@ -6828,6 +6828,11 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 .message-fold-toggle {
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
+  margin-left: -3px;
+  margin-top: -1px;
   border: none;
   background: transparent;
   color: var(--accent);
@@ -6835,10 +6840,20 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   font-weight: 500;
   padding: 0;
   cursor: pointer;
+  text-align: left;
+  text-decoration: none;
 }
 
 .message-fold-toggle:hover {
-  text-decoration: underline;
+  text-decoration: none;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-size: 100% 1px;
+  background-position: 0 calc(100% - 1px);
+  background-repeat: no-repeat;
+}
+
+.cmsg-thread-route:has(.message-fold) .cmsg-thread-link {
+  margin-top: 2px;
 }
 
 .message-fold-toggle:focus-visible {
