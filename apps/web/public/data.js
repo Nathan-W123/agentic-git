@@ -129,6 +129,69 @@ export function messageTooLong(text, target = "channel") {
 }
 
 /**
+ * When a message is long enough to fold away behind a reader control.
+ *
+ * Two thresholds, either of which is enough: a wall of paragraphs, or one
+ * uninterrupted block of text. Short posts stay as they are.
+ */
+export const MESSAGE_FOLD_MIN_BLOCKS = 4;
+export const MESSAGE_FOLD_MIN_CHARS = 800;
+
+/**
+ * Which long messages this browser last left unfolded, keyed by a stable
+ * fold id built where the message is rendered.
+ */
+function rememberedMessageFoldOpen() {
+  try {
+    const saved = JSON.parse(stored("ag.messageFoldOpen", "{}"));
+    return saved !== null && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Whether one message is long enough to fold. */
+export function messageFoldEligible(text) {
+  const raw = String(text ?? "");
+  const blocks = raw
+    .split(/\n{2,}/u)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+  return (
+    blocks.length >= MESSAGE_FOLD_MIN_BLOCKS || raw.length >= MESSAGE_FOLD_MIN_CHARS
+  );
+}
+
+/**
+ * The prefix of a long message shown while it is folded.
+ *
+ * Paragraph boundaries are honoured when there are enough of them; otherwise
+ * the cut is by character count at a word boundary when one is nearby.
+ */
+export function messageFoldClip(text) {
+  const raw = String(text ?? "");
+  const blocks = raw
+    .split(/\n{2,}/u)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+  if (blocks.length >= MESSAGE_FOLD_MIN_BLOCKS) {
+    return blocks.slice(0, MESSAGE_FOLD_MIN_BLOCKS - 1).join("\n\n");
+  }
+  if (raw.length <= MESSAGE_FOLD_MIN_CHARS) {
+    return raw;
+  }
+  const slice = raw.slice(0, MESSAGE_FOLD_MIN_CHARS);
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > MESSAGE_FOLD_MIN_CHARS - 80 ? slice.slice(0, lastSpace) : slice)
+    .trimEnd();
+}
+
+/** Whether a fold id is currently expanded for this reader. */
+export function messageFoldOpen(key) {
+  return state.messageFoldOpen[key] === true;
+}
+
+/**
  * Which of the sidebar's two rosters this browser last left unrolled.
  *
  * Absent, or unreadable, means both: a first visit should show the room, and
@@ -566,6 +629,13 @@ export const state = {
    * halfway through the list. Absent means closed.
    */
   changesOpen: {},
+  /**
+   * Whether a long message is unfolded, keyed by fold id. Absent means folded.
+   *
+   * Remembered in this browser so a poll that rebuilds the transcript does
+   * not collapse a post somebody is halfway through reading.
+   */
+  messageFoldOpen: rememberedMessageFoldOpen(),
   /** A simplified rewrite of one summary, once it has been asked for. */
   simplified: {},
   /** Whether the simple version is the one showing, keyed by reply id. */

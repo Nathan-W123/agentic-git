@@ -7140,6 +7140,58 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   white-space: pre-wrap;
 }
 
+/* A long post, folded behind one control rather than pushing the transcript
+   away. Open state is remembered per message in this browser. */
+.message-fold {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.message-fold-body {
+  width: 100%;
+}
+
+.message-fold:not(.is-open) .message-fold-body {
+  position: relative;
+}
+
+.message-fold:not(.is-open) .message-fold-body::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2.4em;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--surface, var(--bg)) 88%
+  );
+}
+
+.message-fold-toggle {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0;
+  cursor: pointer;
+}
+
+.message-fold-toggle:hover {
+  text-decoration: underline;
+}
+
+.message-fold-toggle:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .cmsg-row .cmsg-actions {
   position: absolute;
   top: -14px;

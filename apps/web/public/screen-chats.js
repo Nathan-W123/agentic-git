@@ -54,6 +54,9 @@ api,
   markChannelRead,
   memberName,
   memberRole,
+  messageFoldClip as clipFoldedMessageText,
+  messageFoldEligible,
+  messageFoldOpen,
   myAgents,
   myAvatar,
   outstandingQuestionsFor,
@@ -2284,6 +2287,32 @@ function messageBodyWithIcons(entry, repositoryId) {
     )}</div></div>`;
 }
 
+/**
+ * Wraps a rendered message body when the source text is long enough to fold.
+ *
+ * The fold id is assigned by the caller so channel, direct, and agent copies
+ * of the same words do not share one another's open state.
+ */
+function messageFoldClip(
+  foldKey,
+  content,
+  renderBody,
+) {
+  const text = String(content ?? "");
+  if (!messageFoldEligible(text)) {
+    return renderBody(text);
+  }
+  const open = messageFoldOpen(foldKey);
+  const shown = open ? text : clipFoldedMessageText(text);
+  return `<div class="message-fold${open ? " is-open" : ""}">
+    <div class="message-fold-body">${renderBody(shown)}</div>
+    <button type="button" class="message-fold-toggle" data-act="message-fold-toggle"
+      data-value="${esc(foldKey)}" aria-expanded="${open}">
+      ${open ? "Show less" : "Show more"}
+    </button>
+  </div>`;
+}
+
 /** Root kinds spoken by an agent rather than a person or the coordinator. */
 const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome"]);
 
@@ -3160,7 +3189,12 @@ function messageRow(
       )}">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
-          : `${messageBodyWithIcons(entry, repositoryId)}${completedReference}`
+          : messageFoldClip(
+              `cmsg:${repositoryId}|${entry.id}`,
+              entry.content,
+              (shown) =>
+                `${messageBodyWithIcons({ ...entry, content: shown }, repositoryId)}${completedReference}`,
+            )
       }</div>
       ${
         // Said plainly, beside a way to try again. The resend re-posts the
@@ -6376,10 +6410,10 @@ function dmPanel() {
                     data-dm-message="${esc(message.id)}">
                   ${directMessageReference(message, messages, name)}
                   <div class="dm-bubble cmsg-text"
-                    data-reveal="dm:${esc(userId)}|msg-${esc(message.id)}">${messageBody(
+                    data-reveal="dm:${esc(userId)}|msg-${esc(message.id)}">${messageFoldClip(
+                    `dm:${userId}|${message.id}`,
                     message.content,
-                    repositoryId,
-                    [],
+                    (shown) => messageBody(shown, repositoryId, []),
                   )}</div>
                   <span class="dm-msg-actions">${iconButton("reply", {
                     act: "dm-reply-quote",

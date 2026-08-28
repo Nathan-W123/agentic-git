@@ -127,6 +127,7 @@ import {
   isDirectMessagePerson,
   memberName,
   memberRole,
+  messageFoldOpen,
   personOnline,
   loadEarlierChannelMessages,
   loadChannelMessage,
@@ -8800,6 +8801,13 @@ document.addEventListener("click", (event) => {
       const details = node?.closest?.("details");
       state.changesOpen[value] =
         details === null || details === undefined ? true : !details.open;
+      return;
+    }
+    case "message-fold-toggle": {
+      const open = !messageFoldOpen(value);
+      state.messageFoldOpen[value] = open;
+      persist("ag.messageFoldOpen", JSON.stringify(state.messageFoldOpen));
+      render();
       return;
     }
     case "chan-collapse-toggle": {

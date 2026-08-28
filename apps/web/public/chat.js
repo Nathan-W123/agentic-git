@@ -15,6 +15,9 @@ import {
   currentUserId,
   currentUserName,
   loadProviderOptions,
+  messageFoldClip as clipFoldedMessageText,
+  messageFoldEligible,
+  messageFoldOpen,
   messageLengthNotice,
   messageTooLong,
   myAvatar,
@@ -40,6 +43,22 @@ import {
 function conversationFor(agentId) {
   state.conversations[agentId] ??= [];
   return state.conversations[agentId];
+}
+
+function messageFoldClip(foldKey, content, renderBody) {
+  const text = String(content ?? "");
+  if (!messageFoldEligible(text)) {
+    return renderBody(text);
+  }
+  const open = messageFoldOpen(foldKey);
+  const shown = open ? text : clipFoldedMessageText(text);
+  return `<div class="message-fold${open ? " is-open" : ""}">
+    <div class="message-fold-body">${renderBody(shown)}</div>
+    <button type="button" class="message-fold-toggle" data-act="message-fold-toggle"
+      data-value="${esc(foldKey)}" aria-expanded="${open}">
+      ${open ? "Show less" : "Show more"}
+    </button>
+  </div>`;
 }
 
 /**
@@ -182,7 +201,11 @@ export function chatThread(agent) {
                 : ""
             }</span>
           </div>`
-    }<div class="msg-text">${esc(entry.content)}</div></div></div>`;
+    }<div class="msg-text">${messageFoldClip(
+      `chat:${agent.id}|${String(entry.at ?? index)}`,
+      entry.content,
+      (shown) => esc(shown),
+    )}</div></div></div>`;
   });
   return `<div class="chat-thread" id="chat-thread">${rows.join("")}</div>`;
 }
