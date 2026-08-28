@@ -1175,19 +1175,33 @@ function declaringHolder(
   });
 }
 
-test("a holder that named the file still takes all of it while there is anything else to grant", () => {
-  // Nothing here is narrower than a path. An agent told to edit a file edits
-  // it wherever it needs to, including lines no index placed, so reading a
-  // limit into that claim would hand the candidate lines the holder will use.
-  // The candidate named a second file, so withholding the contested path is
-  // already an answer and the finer reading below is never reached.
+test("a holder whose footprint cannot be read still takes the whole file", () => {
+  // This test used to state a broader rule: a holder that named a file took
+  // all of it whenever the candidate had anything else to be granted. That was
+  // never a safety rule — `admitWithinFiles` has always read a holder's own
+  // declarations as its footprint when every declared file was contested — it
+  // was an accident of which stage happened to run, and it is the accident the
+  // section at the end of this file removes. What survives is the part that
+  // was doing the protecting: where the holder said nothing a line can be
+  // drawn from, the file is its own, all of it.
+  //
+  // task_b named the file, named no function, and its objective says nothing
+  // about the file's contents. There is no footprint to narrow to, so the
+  // contested path is withheld whole and the candidate keeps only the file
+  // nobody holds — the answer path-level withholding always gave.
   const admission = admit(
     plan("task_a", {
       objective: "render a currency prefix when a price is displayed",
       expectedFiles: ["src/pricing/total.js", "src/format/currency.js"],
       expectedSymbols: ["showPrice"],
     }),
-    [declaringHolder()],
+    [
+      plan("task_b", {
+        objective: "general cleanup",
+        expectedFiles: ["src/pricing/total.js"],
+        expectedSymbols: [],
+      }),
+    ],
     new PlanAdmissionController(),
     placed(),
   );
@@ -1524,4 +1538,244 @@ test("a holder whose objective matches nothing keeps the whole file", () => {
     placed(),
   );
   assert.equal(admission.status, "sequenced");
+});
+
+/**
+ * Splitting a file when only *part* of what the plan named is contested.
+ *
+ * Everything above draws its line inside a file only where *every* file the
+ * plan named is held — that is the one case where withholding paths answers
+ * nothing, so it is the only case the finer reading was ever reached from. One
+ * free file switched all of it off: the contested path went whole to its
+ * holder, the free one to the candidate, and two agents working in different
+ * functions of it were separated by a file boundary neither of them needed.
+ *
+ * Which is backwards. A plan that names one file is the corner; a plan that
+ * names three and collides on one is the ordinary shape of the collision, so
+ * the split was firing everywhere except where it was wanted. The holder is
+ * read here exactly as it is read there — its own declarations, never its
+ * watched ranges, never a claim — and a file whose holders cover every placed
+ * line is put back to being lost whole rather than granted its tail.
+ */
+
+/** Names a contested file and a free one, and a function in each. */
+function mixedCandidate(): AgentPlan {
+  return plan("task_a", {
+    objective: "render a currency prefix when a price is displayed",
+    expectedFiles: ["src/pricing/total.js", "src/format/currency.js"],
+    expectedSymbols: ["formatTotal", "showPrice"],
+  });
+}
+
+test("a contested file is shared even when the plan has a free file to fall back on", () => {
+  // The mixed case, and the one partial admission was reported never to fire
+  // on. Before, task_a was handed currency.js and told to come back for
+  // total.js later; the forty lines of it that task_b actually occupies were
+  // costing it the other hundred.
+  const admission = admit(
+    mixedCandidate(),
+    [declaringHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  // Both paths are granted. Only `orderTotal` — the function the holder
+  // declared — is held back, and `formatTotal` is what the candidate came for.
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/format/currency.js",
+    "file:src/pricing/total.js",
+    "symbol:formatTotal",
+    "symbol:showPrice",
+  ]);
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["symbol:orderTotal"],
+  );
+  assert.deepEqual(admission.deferredResources?.[0]?.locations, [
+    { file: "src/pricing/total.js", startLine: 40, endLine: 80 },
+  ]);
+  assert.deepEqual(admission.deferredResources?.[0]?.heldBy, ["task_b"]);
+});
+
+test("the lease on a shared file is the exact complement of what was withheld", () => {
+  // The invariant, stated as directly as it can be stated from outside: not
+  // one line is both granted to the candidate and withheld from it. The two
+  // sides are computed from a single set of ranges — the lease is the
+  // whole file minus the holder's lines, the withholding is the holder's
+  // lines — so they cannot intersect whatever the split was derived from, and
+  // this is what would notice if that stopped being true.
+  const admission = admit(
+    mixedCandidate(),
+    [declaringHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  const lease = admission.ownershipGrants.find(
+    (entry) =>
+      entry.resourceType === "file" && entry.resourceId === "src/pricing/total.js",
+  );
+  const withheld = (admission.deferredResources ?? [])
+    .flatMap((resource) => resource.locations ?? [])
+    .filter((location) => location.file === "src/pricing/total.js");
+  assert.ok((lease?.ranges ?? []).length > 0, "the shared file was not leased");
+  assert.ok(withheld.length > 0, "nothing was withheld to test against");
+  for (const granted of lease?.ranges ?? []) {
+    for (const held of withheld) {
+      assert.ok(
+        granted.endLine < held.startLine || granted.startLine > held.endLine,
+        `granted ${granted.startLine}-${granted.endLine} overlaps withheld ` +
+          `${held.startLine}-${held.endLine}`,
+      );
+    }
+  }
+  // And the two together account for the whole file: the candidate is not
+  // being quietly refused lines nobody holds.
+  assert.deepEqual(lease?.ranges, [
+    { startLine: 1, endLine: 39 },
+    { startLine: 81, endLine: Number.MAX_SAFE_INTEGER },
+  ]);
+});
+
+test("a holder that occupies every placed line of a shared file keeps it whole", () => {
+  // The illusory split, in the mixed case. The file is nothing but the
+  // holder's function, so what would be "granted" is the space after the last
+  // line anyone can place — permission to append to a file whose every known
+  // line is somebody else's. The file goes back to being lost whole, which is
+  // what it is today, and the candidate still keeps the free one.
+  const admission = admit(
+    mixedCandidate(),
+    [declaringHolder()],
+    new PlanAdmissionController(),
+    {
+      symbolRangesInFile: (file: string) =>
+        file === "src/pricing/total.js"
+          ? [{ name: "orderTotal", startLine: 1, endLine: 80 }]
+          : [],
+    },
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  // `formatTotal` keeps its lease: the candidate declared it in its own right
+  // and nobody else wants it, so losing the file does not lose the symbol.
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/format/currency.js",
+    "symbol:formatTotal",
+    "symbol:showPrice",
+  ]);
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["file:src/pricing/total.js"],
+  );
+});
+
+test("a holder whose claim covers the path takes it whole however it planned", () => {
+  // A claim says what a task is *allowed* to reach, not what it declared, so
+  // it has no lines to withhold — and a frozen claim is added to a file's
+  // holders by `contestedFiles` whether or not conflict scoring found
+  // anything. Reading this holder's declarations as its footprint would hand
+  // the candidate the rest of a file the coordinator has already frozen for
+  // it.
+  const admission = admit(
+    mixedCandidate(),
+    [
+      {
+        ...declaringHolder(),
+        claim: {
+          kind: "frozen" as const,
+          directories: ["src/pricing/"],
+          frozenAt: new Date().toISOString(),
+        },
+      },
+    ],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/format/currency.js",
+    "symbol:formatTotal",
+    "symbol:showPrice",
+  ]);
+  assert.ok(
+    admission.deferredResources?.some(
+      (resource) =>
+        resource.resourceType === "file" &&
+        resource.resourceId === "src/pricing/total.js",
+    ),
+  );
+});
+
+/** src/api/reply.js, whose declarations are named in ordinary English. */
+const REPLY_RANGES: Record<
+  string,
+  { name: string; startLine: number; endLine: number }[]
+> = {
+  "src/api/reply.js": [
+    { name: "responseCache", startLine: 10, endLine: 30 },
+    { name: "listOrders", startLine: 60, endLine: 90 },
+  ],
+};
+
+test("an objective made of ordinary words still locates the holder's function", () => {
+  // Where the split lands rests on reading the holder's objective, and that
+  // reading used to borrow the stop list `estimateScope` uses to pick *files*.
+  // Words are dropped there for being spread evenly over a repository's paths
+  // — "response", "update", "error", "result" — which is true of the
+  // repository and false inside one file: with two declarations, one of them
+  // `responseCache`, the word "response" says exactly which. Borrowed here, it
+  // left "update the response builder" with nothing to match at all, and the
+  // holder took all of reply.js.
+  const admission = admit(
+    plan("task_a", {
+      objective: "paginate the order list",
+      expectedFiles: ["src/api/reply.js", "src/format/currency.js"],
+      expectedSymbols: ["listOrders"],
+    }),
+    [
+      plan("task_b", {
+        objective: "update the response builder",
+        expectedFiles: ["src/api/reply.js"],
+        expectedSymbols: [],
+      }),
+    ],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: (file: string) => REPLY_RANGES[file] ?? [] },
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/api/reply.js",
+    "file:src/format/currency.js",
+    "symbol:listOrders",
+  ]);
+  // The holder's half, and only it: `listOrders` is what the candidate came
+  // for and is never withheld.
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["symbol:responseCache"],
+  );
+  // Its function, plus the room a task that declared nothing is likeliest of
+  // all to write something new into: everything before `responseCache` and
+  // the gap between the two declarations. `listOrders` and its body are not
+  // among them.
+  assert.deepEqual(admission.deferredResources?.[0]?.locations, [
+    { file: "src/api/reply.js", startLine: 10, endLine: 30 },
+    { file: "src/api/reply.js", startLine: 1, endLine: 9 },
+    { file: "src/api/reply.js", startLine: 31, endLine: 59 },
+  ]);
+  const lease = admission.ownershipGrants.find(
+    (entry) =>
+      entry.resourceType === "file" && entry.resourceId === "src/api/reply.js",
+  );
+  assert.deepEqual(lease?.ranges, [
+    { startLine: 60, endLine: Number.MAX_SAFE_INTEGER },
+  ]);
 });

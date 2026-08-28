@@ -783,13 +783,27 @@ export class PlanAdmissionController {
     // it occupies known lines and the candidate really named the path, the
     // contest is over those lines and not over the file, so what is withheld
     // is the holder's own code and the rest of the file is granted.
-    const { whole: lost, partial: shared } = this.partitionContested(
-      input,
-      contested,
+    //
+    // A holder that merely declared the path is read that way only while this
+    // plan has a file of its own that nobody holds. With every declared file
+    // contested the reduced plan is empty whatever this returns, and
+    // `admitWithinFiles` below answers under its own stricter gates — so that
+    // case is left exactly as it shipped.
+    const free = uniqueRepositoryPaths(input.plan.expectedFiles).filter(
+      (file) => !contested.some((entry) => entry.resourceId === file),
     );
+    const {
+      whole: lost,
+      partial: shared,
+      occupied,
+    } = this.partitionContested(input, contested, free.length > 0);
+    // The holders' side of the same split. Without it their leases would still
+    // say the whole file, and ownership would refuse the very remainder this
+    // decision just carved out.
     const narrowed = this.occupancy(
       input,
       new Map(shared.map((entry) => [entry.file, entry.ranges])),
+      occupied,
     );
     // No contested file is not the end of it: what collides may be finer than
     // a file, and often is — two plans naming one symbol in a file only one of
@@ -1160,11 +1174,42 @@ export class PlanAdmissionController {
    * exactly the shape `splitChangeSet` already divides a granted file's patch
    * by, so the sub-file grant is enforced by machinery that was already there
    * and already tested against real `git apply`.
+   *
+   * "Occupies known lines" used to mean one thing only: the holder reached the
+   * file through a grounded symbol referent, so it never named the path and
+   * its claim is those lines. A holder that *named* the path fell straight
+   * through to lost — and since both agents naming one file is the ordinary
+   * collision, the mixed case (this plan names five files, one of them
+   * contested) got no line-level split at all, while the all-contested case
+   * did, through {@link admitWithinFiles}. `shareDeclared` closes that gap by
+   * asking the holder's declarations the same question, under the same guards.
    */
   private partitionContested(
     input: PlanAdmissionInput,
     contested: readonly DeferredResource[],
-  ): { whole: DeferredResource[]; partial: PartiallyHeldFile[] } {
+    /**
+     * Whether a holder that merely *declared* a contested path may be read as
+     * the lines its own declarations occupy inside it.
+     *
+     * Off is the ordinary reading, and the one every path that has shipped
+     * keeps: a file an agent named is that agent's, all of it. It is turned on
+     * only in the mixed case — where some file this candidate named is free —
+     * because that is the case nothing covers today. Where *every* declared
+     * file is contested, the reduced plan comes out empty and
+     * {@link admitWithinFiles} answers under its own stricter gates, so
+     * leaving this off there keeps that tested path bit-identical.
+     */
+    shareDeclared = false,
+  ): {
+    whole: DeferredResource[];
+    partial: PartiallyHeldFile[];
+    /**
+     * What each holder was read as occupying in each shared file, so the
+     * holder's lease can be made to say the same lines the candidate's
+     * withholding says. See {@link PlanAdmissionController.occupancy}.
+     */
+    occupied: Map<TaskId, Map<string, readonly LineRange[]>>;
+  } {
     const locate = input.symbolRangesInFile;
     const declared = new Set(uniqueRepositoryPaths(input.plan.expectedFiles));
     const misnamed = new Set(
@@ -1172,6 +1217,7 @@ export class PlanAdmissionController {
     );
     const lost: DeferredResource[] = [];
     const shared: PartiallyHeldFile[] = [];
+    const occupied = new Map<TaskId, Map<string, readonly LineRange[]>>();
 
     for (const entry of contested) {
       const file = entry.resourceId;
@@ -1180,30 +1226,73 @@ export class PlanAdmissionController {
         continue;
       }
       const spans: NamedRange[] = [];
+      const held = new Map<TaskId, readonly NamedRange[]>();
       let bounded = entry.heldBy.length > 0;
+      let guessed = false;
       for (const holder of entry.heldBy) {
         const active = input.active.find((plan) => plan.taskId === holder);
-        const held =
+        const reached =
           active === undefined
             ? undefined
             : occupiedSpans(active.plan, file, locate);
-        if (held === undefined || held.length === 0) {
+        // `occupiedSpans` reads a *declared* path as the whole file, which is
+        // right everywhere the alternative is a slightly smaller grant. Here
+        // the alternative is no grant at all, so where the candidate still has
+        // free files to be admitted on, the holder's own declarations are
+        // asked the narrower question instead — the same question
+        // `admitWithinFiles` already asks, answered by the same function.
+        //
+        // A claim that occupies this path is exempt, and that guard is not
+        // optional: `contestedFiles` adds frozen-claim holders to `heldBy`,
+        // and a claim states what a task is *allowed* to reach rather than
+        // what it declared, so it has no lines to withhold and takes the file
+        // whole. The reasoning is `admitWithinFiles`', including why a
+        // holder's watched ranges are not an answer either.
+        const occupies =
+          reached ??
+          (active === undefined ||
+          !shareDeclared ||
+          locate === undefined ||
+          claimOccupiesPath(active.plan, file)
+            ? undefined
+            : declaredSpans(active.plan, file, locate));
+        if (occupies === undefined || occupies.length === 0) {
           bounded = false;
           break;
         }
-        spans.push(...held);
+        guessed ||= reached === undefined;
+        spans.push(...occupies);
+        held.set(holder, occupies);
       }
       if (!bounded || spans.length === 0) {
         lost.push(entry);
         continue;
       }
+      const ranges = normalizeRanges(spans);
+      // Reading a declared file as its declarations is only honest where they
+      // do not add up to the file: enrichment makes a plan that named a file
+      // claim every symbol in it, so on a file that is nothing but
+      // declarations what would be "granted" is the space past the last line
+      // anyone placed. `admitWithinFiles` withdraws the whole split on that;
+      // here only this file is withdrawn, and it goes back to being lost
+      // whole — which is exactly what it is today.
+      if (guessed && !leavesGround(locate?.(file) ?? [], ranges)) {
+        lost.push(entry);
+        continue;
+      }
       shared.push({
         file,
-        ranges: normalizeRanges(spans),
+        ranges,
         symbols: withheldSymbolsFor(file, spans, entry),
       });
+      for (const [holder, occupies] of held) {
+        const byFile =
+          occupied.get(holder) ?? new Map<string, readonly LineRange[]>();
+        byFile.set(file, normalizeRanges(occupies));
+        occupied.set(holder, byFile);
+      }
     }
-    return { whole: lost, partial: shared };
+    return { whole: lost, partial: shared, occupied };
   }
 
   /**
