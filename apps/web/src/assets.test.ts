@@ -348,11 +348,11 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
   }
 
-  // Iconly's Light style is one thin rounded line on a 24px grid. Pin the
-  // shared wrapper here so adding a glyph cannot quietly introduce a second
-  // optical weight, lose its theme colour, or become visible to a screen
-  // reader as meaningless content — and so the set it was replaced from
-  // cannot creep back one icon at a time.
+  // Basil is one heavy rounded line on a 24px grid. Pin the shared wrapper
+  // here so adding a glyph cannot quietly introduce a second optical weight,
+  // lose its theme colour, or become visible to a screen reader as
+  // meaningless content — and so the sets it was replaced from cannot creep
+  // back one icon at a time.
   for (const [name, glyph] of Object.entries(ui.ICONS)) {
     assert.match(
       glyph,
@@ -364,19 +364,19 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
       /stroke="currentColor"/u,
       `${name} follows text colour`,
     );
-    assert.match(glyph, /stroke-width="1\.5"/u, `${name} uses Iconly's stroke`);
+    assert.match(glyph, /stroke-width="2"/u, `${name} uses Basil's stroke`);
     assert.match(glyph, /stroke-linecap="round"/u, `${name} has rounded ends`);
     assert.match(glyph, /stroke-linejoin="round"/u, `${name} has rounded joins`);
     assert.match(glyph, /aria-hidden="true"/u, `${name} is decorative`);
     assert.match(glyph, /focusable="false"/u, `${name} cannot take focus`);
     assert.match(
       glyph,
-      /data-icon-style="iconly"/u,
+      /data-icon-style="basil"/u,
       `${name} identifies the selected icon treatment`,
     );
     assert.match(
       glyph,
-      /data-icon-source="iconly-v3-community"/u,
+      /data-icon-source="craftwork-basil"/u,
       `${name} keeps the source attribution`,
     );
     assert.doesNotMatch(
@@ -388,6 +388,26 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
 
   const chats = assets.get("/screen-chats.js")?.body.toString("utf8") ?? "";
   const styles = assets.get("/styles.css")?.body.toString("utf8") ?? "";
+  const uiSource = assets.get("/ui.js")?.body.toString("utf8") ?? "";
+
+  // One icon language, not two. Attribution pills used to carry small glossy
+  // rendered objects from a set of their own, so a digest row put a shaded
+  // blue folder beside a flat drawn agent mark — a difference the eye reads
+  // as a mistake long before it reads it as a distinction. Everything except
+  // the vendor logos, the agent sprites and the product mark now comes from
+  // the one set above, and the second one is gone rather than unreferenced.
+  assert.doesNotMatch(
+    uiSource,
+    /PILL_ART|pillIcon|3dicons/u,
+    "attribution pills draw from the shared icon set",
+  );
+  assert.doesNotMatch(
+    styles,
+    /pill-3d/u,
+    "the second icon set left no styling behind",
+  );
+  assert.match(styles, /\.pill \.ui-icon \{/u);
+
   assert.doesNotMatch(
     chats,
     /&times;/u,
@@ -2824,11 +2844,10 @@ test("catch-up pills use each named agent's actual mark", async () => {
   // path left that draws a stand-in bot under somebody's name.
   assert.match(pillBody, /pill\.icon !== "agent"/u);
 
-  // And the bot is gone from the set of rendered objects entirely, so nothing
-  // can reach it again by asking for it by name.
-  const artStart = ui.indexOf("const PILL_ART = {");
-  const art = ui.slice(artStart, ui.indexOf("\n};", artStart));
-  assert.doesNotMatch(art, /^ {2}agent: \{/mu);
+  // Every other pill draws from the shared interface set, so there is no
+  // second set left holding a stand-in bot for something to reach by name.
+  assert.match(pillBody, /icon\(pill\.icon\)/u);
+  assert.doesNotMatch(ui, /PILL_ART|pillIcon/u);
 
   // The row's agent comes from the task, not from a roster scan that answers
   // "nobody" until the roster has been fetched.

@@ -1693,6 +1693,11 @@ function chanCrown(activeRepositoryId) {
              cls: "chan-crown-new",
            })}`
     }
+    ${iconButton("close", {
+      act: "chan-sidebar-close",
+      title: "Close workspace navigation",
+      cls: "drawer-close",
+    })}
     <button type="button" class="icon-btn desk-only chan-collapse-btn"
       data-act="chan-collapse-toggle"
       title="${fold}"
@@ -1718,19 +1723,10 @@ function chanSidebar(activeRepositoryId) {
     repositoryLabel(activeRepositoryId),
   )} workspace navigation"${hidden ? ' aria-hidden="true" inert' : ""}>
     ${chanCrown(activeRepositoryId)}
-    <!-- No crown in here. The channel's picture and name are drawn once, in
-         \`chanCrown\`, at the head of the bar across the top of the shell —
-         where they stand in this column's own width. What is left in this
-         panel is what the panel is for: the two places to browse, the
-         roster, and the account.
-
-         The drawer's own way out rides on the quick links rather than on a
-         row of its own: on a phone this panel is off-canvas, and the row
-         that used to hold the close button was the same row that held the
-         name it no longer draws.
-
-         The backticks are escaped because this comment is inside a template
-         literal, where a bare one would close the string. -->
+    <!-- The workspace identity and the phone drawer's close control belong
+         together in \`chanCrown\`. This navigation stays a compact, uninterrupted
+         list of destinations instead of making a fourth control compete with
+         its rows. -->
     <nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace destinations">
       <button type="button" class="chan-quick-link workspace-main-link${destination.kind === "main" ? " on" : ""}"
         data-act="workspace-main-open" aria-current="${destination.kind === "main" ? "page" : "false"}"
@@ -1747,11 +1743,6 @@ function chanSidebar(activeRepositoryId) {
         title="Browse workspace files">
         ${icon("folder")}<span>Files</span>
       </button>
-      ${iconButton("close", {
-        act: "chan-sidebar-close",
-        title: "Close",
-        cls: "drawer-close",
-      })}
     </nav>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
@@ -1976,20 +1967,9 @@ function previewLink(repositoryId) {
  * The bar across the top of the shell: the crown at its head, and everything
  * this conversation is and can be done to, after it.
  *
- * The bar spans the whole shell and nothing underneath it can move it — a
- * thread opening narrows the conversation, not the bar. What changed is who
- * owns which part of it. The first zone is the navigation's, exactly as wide
- * as the columns below it, and it is where the channel is named (see
- * `chanCrown`). The rest is the conversation's own header: whether the room
- * is muted, whether a preview is up, what is pinned in it, and the actions on
- * the room itself.
- *
- * Which is why there is no name in it any more. The crown three hundred
- * pixels to the left already says which room this is, and a second copy of
- * the same word on the same line was the loudest thing in a bar whose job is
- * to be quiet. Nor are there counts: how many people and how many agents are
- * in the room is said on the headings of the two lists that hold them, in the
- * navigation this bar begins with — see `section`.
+ * Workspace identity stays in `chanCrown`; this row names only the selected
+ * destination inside it. Status and actions share one bounded group on the
+ * right so a preview address cannot spread across, or overlap, the title.
  */
 function conversationHeader(repositoryId) {
   const destination = primaryDestinationForWorkspace(repositoryId);
@@ -2030,42 +2010,41 @@ function conversationHeader(repositoryId) {
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       aria-expanded="${state.chanSidebarOpen === true}"
       title="Workspace navigation" aria-label="Workspace navigation">${icon("list")}</button>
-    ${main ? icon("chatBubble", 'class="ch-hash"') : ""}
     <div class="ch-title">
       <div class="ch-name">${esc(label)}</div>
-      ${
-        main
-          ? `<div class="ch-desc">${
-              isChannelMuted(repositoryId)
-                ? `<span class="ch-count ch-muted" title="Muted — no badges or sounds from this workspace">${icon(
-                    "bellOff",
-                  )}Muted</span>`
-                : ""
-            }${previewControl(repositoryId)}</div>`
-          : `<div class="ch-destination-kind">${description}</div>`
-      }
+      ${main ? "" : `<div class="ch-destination-kind">${description}</div>`}
     </div>
     <span class="spacer"></span>
-    ${main ? previewLink(repositoryId) : ""}
-    ${
-      destination.kind === "dm"
-        ? iconButton("users", {
-            act: "person-profile-open",
-            value: destination.id,
-            title: `Details for ${label}`,
-          })
-        : destination.kind === "agent"
-          ? iconButton("robot", {
-              act: "agent-panel-open",
+    <div class="conversation-tools">
+      ${
+        main && isChannelMuted(repositoryId)
+          ? `<span class="ch-count ch-muted" title="Muted — no badges or sounds from this workspace">${icon(
+              "bellOff",
+            )}Muted</span>`
+          : ""
+      }
+      ${main ? previewControl(repositoryId) : ""}
+      ${main ? previewLink(repositoryId) : ""}
+      ${
+        destination.kind === "dm"
+          ? iconButton("users", {
+              act: "person-profile-open",
               value: destination.id,
               title: `Details for ${label}`,
             })
-          : iconButton("dots", {
-              act: "channel-menu",
-              value: repositoryId ?? "",
-              title: "Conversation actions",
-            })
-    }
+          : destination.kind === "agent"
+            ? iconButton("robot", {
+                act: "agent-panel-open",
+                value: destination.id,
+                title: `Details for ${label}`,
+              })
+            : iconButton("dots", {
+                act: "channel-menu",
+                value: repositoryId ?? "",
+                title: "Conversation actions",
+              })
+      }
+    </div>
   </header>`;
 }
 

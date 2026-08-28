@@ -1504,34 +1504,34 @@ async function submitInviteSignIn(form) {
 function topbar() {
   const user = currentUserName();
   return `<header class="topbar" aria-label="Global">
-    <button type="button" class="global-brand" data-act="nav" data-value="chats"
-      aria-label="Kumi home" title="Kumi home">
-      ${brandMark(24)}<span>Kumi</span>
-    </button>
-    ${
-      // Off the Chats screen there is no channel sidebar and so no brand to
-      // click home with — this is the way back.
-      state.route === "chats"
-        ? ""
-        : `<button class="icon-btn" data-act="nav" data-value="chats"
-             title="Back to chats" aria-label="Back to chats">${icon("chatBubble")}</button>`
-    }
-    <span class="spacer"></span>
+    <div class="topbar-start">
+      ${
+        // The authenticated shell is workspace-led, so it does not repeat the
+        // product mark above the workspace name. Screens without workspace
+        // navigation keep one explicit route back to it in the same slot.
+        state.route === "chats"
+          ? ""
+          : `<button class="icon-btn" data-act="nav" data-value="chats"
+               title="Back to chats" aria-label="Back to chats">${icon("chatBubble")}</button>`
+      }
+    </div>
     <button type="button" class="global-search" data-act="switch-open"
       aria-label="Search and commands" title="Search and commands (Ctrl or Command K)">
       ${icon("search")}<span>Search</span><kbd>⌘K</kbd>
     </button>
-    <button type="button" class="icon-btn" data-act="shortcuts-open"
-      aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts">${icon("info")}</button>
-    ${
-      // Same reasoning as the sidebar's line: a status that is always the same
-      // is not a status. Only the failure is worth the space.
-      state.health === undefined
-        ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
-        : ""
-    }
-    <button class="account-btn" data-act="user-menu" title="${esc(user)}"
-      >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
+    <div class="topbar-actions">
+      <button type="button" class="icon-btn topbar-icon-btn" data-act="shortcuts-open"
+        aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts">${icon("info")}</button>
+      ${
+        // Same reasoning as the sidebar's line: a status that is always the same
+        // is not a status. Only the failure is worth the space.
+        state.health === undefined
+          ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
+          : ""
+      }
+      <button class="account-btn topbar-account-btn" data-act="user-menu" title="${esc(user)}"
+        >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
+    </div>
   </header>`;
 }
 
