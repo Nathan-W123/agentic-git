@@ -1728,6 +1728,14 @@ function chanCrown(activeRepositoryId) {
  * The gear only appears for somebody who can actually administer it, so the
  * row stays a single target for everybody else.
  */
+/** How a stored visibility reads wherever a room is described in one line. */
+function subChannelVisibilityLabel(visibility) {
+  if (visibility === "private") {
+    return "Private";
+  }
+  return visibility === "public" ? "Open to everyone" : "Read-only";
+}
+
 function subChannelRow(repositoryId, channel, active) {
   const manage = canManageSubChannels(repositoryId);
   const label = `#${channel.slug}`;
@@ -1738,7 +1746,11 @@ function subChannelRow(repositoryId, channel, active) {
       title="Open ${esc(label)}">
       <span class="chan-channel-sigil" aria-hidden="true">${
         channel.visibility === "private" ? icon("lock") : "#"
-      }</span>
+      }</span>${
+        channel.visibility === "public"
+          ? `<span class="sr-only">Open to everyone in the project</span>`
+          : ""
+      }
       <span class="chan-channel-name">${esc(channel.slug)}</span>
       ${
         channel.canPost === false
@@ -1784,11 +1796,10 @@ function chanSidebar(activeRepositoryId) {
          list of destinations instead of making a fourth control compete with
          its rows. -->
     <nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace destinations">
-      <button type="button" class="chan-quick-link workspace-main-link${destination.kind === "main" ? " on" : ""}"
-        data-act="workspace-main-open" aria-current="${destination.kind === "main" ? "page" : "false"}"
-        title="Open Main chat">
-        ${icon("chatBubble")}<span>Main chat</span>
-      </button>
+      <!-- "Main chat" used to sit here, above a Channels list that already
+           contained #general — two ways into one conversation, of which only
+           this one moved the pane. #general is Main chat now, so the room list
+           below is the only entry and selecting a room is what opens it. -->
       <button type="button" class="chan-quick-link${activeSecondaryContext() === "threads" ? " on" : ""}"
         data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}"
         title="Browse workspace threads">
@@ -7624,9 +7635,9 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
   return `<div class="pop-body sub-channel-manage">
     <div class="pop-head">
       <b>#${esc(channel.slug)}</b>
-      <span class="chan-channel-vis">${
-        channel.visibility === "private" ? "Private" : "Open to the project"
-      }</span>
+      <span class="chan-channel-vis">${esc(
+        subChannelVisibilityLabel(channel.visibility),
+      )}</span>
     </div>
     ${
       general
@@ -7634,12 +7645,10 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
         : `<div class="pop-row">
              <button type="button" class="btn-quiet" data-act="sub-channel-rename"
                data-value="${esc(channelId)}">Rename</button>
+             <!-- One entry into a picker rather than a toggle: with three
+                  states a flip cannot reach the one it is not between. -->
              <button type="button" class="btn-quiet" data-act="sub-channel-visibility"
-               data-value="${esc(channelId)}">${
-                 channel.visibility === "private"
-                   ? "Make open to the project"
-                   : "Make private"
-               }</button>
+               data-value="${esc(channelId)}">Change who can use it</button>
              <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
                data-value="${esc(channelId)}">Delete</button>
            </div>

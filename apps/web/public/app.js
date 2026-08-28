@@ -2861,6 +2861,51 @@ async function messageEditValue(
   return values === undefined || next === "" ? undefined : next;
 }
 
+/**
+ * The three things a room's visibility decides, in the order somebody
+ * choosing one actually asks them: can people find it, read it, speak in it.
+ *
+ * Shared by the create dialog and the settings menu so the two cannot drift
+ * into describing one stored value differently — which is how `open` came to
+ * be labelled "Open to the project" in the menu while the confirm box that
+ * set it said "everyone can read it, members can post".
+ */
+const SUB_CHANNEL_VISIBILITIES = [
+  {
+    value: "public",
+    title: "Open",
+    detail: "Anyone in the project can find it, read it, and post.",
+  },
+  {
+    value: "open",
+    title: "Read-only",
+    detail: "Anyone can find and read it. Only members post.",
+  },
+  {
+    value: "private",
+    title: "Private",
+    detail: "Only members can find it. Nobody else knows it exists.",
+  },
+];
+
+/** The radio cards both channel dialogs offer, with one pre-selected. */
+function visibilityChoicesHtml(selected) {
+  return `<div class="chan-visibility-choices" role="radiogroup"
+    aria-label="Who can see and post in this channel">
+    ${SUB_CHANNEL_VISIBILITIES.map(
+      (option) => `<label class="chan-visibility-choice">
+        <input type="radio" name="visibility" value="${esc(option.value)}"${
+          option.value === selected ? " checked" : ""
+        }>
+        <span class="chan-visibility-copy">
+          <strong>${esc(option.title)}</strong>
+          <small>${esc(option.detail)}</small>
+        </span>
+      </label>`,
+    ).join("")}
+  </div>`;
+}
+
 async function editChannelMessageAction(repositoryId, messageId) {
   const message = channelMessagesFor(repositoryId).find(
     (entry) => entry.id === messageId,
@@ -5714,12 +5759,12 @@ function returnFocusFromSecondaryContext(kind, value) {
       : document.querySelector(
           `[data-act="roster-person-menu"][data-value="${CSS.escape(personId)}"]`,
         )) ??
-    $('[data-act="workspace-main-open"]');
+    $("[data-act='channel-input']");
   const focusTarget =
     target !== null && target !== undefined && target.closest("[inert]") === null
       ? target
       : $('[data-act="chan-sidebar-toggle"]') ??
-        $('[data-act="workspace-main-open"]');
+        $("[data-act='channel-input']");
   focusTarget?.focus({ preventScroll: true });
 }
 
@@ -5753,7 +5798,6 @@ function returnFocusFromPrimaryDestination(destination) {
     source !== null && source.closest("[inert]") === null
       ? source
       : $("[data-act='channel-input']") ??
-        $('[data-act="workspace-main-open"]') ??
         $('[data-act="chan-sidebar-toggle"]');
   target?.focus({ preventScroll: true });
 }
@@ -8621,14 +8665,6 @@ document.addEventListener("click", (event) => {
         }
       }
       return;
-    case "workspace-main-open":
-      if (channelFileEdited() && !confirmDiscardEdit()) {
-        return;
-      }
-      selectPrimaryDestination({ kind: "main" }, activeChannelId());
-      setChanDrawer(false);
-      render();
-      return;
     case "composer-plus": {
       // The one control on the left of the bar. Everything that adds something
       // to a message hangs off it: a picture, a command, a name. Ordering is
@@ -10220,6 +10256,11 @@ document.addEventListener("click", (event) => {
     /* ------------------------------------------------ sub-channels ---- */
     case "sub-channel-open": {
       const repositoryId = activeChannelId();
+      // Opening a room has to claim the pane, not just record which room is
+      // current. Without this a room picked while a DM, an agent thread or the
+      // file tree owned the pane changed the selection and nothing else, which
+      // read exactly as the click being ignored.
+      selectPrimaryDestination({ kind: "main" }, repositoryId);
       selectSubChannel(repositoryId, value);
       closePopover();
       writeChatLocation();
@@ -10233,24 +10274,36 @@ document.addEventListener("click", (event) => {
     }
     case "sub-channel-new": {
       const repositoryId = value || activeChannelId();
-      const name = window.prompt(
-        "Name the channel. It will be addressed as #name.",
-        "",
-      );
-      if (name === null || name.trim() === "") {
-        return;
-      }
-      const isPrivate = window.confirm(
-        "Make this channel private?\n\nOK: only members can see it or post in it.\nCancel: everyone in the project can read it, members can post.",
-      );
-      void createSubChannel(repositoryId, name, isPrivate ? "private" : "open")
-        .then(() => {
+      // A real dialog rather than `prompt` then `confirm`. Two native boxes
+      // could only ever ask a yes/no question about visibility, which is why
+      // the third state had nowhere to be offered even once the server knew
+      // how to store it.
+      void showModal({
+        title: "New channel",
+        subtitle: "It will be addressed as #name in this workspace.",
+        confirm: "Create channel",
+        body: `<label class="field">
+            <span>Name</span>
+            <input class="input" name="name" maxlength="60" required autofocus
+              placeholder="frontend">
+          </label>
+          ${visibilityChoicesHtml("open")}`,
+      }).then((values) => {
+        const name = String(values?.name ?? "").trim();
+        if (values === undefined || name === "") {
+          return;
+        }
+        return createSubChannel(
+          repositoryId,
+          name,
+          String(values.visibility ?? "open"),
+        ).then(() => {
           render();
           void ensureChannelMessages(repositoryId, render);
-        })
-        .catch((error) =>
-          toast(`Could not create that channel: ${error.message}`, "error"),
-        );
+        });
+      }).catch((error) =>
+        toast(`Could not create that channel: ${error.message}`, "error"),
+      );
       return;
     }
     case "sub-channel-menu": {
@@ -10275,16 +10328,25 @@ document.addEventListener("click", (event) => {
       const current = subChannelsFor(repositoryId).find(
         (channel) => channel.id === value,
       );
-      const name = window.prompt("Rename this channel", current?.slug ?? "");
-      if (name === null || name.trim() === "") {
-        return;
-      }
       closePopover();
-      void updateSubChannel(repositoryId, value, { name })
-        .then(render)
-        .catch((error) =>
-          toast(`Could not rename that channel: ${error.message}`, "error"),
-        );
+      void showModal({
+        title: "Rename channel",
+        subtitle: "The new name becomes its #handle.",
+        confirm: "Rename",
+        body: `<label class="field">
+            <span>Name</span>
+            <input class="input" name="name" maxlength="60" required autofocus
+              value="${esc(current?.slug ?? "")}">
+          </label>`,
+      }).then((values) => {
+        const name = String(values?.name ?? "").trim();
+        if (values === undefined || name === "") {
+          return;
+        }
+        return updateSubChannel(repositoryId, value, { name }).then(render);
+      }).catch((error) =>
+        toast(`Could not rename that channel: ${error.message}`, "error"),
+      );
       return;
     }
     case "sub-channel-visibility": {
@@ -10292,10 +10354,21 @@ document.addEventListener("click", (event) => {
       const current = subChannelsFor(repositoryId).find(
         (channel) => channel.id === value,
       );
-      const next = current?.visibility === "private" ? "open" : "private";
+      // A toggle could only flip between two of the three states, so the
+      // third was unreachable from here however the server stored it.
       closePopover();
-      void updateSubChannel(repositoryId, value, { visibility: next })
-        .then(render)
+      void showModal({
+        title: `Who can use #${current?.slug ?? "this channel"}?`,
+        confirm: "Save",
+        body: visibilityChoicesHtml(current?.visibility ?? "open"),
+      }).then((values) => {
+        if (values === undefined || values.visibility === current?.visibility) {
+          return;
+        }
+        return updateSubChannel(repositoryId, value, {
+          visibility: String(values.visibility),
+        }).then(render);
+      })
         .catch((error) =>
           toast(`Could not change that channel: ${error.message}`, "error"),
         );

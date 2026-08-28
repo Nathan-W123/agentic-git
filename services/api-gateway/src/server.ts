@@ -4343,7 +4343,14 @@ function subChannelSlug(raw: string): string {
 
 /** `private` only when it says so; anything else is an open room. */
 function subChannelVisibility(raw: unknown): SubChannelVisibility {
-  return raw === "private" ? "private" : "open";
+  // `open` is the default for anything unrecognised, which is what an older
+  // client sending nothing gets: readable by the project, posted in by its
+  // members. Widening the default to `public` would quietly hand posting
+  // rights to everybody on a request that never asked for them.
+  if (raw === "private" || raw === "public") {
+    return raw;
+  }
+  return "open";
 }
 
 function isCoordinatorNotice(message: {
@@ -9523,7 +9530,18 @@ export class ApiGateway {
           if (channel.visibility === "private" && !member && !admin) {
             continue;
           }
-          visible.push({ ...channel, member, canPost: member });
+          visible.push({
+            ...channel,
+            member,
+            // The same rule `canPostInSubChannel` enforces on the write path.
+            // Derived here rather than asked per row: the answer is already in
+            // hand, and a list that disagreed with the write would show a
+            // composer that 403s.
+            canPost:
+              member ||
+              channel.visibility === "public" ||
+              channel.slug === GENERAL_SUB_CHANNEL_SLUG,
+          });
         }
         this.sendJson(response, 200, { channels: visible, canManage: admin });
         return;
@@ -13548,7 +13566,9 @@ export class ApiGateway {
     if (channel === undefined) {
       throw new HttpError(404, "not_found", "Channel was not found");
     }
-    if (channel.visibility === "open") {
+    // Both non-private states are readable by anybody in the project; they
+    // differ only in who may post, which `canPostInSubChannel` decides.
+    if (channel.visibility === "open" || channel.visibility === "public") {
       return channel;
     }
     if (
@@ -13586,6 +13606,12 @@ export class ApiGateway {
     userId: string,
   ): Promise<boolean> {
     if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
+      return true;
+    }
+    // A public room is one anybody may walk into. Membership is still
+    // recorded — it is what mention rosters and unread cursors hang off — but
+    // it stops being the gate on speaking.
+    if (channel.visibility === "public") {
       return true;
     }
     return await this.options.store.isSubChannelMember(channel.id, userId);

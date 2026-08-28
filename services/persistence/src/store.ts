@@ -1398,7 +1398,28 @@ export interface ChannelAgentMember {
  * exists at all, so reads and writes answer 404 rather than 403 — a 403
  * discloses the name of a room somebody deliberately kept off the list.
  */
-export type SubChannelVisibility = "open" | "private";
+/**
+ * Who can find a room, read it, and speak in it.
+ *
+ * Three states rather than two, because "can I see this conversation" and
+ * "may I join it" are separate questions and only one of them was being
+ * asked. `open` answers the first and refuses the second, which is the right
+ * shape for a room a team wants read over its shoulder — and the wrong one
+ * for a room anybody should be able to walk into.
+ *
+ * - `private`  — absent for a non-member. Not listed, not readable, and a
+ *   request for it answers 404 rather than 403, so its existence is not
+ *   disclosed by the refusal.
+ * - `open`     — listed and readable by everybody in the project; only
+ *   members post. The read-over-your-shoulder room.
+ * - `public`   — listed, readable, and postable by everybody in the project.
+ *   Membership still exists and still means something elsewhere (it is what
+ *   a mention roster and an unread cursor hang off), but it is not a gate.
+ *
+ * Stored as plain text with no CHECK constraint in either SQL backend, so a
+ * fourth state would need no migration either.
+ */
+export type SubChannelVisibility = "open" | "private" | "public";
 
 /** The slug every repository's default sub-channel is created under. */
 export const GENERAL_SUB_CHANNEL_SLUG = "general";
