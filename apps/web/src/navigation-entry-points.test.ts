@@ -164,6 +164,14 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   // inside the app root would be swept away mid-search.
   assert.match(app, /document\.querySelector\("#layer-root"\)\.append\(layer\)/u);
   assert.match(css, /\.qs-layer \{/u);
+  const switcher = slice(app, "function openSwitcher() {", "/** What the keys do");
+  const shortcuts = slice(app, "function openShortcutSheet() {", "/** Whether the keyboard");
+  assert.match(switcher, /layer\.className = "qs-layer qs-layer-search"/u);
+  assert.doesNotMatch(shortcuts, /qs-layer-search/u);
+  assert.match(
+    css,
+    /\.qs-layer-search \{[^}]*padding-top: calc\(48px \+ var\(--safe-top\)\);/u,
+  );
 
   // The single-key shortcuts must never eat a character out of somebody's
   // sentence.
