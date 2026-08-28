@@ -1969,6 +1969,37 @@ function previewLink(repositoryId) {
 }
 
 /**
+ * The way out of whatever has taken the message pane.
+ *
+ * A direct message, an agent chat and the file tree are drawn here as the
+ * primary conversation, and each arrives with the panel header its own markup
+ * carries replaced by this one — which is where its close button was. So the
+ * cross belongs on this row instead, in the same shape and the same place
+ * every right-hand panel puts it, or a private conversation is a surface with
+ * no exit but the sidebar behind it.
+ *
+ * Not for the room, which is what closing lands on, and not for an open file
+ * — that one is the exception whose own controls survive the move, in the
+ * toolbar under this row, so a second cross directly above its first would be
+ * the same act twice. Escape still closes it, which is what its "(Esc)"
+ * already promised and nothing used to keep.
+ */
+function primaryDestinationClose(destination) {
+  if (destination.kind === "main" || destination.kind === "file") {
+    return "";
+  }
+  const what =
+    destination.kind === "dm"
+      ? "conversation"
+      : destination.kind === "agent"
+        ? "agent conversation"
+        : destination.kind === "files"
+          ? "files"
+          : "threads";
+  return panelClose("primary-destination-close", `Close ${what} (Esc)`);
+}
+
+/**
  * The bar across the top of the shell: the crown at its head, and everything
  * this conversation is and can be done to, after it.
  *
@@ -2059,6 +2090,7 @@ function conversationHeader(repositoryId) {
                 title: "Conversation actions",
               })
       }
+      ${primaryDestinationClose(destination)}
     </div>
   </header>`;
 }

@@ -211,6 +211,7 @@ import {
   applyProviderSetting,
   channelFileEdited,
   activeSecondaryContext,
+  closePrimaryDestination,
   closeSecondaryContext,
   clearDirectMessageSelection,
   clearRightPanel,
@@ -5734,6 +5735,67 @@ function returnFocusFromSecondaryContext(kind, value) {
 }
 
 /**
+ * Put the keyboard back on whatever opened the destination that just closed.
+ *
+ * The same debt `returnFocusFromSecondaryContext` pays, for the pane rather
+ * than the column: a render replaces the document, so the cross somebody
+ * pressed no longer exists and the focus it held has fallen to
+ * `document.body` — where Tab starts from the top of the page again and a
+ * screen reader is told nothing about where it now is. The roster row the
+ * conversation was opened from is also the honest answer to "where was I".
+ *
+ * The sidebar is `inert` while the phone's drawer is shut, so that row is not
+ * always a place focus may land; the room's own composer is, and it is where
+ * closing has just put the reader.
+ */
+function returnFocusFromPrimaryDestination(destination) {
+  const kind = String(destination?.kind ?? "");
+  const id = CSS.escape(String(destination?.id ?? ""));
+  const selectors = {
+    dm: `[data-act="dm-open"][data-value="${id}"]`,
+    agent: `[data-act="agent-chat-open"][data-value="${id}"]`,
+    file: '[data-act="chan-tree-toggle"]',
+    files: '[data-act="chan-tree-toggle"]',
+    threads: '[data-act="channel-threads-toggle"]',
+  };
+  const selector = selectors[kind];
+  const source = selector === undefined ? null : document.querySelector(selector);
+  const target =
+    source !== null && source.closest("[inert]") === null
+      ? source
+      : $("[data-act='channel-input']") ??
+        $('[data-act="workspace-main-open"]') ??
+        $('[data-act="chan-sidebar-toggle"]');
+  target?.focus({ preventScroll: true });
+}
+
+/**
+ * Close whichever surface has the message pane, however the reader asked.
+ *
+ * The header cross, the Escape key and a panel's own close all end here, so
+ * leaving a private conversation means one thing rather than three. Answers
+ * whether there was anything to close, which is what lets Escape fall through
+ * to it as the last rung without swallowing a press in the room.
+ */
+function closeActivePrimaryDestination() {
+  const repositoryId = activeChannelId();
+  const destination = primaryDestinationForWorkspace(repositoryId);
+  if (destination.kind === "main") {
+    return false;
+  }
+  // An unsaved edit is not thrown away by a keypress any more than by the
+  // file panel's own cross — see `closeSidePanel`, which asks the same thing.
+  if (channelFileEdited() && !confirmDiscardEdit()) {
+    return false;
+  }
+  closePopover();
+  closePrimaryDestination(repositoryId);
+  render();
+  returnFocusFromPrimaryDestination(destination);
+  return true;
+}
+
+/**
  * Profile becoming history, or history becoming profile.
  *
  * Only the inner content moves. The panel, its width, its grip and its header
@@ -5902,7 +5964,8 @@ document.addEventListener("keydown", (event) => {
  * on a desktop — where there is no swipe — left the mouse as the only way out
  * of a surface that covers half the window. This is the third way, and it
  * unwinds in the order the layers were put on: the phone's channel drawer,
- * then the side panel.
+ * then the side panel, and last the destination holding the message pane
+ * itself — a direct message, an agent chat, the files.
  *
  * Deliberately last in line. A field owns its own Escape (the file editor
  * blurs, the mention and slash pickers dismiss), a `<dialog>` closes itself,
@@ -5945,10 +6008,23 @@ document.addEventListener("keydown", (event) => {
   const closing = activeSecondaryContext();
   const closingValue =
     closing === "agent" ? state.activeAgentPanel : undefined;
-  if (sidePanelOpen() && closeSidePanel()) {
-    render();
-    returnFocusFromSecondaryContext(closing, closingValue);
+  // One layer a press, and a layer that declines to go — the file panel
+  // asking about an unsaved edit — still owns this one. Falling past it would
+  // close the conversation underneath instead, which is not the layer the
+  // reader was looking at.
+  if (sidePanelOpen()) {
+    if (closeSidePanel()) {
+      render();
+      returnFocusFromSecondaryContext(closing, closingValue);
+    }
+    return;
   }
+  // The bottom of the ladder: the destination holding the pane itself. A
+  // direct message is not stacked over the conversation — it *is* the
+  // conversation while it is open — so nothing above ever answered for it,
+  // and on a desktop, where there is no swipe either, Escape did nothing at
+  // all in the one place a reader presses it hardest.
+  closeActivePrimaryDestination();
 });
 
 /**
@@ -9249,12 +9325,17 @@ document.addEventListener("click", (event) => {
       }
       return;
     }
+    case "primary-destination-close":
+      closeActivePrimaryDestination();
+      return;
+    // The direct message's own close, from the days when it was a right-hand
+    // panel. Still reachable there, so it falls back to putting that panel
+    // away when the pane is not what it is closing.
     case "dm-close":
-      selectPrimaryDestination({ kind: "main" }, activeChannelId());
-      state.dmDraft = "";
-      state.dmReplyMessageId = undefined;
-      clearDirectMessageSelection();
-      render();
+      if (!closeActivePrimaryDestination()) {
+        putAwayRightPanel("dm");
+        render();
+      }
       return;
     // Your own agent, one to one, without leaving the room.
     //
@@ -11008,6 +11089,16 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (handleComposerKeydown(event, render)) {
+    return;
+  }
+  // Out of the box, the way the file editor's Escape lets go of the code —
+  // and only once the pickers above have declined the press. A field owns its
+  // own Escape, so the ladder below stands down for this textarea; without a
+  // way out of it, a reader who had typed a word held the one key that closes
+  // a private conversation and nothing at all happened. One press leaves the
+  // composer, the next closes the conversation.
+  if (event.key === "Escape" && !imeComposing(event)) {
+    node.blur();
     return;
   }
   if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {

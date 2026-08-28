@@ -6592,6 +6592,52 @@ export function selectPrimaryDestination(
   return next;
 }
 
+/**
+ * Which surface's state a primary destination is standing on.
+ *
+ * The pane and the column are two different vocabularies for the same
+ * surfaces — the file tree is `files` as a destination and `tree` as a panel
+ * — and closing has to speak the second one, because that is where the state
+ * behind each of them actually lives.
+ */
+const PRIMARY_DESTINATION_PANEL = {
+  dm: "dm",
+  agent: "agent",
+  file: "file",
+  files: "tree",
+  threads: "threads",
+};
+
+/**
+ * Leave whatever has taken the message pane, and give the room it back.
+ *
+ * One teardown for every way out of a destination — the header's cross, the
+ * Escape key, and the close each surface's own panel header used to carry.
+ * A direct message is why: as the primary conversation its panel header is
+ * replaced by the workspace's, so the button that closed it stopped being
+ * drawn at all and the only way back to the room was to find the channel in
+ * the sidebar. Whatever asks, "closed" has to mean the same thing — the draft
+ * dropped, the reply target forgotten, the selection cleared — or the
+ * conversation comes back holding half of what the reader left behind.
+ *
+ * Returns the destination that was closed, so the caller can put the keyboard
+ * back on whatever opened it; `undefined` when the room already had the pane.
+ */
+export function closePrimaryDestination(
+  repositoryId = currentRepository()?.id ?? state.repositoryId ?? "",
+) {
+  const destination = primaryDestinationForWorkspace(repositoryId);
+  if (destination.kind === "main") {
+    return undefined;
+  }
+  selectPrimaryDestination({ kind: "main" }, repositoryId);
+  const panel = PRIMARY_DESTINATION_PANEL[destination.kind];
+  if (panel !== undefined) {
+    putAwayRightPanel(panel);
+  }
+  return destination;
+}
+
 /** Every surface whose state says it is open, in the order they used to rank. */
 export function openRightPanels() {
   const primary = normalPrimaryDestination(state.primaryDestination);
