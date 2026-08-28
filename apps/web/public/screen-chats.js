@@ -6632,7 +6632,12 @@ function threadPanel(repositoryId, selectedMessageId) {
         draft: state.threadDraft,
         removeAct: "thread-attachment-remove",
       })}
-      <form class="composer${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit" data-value="${esc(messageId)}">
+      <!-- composer-lite is the thread's own resting shape: shorter and
+           squarer than the room's pill, and showing nothing but the words
+           until it is written in. Opt-in rather than inherited, because the
+           private chat and the direct-message panel sit in this same wrapper
+           and keep their full toolbars. -->
+      <form class="composer composer-lite${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit" data-value="${esc(messageId)}">
         <div class="composer-field">
           <div class="composer-mirror" data-composer-mirror aria-hidden="true"
             >${composerMirror(
