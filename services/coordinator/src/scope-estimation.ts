@@ -1,7 +1,5 @@
 import path from "node:path";
 
-import { lemmaOf } from "@coord/intent-analysis";
-
 import {
   identifierTokens,
   type RepositoryIndex,
@@ -79,70 +77,6 @@ const OBJECTIVE_STOP_WORDS = new Set([
   "utils", "value", "very", "want", "was", "way", "we", "well", "were",
   "what", "when", "where", "whether", "which", "while", "who", "why", "will",
   "with", "within", "without", "work", "would", "write", "you", "your",
-]);
-
-/**
- * Prose that says nothing about *where inside one file* work lands.
- *
- * {@link likelySymbolsIn} needs its own list, and the reason is a difference
- * of scale rather than of taste. {@link OBJECTIVE_STOP_WORDS} answers "which
- * files", so it throws away every word that is evenly spread across a
- * repository's paths — "handler", "config", "request", "result", "value".
- * Inside a single file those words are not spread across anything: a file with
- * two declarations, one of them `errorPath`, is told exactly which one by the
- * word "error". Reusing the repository-scale list here is what makes the
- * matcher miss. Tokenising the function and class names declared under
- * `services/` and `packages/`: a third of them have at least one fragment the
- * objective side could never contribute, and one name in twenty — `createId`,
- * `isFile`, `asRecord` and their kin — has *every* fragment stopped, so no
- * objective could ever name them however precisely it tried, short of writing
- * the identifier out verbatim. A plan that declared no symbols is exactly the
- * plan that did not do that.
- *
- * Dropping those is safe because {@link likelySymbolsIn} already measures the
- * same property directly, locally, and better: the frequency ceiling rejects
- * a fragment that half *this* file carries, which is the question the stop
- * list was answering by proxy. "file" among forty declarations where twenty
- * carry it is still discarded; "file" among two is real evidence, and only
- * the stop list was throwing it away.
- *
- * What stays is what is noise at every scale: function words, and the
- * planning boilerplate every objective in this repository shares. Split the
- * two ways for the same reason `lemmas.ts` splits its own.
- */
-const SYMBOL_STOP_WORDS = new Set([
-  // Ordinary function words.
-  "a", "about", "above", "across", "after", "again", "all", "already",
-  "also", "always", "an", "and", "any", "anything", "are", "around", "as",
-  "at", "back", "be", "because", "been", "before", "behind", "being",
-  "below", "best", "better", "between", "both", "but", "by", "can",
-  "cannot", "could", "current", "currently", "do", "does", "doing", "done",
-  "down", "due", "during", "each", "either", "else", "even", "every",
-  "everything", "first", "for", "from", "full", "further", "has", "have",
-  "here", "how", "however", "if", "in", "instead", "into", "is", "it",
-  "its", "just", "kind", "known", "last", "let", "like", "many", "may",
-  "might", "more", "most", "much", "must", "no", "not", "now", "of", "off",
-  "on", "once", "one", "only", "onto", "or", "other", "our", "out", "over",
-  "own", "per", "possible", "properly", "same", "side", "similar", "simple",
-  "since", "so", "some", "something", "still", "such", "sure", "than",
-  "that", "the", "their", "them", "then", "there", "these", "they", "thing",
-  "this", "those", "through", "time", "to", "too", "top", "two", "under",
-  "until", "up", "upon", "very", "was", "way", "we", "well", "were", "what",
-  "when", "where", "whether", "which", "while", "who", "why", "will",
-  "with", "within", "without", "would", "you", "your",
-  // Planning boilerplate: present in nearly every objective, so shared
-  // between nearly every pair of them, so evidence about nothing.
-  "add", "adding", "allow", "api", "app", "apply", "base", "break", "call",
-  "case", "change", "changes", "clean", "cleanup", "code", "common",
-  "component", "consider", "correct", "drop", "enable", "ensure", "exist",
-  "existing", "expect", "fail", "fix", "fixed", "function", "generate",
-  "generating", "get", "give", "go", "good", "handle", "help", "helper",
-  "implement", "improve", "include", "init", "issue", "keep", "logic",
-  "make", "makes", "method", "module", "need", "needs", "new", "note",
-  "part", "pass", "please", "point", "prevent", "problem", "provide", "put",
-  "reason", "remove", "replace", "require", "return", "see", "setup",
-  "should", "step", "support", "system", "take", "test", "tests", "todo",
-  "try", "use", "used", "using", "util", "utils", "want", "work",
 ]);
 
 /** Manifests whose directory is treated as a module root. */
@@ -387,47 +321,6 @@ function indexTokens(name: string, minLength: number): string[] {
   return identifierTokens(name)
     .map(stem)
     .filter((token) => token.length >= minLength);
-}
-
-/**
- * Lemmatised identifier fragments, for {@link likelySymbolsIn}.
- *
- * {@link stem} folds regular plurals and nothing else, which is the right
- * amount of work when both sides are already identifier-shaped. Here one side
- * is a sentence: objectives are full of verb inflections — "caching",
- * "validating", "retrying", "scheduling", "partitioning" — that `stem` leaves
- * exactly as written, so none of them ever meets `cache`, `validate`, `retry`,
- * `schedule` or `partition` in the index. `lemmaOf` reduces all of those, and
- * unlike a stemmer it returns a word that is still a word ("pricing" → "price",
- * not "pric").
- *
- * The discipline `stem` documents is the whole safety property and is kept
- * exactly: the same function runs over the objective and over the index names,
- * so a normalised form is only ever compared against another normalised form,
- * and the frequency ceiling is computed over the same tokens it filters
- * against. Whatever the table does to an odd word, the two sides meet in the
- * middle.
- *
- * What this does not fix, so nobody has to rediscover it: wink does not reduce
- * `-ion` or `-er` nominalizations. "pagination" stays "pagination" and never
- * meets `paginate`; "builder" stays "builder". A hand-written suffix rule for
- * those is not obviously an improvement — one that maps two unrelated words
- * together degrades the guess in the direction that grants lines away — so it
- * wants measuring before it is written.
- */
-function symbolTokens(
-  word: string,
-  minLength: number,
-  stopped: boolean,
-): string[] {
-  return identifierTokens(word)
-    .map(lemmaOf)
-    .filter(
-      (token) =>
-        token.length >= minLength &&
-        !/^\d+$/u.test(token) &&
-        !(stopped && SYMBOL_STOP_WORDS.has(token)),
-    );
 }
 
 /** Path-shaped substrings of an objective, longest first. */
@@ -856,7 +749,7 @@ export function likelySymbolsIn(
   const words = new Set(
     lowered
       .split(/[^A-Za-z0-9_]+/u)
-      .flatMap((word) => symbolTokens(word, minTokenLength, true)),
+      .flatMap((word) => objectiveTokens(word, minTokenLength)),
   );
   if (words.size === 0 || placed.length === 0) {
     return [];
@@ -864,9 +757,7 @@ export function likelySymbolsIn(
 
   const frequency = new Map<string, number>();
   for (const entry of placed) {
-    for (const token of new Set(
-      symbolTokens(entry.name, minTokenLength, false),
-    )) {
+    for (const token of new Set(indexTokens(entry.name, minTokenLength))) {
       frequency.set(token, (frequency.get(token) ?? 0) + 1);
     }
   }
@@ -888,9 +779,7 @@ export function likelySymbolsIn(
       scored.push({ name: entry.name, matched: Number.MAX_SAFE_INTEGER, whole: true });
       continue;
     }
-    const tokens = [
-      ...new Set(symbolTokens(entry.name, minTokenLength, false)),
-    ];
+    const tokens = [...new Set(indexTokens(entry.name, minTokenLength))];
     const matched = tokens.filter((token) => {
       const shared = frequency.get(token) ?? 0;
       // A fragment every declaration in the file carries has not chosen
