@@ -88,7 +88,7 @@ test("channel messages and workspace links use compact, bounded surfaces", async
   // instead of two loose controls occupying their own unrelated spacing.
   assert.match(
     chats,
-    /<nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">/u,
+    /<nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace destinations">/u,
   );
   // A group, not a card. The outline and the sunken fill around them made a
   // pane inside the panel inside the boundary around the whole application —
@@ -344,54 +344,22 @@ test("the transcript announces itself to a screen reader", async () => {
   assert.doesNotMatch(chats, /id="chan-messages"[\s\S]{0,120}aria-live="assertive"/u);
 });
 
-test("the Thread label opens the thread library as the visible side panel", async () => {
+test("workspace destinations and details share one visible secondary context", async () => {
   const [app, chats] = await Promise.all([
     publicFile("app.js"),
     publicFile("screen-chats.js"),
   ]);
-  const kind = slice(chats, "function panelKind(", "\n/**\n * The control every");
-  const panel = slice(chats, "function threadPanel(", "\nfunction planPanel(");
   const action = app.slice(
     app.indexOf('case "channel-threads-toggle":'),
     app.indexOf('case "channel-thread-delete":'),
   );
 
-  // The category in the screenshot is a real control, not inert header text.
-  assert.match(kind, /<button type="button" class="panel-kind" data-act=/u);
-  // `panelKind` gained a third `panelId` argument so several open thread
-  // panels can be told apart for drag and keep; the label is still the same
-  // `channel-threads-toggle` breadcrumb button, and both are still pinned.
-  assert.match(
-    panel,
-    /panelKind\(\s*"Thread",\s*"channel-threads-toggle",\s*`thread:\$\{messageId\}`/u,
-  );
-
-  // A list marked open with no room left to draw it — or, on a phone, with a
-  // newer surface over it — is not visibly open. Pressing Thread there
-  // navigates back to the library instead of toggling hidden state.
-  assert.match(action, /const listVisible =/u);
-  assert.match(action, /phoneLayout\(\)/u);
-  assert.match(action, /newestRightPanel\(\) === "threads"/u);
-  assert.match(action, /keptRightPanels\(\)\.includes\("threads"\)/u);
-  assert.match(
-    action,
-    /if \(listVisible\) \{\s*state\.chanThreadList = false;\s*render\(\);\s*return;/u,
-  );
-
-  // Opening it is lossless in the stronger sense the column now allows:
-  // nothing else is put away to make space, so there is no unsaved edit to
-  // ask about and nothing to close before the library is rendered.
+  assert.match(action, /activeSecondaryContext\(\) === "threads"/u);
+  assert.match(action, /closeSecondaryContext\(\)/u);
   assert.match(action, /state\.chanThreadList = true;/u);
-  assert.doesNotMatch(action, /confirmDiscardEdit/u);
-  assert.doesNotMatch(action, /closeChannelFile\(\)/u);
-  for (const field of [
-    "activePlan",
-    "activeAgentPanel",
-    "activeDm",
-    "activeChannelThread",
-  ]) {
-    assert.doesNotMatch(action, new RegExp(`state\\.${field} = undefined`, "u"));
-  }
+  assert.match(action, /moveRightPanel\("threads", "right"\)/u);
+  assert.match(chats, /function secondaryPanel\(repositoryId\)/u);
+  assert.match(chats, /activeSecondaryContext\(\)/u);
 });
 
 /*
@@ -408,112 +376,33 @@ test("the Thread label opens the thread library as the visible side panel", asyn
  * drawn from the one helper, a closed surface stopping being kept — not the
  * particular identifiers the client chose to spell it with.
  */
-test("desktop panel tabs can be dragged left to keep three conversations open", async () => {
-  const [app, chats, css] = await Promise.all([
-    publicFile("app.js"),
-    publicFile("screen-chats.js"),
-    publicFile("styles.css"),
-  ]);
-
-  // A tab names its own surface and can be picked up: that is what a second
-  // and a third occupant of the column are made from.
-  assert.match(chats, /data-right-panel-kind=/u);
-  assert.match(chats, /draggable="true"/u);
-  assert.match(chats, /function rightPanels\(repositoryId\)/u);
-  // A phone has no column to push anything into — one surface over the room.
-  assert.match(chats, /phoneLayout\(\)/u);
-  // Kept surfaces are drawn to the left of the newest one, which holds the
-  // edge, and both go through the one positioning helper so the two sides
-  // cannot drift apart.
-  assert.match(chats, /positionedRightPanel\([^)]*"left"\)/u);
-  assert.match(chats, /positionedRightPanel\([^)]*"right"\)/u);
-
-  assert.match(app, /RIGHT_PANEL_DRAG_TYPE/u);
-  // What is kept open is a list of surfaces, not a single one.
-  assert.match(app, /state\.(?:rightPanelStack|splitRightPanels|pinnedRightPanels)\b/u);
-  // Closing a surface also stops it being kept, or the column would hold a
-  // name with nothing behind it.
-  assert.match(app, /(?:clearSplitRightPanel|clearRightPanel|unpinRightPanel)\("dm"\)/u);
-  assert.match(
-    app,
-    /(?:clearSplitRightPanel|clearRightPanel|unpinRightPanel)\("thread"\)|putAwayRightPanel\(`thread:\$\{/u,
-  );
-
-  assert.match(css, /\.chats-shell\.panel-splitting \.chan-main/u);
-  assert.match(css, /\.thread-panel\[data-right-panel-position=/u);
-  assert.match(
-    css,
-    /@media[^}]*max-width:\s*600px[\s\S]*?\.chats-shell\.panel-splitting \.chan-main[\s\S]*?box-shadow:\s*none/u,
-  );
-});
-
-test("separate thread tabs replace the group transcript when two are open", async () => {
-  const [app, chats, data, css] = await Promise.all([
-    publicFile("app.js"),
-    publicFile("screen-chats.js"),
-    publicFile("data.js"),
-    publicFile("styles.css"),
-  ]);
-
-  assert.match(data, /activeChannelThreads:\s*\[\]/u);
-  assert.match(data, /map\(\(id\) => `thread:\$\{id\}`\)/u);
-  assert.match(app, /openThreadPanel\(value\)/u);
-  assert.match(chats, /threadPanel\(repositoryId, kind\.slice\("thread:"\.length\)\)/u);
-  assert.match(chats, /data-thread-id=/u);
-  assert.match(
-    css,
-    /\.chats-shell\.panels-2 \.chan-main,[\s\S]*?\.chats-shell\.panels-3 \.chan-main\s*\{\s*display:\s*none;/u,
-  );
-});
-
-test("a fourth kept panel is refused rather than squeezing the room away", async () => {
+test("direct messages and agent chats replace the primary conversation", async () => {
   const [app, chats, data] = await Promise.all([
     publicFile("app.js"),
     publicFile("screen-chats.js"),
     publicFile("data.js"),
   ]);
-
-  // Three is the ceiling, and it is written down as a number rather than left
-  // implied by the drawing code — a fourth column would leave the transcript
-  // it is all about too narrow to read.
-  assert.match(
-    `${app}\n${chats}\n${data}`,
-    /(?:RIGHT_PANEL_MAX|MAX_RIGHT_PANELS|RIGHT_PANEL_LIMIT|PANEL_STACK_MAX)\s*=\s*3\b|\.slice\(\s*(?:0,\s*)?-?3\s*\)/u,
-  );
+  assert.match(data, /primaryDestination:/u);
+  assert.match(data, /kind === "dm" \? next\.id/u);
+  assert.match(app, /selectPrimaryDestination\(\{ kind: "dm", id: userId \}/u);
+  assert.match(app, /selectPrimaryDestination\(\{ kind: "agent", id: value \}/u);
+  assert.match(chats, /function directMessageConversation\(\)/u);
+  assert.match(chats, /function agentConversation\(repositoryId\)/u);
+  assert.match(chats, /function filesConversation\(repositoryId\)/u);
+  assert.match(chats, /function fileConversation\(\)/u);
+  assert.match(chats, /function primaryConversation\(repositoryId\)/u);
 });
 
-test("a tab opening beside another animates in at that tab's width", async () => {
-  const [app, chats, css] = await Promise.all([
+test("the right side has a ceiling of one and protects a usable conversation", async () => {
+  const [app, data, css] = await Promise.all([
     publicFile("app.js"),
-    publicFile("screen-chats.js"),
+    publicFile("data.js"),
     publicFile("styles.css"),
   ]);
-
-  // Each panel is told apart from its neighbours across a render, so a second
-  // one opening is an arrival rather than "the column was already occupied".
-  // The attribute is its own, not the draggable tab's: sharing that one would
-  // turn every drag started inside a panel into a drag of the panel.
-  assert.match(chats, /data-panel-key="\$\{esc\(kind\)\}"/u);
-  assert.match(app, /key:\s*\(node\) => node\.dataset\.panelKey/u);
-  assert.match(app, /function liveNodes\(root, surface\)/u);
-  assert.match(app, /querySelectorAll\(\s*`\$\{surface\.selector\}:not\(\.\$\{surface\.leave\}\)`/u);
-  // Arrivals and departures are both decided per key now.
-  assert.match(app, /if \(before\.has\(key\)/u);
-  assert.match(app, /if \(now\.has\(key\)/u);
-
-  // And it arrives the size the tab beside it already is, rather than both of
-  // them splitting the window — the dragged width, growing from nothing over
-  // the length of the animation so the neighbour is not shoved sideways in a
-  // single frame.
-  assert.match(
-    css,
-    /\.chats-shell\.panels-2 \.thread-panel,\s*\.chats-shell\.panels-3 \.thread-panel\s*\{[^}]*width:\s*var\(--panel-w/u,
-  );
-  assert.match(
-    css,
-    /\.chats-shell\.panels-2 \.thread-panel\.panel-entering,\s*\.chats-shell\.panels-3 \.thread-panel\.panel-entering\s*\{[^}]*animation:\s*panel-join var\(--motion-panel\)/u,
-  );
-  assert.match(css, /@keyframes panel-join\s*\{[^}]*\{[^}]*width:\s*0;/u);
+  assert.match(data, /RIGHT_PANEL_MAX = 1/u);
+  assert.match(data, /state\.rightPanelStack = active === undefined \? \[\] : \[active\]/u);
+  assert.match(app, /const MAIN_MIN = 480/u);
+  assert.match(css, /@media \(max-width: 1180px\) and \(min-width: 601px\)/u);
 });
 
 /** One node in a stand-in for the part of a row this gesture actually reads. */

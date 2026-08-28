@@ -129,6 +129,69 @@ export function messageTooLong(text, target = "channel") {
 }
 
 /**
+ * When a message is long enough to fold away behind a reader control.
+ *
+ * Two thresholds, either of which is enough: a wall of paragraphs, or one
+ * uninterrupted block of text. Short posts stay as they are.
+ */
+export const MESSAGE_FOLD_MIN_BLOCKS = 4;
+export const MESSAGE_FOLD_MIN_CHARS = 800;
+
+/**
+ * Which long messages this browser last left unfolded, keyed by a stable
+ * fold id built where the message is rendered.
+ */
+function rememberedMessageFoldOpen() {
+  try {
+    const saved = JSON.parse(stored("ag.messageFoldOpen", "{}"));
+    return saved !== null && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Whether one message is long enough to fold. */
+export function messageFoldEligible(text) {
+  const raw = String(text ?? "");
+  const blocks = raw
+    .split(/\n{2,}/u)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+  return (
+    blocks.length >= MESSAGE_FOLD_MIN_BLOCKS || raw.length >= MESSAGE_FOLD_MIN_CHARS
+  );
+}
+
+/**
+ * The prefix of a long message shown while it is folded.
+ *
+ * Paragraph boundaries are honoured when there are enough of them; otherwise
+ * the cut is by character count at a word boundary when one is nearby.
+ */
+export function messageFoldClip(text) {
+  const raw = String(text ?? "");
+  const blocks = raw
+    .split(/\n{2,}/u)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+  if (blocks.length >= MESSAGE_FOLD_MIN_BLOCKS) {
+    return blocks.slice(0, MESSAGE_FOLD_MIN_BLOCKS - 1).join("\n\n");
+  }
+  if (raw.length <= MESSAGE_FOLD_MIN_CHARS) {
+    return raw;
+  }
+  const slice = raw.slice(0, MESSAGE_FOLD_MIN_CHARS);
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > MESSAGE_FOLD_MIN_CHARS - 80 ? slice.slice(0, lastSpace) : slice)
+    .trimEnd();
+}
+
+/** Whether a fold id is currently expanded for this reader. */
+export function messageFoldOpen(key) {
+  return state.messageFoldOpen[key] === true;
+}
+
+/**
  * Which of the sidebar's two rosters this browser last left unrolled.
  *
  * Absent, or unreadable, means both: a first visit should show the room, and
@@ -143,6 +206,28 @@ function rememberedRosterSections() {
     return { people: true, agents: true };
   }
 }
+
+/**
+ * The last primary destination visited inside each workspace.
+ *
+ * This is intentionally small browser navigation state, not server data. A
+ * workspace switch can therefore restore the conversation the reader left
+ * without making a direct message or agent chat pretend to be a global
+ * destination.
+ */
+function rememberedWorkspaceDestinations() {
+  try {
+    const saved = JSON.parse(stored("ag.workspaceDestinations", "{}"));
+    return saved !== null && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+const initialRepositoryId = stored("ag.repo");
+const initialWorkspaceDestinations = rememberedWorkspaceDestinations();
+const initialPrimaryDestination =
+  initialWorkspaceDestinations[initialRepositoryId] ?? { kind: "main" };
 
 export const state = {
   /* Session */
@@ -171,7 +256,13 @@ export const state = {
 
   /* Navigation */
   route: "chats",
-  repositoryId: stored("ag.repo"),
+  repositoryId: initialRepositoryId,
+  /** Main chat, a person DM, or an agent conversation in the active workspace. */
+  primaryDestination: initialPrimaryDestination,
+  /** The last primary destination in every workspace this browser has visited. */
+  workspaceDestinations: initialWorkspaceDestinations,
+  /** The one optional thread, profile, pins, file, or information surface. */
+  secondaryContext: undefined,
   /** The account settings surface floats over the current conversation. */
   settingsOpen: false,
   /** The category selected in the settings dialog's left navigation. */
@@ -184,7 +275,10 @@ export const state = {
   /** The caller's own GitHub connection — the identity their pushes carry.
    *  `undefined` until asked; `null` when this deployment offers none. */
   github: undefined,
-  selectedAgent: stored("ag.agent", "anthropic"),
+  selectedAgent:
+    initialPrimaryDestination?.kind === "agent"
+      ? initialPrimaryDestination.id
+      : stored("ag.agent", "anthropic"),
   conversations: {},
   sending: {},
   /** Commands available on every conversation surface, supplied with the session. */
@@ -493,8 +587,11 @@ export const state = {
   dmConversations: [],
   /** Loaded threads, keyed by the other person's user id. */
   dmThreads: {},
-  /** The conversation open in the side panel, if any. */
-  activeDm: undefined,
+  /** The person named by the active primary direct-message destination. */
+  activeDm:
+    initialPrimaryDestination?.kind === "dm"
+      ? initialPrimaryDestination.id
+      : undefined,
   /** Any agent in the room, open in that same panel. */
   activeAgentPanel: undefined,
   /**
@@ -532,6 +629,13 @@ export const state = {
    * halfway through the list. Absent means closed.
    */
   changesOpen: {},
+  /**
+   * Whether a long message is unfolded, keyed by fold id. Absent means folded.
+   *
+   * Remembered in this browser so a poll that rebuilds the transcript does
+   * not collapse a post somebody is halfway through reading.
+   */
+  messageFoldOpen: rememberedMessageFoldOpen(),
   /** A simplified rewrite of one summary, once it has been asked for. */
   simplified: {},
   /** Whether the simple version is the one showing, keyed by reply id. */
@@ -611,10 +715,13 @@ export const state = {
   // Paths whose inline diff is expanded in the transcript. Plural because a
   // reader comparing two files should not have to close one to open the other.
   chanOpenFiles: [],
-  /** The changed file open in the side panel, if any. */
-  chanFileView: undefined,
+  /** The changed file open as the active primary destination, if any. */
+  chanFileView:
+    initialPrimaryDestination?.kind === "file"
+      ? initialPrimaryDestination.id
+      : undefined,
   /** How the open file is being shown: its diff, or its editable text. */
-  chanFileMode: "diff",
+  chanFileMode: initialPrimaryDestination?.kind === "file" ? "edit" : "diff",
   /** The file's text as the workspace last gave it, and as it is being typed. */
   chanFileBase: undefined,
   chanFileDraft: undefined,
@@ -6517,24 +6624,70 @@ export function channelFileEdited() {
 
 /* ------------------------------------------------ the right-hand column ---- */
 
+/** One primary conversation and, at most, one secondary context. */
+export const RIGHT_PANEL_MAX = 1;
+
+function normalPrimaryDestination(destination) {
+  const kind = String(destination?.kind ?? "main");
+  if (kind === "dm" || kind === "agent" || kind === "file") {
+    const id = String(destination?.id ?? "");
+    return id === "" ? { kind: "main" } : { kind, id };
+  }
+  return ["threads", "files"].includes(kind) ? { kind } : { kind: "main" };
+}
+
+/** The selected primary destination for one workspace. */
+export function primaryDestinationForWorkspace(
+  repositoryId = currentRepository()?.id ?? state.repositoryId ?? "",
+) {
+  if (repositoryId === (currentRepository()?.id ?? state.repositoryId ?? "")) {
+    return normalPrimaryDestination(state.primaryDestination);
+  }
+  return normalPrimaryDestination(state.workspaceDestinations[repositoryId]);
+}
+
 /**
- * How many surfaces the column beside the conversation will hold at once.
- *
- * Three, written down here rather than left implied by the drawing code. A
- * thread, the file it is about and the person who asked for it are three
- * different things to have open; a fourth column would leave the room they
- * are all about too narrow to read, so the oldest gives up its place.
+ * Select the surface that owns the message pane and remember it per workspace.
  */
-export const RIGHT_PANEL_MAX = 3;
+export function selectPrimaryDestination(
+  destination,
+  repositoryId = currentRepository()?.id ?? state.repositoryId ?? "",
+) {
+  const next = normalPrimaryDestination(destination);
+  const previous = normalPrimaryDestination(state.primaryDestination);
+  closeSecondaryContext();
+  state.primaryDestination = next;
+  if (repositoryId !== "") {
+    state.workspaceDestinations[repositoryId] = next;
+    persist(
+      "ag.workspaceDestinations",
+      JSON.stringify(state.workspaceDestinations),
+    );
+  }
+  state.activeDm = next.kind === "dm" ? next.id : undefined;
+  if (next.kind === "agent") {
+    state.selectedAgent = next.id;
+  }
+  if (
+    previous.kind === "file" &&
+    (next.kind !== "file" || next.id !== previous.id)
+  ) {
+    closeChannelFile();
+  }
+  if (next.kind === "file") {
+    state.chanFileView = next.id;
+  }
+  return next;
+}
 
 /** Every surface whose state says it is open, in the order they used to rank. */
 export function openRightPanels() {
-  return [
+  const primary = normalPrimaryDestination(state.primaryDestination);
+  const stateBacked = [
     state.catchUp !== undefined && "catch-up",
     state.activePlan !== undefined && "plan",
     state.activeAgentPanel !== undefined && "agent",
-    state.activeDm !== undefined && "dm",
-    state.chanFileView !== undefined && "file",
+    state.chanFileView !== undefined && primary.kind !== "file" && "file",
     state.chanTree === true && "tree",
     ...(state.activeChannelThreads ?? []).map((id) => `thread:${id}`),
     state.activeChannelThread !== undefined &&
@@ -6542,10 +6695,20 @@ export function openRightPanels() {
       `thread:${state.activeChannelThread}`,
     state.chanThreadList === true && "threads",
   ].filter(Boolean);
+  const virtual = state.secondaryContext;
+  return virtual !== undefined && !stateBacked.includes(virtual)
+    ? [...stateBacked, virtual]
+    : stateBacked;
 }
 
 /** Stop keeping a surface in the column, without touching what is behind it. */
 export function clearRightPanel(kind) {
+  if (
+    state.secondaryContext === kind ||
+    (kind === "thread" && state.secondaryContext?.startsWith("thread:"))
+  ) {
+    state.secondaryContext = undefined;
+  }
   if (kind === "thread") {
     state.rightPanelStack = state.rightPanelStack.filter(
       (open) => !open.startsWith("thread:"),
@@ -6616,8 +6779,45 @@ export function putAwayRightPanel(kind) {
     case "threads":
       state.chanThreadList = false;
       return;
+    case "pins":
+      state.pinsOpen = false;
+      return;
     default:
   }
+}
+
+/** The optional context currently aligned beside or over the conversation. */
+export function activeSecondaryContext() {
+  return state.secondaryContext;
+}
+
+/**
+ * Replace the current secondary context. Contexts never accumulate into
+ * additional columns; opening a new one closes the state owned by the old.
+ */
+export function openSecondaryContext(kind) {
+  const next = String(kind ?? "");
+  if (next === "") {
+    closeSecondaryContext();
+    return undefined;
+  }
+  const current = state.secondaryContext;
+  if (current !== undefined && current !== next) {
+    putAwayRightPanel(current);
+  }
+  state.secondaryContext = next;
+  return next;
+}
+
+/** Close the current context and its backing state. */
+export function closeSecondaryContext() {
+  const current = state.secondaryContext;
+  if (current === undefined) {
+    return false;
+  }
+  putAwayRightPanel(current);
+  state.secondaryContext = undefined;
+  return true;
 }
 
 /**
@@ -6638,21 +6838,22 @@ export function putAwayRightPanel(kind) {
  */
 export function keptRightPanels() {
   const open = openRightPanels();
-  const stack = state.rightPanelStack.filter((kind) => open.includes(kind));
+  let active = state.secondaryContext;
+  if (active !== undefined && !open.includes(active)) {
+    active = undefined;
+    state.secondaryContext = undefined;
+  }
+  if (active === undefined && open.length > 0) {
+    active = open.at(-1);
+    state.secondaryContext = active;
+  }
   for (const kind of open) {
-    if (!stack.includes(kind)) {
-      stack.push(kind);
+    if (kind !== active) {
+      putAwayRightPanel(kind);
     }
   }
-  while (stack.length > RIGHT_PANEL_MAX) {
-    const pushedOut =
-      stack.find((kind) => kind !== "file" || !channelFileEdited()) ??
-      stack[0];
-    stack.splice(stack.indexOf(pushedOut), 1);
-    putAwayRightPanel(pushedOut);
-  }
-  state.rightPanelStack = stack;
-  return stack;
+  state.rightPanelStack = active === undefined ? [] : [active];
+  return state.rightPanelStack;
 }
 
 /** The surface holding the right edge — the one a phone shows at all. */

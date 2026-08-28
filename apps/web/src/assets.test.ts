@@ -424,8 +424,8 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.match(enhancement, /"aria-pressed", String\(open\)/u);
 
   // Header redraws must not duplicate the control. The observer puts it back
-  // after a redraw, while the existing delegated action changes only the
-  // banner's visibility state and never calls the pin/unpin operation.
+  // after a redraw, while the delegated action uses the one secondary slot
+  // and never calls the pin/unpin operation.
   assert.match(enhancement, /querySelector\("\.ch-pins-toggle"\)/u);
   assert.match(enhancement, /new MutationObserver\(sync\)/u);
   assert.match(enhancement, /dataset\.act = "channel-pins-toggle"/u);
@@ -433,14 +433,16 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
     app.indexOf('case "channel-pins-toggle"'),
     app.indexOf('case "channel-pinned-open"'),
   );
-  assert.match(
-    toggle,
-    /setPinnedMessagesOpen\(state\.pinsOpen !== true\)/u,
-  );
-  assert.doesNotMatch(toggle, /render\(\)/u);
+  assert.match(toggle, /activeSecondaryContext\(\) === "pins"/u);
+  assert.match(toggle, /moveRightPanel\("pins", "right"\)/u);
+  assert.match(toggle, /closeSecondaryContext\(\)/u);
+  assert.match(toggle, /render\(\)/u);
   assert.doesNotMatch(toggle, /toggleChannelMessagePin/u);
-  // Closed, the shelf is absent from the markup entirely, so nothing of it can
-  // sit above the conversation; the header shortcut is the only way back in.
+  // Pins are drawn in the same secondary surface as threads and profiles,
+  // rather than taking another strip out of the primary transcript.
+  assert.match(chats, /function pinnedMessagesPanel\(repositoryId\)/u);
+  assert.match(chats, /aria-label="Pinned messages"/u);
+  assert.match(chats, /panelClose\("secondary-context-close"/u);
   assert.match(
     chats,
     /pins\.length === 0 \|\| state\.pinsOpen !== true/u,
@@ -448,22 +450,8 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.match(chats, /class="chan-pins open" aria-hidden="false"/u);
   assert.match(chats, /class="chan-pins-surface"/u);
   assert.match(chats, /chan-pins-list-frame" aria-hidden="false"/u);
-  // Both directions still animate: the open gesture redraws and replays the
-  // unfold, the close gesture folds the live nodes before dropping them.
-  assert.match(app, /banner\.classList\.remove\("open"\)/u);
-  assert.match(app, /banner\.toggleAttribute\("inert", true\)/u);
-  assert.match(app, /shelf\.classList\.add\("open"\)/u);
-  assert.match(app, /pinsFoldTimer = setTimeout/u);
-  assert.match(styles, /\.chan-pins \{[\s\S]*grid-template-rows: 0fr/u);
-  assert.match(styles, /\.chan-pins \{[\s\S]*visibility: hidden/u);
-  assert.match(styles, /\.chan-pins \{[\s\S]*border-bottom: 0 solid/u);
-  assert.match(styles, /\.chan-pins\.open \{[\s\S]*grid-template-rows: 1fr/u);
-  assert.match(styles, /\.chan-pins-surface \{[\s\S]*min-height: 0/u);
-  assert.match(styles, /\.chan-pins-list-frame \{[\s\S]*grid-template-rows: 0fr/u);
-  assert.match(
-    styles,
-    /\.chan-pins\.open \.chan-pins-list-frame \{[\s\S]*grid-template-rows: 1fr/u,
-  );
+  assert.match(styles, /\.pins-panel \.chan-pins \{[\s\S]*display: block/u);
+  assert.match(styles, /\.thread-panel\.panel-entering \{[\s\S]*hierarchy-panel-in/u);
   assert.match(styles, /prefers-reduced-motion: reduce/u);
 
   // Fresh sessions start with the banner folded; readers unfold it when they
@@ -481,7 +469,7 @@ test("one play control beside the pin runs whatever the channel's app is", async
   // and drawn as a count rather than a tool button, because the tray it used
   // to sit in no longer exists and a boxed icon among these would read as a
   // control that arrived by accident.
-  const headerStart = chats.indexOf("function chanHeader(repositoryId)");
+  const headerStart = chats.indexOf("function conversationHeader(repositoryId)");
   const header = chats.slice(
     headerStart,
     chats.indexOf('<span class="spacer">', headerStart),
@@ -597,7 +585,7 @@ test("one play control beside the pin runs whatever the channel's app is", async
   assert.match(control, /partial === undefined \? "" : " warn"/u);
   const link = chats.slice(
     chats.indexOf("function previewLink(repositoryId)"),
-    chats.indexOf("function chanHeader(repositoryId)"),
+    chats.indexOf("function conversationHeader(repositoryId)"),
   );
   assert.match(link, /preview\.buildFailure/u);
 });
@@ -1024,7 +1012,7 @@ test("sound effects confirm real sends and reserve interruptions for live arriva
   assert.match(app, /entry\.role === "assistant" && entry\.pending !== true/u);
 });
 
-test("the channel rail stays visible when the tool sidebar collapses", async () => {
+test("the workspace rail stays visible when workspace navigation collapses", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
@@ -1037,7 +1025,7 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     chats.indexOf("function chanSidebar"),
   );
   const header = chats.slice(
-    chats.indexOf("function chanHeader"),
+    chats.indexOf("function conversationHeader"),
     chats.indexOf("function threadParticipants"),
   );
 
@@ -1046,9 +1034,9 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   // sidebar folds. There is exactly one of it in the screen; the rail's copy
   // of the same button, beside it and drawn with the same glyph, is gone. The
   // sidebar keeps only the phone button that opens the off-canvas drawer.
-  assert.match(crown, /class="chan-crown"/u);
+  assert.match(crown, /class="chan-crown workspace-sidebar-header"/u);
   assert.match(crown, /data-act="chan-collapse-toggle"/u);
-  assert.doesNotMatch(sidebar, /data-act="chan-collapse-toggle"/u);
+  assert.match(sidebar, /\$\{chanCrown\(activeRepositoryId\)\}/u);
   assert.equal(
     chats.split('data-act="chan-collapse-toggle"').length - 1,
     1,
@@ -1088,7 +1076,7 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     "the account action should not repeat its destination as a subtitle",
   );
 
-  // Channels and their pictures live in the dedicated rail. Collapsing the
+  // Workspaces and their pictures live in the dedicated rail. Collapsing the
   // adjacent tool/roster sidebar cannot hide that navigation surface.
   assert.match(chats, /function channelPictureMarkup/u);
   assert.match(
@@ -1096,8 +1084,8 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     /function channelPictureMarkup[\s\S]*?const label = repositoryLabel\(repositoryId\);[\s\S]*?const initials = channelInitials\(label\);/u,
     "an unset channel picture should follow the repository's current display name",
   );
-  assert.match(chats, /function channelRail/u);
-  assert.match(chats, /class="channel-rail" aria-label="Channels"/u);
+  assert.match(chats, /function workspaceRail/u);
+  assert.match(chats, /class="channel-rail workspace-rail" aria-label="Workspaces"/u);
   assert.match(chats, /data-act="channel-picture-pick"/u);
   assert.match(chats, /\$\{rail \? channelRail\(repositoryId\) : ""\}/u);
   assert.match(
@@ -1125,17 +1113,17 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     /\.chats-shell\.chan-collapsed \.chan-brand \{[\s\S]{0,260}opacity: 0;[\s\S]{0,80}visibility: hidden;/u,
   );
   assert.match(css, /\.chan-collapse-btn \{\s*flex: none;\s*margin-left: auto;/u);
-  const sidebarRule = /\.chan-sidebar \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  const sidebarRule = /\n\.chan-sidebar \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(sidebarRule, undefined, "the sidebar has a base layout rule");
   assert.match(
     sidebarRule ?? "",
     /transition: width var\(--motion-content\) var\(--ease-motion\);/u,
   );
-  // Three rows, not four: the crown that used to open this panel is drawn
-  // once at the head of the banner.
+  // Four owned rows: workspace identity, destinations, the one roster
+  // scroller, and the account footer.
   assert.match(
     css,
-    /grid-template-rows: auto minmax\(0, 1fr\) auto;/u,
+    /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
   );
 
   // Changing the class on the existing shell gives the width transition an
@@ -1835,6 +1823,46 @@ test("agent settings sign in first, but can fall back to a credential", async ()
   assert.match(source, /Use a credential instead/u);
 });
 
+test("connect buttons show a busy state until the server answers or a modal opens", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const chat = await publicFile("chat.js");
+  const css = await publicFile("styles.css");
+
+  assert.match(app, /const providerConnecting = new Set\(\)/u);
+  assert.match(app, /state\.providerConnecting = providerConnecting/u);
+  assert.match(agents, /providerConnecting\?\.add\(providerId\)/u);
+  assert.match(agents, /providerConnecting\?\.delete\(providerId\)/u);
+  assert.match(agents, /providerConnecting\?\.add\("github"\)/u);
+  assert.match(agents, /providerConnecting\?\.delete\("github"\)/u);
+
+  const agentsCard = app.slice(
+    app.indexOf("function agentsCard()"),
+    app.indexOf("function commitAgentRename"),
+  );
+  assert.match(agentsCard, /providerConnecting\?\.has\(agent\.id\)/u);
+  assert.match(agentsCard, /connecting/u);
+  assert.match(agentsCard, /disabled/u);
+  assert.match(agentsCard, /aria-busy="true"/u);
+
+  const githubCard = app.slice(
+    app.indexOf("function githubCard()"),
+    app.indexOf("function agentsCard()"),
+  );
+  assert.match(githubCard, /providerConnecting\?\.has\("github"\)/u);
+  assert.match(githubCard, /connecting/u);
+
+  const composer = chat.slice(
+    chat.indexOf("export function chatComposer"),
+    chat.indexOf("export function chatPanel"),
+  );
+  assert.match(composer, /providerConnecting\?\.has\(agent\.id\)/u);
+  assert.match(composer, /connecting/u);
+
+  assert.match(css, /\.btn\.connecting \{/u);
+  assert.match(css, /animation: pulse 2\.4s ease-in-out infinite/u);
+});
+
 test("adding another agent always begins with a provider choice", async () => {
   const app = await publicFile("app.js");
   const agents = await publicFile("screen-agents.js");
@@ -2009,20 +2037,12 @@ test("the composer stays open over a decision the textarea cannot see", async ()
   }
 });
 
-test("the channel composer placeholder uses the repository display name", async () => {
+test("the main-chat composer placeholder names the selected conversation", async () => {
   const source = await publicFile("screen-chats.js");
   const start = source.indexOf("function composer(repositoryId)");
   const body = source.slice(start, source.indexOf("\n}", start));
-  // A rename changes displayName (e.g. KUMI) while the id can stay the old
-  // slug; the empty-bar hint must follow the name people see elsewhere.
-  assert.match(
-    body,
-    /Message #\$\{esc\(repositoryLabel\(repositoryId \?\? ""\)\)\}/u,
-  );
-  assert.doesNotMatch(
-    body,
-    /Message #\$\{esc\(repositoryId \?\? ""\)\}/u,
-  );
+  assert.match(body, /\? "Message Main chat"/u);
+  assert.doesNotMatch(body, /Message #/u);
 });
 
 test("the chat panel shows a bare progress bar and no token statistics", async () => {
@@ -3946,7 +3966,7 @@ test(
     );
     assert.match(
       app,
-      /case "dm-open":[\s\S]{0,120}state\.activeDm = value;[\s\S]{0,120}state\.dmDraft = "";/u,
+      /case "dm-open":[\s\S]{0,180}openUserDirectMessage\(value\)/u,
     );
   },
 );
@@ -5737,7 +5757,7 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   assert.match(chats, /const people = channelPeopleFor\(repositoryId\)/u);
   assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
   assert.doesNotMatch(
-    /function chanHeader[\s\S]*?\n\}/u.exec(chats)?.[0] ?? "",
+    /function conversationHeader[\s\S]*?\n\}/u.exec(chats)?.[0] ?? "",
     /collaborators\(\)/u,
     "the channel header no longer counts the organization",
   );
@@ -5782,7 +5802,7 @@ test("people and agents render directly without a main branch node", async () =>
     chats.indexOf("/* ---------------------------------------------------------- chan main"),
   );
   const header = chats.slice(
-    chats.indexOf("function chanHeader"),
+    chats.indexOf("function conversationHeader"),
     chats.indexOf("function threadParticipants"),
   );
 
@@ -5847,7 +5867,7 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.match(panel, /const headerAction = \(view, iconName, title\)/u);
   assert.match(
     panel,
-    /canChatPrivately \? headerAction\("chat", "chatBubble", "Private chat"\) : ""/u,
+    /act: "agent-chat-open",[\s\S]*?title: "Open as primary conversation"/u,
   );
   assert.match(panel, /headerAction\("history", "history", "Task history"\)/u);
 });
@@ -7010,13 +7030,12 @@ test("a held plan auto-opens with a simple link back to its panel", async () => 
   assert.match(app, /function openReadyPlan\(repositoryId\)/u);
   assert.match(app, /openReadyPlan\(channelRepositoryId\);/u);
   assert.match(app, /state\.activePlan = messageId;/u);
-  // Escape and the swipe close it when it is the surface holding the column's
-  // right edge — the newest one, which on a phone is the only one drawn.
+  // Escape and a swipe close the one active secondary context.
   assert.match(
     app,
-    /function closeSidePanel\(\) \{[\s\S]*?newestRightPanel\(\)/u,
+    /function closeSidePanel\(\) \{[\s\S]*?activeSecondaryContext\(\)/u,
   );
-  assert.match(app, /putAwayRightPanel\(showing\)/u);
+  assert.match(app, /closeSecondaryContext\(\)/u);
 
   assert.match(css, /\n\.plan-link \{/u);
   assert.doesNotMatch(css, /\n\.plan-card \{/u);
@@ -7029,7 +7048,7 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
   const css = await publicFile("styles.css");
 
   const header = chats.slice(
-    chats.indexOf("function chanHeader"),
+    chats.indexOf("function conversationHeader"),
     chats.indexOf("function threadParticipants"),
   );
   // Search and the info / exclamation control are gone; channel info is still
@@ -7070,62 +7089,36 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
   assert.match(app, /ensureRepositoryGrants\(activeChannelId\(\)/u);
 });
 
-test("a phone's channel header is one banner across the screen with its actions on the right", async () => {
+test("a phone shows stable global chrome and an in-flow conversation header", async () => {
   const css = await publicFile("styles.css");
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  // Fixed, full width, and tall enough to clear the status bar — the header
-  // used to start where the channel rail ended, so the top of a phone read as
-  // two unrelated bars.
-  const banner = css.slice(
-    css.indexOf(".chats-shell .chan-head {"),
-    css.indexOf("}", css.indexOf(".chats-shell .chan-head {")),
-  );
-  assert.notEqual(banner, "", "the phone header banner rule is still there");
-  assert.match(banner, /position: fixed;/u);
-  assert.match(banner, /left: 0;/u);
-  assert.match(banner, /right: 0;/u);
-  assert.match(banner, /height: var\(--chan-head-h\);/u);
-  // One row. Wrapping is what dropped the channel actions button onto a
-  // second line at the left, where no thumb looks for a menu.
-  assert.match(banner, /flex-wrap: nowrap;/u);
-  assert.doesNotMatch(banner, /flex-wrap: wrap;/u);
-  // The spacer pushes that button to the right edge instead of breaking the
-  // row in half.
+  assert.match(app, /<header class="topbar" aria-label="Global">/u);
+  assert.match(app, /class="global-search"/u);
   assert.match(
     css,
-    /@media \(max-width: 600px\)[\s\S]*?\.chan-head \.spacer \{\s*flex: 1;\s*height: auto;/u,
+    /@media \(max-width: 600px\) \{[\s\S]*?\.topbar \{[\s\S]*?height: calc\(54px \+ var\(--safe-top\)\)/u,
   );
-  // Under the drawer, its scrim and a full-screen thread panel; above the
-  // conversation it is a banner over.
-  assert.match(banner, /z-index: 70;/u);
-  // The status-bar inset is paid inside the banner's own height.
   assert.match(
     css,
-    /\.chats-shell \{\s*--chan-head-h: calc\(52px \+ var\(--safe-top\)\);/u,
+    /@media \(max-width: 600px\) \{[\s\S]*?\.chats-shell \.chan-head \{[\s\S]*?position: static;/u,
   );
-  assert.match(banner, /padding: var\(--safe-top\)/u);
-
-  // The actions menu is still the last thing in the header, which is what
-  // puts it at the right end of the banner.
   const header = chats.slice(
-    chats.indexOf("function chanHeader"),
+    chats.indexOf("function conversationHeader"),
     chats.indexOf("function threadParticipants"),
   );
+  assert.match(header, /class="ch-name">\$\{esc\(label\)\}<\/div>/u);
   assert.ok(
     header.indexOf('act: "channel-menu"') >
       header.indexOf('class="icon-btn chan-sidebar-btn"'),
-    "the channel actions button comes after the channels button",
+    "conversation actions follow the workspace-navigation button",
   );
   assert.ok(
     header.indexOf('act: "channel-menu"') > header.indexOf('<span class="spacer">'),
-    "the spacer pushes the channel actions button to the right",
+    "the spacer pushes conversation actions to the right",
   );
 
-  // The account button is the only global action sharing the channel banner.
-  // Notification history remains available without crowding the phone header
-  // with a bell and its unread badge.
   const topbar = app.slice(
     app.indexOf("function topbar"),
     app.indexOf("The screens the account menu is the way into"),
@@ -7137,38 +7130,36 @@ test("a phone's channel header is one banner across the screen with its actions 
   assert.match(app, /case "go-notifications":/u);
 });
 
-test("a phone's channel rail and sidebar drawer start below the header banner", async () => {
+test("a phone combines workspace selection and navigation in one inert drawer", async () => {
   const css = await publicFile("styles.css");
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
 
-  // The banner is out of flow, so the shell pays its height back as padding —
-  // which is what drops the rail, the conversation and the drawer under it.
   assert.match(
     css,
-    /\.chats-shell \{\s*--chan-head-h: calc\(52px \+ var\(--safe-top\)\);\s*padding-top: var\(--chan-head-h\);/u,
+    /\.workspace-rail \{[\s\S]*?top: calc\(54px \+ var\(--safe-top\)\);[\s\S]*?transform: translateX\(-100%\)/u,
   );
-
-  // The drawer slides out from under the banner rather than over it, so the
-  // header it belongs to stays visible while it is open.
-  const drawerAt = css.indexOf("  .chan-sidebar {\n    position: fixed;");
-  assert.notEqual(drawerAt, -1, "the phone drawer rule is still there");
-  const drawer = css.slice(
-    drawerAt,
-    css.indexOf("will-change: transform;", drawerAt),
-  );
-  assert.match(drawer, /top: var\(--chan-head-h\);/u);
-  assert.doesNotMatch(drawer, /top: 0;/u);
-  // And its safe-area top-up is the banner's job now, not the drawer's.
   assert.match(
     css,
-    /\.chats-shell \.chan-sidebar \{\s*padding-top: 0;/u,
+    /\.chats-shell \.chan-sidebar \{[\s\S]*?top: calc\(54px \+ var\(--safe-top\)\);[\s\S]*?left: 52px;[\s\S]*?width: calc\(100vw - 52px\)/u,
   );
-
-  // The scrim covers what the drawer covers and no more: the banner stays
-  // lit and tappable behind it.
   assert.match(
-    css,
-    /\.chan-sidebar-scrim \{[\s\S]{0,400}inset: var\(--chan-head-h\) 0 0;/u,
+    chats,
+    /phoneLayout\(\) && state\.chanSidebarOpen !== true[\s\S]*?' aria-hidden="true" inert'/u,
   );
+  assert.match(
+    app,
+    /navigation\.toggleAttribute\("inert", !next\)[\s\S]*?navigation\.setAttribute\("aria-hidden", String\(!next\)\)/u,
+  );
+  assert.match(
+    chats,
+    /primaryHidden \? ' aria-hidden="true" inert' : ""/u,
+  );
+  assert.match(
+    app,
+    /conversation\?\.toggleAttribute\("inert", conversationHidden\)/u,
+  );
+  assert.match(css, /\.chats-shell > \.thread-panel \{[\s\S]*?position: fixed;[\s\S]*?width: 100vw/u);
 });
 
 test("a provider with no model list still lets a model be named", async () => {
@@ -7294,7 +7285,7 @@ test("no marketing address is served from this build", async () => {
 
 /* ------------------------------------------------- room presentation ---- */
 
-test("the channel rail is drawn only when there is a channel to switch to", async () => {
+test("the workspace rail is drawn only when there is a workspace to switch to", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
 
@@ -7302,9 +7293,9 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   // window permanently, and it held them from the conversation.
   assert.match(
     chats,
-    /function showsChannelRail\(\) \{\s*return state\.repositories\.length > 1;/u,
+    /function showsWorkspaceRail\(\) \{\s*return state\.repositories\.length > 1;/u,
   );
-  assert.match(chats, /const rail = showsChannelRail\(\);/u);
+  assert.match(chats, /const rail = showsWorkspaceRail\(\);/u);
   assert.match(chats, /\$\{rail \? "" : " no-rail"\}/u);
   assert.match(css, /--rail-w: 60px;/u);
   assert.match(css, /--chan-sidebar-w: 256px;/u);

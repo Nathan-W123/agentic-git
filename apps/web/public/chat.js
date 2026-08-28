@@ -15,6 +15,9 @@ import {
   currentUserId,
   currentUserName,
   loadProviderOptions,
+  messageFoldClip as clipFoldedMessageText,
+  messageFoldEligible,
+  messageFoldOpen,
   messageLengthNotice,
   messageTooLong,
   myAvatar,
@@ -40,6 +43,22 @@ import {
 function conversationFor(agentId) {
   state.conversations[agentId] ??= [];
   return state.conversations[agentId];
+}
+
+function messageFoldClip(foldKey, content, renderBody) {
+  const text = String(content ?? "");
+  if (!messageFoldEligible(text)) {
+    return renderBody(text);
+  }
+  const open = messageFoldOpen(foldKey);
+  const shown = open ? text : clipFoldedMessageText(text);
+  return `<div class="message-fold${open ? " is-open" : ""}">
+    <div class="message-fold-body">${renderBody(shown)}</div>
+    <button type="button" class="message-fold-toggle" data-act="message-fold-toggle"
+      data-value="${esc(foldKey)}" aria-expanded="${open}">
+      ${open ? "Show less" : "Show more"}
+    </button>
+  </div>`;
 }
 
 /**
@@ -182,7 +201,11 @@ export function chatThread(agent) {
                 : ""
             }</span>
           </div>`
-    }<div class="msg-text">${esc(entry.content)}</div></div></div>`;
+    }<div class="msg-text">${messageFoldClip(
+      `chat:${agent.id}|${String(entry.at ?? index)}`,
+      entry.content,
+      (shown) => esc(shown),
+    )}</div></div></div>`;
   });
   return `<div class="chat-thread" id="chat-thread">${rows.join("")}</div>`;
 }
@@ -240,12 +263,19 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
   // says so and stays out of the way rather than accepting a message and
   // failing it into a toast a moment later.
   if (agent !== undefined && agent.connected !== true) {
+    const connecting = state.providerConnecting?.has(agent.id) === true;
     return `<div class="composer composer-blocked">
       <p>${esc(agent.name)} is not connected, so it cannot be messaged yet.</p>
-      <button class="btn btn-sm" data-act="agent-connect"
-        data-value="${esc(agent.id)}">Connect ${esc(
-          agent.name.split(" ")[0],
-        )}</button>
+      <button class="btn btn-sm${connecting ? " connecting" : ""}" data-act="agent-connect"
+        data-value="${esc(agent.id)}"${
+          connecting
+            ? ' disabled aria-busy="true" title="Connecting…" aria-label="Connecting…"'
+            : ""
+        }>${
+          connecting
+            ? "Connecting…"
+            : `Connect ${esc(agent.name.split(" ")[0])}`
+        }</button>
     </div>`;
   }
   // The same two helpers the channel roster's pickers read. They used to be

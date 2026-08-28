@@ -815,6 +815,8 @@ function pause(ms) {
  * `null` when the user walked away.
  */
 async function signInAgent(providerId, mode, rerender) {
+  state.providerConnecting?.add(providerId);
+  rerender();
   // Opened now, empty, and pointed at the vendor once the URL is known.
   // A tab opened after the `await` below is a popup as far as the browser is
   // concerned — the click that authorised it is long over — so it gets
@@ -845,12 +847,16 @@ async function signInAgent(providerId, mode, rerender) {
   try {
     flow = await startProviderSignIn(providerId);
   } catch (error) {
+    state.providerConnecting?.delete(providerId);
+    rerender();
     tab?.close();
     // The caller offers a fresh attempt, and saying why beats silently
     // showing a credential form the user did not ask for.
     toast(`${agentLabelOf(providerId)} sign-in unavailable — ${error.message}`, "error");
     return false;
   }
+  state.providerConnecting?.delete(providerId);
+  rerender();
 
   // If the tab was blocked anyway, the link in the dialog is still there and
   // still works — this is a shortcut, not the only route.
@@ -998,6 +1004,8 @@ async function signInAgent(providerId, mode, rerender) {
 }
 
 export async function connectAgent(providerId, rerender) {
+  state.providerConnecting?.add(providerId);
+  rerender();
   // Sign-in first where the vendor supports it, because the alternative is
   // asking somebody to go and find a secret. The server reports which
   // providers can, so this does not have to know.
@@ -1056,10 +1064,14 @@ export async function connectAgent(providerId, rerender) {
   // from a list here, so a vendor gaining or losing a paste route does not
   // need this file changed to match.
   if (!pasteable) {
+    state.providerConnecting?.delete(providerId);
+    rerender();
     toast(`${agentLabelOf(providerId)} browser sign-in is unavailable`, "error");
     return;
   }
 
+  state.providerConnecting?.delete(providerId);
+  rerender();
   const help = CREDENTIAL_HELP[providerId] ?? {
     hint: "Paste a credential for this provider.",
     placeholder: "",
@@ -1152,6 +1164,8 @@ export async function connectAgent(providerId, rerender) {
  * person walked away.
  */
 async function signInGitHub(rerender) {
+  state.providerConnecting?.add("github");
+  rerender();
   // Claimed during the click, navigated once the URL is known — the same
   // popup-blocker reasoning as `signInAgent`.
   const tab = window.open("", "_blank");
@@ -1159,10 +1173,14 @@ async function signInGitHub(rerender) {
   try {
     flow = await startGitHubSignIn();
   } catch (error) {
+    state.providerConnecting?.delete("github");
+    rerender();
     tab?.close();
     toast(`GitHub sign-in unavailable — ${error.message}`, "error");
     return false;
   }
+  state.providerConnecting?.delete("github");
+  rerender();
   if (tab !== null && tab !== undefined) {
     tab.opener = null;
     tab.location.replace(flow.verificationUrl);
@@ -1253,6 +1271,8 @@ async function signInGitHub(rerender) {
  * grant.
  */
 export async function connectGitHubAccount(rerender) {
+  state.providerConnecting?.add("github");
+  rerender();
   if (state.github?.signInAvailable === true) {
     for (;;) {
       const outcome = await signInGitHub(rerender);
@@ -1277,6 +1297,8 @@ export async function connectGitHubAccount(rerender) {
       }
     }
   }
+  state.providerConnecting?.delete("github");
+  rerender();
   const values = await showModal({
     title: "Connect GitHub",
     subtitle: "Your token, spent only on pushes your own tasks ask for.",

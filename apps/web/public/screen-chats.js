@@ -50,9 +50,13 @@ api,
   flushChannelDrafts,
   isChannelMuted,
   keptRightPanels,
+  activeSecondaryContext,
   markChannelRead,
   memberName,
   memberRole,
+  messageFoldClip as clipFoldedMessageText,
+  messageFoldEligible,
+  messageFoldOpen,
   myAgents,
   myAvatar,
   outstandingQuestionsFor,
@@ -67,7 +71,9 @@ api,
   providerAllowsCustomModel,
   usageKey,
   providerOptionsNote,
+  primaryDestinationForWorkspace,
   repositoryLabel,
+  selectPrimaryDestination,
   saveChannelDraft,
   sendChannelMessage,
   snapshotChannelRead,
@@ -203,12 +209,17 @@ function channelPictureMarkup(repositoryId, size = 34) {
  * for. The two controls that were only ever in the rail move into the
  * sidebar's crown while it is away; see `chanSidebar`.
  */
-export function showsChannelRail() {
+export function showsWorkspaceRail() {
   return state.repositories.length > 1;
 }
 
-/** The compact channel switcher, drawn when there is a choice to make. */
-function channelRail(activeRepositoryId) {
+/** Compatibility for callers that still use the repository-channel name. */
+export function showsChannelRail() {
+  return showsWorkspaceRail();
+}
+
+/** The compact workspace switcher, drawn when there is a choice to make. */
+function workspaceRail(activeRepositoryId) {
   const repositories = [...state.repositories].sort((left, right) =>
     left.id.localeCompare(right.id),
   );
@@ -217,7 +228,10 @@ function channelRail(activeRepositoryId) {
   // the same glyph and both doing the same thing — the crown's is the only
   // one now, and it keeps its place in the crown whether the sidebar is open
   // or folded away. See `chanCrown`.
-  return `<nav class="channel-rail" aria-label="Channels">
+  const hidden = phoneLayout() && state.chanSidebarOpen !== true;
+  return `<nav class="channel-rail workspace-rail" aria-label="Workspaces"${
+    hidden ? ' aria-hidden="true" inert' : ""
+  }>
     <div class="channel-rail-list">
       ${repositories
         .map((repo) => {
@@ -241,8 +255,8 @@ function channelRail(activeRepositoryId) {
           const muted = isChannelMuted(repo.id);
           return `<div class="channel-rail-entry${active ? " active" : ""}${muted ? " muted" : ""}">
             <button type="button" class="channel-rail-button" data-act="channel-open"
-              data-value="${esc(repo.id)}" title="#${esc(label)}${muted ? " (muted)" : ""}"
-              aria-label="Switch to channel ${esc(label)}${muted ? ", muted" : ""}"${active ? ' aria-current="page"' : ""}>
+              data-value="${esc(repo.id)}" title="${esc(label)}${muted ? " (muted)" : ""}"
+              aria-label="Switch to workspace ${esc(label)}${muted ? ", muted" : ""}"${active ? ' aria-current="page" aria-selected="true"' : ' aria-selected="false"'}>
               ${channelPictureMarkup(repo.id, 36)}
               ${
                 unread > 0
@@ -269,9 +283,14 @@ function channelRail(activeRepositoryId) {
         .join("")}
     </div>
     <button type="button" class="channel-rail-new" data-act="channel-new"
-      data-value="${esc(activeRepositoryId ?? "")}" title="New channel"
-      aria-label="New channel">${icon("plus")}</button>
+      data-value="${esc(activeRepositoryId ?? "")}" title="Add or join a workspace"
+      aria-label="Add or join a workspace">${icon("plus")}</button>
   </nav>`;
+}
+
+/** Compatibility for source-level callers while channel APIs remain named. */
+function channelRail(activeRepositoryId) {
+  return workspaceRail(activeRepositoryId);
 }
 
 /**
@@ -1205,13 +1224,15 @@ function personRow(person) {
   // roster uses — never on the channel-info panel. Only drawn when there is
   // something to offer; an empty menu is a dead control.
   const hasMenu = personMenuItems(userId).length > 0;
+  const destination = primaryDestinationForWorkspace(repositoryId);
+  const selected = destination.kind === "dm" && destination.id === userId;
   // Writing to yourself is not a conversation, so your own row is a label
   // rather than a button — everyone else's opens the thread with them.
   return `<div class="roster-row">
-    <div class="roster-row-main"${
+    <div class="roster-row-main${selected ? " selected" : ""}"${
       me
         ? ""
-        : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}"`
+        : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}" aria-current="${selected ? "page" : "false"}"`
     }>
       ${
         // The same card an agent's face carries, from the same builders. A
@@ -1283,7 +1304,15 @@ export function personMenuItems(userId) {
   if (!repositoryId || !userId || userId === currentUserId()) {
     return [];
   }
-  const items = [];
+  const items = [
+    {
+      act: "person-profile-open",
+      value: userId,
+      label: "View details",
+      hint: "Open this person's profile beside the conversation",
+      iconName: "users",
+    },
+  ];
   const canManageChannel = canManageRepository(repositoryId);
   const grants = state.repositoryGrants[repositoryId] ?? [];
   const coOwner = grants.some(
@@ -1296,7 +1325,7 @@ export function personMenuItems(userId) {
             act: "channel-grant-promote",
             value: `${repositoryId}:${userId}`,
             label: "Promote to co-owner",
-            hint: "Same capabilities as the repository's creator, on this channel only",
+            hint: "Same capabilities as the repository's creator, in this workspace only",
             iconName: "users",
           }
         : {
@@ -1395,6 +1424,9 @@ const AGENT_STATUS_TITLE = {
 function rosterRow(agent) {
   const settingsOpen =
     agent.mine === true && state.chatSettingsOpenId === agent.id;
+  const destination = primaryDestinationForWorkspace(activeChannelId());
+  const selected =
+    destination.kind === "agent" && destination.id === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
   // Same rule `personRow` follows: draw the "…" only when it has something to
@@ -1403,8 +1435,9 @@ function rosterRow(agent) {
   // worse than no control.
   const hasMenu = rosterMenuItems(agent.id).length > 0;
   return `<div class="roster-row">
-    <div class="roster-row-main" role="button" tabindex="0"
-      data-act="agent-panel-open" data-value="${esc(agent.id)}">
+    <div class="roster-row-main${selected ? " selected" : ""}" role="button" tabindex="0"
+      data-act="agent-panel-open" data-value="${esc(agent.id)}"
+      aria-current="${selected ? "page" : "false"}">
       ${
         // `data-hover` is what starts the usage fetch the card's own section
         // reads — see `requestUsageForHoverTarget` in app.js. Keyed by the
@@ -1624,15 +1657,15 @@ function chanCrown(activeRepositoryId) {
   const channel = esc(activeRepositoryId ?? "");
   const label = repositoryLabel(activeRepositoryId ?? "");
   const fold = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
-  return `<div class="chan-crown">
+  return `<header class="chan-crown workspace-sidebar-header">
     <!-- The name is in the label as well as in the button, because this is
          the only place the room is named now: an accessible name of "Channel
          info" replaces the text inside it, which would have left a reader
          using a screen reader with no way to hear which channel they are
          in. -->
     <button type="button" class="chan-brand" data-act="channel-info"
-      data-value="${channel}" title="Channel info"
-      aria-label="${esc(label)} — channel info">
+      data-value="${channel}" title="Workspace information"
+      aria-label="${esc(label)} workspace information">
       ${channelPictureMarkup(activeRepositoryId ?? "", 26)}
       <!-- The id on the name itself, as it was on the banner's before this:
            a channel keeps the id every task, run and API path addresses it
@@ -1648,15 +1681,15 @@ function chanCrown(activeRepositoryId) {
       showsChannelRail()
         ? ""
         : `<label class="icon-btn chan-crown-picture"
-             title="Change picture for ${esc(label)}"
-             aria-label="Change picture for ${esc(label)}">${icon("pencil")}
+             title="Change workspace picture for ${esc(label)}"
+             aria-label="Change workspace picture for ${esc(label)}">${icon("pencil")}
              <input type="file" accept="image/*" data-act="channel-picture-pick"
                data-repository="${channel}" hidden>
            </label>
            ${iconButton("plus", {
              act: "channel-new",
              value: activeRepositoryId ?? "",
-             title: "New channel",
+             title: "Add or join a workspace",
              cls: "chan-crown-new",
            })}`
     }
@@ -1665,7 +1698,7 @@ function chanCrown(activeRepositoryId) {
       title="${fold}"
       aria-pressed="${state.chanCollapsed === true}"
       aria-label="${fold}">${icon("columns")}</button>
-  </div>`;
+  </header>`;
 }
 
 function chanSidebar(activeRepositoryId) {
@@ -1679,7 +1712,12 @@ function chanSidebar(activeRepositoryId) {
   const user = currentUserName();
 
   const channel = esc(activeRepositoryId ?? "");
-  return `<aside class="chan-sidebar" aria-label="Channel tools and account">
+  const destination = primaryDestinationForWorkspace(activeRepositoryId);
+  const hidden = phoneLayout() && state.chanSidebarOpen !== true;
+  return `<aside class="chan-sidebar" aria-label="${esc(
+    repositoryLabel(activeRepositoryId),
+  )} workspace navigation"${hidden ? ' aria-hidden="true" inert' : ""}>
+    ${chanCrown(activeRepositoryId)}
     <!-- No crown in here. The channel's picture and name are drawn once, in
          \`chanCrown\`, at the head of the bar across the top of the shell —
          where they stand in this column's own width. What is left in this
@@ -1693,15 +1731,20 @@ function chanSidebar(activeRepositoryId) {
 
          The backticks are escaped because this comment is inside a template
          literal, where a bare one would close the string. -->
-    <nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">
-      <button type="button" class="chan-quick-link${state.chanThreadList === true ? " on" : ""}"
+    <nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace destinations">
+      <button type="button" class="chan-quick-link workspace-main-link${destination.kind === "main" ? " on" : ""}"
+        data-act="workspace-main-open" aria-current="${destination.kind === "main" ? "page" : "false"}"
+        title="Open Main chat">
+        ${icon("chatBubble")}<span>Main chat</span>
+      </button>
+      <button type="button" class="chan-quick-link${activeSecondaryContext() === "threads" ? " on" : ""}"
         data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}"
-        title="Browse channel threads">
+        title="Browse workspace threads">
         ${icon("reply")}<span>Threads</span>
       </button>
-      <button type="button" class="chan-quick-link${state.chanTree === true ? " on" : ""}"
-        data-act="chan-tree-toggle" aria-pressed="${state.chanTree === true}"
-        title="Browse repository files">
+      <button type="button" class="chan-quick-link${destination.kind === "files" || destination.kind === "file" ? " on" : ""}"
+        data-act="chan-tree-toggle" aria-current="${destination.kind === "files" || destination.kind === "file" ? "page" : "false"}"
+        title="Browse workspace files">
         ${icon("folder")}<span>Files</span>
       </button>
       ${iconButton("close", {
@@ -1948,95 +1991,87 @@ function previewLink(repositoryId) {
  * in the room is said on the headings of the two lists that hold them, in the
  * navigation this bar begins with — see `section`.
  */
-function chanHeader(repositoryId) {
-  return `<header class="chan-head">
-    ${chanCrown(repositoryId)}
-    <!-- No hamburger. It opened the outer app rail, which stopped being
-         rendered when this sidebar became the navigation, so between 600 and
-         900 pixels the header led with a button that did nothing at all. The
-         channels button below is the one that opens something. -->
-    <!-- Phone-only: the channel list and roster live in \`.chan-sidebar\`,
-         which goes off-canvas below the 600px breakpoint the same way the
-         outer app \`.sidebar\` already does at 900px. This is the only way
-         back to it once it is closed, so it is a real button rather than
-         something folded into a menu.
-
-         The backticks are escaped because this comment is inside a template
-         literal: a bare one closes the string, and the selector after it
-         then parses as real code — ".chan-sidebar" becomes a property read
-         minus an identifier named "sidebar", which is valid JavaScript and
-         throws only when this header renders.
-
-         Not the only way in any more — a rightward swipe across the
-         conversation drags the same drawer out, and a leftward one puts it
-         back (see the phone drawer drag in app.js). The button stays because
-         a gesture leaves no trace on the screen, so it cannot be the sole
-         route to a surface; \`aria-expanded\` is what tells a reader which of
-         the two states the invisible drawer is currently in. -->
+function conversationHeader(repositoryId) {
+  const destination = primaryDestinationForWorkspace(repositoryId);
+  const person =
+    destination.kind === "dm"
+      ? state.dmPeople.find((candidate) => candidate.id === destination.id)
+      : undefined;
+  const agent =
+    destination.kind === "agent"
+      ? channelAgentsFor(repositoryId).find(
+          (candidate) => candidate.id === destination.id,
+        ) ?? myAgents().find((candidate) => candidate.id === destination.id)
+      : undefined;
+  const label =
+    destination.kind === "dm"
+      ? person?.name ?? memberName(destination.id) ?? "Direct message"
+      : destination.kind === "agent"
+        ? agent?.name ?? "Agent conversation"
+        : destination.kind === "file"
+          ? destination.id
+        : destination.kind === "threads"
+          ? "Threads"
+          : destination.kind === "files" || destination.kind === "file"
+            ? "Files"
+            : "Main chat";
+  const description =
+    destination.kind === "dm"
+      ? "Direct message"
+      : destination.kind === "agent"
+        ? "Agent conversation"
+        : destination.kind === "file"
+          ? "Workspace file"
+          : destination.kind === "files"
+            ? "Workspace files"
+            : "Workspace threads";
+  const main = destination.kind === "main";
+  return `<header class="chan-head conversation-header" aria-label="${esc(label)} conversation header">
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       aria-expanded="${state.chanSidebarOpen === true}"
-      title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
-    ${icon("chatBubble", 'class="ch-hash"')}
-    <!-- What the room is, rather than what it is called: the crown at the
-         head of this bar carries the name, and the id it is addressed by.
-         One line, because with the name gone there is only ever one. -->
+      title="Workspace navigation" aria-label="Workspace navigation">${icon("list")}</button>
+    ${main ? icon("chatBubble", 'class="ch-hash"') : ""}
     <div class="ch-title">
-      <div class="ch-desc">
-        <!-- No counts here any more. A bust and a number, a robot and another
-             number, and then a literal "|" holding them apart from the room's
-             own controls: five glyphs of furniture on the busiest line of the
-             screen, counting two lists that are drawn in full three hundred
-             pixels to the left. The figures are on those lists' own headings
-             now — see \`section\` — where the eye is already counting. What is
-             left in here is what only this line can say: why the room is
-             quiet, whether its app is up, and what is pinned in it.
-
-             The backticks are escaped because this comment is inside a
-             template literal, where a bare one would close the string. -->
-        ${
-          // Why this room is quiet, said in the one place somebody wondering
-          // about it is already looking. Without it a muted channel simply
-          // never raises a badge, which reads as nobody talking rather than as
-          // a choice this account made.
-          isChannelMuted(repositoryId)
-            ? `<span class="ch-count ch-muted" title="Muted — no badges or sounds from this channel">${icon(
-                "bellOff",
-              )}Muted</span>`
-            : ""
-        }
-        <!-- Last of the statically rendered pieces, because the pin toggle
-             is appended here after the fact (see \`S.showPinnedMessages\` in
-             ui.js) and lands immediately after this. The two belong together:
-             both are one-press channel controls that say something about this
-             room rather than about the message in front of you.
-
-             The separator that used to stand here divided the counts from
-             these controls. With the counts gone it divided the controls from
-             nothing at all. -->
-        ${previewControl(repositoryId)}
-      </div>
+      <div class="ch-name">${esc(label)}</div>
+      ${
+        main
+          ? `<div class="ch-desc">${
+              isChannelMuted(repositoryId)
+                ? `<span class="ch-count ch-muted" title="Muted — no badges or sounds from this workspace">${icon(
+                    "bellOff",
+                  )}Muted</span>`
+                : ""
+            }${previewControl(repositoryId)}</div>`
+          : `<div class="ch-destination-kind">${description}</div>`
+      }
     </div>
     <span class="spacer"></span>
+    ${main ? previewLink(repositoryId) : ""}
     ${
-      // A running preview's address is not a control, so it stays out of the
-      // fold. The point of hiding the tools is a quieter header; hiding the
-      // one live thing in it would mean expanding a menu to find out whether
-      // your app is up.
-      previewLink(repositoryId)
+      destination.kind === "dm"
+        ? iconButton("users", {
+            act: "person-profile-open",
+            value: destination.id,
+            title: `Details for ${label}`,
+          })
+        : destination.kind === "agent"
+          ? iconButton("robot", {
+              act: "agent-panel-open",
+              value: destination.id,
+              title: `Details for ${label}`,
+            })
+          : iconButton("dots", {
+              act: "channel-menu",
+              value: repositoryId ?? "",
+              title: "Conversation actions",
+            })
     }
-    <!-- Rename and delete live here, on the channel itself. The menu was
-         reachable from nowhere before this: the repositories grid that used
-         to carry it is no longer a screen, so a repository could be renamed
-         or removed only through the API. -->
-    ${iconButton("dots", {
-      act: "channel-menu",
-      value: repositoryId ?? "",
-      title: "Channel actions",
-    })}
-    <!-- No faces here. Six cropped circles said "some agents and some people
-         are in this room", which the two counts already say exactly, in less
-         space and without the guessing. -->
   </header>`;
+}
+
+/** Compatibility for callers while the conversation header takes ownership. */
+function chanHeader(repositoryId) {
+  return conversationHeader(repositoryId);
 }
 
 /**
@@ -2250,6 +2285,32 @@ function messageBodyWithIcons(entry, repositoryId) {
       repositoryId,
       entry.mentions,
     )}</div></div>`;
+}
+
+/**
+ * Wraps a rendered message body when the source text is long enough to fold.
+ *
+ * The fold id is assigned by the caller so channel, direct, and agent copies
+ * of the same words do not share one another's open state.
+ */
+function messageFoldClip(
+  foldKey,
+  content,
+  renderBody,
+) {
+  const text = String(content ?? "");
+  if (!messageFoldEligible(text)) {
+    return renderBody(text);
+  }
+  const open = messageFoldOpen(foldKey);
+  const shown = open ? text : clipFoldedMessageText(text);
+  return `<div class="message-fold${open ? " is-open" : ""}">
+    <div class="message-fold-body">${renderBody(shown)}</div>
+    <button type="button" class="message-fold-toggle" data-act="message-fold-toggle"
+      data-value="${esc(foldKey)}" aria-expanded="${open}">
+      ${open ? "Show less" : "Show more"}
+    </button>
+  </div>`;
 }
 
 /** Root kinds spoken by an agent rather than a person or the coordinator. */
@@ -3128,7 +3189,12 @@ function messageRow(
       )}">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
-          : `${messageBodyWithIcons(entry, repositoryId)}${completedReference}`
+          : messageFoldClip(
+              `cmsg:${repositoryId}|${entry.id}`,
+              entry.content,
+              (shown) =>
+                `${messageBodyWithIcons({ ...entry, content: shown }, repositoryId)}${completedReference}`,
+            )
       }</div>
       ${
         // Said plainly, beside a way to try again. The resend re-posts the
@@ -3468,7 +3534,7 @@ function channelLoadFailure(repositoryId) {
   return `<div class="chan-messages" id="chan-messages" role="status"
     aria-live="polite" data-scroll-key="channel:${esc(repositoryId)}">${emptyState(
       "chatBubble",
-      "This channel could not be loaded",
+      "Main chat could not be loaded",
       `${failure.message ?? "The request did not complete"}${status}`,
       `<button type="button" class="btn btn-sm" data-act="channel-retry-load"
         data-value="${esc(repositoryId)}">Try again</button>`,
@@ -3491,7 +3557,7 @@ function messageList(repositoryId) {
     )}${emptyState(
       "chatBubble",
       "No messages yet",
-      "Say hello — messages sent here stay in this channel for your session.",
+      "Say hello — messages sent here stay in this workspace's Main chat for your session.",
       // Also on the empty branch: an empty channel is exactly where somebody
       // starting to type matters most, and leaving it off here meant the dots
       // could not appear until the room already had a message in it.
@@ -4286,7 +4352,7 @@ function composer(repositoryId) {
           enterkeyhint="send"
           placeholder="${
             state.composerThreadId === undefined
-              ? `Message #${esc(repositoryLabel(repositoryId ?? ""))}`
+              ? "Message Main chat"
               : replyTarget?.kind === "user" &&
                   replyTarget.taskId === undefined
                 ? "Write a reply..."
@@ -4362,10 +4428,7 @@ function panelKind(label, act, panelId) {
                   ? "agent"
                   : ""
   );
-  const drag = kind === ""
-    ? ""
-    : ` draggable="true" data-right-panel-kind="${kind}"
-        aria-label="${esc(label)} panel; drag onto the conversation to move it left"`;
+  const drag = kind === "" ? "" : ` data-right-panel-kind="${kind}"`;
   return act === undefined
     ? `<span class="panel-kind"${drag}>${esc(label)}</span>`
     : `<button type="button" class="panel-kind" data-act="${esc(act)}"${drag}
@@ -4377,6 +4440,9 @@ function rightPanel(repositoryId, kind) {
   if (kind.startsWith("thread:")) {
     return threadPanel(repositoryId, kind.slice("thread:".length));
   }
+  if (kind.startsWith("person:")) {
+    return personProfilePanel(repositoryId, kind.slice("person:".length));
+  }
   switch (kind) {
     case "catch-up":
       return catchUpPanel();
@@ -4384,6 +4450,10 @@ function rightPanel(repositoryId, kind) {
       return planPanel(repositoryId);
     case "agent":
       return agentPanel();
+    case "conversation-info":
+      return conversationInfoPanel(repositoryId);
+    case "pins":
+      return pinnedMessagesPanel(repositoryId);
     case "dm":
       return dmPanel();
     case "file":
@@ -4416,6 +4486,14 @@ function positionedRightPanel(repositoryId, kind, position) {
   );
 }
 
+/** The one optional context aligned with the primary conversation. */
+function secondaryPanel(repositoryId) {
+  const kind = activeSecondaryContext();
+  return kind === undefined
+    ? ""
+    : positionedRightPanel(repositoryId, kind, "right");
+}
+
 /**
  * Everything the column is holding, oldest on the left.
  *
@@ -4429,19 +4507,8 @@ function positionedRightPanel(repositoryId, kind, position) {
  * the newest surface, over the conversation, the way it arrived.
  */
 function rightPanels(repositoryId) {
-  const kept = keptRightPanels();
-  if (kept.length === 0) {
-    return "";
-  }
-  const newest = kept[kept.length - 1];
-  if (phoneLayout()) {
-    return positionedRightPanel(repositoryId, newest, "right");
-  }
-  const pushedLeft = kept
-    .slice(0, -1)
-    .map((kind) => positionedRightPanel(repositoryId, kind, "left"))
-    .join("");
-  return `${pushedLeft}${positionedRightPanel(repositoryId, newest, "right")}`;
+  keptRightPanels();
+  return secondaryPanel(repositoryId);
 }
 
 /**
@@ -4453,6 +4520,83 @@ function rightPanels(repositoryId) {
  */
 function panelClose(act, title) {
   return iconButton("close", { act, title, cls: "panel-close" });
+}
+
+/** A person's identity is context for a DM, not the DM itself. */
+function personProfilePanel(repositoryId, userId) {
+  const person = state.dmPeople.find((candidate) => candidate.id === userId);
+  const name = person?.name ?? memberName(userId) ?? "Someone";
+  const profile = personProfile(userId, name, repositoryId);
+  const facts = profile.facts
+    .map(
+      (fact) => `<div class="secondary-fact"><span>${esc(
+        fact.label,
+      )}</span><b>${esc(fact.value)}</b></div>`,
+    )
+    .join("");
+  return `<aside class="thread-panel person-detail-panel" aria-label="Person details">
+    ${panelGrip()}
+    <header class="thread-head">
+      ${panelKind("Person")}
+      <span class="thread-title">${esc(name)}</span>
+      <span class="spacer"></span>
+      ${panelClose("secondary-context-close", "Close person details (Esc)")}
+    </header>
+    <div class="thread-body secondary-profile-body">
+      <div class="secondary-profile-face">${profile.face}</div>
+      <h2>${esc(profile.name)}</h2>
+      ${profile.subtitle ? `<p>${esc(profile.subtitle)}</p>` : ""}
+      <p>${esc(profile.statusText)}</p>
+      <div class="secondary-facts">${facts}</div>
+      ${
+        userId === currentUserId()
+          ? ""
+          : `<button type="button" class="btn btn-primary" data-act="dm-open" data-value="${esc(
+              userId,
+            )}">Message ${esc(name)}</button>`
+      }
+    </div>
+  </aside>`;
+}
+
+/** Workspace information uses the same single secondary-context slot. */
+function conversationInfoPanel(repositoryId) {
+  const content = channelInfoPopoverHtml(repositoryId).replace(
+    /^<div class="pop-head">[\s\S]*?<\/div>/u,
+    "",
+  );
+  return `<aside class="thread-panel conversation-info-panel" aria-label="Conversation information">
+    ${panelGrip()}
+    <header class="thread-head">
+      ${panelKind("Information")}
+      <span class="thread-title">${esc(repositoryLabel(repositoryId))}</span>
+      <span class="spacer"></span>
+      ${panelClose("secondary-context-close", "Close conversation information (Esc)")}
+    </header>
+    <div class="thread-body secondary-info-body">${content}</div>
+  </aside>`;
+}
+
+/** Pinned messages are context beside Main chat, never another transcript. */
+function pinnedMessagesPanel(repositoryId) {
+  const wasOpen = state.pinsOpen;
+  state.pinsOpen = true;
+  const pins = pinnedBanner(repositoryId);
+  state.pinsOpen = wasOpen;
+  return `<aside class="thread-panel pins-panel" aria-label="Pinned messages">
+    ${panelGrip()}
+    <header class="thread-head">
+      ${panelKind("Pins")}
+      <span class="thread-title">Pinned messages</span>
+      <span class="spacer"></span>
+      ${panelClose("secondary-context-close", "Close pinned messages (Esc)")}
+    </header>
+    <div class="thread-body secondary-info-body">${
+      pins.includes("chan-pin-row")
+        ? pins
+        : '<p class="util-empty">Nothing is pinned in this conversation.</p>'
+    }</div>
+  </aside>`;
 }
 
 /**
@@ -4912,7 +5056,7 @@ function threadListPanel(repositoryId) {
           ? ""
           : iconButton("trash", {
               act: "channel-threads-clear",
-              title: "Delete every thread in this channel",
+              title: "Delete every thread in this workspace",
               small: true,
             })
       }
@@ -5599,7 +5743,7 @@ export function agentChannelsPopoverHtml(agent, repositoryId) {
         (id) =>
           `<li${id === repositoryId ? ` class="here"` : ""}>#${esc(
             repositoryLabel(id),
-          )}${id === repositoryId ? `<span>this channel</span>` : ""}</li>`,
+          )}${id === repositoryId ? `<span>this workspace</span>` : ""}</li>`,
       )
       .join("")}</ul>
   </div>`;
@@ -5685,7 +5829,7 @@ function agentIdentityZone(agent, repositoryId, { status, statusText, providerId
     },
     {
       text: `#${repositoryLabel(repositoryId)}`,
-      title: "The channel this panel was opened from",
+      title: "The workspace this panel was opened from",
     },
   ].filter((fact) => fact.text !== "");
   return `<section class="aspec-zone aspec-identity" aria-label="Identity">
@@ -5869,7 +6013,7 @@ function agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId }
               "channel-agent-model",
               models,
               modelValue,
-              "Model in this channel",
+              "Model in this workspace",
             )
           : customModel
             ? miniEditable(
@@ -5881,7 +6025,7 @@ function agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId }
                   "CLI's own default.",
               )
             : readOnly(modelValue),
-        "Used for work in this channel",
+        "Used for work in this workspace",
         optionsNote === "" && !blocking
           ? ""
           : specInfoButton(
@@ -5897,7 +6041,7 @@ function agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId }
               "channel-agent-effort",
               efforts,
               effortValue,
-              "Reasoning effort in this channel",
+              "Reasoning effort in this workspace",
             )
           : readOnly(effortValue || "Provider default"),
         "Thinking depth for new work",
@@ -5916,7 +6060,7 @@ function agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId }
               "Who may use this agent",
             )
           : readOnly(visibility === "org" ? "Organization" : "Owner only"),
-        "Applies in every channel",
+        "Applies in every workspace",
       )}
     </div>
     ${
@@ -5950,12 +6094,12 @@ function agentContextZone(agent, repositoryId, { assignments, allChannelsLoaded 
   return `<section class="aspec-zone aspec-context" aria-label="Context">
     <div class="aspec-context-cell">
       <div class="aspec-cell-head">
-        <span class="aspec-cell-label">Channels</span>
+        <span class="aspec-cell-label">Workspaces</span>
         <span class="aspec-count">${channels.length}</span>
       </div>
       <div class="aspec-channel-list">
         ${specPill(`#${repositoryLabel(repositoryId)}`, {
-          title: "The channel this panel was opened from",
+          title: "The workspace this panel was opened from",
         })}
         ${named
           .map((repository) =>
@@ -5978,7 +6122,7 @@ function agentContextZone(agent, repositoryId, { assignments, allChannelsLoaded 
       ${
         allChannelsLoaded
           ? ""
-          : `<div class="aspec-note">Checking remaining channels…</div>`
+          : `<div class="aspec-note">Checking remaining workspaces…</div>`
       }
     </div>
     <div class="aspec-context-cell">
@@ -6067,7 +6211,16 @@ function agentPanel() {
         ${esc(agent.name)}
       </span>
       <span class="spacer"></span>
-      ${canChatPrivately ? headerAction("chat", "chatBubble", "Private chat") : ""}
+      ${
+        canChatPrivately
+          ? iconButton("chatBubble", {
+              act: "agent-chat-open",
+              value: agent.id,
+              title: "Open as primary conversation",
+              small: true,
+            })
+          : ""
+      }
       ${headerAction("history", "history", "Task history")}
       ${panelClose("agent-panel-close", "Close agent panel (Esc)")}
     </header>
@@ -6257,10 +6410,10 @@ function dmPanel() {
                     data-dm-message="${esc(message.id)}">
                   ${directMessageReference(message, messages, name)}
                   <div class="dm-bubble cmsg-text"
-                    data-reveal="dm:${esc(userId)}|msg-${esc(message.id)}">${messageBody(
+                    data-reveal="dm:${esc(userId)}|msg-${esc(message.id)}">${messageFoldClip(
+                    `dm:${userId}|${message.id}`,
                     message.content,
-                    repositoryId,
-                    [],
+                    (shown) => messageBody(shown, repositoryId, []),
                   )}</div>
                   <span class="dm-msg-actions">${iconButton("reply", {
                     act: "dm-reply-quote",
@@ -6326,6 +6479,83 @@ function dmPanel() {
       </form>
     </div>
   </aside>`;
+}
+
+/** A direct message owns the primary pane rather than a right-hand column. */
+function directMessageConversation() {
+  return dmPanel()
+    .replace(
+      /^<aside class="thread-panel">[\s\S]*?<\/header>/u,
+      '<section class="primary-private-conversation direct-message-conversation" aria-label="Direct message">',
+    )
+    .replace(/<\/aside>$/u, "</section>");
+}
+
+/** A private agent chat uses the same primary-conversation contract as a DM. */
+function agentConversation(repositoryId) {
+  const destination = primaryDestinationForWorkspace(repositoryId);
+  const agent =
+    channelAgentsFor(repositoryId).find(
+      (candidate) => candidate.id === destination.id,
+    ) ?? myAgents().find((candidate) => candidate.id === destination.id);
+  if (agent === undefined) {
+    return `<section class="primary-private-conversation"><p class="util-empty">This agent is not available in this workspace.</p></section>`;
+  }
+  return `<section class="primary-private-conversation agent-conversation" aria-label="Conversation with ${esc(
+    agent.name,
+  )}">
+    ${chatProgress(agent)}
+    ${chatThread(agent)}
+    ${chatComposer(agent, `Ask ${agent.name.split(" ")[0]} to do anything...`)}
+  </section>`;
+}
+
+/** The shared workspace room, including its stable composer. */
+function mainChatConversation(repositoryId) {
+  return `${messageList(repositoryId)}
+    ${jumpToLatest()}
+    ${agentQuestionPrompt(repositoryId)}
+    ${dismissedQuestionChip(repositoryId)}
+    ${composer(repositoryId)}`;
+}
+
+/** Workspace files are a first-class primary destination. */
+function filesConversation(repositoryId) {
+  return chanTreePanel(repositoryId)
+    .replace(
+      /^<aside class="thread-panel">[\s\S]*?<\/header>/u,
+      '<section class="primary-private-conversation files-conversation" aria-label="Workspace files">',
+    )
+    .replace(/<\/aside>$/u, "</section>");
+}
+
+/** A selected file replaces the primary destination while keeping its tools. */
+function fileConversation() {
+  return filePanel()
+    .replace(
+      /^<aside class="thread-panel file-panel([^"]*)">[\s\S]*?<header class="thread-head">/u,
+      '<section class="primary-private-conversation primary-file-conversation$1" aria-label="Workspace file"><div class="primary-file-toolbar">',
+    )
+    .replace("</header>", "</div>")
+    .replace(/<\/aside>$/u, "</section>");
+}
+
+/** Draw exactly one primary destination in the message pane. */
+function primaryConversation(repositoryId) {
+  const destination = primaryDestinationForWorkspace(repositoryId);
+  if (destination.kind === "dm") {
+    return directMessageConversation();
+  }
+  if (destination.kind === "agent") {
+    return agentConversation(repositoryId);
+  }
+  if (destination.kind === "files") {
+    return filesConversation(repositoryId);
+  }
+  if (destination.kind === "file") {
+    return fileConversation();
+  }
+  return mainChatConversation(repositoryId);
 }
 
 function threadPanel(repositoryId, selectedMessageId) {
@@ -7185,7 +7415,7 @@ export function channelInfoPopoverHtml(repositoryId) {
   // Stats moved to Settings (`channelStatsCard`); co-owner promote / demote /
   // remove moved to People-row menus (`personMenuItems`). Channel info keeps
   // branch, remote, agents, sync, leave, and delete.
-  return `<div class="pop-head"><h3># ${esc(repositoryId)}</h3><span class="spacer"></span>
+  return `<div class="pop-head"><h3>${esc(repositoryLabel(repositoryId))}</h3><span class="spacer"></span>
       ${iconButton("close", { act: "pop-close", title: "Close", small: true })}</div>
     <div class="pop-block">
       <h4>Branch</h4>
@@ -7196,7 +7426,7 @@ export function channelInfoPopoverHtml(repositoryId) {
       <p>${esc(repository?.remoteUrl ?? "No remote recorded")}</p>
     </div>
     <div class="pop-block">
-      <h4>Agents in this channel</h4>
+      <h4>Agents in this workspace</h4>
       <p>${roster.map((agent) => esc(agent.name)).join(", ") || "None yet"}</p>
     </div>
     ${
@@ -7211,7 +7441,7 @@ export function channelInfoPopoverHtml(repositoryId) {
                      data-act="channel-agent-add" data-value="${esc(agent.id)}">
                      ${agentFace(agent, 22)}
                      <span>${esc(agent.name)}</span>
-                     <span class="pop-agent-add-cta">Add to this chat</span>
+                     <span class="pop-agent-add-cta">Add to this workspace</span>
                    </button>`,
                  )
                  .join("")}
@@ -7246,15 +7476,15 @@ export function channelInfoPopoverHtml(repositoryId) {
         isChannelMuted(repositoryId)
           ? `<button type="button" class="btn btn-sm" data-act="channel-mute"
                data-value="${esc(repositoryId)}" aria-pressed="true">
-               ${icon("bell")} Unmute this channel
+               ${icon("bell")} Unmute this workspace
              </button>
-             <p>Muted. Badges, notifications and sounds from this channel are
+             <p>Muted. Badges, notifications and sounds from this workspace are
                off for you — everyone else in it is unaffected.</p>`
           : `<button type="button" class="btn btn-sm" data-act="channel-mute"
                data-value="${esc(repositoryId)}" aria-pressed="false">
-               ${icon("bellOff")} Mute this channel
+               ${icon("bellOff")} Mute this workspace
              </button>
-             <p>Stops this channel raising badges, notifications and sounds
+             <p>Stops this workspace raising badges, notifications and sounds
                for you. Messages still arrive, and nobody else's view
                changes.</p>`
       }
@@ -7279,13 +7509,25 @@ export function channelInfoPopoverHtml(repositoryId) {
 
 /* -------------------------------------------------------------- screen ---- */
 
+/**
+ * Before the shell is drawn: close anything pushed past the column ceiling,
+ * and say how many panels the stylesheet should lay out beside the room.
+ *
+ * The header's own buttons — Files, Thread — read the reconciled state to
+ * say whether they are lit, so this runs before any of them is drawn.
+ */
+function reconcileNavigationForPanels() {
+  const panels = keptRightPanels();
+  return phoneLayout() ? 1 : panels.length;
+}
+
 export function renderChats() {
   if (state.repositories.length === 0) {
     return `<div class="chats-shell no-banner"><div class="scroll" style="flex:1"><div class="page">
       ${emptyState(
         "chatBubble",
-        "No channels yet",
-        "Create or import a repository to open its channel — every repository becomes a channel here, with its agents in the roster.",
+        "No workspaces yet",
+        "Create or import a repository to open its workspace, with Main chat, people, agents, threads, and files together.",
         `<button class="btn btn-primary" data-act="repo-create" style="margin-top:6px">${icon(
           "plus",
         )} Create new repository</button>
@@ -7296,34 +7538,14 @@ export function renderChats() {
     </div></div></div>`;
   }
   const repositoryId = activeChannelId();
-  // Before anything else is drawn. Reconciling the column is what closes a
-  // surface pushed past its ceiling, and the header's own buttons — Files,
-  // Thread — read that state to say whether they are lit.
-  //
-  // How many columns end up beside the room is also something the stylesheet
-  // has to know: two or three of them cannot each keep the width a reader
-  // dragged for one, or the conversation they are all about would be squeezed
-  // out of its own screen. A phone draws one however many are being held.
-  const columns = phoneLayout() ? 1 : keptRightPanels().length;
+  const destination = primaryDestinationForWorkspace(repositoryId);
+  reconcileNavigationForPanels();
+  const rail = showsWorkspaceRail();
+  const primaryHidden =
+    phoneLayout() &&
+    (state.chanSidebarOpen === true || activeSecondaryContext() !== undefined);
 
-  const rail = showsChannelRail();
-
-  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}${columns > 1 ? ` panels-${columns}` : ""}">
-    <!-- The channel's banner, first in the shell and first in the reading
-         order, because it is the bar across the top of everything below it.
-         It opens with the crown — the one place this room is named, standing
-         in the navigation's own width — and carries the conversation's own
-         header after it.
-         It used to be the conversation column's own first row, which meant a
-         thread or a file opening beside the conversation narrowed the column
-         and shoved the channel's name, counts and actions leftward with it —
-         the top bar moved because something unrelated to it had opened. Out
-         here it spans the whole shell and only the things underneath it give
-         ground. It is pinned rather than in flow; the shell reserves its
-         height as padding. See \`.chan-head\` in styles.css — the
-         backticks are escaped because this comment is inside a template
-         literal, where a bare one would close the string. -->
-    ${chanHeader(repositoryId)}
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}">
     ${rail ? channelRail(repositoryId) : ""}
     ${chanSidebar(repositoryId)}
     ${
@@ -7339,14 +7561,14 @@ export function renderChats() {
       // breakpoint — see `.chan-sidebar-scrim` in styles.css.
       `<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"></div>`
     }
-    <div class="chan-main">
-      ${pinnedBanner(repositoryId)}
-      ${messageList(repositoryId)}
-      ${jumpToLatest()}
-      ${agentQuestionPrompt(repositoryId)}
-      ${dismissedQuestionChip(repositoryId)}
-      ${composer(repositoryId)}
-    </div>
+    <main class="chan-main" aria-label="Primary conversation" aria-current="page"${
+      primaryHidden ? ' aria-hidden="true" inert' : ""
+    }>
+      ${chanHeader(repositoryId)}
+      <div class="primary-conversation-surface" data-primary-key="${esc(
+        `${repositoryId}:${destination.kind}:${destination.id ?? ""}`,
+      )}">${primaryConversation(repositoryId)}</div>
+    </main>
     ${rightPanels(repositoryId)}
   </div>`;
 }
@@ -7929,6 +8151,10 @@ export function openChannel(repositoryId, rerender) {
     flushChannelDrafts();
   }
   state.repositoryId = repositoryId;
+  const destination = selectPrimaryDestination(
+    state.workspaceDestinations[repositoryId] ?? { kind: "main" },
+    repositoryId,
+  );
   // A catch-up is a repository tab, just like the channel beneath it. Keep
   // the unread reports parked when changing rooms and reveal only this one.
   state.catchUp = state.catchUps?.[repositoryId];
@@ -7961,7 +8187,8 @@ export function openChannel(repositoryId, rerender) {
   // Another channel's expanded diffs are not this channel's; collapse them so
   // the transcript opens scannable rather than mid-review.
   state.chanOpenFiles = [];
-  state.chanFileView = undefined;
+  state.chanFileView = destination.kind === "file" ? destination.id : undefined;
+  state.chanFileMode = destination.kind === "file" ? "edit" : "diff";
   state.chanFileTaskId = undefined;
   state.chatRenamingId = undefined;
   state.chatSettingsOpenId = undefined;
@@ -8137,7 +8364,7 @@ function composerThreadChip(repositoryId) {
     <span class="spacer"></span>
     ${iconButton("close", {
       act: "composer-thread-clear",
-      title: "Post to the channel instead",
+      title: "Post to Main chat instead",
       small: true,
     })}
   </div>`;

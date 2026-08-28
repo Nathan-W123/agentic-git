@@ -369,3 +369,35 @@ test("an open picker takes Enter in a private chat; a closed one leaves it to se
   assert.equal(press("dm-input", "Tab"), true);
   assert.deepEqual(picks.pop(), ["Mary Jane", "dm"]);
 });
+
+test(
+  'mention suggestions rank Nathan ahead of Luna for query "na" while retaining both valid candidates and stable fallback ordering',
+  async () => {
+    const chats = await publicFile("screen-chats.js");
+    const start = chats.indexOf("function channelMentionCandidates");
+    const end = chats.indexOf("\n/**", start);
+    assert.notEqual(start, -1, "the mention candidate filter should exist");
+    assert.notEqual(end, -1, "the mention candidate filter should have a boundary");
+
+    const state = { mentionQuery: "na" };
+    const roster = [
+      { id: "luna", name: "Luna", kind: "agent" },
+      { id: "diana", name: "Diana", kind: "person" },
+      { id: "shana", name: "Shana", kind: "person" },
+      { id: "cabana", name: "Cabana", kind: "agent" },
+      { id: "savannah", name: "Savannah", kind: "person" },
+      { id: "nathan", name: "Nathan", kind: "person" },
+    ];
+    const candidates = new Function(
+      "state",
+      "channelParticipants",
+      `${chats.slice(start, end)}\nreturn channelMentionCandidates;`,
+    )(state, () => roster) as (repositoryId: string) => Array<{ name: string }>;
+
+    assert.deepEqual(
+      candidates("repo").map((entry) => entry.name),
+      ["Nathan", "Luna", "Diana", "Shana", "Cabana"],
+      "a leading name match should rank before incidental substrings and before the row cap",
+    );
+  },
+);

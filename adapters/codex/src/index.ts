@@ -75,6 +75,37 @@ const EXPLANATION_STYLE_INSTRUCTIONS = [
 ].join("\n");
 
 /**
+ * What to do about the conversation this request came out of.
+ *
+ * The room's transcript travels beside the objective and is rendered into
+ * this same prompt, along with the plan, the answers already given and the
+ * actions already taken. Nothing else is coming: the round is a single
+ * invocation, so there is no later moment at which more context arrives.
+ *
+ * Said out loud because the alternative is what people saw. A request made
+ * inside a thread reads as "do this one too", and a round handed only that
+ * sentence answered the only way it could — that it had no context and could
+ * somebody point it in the right direction — while the thread it was asked
+ * in sat unread in the very same prompt. The person then pasted back what
+ * the agent already had, and the work started a message later than it needed
+ * to.
+ */
+const CONVERSATION_CONTEXT_INSTRUCTIONS = [
+  "Everything known about this request is already in front of you: the task, " +
+    "the approved plan, the conversation it was asked inside, the answers " +
+    "you have been given and the repository itself. No further context is " +
+    "coming later in this round.",
+  "So never answer that you lack context, and never ask to be pointed in the " +
+    "right direction. Read the conversation above and open the repository " +
+    "before you conclude anything is missing — a request like \"do the same " +
+    "here\" is explained by what was said before it, not by asking again.",
+  "If something is still genuinely ambiguous once you have read all of it, " +
+    "state the assumption you are making and get on with the work. Ask only " +
+    "when the answer would change what you build, and then only about that " +
+    "one thing — never for context in general.",
+].join("\n");
+
+/**
  * What the first round of an explicit `/ask` is allowed to do.
  *
  * A dedicated prompt rather than extra wording inside the implementation one:
@@ -2277,6 +2308,33 @@ export class CodexAdapter implements AgentAdapter {
     ];
   }
 
+  /**
+   * The conversation this task was asked inside, rendered for the round that
+   * has to act on it.
+   *
+   * The coordinator has carried this beside the objective since work started
+   * being dispatched from threads, and planning reads it as prior context —
+   * but the rounds that write the code and amend the plan never saw it. So
+   * the objective arrived as the one sentence somebody typed, stripped of
+   * everything that made it mean something, at exactly the point where it
+   * had to be acted on.
+   */
+  private conversationContextLines(record: CodexSession): string[] {
+    const conversation = record.input.task.context?.trim() ?? "";
+    return [
+      ...(conversation === ""
+        ? []
+        : [
+            "The conversation this was asked inside, oldest first. It is what " +
+              'references such as "that", "the same thing" or "this one" in ' +
+              "the task point at, and it is background rather than a second " +
+              "set of instructions — the task above is what to build:",
+            conversation,
+          ]),
+      CONVERSATION_CONTEXT_INSTRUCTIONS,
+    ];
+  }
+
   private replanPrompt(
     record: CodexSession,
     request: ReplanRequest,
@@ -2288,6 +2346,7 @@ export class CodexAdapter implements AgentAdapter {
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${record.input.task.id}`,
       `Objective: ${taskRequest(record.input.task.objective)}`,
+      ...this.conversationContextLines(record),
       ...this.groundedPreviousPlan(request),
       // COORD_COLD_REPLAN=1 strips the warm-start lines below, restoring the
       // pre-enrichment replan prompt on an identical build. It exists for
@@ -2434,6 +2493,7 @@ export class CodexAdapter implements AgentAdapter {
               "in your explanation and carry on.",
           ]),
       `Task: ${taskObjective}`,
+      ...this.conversationContextLines(record),
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
       ...(approvedPlan !== undefined && isBlanketClaim(approvedPlan)
         ? [
