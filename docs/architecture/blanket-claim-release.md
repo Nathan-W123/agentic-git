@@ -85,17 +85,45 @@ this reuses it rather than inventing a second notion of "finished with".
 
 ## What it costs
 
-A blanket holder that later needs a released file must widen, and
-`widenFrozenClaim` refuses on the spot rather than queueing. The agent then
-"carries on inside what it still holds and reports what it could not do".
+A blanket holder that later reaches into a released file is refused when it
+tries to widen, **and that task fails**. `claimOccupiesPath` says so plainly:
 
-So the trade is explicit: today the holder keeps 90% of a lock it never uses
-and everybody waits; after this, the holder may occasionally be refused a
-file it guessed at, never touched, and someone else asked for first.
+> A holder that later reaches into a file granted away is refused when it
+> tries to widen, and that task fails. Reaching for what you never named is
+> the rarer accident; being locked out of a directory somebody else brushed
+> against was the common one.
 
-That risk is real and is the reason to measure rather than assume. It is
-also bounded — the release is contest-driven, so a holder alone in the
-repository loses nothing at all.
+That is not a new risk this introduces. It is the trade the frozen claim
+already makes for *directories* — a freeze carries the directories its files
+live in, and arbitration deliberately does not read them as a hold, so one
+task touching one file does not queue everybody behind the other seventeen.
+This extends the same rule from directories to estimated-but-untouched
+files, with the same accepted cost and the same reasoning.
+
+Two things bound it. The release is contest-driven, so a holder alone in the
+repository loses nothing. And the released file is one the holder has never
+written to, so nothing it has already done is thrown away.
+
+### Why the refused holder cannot simply wait
+
+The obvious softening — let the refused holder wait for the other task and
+then proceed — is the one thing that can deadlock, and the widening path
+rules it out on purpose:
+
+> decided against every other holder, granted or refused immediately, never
+> queued. Nothing here waits on a lease while holding one.
+
+Hold-and-wait is the whole condition: A holds `x` and wants `y`, B holds `y`
+and wants `x`, and both wait forever. Refusing immediately is what makes the
+cycle impossible.
+
+The safe shape of "wait, then go" is to let go first — requeue the task and
+re-admit it later against a clear board, which is what already happens for
+genuine contention at integration time. That trades a hard failure for
+re-running the agent, and is worth doing as a follow-up rather than as part
+of this change: it is a change to what a refused widening *does*, which is
+orthogonal to which files are held in the first place, and it should be
+measured on its own.
 
 ## How to tell whether it worked
 
