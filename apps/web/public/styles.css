@@ -4934,6 +4934,7 @@ button.chip.lg:hover {
    rather than a grid row because a heading is one line of small caps beside a
    20px button — a ceiling the content cannot reach is near enough to the real
    height that the fold reads as immediate at either end. */
+.chan-sec-channels,
 .chan-sec-people,
 .chan-sec-agents {
   max-height: 60px;
@@ -10965,7 +10966,7 @@ dialog.modal[open]::backdrop {
     width: 256px;
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents),
+  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents),
   .chats-shell.chan-collapsed .chan-roster {
     opacity: 0;
     visibility: hidden;
@@ -10973,7 +10974,7 @@ dialog.modal[open]::backdrop {
     transform: translateY(-10px);
   }
 
-  .chats-shell.chan-collapsed :is(.chan-sec-people, .chan-sec-agents) {
+  .chats-shell.chan-collapsed :is(.chan-sec-channels, .chan-sec-people, .chan-sec-agents) {
     max-height: 0;
     padding-top: 0;
     padding-bottom: 0;
@@ -10988,6 +10989,7 @@ dialog.modal[open]::backdrop {
      `chan-collapsed` is removed first and the base transitions above remain in
      force, so the sections still unfold downward. */
   .chats-shell.chan-folding.chan-collapsed :is(
+      .chan-sec-channels,
       .chan-sec-people,
       .chan-sec-agents,
       .chan-roster
@@ -14160,4 +14162,184 @@ dialog.modal[open]::backdrop {
   font-size: 11.5px;
   color: var(--text-3);
   text-align: center;
+}
+
+/* ------------------------------------------------------- sub-channels ---- */
+
+/* One room in the sidebar's channel list.
+   A row rather than a single button, because an administrator gets a gear
+   beside the name and everybody else does not — and the name must stay one
+   full-width target in both cases rather than shrinking when the gear
+   appears. The gear is only revealed on hover or focus, so a list of rooms
+   reads as a list of names. */
+.chan-channel-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+
+.chan-channel-row.on,
+.chan-channel-row:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}
+
+.chan-channel {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chan-channel-row.on .chan-channel {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The hash and the lock occupy the same box, so a private room's name starts
+   exactly where an open one's does and the column of names stays straight. */
+.chan-channel-sigil {
+  flex: 0 0 auto;
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.62;
+  font-size: 13px;
+}
+
+.chan-channel-sigil svg {
+  width: 13px;
+  height: 13px;
+}
+
+.chan-channel-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-channel-note {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.chan-channel-menu {
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity var(--motion-pop, 0.12s) ease;
+}
+
+.chan-channel-row:hover .chan-channel-menu,
+.chan-channel-menu:focus-visible {
+  opacity: 0.8;
+}
+
+/* The composer's replacement in a room somebody can read but not post in.
+   Sized like the bar it stands in for so opening such a channel does not move
+   the transcript above it. */
+.chan-composer-locked {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  margin: 0 12px 12px;
+  padding: 0 14px;
+  border: 1px solid var(--border, #34302d);
+  border-radius: 14px;
+  background: var(--surface-1, #2c2926);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.chan-composer-locked svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  opacity: 0.7;
+}
+
+/* The channel settings popover. */
+.sub-channel-manage .pop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 8px;
+}
+
+.chan-channel-vis {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sub-channel-manage .pop-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 8px;
+}
+
+.sub-channel-manage .pop-sec {
+  padding: 6px 2px 4px;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.sub-channel-members {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.sub-channel-member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sub-channel-member:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.05));
+}
+
+.sub-channel-member-state {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.sub-channel-member.on .sub-channel-member-state {
+  color: var(--accent, currentColor);
 }

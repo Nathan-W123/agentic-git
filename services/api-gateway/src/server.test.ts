@@ -18990,3 +18990,248 @@ test("with payments off nothing is billed, gated, or reachable at Stripe", async
     `a cancelled subscription must not gate anything: ${JSON.stringify(invited.data)}`,
   );
 });
+
+test("a repository's rooms are listed, gated and addressed one at a time", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "rooms");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}`;
+
+  // A repository nobody has divided has exactly one room, and it is the one
+  // every message written without a destination lands in — so the interface
+  // in front of it is unchanged.
+  const listed = await owner.request(`${base}/channels`);
+  assert.equal(listed.status, 200, JSON.stringify(listed.data));
+  assert.deepEqual(
+    listed.data.channels.map((channel: { slug: string }) => channel.slug),
+    ["general"],
+  );
+  assert.equal(listed.data.canManage, true);
+  const general = listed.data.channels[0].id as string;
+
+  const said = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { content: "Said before there was a second room." },
+  });
+  assert.equal(said.status, 201, JSON.stringify(said.data));
+  assert.equal(said.data.message.channelId, general);
+
+  // A typed name becomes a #handle: no spaces, no punctuation, because the
+  // name is addressed inside running text.
+  const created = await owner.request(`${base}/channels`, {
+    method: "POST",
+    body: { name: "Design Review", visibility: "private" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.channel.slug, "design-review");
+  const design = created.data.channel.id as string;
+
+  // Whoever made it is in it, so a private room is never created into a state
+  // where nobody at all can read or post in it.
+  const members = await owner.request(`${base}/channels/${design}/members`);
+  assert.equal(members.status, 200);
+  assert.equal(members.data.members.length, 1);
+
+  const inDesign = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Only for the people in here." },
+  });
+  assert.equal(inDesign.status, 201, JSON.stringify(inDesign.data));
+
+  // Each room reads only its own lines.
+  const generalRead = await owner.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(general)}`,
+  );
+  assert.deepEqual(
+    generalRead.data.messages.map((message: { content: string }) => message.content),
+    ["Said before there was a second room."],
+  );
+  const designRead = await owner.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(design)}`,
+  );
+  assert.deepEqual(
+    designRead.data.messages.map((message: { content: string }) => message.content),
+    ["Only for the people in here."],
+  );
+  // No channelId at all still means #general, so a client that predates
+  // sub-channels reads exactly what it always did.
+  const unqualified = await owner.request(`${base}/channel/messages`);
+  assert.deepEqual(
+    unqualified.data.messages.map((message: { content: string }) => message.content),
+    ["Said before there was a second room."],
+  );
+
+  // Somebody with a repository grant and no membership of the private room.
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: inviteBody("roomless@example.com", "developer", repo) },
+  );
+  assert.equal(invited.status, 201);
+  const outsider = new TestClient(runtime.origin);
+  const accepted = await outsider.request(
+    `/api/v1/invitations/${invited.data.token as string}/accept`,
+    { method: "POST", body: { displayName: "Roomless", password: PASSWORD } },
+  );
+  assert.equal(accepted.status, 200);
+  const outsiderId = accepted.data.user.id as string;
+
+  // Private means invisible, not forbidden: it is absent from the list, and
+  // reading it answers 404 rather than a 403 that would confirm it exists and
+  // name it.
+  const outsiderList = await outsider.request(`${base}/channels`);
+  assert.equal(outsiderList.status, 200);
+  assert.deepEqual(
+    outsiderList.data.channels.map((channel: { slug: string }) => channel.slug),
+    ["general"],
+  );
+  assert.equal(outsiderList.data.canManage, false);
+  const peeked = await outsider.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(design)}`,
+  );
+  assert.equal(peeked.status, 404);
+  assert.equal(peeked.data.error?.code ?? peeked.data.code, "not_found");
+  const posted = await outsider.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Can I get in?" },
+  });
+  assert.equal(posted.status, 404);
+
+  // Opened to the project, the same room becomes readable by everybody and
+  // postable only by its members.
+  const opened = await owner.request(`${base}/channels/${design}`, {
+    method: "PATCH",
+    body: { visibility: "open" },
+  });
+  assert.equal(opened.status, 200, JSON.stringify(opened.data));
+  const nowListed = await outsider.request(`${base}/channels`);
+  assert.deepEqual(
+    nowListed.data.channels.map((channel: { slug: string; canPost: boolean }) => [
+      channel.slug,
+      channel.canPost,
+    ]),
+    [
+      ["general", true],
+      ["design-review", false],
+    ],
+  );
+  const nowRead = await outsider.request(
+    `${base}/channel/messages?channelId=${encodeURIComponent(design)}`,
+  );
+  assert.equal(nowRead.status, 200);
+  assert.equal(nowRead.data.channel.canPost, false);
+  const stillRefused = await outsider.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Can I get in?" },
+  });
+  assert.equal(stillRefused.status, 403);
+  assert.equal(
+    stillRefused.data.error?.code ?? stillRefused.data.code,
+    "not_a_member",
+  );
+
+  // Added, they can post — and only an administrator could have added them.
+  const refusedAdd = await outsider.request(`${base}/channels/${design}/members`, {
+    method: "POST",
+    body: { userId: outsiderId },
+  });
+  assert.ok(
+    refusedAdd.status === 403 || refusedAdd.status === 404,
+    `only an administrator may edit a room's membership: ${refusedAdd.status}`,
+  );
+  const added = await owner.request(`${base}/channels/${design}/members`, {
+    method: "POST",
+    body: { userId: outsiderId },
+  });
+  assert.equal(added.status, 200, JSON.stringify(added.data));
+  const nowPosted = await outsider.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: design, content: "Thanks." },
+  });
+  assert.equal(nowPosted.status, 201, JSON.stringify(nowPosted.data));
+
+  // #general is the fallback for every unaddressed message, so it can be
+  // neither hidden nor removed.
+  const hideGeneral = await owner.request(`${base}/channels/${general}`, {
+    method: "PATCH",
+    body: { visibility: "private" },
+  });
+  assert.equal(hideGeneral.status, 409);
+  const dropGeneral = await owner.request(`${base}/channels/${general}`, {
+    method: "DELETE",
+  });
+  assert.equal(dropGeneral.status, 409);
+
+  // Deleting a room takes its transcript with it and leaves the rest alone.
+  const dropped = await owner.request(`${base}/channels/${design}`, {
+    method: "DELETE",
+  });
+  assert.equal(dropped.status, 200);
+  const after = await owner.request(`${base}/channels`);
+  assert.deepEqual(
+    after.data.channels.map((channel: { slug: string }) => channel.slug),
+    ["general"],
+  );
+  const survivors = await owner.request(`${base}/channel/messages`);
+  assert.deepEqual(
+    survivors.data.messages.map((message: { content: string }) => message.content),
+    ["Said before there was a second room."],
+  );
+});
+
+test("an @mention only reaches agents assigned to the room it was said in", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id as string;
+  const repo = await invitableRepository(owner, "roomed-mentions");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}`;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  const created = await owner.request(`${base}/channels`, {
+    method: "POST",
+    body: { name: "backlog" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const backlog = created.data.channel.id as string;
+
+  // The agent was added to #general, so the new room's roster is empty. An
+  // agent is assigned per room, not per repository.
+  const backlogRoster = await owner.request(
+    `${base}/channel/agents?channelId=${encodeURIComponent(backlog)}`,
+  );
+  assert.equal(backlogRoster.status, 200, JSON.stringify(backlogRoster.data));
+  assert.deepEqual(backlogRoster.data.agents, []);
+  const generalRoster = await owner.request(`${base}/channel/agents`);
+  assert.equal(generalRoster.data.agents.length, 1);
+
+  // So the same words that would start work in #general start none here.
+  const inBacklog = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: backlog, content: `@${mention} can you audit the codebase` },
+  });
+  assert.equal(inBacklog.status, 201, JSON.stringify(inBacklog.data));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.deepEqual(runtime.submittedTasks, []);
+
+  // Assigned to this room, the same message is work.
+  const joined = await owner.request(
+    `${base}/channel/agents/openai/membership?channelId=${encodeURIComponent(backlog)}`,
+    { method: "POST" },
+  );
+  assert.equal(joined.status, 200, JSON.stringify(joined.data));
+  const again = await owner.request(`${base}/channel/messages`, {
+    method: "POST",
+    body: { channelId: backlog, content: `@${mention} can you audit the codebase` },
+  });
+  assert.equal(again.status, 201, JSON.stringify(again.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "asking an agent that is in this room never became work",
+  );
+});

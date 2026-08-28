@@ -63,8 +63,18 @@ import {
   loadChannelFile,
   moveChannelFile,
   saveChannelFile,
+  createSubChannel,
+  deleteSubChannel,
   ensureChannelMessages,
   ensureChannelRoster,
+  ensureSubChannels,
+  loadSubChannelMembers,
+  loadSubChannels,
+  activeSubChannelId,
+  selectSubChannel,
+  setSubChannelMember,
+  subChannelsFor,
+  updateSubChannel,
   ensureProviderUsage,
   ensureRepositoryGrants,
   markChannelRead,
@@ -238,6 +248,7 @@ import {
   captureChannelScroll,
   channelMessageHasTaskThread,
   channelInfoPopoverHtml,
+  subChannelManagePopoverHtml,
   closeComposerAutocomplete,
   copyMessageText,
   handleComposerKeydown,
@@ -7469,6 +7480,13 @@ function renderNow() {
         });
       }
     }
+    // The rooms inside this workspace, once per visit. Everything that draws
+    // them reads `subChannelsFor` synchronously, so this only has to fill it.
+    void ensureSubChannels(activeChannelId(), () => {
+      if (state.route === "chats") {
+        render();
+      }
+    });
     void ensureChannelRoster(activeChannelId(), () => {
       if (state.route === "chats") {
         render();
@@ -7759,10 +7777,17 @@ function parseChatLocation(hash = window.location.hash) {
       : ["threads", "files"].includes(kind)
         ? { kind }
         : { kind: "main" };
+  const params = new URLSearchParams(query);
   return {
     workspaceId: decode(parts[1]),
     primary,
-    secondary: new URLSearchParams(query).get("context") ?? undefined,
+    // The room inside the workspace. A query parameter rather than a path
+    // segment: the path already means "which destination", and a link written
+    // before sub-channels existed has to keep opening the same workspace —
+    // which it does, at `#general`, because an absent value means "let the
+    // server decide" and the server decides `#general`.
+    channelId: params.get("channel") ?? undefined,
+    secondary: params.get("context") ?? undefined,
   };
 }
 
@@ -7786,6 +7811,12 @@ function writeChatLocation() {
     secondary = `plan:${state.activePlan}`;
   }
   const query = new URLSearchParams();
+  // Only when there is more than one room to be in. A repository nobody has
+  // divided keeps the exact URL it has always had.
+  const channelId = activeSubChannelId(workspaceId);
+  if (channelId !== undefined && subChannelsFor(workspaceId).length > 1) {
+    query.set("channel", channelId);
+  }
   if (secondary !== undefined) {
     query.set("context", secondary);
   }
@@ -7894,6 +7925,13 @@ function applyHash() {
       chatLocation.primary,
       chatLocation.workspaceId || activeChannelId(),
     );
+    if (chatLocation.channelId !== undefined) {
+      // Recorded rather than selected: `selectSubChannel` clears the room's
+      // transcript, which is exactly wrong on the first paint of a link — the
+      // list has not loaded yet, so there is nothing to switch away from.
+      state.activeSubChannel[chatLocation.workspaceId || activeChannelId()] =
+        chatLocation.channelId;
+    }
     if (chatLocation.primary.kind === "file") {
       state.chanFileView = chatLocation.primary.id;
       state.chanFileMode = "edit";
@@ -10179,6 +10217,139 @@ document.addEventListener("click", (event) => {
      * account's agents are offerable: membership is managed per caller, and
      * the server's membership route refuses a teammate's agent anyway.
      */
+    /* ------------------------------------------------ sub-channels ---- */
+    case "sub-channel-open": {
+      const repositoryId = activeChannelId();
+      selectSubChannel(repositoryId, value);
+      closePopover();
+      writeChatLocation();
+      render();
+      // The transcript, roster and unread cursor are all keyed by repository,
+      // so `selectSubChannel` dropped them; this is what fills them back in
+      // for the room that is now open.
+      void ensureChannelMessages(repositoryId, render);
+      void ensureChannelRoster(repositoryId, render);
+      return;
+    }
+    case "sub-channel-new": {
+      const repositoryId = value || activeChannelId();
+      const name = window.prompt(
+        "Name the channel. It will be addressed as #name.",
+        "",
+      );
+      if (name === null || name.trim() === "") {
+        return;
+      }
+      const isPrivate = window.confirm(
+        "Make this channel private?\n\nOK: only members can see it or post in it.\nCancel: everyone in the project can read it, members can post.",
+      );
+      void createSubChannel(repositoryId, name, isPrivate ? "private" : "open")
+        .then(() => {
+          render();
+          void ensureChannelMessages(repositoryId, render);
+        })
+        .catch((error) =>
+          toast(`Could not create that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-menu": {
+      const repositoryId = activeChannelId();
+      state.subChannelMenu = value;
+      // Fetched on open rather than with the channel list: a member list is
+      // only ever looked at from here, and loading one per room on every
+      // render would be a request per room per paint.
+      void loadSubChannelMembers(repositoryId, value).then(() => {
+        const layer = document.querySelector(".pop-layer .sub-channel-manage");
+        if (layer !== null && state.subChannelMenu === value) {
+          layer.outerHTML = subChannelManagePopoverHtml(repositoryId, value);
+        }
+      });
+      showPopover(node, subChannelManagePopoverHtml(repositoryId, value), {
+        width: 280,
+      });
+      return;
+    }
+    case "sub-channel-rename": {
+      const repositoryId = activeChannelId();
+      const current = subChannelsFor(repositoryId).find(
+        (channel) => channel.id === value,
+      );
+      const name = window.prompt("Rename this channel", current?.slug ?? "");
+      if (name === null || name.trim() === "") {
+        return;
+      }
+      closePopover();
+      void updateSubChannel(repositoryId, value, { name })
+        .then(render)
+        .catch((error) =>
+          toast(`Could not rename that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-visibility": {
+      const repositoryId = activeChannelId();
+      const current = subChannelsFor(repositoryId).find(
+        (channel) => channel.id === value,
+      );
+      const next = current?.visibility === "private" ? "open" : "private";
+      closePopover();
+      void updateSubChannel(repositoryId, value, { visibility: next })
+        .then(render)
+        .catch((error) =>
+          toast(`Could not change that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-delete": {
+      const repositoryId = activeChannelId();
+      const current = subChannelsFor(repositoryId).find(
+        (channel) => channel.id === value,
+      );
+      if (
+        !window.confirm(
+          `Delete #${current?.slug ?? "this channel"} and everything said in it? This cannot be undone.`,
+        )
+      ) {
+        return;
+      }
+      closePopover();
+      void deleteSubChannel(repositoryId, value)
+        .then(() => {
+          render();
+          void ensureChannelMessages(repositoryId, render);
+        })
+        .catch((error) =>
+          toast(`Could not delete that channel: ${error.message}`, "error"),
+        );
+      return;
+    }
+    case "sub-channel-member-toggle": {
+      const repositoryId = activeChannelId();
+      const [channelId = "", userId = "", direction = "in"] = value.split("|");
+      void setSubChannelMember(
+        repositoryId,
+        channelId,
+        userId,
+        direction === "in",
+      )
+        .then(() => {
+          const layer = document.querySelector(".pop-layer .sub-channel-manage");
+          if (layer !== null) {
+            layer.outerHTML = subChannelManagePopoverHtml(
+              repositoryId,
+              channelId,
+            );
+          }
+          // The person's own view of the room changes with their membership,
+          // so the list has to be re-read rather than patched from here.
+          void loadSubChannels(repositoryId).then(render);
+        })
+        .catch((error) =>
+          toast(`Could not change that membership: ${error.message}`, "error"),
+        );
+      return;
+    }
     case "channel-agent-menu": {
       // Anchor to the channel's own dots button, not to the menu item that
       // was clicked: `showMenu` closes the open popover first, which detaches

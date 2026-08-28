@@ -44,3 +44,24 @@ test("the default does not remove the per-repository controls", async () => {
   assert.match(data, /export function removeChannelAgent/u);
   assert.match(data, /method: "DELETE"/u);
 });
+
+test("an agent is added to the room that is open, not to the repository", async () => {
+  const data = await publicFile("data.js");
+
+  // Membership became per sub-channel, so the add has to name one. It goes
+  // through `scopedChannelPath`, which appends whichever room is open — and
+  // `#general` when the browser has not been told there is another.
+  assert.match(
+    data,
+    /scopedChannelPath\(\s*repositoryId,\s*`\/agents\/\$\{encodeURIComponent\(agentId\)\}\/membership`,?\s*\)/u,
+  );
+
+  // The connect-time default stays repository-wide on purpose: a new
+  // connection belongs in every workspace's #general, which is what the
+  // unscoped path means to the server.
+  assert.match(data, /export async function addAgentToAllRepositories/u);
+  assert.match(
+    data,
+    /channelPath\(\s*repositoryId,\s*`\/agents\/\$\{encodeURIComponent\(providerId\)\}\/membership`,?\s*\)/u,
+  );
+});

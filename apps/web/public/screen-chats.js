@@ -18,6 +18,11 @@
 
 import {
   activeChannelId,
+  activeSubChannelId,
+  canManageSubChannels,
+  canPostInActiveSubChannel,
+  subChannelLabel,
+  subChannelsFor,
   activeTasks,
   agentForTask,
   agentStatus,
@@ -1714,6 +1719,47 @@ function chanCrown(activeRepositoryId) {
   </header>`;
 }
 
+/**
+ * One room in the channel list.
+ *
+ * A lock instead of a hash for a private room, which is the one thing the
+ * name alone cannot say — and the only place the distinction is drawn, since
+ * a private room the reader is not in never reaches this function at all.
+ * The gear only appears for somebody who can actually administer it, so the
+ * row stays a single target for everybody else.
+ */
+function subChannelRow(repositoryId, channel, active) {
+  const manage = canManageSubChannels(repositoryId);
+  const label = `#${channel.slug}`;
+  return `<div class="chan-channel-row${active ? " on" : ""}">
+    <button type="button" class="chan-channel"
+      data-act="sub-channel-open" data-value="${esc(channel.id)}"
+      aria-current="${active ? "page" : "false"}"
+      title="Open ${esc(label)}">
+      <span class="chan-channel-sigil" aria-hidden="true">${
+        channel.visibility === "private" ? icon("lock") : "#"
+      }</span>
+      <span class="chan-channel-name">${esc(channel.slug)}</span>
+      ${
+        channel.canPost === false
+          ? `<span class="chan-channel-note" title="You can read this channel but not post in it">read&nbsp;only</span>`
+          : ""
+      }
+    </button>
+    ${
+      manage
+        ? `<button type="button" class="icon-btn chan-channel-menu"
+             data-act="sub-channel-menu" data-value="${esc(channel.id)}"
+             aria-haspopup="dialog"
+             aria-expanded="${state.subChannelMenu === channel.id}"
+             title="Channel settings" aria-label="Settings for ${esc(label)}">
+             ${icon("gear")}
+           </button>`
+        : ""
+    }
+  </div>`;
+}
+
 function chanSidebar(activeRepositoryId) {
   const roster = channelAgentsFor(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
@@ -1725,6 +1771,8 @@ function chanSidebar(activeRepositoryId) {
   const user = currentUserName();
 
   const channel = esc(activeRepositoryId ?? "");
+  const channels = subChannelsFor(activeRepositoryId);
+  const openChannelId = activeSubChannelId(activeRepositoryId);
   const destination = primaryDestinationForWorkspace(activeRepositoryId);
   const hidden = phoneLayout() && state.chanSidebarOpen !== true;
   return `<aside class="chan-sidebar" aria-label="${esc(
@@ -1768,6 +1816,27 @@ function chanSidebar(activeRepositoryId) {
            height nobody has measured: the row of the grid goes to zero, the
            block inside it keeps its own height, and the box crops the
            difference. -->
+      ${
+        // The room list, above the people in them — a reader picks where to
+        // be before they look at who is there. Drawn only once the list has
+        // arrived and only when there is more than one room, so a repository
+        // nobody has divided looks exactly as it did before sub-channels
+        // existed: no heading, no list, one conversation.
+        channels.length > 1 || canManageSubChannels(activeRepositoryId)
+          ? `${section("Channels", "sub-channel-new", channel, "Create a channel", "chan-sec-channels", "channels", channels.length)}
+      <div class="chan-roster chan-roster-channels${
+        state.rosterSectionsOpen.channels === false ? " chan-roster-closed" : ""
+      }">
+        <div class="chan-roster-inner">
+          ${channels
+            .map((entry) =>
+              subChannelRow(activeRepositoryId, entry, entry.id === openChannelId),
+            )
+            .join("")}
+        </div>
+      </div>`
+          : ""
+      }
       ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people", "people", people.length)}
       <div class="chan-roster chan-roster-people${
         state.rosterSectionsOpen.people === false ? " chan-roster-closed" : ""
@@ -4371,6 +4440,19 @@ function composer(repositoryId) {
   // deliberately does not rebuild this screen.
   const sendable =
     draftText().trim() !== "" || draftAttachments(repositoryId).length > 0;
+  // Reading and posting come apart in an open channel: everybody in the
+  // project can follow it, only its members can speak in it. The bar is
+  // replaced rather than disabled, because a disabled composer says "not
+  // right now" and this is "not you" — with the thing to do about it.
+  if (!canPostInActiveSubChannel(repositoryId)) {
+    const label = subChannelLabel(repositoryId, activeSubChannelId(repositoryId));
+    return `<div class="chan-composer-wrap">
+      <div class="chan-composer-locked">
+        ${icon("lock")}
+        <span>You are following ${esc(label)} but are not a member, so you cannot post here. Ask an admin to add you.</span>
+      </div>
+    </div>`;
+  }
   return `<div class="chan-composer-wrap${mentionActiveFor("channel") ? " mention-active" : ""}">
     <div data-composer-suggestions>${composerSuggestions(repositoryId, "channel")}</div>
     ${composerThreadChip(repositoryId)}
@@ -4394,7 +4476,17 @@ function composer(repositoryId) {
           enterkeyhint="send"
           placeholder="${
             state.composerThreadId === undefined
-              ? esc(`Message #${repositoryLabel(repositoryId)}`)
+              ? esc(
+                  // The room, when the workspace has more than one; the
+                  // workspace itself when it does not, so an undivided
+                  // repository reads exactly as it always did.
+                  subChannelsFor(repositoryId).length > 1
+                    ? `Message ${subChannelLabel(
+                        repositoryId,
+                        activeSubChannelId(repositoryId),
+                      )}`
+                    : `Message #${repositoryLabel(repositoryId)}`,
+                )
               : replyTarget?.kind === "user" &&
                   replyTarget.taskId === undefined
                 ? "Write a reply..."
@@ -7510,6 +7602,83 @@ export function coOwnerPanelHtml(repositoryId) {
 }
 
 /** The repository's own record, for the info popover's small facts. */
+/**
+ * Who is in one room, and the controls for changing that.
+ *
+ * Only reached from the gear on a channel row, which only an administrator
+ * sees. Membership is what an `open` room gates posting on and what a
+ * `private` room gates existing on, so both are edited in the one place
+ * rather than split between a settings panel and an invite dialog.
+ */
+export function subChannelManagePopoverHtml(repositoryId, channelId) {
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === channelId,
+  );
+  if (channel === undefined) {
+    return `<div class="pop-body"><div class="util-empty">This channel is gone.</div></div>`;
+  }
+  const members = state.subChannelMembers[channelId];
+  const inRoom = new Set((members ?? []).map((member) => member.userId));
+  const people = channelPeopleFor(repositoryId);
+  const general = channel.slug === "general";
+  return `<div class="pop-body sub-channel-manage">
+    <div class="pop-head">
+      <b>#${esc(channel.slug)}</b>
+      <span class="chan-channel-vis">${
+        channel.visibility === "private" ? "Private" : "Open to the project"
+      }</span>
+    </div>
+    ${
+      general
+        ? `<div class="util-hint">Everybody in the project is in #general, and it is always open. Add another channel to have a room with its own list.</div>`
+        : `<div class="pop-row">
+             <button type="button" class="btn-quiet" data-act="sub-channel-rename"
+               data-value="${esc(channelId)}">Rename</button>
+             <button type="button" class="btn-quiet" data-act="sub-channel-visibility"
+               data-value="${esc(channelId)}">${
+                 channel.visibility === "private"
+                   ? "Make open to the project"
+                   : "Make private"
+               }</button>
+             <button type="button" class="btn-quiet btn-danger" data-act="sub-channel-delete"
+               data-value="${esc(channelId)}">Delete</button>
+           </div>
+           <div class="pop-sec">Members</div>
+           <div class="sub-channel-members">
+             ${
+               members === undefined
+                 ? `<div class="util-empty">Loading…</div>`
+                 : people.length === 0
+                   ? `<div class="util-empty">Nobody else in this workspace yet.</div>`
+                   : people
+                       .map((person) => {
+                         // Two shapes reach here, exactly as `personRow`
+                         // documents: the organization list nests the account
+                         // under `user`, the room's own list flattens it.
+                         const id =
+                           person.user?.id ?? person.userId ?? person.id ?? "";
+                         const on = inRoom.has(id);
+                         return `<button type="button" class="sub-channel-member${
+                           on ? " on" : ""
+                         }" data-act="sub-channel-member-toggle"
+                           data-value="${esc(`${channelId}|${id}|${on ? "out" : "in"}`)}"
+                           aria-pressed="${on}">
+                           <span>${esc(
+                             person.user?.displayName ??
+                               person.user?.email ??
+                               person.name ??
+                               id,
+                           )}</span>
+                           <span class="sub-channel-member-state">${on ? "In" : "Add"}</span>
+                         </button>`;
+                       })
+                       .join("")
+             }
+           </div>`
+    }
+  </div>`;
+}
+
 export function channelInfoPopoverHtml(repositoryId) {
   const repository = state.repositories.find((repo) => repo.id === repositoryId);
   const roster = channelAgentsFor(repositoryId);

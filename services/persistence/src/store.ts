@@ -986,6 +986,16 @@ export interface ChannelReply {
 export interface ChannelMessage {
   id: string;
   repositoryId: string;
+  /**
+   * The sub-channel this message was posted in.
+   *
+   * Every repository has at least a `#general` (see
+   * {@link GENERAL_SUB_CHANNEL_SLUG}), and the `repository-sub-channels`
+   * migration moved every pre-existing message into it, so this is always
+   * set on a row read back from the store even though writers may leave it
+   * out and let the store resolve `#general`.
+   */
+  channelId: string;
   projectId: ProjectId;
   kind: ChannelEntryKind;
   authorId: string;
@@ -1091,6 +1101,15 @@ export interface AuditorCursor {
 
 export interface AppendChannelMessageInput {
   repositoryId: string;
+  /**
+   * Which sub-channel to post into.
+   *
+   * Optional so every internal writer that predates sub-channels keeps
+   * working unchanged: left out, the store posts into the sub-channel of
+   * {@link referencedMessageId} when there is one — an agent's answer belongs
+   * beside the question — and otherwise into the repository's `#general`.
+   */
+  channelId?: string;
   projectId: ProjectId;
   kind?: ChannelEntryKind;
   authorId: string;
@@ -1214,6 +1233,14 @@ export interface ChannelMessageFilter {
   /** Exclusive cursor: only messages created strictly before this ISO time. */
   before?: string;
   limit?: number;
+  /**
+   * Narrow to one sub-channel.
+   *
+   * Absent means the whole repository, which is what every reader meant
+   * before sub-channels existed and what the task narrator and the socket
+   * fan-out still mean. The HTTP surface always names one.
+   */
+  channelId?: string;
 }
 
 /**
@@ -1355,8 +1382,70 @@ export interface AgentCallSign {
  */
 export interface ChannelAgentMember {
   repositoryId: string;
+  /** The sub-channel the agent is assigned to. */
+  channelId: string;
   userId: string;
   provider: string;
+}
+
+/**
+ * Whether a sub-channel is listed to everyone in the project or only to the
+ * people in it.
+ *
+ * `open` is Slack's public channel: anybody who can see the repository sees
+ * it in the list and can read what is said there, but only members may post.
+ * `private` is stronger than "not allowed": a non-member is not told it
+ * exists at all, so reads and writes answer 404 rather than 403 — a 403
+ * discloses the name of a room somebody deliberately kept off the list.
+ */
+export type SubChannelVisibility = "open" | "private";
+
+/** The slug every repository's default sub-channel is created under. */
+export const GENERAL_SUB_CHANNEL_SLUG = "general";
+
+/**
+ * One room inside a repository's channel.
+ *
+ * A repository used to be a channel outright — `ChannelMessage` was keyed on
+ * `repositoryId` alone. This is the level beneath that: the repository is the
+ * workspace, and the conversation inside it is divided the way Slack or
+ * Discord divides a server. Every repository has a `#general` that everybody
+ * in the project belongs to, so a deployment that never adds a second
+ * sub-channel behaves exactly as it did before.
+ */
+export interface SubChannel {
+  id: string;
+  repositoryId: string;
+  projectId: ProjectId;
+  /** The `#name` handle, lowercase and hyphenated, unique per repository. */
+  slug: string;
+  /** What an admin typed. Defaults to the slug. */
+  name: string;
+  visibility: SubChannelVisibility;
+  createdAt: string;
+  createdBy?: string;
+}
+
+/** One person's membership of one sub-channel. */
+export interface SubChannelMember {
+  channelId: string;
+  userId: string;
+  addedAt: string;
+}
+
+export interface CreateSubChannelInput {
+  repositoryId: string;
+  projectId: ProjectId;
+  slug: string;
+  name?: string;
+  visibility?: SubChannelVisibility;
+  createdBy?: string;
+}
+
+export interface UpdateSubChannelInput {
+  slug?: string;
+  name?: string;
+  visibility?: SubChannelVisibility;
 }
 
 export const DEFAULT_ORGANIZATION_ID = "org_local";
@@ -1904,7 +1993,55 @@ export interface CoordinationStore {
    * figure into "200+". A count is cheap where the rows already are; carrying
    * them all into the gateway to measure their length is not.
    */
-  countChannelMessages(repositoryId: string): Promise<ChannelMessageCounts>;
+  countChannelMessages(
+    repositoryId: string,
+    channelId?: string,
+  ): Promise<ChannelMessageCounts>;
+
+  /**
+   * The sub-channels inside one repository, `#general` first and the rest by
+   * name. Every one of them, regardless of visibility — hiding a private room
+   * from somebody who is not in it is the gateway's job, because only it
+   * knows who is asking.
+   */
+  listSubChannels(repositoryId: string): Promise<SubChannel[]>;
+  getSubChannel(
+    repositoryId: string,
+    channelId: string,
+  ): Promise<SubChannel | undefined>;
+  /**
+   * The repository's `#general`, created if it is not there yet.
+   *
+   * Idempotent and safe to race: two callers asking at once get the same row
+   * rather than two rooms with the same name. This is what makes every
+   * message writer able to leave `channelId` out and still land somewhere
+   * real.
+   */
+  ensureGeneralSubChannel(
+    repositoryId: string,
+    projectId: ProjectId,
+  ): Promise<SubChannel>;
+  createSubChannel(input: CreateSubChannelInput): Promise<SubChannel>;
+  updateSubChannel(
+    repositoryId: string,
+    channelId: string,
+    input: UpdateSubChannelInput,
+  ): Promise<SubChannel>;
+  /**
+   * Removes a sub-channel and everything said in it.
+   *
+   * Refuses `#general`: it is the room every message written without a
+   * destination falls back to, and a repository without one has nowhere to
+   * put the next line.
+   */
+  deleteSubChannel(repositoryId: string, channelId: string): Promise<void>;
+  listSubChannelMembers(channelId: string): Promise<SubChannelMember[]>;
+  setSubChannelMember(
+    channelId: string,
+    userId: string,
+    isMember: boolean,
+  ): Promise<void>;
+  isSubChannelMember(channelId: string, userId: string): Promise<boolean>;
   appendChannelMessage(
     input: AppendChannelMessageInput,
   ): Promise<ChannelMessage>;
@@ -2017,6 +2154,7 @@ export interface CoordinationStore {
   listPinnedChannelMessages(
     repositoryId: string,
     viewerId: UserId,
+    channelId?: string,
   ): Promise<ChannelMessage[]>;
   /**
    * Moves a message to the foot of the channel without changing when it was
@@ -2035,7 +2173,10 @@ export interface CoordinationStore {
   /** Removes a message with its replies and reactions. */
   deleteChannelMessage(repositoryId: string, messageId: string): Promise<void>;
   /** Removes every message in one channel. Returns how many went. */
-  deleteChannelMessages(repositoryId: string): Promise<number>;
+  deleteChannelMessages(
+    repositoryId: string,
+    channelId?: string,
+  ): Promise<number>;
   /**
    * Blanks a message in place, leaving its thread standing.
    *
@@ -2181,13 +2322,20 @@ export interface CoordinationStore {
   /** Every (user, provider) that is currently an opted-in member of this channel. */
   listChannelAgentMembers(
     repositoryId: string,
-  ): Promise<Array<{ userId: string; provider: string }>>;
-  /** Adds or removes one (repository, user, provider) membership row. */
+    channelId?: string,
+  ): Promise<Array<{ userId: string; provider: string; channelId: string }>>;
+  /**
+   * Adds or removes one (channel, user, provider) membership row.
+   *
+   * `channelId` left out means the repository's `#general`, which is where
+   * the pre-sub-channel rows were migrated to.
+   */
   setChannelAgentMember(
     repositoryId: string,
     userId: string,
     provider: string,
     isMember: boolean,
+    channelId?: string,
   ): Promise<void>;
   /**
    * Whether the one-time grandfather backfill (see `channelAgentConnections`
@@ -2202,10 +2350,12 @@ export interface CoordinationStore {
     repositoryId: string,
     userId: UserId,
     at: string,
+    channelId?: string,
   ): Promise<void>;
   getChannelReadCursor(
     repositoryId: string,
     userId: UserId,
+    channelId?: string,
   ): Promise<string | undefined>;
 
   /**
