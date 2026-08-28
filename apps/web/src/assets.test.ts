@@ -511,15 +511,17 @@ test("one play control beside the pin runs whatever the channel's app is", async
   // to sit in no longer exists and a boxed icon among these would read as a
   // control that arrived by accident.
   const headerStart = chats.indexOf("function conversationHeader(repositoryId)");
-  const header = chats.slice(
-    headerStart,
-    chats.indexOf('<span class="spacer">', headerStart),
-  );
+  // The whole function, not the stretch before the spacer. The room's own
+  // line — the muted mark, the pin, the play control — sits after the spacer
+  // now, so the old boundary cut away exactly what this test is about.
+  const header = chats.slice(headerStart, chats.indexOf("\n}", headerStart));
   assert.notEqual(headerStart, -1, "the channel header should exist");
-  assert.match(header, /\$\{previewControl\(repositoryId\)\}/u);
+  // Guarded on `main`: the play control runs the channel's app, and a DM or
+  // an agent thread has no app to run.
+  assert.match(header, /\$\{main \? previewControl\(repositoryId\) : ""\}/u);
   assert.match(
     header,
-    /ch-count ch-muted[\s\S]*?\$\{previewControl\(repositoryId\)\}/u,
+    /ch-count ch-muted[\s\S]*?previewControl\(repositoryId\)/u,
     "the muted mark and the preview control share the room's own line",
   );
   // And nothing stands between them. The separator existed to hold the two
@@ -2112,12 +2114,24 @@ test("the composer stays open over a decision the textarea cannot see", async ()
   }
 });
 
-test("the main-chat composer placeholder names the selected conversation", async () => {
+test("the composer placeholder names the room it will post into", async () => {
   const source = await publicFile("screen-chats.js");
   const start = source.indexOf("function composer(repositoryId)");
   const body = source.slice(start, source.indexOf("\n}", start));
-  assert.match(body, /\? "Message Main chat"/u);
-  assert.doesNotMatch(body, /Message #/u);
+
+  // It used to say "Message Main chat", which stopped being a place when
+  // rooms arrived: the composer posts into whichever room is open, and a
+  // placeholder naming a destination that no longer exists is a lie about
+  // where the message is going.
+  assert.doesNotMatch(body, /Message Main chat/u);
+  assert.match(
+    body,
+    /Message \$\{subChannelLabel\(\s*repositoryId,\s*activeSubChannelId\(repositoryId\),?\s*\)\}/u,
+  );
+  // An undivided repository has one room and no choice to report, so it reads
+  // exactly as it did before rooms existed.
+  assert.match(body, /subChannelsFor\(repositoryId\)\.length > 1/u);
+  assert.match(body, /Message #\$\{repositoryLabel\(repositoryId\)\}/u);
 });
 
 test("the chat panel shows a bare progress bar and no token statistics", async () => {
