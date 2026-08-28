@@ -236,7 +236,12 @@ svg {
 
 /* Every product glyph comes through the shared icon renderer. This class is
    deliberately light-touch: each control still owns the icon's optical size,
-   while the pack owns alignment and rendering consistently everywhere. */
+   while the pack owns alignment and rendering consistently everywhere.
+
+   The pack is Basil Solid Bold, so a glyph is filled geometry rather than a
+   stroked outline: nothing here sets `fill` or `stroke`, because doing so
+   from a stylesheet is how half a set ends up in a different weight from the
+   other half. Colour arrives through `color`, which the fills inherit. */
 svg.ui-icon {
   flex: none;
   overflow: visible;
@@ -2112,12 +2117,13 @@ svg.ui-icon {
   height: 14px;
 }
 
+/* A favourite is told apart by colour alone. The star used to be an outline
+   that this rule filled in, which no longer says anything: in a solid pack
+   both states are filled, and filling an already-filled star is a rule that
+   looks like it does something. `aria-pressed` carries the state either
+   way. */
 .star.on {
   color: var(--orange);
-}
-
-.star.on svg {
-  fill: currentColor;
 }
 
 .star:hover {

@@ -72,264 +72,469 @@ export function imeComposing(event) {
 /* -------------------------------------------------------------- icons ---- */
 
 /**
- * The local subset of Basil selected for Kumi's interface.
+ * The local subset of Basil Solid Bold selected for Kumi's interface.
  *
  * Basil is Craftwork's open icon set:
  * https://craftwork.design/product/basil
  *
- * It replaces the set the interface used before, wholesale rather than icon
- * by icon: half a set is worse than either whole one, because the eye reads
- * the difference in weight long before it reads the picture. Basil is the
- * warmer, thicker register this product wanted — marks drawn large inside
- * the box, corners rounded far more generously than a geometric line set
- * would allow, and one heavy stroke that holds its shape at 14px instead of
- * thinning into a smudge beside the words.
+ * Basil ships in several weights, and this is the solid one: every mark is a
+ * filled silhouette rather than a traced outline. The set was drawn as
+ * outlines first and that was the wrong register for this product — beside
+ * bold labels on a dense panel, a 2px line reads as a hairline sketch and
+ * thins into a smudge at 14px. Filled, the same picture holds its shape at
+ * any size a control uses it at, which is the whole point of the bold cut.
+ *
+ * Solid Bold's rules are followed rather than approximated: shapes are drawn
+ * large inside the 24px box, corners are rounded far more generously than a
+ * geometric set would allow, the details inside a mark are cut out of the
+ * fill with `evenodd` instead of being drawn on top of it, and lines that
+ * remain lines — a slash, a tick, a chevron — are heavy rounded bars, not
+ * strokes. Nothing in this file strokes anything: a stroked path beside a
+ * filled one is the one difference the eye reads before it reads the
+ * picture, and half a set is worse than either whole one.
  *
  * Only the geometry the product uses is kept inline, so the marks stay
  * instant and available when the control plane is offline, and nothing here
- * fetches artwork at runtime. The shared wrapper carries Basil's 24px grid,
- * its 2px rounded stroke and `currentColor` behaviour, while keeping every
- * interface mark decorative to assistive technology. This is the interface's
- * only icon language: attribution pills draw from the same set rather than
- * standing up a second one beside it, because two weights in one row read as
- * a mistake before they read as a distinction. Product-only concepts (agents
- * and the Kumi network) use that same grid and optical weight, and the two
- * vendor marks here — GitHub and Google — stay their owners' published
- * artwork, because a logo redrawn in somebody else's style is no longer the
+ * fetches artwork at runtime. The shared wrapper carries the 24px grid and
+ * `currentColor` behaviour, while keeping every interface mark decorative to
+ * assistive technology. This is the interface's only icon language:
+ * attribution pills draw from the same set rather than standing up a second
+ * one beside it. Product-only concepts (agents and the Kumi network) use
+ * that same grid and optical weight, and the two vendor marks here — GitHub
+ * and Google — stay their owners' published artwork, which both publish
+ * filled, because a logo redrawn in somebody else's style is no longer the
  * logo.
  */
 const S = (body, extra = "") =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" data-icon-style="basil" data-icon-source="craftwork-basil"${extra}>${body}</svg>`;
+  `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false" data-icon-style="basil-solid" data-icon-source="craftwork-basil"${extra}>${body}</svg>`;
 
 export const ICONS = {
   // Basil's house is squarer and sits lower than a drawn-to-a-point roof:
-  // the eaves and the ridge share one generous radius, which is what stops a
-  // 16px house from reading as an arrowhead.
+  // the eaves and the ridge share one generous radius, and the doorway is a
+  // notch cut out of the silhouette rather than a line drawn on it.
   home: S(
-    '<path d="M3.6 10.7a2.7 2.7 0 0 1 1.04-2.13l5.7-4.42a2.7 2.7 0 0 1 3.32 0l5.7 4.42a2.7 2.7 0 0 1 1.04 2.13v6.5a3.2 3.2 0 0 1-3.2 3.2H6.8a3.2 3.2 0 0 1-3.2-3.2z"/><path d="M9.6 20.4v-3.8a2.4 2.4 0 0 1 4.8 0v3.8"/>',
+    '<path d="M10.34 3.13a2.7 2.7 0 0 1 3.32 0l5.7 4.42A2.7 2.7 0 0 1 20.4 9.68V17.2a3.2 3.2 0 0 1-3.2 3.2h-2.3v-3.8a2.9 2.9 0 0 0-5.8 0v3.8H6.8a3.2 3.2 0 0 1-3.2-3.2V9.68' +
+      'a2.7 2.7 0 0 1 1.04-2.13z"/>',
   ),
-  // One closed shape with the tab drawn into it. Basil leaves the inside of a
-  // folder empty: at this stroke a rule across the body closes up against the
-  // walls and the mark turns into a full drawer.
+  // One closed shape with the tab drawn into it. Solid Bold leaves the body
+  // unbroken: a rule across it would read as a drawer front, not a folder.
   folder: S(
-    '<path d="M3.5 8.9a3.3 3.3 0 0 1 3.3-3.3h2.1c.7 0 1.38.22 1.94.63l1.86 1.37h4.5a3.3 3.3 0 0 1 3.3 3.3v5.6a3.3 3.3 0 0 1-3.3 3.3H6.8a3.3 3.3 0 0 1-3.3-3.3z"/>',
+    '<path d="M6.8 5.6h2.1c.7 0 1.38.22 1.94.63l1.86 1.37h4.5a3.3 3.3 0 0 1 3.3 3.3v5.6a3.3 3.3 0 0 1-3.3 3.3H6.8a3.3 3.3 0 0 1-3.3-3.3V8.9a3.3 3.3 0 0 1 3.3-3.3z"/>',
   ),
   code: S(
-    '<path d="M8.6 8.2 4.4 12l4.2 3.8"/><path d="m15.4 8.2 4.2 3.8-4.2 3.8"/><path d="M13.4 5.6 10.6 18.4"/>',
+    '<path d="M7.79 6.75L3.69 11.15A1.25 1.25 0 0 0 3.69 12.85L7.79 17.25A1.25 1.25 0 0 0 9.61 15.55L6.31 12 9.61 8.45A1.25 1.25 0 0 0 7.79 6.75Z"/>' +
+      '<path d="M14.39 8.45L17.69 12 14.39 15.55A1.25 1.25 0 0 0 16.21 17.25L20.31 12.85A1.25 1.25 0 0 0 20.31 11.15L16.21 6.75A1.25 1.25 0 0 0 14.39 8.45Z"/>' +
+      '<path d="M12.28 5.12L9.28 18.32A1.25 1.25 0 0 0 11.72 18.88L14.72 5.68A1.25 1.25 0 0 0 12.28 5.12Z"/>',
   ),
   robot: S(
-    '<rect x="3.4" y="7.4" width="17.2" height="12.4" rx="5.2"/><path d="M12 7.4V5.2"/><circle cx="12" cy="3.7" r="1.4" fill="currentColor" stroke="none"/><circle cx="9.2" cy="13" r="1.35" fill="currentColor" stroke="none"/><circle cx="14.8" cy="13" r="1.35" fill="currentColor" stroke="none"/><path d="M10.2 16.6h3.6"/>',
+    '<path fill-rule="evenodd" d="M8.6 7.4h6.8a5.2 5.2 0 0 1 5.2 5.2v2a5.2 5.2 0 0 1-5.2 5.2h-6.8a5.2 5.2 0 0 1-5.2-5.2v-2a5.2 5.2 0 0 1 5.2-5.2Z' +
+      'M7.7 13a1.5 1.5 0 1 0 3 0 1.5 1.5 0 1 0-3 0ZM13.3 13a1.5 1.5 0 1 0 3 0 1.5 1.5 0 1 0-3 0Z' +
+      'M11.05 15.8h1.9a.95.95 0 0 1 .95.95.95.95 0 0 1-.95.95h-1.9a.95.95 0 0 1-.95-.95.95.95 0 0 1 .95-.95Z"/>' +
+      '<path d="M10.9 4.9L10.9 7.8A1.1 1.1 0 0 0 13.1 7.8L13.1 4.9A1.1 1.1 0 0 0 10.9 4.9Z"/>' +
+      '<circle cx="12" cy="3.5" r="1.7"/>',
   ),
   // Head and shoulders, the two of them deliberately the same silhouette so
   // the pair reads as one count of people beside one count of agents rather
   // than as two unrelated pictures. Soft-cornered head and antenna for the
   // agent, round head for the person; nothing below the shoulders in either.
   personBust: S(
-    '<circle cx="12" cy="7.6" r="4"/><path d="M4.6 20c0-3.5 3.4-5.6 7.4-5.6s7.4 2.1 7.4 5.6"/>',
+    '<circle cx="12" cy="7.8" r="4.3"/>' +
+      '<path d="M4.4 20.9C4.4 16.44 8.58 13.7 12 13.7 15.42 13.7 19.6 16.44 19.6 20.9Z"/>',
   ),
   robotBust: S(
-    '<rect x="6" y="4.8" width="12" height="9.2" rx="3.8"/><path d="M12 4.8V3.4"/><circle cx="12" cy="2.3" r="1.2" fill="currentColor" stroke="none"/><circle cx="9.7" cy="9.2" r="1.2" fill="currentColor" stroke="none"/><circle cx="14.3" cy="9.2" r="1.2" fill="currentColor" stroke="none"/><path d="M4.6 20c0-3.3 3.4-5.3 7.4-5.3s7.4 2 7.4 5.3"/>',
+    '<path fill-rule="evenodd" d="M9.8 4.9h4.4a3.8 3.8 0 0 1 3.8 3.8v1.6a3.8 3.8 0 0 1-3.8 3.8h-4.4a3.8 3.8 0 0 1-3.8-3.8v-1.6a3.8 3.8 0 0 1 3.8-3.8Z' +
+      'M8.35 9.3a1.35 1.35 0 1 0 2.7 0 1.35 1.35 0 1 0-2.7 0ZM12.95 9.3a1.35 1.35 0 1 0 2.7 0 1.35 1.35 0 1 0-2.7 0Z"/>' +
+      '<path d="M11.05 2.9L11.05 5.2A.95.95 0 0 0 12.95 5.2L12.95 2.9A.95.95 0 0 0 11.05 2.9Z"/>' +
+      '<circle cx="12" cy="2.2" r="1.45"/>' +
+      '<path d="M4.5 20.9C4.5 16.99 8.62 14.6 12 14.6 15.38 14.6 19.5 16.99 19.5 20.9Z"/>',
   ),
   network: S(
-    '<circle cx="12" cy="12" r="3.2"/><circle cx="4.8" cy="5.6" r="2.4"/><circle cx="19.2" cy="5.6" r="2.4"/><circle cx="12" cy="20" r="2.4"/><path d="m6.6 7.2 3 2.7M17.4 7.2l-3 2.7M12 15.2v2.4"/>',
+    '<circle cx="12" cy="12" r="3.5"/>' +
+      '<circle cx="4.8" cy="5.6" r="2.7"/>' +
+      '<circle cx="19.2" cy="5.6" r="2.7"/>' +
+      '<circle cx="12" cy="20" r="2.7"/>' +
+      '<path d="M6.16 8.52L9.16 11.22A1.1 1.1 0 0 0 10.64 9.58L7.64 6.88A1.1 1.1 0 0 0 6.16 8.52Z"/>' +
+      '<path d="M16.36 6.88L13.36 9.58A1.1 1.1 0 0 0 14.84 11.22L17.84 8.52A1.1 1.1 0 0 0 16.36 6.88Z"/>' +
+      '<path d="M10.9 15.3L10.9 17.5A1.1 1.1 0 0 0 13.1 17.5L13.1 15.3A1.1 1.1 0 0 0 10.9 15.3Z"/>',
   ),
   // A flat-bottomed bell whose skirt is squared off by two soft curls rather
   // than a rim line, so the mark keeps its weight low and stays legible in a
   // topbar.
   bell: S(
-    '<path d="M12 3a6.3 6.3 0 0 0-6.3 6.3c0 1.5-.15 2.5-.47 3.35-.33.9-.85 1.6-1.53 2.35a1.3 1.3 0 0 0 .95 2.2h14.7a1.3 1.3 0 0 0 .95-2.2c-.68-.75-1.2-1.45-1.53-2.35-.32-.85-.47-1.85-.47-3.35A6.3 6.3 0 0 0 12 3z"/><path d="M9.7 20.1a2.5 2.5 0 0 0 4.6 0"/>',
+    '<path d="M12 2.4a6.9 6.9 0 0 0-6.9 6.9c0 1.47-.15 2.44-.46 3.27-.32.86-.82 1.54-1.5 2.29A1.8 1.8 0 0 0 4.47 17.9h15.06a1.8 1.8 0 0 0 1.33-3.04' +
+      'c-.68-.75-1.18-1.43-1.5-2.29-.31-.83-.46-1.8-.46-3.27A6.9 6.9 0 0 0 12 2.4Z"/>' +
+      '<path d="M9.4 19.4h5.2a2.6 2.6 0 0 1-5.2 0Z"/>',
   ),
-  // The same bell with a stroke through it, deliberately: a muted room is the
+  // The same bell struck through, deliberately: a muted room is the
   // notification mark negated, and inventing a second unrelated picture for
-  // it would make the pair harder to read than the one crossed-out one.
+  // it would make the pair harder to read than the one crossed-out one. The
+  // bar is cut out of the bell and redrawn over the gap, so the slash reads
+  // at 14px instead of disappearing into the silhouette.
   bellOff: S(
-    '<path d="M12 3a6.3 6.3 0 0 0-6.3 6.3c0 1.5-.15 2.5-.47 3.35-.33.9-.85 1.6-1.53 2.35a1.3 1.3 0 0 0 .95 2.2h14.7a1.3 1.3 0 0 0 .95-2.2c-.68-.75-1.2-1.45-1.53-2.35-.32-.85-.47-1.85-.47-3.35A6.3 6.3 0 0 0 12 3z"/><path d="M9.7 20.1a2.5 2.5 0 0 0 4.6 0"/><path d="M4 4 20 20"/>',
+    '<path fill-rule="evenodd" d="M12 2.4a6.9 6.9 0 0 0-6.9 6.9c0 1.47-.15 2.44-.46 3.27-.32.86-.82 1.54-1.5 2.29A1.8 1.8 0 0 0 4.47 17.9h15.06a1.8 1.8 0 0 0 1.33-3.04' +
+      'c-.68-.75-1.18-1.43-1.5-2.29-.31-.83-.46-1.8-.46-3.27A6.9 6.9 0 0 0 12 2.4ZM9.4 19.4h5.2a2.6 2.6 0 0 1-5.2 0Z' +
+      'M.97 4.23L19.77 23.03A2.3 2.3 0 0 0 23.03 19.77L4.23.97A2.3 2.3 0 0 0 .97 4.23Z"/>' +
+      '<path d="M2.82 4.58L19.42 21.18A1.25 1.25 0 0 0 21.18 19.42L4.58 2.82A1.25 1.25 0 0 0 2.82 4.58Z"/>',
   ),
-  // Six chunky teeth around an open hub. The eight soft lobes this replaced
-  // were drawn for a thin line: at Basil's weight their valleys close up and
-  // the cog silhouettes into a blob, so the teeth are fewer and deeper.
+  // Six chunky teeth around a hub knocked clean out of the middle. The eight
+  // soft lobes this replaced were drawn for a thin line: filled, their
+  // valleys close up and the cog silhouettes into a blob.
   gear: S(
-    '<path d="M9.7 5.9 10.1 3h3.8l.4 2.9 1.8 1 2.7-1.1 1.9 3.4-2.3 1.8v2l2.3 1.8-1.9 3.4-2.7-1.1-1.8 1-.4 2.9h-3.8l-.4-2.9-1.8-1-2.7 1.1-1.9-3.4L5.6 13v-2L3.3 9.2l1.9-3.4 2.7 1.1z"/><circle cx="12" cy="12" r="3.1"/>',
+    '<path fill-rule="evenodd" d="M9.7 5.9 10.1 3h3.8l.4 2.9 1.8 1 2.7-1.1 1.9 3.4-2.3 1.8v2l2.3 1.8-1.9 3.4-2.7-1.1-1.8 1-.4 2.9h-3.8l-.4-2.9-1.8-1-2.7 1.1-1.9-3.4L5.6 13v-2L3.3 9.2l1.9-3.4 2.7 1.1z' +
+      'M8.8 12a3.2 3.2 0 1 0 6.4 0 3.2 3.2 0 1 0-6.4 0Z"/>',
   ),
-  search: S('<circle cx="10.9" cy="10.9" r="7.1"/><path d="m16.2 16.2 4 4"/>'),
-  plus: S('<path d="M12 5v14M5 12h14"/>'),
-  close: S('<path d="M18 6 6 18M6 6l12 12"/>'),
+  search: S(
+    '<path fill-rule="evenodd" d="M2.8 10.8a8 8 0 1 0 16 0 8 8 0 1 0-16 0ZM5.6 10.8a5.2 5.2 0 1 0 10.4 0 5.2 5.2 0 1 0-10.4 0Z"/>' +
+      '<path d="M14.98 16.82L19.48 21.32A1.3 1.3 0 0 0 21.32 19.48L16.82 14.98A1.3 1.3 0 0 0 14.98 16.82Z"/>',
+  ),
+  plus: S(
+    '<path d="M13.35 5.75A1.35 1.35 0 0 0 10.65 5.75L10.65 10.65 5.75 10.65A1.35 1.35 0 0 0 5.75 13.35L10.65 13.35 10.65 18.25A1.35 1.35 0 0 0 13.35 18.25L13.35 13.35 18.25 13.35' +
+      'A1.35 1.35 0 0 0 18.25 10.65L13.35 10.65Z"/>',
+  ),
+  close: S(
+    '<path d="M5.45 7.35L16.65 18.55A1.35 1.35 0 0 0 18.55 16.65L7.35 5.45A1.35 1.35 0 0 0 5.45 7.35Z"/>' +
+      '<path d="M16.65 5.45L5.45 16.65A1.35 1.35 0 0 0 7.35 18.55L18.55 7.35A1.35 1.35 0 0 0 16.65 5.45Z"/>',
+  ),
   // Deleting is the one action here that destroys something, so it gets its
   // own mark rather than borrowing the close cross — the two must not be a
-  // slip apart. The bin tapers toward its base and keeps the lid a single
-  // line above it.
+  // slip apart. The bin tapers toward its base and carries two cut-out
+  // slots, which is what keeps a filled bin from reading as a plain block.
   trash: S(
-    '<path d="M4.2 6.2h15.6"/><path d="m18.1 8.8-.4 9.4a2.6 2.6 0 0 1-2.6 2.5H8.9a2.6 2.6 0 0 1-2.6-2.5l-.4-9.4"/><path d="M9.4 6.2V4.6a1.8 1.8 0 0 1 1.8-1.8h1.6a1.8 1.8 0 0 1 1.8 1.8v1.6"/><path d="M10.2 11.6v5.2M13.8 11.6v5.2"/>',
+    '<path fill-rule="evenodd" d="M6.28 8.8h11.44l-.42 9.42a2.6 2.6 0 0 1-2.6 2.48H9.3a2.6 2.6 0 0 1-2.6-2.48z' +
+      'M9.55 11.7L9.55 17.2A.75.75 0 0 0 11.05 17.2L11.05 11.7A.75.75 0 0 0 9.55 11.7ZM12.95 11.7L12.95 17.2A.75.75 0 0 0 14.45 17.2L14.45 11.7A.75.75 0 0 0 12.95 11.7Z"/>' +
+      '<path d="M3.9 7.55L20.1 7.55A1.25 1.25 0 0 0 20.1 5.05L3.9 5.05A1.25 1.25 0 0 0 3.9 7.55Z"/>' +
+      '<path d="M7.85 6.3A4.15 4.15 0 0 1 16.15 6.3L13.75 6.3A1.75 1.75 0 0 0 10.25 6.3Z"/>',
   ),
-  chevronDown: S('<path d="m6.6 9.4 5.4 5.2 5.4-5.2"/>'),
-  chevronRight: S('<path d="m9.4 6.6 5.2 5.4-5.2 5.4"/>'),
-  chevronUp: S('<path d="m6.6 14.6 5.4-5.2 5.4 5.2"/>'),
-  arrowRight: S('<path d="M4 12h16"/><path d="m13.4 5.4 6.6 6.6-6.6 6.6"/>'),
-  arrowLeft: S('<path d="M20 12H4"/><path d="m10.6 5.4-6.6 6.6 6.6 6.6"/>'),
+  chevronDown: S(
+    '<path d="M5.48 10.22L11.08 15.82A1.3 1.3 0 0 0 12.92 15.82L18.52 10.22A1.3 1.3 0 0 0 16.68 8.38L12 13.06 7.32 8.38A1.3 1.3 0 0 0 5.48 10.22Z"/>',
+  ),
+  chevronRight: S(
+    '<path d="M8.38 7.32L13.06 12 8.38 16.68A1.3 1.3 0 0 0 10.22 18.52L15.82 12.92A1.3 1.3 0 0 0 15.82 11.08L10.22 5.48A1.3 1.3 0 0 0 8.38 7.32Z"/>',
+  ),
+  chevronUp: S(
+    '<path d="M7.32 15.62L12 10.94 16.68 15.62A1.3 1.3 0 0 0 18.52 13.78L12.92 8.18A1.3 1.3 0 0 0 11.08 8.18L5.48 13.78A1.3 1.3 0 0 0 7.32 15.62Z"/>',
+  ),
+  arrowRight: S(
+    '<path d="M4.2 13.3L19.2 13.3A1.3 1.3 0 0 0 19.2 10.7L4.2 10.7A1.3 1.3 0 0 0 4.2 13.3Z"/>' +
+      '<path d="M12.38 6.62L17.76 12 12.38 17.38A1.3 1.3 0 0 0 14.22 19.22L20.52 12.92A1.3 1.3 0 0 0 20.52 11.08L14.22 4.78A1.3 1.3 0 0 0 12.38 6.62Z"/>',
+  ),
+  arrowLeft: S(
+    '<path d="M19.8 10.7L4.8 10.7A1.3 1.3 0 0 0 4.8 13.3L19.8 13.3A1.3 1.3 0 0 0 19.8 10.7Z"/>' +
+      '<path d="M9.78 4.78L3.48 11.08A1.3 1.3 0 0 0 3.48 12.92L9.78 19.22A1.3 1.3 0 0 0 11.62 17.38L6.24 12 11.62 6.62A1.3 1.3 0 0 0 9.78 4.78Z"/>',
+  ),
   branch: S(
-    '<circle cx="7" cy="5.6" r="2.8"/><circle cx="7" cy="18.4" r="2.8"/><circle cx="17" cy="7.4" r="2.8"/><path d="M7 8.4v7.2"/><path d="M17 10.2c0 3.9-3.6 4.6-6.7 5.7"/>',
+    '<circle cx="7" cy="5.6" r="3.05"/>' +
+      '<circle cx="7" cy="18.4" r="3.05"/>' +
+      '<circle cx="17" cy="7.4" r="3.05"/>' +
+      '<path d="M5.8 7.9L5.8 16.1A1.2 1.2 0 0 0 8.2 16.1L8.2 7.9A1.2 1.2 0 0 0 5.8 7.9Z"/>' +
+      '<path d="M18.2 10.6A8.2 8.2 0 0 1 9.29 18.77L9.49 16.38A5.8 5.8 0 0 0 15.8 10.6Z"/>',
   ),
-  git: S('<circle cx="12" cy="12" r="3.4"/><path d="M3.4 12h5.2M15.4 12h5.2"/>'),
+  git: S(
+    '<circle cx="12" cy="12" r="3.5"/>' +
+      '<path d="M3.6 13.2L8.6 13.2A1.2 1.2 0 0 0 8.6 10.8L3.6 10.8A1.2 1.2 0 0 0 3.6 13.2Z"/>' +
+      '<path d="M15.4 13.2L20.4 13.2A1.2 1.2 0 0 0 20.4 10.8L15.4 10.8A1.2 1.2 0 0 0 15.4 13.2Z"/>',
+  ),
   // GitHub and Google keep their owners' published artwork rather than being
   // redrawn in Basil's hand: a logo in somebody else's style is a drawing of
   // a logo, and these two say which account somebody is signing in with.
+  // Both are published as filled marks, so they were already in this
+  // register before the set moved to it.
   github: S(
-    '<path d="M9 19c-4 1.2-4-2.2-5.6-2.8M15 21v-3.3c0-.9-.1-1.3-.6-1.8 2.4-.3 4.8-1.2 4.8-5.2a4 4 0 0 0-1.1-2.8 3.7 3.7 0 0 0-.1-2.8s-.9-.3-2.9 1.1a10 10 0 0 0-5.2 0C7.9 2 7 2.3 7 2.3a3.7 3.7 0 0 0-.1 2.8A4 4 0 0 0 5.8 8c0 3.9 2.4 4.8 4.7 5.2-.3.3-.6.8-.6 1.6V21"/>',
+    '<path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61' +
+      'C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 ' +
+      '3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 ' +
+      '1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 ' +
+      '5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12z"/>',
   ),
   google: S(
-    '<path d="M20.6 12.2c0-.6-.1-1.2-.2-1.8H12v3.4h4.8a4.1 4.1 0 0 1-1.8 2.7v2.2h2.9a8.6 8.6 0 0 0 2.7-6.5z"/><path d="M12 21a8.5 8.5 0 0 0 5.9-2.2l-2.9-2.2A5.3 5.3 0 0 1 12 17.4a5.3 5.3 0 0 1-4.9-3.6H4.1v2.3A9 9 0 0 0 12 21z"/><path d="M7.1 13.8a5.3 5.3 0 0 1 0-3.4V8.1H4.1a9 9 0 0 0 0 8.1z"/><path d="M12 6.6c1.3 0 2.5.5 3.5 1.4l2.6-2.6A9 9 0 0 0 4.1 8.1l3 2.3A5.3 5.3 0 0 1 12 6.6z"/>',
+    '<path d="M12.48 10.92v3.28h7.84c-.24 1.84-.85 3.19-1.79 4.14-1.14 1.14-2.93 2.4-6.05 2.4-4.83 0-8.6-3.9-8.6-8.72s3.77-8.72 8.6-8.72c2.6 0 4.51 1.03 5.91 2.35l2.3-2.31' +
+      'C18.75 1.44 16.13 0 12.48 0 5.87 0 .31 5.39.31 12s5.56 12 12.17 12c3.57 0 6.27-1.17 8.37-3.36 2.16-2.16 2.84-5.21 2.84-7.67 0-.76-.05-1.47-.17-2.05z"/>',
   ),
   cloud: S(
     '<path d="M7.6 19.4a4.7 4.7 0 0 1-.55-9.36 6.1 6.1 0 0 1 11.55.87 4.4 4.4 0 0 1-.6 8.49z"/>',
   ),
+  // Two filled links with their eyes cut out, set on the diagonal every
+  // chain glyph uses. The bar between them is what stops the pair from
+  // reading as two unrelated pills.
   link: S(
-    '<path d="M10.2 13.8a4.1 4.1 0 0 0 6.18.44l2.1-2.1a4.1 4.1 0 0 0-5.8-5.8l-1.2 1.2"/><path d="M13.8 10.2a4.1 4.1 0 0 0-6.18-.44l-2.1 2.1a4.1 4.1 0 0 0 5.8 5.8l1.2-1.2"/>',
+    '<g transform="rotate(45 12 12)">' +
+      '<path fill-rule="evenodd" d="M12 2.6a3.2 3.2 0 0 1 3.2 3.2v2.6a3.2 3.2 0 0 1-3.2 3.2 3.2 3.2 0 0 1-3.2-3.2v-2.6a3.2 3.2 0 0 1 3.2-3.2Z' +
+      'M12 4.35a1.45 1.45 0 0 1 1.45 1.45v2.6a1.45 1.45 0 0 1-1.45 1.45 1.45 1.45 0 0 1-1.45-1.45v-2.6a1.45 1.45 0 0 1 1.45-1.45Z"/>' +
+      '<path fill-rule="evenodd" d="M12 12.4a3.2 3.2 0 0 1 3.2 3.2v2.6a3.2 3.2 0 0 1-3.2 3.2 3.2 3.2 0 0 1-3.2-3.2v-2.6a3.2 3.2 0 0 1 3.2-3.2Z' +
+      'M12 14.15a1.45 1.45 0 0 1 1.45 1.45v2.6a1.45 1.45 0 0 1-1.45 1.45 1.45 1.45 0 0 1-1.45-1.45v-2.6a1.45 1.45 0 0 1 1.45-1.45Z"/>' +
+      '<path d="M10.7 10.6L10.7 13.4A1.3 1.3 0 0 0 13.3 13.4L13.3 10.6A1.3 1.3 0 0 0 10.7 10.6Z"/>' +
+      '</g>',
   ),
   star: S(
-    '<path d="M12.9 3.5 15.1 8a1 1 0 0 0 .76.55l4.94.72c.84.12 1.17 1.15.57 1.74l-3.58 3.49a1 1 0 0 0-.29.89l.85 4.92c.14.84-.74 1.48-1.49 1.08l-4.4-2.32a1 1 0 0 0-.94 0l-4.4 2.32c-.75.4-1.63-.24-1.49-1.08l.85-4.92a1 1 0 0 0-.29-.89L2.63 11.01c-.6-.59-.27-1.62.57-1.74l4.94-.72A1 1 0 0 0 8.9 8l2.2-4.5a1 1 0 0 1 1.8 0z"/>',
+    '<path d="M12.9 3.5 15.1 8a1 1 0 0 0 .76.55l4.94.72c.84.12 1.17 1.15.57 1.74l-3.58 3.49a1 1 0 0 0-.29.89l.85 4.92c.14.84-.74 1.48-1.49 1.08l-4.4-2.32a1 1 0 0 0-.94 0l-4.4 2.32' +
+      'c-.75.4-1.63-.24-1.49-1.08l.85-4.92a1 1 0 0 0-.29-.89L2.63 11.01c-.6-.59-.27-1.62.57-1.74l4.94-.72A1 1 0 0 0 8.9 8l2.2-4.5a1 1 0 0 1 1.8 0z"/>',
   ),
   dots: S(
-    '<circle cx="12" cy="4.9" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="19.1" r="1.7" fill="currentColor" stroke="none"/>',
+    '<circle cx="12" cy="4.8" r="1.9"/>' +
+      '<circle cx="12" cy="12" r="1.9"/>' +
+      '<circle cx="12" cy="19.2" r="1.9"/>',
   ),
   dotsHorizontal: S(
-    '<circle cx="4.9" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="19.1" cy="12" r="1.7" fill="currentColor" stroke="none"/>',
+    '<circle cx="4.8" cy="12" r="1.9"/>' +
+      '<circle cx="12" cy="12" r="1.9"/>' +
+      '<circle cx="19.2" cy="12" r="1.9"/>',
   ),
   // A funnel rather than three stacked rules: the rules read as a list at
   // small sizes, which is the one thing a filter control must not be
   // mistaken for.
-  filter: S('<path d="M4 5.2h16l-6.2 7.6v6.1l-3.6 1.9v-8z"/>'),
+  filter: S(
+    '<path d="M4.1 4.9h15.8a1 1 0 0 1 .78 1.63l-6.28 7.7v5.05a1 1 0 0 1-.55.9l-3.6 1.8a1 1 0 0 1-1.45-.9v-6.85L3.32 6.53A1 1 0 0 1 4.1 4.9z"/>',
+  ),
   grid: S(
-    '<rect x="3.2" y="3.2" width="7.8" height="7.8" rx="2.9"/><rect x="13" y="3.2" width="7.8" height="7.8" rx="2.9"/><rect x="3.2" y="13" width="7.8" height="7.8" rx="2.9"/><rect x="13" y="13" width="7.8" height="7.8" rx="2.9"/>',
+    '<rect x="3.2" y="3.2" width="7.9" height="7.9" rx="2.9"/>' +
+      '<rect x="12.9" y="3.2" width="7.9" height="7.9" rx="2.9"/>' +
+      '<rect x="3.2" y="12.9" width="7.9" height="7.9" rx="2.9"/>' +
+      '<rect x="12.9" y="12.9" width="7.9" height="7.9" rx="2.9"/>',
   ),
   list: S(
-    '<path d="M9.4 6.6h10.2M9.4 12h10.2M9.4 17.4h10.2"/><circle cx="4.8" cy="6.6" r="1.4" fill="currentColor" stroke="none"/><circle cx="4.8" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="4.8" cy="17.4" r="1.4" fill="currentColor" stroke="none"/>',
+    '<path d="M9.5 7.75L19.8 7.75A1.15 1.15 0 0 0 19.8 5.45L9.5 5.45A1.15 1.15 0 0 0 9.5 7.75Z"/>' +
+      '<path d="M9.5 13.15L19.8 13.15A1.15 1.15 0 0 0 19.8 10.85L9.5 10.85A1.15 1.15 0 0 0 9.5 13.15Z"/>' +
+      '<path d="M9.5 18.55L19.8 18.55A1.15 1.15 0 0 0 19.8 16.25L9.5 16.25A1.15 1.15 0 0 0 9.5 18.55Z"/>' +
+      '<circle cx="4.7" cy="6.6" r="1.6"/>' +
+      '<circle cx="4.7" cy="12" r="1.6"/>' +
+      '<circle cx="4.7" cy="17.4" r="1.6"/>',
   ),
-  // Two written lines inside the page, which is what tells a document apart
-  // from an empty card at 14px.
+  // Two written lines cut out of the page, which is what tells a document
+  // apart from a blank card at 14px, and a bevelled corner where the fold
+  // would be.
   file: S(
-    '<path d="M14.2 2.8H8A3.3 3.3 0 0 0 4.7 6.1v11.8A3.3 3.3 0 0 0 8 21.2h8a3.3 3.3 0 0 0 3.3-3.3V7.9z"/><path d="M14 3v3.3a1.9 1.9 0 0 0 1.9 1.9h3.3"/><path d="M8.9 16.4h5.4M8.9 12.6h3.4"/>',
+    '<path fill-rule="evenodd" d="M14.3 2.6H8A3.4 3.4 0 0 0 4.6 6v12A3.4 3.4 0 0 0 8 21.4h8a3.4 3.4 0 0 0 3.4-3.4V7.7z' +
+      'M8.9 17.25L14.3 17.25A.85.85 0 0 0 14.3 15.55L8.9 15.55A.85.85 0 0 0 8.9 17.25ZM8.9 13.45L12.4 13.45A.85.85 0 0 0 12.4 11.75L8.9 11.75A.85.85 0 0 0 8.9 13.45Z"/>',
   ),
   history: S(
-    '<path d="M3.2 12a8.8 8.8 0 1 0 2.8-6.45"/><path d="M3 4.6v4.6h4.6"/><path d="M12 7.4v4.8l3.3 1.9"/>',
+    '<path d="M4.75 6.92A8.85 8.85 0 1 1 3.28 10.46L5.75 10.9A6.35 6.35 0 1 0 6.8 8.36Z"/>' +
+      '<path d="M3.9 6.33L7.65 8.95 4.49 10.81Z"/>' +
+      '<path d="M10.9 7.4L10.9 12A1.1 1.1 0 0 0 11.49 12.97L14.89 14.77A1.1 1.1 0 0 0 15.91 12.83L13.1 11.34 13.1 7.4A1.1 1.1 0 0 0 10.9 7.4Z"/>',
   ),
   sparkle: S(
-    '<path d="M11.2 3.4c0 4.2 2.8 7 7 7-4.2 0-7 2.8-7 7 0-4.2-2.8-7-7-7 4.2 0 7-2.8 7-7Z"/><path d="M18.2 15v3.6M20 16.8h-3.6"/>',
+    '<path d="M11.2 3.4c0 4.2 2.8 7 7 7-4.2 0-7 2.8-7 7 0-4.2-2.8-7-7-7 4.2 0 7-2.8 7-7Z"/>' +
+      '<path d="M17.45 14.9L17.45 18.9A.85.85 0 0 0 19.15 18.9L19.15 14.9A.85.85 0 0 0 17.45 14.9Z"/>' +
+      '<path d="M16.3 17.75L20.3 17.75A.85.85 0 0 0 20.3 16.05L16.3 16.05A.85.85 0 0 0 16.3 17.75Z"/>',
   ),
   wand: S(
-    '<path d="M4 20 14.2 9.8"/><path d="m16.8 3.2 1.05 2.95L20.8 7.2l-2.95 1.05L16.8 11.2l-1.05-2.95L12.8 7.2l2.95-1.05z"/><path d="M6.2 4.6v2.6M7.5 5.9H4.9"/><path d="M19.4 14v2.4M20.6 15.2h-2.4"/>',
+    '<path d="M5.22 20.62L15.02 10.82A1.3 1.3 0 0 0 13.18 8.98L3.38 18.78A1.3 1.3 0 0 0 5.22 20.62Z"/>' +
+      '<path d="M16.9 2.7Q17.78 6.22 21.3 7.1 17.78 7.98 16.9 11.5 16.02 7.98 12.5 7.1 16.02 6.22 16.9 2.7Z"/>' +
+      '<path d="M6.2 3.7Q6.64 5.46 8.4 5.9 6.64 6.34 6.2 8.1 5.76 6.34 4 5.9 5.76 5.46 6.2 3.7Z"/>' +
+      '<path d="M19.9 13Q20.34 14.76 22.1 15.2 20.34 15.64 19.9 17.4 19.46 15.64 17.7 15.2 19.46 14.76 19.9 13Z"/>',
   ),
   paperclip: S(
-    '<path d="M19.6 10.9 11.9 18.6a4.9 4.9 0 0 1-6.93-6.93l7.6-7.6a3.35 3.35 0 0 1 4.67 4.67l-7.6 7.6a1.7 1.7 0 0 1-2.4-2.4l6.9-6.9"/>',
+    '<g transform="rotate(45 12 12)">' +
+      '<path d="M18.6 13A6.6 6.6 0 0 1 5.4 13L7.8 13A4.2 4.2 0 0 0 16.2 13Z"/>' +
+      '<path d="M5.4 5.6L5.4 13A1.2 1.2 0 0 0 7.8 13L7.8 5.6A1.2 1.2 0 0 0 5.4 5.6Z"/>' +
+      '<path d="M16.2 8L16.2 13A1.2 1.2 0 0 0 18.6 13L18.6 8A1.2 1.2 0 0 0 16.2 8Z"/>' +
+      '<path d="M9.4 8A4.6 4.6 0 0 1 18.6 8L16.2 8A2.2 2.2 0 0 0 11.8 8Z"/>' +
+      '<path d="M9.4 8L9.4 12.6A1.2 1.2 0 0 0 11.8 12.6L11.8 8A1.2 1.2 0 0 0 9.4 8Z"/>' +
+      '</g>',
   ),
+  // The ring is left open on the lower right and the tail stops inside that
+  // opening: joined up, the mark closes into a copyright sign.
   at: S(
-    '<circle cx="12" cy="12" r="3.6"/><path d="M15.6 12v1.5a2.7 2.7 0 0 0 5.4 0V12a9 9 0 1 0-3.6 7.2"/>',
+    '<path d="M18.05 18.05A8.55 8.55 0 1 1 19 7.1L16.96 8.53A6.05 6.05 0 1 0 16.28 16.28Z"/>' +
+      '<circle cx="11.6" cy="12" r="3.1"/>' +
+      '<path d="M14.13 13.86L19.53 16.06A1.25 1.25 0 0 0 20.47 13.74L15.07 11.54A1.25 1.25 0 0 0 14.13 13.86Z"/>',
   ),
-  // A paper plane with the fold drawn in — the arrow this used to be was the
-  // same picture as "next", and the composer's primary action should not be
-  // a navigation mark.
+  // A paper plane with its fold cut into the silhouette — the arrow this
+  // used to be was the same picture as "next", and the composer's primary
+  // action should not be a navigation mark.
   send: S(
-    '<path d="M20.7 3.3 4.4 8.85a.85.85 0 0 0-.07 1.67l5.1 2.44c.32.15.57.4.72.72l2.44 5.1a.85.85 0 0 0 1.67-.07z"/><path d="m9.9 14.1 3.5-3.5"/>',
+    '<path d="M20.7 3.3 4.4 8.85a.85.85 0 0 0-.07 1.67l5.1 2.44c.32.15.57.4.72.72l2.44 5.1a.85.85 0 0 0 1.67-.07z"/>',
   ),
   sliders: S(
-    '<path d="M4.2 8h3.4M12.8 8h7M4.2 16h7.2M16.4 16h3.4"/><circle cx="10.2" cy="8" r="2.6"/><circle cx="14" cy="16" r="2.6"/>',
+    '<path d="M4.3 9.2L7.6 9.2A1.2 1.2 0 0 0 7.6 6.8L4.3 6.8A1.2 1.2 0 0 0 4.3 9.2Z"/>' +
+      '<path d="M12.8 9.2L19.7 9.2A1.2 1.2 0 0 0 19.7 6.8L12.8 6.8A1.2 1.2 0 0 0 12.8 9.2Z"/>' +
+      '<circle cx="10.2" cy="8" r="2.75"/>' +
+      '<path d="M4.3 17.2L11.4 17.2A1.2 1.2 0 0 0 11.4 14.8L4.3 14.8A1.2 1.2 0 0 0 4.3 17.2Z"/>' +
+      '<path d="M16.6 17.2L19.7 17.2A1.2 1.2 0 0 0 19.7 14.8L16.6 14.8A1.2 1.2 0 0 0 16.6 17.2Z"/>' +
+      '<circle cx="14" cy="16" r="2.75"/>',
   ),
-  check: S('<path d="m5 12.6 4.8 4.8L19 6.8"/>'),
+  check: S(
+    '<path d="M4.05 13.35L8.95 18.25A1.35 1.35 0 0 0 10.92 18.19L20.02 7.79A1.35 1.35 0 0 0 17.98 6.01L9.83 15.33 5.95 11.45A1.35 1.35 0 0 0 4.05 13.35Z"/>',
+  ),
   doubleCheck: S(
-    '<path d="m3 12.6 4.2 4.2 8-8.6"/><path d="m11.6 15.2 1.8 1.8 7.6-9"/>',
+    '<path d="M2.12 13.48L6.32 17.68A1.25 1.25 0 0 0 8.12 17.65L16.12 9.05A1.25 1.25 0 0 0 14.28 7.35L7.17 15 3.88 11.72A1.25 1.25 0 0 0 2.12 13.48Z"/>' +
+      '<path d="M10.72 16.08L12.52 17.88A1.25 1.25 0 0 0 14.36 17.81L21.96 8.81A1.25 1.25 0 0 0 20.04 7.19L13.32 15.15 12.48 14.32A1.25 1.25 0 0 0 10.72 16.08Z"/>',
   ),
   checkCircle: S(
-    '<circle cx="12" cy="12" r="8.8"/><path d="m8.2 12.2 2.6 2.6 5-5.4"/>',
+    '<path fill-rule="evenodd" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0Z' +
+      'M7.49 13.01L10.19 15.71A1 1 0 0 0 11.65 15.66L16.65 9.96A1 1 0 0 0 15.15 8.64L10.85 13.54 8.91 11.59A1 1 0 0 0 7.49 13.01Z"/>',
   ),
   closeCircle: S(
-    '<circle cx="12" cy="12" r="8.8"/><path d="m9.1 9.1 5.8 5.8M14.9 9.1l-5.8 5.8"/>',
+    '<path fill-rule="evenodd" transform="rotate(45 12 12)" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0Z' +
+      'M13.05 8.35A1.05 1.05 0 0 0 10.95 8.35L10.95 10.95 8.35 10.95A1.05 1.05 0 0 0 8.35 13.05L10.95 13.05 10.95 15.65A1.05 1.05 0 0 0 13.05 15.65L13.05 13.05 15.65 13.05' +
+      'A1.05 1.05 0 0 0 15.65 10.95L13.05 10.95Z"/>',
   ),
-  minusCircle: S('<circle cx="12" cy="12" r="8.8"/><path d="M8 12h8"/>'),
+  minusCircle: S(
+    '<path fill-rule="evenodd" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0ZM8.3 13L15.7 13A1 1 0 0 0 15.7 11L8.3 11A1 1 0 0 0 8.3 13Z"/>',
+  ),
   helpCircle: S(
-    '<circle cx="12" cy="12" r="8.8"/><path d="M9.7 9.4a2.5 2.5 0 1 1 3.5 2.3c-.9.47-1.3 1-1.3 2"/><circle cx="12" cy="16.5" r="1.1" fill="currentColor" stroke="none"/>',
+    '<path fill-rule="evenodd" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0Z' +
+      'M10.26 10.22L10.73 8.43 12 7.85 13.27 8.43 13.62 9.75 12.53 11.11 11.43 11.94A.95.95 0 0 0 11.05 12.7L11.05 13.9A.95.95 0 0 0 12.95 13.9L12.95 13.18 13.77 12.56' +
+      'A.95.95 0 0 0 13.94 12.39L15.4 10.56A.95.95 0 0 0 15.58 9.72L14.99 7.51A.95.95 0 0 0 14.47 6.9L12.4 5.94A.95.95 0 0 0 11.6 5.94L9.53 6.9A.95.95 0 0 0 9.01 7.51' +
+      'L8.42 9.72A.95.95 0 0 0 10.26 10.22ZM10.8 16.4a1.2 1.2 0 1 0 2.4 0 1.2 1.2 0 1 0-2.4 0Z"/>',
   ),
   alert: S(
-    '<path d="M10.2 4.5a2.05 2.05 0 0 1 3.6 0l6.9 11.9a2.05 2.05 0 0 1-1.78 3.08H5.08a2.05 2.05 0 0 1-1.78-3.08z"/><path d="M12 9.2v4.1"/><circle cx="12" cy="16.6" r="1.1" fill="currentColor" stroke="none"/>',
+    '<path fill-rule="evenodd" d="M10.2 4.5a2.05 2.05 0 0 1 3.6 0l6.9 11.9a2.05 2.05 0 0 1-1.78 3.08H5.08a2.05 2.05 0 0 1-1.78-3.08z' +
+      'M11.05 9.4L11.05 13.4A.95.95 0 0 0 12.95 13.4L12.95 9.4A.95.95 0 0 0 11.05 9.4ZM10.85 16.4a1.15 1.15 0 1 0 2.3 0 1.15 1.15 0 1 0-2.3 0Z"/>',
   ),
-  clock: S('<circle cx="12" cy="12" r="8.8"/><path d="M15.5 14 12 11.9V7"/>'),
+  clock: S(
+    '<path fill-rule="evenodd" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0Z' +
+      'M11.05 7.2L11.05 12.2A.95.95 0 0 0 11.56 13.04L15.16 14.94A.95.95 0 0 0 16.04 13.26L12.95 11.63 12.95 7.2A.95.95 0 0 0 11.05 7.2Z"/>',
+  ),
+  // Two of the same bust, the one behind bitten back where the one in front
+  // would touch it. Without that cut the pair fills in and reads as a single
+  // wide shoulder.
   users: S(
-    '<circle cx="9.4" cy="8" r="3.7"/><path d="M3.2 19.6a6.2 6.2 0 0 1 12.4 0"/><path d="M16.4 4.9a3.6 3.6 0 0 1 0 6.2"/><path d="M17.8 13.6a6 6 0 0 1 3 5.9"/>',
+    '<circle cx="9.3" cy="8.1" r="3.9"/>' +
+      '<path d="M2.4 20.9C2.4 16.68 6.2 14.1 9.3 14.1 12.41 14.1 16.2 16.68 16.2 20.9Z"/>' +
+      '<circle cx="17.4" cy="7.6" r="3.1"/>' +
+      '<path fill-rule="evenodd" d="M12.2 20.4C12.2 16.37 15.06 13.9 17.4 13.9 19.74 13.9 22.6 16.37 22.6 20.4ZM1.2 22C1.2 16.42 5.66 13 9.3 13 12.95 13 17.4 16.42 17.4 22Z"/>',
   ),
   lock: S(
-    '<rect x="4.2" y="9.8" width="15.6" height="10.4" rx="3.8"/><path d="M7.9 9.8V7.4a4.1 4.1 0 0 1 8.2 0v2.4"/><circle cx="12" cy="15" r="1.4" fill="currentColor" stroke="none"/>',
+    '<path d="M6.65 9.9A5.35 5.35 0 0 1 17.35 9.9L14.95 9.9A2.95 2.95 0 0 0 9.05 9.9Z"/>' +
+      '<path fill-rule="evenodd" d="M8.2 9.9h7.6a3.9 3.9 0 0 1 3.9 3.9v2.6a3.9 3.9 0 0 1-3.9 3.9h-7.6a3.9 3.9 0 0 1-3.9-3.9v-2.6a3.9 3.9 0 0 1 3.9-3.9Z' +
+      'M10.35 15.1a1.65 1.65 0 1 0 3.3 0 1.65 1.65 0 1 0-3.3 0Z"/>',
   ),
   play: S(
     '<path d="M8.2 5.8a1.15 1.15 0 0 1 1.75-.98l8.5 6.2a1.15 1.15 0 0 1 0 1.96l-8.5 6.2A1.15 1.15 0 0 1 8.2 18.2z"/>',
   ),
   pause: S(
-    '<rect x="7" y="4.4" width="3.8" height="15.2" rx="1.9"/><rect x="13.2" y="4.4" width="3.8" height="15.2" rx="1.9"/>',
+    '<rect x="6.8" y="4.4" width="4.1" height="15.2" rx="2.05"/>' +
+      '<rect x="13.1" y="4.4" width="4.1" height="15.2" rx="2.05"/>',
   ),
+  // A filled world with its graticule cut out. The cuts are laid out so that
+  // no two of them cross: an overlap would fill itself back in and leave a
+  // blot where a meridian meets a parallel.
   globe: S(
-    '<circle cx="12" cy="12" r="8.8"/><path d="M3.5 9.4h17M3.5 14.6h17"/><path d="M12 3.2a14.6 14.6 0 0 1 0 17.6 14.6 14.6 0 0 1 0-17.6z"/>',
+    '<path fill-rule="evenodd" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0ZM3.86 8.4L20.14 8.4A8.9 8.9 0 0 1 20.75 10.4L3.25 10.4A8.9 8.9 0 0 1 3.86 8.4Z' +
+      'M3.25 13.6L20.75 13.6A8.9 8.9 0 0 1 20.14 15.6L3.86 15.6A8.9 8.9 0 0 1 3.25 13.6ZM8.43 8.4A3.9 8.9 0 0 1 15.57 8.4L14.15 8.4A2.35 8.9 0 0 0 9.85 8.4Z' +
+      'M15.57 15.6A3.9 8.9 0 0 1 8.43 15.6L9.85 15.6A2.35 8.9 0 0 0 14.15 15.6ZM15.84 10.4A3.9 8.9 0 0 1 15.84 13.6L14.31 13.6A2.35 8.9 0 0 0 14.31 10.4Z' +
+      'M8.16 10.4A3.9 8.9 0 0 0 8.16 13.6L9.69 13.6A2.35 8.9 0 0 1 9.69 10.4Z"/>',
   ),
   shield: S(
-    '<path d="M12 21c-4.4-1.6-7.4-4.9-7.4-9.3V6.3c0-.62.38-1.17.96-1.4l6-2.24a1.5 1.5 0 0 1 1.04 0l6 2.24c.58.23.96.78.96 1.4v5.4c0 4.4-3 7.7-7.4 9.3z"/><path d="m9.2 11.9 2 2 3.6-4.1"/>',
+    '<path fill-rule="evenodd" d="M12 21c-4.4-1.6-7.4-4.9-7.4-9.3V6.3c0-.62.38-1.17.96-1.4l6-2.24a1.5 1.5 0 0 1 1.04 0l6 2.24c.58.23.96.78.96 1.4v5.4c0 4.4-3 7.7-7.4 9.3z' +
+      'M8.53 12.57L10.53 14.57A.95.95 0 0 0 11.93 14.51L15.63 10.11A.95.95 0 0 0 14.17 8.89L11.14 12.5 9.87 11.23A.95.95 0 0 0 8.53 12.57Z"/>',
   ),
   sync: S(
-    '<path d="M20.4 12a8.4 8.4 0 0 1-14.4 5.9"/><path d="M3.6 12a8.4 8.4 0 0 1 14.4-5.9"/><path d="M18 2.8v3.8h-3.8M6 21.2v-3.8h3.8"/>',
+    '<path d="M21.1 12A9.1 9.1 0 0 1 3.45 15.11L5.7 14.29A6.7 6.7 0 0 0 18.7 12Z"/>' +
+      '<path d="M2.5 15.46L6.65 13.95 4.14 11.17Z"/>' +
+      '<path d="M2.9 12A9.1 9.1 0 0 1 20.55 8.89L18.3 9.71A6.7 6.7 0 0 0 5.3 12Z"/>' +
+      '<path d="M21.5 8.54L17.35 10.05 19.86 12.83Z"/>',
   ),
+  // Three stacked slabs with air between them rather than one filled
+  // cylinder with its bands cut out: the gaps are the drum, and they survive
+  // being drawn at 14px where a cut-out hairline would not.
   database: S(
-    '<ellipse cx="12" cy="6" rx="7.4" ry="3"/><path d="M4.6 6v11.9c0 1.66 3.31 3 7.4 3s7.4-1.34 7.4-3V6"/><path d="M4.6 12c0 1.66 3.31 3 7.4 3s7.4-1.34 7.4-3"/>',
+    '<ellipse cx="12" cy="6" rx="7.4" ry="3"/>' +
+      '<path d="M4.6 7.7A7.4 3 0 0 0 19.4 7.7V11.9A7.4 3 0 0 1 4.6 11.9Z"/>' +
+      '<path d="M4.6 13.6A7.4 3 0 0 0 19.4 13.6V17.8A7.4 3 0 0 1 4.6 17.8Z"/>',
   ),
   cpu: S(
-    '<rect x="6.6" y="6.6" width="10.8" height="10.8" rx="3.4"/><rect x="9.9" y="9.9" width="4.2" height="4.2" rx="1.5"/><path d="M9.6 3.4v3.2M14.4 3.4v3.2M9.6 17.4v3.2M14.4 17.4v3.2M3.4 9.6h3.2M3.4 14.4h3.2M17.4 9.6h3.2M17.4 14.4h3.2"/>',
+    '<path fill-rule="evenodd" d="M9.8 6.4h4.4a3.4 3.4 0 0 1 3.4 3.4v4.4a3.4 3.4 0 0 1-3.4 3.4h-4.4a3.4 3.4 0 0 1-3.4-3.4v-4.4a3.4 3.4 0 0 1 3.4-3.4Z' +
+      'M11.3 9.7h1.4a1.6 1.6 0 0 1 1.6 1.6v1.4a1.6 1.6 0 0 1-1.6 1.6h-1.4a1.6 1.6 0 0 1-1.6-1.6v-1.4a1.6 1.6 0 0 1 1.6-1.6Z"/>' +
+      '<path d="M8.62 3.6L8.62 6.8A.97.97 0 0 0 10.57 6.8L10.57 3.6A.97.97 0 0 0 8.62 3.6Z"/>' +
+      '<path d="M13.43 3.6L13.43 6.8A.97.97 0 0 0 15.38 6.8L15.38 3.6A.97.97 0 0 0 13.43 3.6Z"/>' +
+      '<path d="M8.62 17.2L8.62 20.4A.97.97 0 0 0 10.57 20.4L10.57 17.2A.97.97 0 0 0 8.62 17.2Z"/>' +
+      '<path d="M13.43 17.2L13.43 20.4A.97.97 0 0 0 15.38 20.4L15.38 17.2A.97.97 0 0 0 13.43 17.2Z"/>' +
+      '<path d="M3.6 10.57L6.8 10.57A.97.97 0 0 0 6.8 8.62L3.6 8.62A.97.97 0 0 0 3.6 10.57Z"/>' +
+      '<path d="M3.6 15.38L6.8 15.38A.97.97 0 0 0 6.8 13.43L3.6 13.43A.97.97 0 0 0 3.6 15.38Z"/>' +
+      '<path d="M17.2 10.57L20.4 10.57A.97.97 0 0 0 20.4 8.62L17.2 8.62A.97.97 0 0 0 17.2 10.57Z"/>' +
+      '<path d="M17.2 15.38L20.4 15.38A.97.97 0 0 0 20.4 13.43L17.2 13.43A.97.97 0 0 0 17.2 15.38Z"/>',
   ),
   layers: S(
-    '<path d="m12 3.2 8.6 4.5-8.6 4.5-8.6-4.5z"/><path d="m4.4 12.3 7.6 4 7.6-4"/><path d="m4.4 16.6 7.6 4 7.6-4"/>',
+    '<path d="m12 2.6 9.4 4.9-9.4 4.9-9.4-4.9z"/>' +
+      '<path d="M2.85 11.87L11.45 16.27A1.2 1.2 0 0 0 12.55 16.27L21.15 11.87A1.2 1.2 0 0 0 20.05 9.73L12 13.85 3.95 9.73A1.2 1.2 0 0 0 2.85 11.87Z"/>' +
+      '<path d="M2.85 15.97L11.45 20.37A1.2 1.2 0 0 0 12.55 20.37L21.15 15.97A1.2 1.2 0 0 0 20.05 13.83L12 17.95 3.95 13.83A1.2 1.2 0 0 0 2.85 15.97Z"/>',
   ),
   terminal: S(
-    '<rect x="2.8" y="4.4" width="18.4" height="15.2" rx="4.6"/><path d="m7.6 9.8 2.6 2.5-2.6 2.5"/><path d="M12.8 14.8h4"/>',
+    '<path fill-rule="evenodd" d="M7.4 4.4h9.2a4.6 4.6 0 0 1 4.6 4.6v6a4.6 4.6 0 0 1-4.6 4.6h-9.2a4.6 4.6 0 0 1-4.6-4.6v-6a4.6 4.6 0 0 1 4.6-4.6Z' +
+      'M6.93 10.37L8.86 12.3 6.93 14.23A.95.95 0 0 0 8.27 15.57L10.87 12.97A.95.95 0 0 0 10.87 11.63L8.27 9.03A.95.95 0 0 0 6.93 10.37Z' +
+      'M13 15.85L16.8 15.85A.95.95 0 0 0 16.8 13.95L13 13.95A.95.95 0 0 0 13 15.85Z"/>',
   ),
-  refresh: S('<path d="M20.2 12a8.2 8.2 0 1 1-2.5-5.9"/><path d="M20.5 4v4.4h-4.4"/>'),
+  refresh: S(
+    '<path d="M16.58 4.08A9.15 9.15 0 1 1 9.63 3.16L10.28 5.58A6.65 6.65 0 1 0 15.33 6.24Z"/>' +
+      '<path d="M9.36 2.16L10.55 6.58 13.24 4.2Z"/>',
+  ),
   folderPlus: S(
-    '<path d="M3.5 8.9a3.3 3.3 0 0 1 3.3-3.3h2.1c.7 0 1.38.22 1.94.63l1.86 1.37h4.5a3.3 3.3 0 0 1 3.3 3.3v5.6a3.3 3.3 0 0 1-3.3 3.3H6.8a3.3 3.3 0 0 1-3.3-3.3z"/><path d="M12 10.6v5M9.5 13.1h5"/>',
+    '<path fill-rule="evenodd" d="M6.8 5.6h2.1c.7 0 1.38.22 1.94.63l1.86 1.37h4.5a3.3 3.3 0 0 1 3.3 3.3v5.6a3.3 3.3 0 0 1-3.3 3.3H6.8a3.3 3.3 0 0 1-3.3-3.3V8.9a3.3 3.3 0 0 1 3.3-3.3z' +
+      'M12.95 11.55A.95.95 0 0 0 11.05 11.55L11.05 12.65 9.95 12.65A.95.95 0 0 0 9.95 14.55L11.05 14.55 11.05 15.65A.95.95 0 0 0 12.95 15.65L12.95 14.55 14.05 14.55' +
+      'A.95.95 0 0 0 14.05 12.65L12.95 12.65Z"/>',
   ),
   columns: S(
-    '<rect x="3.4" y="4.6" width="17.2" height="14.8" rx="4.4"/><path d="M12 4.6v14.8"/>',
+    '<path fill-rule="evenodd" d="M7.8 4.6h8.4a4.4 4.4 0 0 1 4.4 4.4v6a4.4 4.4 0 0 1-4.4 4.4h-8.4a4.4 4.4 0 0 1-4.4-4.4v-6a4.4 4.4 0 0 1 4.4-4.4ZM11.05 4.6h1.9v14.8h-1.9Z"/>',
   ),
   info: S(
-    '<circle cx="12" cy="12" r="8.8"/><path d="M12 11.4v5"/><circle cx="12" cy="7.9" r="1.1" fill="currentColor" stroke="none"/>',
+    '<path fill-rule="evenodd" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0ZM11.05 11.6L11.05 16.3A.95.95 0 0 0 12.95 16.3L12.95 11.6A.95.95 0 0 0 11.05 11.6Z' +
+      'M10.75 7.9a1.25 1.25 0 1 0 2.5 0 1.25 1.25 0 1 0-2.5 0Z"/>',
   ),
   chart: S(
-    '<path d="M4.2 3.4v14.4a2.4 2.4 0 0 0 2.4 2.4h13.2"/><path d="M8.8 16.6v-3.4M12.8 16.6V8.4M16.8 16.6v-5.8"/>',
+    '<path d="M3.15 3.6L3.15 17.8A1.25 1.25 0 0 0 4.4 19.05L19.8 19.05A1.25 1.25 0 0 0 19.8 16.55L5.65 16.55 5.65 3.6A1.25 1.25 0 0 0 3.15 3.6Z"/>' +
+      '<path d="M10.2 17L10.2 13A1.2 1.2 0 0 0 7.8 13L7.8 17A1.2 1.2 0 0 0 10.2 17Z"/>' +
+      '<path d="M14.2 17L14.2 8.6A1.2 1.2 0 0 0 11.8 8.6L11.8 17A1.2 1.2 0 0 0 14.2 17Z"/>' +
+      '<path d="M18.2 17L18.2 11A1.2 1.2 0 0 0 15.8 11L15.8 17A1.2 1.2 0 0 0 18.2 17Z"/>',
   ),
   logout: S(
-    '<path d="M14.4 4h2.8A2.8 2.8 0 0 1 20 6.8v10.4a2.8 2.8 0 0 1-2.8 2.8h-2.8"/><path d="m9 8.2-3.8 3.8 3.8 3.8"/><path d="M5.2 12h9.4"/>',
+    '<path d="M15.3 3.4h1.9a3.3 3.3 0 0 1 3.3 3.3v10.6a3.3 3.3 0 0 1-3.3 3.3h-1.9a1.3 1.3 0 0 1 0-2.6h1.9a.7.7 0 0 0 .7-.7V6.7a.7.7 0 0 0-.7-.7h-1.9a1.3 1.3 0 0 1 0-2.6z"/>' +
+      '<path d="M14.2 10.75L5.6 10.75A1.25 1.25 0 0 0 5.6 13.25L14.2 13.25A1.25 1.25 0 0 0 14.2 10.75Z"/>' +
+      '<path d="M8.32 6.32L3.52 11.12A1.25 1.25 0 0 0 3.52 12.88L8.32 17.68A1.25 1.25 0 0 0 10.08 15.92L6.17 12 10.08 8.08A1.25 1.25 0 0 0 8.32 6.32Z"/>',
   ),
   external: S(
-    '<path d="M13.8 4.2h6v6"/><path d="M19.8 4.2 11.4 12.6"/><path d="M17.6 13.8V18a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V8.8A2.4 2.4 0 0 1 6 6.4h4.2"/>',
+    '<path d="M10.4 4H6a3.8 3.8 0 0 0-3.8 3.8V18A3.8 3.8 0 0 0 6 21.8h9.2a3.8 3.8 0 0 0 3.8-3.8v-4.4a1.3 1.3 0 0 0-2.6 0V18a1.2 1.2 0 0 1-1.2 1.2H6A1.2 1.2 0 0 1 4.8 18V7.8' +
+      'A1.2 1.2 0 0 1 6 6.6h4.4a1.3 1.3 0 0 0 0-2.6z"/>' +
+      '<path d="M12.38 13.38L20.28 5.48A1.25 1.25 0 0 0 18.52 3.72L10.62 11.62A1.25 1.25 0 0 0 12.38 13.38Z"/>' +
+      '<path d="M13.6 4.65L19.35 4.65 19.35 10.4A1.25 1.25 0 0 0 21.85 10.4L21.85 3.4A1.25 1.25 0 0 0 20.6 2.15L13.6 2.15A1.25 1.25 0 0 0 13.6 4.65Z"/>',
   ),
-  bolt: S('<path d="M13.4 2.8 5.4 13.4h5.6l-.4 7.8 8-10.6h-5.6z"/>'),
+  bolt: S('<path d="M13.6 2.4 5.1 13.5h5.7l-.4 8.1 8.5-11.1h-5.7z"/>'),
+  // A filled almond with the iris cut out and the pupil dropped back inside
+  // it, so the eye still has a middle at the sizes this control is used at.
   eye: S(
-    '<path d="M2.6 12s3.8-6.6 9.4-6.6 9.4 6.6 9.4 6.6-3.8 6.6-9.4 6.6S2.6 12 2.6 12z"/><circle cx="12" cy="12" r="3.1"/>',
+    '<path fill-rule="evenodd" d="M2.2 12c1.6-2.9 5.3-6.6 9.8-6.6s8.2 3.7 9.8 6.6c-1.6 2.9-5.3 6.6-9.8 6.6S3.8 14.9 2.2 12zM8.5 12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0Z' +
+      'M10.5 12a1.5 1.5 0 1 0 3 0 1.5 1.5 0 1 0-3 0Z"/>',
   ),
-  menu: S('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+  menu: S(
+    '<path d="M4 8.15L20 8.15A1.25 1.25 0 0 0 20 5.65L4 5.65A1.25 1.25 0 0 0 4 8.15Z"/>' +
+      '<path d="M4 13.25L20 13.25A1.25 1.25 0 0 0 20 10.75L4 10.75A1.25 1.25 0 0 0 4 13.25Z"/>' +
+      '<path d="M4 18.35L20 18.35A1.25 1.25 0 0 0 20 15.85L4 15.85A1.25 1.25 0 0 0 4 18.35Z"/>',
+  ),
   chatBubble: S(
     '<path d="M12 3.6c-4.75 0-8.6 3.5-8.6 7.8 0 2.06.89 3.94 2.34 5.34l-.72 3.42a.8.8 0 0 0 1.16.88l3.66-1.94c.7.13 1.42.2 2.16.2 4.75 0 8.6-3.5 8.6-7.9s-3.85-7.8-8.6-7.8z"/>',
   ),
   smile: S(
-    '<circle cx="12" cy="12" r="8.8"/><path d="M8.4 14.3c.95 1.4 2.2 2.1 3.6 2.1s2.65-.7 3.6-2.1"/><circle cx="9" cy="9.9" r="1.15" fill="currentColor" stroke="none"/><circle cx="15" cy="9.9" r="1.15" fill="currentColor" stroke="none"/>',
+    '<path fill-rule="evenodd" d="M3.1 12a8.9 8.9 0 1 0 17.8 0 8.9 8.9 0 1 0-17.8 0ZM7.75 10a1.35 1.35 0 1 0 2.7 0 1.35 1.35 0 1 0-2.7 0Z' +
+      'M13.55 10a1.35 1.35 0 1 0 2.7 0 1.35 1.35 0 1 0-2.7 0ZM15.98 14.6A4.6 4.6 0 0 1 8.02 14.6L9.58 13.7A2.8 2.8 0 0 0 14.42 13.7Z"/>',
   ),
   reply: S(
-    '<path d="m9.4 6.6-5 5 5 5"/><path d="M4.4 11.6h8.8a6.4 6.4 0 0 1 6.4 6.4v1.4"/>',
+    '<path d="M8.58 5.58L3.48 10.68A1.3 1.3 0 0 0 3.48 12.52L8.58 17.62A1.3 1.3 0 0 0 10.42 15.78L6.24 11.6 10.42 7.42A1.3 1.3 0 0 0 8.58 5.58Z"/>' +
+      '<path d="M4.4 12.9L13.2 12.9A1.3 1.3 0 0 0 13.2 10.3L4.4 10.3A1.3 1.3 0 0 0 4.4 12.9Z"/>' +
+      '<path d="M13.2 10.3A7.7 7.7 0 0 1 20.9 18L18.3 18A5.1 5.1 0 0 0 13.2 12.9Z"/>' +
+      '<path d="M18.3 18L18.3 19.4A1.3 1.3 0 0 0 20.9 19.4L20.9 18A1.3 1.3 0 0 0 18.3 18Z"/>',
   ),
-  // Two overlapping sheets — the clipboard glyph every surface uses for "take
-  // these words with you". Drawn as one rounded rectangle behind another
-  // rather than as a clipboard with a clasp: at 14px the clasp closes up into
-  // a smudge and the pair of sheets stays readable.
+  // Two overlapping sheets — the clipboard glyph every surface uses for
+  // "take these words with you". The sheet behind is cut back to an L so the
+  // two do not merge into one block; a clasp would close up into a smudge at
+  // 14px, so there isn't one.
   copy: S(
-    '<rect x="8.6" y="8.6" width="12" height="12" rx="3.8"/><path d="M5.6 15.4h-.2a2.4 2.4 0 0 1-2.4-2.4V5.8a2.4 2.4 0 0 1 2.4-2.4h7.2a2.4 2.4 0 0 1 2.4 2.4v.2"/>',
+    '<path fill-rule="evenodd" d="M6.8 3.2h4.8a3.6 3.6 0 0 1 3.6 3.6v4.8a3.6 3.6 0 0 1-3.6 3.6h-4.8a3.6 3.6 0 0 1-3.6-3.6v-4.8a3.6 3.6 0 0 1 3.6-3.6Z' +
+      'M12 7.4h1.4a4.6 4.6 0 0 1 4.6 4.6v1.4a4.6 4.6 0 0 1-4.6 4.6h-1.4a4.6 4.6 0 0 1-4.6-4.6v-1.4a4.6 4.6 0 0 1 4.6-4.6Z"/>' +
+      '<rect x="8.6" y="8.6" width="12" height="12" rx="3.8"/>',
   ),
   pin: S(
-    '<path d="m14.6 2.9 6.5 6.5-2.6.65-3.45 3.45-.3 3.85-1.5 1.5L4.9 10.4l1.5-1.5 3.85-.3 3.45-3.45z"/><path d="m8.6 15.4-4.7 4.7"/>',
+    '<path d="m14.6 2.9 6.5 6.5-2.6.65-3.45 3.45-.3 3.85-1.5 1.5L4.9 10.4l1.5-1.53.85-.3 3.45-3.45z"/>' +
+      '<path d="M7.77 14.67L3.12 19.32A1.1 1.1 0 0 0 4.68 20.88L9.33 16.23A1.1 1.1 0 0 0 7.77 14.67Z"/>',
   ),
-  hash: S('<path d="M10.2 4 8.4 20M16 4l-1.8 16M4.2 9.2h15.2M3.8 14.8h15.2"/>'),
+  hash: S(
+    '<path d="M9.31 3.67L7.51 20.07A1.2 1.2 0 0 0 9.89 20.33L11.69 3.93A1.2 1.2 0 0 0 9.31 3.67Z"/>' +
+      '<path d="M15.11 3.67L13.31 20.07A1.2 1.2 0 0 0 15.69 20.33L17.49 3.93A1.2 1.2 0 0 0 15.11 3.67Z"/>' +
+      '<path d="M4.1 10.4L19.7 10.4A1.2 1.2 0 0 0 19.7 8L4.1 8A1.2 1.2 0 0 0 4.1 10.4Z"/>' +
+      '<path d="M3.7 16L19.3 16A1.2 1.2 0 0 0 19.3 13.6L3.7 13.6A1.2 1.2 0 0 0 3.7 16Z"/>',
+  ),
   pencil: S(
-    '<path d="m3.8 20.2 1-4.6L15.6 4.8a2.2 2.2 0 0 1 3.1 0l.7.7a2.2 2.2 0 0 1 0 3.1L8.4 19.2z"/><path d="m14.2 6.2 3.6 3.6"/>',
+    '<path fill-rule="evenodd" d="M3.8 20.2l1-4.6L15.6 4.8a2.2 2.2 0 0 1 3.1 0l.7.7a2.2 2.2 0 0 1 0 3.1L8.4 19.2z' +
+      'M14.27 7.63L16.27 9.63A.75.75 0 0 0 17.33 8.57L15.33 6.57A.75.75 0 0 0 14.27 7.63Z"/>',
   ),
 };
 
@@ -613,7 +818,7 @@ const VENDOR_MARKS = {
   // vendor an agent runs on, and an agent that lands on it reads as the
   // anonymous bot this panel was drawing before. Each is a filled silhouette
   // with its features cut out (`evenodd`), so it sits in the same family as
-  // the vendor marks above rather than beside the outlined fallback below.
+  // the vendor marks above and the fallback below.
   copilot: `<path fill-rule="evenodd" fill="currentColor"
       d="M12 3.1c-4.6 0-8.4 3.1-8.4 6.9v4.4c0 3.8 3.8 6.5 8.4 6.5s
       8.4-2.7 8.4-6.5V10c0-3.8-3.8-6.9-8.4-6.9m-3.4 7.5c1.2 0 2.1 1.1
@@ -626,14 +831,14 @@ const VENDOR_MARKS = {
       1 0 0 3.5 1.75 1.75 0 0 0 0-3.5M8.5 15.2a.95.95 0 0 0 0 1.9h7a
       .95.95 0 0 1 0-1.9z"/>`,
   // Anything this deployment can run but has no mark for. Ours to draw,
-  // because there is no vendor to be faithful to.
-  generic: `<g stroke="currentColor" stroke-width="1.7" fill="none"
-      stroke-linecap="round" stroke-linejoin="round">
-      <rect x="4.5" y="8" width="15" height="11" rx="3"/>
-      <path d="M12 8V4.8"/><circle cx="12" cy="3.7" r="1.2"/>
-      <circle cx="9.4" cy="13" r="1.05" fill="currentColor" stroke="none"/>
-      <circle cx="14.6" cy="13" r="1.05" fill="currentColor" stroke="none"/>
-    </g>`,
+  // because there is no vendor to be faithful to — so it is drawn the way
+  // the interface's own icons are: one filled silhouette with its eyes cut
+  // out, in the same solid register as every mark above and beside it.
+  generic: `<path fill-rule="evenodd" fill="currentColor"
+      d="M11 2.4a1.3 1.3 0 0 1 2 0V7h3.9A4.1 4.1 0 0 1 21 11.1v4.6a4.1 4.1 0
+      0 1-4.1 4.1H7.1A4.1 4.1 0 0 1 3 15.7v-4.6A4.1 4.1 0 0 1 7.1 7H11zm-1.6
+      8.8a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3m5.2 0a1.5 1.5 0 1 0 0 3 1.5
+      1.5 0 0 0 0-3"/>`,
 };
 
 /** One vendor's mark, sized by whatever contains it. */
