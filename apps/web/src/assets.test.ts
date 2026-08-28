@@ -465,6 +465,14 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.match(chats, /class="chan-pins-surface"/u);
   assert.match(chats, /chan-pins-list-frame" aria-hidden="false"/u);
   assert.match(styles, /\.pins-panel \.chan-pins \{[\s\S]*display: block/u);
+  // The compact transcript shelf stays bounded, but the dedicated panel lets
+  // its existing body scroller own the full list instead of nesting a short
+  // scroller above unused space.
+  assert.match(styles, /\.chan-pins-list \{[\s\S]*?max-height: 132px;/u);
+  assert.match(
+    styles,
+    /\.pins-panel \.chan-pins-list \{[\s\S]*?max-height: none;[\s\S]*?overflow-y: visible;/u,
+  );
   assert.match(styles, /\.thread-panel\.panel-entering \{[\s\S]*hierarchy-panel-in/u);
   assert.match(styles, /prefers-reduced-motion: reduce/u);
 

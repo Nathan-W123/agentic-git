@@ -13523,6 +13523,15 @@ dialog.modal[open]::backdrop {
   border: 0;
 }
 
+/* The compact shelf above a conversation keeps its own 132px scroller so it
+   cannot squeeze the transcript. Inside the dedicated panel, the panel body
+   is already the scroller; let the pin list grow into that available height
+   instead of clipping after a few rows and leaving the rest of it empty. */
+.pins-panel .chan-pins-list {
+  max-height: none;
+  overflow-y: visible;
+}
+
 @media (max-width: 1180px) and (min-width: 601px) {
   .chats-shell > .thread-panel {
     position: absolute;
