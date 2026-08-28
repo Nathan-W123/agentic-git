@@ -1520,7 +1520,7 @@ function topbar() {
       ${icon("search")}<span>Search</span><kbd>⌘K</kbd>
     </button>
     <div class="topbar-actions">
-      <button type="button" class="icon-btn" data-act="shortcuts-open"
+      <button type="button" class="icon-btn topbar-icon-btn" data-act="shortcuts-open"
         aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts">${icon("info")}</button>
       ${
         // Same reasoning as the sidebar's line: a status that is always the same
@@ -1529,7 +1529,7 @@ function topbar() {
           ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
           : ""
       }
-      <button class="account-btn" data-act="user-menu" title="${esc(user)}"
+      <button class="account-btn topbar-account-btn" data-act="user-menu" title="${esc(user)}"
         >${avatar(user, 32, user, myAvatar())}${dmBadge()}</button>
     </div>
   </header>`;

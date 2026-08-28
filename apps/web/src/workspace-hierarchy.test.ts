@@ -29,6 +29,8 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(globalChrome, /class="topbar-start"/u);
   assert.match(globalChrome, /class="global-search"/u);
   assert.match(globalChrome, /class="topbar-actions"/u);
+  assert.match(globalChrome, /class="icon-btn topbar-icon-btn"[\s\S]*icon\("info"\)/u);
+  assert.match(globalChrome, /class="account-btn topbar-account-btn"/u);
   assert.doesNotMatch(globalChrome, /global-brand|brandMark|>Kumi</u);
   assert.doesNotMatch(app, /const BARE = new Set\(\[[^\]]*"chats"/u);
   assert.match(chats, /<nav class="channel-rail workspace-rail" aria-label="Workspaces"/u);
@@ -42,6 +44,8 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(chats, /<main class="chan-main" aria-label="Primary conversation" aria-current="page">/u);
   assert.match(chats, /function secondaryPanel\(repositoryId\)/u);
   assert.match(hierarchyCss, /\.topbar \{[^}]*display: grid;[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);[^}]*border-bottom: 0;/u);
+  assert.match(hierarchyCss, /grid-template-columns: minmax\(76px, 1fr\) minmax\(240px, 640px\) minmax\(76px, 1fr\);/u);
+  assert.match(hierarchyCss, /\.topbar-icon-btn,[\s\S]*?\.topbar-account-btn \{[\s\S]*?flex: 0 0 34px;[\s\S]*?width: 34px;[\s\S]*?height: 34px;/u);
   assert.match(hierarchyCss, /\.channel-rail \{[^}]*background: color-mix\(in srgb, var\(--bg-panel\) 88%, var\(--bg\)\);/u);
   assert.match(css, /\.global-search svg \{[\s\S]*?width: 16px;/u);
   assert.match(css, /\.workspace-sidebar-header \{[\s\S]*?border-bottom:/u);

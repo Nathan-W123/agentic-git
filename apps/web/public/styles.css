@@ -13103,7 +13103,10 @@ dialog.modal[open]::backdrop {
    their identity never leaks into this bar. */
 .topbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 640px) minmax(0, 1fr);
+  /* Both outside tracks reserve the width of the actions. Without a floor,
+     the centred search track can squeeze the right track below its contents
+     and make the help mark and account face spill into the search control. */
+  grid-template-columns: minmax(76px, 1fr) minmax(240px, 640px) minmax(76px, 1fr);
   align-items: center;
   min-width: 0;
   gap: 10px;
@@ -13126,7 +13129,35 @@ dialog.modal[open]::backdrop {
 
 .topbar-actions {
   justify-content: flex-end;
-  gap: 6px;
+  gap: 4px;
+}
+
+/* The two right-hand controls share one optical box. The generic icon and
+   avatar primitives intentionally size their contents differently; owning
+   the button geometry here keeps those contents centred and prevents flex
+   shrink from distorting either control when the window gets narrow. */
+.topbar-icon-btn,
+.topbar-account-btn {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 9px;
+}
+
+.topbar-icon-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.topbar-account-btn {
+  overflow: visible;
+}
+
+.topbar-account-btn .avatar {
+  width: 30px !important;
+  height: 30px !important;
 }
 
 .topbar-actions .health {
@@ -13506,6 +13537,13 @@ dialog.modal[open]::backdrop {
   .thread-head .icon-btn,
   .channel-rail-new,
   .channel-rail-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .topbar-icon-btn,
+  .topbar-account-btn {
+    flex-basis: 44px;
     width: 44px;
     height: 44px;
   }
