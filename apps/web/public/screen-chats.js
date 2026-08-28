@@ -3030,9 +3030,7 @@ function messageRow(
   // which spent a full line of the room saying something no reader could
   // attribute to anybody in a thread with more than one participant.
   const progress =
-    channelThread && threadIsWorking(entry)
-      ? (threadProgress(entry) ?? 0)
-      : undefined;
+    channelThread && threadIsWorking(entry) ? threadProgress(entry) : undefined;
   // The path is assigned by `messageThreadPaths`, which can start it on an
   // earlier compact-group message than the one that owns the task. A direct
   // channel render still gets a complete standalone path as a safe fallback.

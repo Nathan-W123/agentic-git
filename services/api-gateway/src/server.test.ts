@@ -7152,6 +7152,87 @@ test("a reply in a person's thread does not summon an agent", async (t) => {
   );
 });
 
+test("a reply that @mentions an agent in a person's thread reaches that agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "human-thread-mention");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Zeus" },
+    })).status,
+    200,
+  );
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "found a bug in the composer" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  runtime.chatAnswer.text = "On it — looking at the composer bug.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(posted.data.message.id)}/replies`,
+    { method: "POST", body: { content: "@Zeus can you tackle this" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mentioned agent never picked up the work in the person's thread",
+  );
+  assert.equal(runtime.submittedTasks[0]?.conversationId, posted.data.message.id);
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /tackle this/u,
+  );
+  assert.equal(runtime.chatPrompts.length, 0);
+});
+
+test("a channel thread reply carries the message it quotes", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "thread-reply-reference");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "The retry helper still loops forever." },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const rootId = posted.data.message.id;
+
+  const first = await owner.request(`${base}/messages/${rootId}/replies`, {
+    method: "POST",
+    body: { content: "Can you cap the attempts?" },
+  });
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const firstReplyId = first.data.reply.id;
+
+  const quoted = await owner.request(`${base}/messages/${rootId}/replies`, {
+    method: "POST",
+    body: {
+      content: "Especially in the config loader.",
+      referencedMessageId: firstReplyId,
+    },
+  });
+  assert.equal(quoted.status, 201, JSON.stringify(quoted.data));
+  assert.equal(quoted.data.reply.referencedMessageId, firstReplyId);
+
+  const listed = await owner.request(`${base}/messages`);
+  const thread = (listed.data.messages as { id: string; replies: { id: string; referencedMessageId?: string }[] }[]).find(
+    (message) => message.id === rootId,
+  );
+  const stored = thread?.replies.find((reply) => reply.id === quoted.data.reply.id);
+  assert.equal(stored?.referencedMessageId, firstReplyId);
+});
+
 test("a reply in an open thread continues the conversation, whoever it mentions", async (t) => {
   // Stage four of docs/architecture/conversational-tasks.md: the open status
   // is a routing rule. A thread whose task is open is a conversation between

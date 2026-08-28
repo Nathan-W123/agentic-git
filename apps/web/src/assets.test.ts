@@ -7497,6 +7497,58 @@ test("inactive channel rail icons show a live unread count", async () => {
   );
 });
 
+test("reply previews collapse multiline content and omit hidden attachment references", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function replyPreviewText(");
+  const end = chats.indexOf("\n/** The compact address above an inline reply.", start);
+  assert.notEqual(start, -1, "the shared reply preview helper should exist");
+  assert.notEqual(end, -1, "the reply preview helper should have a boundary");
+
+  const preview = new Function(
+    "ATTACHMENT_PATTERN",
+    `${chats.slice(start, end)}\nreturn replyPreviewText;`,
+  )(
+    /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu,
+  ) as (entry: { content?: string; deletedAt?: string }) => string;
+  const attachment =
+    "![Attached image](attachment:0123456789abcdef0123456789abcdef.png)";
+
+  assert.equal(
+    preview({ content: `First line\n  second line\n${attachment}` }),
+    "First line second line",
+  );
+  assert.equal(preview({ content: attachment }), "Attached image");
+  assert.equal(
+    preview({ content: "words that are replaced", deletedAt: "now" }),
+    "This message was deleted",
+  );
+});
+
+test("a reply's reference keeps clear of the avatar it sits above", async () => {
+  const [chats, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+  const block = (selector: string): string => {
+    const start = css.indexOf(`\n${selector} {`);
+    assert.notEqual(start, -1, `${selector} is missing`);
+    return css.slice(start, css.indexOf("}", start));
+  };
+
+  assert.match(
+    row,
+    /messageReference\(inlineReplyTo, repositoryId\)[\s\S]*<span class="cmsg-avatar">[\s\S]*<div class="cmsg-body">/u,
+  );
+  assert.match(block(".cmsg-row"), /flex-wrap: wrap;/u);
+  assert.match(block(".cmsg-ref"), /flex: 0 0 100%;/u);
+  assert.doesNotMatch(block(".cmsg-ref"), /margin: 0 0 2px -28px;/u);
+  assert.match(block(".cmsg-ref-elbow"), /margin-left: 16px;/u);
+});
+
 test("a message keeps react and reply, and puts the rest behind one menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await browserSource();
