@@ -10919,9 +10919,9 @@ dialog.modal[open]::backdrop {
   }
 }
 
-/* Attribution pills: the rendered 3dicons object, then a short label, in a
-   row that reads inline with the text above it. Sized off the label so one
-   pill is never taller than the line it belongs to. */
+/* Attribution pills: one mark from the shared icon set, then a short label,
+   in a row that reads inline with the text above it. Sized off the label so
+   one pill is never taller than the line it belongs to. */
 .pill-bar {
   display: flex;
   flex-wrap: wrap;
@@ -10950,7 +10950,9 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
-.pill .pill-3d {
+/* The mark matches the agent portrait a pill draws in its place, so a row of
+   "who" and "what" chips sits on one optical size. */
+.pill .ui-icon {
   flex: 0 0 auto;
   height: 18px;
   width: 18px;
