@@ -403,8 +403,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO repositories
          (id, path, branch, first_seen_at, provider, remote_url, created_by,
-          display_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          display_name, picture)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (id) DO NOTHING`,
       [
         repository.id,
@@ -415,6 +415,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         repository.remoteUrl ?? null,
         repository.createdBy ?? null,
         repository.displayName ?? null,
+        repository.picture ?? null,
       ],
     );
     const existing = await this.getRepository(repository.id);
@@ -2022,6 +2023,16 @@ export class PostgresCoordinationStore implements CoordinationStore {
       "UPDATE repositories SET display_name = $1 WHERE id = $2",
       [displayName ?? null, id],
     );
+  }
+
+  public async setRepositoryPicture(
+    id: string,
+    picture: string | undefined,
+  ): Promise<void> {
+    await this.query("UPDATE repositories SET picture = $1 WHERE id = $2", [
+      picture ?? null,
+      id,
+    ]);
   }
 
   public async getRepository(
@@ -4858,6 +4869,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const remoteUrl = optionalText(row, "remote_url");
     const createdBy = optionalText(row, "created_by");
     const displayName = optionalText(row, "display_name");
+    const picture = optionalText(row, "picture");
     return {
       id: text(row, "id"),
       path: text(row, "path"),
@@ -4868,6 +4880,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       ...(remoteUrl === undefined ? {} : { remoteUrl }),
       ...(createdBy === undefined ? {} : { createdBy }),
       ...(displayName === undefined ? {} : { displayName }),
+      ...(picture === undefined ? {} : { picture }),
     };
   }
 

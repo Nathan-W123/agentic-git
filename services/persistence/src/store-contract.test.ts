@@ -344,6 +344,61 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a repository's picture is stored, and is not its name`, async () => {
+    const { store, cleanup } = await backend.open();
+    const PICTURE = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+    try {
+      await store.saveRepository(REPOSITORY);
+      assert.equal(
+        (await store.getRepository(REPOSITORY.id))?.picture,
+        undefined,
+      );
+
+      await store.setRepositoryPicture(REPOSITORY.id, PICTURE);
+      assert.equal((await store.getRepository(REPOSITORY.id))?.picture, PICTURE);
+
+      // It survives a re-save, the way a display name does: `saveRepository`
+      // is first-insert-wins, not an update.
+      await store.saveRepository(REPOSITORY);
+      assert.equal((await store.getRepository(REPOSITORY.id))?.picture, PICTURE);
+
+      // The two fields are set from different places and must not disturb one
+      // another — the reason this is its own route rather than a field on the
+      // rename. Both orders are checked, and both of a picture's two paths:
+      // renaming keeps the picture, and setting *or clearing* a picture keeps
+      // the name. Checking only the first order lets a setter that clobbers
+      // the name through, because nothing has been named yet when it runs.
+      await store.renameRepository(REPOSITORY.id, "Widgets");
+      const renamedWithPicture = await store.getRepository(REPOSITORY.id);
+      assert.equal(renamedWithPicture?.picture, PICTURE);
+      assert.equal(renamedWithPicture?.displayName, "Widgets");
+
+      const OTHER = "data:image/png;base64,iVBORw0KGgo=";
+      await store.setRepositoryPicture(REPOSITORY.id, OTHER);
+      const repictured = await store.getRepository(REPOSITORY.id);
+      assert.equal(repictured?.picture, OTHER);
+      assert.equal(repictured?.displayName, "Widgets");
+
+      await store.setRepositoryPicture(REPOSITORY.id, undefined);
+      const cleared = await store.getRepository(REPOSITORY.id);
+      assert.equal(cleared?.picture, undefined);
+      assert.equal(cleared?.displayName, "Widgets");
+
+      // The list every viewer's rail is drawn from carries it, which is the
+      // whole point: a picture nobody but the setter can read is the bug this
+      // replaced.
+      await store.setRepositoryPicture(REPOSITORY.id, PICTURE);
+      const listed = (await store.listRepositories()).find(
+        (entry) => entry.id === REPOSITORY.id,
+      );
+      assert.equal(listed?.picture, PICTURE);
+      assert.equal(listed?.displayName, "Widgets");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a save that omits provenance is not a remapping`, async () => {
     // Every run on a GitHub-imported repository used to fail here.
     // `canonical()` in worker-operations narrows a stored repository to

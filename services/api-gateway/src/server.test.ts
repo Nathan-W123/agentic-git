@@ -9648,6 +9648,109 @@ test("a repository can be renamed without its id moving, and only by somebody wh
   );
 });
 
+test("a workspace picture is the workspace's: set only by a manager, read by everyone", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "pictured-repo");
+  const picturePath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/pictured-repo/picture`;
+  const PICTURE = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+
+  const set = await owner.request(picturePath, {
+    method: "PUT",
+    body: { picture: PICTURE },
+  });
+  assert.equal(set.status, 200, JSON.stringify(set.data));
+  assert.equal(set.data.repository.picture, PICTURE);
+  assert.equal(
+    (await runtime.store.getRepository("pictured-repo"))?.picture,
+    PICTURE,
+  );
+  assert.equal(
+    (
+      await runtime.store.listAuditEvents({
+        types: ["repository_picture_changed"],
+      })
+    ).length,
+    1,
+  );
+
+  // The point of the whole change: a colleague who can see the repository is
+  // sent the picture in the list their workspace rail is drawn from. While it
+  // lived in the setter's browser this was the one thing it could never do.
+  const developer = await runtime.store.createUser({
+    email: "picture-dev@example.com",
+    displayName: "Picture Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: developer.id,
+    role: "developer",
+  });
+  const devClient = await loginAs(runtime.origin, developer.email);
+  const listed = await devClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.equal(listed.status, 200, JSON.stringify(listed.data));
+  assert.equal(
+    listed.data.repositories.find(
+      (entry: { id: string }) => entry.id === "pictured-repo",
+    )?.picture,
+    PICTURE,
+  );
+
+  // Seeing it is not setting it. A developer who neither created the
+  // repository nor holds manage_project is refused, as they are for renaming.
+  const refused = await devClient.request(picturePath, {
+    method: "PUT",
+    body: { picture: "data:image/png;base64,iVBORw0KGgo=" },
+  });
+  assert.equal(refused.status, 403);
+  assert.equal(
+    (await runtime.store.getRepository("pictured-repo"))?.picture,
+    PICTURE,
+  );
+
+  // Anything that is not a base64 image data URL is refused. This value ends
+  // up in every colleague's `<img src>`, so a caller that skipped the resize
+  // and one aiming a URL of its own choosing get the same answer.
+  for (const bad of [
+    "https://example.com/tracker.png",
+    "javascript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+  ]) {
+    const rejected = await owner.request(picturePath, {
+      method: "PUT",
+      body: { picture: bad },
+    });
+    assert.equal(rejected.status, 400, `${bad} should be refused`);
+  }
+  const oversized = await owner.request(picturePath, {
+    method: "PUT",
+    body: { picture: `data:image/jpeg;base64,${"A".repeat(256 * 1024)}` },
+  });
+  assert.equal(oversized.status, 400);
+  assert.equal(
+    (await runtime.store.getRepository("pictured-repo"))?.picture,
+    PICTURE,
+  );
+
+  // An empty picture clears it, the way an empty name clears a rename, and
+  // leaves the name alone — the two are separate routes for exactly this.
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/pictured-repo`,
+    { method: "PATCH", body: { name: "Lattice" } },
+  );
+  const cleared = await owner.request(picturePath, {
+    method: "PUT",
+    body: { picture: "" },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+  assert.equal(cleared.data.repository.picture, undefined);
+  assert.equal(cleared.data.repository.displayName, "Lattice");
+});
+
 test("a repository's creator can rename it without manage_project, but deleting it is the owner's alone", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

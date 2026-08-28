@@ -3192,6 +3192,16 @@ function scoreCandidate(
   return { score, roleOverlap };
 }
 const MAX_JSON_BYTES = 1024 * 1024;
+/**
+ * How long a workspace picture's `data:` URL may be.
+ *
+ * The client sends a 128x128 JPEG at quality 0.82, which lands around seven
+ * kilobytes of base64; a quarter of a megabyte leaves room for a detailed
+ * image at that size while refusing an original photograph pasted in by a
+ * caller that skipped the resize. It is well inside `MAX_JSON_BYTES`, so an
+ * oversized picture is refused as a picture rather than as a large body.
+ */
+const REPOSITORY_PICTURE_MAX_CHARS = 256 * 1024;
 /** How long a worker holds a task before it must heartbeat again. */
 const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
 /** A week: long enough to be useful, short enough to be a poor thing to leak. */
@@ -8261,6 +8271,72 @@ export class ApiGateway {
     // leave it with nobody able to reach it. The creator's own administrative
     // access does not even depend on holding a grant; it comes from
     // `createdBy`, which revoking a grant never touches.
+    // The workspace picture. A room's picture, not a reader's: everybody who
+    // opens this repository is drawn the same one, which is the whole reason
+    // it moved off `localStorage`.
+    //
+    // Its own route rather than a field on the rename PATCH above, because
+    // that route reads an absent `name` as "clear the name" — folding the
+    // picture in would mean anyone changing a picture had to restate the name
+    // to keep it. Gated identically: `manage_project`, or the creator.
+    //
+    // An absent or empty `picture` clears it, matching how rename expresses
+    // clearing, and puts the workspace back to its initials.
+    const repositoryPictureMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/picture$`,
+        "u",
+      ),
+    );
+    if (repositoryPictureMatch !== undefined && method === "PUT") {
+      const [projectId = "", repositoryId = ""] = repositoryPictureMatch;
+      await this.authorizeRepositoryOwnerAction(
+        principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+      const body = objectBody(await this.readJson(request));
+      const requested = stringField(body["picture"], "picture", {
+        min: 0,
+        max: REPOSITORY_PICTURE_MAX_CHARS,
+        optional: true,
+      });
+      // Required to be an image `data:` URL. The client resizes to a 128px
+      // square JPEG before sending, so anything else here is either a caller
+      // that skipped that step or one aiming a URL of its own choosing at
+      // every colleague's `<img src>`; neither is a picture.
+      if (
+        requested !== undefined &&
+        requested !== "" &&
+        !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/u.test(
+          requested,
+        )
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "picture must be a base64 image data URL",
+        );
+      }
+      const picture =
+        requested === undefined || requested === "" ? undefined : requested;
+      await this.options.store.setRepositoryPicture(repositoryId, picture);
+      await this.options.store.appendAudit(undefined, {
+        type: "repository_picture_changed",
+        data: {
+          projectId,
+          repositoryId,
+          cleared: picture === undefined,
+          actorId: principal.user.id,
+        },
+      });
+      const repository = await this.options.store.getRepository(repositoryId);
+      this.sendJson(response, 200, { repository });
+      return;
+    }
+
     const repositoryGrantsMatch = matchPath(
       path,
       new RegExp(

@@ -1452,6 +1452,24 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_agent_members_next RENAME TO channel_agent_members`,
     ],
   },
+  {
+    // A workspace's picture, so it is the workspace's and not the viewer's.
+    //
+    // It lived in `localStorage` until now, which meant every person who
+    // opened the same workspace saw a different picture: whoever set one saw
+    // it, everybody else saw the fallback initials. That is not what a
+    // picture on a shared room is for — it is a thing colleagues recognise
+    // the room by, so it has to be the same picture for all of them.
+    //
+    // Stored as the `data:` URL the client already produces: the browser
+    // crops to a square and re-encodes to a 128x128 JPEG before sending, so a
+    // row is a few kilobytes rather than a photograph, and the picture needs
+    // no second request to draw. The gateway caps the length so an unresized
+    // upload cannot be pasted straight in.
+    version: 50,
+    name: "repository-pictures",
+    statements: [`ALTER TABLE repositories ADD COLUMN picture TEXT`],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

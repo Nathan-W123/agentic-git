@@ -7127,19 +7127,111 @@ export function setMyAvatar(dataUrl) {
   localStorage.setItem("ag.avatar", dataUrl);
 }
 
-/** A channel picture, kept per repository in this browser. */
+/** Where a workspace picture lived before it was the workspace's. */
+const legacyChannelPictureKey = (repositoryId) =>
+  `ag.channelPicture.${repositoryId}`;
+
+/**
+ * The picture a workspace is drawn with, or undefined for the initials.
+ *
+ * Read off the repository record, which is why everybody who opens the same
+ * workspace now sees the same picture. It used to be read out of
+ * `localStorage`, so whoever set one saw it and every colleague saw the
+ * fallback — a picture nobody else could see, on a room that is shared.
+ *
+ * The `localStorage` read that remains is only for pictures set before that
+ * changed: it keeps the person who set one seeing it, until
+ * {@link ensureChannelPictureShared} has handed it to the server for
+ * everybody else.
+ */
 export function channelPicture(repositoryId) {
-  const stored = localStorage.getItem(`ag.channelPicture.${repositoryId}`);
-  return stored === null || stored === "" ? undefined : stored;
+  const shared = state.repositories.find(
+    (repo) => repo.id === repositoryId,
+  )?.picture;
+  if (typeof shared === "string" && shared !== "") {
+    return shared;
+  }
+  const local = localStorage.getItem(legacyChannelPictureKey(repositoryId));
+  return local === null || local === "" ? undefined : local;
 }
 
-export function setChannelPicture(repositoryId, dataUrl) {
-  const key = `ag.channelPicture.${repositoryId}`;
-  if (dataUrl === undefined) {
-    localStorage.removeItem(key);
+/**
+ * Sets — or, with `undefined`, clears — the picture a workspace is drawn
+ * with, for everybody who opens it.
+ *
+ * Refused server-side for anybody but an administrator of the repository;
+ * the interface only offers the control to the same people, but the check
+ * that counts is the one on the route.
+ */
+export async function setChannelPicture(repositoryId, dataUrl) {
+  const response = await api(repositoryPath(repositoryId, "/picture"), {
+    method: "PUT",
+    body: { picture: dataUrl ?? "" },
+  });
+  // Whatever this browser was holding can now only disagree with the record.
+  localStorage.removeItem(legacyChannelPictureKey(repositoryId));
+  const repository = state.repositories.find((repo) => repo.id === repositoryId);
+  if (repository !== undefined) {
+    // Applied here as well as returned, so the rail redraws on the frame the
+    // picker closes on rather than after the next context load.
+    if (dataUrl === undefined) {
+      delete repository.picture;
+    } else {
+      repository.picture = response?.repository?.picture ?? dataUrl;
+    }
+  }
+  return response?.repository;
+}
+
+/** Repositories whose legacy picture has been dealt with this page load. */
+const channelPictureShared = new Set();
+
+/**
+ * Hands a picture set before pictures were shared to the server, once.
+ *
+ * Somebody who set a workspace picture in the old build set it through a
+ * control that said it changed the picture *for that workspace* — it simply
+ * never left their browser. Uploading it is finishing the action they already
+ * took, not taking a new one on their behalf, and it is attempted only by
+ * somebody who could set that picture today anyway.
+ *
+ * A non-administrator holding a stale local picture keeps seeing it and
+ * uploads nothing; a workspace that already has a server picture wins over
+ * the local copy, which is discarded, because the shared one is the real one.
+ */
+export async function ensureChannelPictureShared(repositoryId, rerender) {
+  if (!repositoryId || channelPictureShared.has(repositoryId)) {
     return;
   }
-  localStorage.setItem(key, dataUrl);
+  const local = localStorage.getItem(legacyChannelPictureKey(repositoryId));
+  if (local === null || local === "") {
+    channelPictureShared.add(repositoryId);
+    return;
+  }
+  const repository = state.repositories.find((repo) => repo.id === repositoryId);
+  if (repository === undefined) {
+    // The context has not loaded yet. Not marked done, so the next render
+    // after it arrives tries again.
+    return;
+  }
+  channelPictureShared.add(repositoryId);
+  if (typeof repository.picture === "string" && repository.picture !== "") {
+    localStorage.removeItem(legacyChannelPictureKey(repositoryId));
+    rerender();
+    return;
+  }
+  if (!canManageRepository(repositoryId)) {
+    return;
+  }
+  try {
+    await setChannelPicture(repositoryId, local);
+    rerender();
+  } catch {
+    // Left where it is and untried-again this load. The reader still sees
+    // their own picture, so a failed upload leaves nothing worse than the
+    // state this migration exists to fix.
+    channelPictureShared.delete(repositoryId);
+  }
 }
 
 /** The saved theme choice, kept separate from the theme it resolves to. */

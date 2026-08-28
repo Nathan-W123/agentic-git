@@ -92,6 +92,16 @@ export interface StoredRepository {
    * actually wanted to change, and absent means "call it by its id".
    */
   displayName?: string;
+  /**
+   * The picture this workspace is drawn with, as a `data:` URL, when somebody
+   * has set one.
+   *
+   * Kept on the repository rather than per browser because it belongs to the
+   * room and not to the reader: everybody who opens a workspace sees the same
+   * picture, the way they see the same name. Absent means the interface falls
+   * back to initials on a colour derived from the id.
+   */
+  picture?: string;
   provider?: "local" | "git" | "github";
   remoteUrl?: string;
   /**
@@ -1799,6 +1809,13 @@ export interface CoordinationStore {
    * puts the repository back to being called by its id.
    */
   renameRepository(id: string, displayName: string | undefined): Promise<void>;
+  /**
+   * Sets — or, with `undefined`, clears — the picture a repository is drawn
+   * with. Separate from {@link renameRepository} rather than folded into it
+   * because the two are set from different places and a caller changing one
+   * must not have to restate the other to avoid clearing it.
+   */
+  setRepositoryPicture(id: string, picture: string | undefined): Promise<void>;
   listRepositories(): Promise<StoredRepository[]>;
   getRepository(id: string): Promise<StoredRepository | undefined>;
 
