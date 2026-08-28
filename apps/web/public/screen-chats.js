@@ -2113,7 +2113,16 @@ function conversationHeader(repositoryId) {
           ? "Threads"
           : destination.kind === "files" || destination.kind === "file"
             ? "Files"
-            : "Main chat";
+            // The room, which is what this pane is showing. It said "Main
+            // chat" for every room — a destination that no longer exists,
+            // while the composer under it correctly offered to post to
+            // #frontend. `subChannelLabel` falls back to the workspace name
+            // for a repository nobody has divided, so an undivided one reads
+            // as it always did.
+            : subChannelLabel(
+                repositoryId,
+                activeSubChannelId(repositoryId),
+              ) || `#${repositoryLabel(repositoryId)}`;
   const description =
     destination.kind === "dm"
       ? "Direct message"

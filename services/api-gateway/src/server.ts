@@ -9736,8 +9736,13 @@ export class ApiGateway {
         return;
       }
       const body = objectBody(await this.readJson(request));
+      // Optional, because this route patches: a request that changes only a
+      // room's visibility sends no name, and without this it was refused with
+      // "name must be a string" before it reached the store. Changing a
+      // channel from private to open could not work at all.
       const rawName = stringField(body["name"] ?? body["slug"], "name", {
         max: 60,
+        optional: true,
       });
       const update: {
         slug?: string;
@@ -10363,7 +10368,11 @@ export class ApiGateway {
         this.sendJson(response, 200, {
           channel: {
             ...channel,
-            canPost: await this.canPostInSubChannel(channel, principal.user.id),
+            canPost: await this.canPostInSubChannel(
+              channel,
+              principal.user.id,
+              await this.isRepositoryAdmin(principal, projectId, repositoryId),
+            ),
           },
           messages: (
             await this.withChangedFiles(repositoryId, messages)
@@ -10403,7 +10412,13 @@ export class ApiGateway {
         // project can follow it, only its members can speak in it. 403 here
         // rather than 404 — the caller can already see this room, so there
         // is nothing left to conceal by pretending it is absent.
-        if (!(await this.canPostInSubChannel(channel, principal.user.id))) {
+        if (
+          !(await this.canPostInSubChannel(
+            channel,
+            principal.user.id,
+            await this.isRepositoryAdmin(principal, projectId, repositoryId),
+          ))
+        ) {
           throw new HttpError(
             403,
             "not_a_member",
@@ -10527,7 +10542,11 @@ export class ApiGateway {
         principal,
       });
       if (
-        !(await this.canPostInSubChannel(replyChannel, principal.user.id))
+        !(await this.canPostInSubChannel(
+          replyChannel,
+          principal.user.id,
+          await this.isRepositoryAdmin(principal, projectId, repositoryId),
+        ))
       ) {
         throw new HttpError(
           403,
@@ -13601,9 +13620,43 @@ export class ApiGateway {
    * membership row for every collaborator would be a table that has to be
    * kept in step with the project's own list forever.
    */
+  /** Whether this person administers the repository, as a plain boolean. */
+  private async isRepositoryAdmin(
+    principal: AuthenticatedPrincipal,
+    projectId: string,
+    repositoryId: string,
+  ): Promise<boolean> {
+    return await authorizeRepository(
+      this.options.store,
+      principal,
+      projectId,
+      repositoryId,
+      "manage_project",
+    ).then(
+      () => true,
+      () => false,
+    );
+  }
+
   private async canPostInSubChannel(
     channel: SubChannel,
     userId: string,
+    /**
+     * Where this person is a repository administrator, when the caller knows.
+     *
+     * Reading and posting disagreed without it. `authorizeSubChannel` hands a
+     * private room to an administrator who is not on its member list — that is
+     * deliberate, administering a room means being able to look at it — while
+     * this refused the same person the composer. So a co-owner could open a
+     * private channel, read every word, and be told they were not a member
+     * when they tried to answer.
+     *
+     * Granting it changes nothing they could not already do: they can read it
+     * already, and adding themselves to the list is one click in the settings
+     * they own. The refusal was theatre, and the confusing kind — the room
+     * appeared in their sidebar, so it read as one they were in.
+     */
+    admin = false,
   ): Promise<boolean> {
     if (channel.slug === GENERAL_SUB_CHANNEL_SLUG) {
       return true;
@@ -13612,6 +13665,9 @@ export class ApiGateway {
     // recorded — it is what mention rosters and unread cursors hang off — but
     // it stops being the gate on speaking.
     if (channel.visibility === "public") {
+      return true;
+    }
+    if (admin) {
       return true;
     }
     return await this.options.store.isSubChannelMember(channel.id, userId);
