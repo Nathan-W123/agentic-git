@@ -47,6 +47,12 @@ step.
 It is **agent-initiated**. Nothing reclaims an untouched file on its own, so
 the 10% precision above stands for the whole run unless the agent volunteers.
 
+## Status
+
+Implemented in `narrowBlanketHolder` (`apps/cli/src/lease-admission.ts`).
+The second change this document names — making a refused widening requeue
+rather than fail — is **not** implemented and remains a follow-up.
+
 ## The change
 
 Release on contest, not on arrival and not preemptively.
@@ -60,11 +66,25 @@ Concretely, in `narrowBlanketHolder`:
 - it already has `observed`, the holder's dirty paths, from `observeHolder`
 - it already knows the arrival's requested files from `request.plan`
 - so: drop from the freeze any estimated path that is (a) wanted by the
-  arrival and (b) absent from `observed`
+  arrival, (b) absent from `observed`, and (c) belongs to a holder that has
+  been observed writing *something*
 
 Everything else is unchanged. A file nobody is asking for stays with the
 holder; a file the holder has touched stays with the holder whether or not
 somebody wants it.
+
+The third condition is the one the first draft of this document missed.
+Presence is evidence of presence and never of absence: a holder that has
+produced nothing yet has said nothing about where it is *not* going, and its
+estimate is the only statement it has made. Releasing against that would be
+guess against guess. A holder with an empty worktree therefore keeps all of
+it, which also rules out the degenerate case — a holder narrowed to no files
+at all, whose next write would fail the widening and end the task.
+
+What was released is recorded on the `blanket_claim_frozen` audit event as
+`releasedFiles`, beside the `files` the holder kept. That pair is what makes
+the estimate's slack measurable in a real deployment rather than only in the
+commit replay above.
 
 ## Why this is safe where preemptive release is not
 

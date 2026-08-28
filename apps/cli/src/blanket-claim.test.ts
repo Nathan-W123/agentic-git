@@ -792,14 +792,125 @@ test("a holder whose edits cannot be read keeps the whole repository", async () 
       isBlanketClaim(lease!.plan!.plan),
       `${label}: the claim should still cover the repository`,
     );
+    // Read off `entry.event`, which is where `listAuditEvents` puts the audit
+    // record. This read the wrapper instead, so the filter matched nothing
+    // whatever happened and the assertion below could not fail.
     const narrowings = (
       await store.listAuditEvents({ types: ["blanket_claim_frozen"] })
-    ).filter(
-      (entry) =>
-        (entry as { data?: Record<string, unknown> }).data?.[
-          "narrowedOnArrival"
-        ] === true,
-    );
+    ).filter((entry) => entry.event.data["narrowedOnArrival"] === true);
     assert.deepEqual(narrowings, [], label);
+  }
+});
+
+test("a file the holder guessed at and never entered goes to whoever asks for it", async () => {
+  const real = await realRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    // The holder's objective anchored three files. It is in exactly one of
+    // them — roughly the ratio a blanket claim runs at in this repository,
+    // where nine of every ten estimated files are never opened.
+    const first = await holderWithWorktree(
+      store,
+      worker,
+      ["src/a.ts", "src/b.ts", "src/c.ts"],
+      real.repository,
+      real.version,
+    );
+    const second = await leaseFor(
+      store,
+      worker,
+      "fix the audio mixer",
+      real.version,
+    );
+
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+      workspaces: stubWorkspaces([{ path: "src/a.ts", status: "modified" }]),
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: arrivingPlan(second.task.id, ["src/b.ts"]),
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+
+    // The whole point: the arrival runs now rather than waiting out
+    // `maxWaitMs` for a file the holder was never going to open.
+    assert.equal(decision.outcome, "admitted", JSON.stringify(decision));
+
+    const frozen = (await store.getWorkLease(first.leaseId))!.plan!.plan;
+    assert.equal(frozen.claim?.kind, "frozen");
+    assert.ok(
+      frozen.expectedFiles.includes("src/a.ts"),
+      `the holder keeps the file it is editing: ${frozen.expectedFiles.join(", ")}`,
+    );
+    // A guess nobody asked for is not taken off the holder. Releasing on
+    // idleness alone would give away ground and gain nobody anything.
+    assert.ok(
+      frozen.expectedFiles.includes("src/c.ts"),
+      `an uncontested guess should be kept: ${frozen.expectedFiles.join(", ")}`,
+    );
+    assert.ok(
+      !frozen.expectedFiles.includes("src/b.ts"),
+      `the contested guess should have been released: ${frozen.expectedFiles.join(", ")}`,
+    );
+
+    const [narrowing] = (
+      await store.listAuditEvents({ types: ["blanket_claim_frozen"] })
+    ).filter((entry) => entry.event.data["narrowedOnArrival"] === true);
+    assert.deepEqual(
+      narrowing?.event.data["releasedFiles"],
+      ["src/b.ts"],
+      "what was handed over has to be on the record",
+    );
+  } finally {
+    await real.cleanup();
+  }
+});
+
+test("nothing is released by a holder that has written nothing yet", async () => {
+  const real = await realRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const first = await holderWithWorktree(
+      store,
+      worker,
+      ["src/a.ts", "src/b.ts"],
+      real.repository,
+      real.version,
+    );
+    const second = await leaseFor(
+      store,
+      worker,
+      "fix the audio mixer",
+      real.version,
+    );
+
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+      // Readable, and empty: the holder has started but produced nothing.
+      workspaces: stubWorkspaces([]),
+    });
+    await arriving.admit({
+      task: second.task,
+      plan: arrivingPlan(second.task.id, ["src/b.ts"]),
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+
+    // Presence is evidence of presence and never of absence. A holder that
+    // has written nothing has said nothing about where it is *not* going,
+    // and its estimate is the only statement it has made — so it keeps it.
+    const frozen = (await store.getWorkLease(first.leaseId))!.plan!.plan;
+    assert.ok(
+      frozen.expectedFiles.includes("src/b.ts"),
+      `a holder with no observed edits keeps its estimate: ${frozen.expectedFiles.join(", ")}`,
+    );
+  } finally {
+    await real.cleanup();
   }
 });
