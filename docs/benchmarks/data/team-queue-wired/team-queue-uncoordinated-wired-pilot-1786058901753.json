@@ -131,7 +131,7 @@
     "repairPenaltySeconds": 300,
     "validation": {
       "passed": false,
-      "output": " twenty five orders (0.1439ms)\n✔ notifications use the account channel (0.546ms)\n✔ exports keep id, name and status columns (0.7029ms)\n✔ money renders with a currency symbol (0.637ms)\n✔ rounding leaves a positive amount positive and never grows it much (0.1415ms)\n✔ rounding keeps whole pence (0.0826ms)\n✔ money renders to whole pence, never long decimals (0.0747ms)\n✔ search matches on name and rejects empty queries (1.1482ms)\n✔ tax is charged on a standard order (0.5432ms)\n✔ an order total is a positive number (1.2926ms)\n✔ every order carries the flat handling charge (0.1262ms)\n✔ a bigger basket costs more than a smaller one (0.1066ms)\n✖ an order over a hundred pounds is not charged for delivery (0.7141ms)\n✖ an order of exactly a hundred pounds is not charged for delivery (0.193ms)\n✖ an order under a hundred pounds is charged three pounds delivery (0.1468ms)\n✔ webhook delivery reports the endpoint it used (0.6208ms)\n✔ webhook delivery does not retry after a successful attempt (0.1123ms)\n✔ webhook delivery retries until the transport succeeds (0.0941ms)\n✔ webhook delivery retries after a thrown transport error (0.733ms)\n✔ webhook delivery gives up after three failed attempts (0.139ms)\n✔ webhook delivery gives up after three thrown transport errors (0.1077ms)\nℹ tests 23\nℹ suites 0\nℹ pass 20\nℹ fail 3\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 616.515\n\n✖ failing tests:\n\ntest at test\\total.test.js:32:1\n✖ an order over a hundred pounds is not charged for delivery (0.7141ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  186 !== 180\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:34:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 186,\n    expected: 180,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at test\\total.test.js:37:1\n✖ an order of exactly a hundred pounds is not charged for delivery (0.193ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  126 !== 120\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:39:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 126,\n    expected: 120,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at test\\total.test.js:42:1\n✖ an order under a hundred pounds is charged three pounds delivery (0.1468ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  124.8 !== 122\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:44:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 124.8,\n    expected: 122,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n"
+      "output": " twenty five orders (0.1439ms)\n\u2714 notifications use the account channel (0.546ms)\n\u2714 exports keep id, name and status columns (0.7029ms)\n\u2714 money renders with a currency symbol (0.637ms)\n\u2714 rounding leaves a positive amount positive and never grows it much (0.1415ms)\n\u2714 rounding keeps whole pence (0.0826ms)\n\u2714 money renders to whole pence, never long decimals (0.0747ms)\n\u2714 search matches on name and rejects empty queries (1.1482ms)\n\u2714 tax is charged on a standard order (0.5432ms)\n\u2714 an order total is a positive number (1.2926ms)\n\u2714 every order carries the flat handling charge (0.1262ms)\n\u2714 a bigger basket costs more than a smaller one (0.1066ms)\n\u2716 an order over a hundred pounds is not charged for delivery (0.7141ms)\n\u2716 an order of exactly a hundred pounds is not charged for delivery (0.193ms)\n\u2716 an order under a hundred pounds is charged three pounds delivery (0.1468ms)\n\u2714 webhook delivery reports the endpoint it used (0.6208ms)\n\u2714 webhook delivery does not retry after a successful attempt (0.1123ms)\n\u2714 webhook delivery retries until the transport succeeds (0.0941ms)\n\u2714 webhook delivery retries after a thrown transport error (0.733ms)\n\u2714 webhook delivery gives up after three failed attempts (0.139ms)\n\u2714 webhook delivery gives up after three thrown transport errors (0.1077ms)\n\u2139 tests 23\n\u2139 suites 0\n\u2139 pass 20\n\u2139 fail 3\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 616.515\n\n\u2716 failing tests:\n\ntest at test\\total.test.js:32:1\n\u2716 an order over a hundred pounds is not charged for delivery (0.7141ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  186 !== 180\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:34:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 186,\n    expected: 180,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at test\\total.test.js:37:1\n\u2716 an order of exactly a hundred pounds is not charged for delivery (0.193ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  126 !== 120\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:39:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 126,\n    expected: 120,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at test\\total.test.js:42:1\n\u2716 an order under a hundred pounds is charged three pounds delivery (0.1468ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  124.8 !== 122\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:44:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 124.8,\n    expected: 122,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n"
     },
     "survival": [
       {
@@ -507,7 +507,7 @@
         ],
         "externalAccess": [],
         "riskLevel": "low",
-        "intent": "Modify existing rounding behavior: change the customer-facing precision constant PLACES in src/format/money.js from 0 (whole pounds) to 2 (whole pence), so roundMoney and its callers (formatMoney, orderTotal) quantize to pence instead of pounds. Not adding, removing, or gating a feature — no new module, export, or flag; the single existing rounding seam is corrected in place. Add a test in test/money.test.js pinning two-decimal-place rounding (the current test deliberately leaves precision unasserted). No change to src/pricing/total.js, which already delegates rounding to src/format/money.js, and no change to the four non-pricing feature areas (notify, audit, export, search), which render no amounts."
+        "intent": "Modify existing rounding behavior: change the customer-facing precision constant PLACES in src/format/money.js from 0 (whole pounds) to 2 (whole pence), so roundMoney and its callers (formatMoney, orderTotal) quantize to pence instead of pounds. Not adding, removing, or gating a feature \u2014 no new module, export, or flag; the single existing rounding seam is corrected in place. Add a test in test/money.test.js pinning two-decimal-place rounding (the current test deliberately leaves precision unasserted). No change to src/pricing/total.js, which already delegates rounding to src/format/money.js, and no change to the four non-pricing feature areas (notify, audit, export, search), which render no amounts."
       }
     },
     {
@@ -661,7 +661,7 @@
         ],
         "externalAccess": [],
         "riskLevel": "low",
-        "intent": "Adding behavior: introduce a new flat £2 handling charge constant in src/pricing/total.js and include it in every order total alongside the existing £3 delivery charge (added to the discounted line subtotal before tax is applied, so handling is taxed like delivery), with a new test in test/total.test.js asserting the fixed charge raises the total by the expected amount; no existing charge, discount, tax, or rounding behavior is removed or disabled."
+        "intent": "Adding behavior: introduce a new flat \u00a32 handling charge constant in src/pricing/total.js and include it in every order total alongside the existing \u00a33 delivery charge (added to the discounted line subtotal before tax is applied, so handling is taxed like delivery), with a new test in test/total.test.js asserting the fixed charge raises the total by the expected amount; no existing charge, discount, tax, or rounding behavior is removed or disabled."
       }
     },
     {
@@ -885,162 +885,6 @@
       "agentId": "codex-e",
       "band": "independent",
       "objective": "Make account search match on email address as well as name"
-    }
-  ],
-  "iterations": [
-    {
-      "worker": 2,
-      "taskId": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
-      "startedAt": "2026-08-06T22:52:31.353Z",
-      "finishedAt": "2026-08-06T22:54:25.343Z",
-      "elapsedMs": 113990,
-      "worked": true,
-      "accepted": true,
-      "tokens": 0
-    },
-    {
-      "worker": 0,
-      "taskId": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
-      "startedAt": "2026-08-06T22:52:31.352Z",
-      "finishedAt": "2026-08-06T22:54:27.441Z",
-      "elapsedMs": 116089,
-      "worked": true,
-      "accepted": true,
-      "tokens": 0
-    },
-    {
-      "worker": 3,
-      "taskId": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
-      "startedAt": "2026-08-06T22:52:31.354Z",
-      "finishedAt": "2026-08-06T22:54:38.969Z",
-      "elapsedMs": 127615,
-      "worked": true,
-      "accepted": true,
-      "tokens": 0
-    },
-    {
-      "worker": 2,
-      "taskId": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
-      "startedAt": "2026-08-06T22:54:25.343Z",
-      "finishedAt": "2026-08-06T22:56:14.691Z",
-      "elapsedMs": 109348,
-      "worked": true,
-      "accepted": true,
-      "tokens": 0
-    },
-    {
-      "worker": 0,
-      "taskId": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
-      "startedAt": "2026-08-06T22:54:27.441Z",
-      "finishedAt": "2026-08-06T22:56:35.959Z",
-      "elapsedMs": 128518,
-      "worked": true,
-      "accepted": true,
-      "tokens": 0
-    },
-    {
-      "worker": 4,
-      "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
-      "startedAt": "2026-08-06T22:52:31.354Z",
-      "finishedAt": "2026-08-06T23:09:51.127Z",
-      "elapsedMs": 1039773,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
-    },
-    {
-      "worker": 1,
-      "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
-      "startedAt": "2026-08-06T22:52:31.353Z",
-      "finishedAt": "2026-08-06T23:10:15.902Z",
-      "elapsedMs": 1064549,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
-    },
-    {
-      "worker": 3,
-      "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
-      "startedAt": "2026-08-06T22:54:38.969Z",
-      "finishedAt": "2026-08-06T23:11:00.360Z",
-      "elapsedMs": 981391,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
-    },
-    {
-      "worker": 2,
-      "taskId": "task_93a3bef7-7a61-4366-a745-6d6c97f73cad",
-      "startedAt": "2026-08-06T22:56:14.692Z",
-      "finishedAt": "2026-08-06T23:12:44.195Z",
-      "elapsedMs": 989503,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
-    },
-    {
-      "worker": 0,
-      "taskId": "task_63ccee63-6652-416d-9292-a7c1691f7095",
-      "startedAt": "2026-08-06T22:56:35.960Z",
-      "finishedAt": "2026-08-06T23:13:09.973Z",
-      "elapsedMs": 994013,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
-    },
-    {
-      "worker": 4,
-      "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
-      "startedAt": "2026-08-06T23:09:52.629Z",
-      "finishedAt": "2026-08-06T23:26:31.292Z",
-      "elapsedMs": 998663,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
-    },
-    {
-      "worker": 1,
-      "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
-      "startedAt": "2026-08-06T23:10:17.417Z",
-      "finishedAt": "2026-08-06T23:27:36.552Z",
-      "elapsedMs": 1039135,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
-    },
-    {
-      "worker": 3,
-      "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
-      "startedAt": "2026-08-06T23:11:01.876Z",
-      "finishedAt": "2026-08-06T23:28:16.482Z",
-      "elapsedMs": 1034606,
-      "worked": true,
-      "accepted": false,
-      "deferred": true,
-      "transport": true,
-      "tokens": 0,
-      "reason": "control plane unreachable, task requeued: fetch failed"
     }
   ]
 }

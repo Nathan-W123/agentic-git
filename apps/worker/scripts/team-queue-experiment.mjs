@@ -55,6 +55,10 @@
  *   node apps/worker/scripts/team-queue-experiment.mjs \
  *     --arm=coordinated --workers=5 --out=docs/benchmarks/data/team-queue
  *
+ * Add `--trace` to keep the per-lease `iterations` array in the result file.
+ * It is off by default because nothing reads it back and it was 68% of the
+ * committed corpus; keep it while debugging a run, not in a commit.
+ *
  * Requires COORD_AGENT_CMD to name the agent executable, exactly like the
  * live benchmark and the remote-path harness.
  */
@@ -94,6 +98,22 @@ const workerCount = Number(flag("workers", "5"));
 const outDir = flag("out", "docs/benchmarks/data/team-queue");
 const runBudgetMs = Number(flag("budget-ms", String(75 * 60 * 1000)));
 const runLabel = flag("label", "run1");
+/**
+ * Whether to serialise the per-lease trace into the result file.
+ *
+ * `iterations` is what `summarize` reduces into `metrics`, so it is always
+ * computed — but it was also written out verbatim, and nothing ever read it
+ * back. Across the twenty-five committed runs that carried it, that one field
+ * was 180,486 lines and 4.0 MB: 68% of the entire benchmark corpus, kept for a
+ * reader that does not exist. Every consumer — `team-queue-report.mjs`,
+ * `intent-signal-eval.mjs`, `intent-relation-inputs.mjs` — reads `metrics`,
+ * `plans`, `tasks` and `outcome` instead.
+ *
+ * Off by default rather than deleted, because the trace is genuinely useful
+ * while a run is being debugged; `--trace` puts it back for that one run
+ * without putting four megabytes back into the repository.
+ */
+const keepTrace = process.argv.includes("--trace");
 /**
  * What one merge conflict costs a human, in seconds.
  *
@@ -1435,21 +1455,29 @@ async function once() {
         band: plane.byTaskId.get(task.id)?.band,
         objective: task.objective.slice(0, 200),
       })),
-      iterations: iterations.map((entry) => ({
-        worker: entry.worker,
-        taskId: entry.taskId,
-        startedAt: entry.startedAt,
-        finishedAt: entry.finishedAt,
-        elapsedMs: entry.elapsedMs,
-        worked: entry.worked,
-        accepted: entry.accepted,
-        deferred: entry.deferred,
-        transport: entry.transport,
-        deferredResources: entry.deferredResources,
-        tokens: (entry.usage ?? []).reduce((sum, u) => sum + u.tokens, 0),
-        reason:
-          entry.reason === undefined ? undefined : String(entry.reason).slice(0, 400),
-      })),
+      // Only under `--trace`; see `keepTrace`. The counts this array supports
+      // are already in `metrics`, which is what every reader consumes.
+      ...(keepTrace
+        ? {
+            iterations: iterations.map((entry) => ({
+              worker: entry.worker,
+              taskId: entry.taskId,
+              startedAt: entry.startedAt,
+              finishedAt: entry.finishedAt,
+              elapsedMs: entry.elapsedMs,
+              worked: entry.worked,
+              accepted: entry.accepted,
+              deferred: entry.deferred,
+              transport: entry.transport,
+              deferredResources: entry.deferredResources,
+              tokens: (entry.usage ?? []).reduce((sum, u) => sum + u.tokens, 0),
+              reason:
+                entry.reason === undefined
+                  ? undefined
+                  : String(entry.reason).slice(0, 400),
+            })),
+          }
+        : {}),
     };
   } finally {
     await plane?.gateway.close().catch(() => undefined);

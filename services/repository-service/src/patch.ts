@@ -158,17 +158,3 @@ export function emitPatch(
   const text = lines.join("\n");
   return parsed.trailingNewline ? `${text}\n` : text;
 }
-
-/**
- * Each hunk of a patch as a patch of its own, in order.
- *
- * `undefined` when the patch cannot safely be divided, which the caller must
- * treat as "handle it whole" rather than as "it has no hunks".
- */
-export function splitPatchHunks(patch: string): string[] | undefined {
-  const parsed = parseUnifiedPatch(patch);
-  if (parsed === undefined) {
-    return undefined;
-  }
-  return parsed.hunks.map((hunk) => emitPatch(parsed, [hunk]));
-}
