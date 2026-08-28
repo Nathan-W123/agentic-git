@@ -13476,6 +13476,33 @@ dialog.modal[open]::backdrop {
   text-overflow: ellipsis;
 }
 
+/* The way out of a destination that has taken the message pane over — the
+   same control, in the same shape and behind the same fence, that every
+   right-hand panel carries in its own header. It is deliberately last and
+   deliberately not allowed to shrink: a long name or a preview address
+   crowds this row on a phone, and the one control a reader is looking for
+   when they want out is the one that must never be the thing clipped. */
+.conversation-header .panel-close {
+  flex: none;
+  position: relative;
+  margin-left: 12px;
+  color: var(--text-2);
+}
+
+.conversation-header .panel-close::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--border-soft);
+}
+
+.conversation-header .panel-close:hover {
+  color: var(--text);
+}
+
 .primary-conversation-surface {
   position: relative;
   flex: 1;
