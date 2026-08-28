@@ -12939,20 +12939,47 @@ dialog.modal[open]::backdrop {
   padding-top: 0;
 }
 
+/* The switcher is not a region of the workspace below it — it is the bottom of
+   the application bar, turned on its side. It carries the bar's own surface
+   and, like the bar, draws no boundary of its own: the two are one continuous
+   L of chrome down the left of the window, which is why the mark in the bar
+   stands on this column's centre line rather than near it.
+
+   No right-hand hairline here any more. The seam between the switcher and the
+   navigation belongs to the navigation now, so that it can turn the corner
+   into the line under the bar instead of running past it. */
 .channel-rail {
   border: 0;
-  border-right: 1px solid var(--border-soft);
   border-radius: 0;
   background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg));
 }
 
+/* Where the workspace starts. This is the top-left corner of everything that
+   is not chrome, so it owns three edges of one boundary: the hairline down its
+   left, the hairline across its top — which the conversation continues to the
+   far side of the window — and the rounding where the two meet. The bar above
+   draws no bottom border precisely so that this is the only line there is; a
+   bar with its own would have made two, a pixel apart, which is the seam that
+   left the navigation and the bar reading as separate slabs.
+
+   Its right-hand hairline is the other thing this panel owns: the one line
+   that says where navigation ends and the conversation begins. Square at that
+   corner, and square at both corners along the bottom — the rounding is the
+   start of the boundary, not decoration applied to a column. */
 .chan-sidebar {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   border: 0;
+  border-top: 1px solid var(--border-soft);
+  border-left: 1px solid var(--border-soft);
   border-right: 1px solid var(--border-soft);
-  border-radius: 0;
+  border-radius: var(--radius-xl) 0 0 0;
 }
 
+/* With one workspace there is no switcher to stand beside, so the navigation
+   is against the window itself. A rounded corner needs something to be
+   rounded away from and an edge needs something to be an edge of; against the
+   frame of the window there is neither, so the boundary is the top line alone,
+   run straight across from the corner. */
 .chats-shell.no-rail > .chan-sidebar,
 .chats-shell.no-rail > .chan-main {
   border-radius: 0;
@@ -13002,8 +13029,14 @@ dialog.modal[open]::backdrop {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* The conversation is the rest of that same surface: the sidebar's line
+   across its top, carried on to the far edge of the window, and no corner or
+   edge of its own — the hairline on its left is the navigation's, and the
+   window is its right. One line under the bar, from the rounded corner to the
+   end of the screen. */
 .chan-main {
   border: 0;
+  border-top: 1px solid var(--border-soft);
   border-radius: 0;
 }
 
@@ -13151,15 +13184,33 @@ dialog.modal[open]::backdrop {
   to { opacity: 0; }
 }
 
-/* One secondary context. It may be resized only while the primary
-   conversation can keep its usable floor; intermediate layouts overlay it. */
+/* One secondary context, and the one surface here that is not part of the
+   frame. A thread is opened, dragged wider and closed again; a region of the
+   boundary cannot come and go, so this is a card instead — its own gutter on
+   every side, its own outline, and the rounding on all four corners. Stripped
+   of them it was a fourth column butted against the conversation, which is
+   what made stepping aside into a thread read as the channel changing.
+
+   The gutter is why the conversation's top line stops short of the window
+   whenever a thread is open: the line belongs to the frame, and the card is
+   in front of it.
+
+   It may be resized only while the primary conversation can keep its usable
+   floor; intermediate layouts overlay it instead. */
 .chats-shell > .thread-panel {
-  margin-left: 0;
-  border-block: 0;
-  border-right: 0;
-  border-radius: 0;
+  margin: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-xl);
   padding-top: 0;
   box-shadow: -14px 0 30px -24px rgb(0 0 0 / 55%);
+}
+
+/* Cards share the gutter rather than each bringing one: the first panel's
+   right margin is already the whole gap to the second, so a left margin there
+   as well would set the pair twice as far apart as either is from the
+   conversation. */
+.chats-shell > .thread-panel + .thread-panel {
+  margin-left: 0;
 }
 
 .thread-head {
@@ -13241,6 +13292,11 @@ dialog.modal[open]::backdrop {
 }
 
 @media (max-width: 1180px) and (min-width: 601px) {
+  /* No room to set a card down in. Here the panel slides over the conversation
+     and holds the whole height of the window against its right edge, so the
+     gutter and the rounding go: a card cropped by three sides of the screen is
+     not a card, and rounded corners against the window frame are just chips
+     out of it. One straight edge where it meets what it covers. */
   .chats-shell > .thread-panel {
     position: absolute;
     top: 0;
@@ -13249,7 +13305,10 @@ dialog.modal[open]::backdrop {
     width: min(var(--panel-w, 420px), calc(100% - 72px));
     max-width: calc(100% - 72px);
     z-index: 20;
+    margin: 0;
+    border: 0;
     border-left: 1px solid var(--border-soft);
+    border-radius: 0;
   }
 }
 
@@ -13338,11 +13397,17 @@ dialog.modal[open]::backdrop {
     transform: none;
   }
 
+  /* A drawer rather than a column of the frame: it slides in over the
+     conversation and slides out again, so it draws none of the boundary the
+     desktop navigation carries — no corner, no top line, and no left edge
+     against a switcher that is itself off-canvas here. */
   .chats-shell .chan-sidebar {
     top: calc(54px + var(--safe-top));
     left: 52px;
     width: calc(100vw - 52px);
     max-width: none;
+    border-top: 0;
+    border-left: 0;
     border-radius: 0;
     transform: translateX(calc(-100% - 52px));
     z-index: 77;
@@ -13374,6 +13439,7 @@ dialog.modal[open]::backdrop {
     grid-row: 1 / span 3;
   }
 
+  /* The thread is the screen here, so it has no edges of its own at all. */
   .chats-shell > .thread-panel {
     position: fixed;
     inset: calc(54px + var(--safe-top)) 0 0;
@@ -13381,7 +13447,9 @@ dialog.modal[open]::backdrop {
     max-width: 100vw;
     min-width: 0;
     z-index: 80;
+    margin: 0;
     border: 0;
+    border-radius: 0;
   }
 
   .thread-panel.panel-entering {
@@ -13393,8 +13461,12 @@ dialog.modal[open]::backdrop {
     width: 100%;
   }
 
+  /* The line under the bar stays whether or not there is a switcher: on a
+     phone the conversation is the only thing under it, so that hairline is the
+     whole of the boundary. */
   .chats-shell.no-rail > .chan-main {
     border: 0;
+    border-top: 1px solid var(--border-soft);
     border-radius: 0;
   }
 }

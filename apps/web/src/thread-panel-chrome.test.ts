@@ -25,6 +25,30 @@ test("conversation and secondary headers align while the message pane keeps a fl
   assert.match(app, /available - MAIN_MIN/u);
 });
 
+test("the secondary panel is a rounded card with its own gutter", async () => {
+  const css = await publicFile("styles.css");
+  const panel = css.slice(css.indexOf("\n.chats-shell > .thread-panel {"));
+
+  // The frame around the conversation gave up its gutters and its rounding to
+  // become one continuous surface. A thread did not: it arrives, it is dragged
+  // wider and it is closed again, so it stays a card in front of that surface.
+  assert.match(panel, /^\n\.chats-shell > \.thread-panel \{[\s\S]*?margin: 8px;/u);
+  assert.match(panel, /^\n\.chats-shell > \.thread-panel \{[\s\S]*?border: 1px solid var\(--border-soft\);/u);
+  assert.match(panel, /^\n\.chats-shell > \.thread-panel \{[\s\S]*?border-radius: var\(--radius-xl\);/u);
+  // One gutter between two cards, not one from each of them.
+  assert.match(css, /\.chats-shell > \.thread-panel \+ \.thread-panel \{\s*margin-left: 0;/u);
+  // Both overlay tiers cover the conversation edge to edge instead, where a
+  // gutter would crop the card against the window and the corners with it.
+  assert.match(
+    css,
+    /@media \(max-width: 1180px\) and \(min-width: 601px\)[\s\S]*?\.chats-shell > \.thread-panel \{[\s\S]*?margin: 0;[\s\S]*?border-radius: 0;/u,
+  );
+  assert.match(
+    css,
+    /@media \(max-width: 600px\)[\s\S]*?\.chats-shell > \.thread-panel \{[\s\S]*?margin: 0;[\s\S]*?border-radius: 0;/u,
+  );
+});
+
 test("intermediate and compact secondary contexts overlay instead of squeezing chat", async () => {
   const css = await publicFile("styles.css");
   assert.match(css, /@media \(max-width: 1180px\) and \(min-width: 601px\)[\s\S]*?\.chats-shell > \.thread-panel \{[\s\S]*?position: absolute;/u);
