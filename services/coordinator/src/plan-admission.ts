@@ -1248,11 +1248,28 @@ export class PlanAdmissionController {
         // what it declared, so it has no lines to withhold and takes the file
         // whole. The reasoning is `admitWithinFiles`', including why a
         // holder's watched ranges are not an answer either.
+        //
+        // And only where the holder said something. `declaredSpans` will fall
+        // back to guessing a footprint out of the holder's objective text when
+        // it declared no symbols, and that guess is not good enough to hand a
+        // file's lines away on: `likelySymbolsIn` treats a declaration whose
+        // name is an ordinary English word as written out verbatim by any
+        // objective that merely uses that word, scores it above every real
+        // match, and discards the rest — so a holder that says "fix the order
+        // total once a discount applies" is read as occupying `discount` and
+        // `orderTotal` is granted to somebody else. `admitWithinFiles` still
+        // guesses, because there the alternative is that nobody runs at all;
+        // here the alternative is the answer that shipped, which is a wait.
+        const said =
+          active === undefined
+            ? []
+            : (active.plan.declared?.symbols ?? active.plan.expectedSymbols);
         const occupies =
           reached ??
           (active === undefined ||
           !shareDeclared ||
           locate === undefined ||
+          said.length === 0 ||
           claimOccupiesPath(active.plan, file)
             ? undefined
             : declaredSpans(active.plan, file, locate));
@@ -1268,7 +1285,41 @@ export class PlanAdmissionController {
         lost.push(entry);
         continue;
       }
-      const ranges = normalizeRanges(spans);
+      // Nobody gets the tail.
+      //
+      // A holder's footprint is built out of the index, so it stops at the
+      // last line the index accounts for. The candidate's lease is the
+      // complement of it against a whole file that runs to
+      // `Number.MAX_SAFE_INTEGER`. The two ends disagree, and the strip
+      // between them — everything past the last known declaration — was
+      // granted away, which is precisely where a new function gets appended.
+      // Withholding it costs the candidate the right to append to a file it
+      // is sharing, and that is the correct price: the holder may be about to
+      // append there too, and no index built before either of them ran can
+      // say otherwise.
+      const known = (locate?.(file) ?? []).reduce(
+        (end, range) => Math.max(end, range.endLine),
+        0,
+      );
+      // Withheld, not attributed: the tail is nobody's. It goes into the
+      // ranges the candidate is kept out of and stays out of `spans`, which is
+      // what names the symbols being deferred — a region is not a declaration,
+      // and reporting one as `symbol:unwritten` would put a name no agent used
+      // into the follow-up task's objective. It is kept out of the holders'
+      // leases too: neither side is granted the append zone, because the
+      // index predates both of them and cannot say who is going to use it.
+      const ranges = normalizeRanges(
+        guessed && known > 0
+          ? [
+              ...spans,
+              {
+                name: "",
+                startLine: known + 1,
+                endLine: Number.MAX_SAFE_INTEGER,
+              },
+            ]
+          : spans,
+      );
       // Reading a declared file as its declarations is only honest where they
       // do not add up to the file: enrichment makes a plan that named a file
       // claim every symbol in it, so on a file that is nothing but
@@ -1276,7 +1327,7 @@ export class PlanAdmissionController {
       // anyone placed. `admitWithinFiles` withdraws the whole split on that;
       // here only this file is withdrawn, and it goes back to being lost
       // whole — which is exactly what it is today.
-      if (guessed && !leavesGround(locate?.(file) ?? [], ranges)) {
+      if (guessed && !leavesGround(locate?.(file) ?? [], normalizeRanges(spans))) {
         lost.push(entry);
         continue;
       }

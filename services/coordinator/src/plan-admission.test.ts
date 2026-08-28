@@ -1632,11 +1632,16 @@ test("the lease on a shared file is the exact complement of what was withheld", 
       );
     }
   }
-  // And the two together account for the whole file: the candidate is not
-  // being quietly refused lines nobody holds.
+  // And the two together account for every line the index knows about. The
+  // grant stops at 140, the last line anything is placed at, rather than
+  // running to Number.MAX_SAFE_INTEGER: past there is where a function gets
+  // appended, the holder declared this file too, and an index built before
+  // either of them ran cannot say which of them is going to use it. So it
+  // goes to neither — withheld from the candidate, and not in the holder's
+  // lease either.
   assert.deepEqual(lease?.ranges, [
     { startLine: 1, endLine: 39 },
-    { startLine: 81, endLine: Number.MAX_SAFE_INTEGER },
+    { startLine: 81, endLine: 140 },
   ]);
 });
 
@@ -1731,10 +1736,17 @@ test("an objective made of ordinary words still locates the holder's function", 
   // `responseCache`, the word "response" says exactly which. Borrowed here, it
   // left "update the response builder" with nothing to match at all, and the
   // holder took all of reply.js.
+  // Every file the candidate names is contested, which is what puts this
+  // through `admitWithinFiles` — the one path that still reads a guessed
+  // footprint. `partitionContested` does not: there the alternative to a guess
+  // is the wait that shipped, and a guess that names the wrong declaration
+  // hands away the one the holder is really in. Here the alternative is that
+  // nobody runs at all, and the stop list is what decides whether the guess
+  // finds anything to run on.
   const admission = admit(
     plan("task_a", {
       objective: "paginate the order list",
-      expectedFiles: ["src/api/reply.js", "src/format/currency.js"],
+      expectedFiles: ["src/api/reply.js"],
       expectedSymbols: ["listOrders"],
     }),
     [
@@ -1751,7 +1763,6 @@ test("an objective made of ordinary words still locates the holder's function", 
   assert.equal(admission.status, "approved_with_constraints");
   assert.deepEqual(grantedResources(admission), [
     "file:src/api/reply.js",
-    "file:src/format/currency.js",
     "symbol:listOrders",
   ]);
   // The holder's half, and only it: `listOrders` is what the candidate came
