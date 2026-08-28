@@ -6485,7 +6485,7 @@ test("a failed task says why, whichever shape the failure was recorded in", () =
         error: "OAuth session expired and could not be refreshed",
       }),
     ),
-    /sign-in has expired\. Reconnect me from My Agents/u,
+    /sign-in has expired\. Reconnect me from Settings → Agents/u,
   );
 
   // Nothing to say at all is still the honest fallback.
@@ -6545,7 +6545,7 @@ test("a clipped failure detail still ends on a whole word", () => {
 test("a refused GitHub push keeps GitHub's remedy, not the agent's", () => {
   // The push path fails in GitHub's name when the *submitter's* token is
   // refused. It speaks the same auth vocabulary — "401", "unauthorized" —
-  // but "Reconnect me from My Agents" is the wrong door: it sends somebody
+  // but reconnecting an agent is the wrong door: it sends somebody
   // off to reconnect an agent that is working fine, while the actual fix
   // lives in Settings → GitHub and the failure's own words point there.
   const said = String(
@@ -6555,19 +6555,19 @@ test("a refused GitHub push keeps GitHub's remedy, not the agent's", () => {
         "Reconnect GitHub in Settings and ask again.",
     }),
   );
-  assert.doesNotMatch(said, /Reconnect me from My Agents/u);
+  assert.doesNotMatch(said, /Settings → Agents/u);
   assert.match(said, /Reconnect GitHub in Settings/u);
 
   // The same guard where a question failed rather than a task.
   assert.doesNotMatch(
     explainAnswerFailure("GitHub answered 401 for the stored token"),
-    /My Agents/u,
+    /Settings → Agents/u,
   );
 
   // And a genuine vendor sign-in failure still gets its remedy.
   assert.match(
     explainAnswerFailure("OAuth session expired and could not be refreshed"),
-    /Reconnect me from My Agents/u,
+    /Reconnect me from Settings → Agents/u,
   );
 });
 
@@ -6839,7 +6839,7 @@ test("a reply whose agent is no longer connected says so, and says who can fix i
   ).find((message) => message.id === root.id);
   const said = (thread?.replies ?? []).find((reply) => reply.kind === "system");
   assert.match(String(said?.content), /not connected any more/u);
-  assert.match(String(said?.content), /My Agents/u);
+  assert.match(String(said?.content), /Settings → Agents/u);
   // Not in the missing agent's voice: the news is that nobody answered, and
   // attributing it to the absent participant reads as though somebody did.
   assert.equal(said?.authorId, "system");
@@ -6899,7 +6899,7 @@ test("a reply whose agent has left the channel says that, not that it is disconn
   // The sign-in is fine. Telling somebody to reconnect it sends them to a
   // screen where nothing is wrong.
   assert.match(String(said?.content), /left this channel/u);
-  assert.doesNotMatch(String(said?.content), /My Agents/u);
+  assert.doesNotMatch(String(said?.content), /Settings → Agents/u);
 });
 
 test("animation work asked for inside a thread is dispatched with its context", async (t) => {

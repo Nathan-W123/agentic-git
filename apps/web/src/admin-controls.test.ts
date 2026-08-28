@@ -137,21 +137,11 @@ test("a channel offers renaming and deleting its repository", async () => {
 });
 
 test("the agent surfaces name a renamed channel by its new name", async () => {
-  const agents = await publicFile("screen-agents.js");
   const chats = await publicFile("screen-chats.js");
 
-  // My Agents reads the channel through the same helper the channel header
-  // does, rather than printing the raw id beside every agent and in the
-  // Repository field of its detail pane.
-  assert.match(agents, /^ {2}repositoryLabel,$/mu);
-  const subtitle = slice(agents, "function rowSubtitle(agent)", "/**");
-  assert.match(subtitle, /repositoryLabel\(task\.repositoryId\)/u);
-  assert.doesNotMatch(subtitle, /: task\.repositoryId,/u);
-  const specs = slice(agents, "function agentSpecs(agent)", "function detailPane");
-  assert.match(specs, /"Repository",[\s\S]*?repositoryLabel\(task\.repositoryId\)/u);
-
-  // The channel agent panel: the pill beside the status, both halves of the
-  // Activity line, and every pill in the Channels list.
+  // The channel agent panel names the repository through the shared label
+  // helper: the pill beside the status, both halves of the Activity line,
+  // and every pill in the Channels list.
   const spec = slice(chats, "function agentSpec(agent, repositoryId)", "function agentPanel()");
   assert.match(spec, /specPill\(`#\$\{repositoryLabel\(repositoryId\)\}`/u);
   assert.match(spec, /Nothing running in #\$\{esc\(repositoryLabel\(repositoryId\)\)\}/u);

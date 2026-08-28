@@ -946,8 +946,10 @@ test("first-run setup is exposed only while the control plane needs an owner", a
   assert.match(source, /data-act="auth-mode" data-value="bootstrap"/u);
 });
 
-test("settings floats above the three product routes", async () => {
+test("settings floats above the product routes", async () => {
   const source = await browserSource();
+  const agentConnections = await publicFile("screen-agents.js");
+  const styles = await publicFile("styles.css");
   const routes = /const ROUTES = new Set\(\[([\s\S]*?)\]\)/u.exec(source)?.[1];
   assert.notEqual(routes, undefined);
   const parsed = [...(routes ?? "").matchAll(/"([a-z]+)"/gu)].map(
@@ -955,7 +957,7 @@ test("settings floats above the three product routes", async () => {
   );
   // Settings and Advanced are categories in one modal, so neither can replace
   // the conversation as a router screen.
-  assert.deepEqual(parsed, ["chats", "agents", "notifications"]);
+  assert.deepEqual(parsed, ["chats", "notifications"]);
   assert.match(source, /state\.settingsOpen === true \? settingsDialog\(\) : ""/u);
   assert.match(source, /role="dialog"[\s\S]{0,80}aria-modal="true"/u);
   assert.match(source, /data-act="settings-section"/u);
@@ -968,6 +970,15 @@ test("settings floats above the three product routes", async () => {
     ),
     false,
   );
+  // The retired roster route is neither renderable nor accepted by the
+  // router. Old programmatic destinations therefore take the existing chats
+  // fallback instead of preserving a hidden copy of the page.
+  const productScreen = sourceOf(source, "screen", "billingBanner");
+  assert.doesNotMatch(productScreen, /case "agents":/u);
+  assert.doesNotMatch(source, /renderAgents|route: "agents"/u);
+  assert.doesNotMatch(agentConnections, /renderAgents|<h1>My Agents<\/h1>/iu);
+  assert.doesNotMatch(styles, /\.agents-split|\.agent-list-head/u);
+  assert.match(source, /if \(!ROUTES\.has\(route\)\) \{\s*route = "chats";/u);
 });
 
 test("settings exposes theme and sound effect preferences", async () => {

@@ -3571,384 +3571,9 @@ svg.ui-icon {
   gap: 7px;
 }
 
-/* -------------------------------------------------------------- agents ---- */
-
-.agents-split {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-
-.agent-list-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.agent-list-head .tabs {
-  border-bottom: none;
-  flex: none;
-}
-
-.agent-list-head .tab {
-  padding: 6px 10px;
-  font-size: 12.5px;
-}
-
-/* Was an inline `style="width:190px"` on the search box's wrapper — moved
-   to a class so the phone breakpoint can override it below. */
-.agent-search-wrap {
-  width: 190px;
-  flex: none;
-}
-
-.agent-rows {
-  padding: 6px;
-  display: grid;
-  gap: 2px;
-}
-
-.agent-row {
-  display: grid;
-  /* Face, everything else, progress, menu.
-     Six columns stood here: the provider, the status, the objective and the
-     repository each claimed one, so a single connection was four lines of
-     type arranged across the width and a reader had to sweep sideways to
-     assemble one sentence. They are now that sentence, under the name. The
-     trailing column is still sized explicitly: left as `auto` it collapses to
-     zero once the flexible columns claim the row, and the menu overflows. */
-  grid-template-columns: auto minmax(0, 1fr) auto 28px;
-  align-items: center;
-  gap: 11px;
-  width: 100%;
-  padding: 9px 11px;
-  border-radius: var(--radius);
-  text-align: left;
-  border: 1px solid transparent;
-  transition: background 0.14s ease, border-color 0.14s ease;
-}
-
-.agent-row:hover {
-  background: var(--bg-hover);
-}
-
-.agent-row.active {
-  background: var(--bg-active);
-  border-color: var(--border-strong);
-}
-
-.agent-row .ar-id {
-  min-width: 0;
-}
-
-.agent-row .ar-name {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.agent-row .ar-name > span {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.agent-row .ar-name .badge {
-  flex: none;
-}
-
-/* Provider, what it is doing, and where — one quiet line. */
-.agent-row .ar-sub {
-  font-size: 11.5px;
-  color: var(--text-3);
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Shared by the row and the card foot, so a run reads the same in both. It
-   collapses when there is nothing running: a 0% bar beside every idle
-   connection is a column of furniture that all says the same nothing. */
-.ar-prog {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ar-prog:empty {
-  display: none;
-}
-
-.ar-prog .bar {
-  width: 58px;
-  flex: none;
-}
-
-.ar-prog .ar-pct {
-  font-size: 11px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-  min-width: 26px;
-  text-align: right;
-}
-
-.agent-panel {
-  display: grid;
-  /* Hero, specs, tabs, body, composer. */
-  grid-template-rows: auto auto auto 1fr auto;
-  min-height: 0;
-  height: calc(100vh - 320px);
-  min-height: 500px;
-}
-
-.agent-panel .tabs {
-  padding: 0 12px;
-}
-
-/* The selected agent's identity, given the room the reference gives a title:
-   the face large enough to recognise, the name at heading size, and the
-   facts about the connection stated underneath rather than crowded beside
-   it. This replaces a 14px name on one line with the controls — which read
-   as another row of the list rather than as the subject of the panel. */
-.agent-hero {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  padding: 16px 12px 14px 18px;
-}
-
-.agent-hero .ah-face {
-  flex: none;
-}
-
-.agent-hero .ah-id {
-  min-width: 0;
-}
-
-.agent-hero .ah-name {
-  font-size: 19px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.agent-hero .ah-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-3);
-  margin-top: 3px;
-  min-width: 0;
-}
-
-/* The dot-separators between provider, presence and visibility. Quieter than
-   the words they part, so the line reads as one fact with qualifiers rather
-   than as three of equal weight. Carried on a class rather than a positional
-   selector: whether the presence dot is drawn depends on the agent, so the
-   separators are not at fixed positions in the row. */
-.agent-hero .ah-meta .sep {
-  color: var(--text-4);
-}
-
-.agent-hero .spacer {
-  flex: 1;
-}
-
-/* What the connection is set to, as a grid of labelled values.
-   This was three `sectionRail`s of chips: nine outlined pills, each with its
-   own glyph and ground, stacked in a column beside a label column — more
-   drawing than the nine short facts inside them were worth, and busier than
-   the conversation it sits above. A micro-label over a plain value states
-   the same thing and lets the values line up in columns, which is what makes
-   them comparable between one agent and the next. */
-.agent-specs {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-  gap: 12px 16px;
-  padding: 2px 18px 16px;
-}
-
-/* The same grid, dropped into a tab body that already has its own padding. */
-.agent-specs.bare {
-  padding: 0;
-}
-
-.agent-specs .spec {
-  min-width: 0;
-}
-
-/* The full-width one: the objective is a sentence, not a value, and wrapping
-   it into a 112px column is how it became an ellipsis in every panel. */
-.agent-specs .spec.wide {
-  grid-column: 1 / -1;
-}
-
-.agent-specs .spec-k {
-  display: block;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--text-4);
-}
-
-.agent-specs .spec-v {
-  display: block;
-  margin-top: 3px;
-  font-size: 12.5px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* The objective is the one value that is prose, so it wraps rather than
-   ellipsising at the first column edge — two lines, then a clamp, which is
-   the length the reference cards give a description. */
-.agent-specs .spec.wide .spec-v {
-  font-size: 13px;
-  line-height: 1.45;
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-}
-
-.agent-specs .spec-v.quiet {
-  color: var(--text-3);
-}
-
-.agent-specs .spec-v.green {
-  color: var(--green);
-}
-
-.agent-specs .spec-v.blue {
-  color: var(--blue);
-}
-
-.agent-specs .spec-v.orange {
-  color: var(--orange);
-}
-
-.task-body {
-  display: grid;
-  gap: 14px;
-  padding: 16px 18px;
-}
-
-.task-body .task-objective {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.4;
-}
-
-.task-body > .bar {
-  width: 100%;
-}
-
-/* The deck: the same connections as the list, laid out as cards. The head
-   above it keeps the filter tabs and the search box it always had, plus the
-   grid/list switch — the list is still the right shape for twenty agents,
-   so it stays rather than being replaced. */
-.agent-deck {
-  padding: 14px;
-}
-
-.agent-deck .tile-face {
-  flex: none;
-}
-
-/* The provider names the maker before the line says what the agent is doing,
-   the way the reference cards do. */
-.agent-deck .tile-sub .tile-by {
-  flex: none;
-  color: var(--text-2);
-  max-width: 45%;
-}
-
-/* The separator between the two hangs off the *second* half, not the first:
-   an ellipsis clips the end of a span, so an `::after` on the provider would
-   disappear exactly when the provider is long enough to need one. */
-.agent-deck .tile-sub .tile-say {
-  flex: 1;
-}
-
-.agent-deck .tile-sub .tile-say::before {
-  content: "· ";
-  color: var(--text-4);
-}
-
-.agent-deck-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* The heading of the connections list, with the roster's five counts set on
-   the same line. They were four `statTile` cards — four bordered boxes, four
-   icons and four lines of encouragement above a list whose own filter tabs
-   already carry the same numbers. The numbers were worth keeping; the boxes
-   were the bloat. */
-.agent-summary {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px 20px;
-  margin-bottom: 12px;
-}
-
-.agent-summary h2 {
-  font-size: 14.5px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.agent-summary .spacer {
-  flex: 1;
-}
-
-.agent-summary .asum {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  white-space: nowrap;
-}
-
-.agent-summary .asum-value {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-}
-
-.agent-summary .asum-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-3);
-}
-
 /* ------------------------------------------------------------- tiles ---- */
 
-/* The card grid, the labelled rail and the chip run below are one set: a
-   surface says what it holds with a quiet label, lays the things out as
-   tiles rather than as rows, and states the small facts about each as chips.
-   Kept general on purpose — My Agents uses all three, the repository grid
-   uses the add tile, and nothing here knows what an agent is. */
+/* Shared card grid primitives used by repository and connection surfaces. */
 
 .tile-grid {
   display: grid;
@@ -5547,7 +5172,6 @@ button.chip.lg:hover {
   .chan-row:active,
   .menu-item:active,
   .mention-item:active,
-  .agent-row:active,
   .tree-row:active,
   .roster-row-main:active,
   .icon-btn:active,
@@ -11187,16 +10811,11 @@ dialog.modal[open]::backdrop {
 }
 
 @media (max-width: 1180px) {
-  .agents-split,
   .coord-grid,
   .coord-cols-3 {
     grid-template-columns: 1fr;
   }
 
-  .agent-panel {
-    height: auto;
-    min-height: 520px;
-  }
 
   .code-shell {
     grid-template-columns: var(--tree-w) 1fr;
@@ -11696,23 +11315,12 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
-  /* The row no longer needs a tablet layout of its own. It was six columns
-     wide and had to be folded into three stacked areas here; two columns of
-     content and a menu fit at any width this tier covers, so the desktop
-     shape simply holds. */
-  .agent-row .ar-prog .bar {
-    width: 44px;
-  }
 }
 
 /* ----------------------------------------------------------- phone ---- */
 /* Real phone widths — iPhone SE (375) through Pro Max (430), common Android
-   widths down to 360. The 900px tier above stays tablet-shaped (it already
-   does real work collapsing the outer nav, the Code chat drawer, and the
-   agent-row layout); this tier is additive rather than a lower number for
-   the same rules, because "channel list + roster fixed at 268px" and
-   "message composer with two inline mini-selects" are still fine at 820px
-   and are not fine at 380px. */
+   widths down to 360. The 900px tier above stays tablet-shaped because its
+   outer navigation and Code chat drawer still fit at 820px and not at 380px. */
 @media (max-width: 600px) {
   .channel-rail {
     width: 52px;
@@ -12147,42 +11755,12 @@ dialog.modal[open]::backdrop {
 
   .chan-row,
   .roster-row-main,
-  .agent-row,
   .tree-row,
   .mention-item,
   .menu-item {
     min-height: 44px;
   }
 
-  /* My Agents' list header: four filter tabs, a spacer, and a 190px-wide
-     search box, all on one row on desktop. The tabs alone can run past a
-     phone's width before the search box is even considered, so the whole
-     row wraps and the search box — the widest, least essential-to-see-first
-     item — drops to a full-width row of its own. */
-  .agent-list-head {
-    flex-wrap: wrap;
-    row-gap: 8px;
-  }
-
-  .agent-search-wrap {
-    flex: 1 0 100%;
-    width: auto;
-  }
-
-  /* The panel's hero and its specs, at a width where a 19px name and three
-     icon buttons no longer fit on one line. The hero wraps its controls under
-     the name; the spec grid holds two columns rather than letting `auto-fit`
-     put four 112px values across a 375px screen. */
-  .agent-hero {
-    flex-wrap: wrap;
-    row-gap: 10px;
-    padding: 16px 14px 12px;
-  }
-
-  .agent-specs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 2px 14px 14px;
-  }
 
   .rail {
     grid-template-columns: minmax(0, 1fr);
@@ -12193,15 +11771,6 @@ dialog.modal[open]::backdrop {
     padding-top: 0;
   }
 
-  /* The bar goes; the percentage beside it says the same thing in a quarter
-     of the width, and a phone row needs that width for the name. */
-  .agent-row .ar-prog .bar {
-    display: none;
-  }
-
-  .agent-deck {
-    padding: 12px;
-  }
 
   /* Every screen's title row (`.page-head`) — icon, heading, and a trailing
      primary action like "Add Agent" or "Create new repository" — is a
@@ -13058,7 +12627,7 @@ dialog.modal[open]::backdrop {
   padding-top: var(--safe-top);
 }
 
-/* The generic screen header — Settings, Repositories, Agents. It sat out
+/* The generic screen header respects the top safe area. It sat out
    the first safe-area pass because browser chrome kept it clear; installed
    to a home screen (standalone, translucent status bar) the page draws
    under the clock on every screen, not only the chat ones. */
@@ -13177,12 +12746,6 @@ dialog.modal[open]::backdrop {
   min-height: 100dvh;
 }
 
-/* The `vh` straggler, for the same reason as the shell above. `.chan-list` is
-   no longer here: it has no height of its own to mis-size now that the whole
-   sidebar scrolls as one — see `.chan-scroll`. */
-.agent-panel {
-  height: calc(100dvh - 320px);
-}
 
 /* A flick that reaches the end of a drawer or the transcript must stop
    there, not hand its momentum to whatever scroller is behind it — a

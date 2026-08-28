@@ -194,9 +194,7 @@ import {
   cancelTask,
   connectAgent,
   connectGitHubAccount,
-  renderAgents,
   retryTask,
-  selectAgent,
   startAddAgentFlow,
 } from "./screen-agents.js";
 import {
@@ -1553,9 +1551,8 @@ function topbar() {
  * agent has done is not that; it remains reachable by name in the quick
  * switcher.
  *
- * My Agents is absent for the same reason it always was: a roster of agent
- * connections is not the account's own things either, and it keeps the quick
- * switcher and the channel agent menu's "Connect agents" as its doors.
+ * Agent connections live in Settings, while the channel roster remains the
+ * place to add a connected agent to a repository.
  *
  * The count is read here rather than carried in state, so a number in this
  * menu cannot disagree with the list it sits above.
@@ -4494,7 +4491,6 @@ function accentInk(accent) {
 
 const ROUTES = new Set([
   "chats",
-  "agents",
   "notifications",
 ]);
 
@@ -4505,8 +4501,6 @@ function currentAgent() {
 
 function screen() {
   switch (state.route) {
-    case "agents":
-      return renderAgents();
     case "notifications":
       return renderNotifications();
     default:
@@ -4906,7 +4900,6 @@ function switcherEntries(query) {
       })),
     ...[
       { route: "chats", label: "Chats" },
-      { route: "agents", label: "My agents" },
       { route: "notifications", label: "Notifications" },
     ].map((screen) => ({
       kind: "Screen",
@@ -7459,7 +7452,6 @@ function renderNow() {
   void ensureAgentOptions(state.selectedAgent, () => {
     if (
       state.route === "code" ||
-      state.route === "agents" ||
       (state.route === "chats" &&
         primaryDestinationForWorkspace(activeChannelId()).kind === "agent")
     ) {
@@ -7548,8 +7540,8 @@ function renderNow() {
         render();
       }
     });
-    // The roster's model/effort pickers read the same real options My Agents
-    // and Code load — loaded here too, rather than invented for this screen.
+    // The roster's model/effort pickers read the provider's real options,
+    // loaded here rather than invented for this screen.
     //
     // By vendor, and for everyone's agents. The options route answers about
     // the CLI installed on this host and takes no per-user argument, so one
@@ -9913,33 +9905,7 @@ document.addEventListener("click", (event) => {
     case "chat-toggle":
       toggleChat(render);
       return;
-    /* Agents */
-    case "agent-pick":
-      selectAgent(value, render);
-      return;
-    case "agent-tab":
-      state.agentTab = value;
-      render();
-      // The Files tab is scoped to this agent's own work now, which means it
-      // needs that work's changeset — one fetch per task, cached. Without
-      // this the tab would be honest and permanently empty, which is only
-      // half the fix.
-      if (value === "files") {
-        const task = currentAgent()?.task;
-        if (task !== undefined) {
-          void ensureChangeSetForTask(task.id, render);
-        }
-      }
-      return;
-    case "agent-filter":
-      state.agentFilter = value;
-      render();
-      return;
-    case "agent-view":
-      state.agentView = value;
-      persist("ag.agentview", value);
-      render();
-      return;
+    /* Agent connections */
     case "agent-connect":
       void connectAgent(value, render);
       return;
@@ -9969,11 +9935,7 @@ document.addEventListener("click", (event) => {
         })
         .catch((error) => toast(error.message, "error"));
       return;
-    case "agent-switch":
-    case "agent-menu": {
-      // Was folded in with the navigation cases below, so the three dots on
-      // an agent row did nothing except change screen — including on the
-      // Agents screen itself, where it changed nothing at all.
+    case "agent-switch": {
       const agent = myAgents().find((entry) => entry.id === value);
       const provider = state.providers.find((entry) => entry.id === value);
       const mine = provider?.ownCredential !== undefined;
@@ -9998,14 +9960,9 @@ document.addEventListener("click", (event) => {
               : `Connect ${agentLabelOf(value)}`,
           iconName: "robot",
         },
-        { act: "agent-usage", value, label: "Usage", iconName: "chart" },
       ]);
       return;
     }
-    case "agent-info":
-    case "agent-usage":
-      navigate("agents");
-      return;
     // Asks the vendor again rather than reading the kept answer. A usage card
     // that said "no session has recorded rate limits yet" would otherwise go
     // on saying it for the rest of the session, including after the run that
@@ -10859,17 +10816,6 @@ document.addEventListener("input", (event) => {
     render();
     if (focused) {
       const next = $("[data-act='repo-search']");
-      next?.focus();
-      next?.setSelectionRange(next.value.length, next.value.length);
-    }
-    return;
-  }
-  if (act === "agent-search") {
-    state.agentQuery = node.value;
-    const focused = document.activeElement === node;
-    render();
-    if (focused) {
-      const next = $("[data-act='agent-search']");
       next?.focus();
       next?.setSelectionRange(next.value.length, next.value.length);
     }

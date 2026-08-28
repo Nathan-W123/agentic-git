@@ -1677,9 +1677,9 @@ const IS_AUTH_FAILURE_RE =
  * Whether an error is the agent's own vendor sign-in failing — as opposed
  * to some other credential the run touched. The push path fails in GitHub's
  * name when the *submitter's* GitHub token is refused, and those failures
- * speak the same auth vocabulary ("401", "unauthorized"); but "reconnect me
- * from My Agents" is the wrong door for them — that fix lives in Settings →
- * GitHub, and the push failure's own words already point there. Anything
+ * speak the same auth vocabulary ("401", "unauthorized"); but reconnecting
+ * an agent is the wrong door for them — that fix lives in Settings → GitHub,
+ * and the push failure's own words already point there. Anything
  * naming GitHub keeps those words.
  */
 function isVendorSignInFailure(error: string): boolean {
@@ -1715,7 +1715,7 @@ export function explainAnswerFailure(error?: string): string {
   if (isVendorSignInFailure(error ?? "")) {
     return (
       "I could not answer that — my sign-in has expired. Reconnect me from " +
-      "My Agents."
+      "Settings → Agents."
     );
   }
   const cleaned = (error ?? "").replace(/\s+/gu, " ").trim();
@@ -1851,7 +1851,7 @@ function explainTaskFailure(error: string, status?: string): string {
   if (isVendorSignInFailure(error)) {
     return (
       "I could not finish this — my sign-in has expired. Reconnect me from " +
-      "My Agents and send this again."
+      "Settings → Agents and send this again."
     );
   }
   // Split before collapsing whitespace: the alarm is one sentence and reads
@@ -6392,8 +6392,8 @@ export class ApiGateway {
       // Commands belong to every authenticated conversation surface, not only
       // to a channel that happened to have loaded its first page of messages.
       // Sending the catalogue with the session makes it available to a private
-      // agent chat opened directly from My Agents or Code, while the channel
-      // response continues to carry it for older clients.
+      // agent chat opened directly from a channel, while the channel response
+      // continues to carry it for older clients.
       this.sendJson(response, 200, {
         ...principal,
         slashCommands: SLASH_COMMANDS,
@@ -15706,8 +15706,8 @@ export class ApiGateway {
       if (!connections.some((connection) => connection.provider === provider)) {
         return (
           `${who}'s ${label} is not connected any more — the sign-in behind ` +
-          `it has been removed or has expired. Only ${who} can reconnect it, ` +
-          `from My Agents; until then, mention another agent by name.`
+          `it has been removed or has expired. Only ${who} can reconnect it ` +
+          `from Settings → Agents; until then, mention another agent by name.`
         );
       }
       if (PROVIDER_TO_VENDOR[provider] === undefined) {

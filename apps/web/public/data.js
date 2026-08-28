@@ -359,13 +359,6 @@ export const state = {
   repoQuery: "",
   repoSort: "recent",
   repoView: "grid",
-  agentFilter: "all",
-  agentQuery: "",
-  /* Whether My Agents draws its connections as a deck of cards or as rows.
-     Cards are the default because a handful of agents reads better as things
-     than as a table; the list is still the better shape for a screenful, so
-     the choice is the reader's and is kept across sessions. */
-  agentView: window.localStorage.getItem("ag.agentview") ?? "grid",
   coordinatorTab: "overview",
 
   /* Chats screen — one group channel per repository, backed by
@@ -821,7 +814,6 @@ export function forgetOtherAccount(storage, userId) {
     "ag.project",
     "ag.repo",
     "ag.agent",
-    "ag.agentview",
     "ag.avatar",
     "ag.chanCollapsed",
     "ag.chandrafts",
