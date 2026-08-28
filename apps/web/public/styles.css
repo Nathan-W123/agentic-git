@@ -678,20 +678,36 @@ svg.ui-icon {
   overflow: hidden;
 }
 
-/* The sidebar crown owns both the product home and the control that changes
-   its width. Keeping those together means the control remains at the top of
-   the rail in both states instead of jumping into the conversation header. */
-.chan-sidebar-top {
+/* The crown: the channel's picture, its name, and the control that folds the
+   navigation away — the head of the banner, cut to the navigation's own
+   width so it stands over the columns it belongs to and the conversation's
+   header begins where they end.
+
+   It used to be a row inside the sidebar, one bar-height below a banner that
+   opened with the same picture and the same name. Two crowns for one room.
+   This is the one, and the width is what ties it to the navigation: it
+   travels with the sidebar's own fold, on the same duration and the same
+   curve, so the pair reads as one column changing width rather than as two
+   surfaces that happen to move at once. */
+.chan-crown {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 52px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-soft);
+  /* The banner's own left padding is already inside this, so the picture
+     lands exactly where the sidebar's crown put it and the right edge lands
+     on the sidebar's. */
+  width: calc(var(--nav-w) - 18px);
+  min-width: 0;
+  align-self: stretch;
   overflow: hidden;
+  /* The sidebar's own right edge, carried up through the bar: one line from
+     the bottom of the screen to the top says where the navigation ends and
+     the conversation begins, which is the whole point of dividing the bar. */
+  border-right: 1px solid var(--border-soft);
   transition:
-    gap var(--motion-content) var(--ease-motion),
-    padding var(--motion-content) var(--ease-motion);
+    width var(--motion-content) var(--ease-motion),
+    gap var(--motion-content) var(--ease-motion);
 }
 
 /* The picture control that stands in for the rail's own when there is no
@@ -802,13 +818,21 @@ svg.ui-icon {
 
 .brand-text {
   display: grid;
+  min-width: 0;
   line-height: 1.2;
 }
 
+/* Cut rather than wrapped: the crown is one line inside a bar of a fixed
+   height, and a two-line repository name would print over the hairline under
+   it. The id is on the element's own title for whoever needs the whole of
+   it. */
 .brand-text b {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The outer app rail — `.sidebar`, `.brand`, `.repo-switch`, `.nav`,
@@ -4838,6 +4862,13 @@ button.chip.lg:hover {
      header is fixed to the viewport rather than to the shell, and the panel
      takes the whole screen. */
   --chan-head-h: calc(56px + var(--safe-top));
+  /* And how wide the navigation is, from the shell's left edge to the right
+     edge of the sidebar: the padding this shell starts with, the rail, the
+     gutter between them and the sidebar itself. The crown at the head of the
+     banner is cut to this, so the one place the channel is named stands in
+     the same column as the navigation it names — and folds with it. Written
+     as one number here because four rules need to agree about it. */
+  --nav-w: calc(8px + var(--rail-w) + 8px + var(--chan-sidebar-w));
   /* And how tall a side panel's own header is — one short row of tools, set
      once here because every panel shares `.thread-head`. */
   --thread-head-h: 38px;
@@ -4868,6 +4899,21 @@ button.chip.lg:hover {
   padding-top: 8px;
 }
 
+/* The navigation is narrower in the two states where one of its columns is
+   away, and the crown is cut to whatever is left. Collapsed, that is the rail
+   alone — which is exactly enough for the one control that brings the sidebar
+   back. */
+.chats-shell.no-rail {
+  --nav-w: calc(8px + var(--chan-sidebar-w));
+}
+
+@media (min-width: 601px) {
+  .chats-shell.chan-collapsed,
+  .chats-shell.no-rail.chan-collapsed {
+    --nav-w: calc(8px + var(--rail-w));
+  }
+}
+
 /* A dedicated channel switcher stays narrow while the adjacent sidebar is
    free to hold tools and the active channel's roster. */
 .channel-rail {
@@ -4883,7 +4929,9 @@ button.chip.lg:hover {
   border-radius: var(--radius-xl);
 }
 
-.channel-rail-toggle,
+/* No collapse control at the head of this column any more — it is in the
+   crown, which keeps it in one place whether the sidebar is open or folded
+   away. See `.chan-crown`. */
 .channel-rail-new,
 .channel-rail-button {
   display: grid;
@@ -4895,7 +4943,6 @@ button.chip.lg:hover {
   transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
 }
 
-.channel-rail-toggle:hover,
 .channel-rail-new:hover,
 .channel-rail-button:hover {
   background: var(--surface-3);
@@ -4903,7 +4950,6 @@ button.chip.lg:hover {
   border-radius: var(--radius-sm);
 }
 
-.channel-rail-toggle:focus-visible,
 .channel-rail-new:focus-visible,
 .channel-rail-button:focus-visible {
   outline: 2px solid var(--accent-line);
@@ -4911,18 +4957,23 @@ button.chip.lg:hover {
   color: var(--text);
 }
 
+/* Where the reader is, said three ways at once: the room's mark is lit, it
+   carries a ring of the accent, and the bar beside it is longer and thicker
+   than the hairline it used to be. A tenth of an accent behind a 36px picture
+   was the whole of the old signal, and against a channel with a photograph of
+   its own it disappeared entirely — which is how a rail of near-identical
+   marks ended up with no answer to "which one am I in". */
 .channel-rail-entry.active .channel-rail-button {
-  background: color-mix(in srgb, var(--salmon) 10%, transparent);
+  background: color-mix(in srgb, var(--salmon) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--salmon) 46%, transparent);
   color: var(--text);
   border-radius: var(--radius-sm);
 }
 
-.channel-rail-toggle,
 .channel-rail-new {
   height: 34px;
 }
 
-.channel-rail-toggle svg,
 .channel-rail-new svg {
   width: 17px;
   height: 17px;
@@ -4965,9 +5016,9 @@ button.chip.lg:hover {
   content: "";
   position: absolute;
   left: -7px;
-  width: 2px;
-  height: 24px;
-  border-radius: 0 2px 2px 0;
+  width: 3px;
+  height: 30px;
+  border-radius: 0 3px 3px 0;
   background: var(--salmon);
 }
 
@@ -4979,9 +5030,16 @@ button.chip.lg:hover {
   object-fit: cover;
 }
 
+/* A channel with no picture of its own wears two letters and one steady
+   tint, both derived from what it is called and what it is (see
+   `channelInitials` and `channelTone` in screen-chats.js). One letter on one
+   grey was not a distinguishing mark: two channels whose names began with the
+   same letter drew the same square, and the rail is nothing but squares.
+   `--pic-tone` comes in on the element, so the fallback still has a colour
+   here if it ever arrives without one. */
 .channel-picture-fallback {
-  background: var(--surface-3);
-  color: var(--text-2);
+  background: color-mix(in srgb, var(--pic-tone, var(--muted)) 20%, var(--surface-3));
+  color: color-mix(in srgb, var(--pic-tone, var(--text-2)) 45%, var(--text));
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -5039,13 +5097,15 @@ button.chip.lg:hover {
   width: var(--chan-sidebar-w);
   flex: none;
   display: grid;
-  /* Crown, search, everything else in one scroller, then the account footer.
-     The panel used to be four rows with two scrollbars in it — a
-     capped channel list above an independently scrolling roster — which is
-     two things to drag inside 256 pixels and a band of dead panel whenever
-     neither list was long enough to fill its share. `.chan-scroll` is the
-     one that moves. */
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* Quick links, everything else in one scroller, then the account footer.
+     Three rows rather than four: the crown that used to open this panel is
+     drawn once at the head of the banner now, where it stands in this
+     column's own width. The panel before that was four rows with two
+     scrollbars in it — a capped channel list above an independently scrolling
+     roster — which is two things to drag inside 256 pixels and a band of dead
+     panel whenever neither list was long enough to fill its share.
+     `.chan-scroll` is the one that moves. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
   border: 1px solid var(--border-soft);
@@ -6131,27 +6191,28 @@ button.chip.lg:hover {
   border-bottom: 1px solid var(--border-soft);
 }
 
+/* The mark that says the rest of this bar is about a room. It leads the
+   conversation's own zone now that the name is in the crown, so it is drawn
+   at the weight the name used to have rather than as a glyph beside it. */
 .chan-head .ch-hash {
-  width: 19px;
-  height: 19px;
+  width: 18px;
+  height: 18px;
   color: var(--text-3);
   flex: none;
 }
 
+/* No `.ch-name` in here. The channel is named once, in the crown at the head
+   of this bar; what is left is one line of what the room is — its counts, its
+   muted state, its preview — centred in the bar rather than stacked under a
+   title. Half a point larger than it was for the same reason: it is the line
+   now, not the subtitle of one. */
 .chan-head .ch-title {
   min-width: 0;
 }
 
-.chan-head .ch-name {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
 .chan-head .ch-desc {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-3);
-  margin-top: 1px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -10943,10 +11004,12 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
-  .chats-shell.chan-collapsed .chan-sidebar-top {
+  /* Collapsed, the crown is the rail's width and holds one control. No
+     padding of its own and no centring: the banner's 18px already places a
+     40px button on the rail's own centre line, which is where the "+" and
+     every channel mark below it stand. */
+  .chats-shell.chan-collapsed .chan-crown {
     gap: 0;
-    justify-content: center;
-    padding: 10px 0 6px;
   }
 
   /* Folded to nothing rather than merely hidden: left at `flex: 1` it still
@@ -11383,10 +11446,6 @@ dialog.modal[open]::backdrop {
     padding: 8px 5px;
   }
 
-  .channel-rail-toggle {
-    display: none;
-  }
-
   .channel-rail-new,
   .channel-rail-button {
     width: 40px;
@@ -11421,10 +11480,26 @@ dialog.modal[open]::backdrop {
     display: inline-grid !important;
   }
 
-  /* See `.drawer-close` above — the drawer's own way out, next to the search
-     box it opens with. */
+  /* See `.drawer-close` above — the drawer's own way out. It rides on the
+     quick links now that the crown it used to sit in is drawn at the head of
+     the banner: one column of links, and the cross beside them, centred on
+     the pair rather than stacked underneath as a third row. */
   .drawer-close {
     display: inline-grid;
+  }
+
+  .chan-quick-links {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .chan-quick-links .chan-quick-link {
+    grid-column: 1;
+  }
+
+  .chan-quick-links .drawer-close {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: center;
   }
 
   /* Off-canvas, and draggable.
@@ -11569,23 +11644,32 @@ dialog.modal[open]::backdrop {
   }
 
   /* The channel is already named, in the widest type on the row; the small
-     bubble beside the name was spending 19px plus a gap saying so again. */
+     bubble beside the counts was spending 19px plus a gap saying so again. */
   .chats-shell .chan-head .ch-hash {
     display: none;
   }
 
-  /* Whatever room is left after the two buttons, and no more — a long
-     channel name otherwise pushes the actions button off the right edge
-     rather than being cut where it runs out of banner. */
-  .chats-shell .chan-head .ch-title {
-    flex: 1;
-    min-width: 0;
+  /* There is no navigation column to stand over here — the sidebar is a
+     drawer — so the crown takes whatever the row has left and the name is
+     cut when it runs out. The drawer button leads the row regardless of
+     where it sits in the markup: on a phone the way back to the navigation
+     is the first thing at the top left, and on a desk it is not drawn at
+     all. */
+  .chats-shell .chan-head .chan-crown {
+    flex: 1 1 auto;
+    width: auto;
+    border-right: 0;
   }
 
-  .chats-shell .chan-head .ch-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .chan-head .chan-sidebar-btn {
+    order: -1;
+  }
+
+  /* And the counts take only what they need, so a long name is cut before
+     they are. */
+  .chats-shell .chan-head .ch-title {
+    flex: 0 1 auto;
+    min-width: 0;
   }
 
   /* Same shape of overflow as the header, and the same fix: the counts and

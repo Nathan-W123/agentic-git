@@ -131,20 +131,66 @@ function countBadge(count) {
     : `<span class="dot-badge">${esc(String(count > 99 ? "99+" : count))}</span>`;
 }
 
+/**
+ * Two letters for a channel that has no picture of its own.
+ *
+ * One letter was not enough to tell channels apart. The rail is a column of
+ * marks and nothing else, so "KUMI" and "KUMI.WEBSITE" both drew a lone "K" —
+ * two identical squares stacked on each other, and the only way to find out
+ * which was which was to hover them one at a time.
+ *
+ * A dot is a word boundary here as much as a dash or a space is: repository
+ * names are written both ways and neither is more of a separator than the
+ * other. A name with no boundary in it takes its first two letters instead of
+ * standing on one, so a single word is still two marks wide.
+ */
+function channelInitials(label) {
+  const parts = label.split(/[-_\s./]+/u).filter(Boolean);
+  if (parts.length === 0) {
+    return "#";
+  }
+  const letters =
+    parts.length === 1
+      ? Array.from(parts[0]).slice(0, 2)
+      : parts.slice(0, 2).map((part) => Array.from(part)[0]);
+  return letters.join("").toUpperCase();
+}
+
+/* The tints a fallback picture may wear, and deliberately none of the colours
+   that mean something elsewhere: green, amber and red are states a run can be
+   in, and a channel is not a state. Identity only. */
+const CHANNEL_TONES = [
+  "var(--salmon)",
+  "var(--lavender)",
+  "var(--blue)",
+  "var(--cyan)",
+  "var(--pink)",
+];
+
+/**
+ * One steady tint per channel, so two initials that still collide do not.
+ *
+ * Derived from the id rather than the display name: renaming a channel must
+ * not repaint the mark somebody has learned to find in the rail.
+ */
+function channelTone(repositoryId) {
+  let hash = 0;
+  for (const character of String(repositoryId)) {
+    hash = (hash * 31 + character.codePointAt(0)) % 9973;
+  }
+  return CHANNEL_TONES[hash % CHANNEL_TONES.length];
+}
+
 function channelPictureMarkup(repositoryId, size = 34) {
   const picture = channelPicture(repositoryId);
   if (picture !== undefined) {
     return `<img class="channel-picture" src="${esc(picture)}" alt="" width="${size}" height="${size}">`;
   }
   const label = repositoryLabel(repositoryId);
-  const initials =
-    label
-      .split(/[-_\s]+/u)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part[0]?.toUpperCase() ?? "")
-      .join("") || "#";
-  return `<span class="channel-picture channel-picture-fallback" style="width:${size}px;height:${size}px">${esc(initials)}</span>`;
+  const initials = channelInitials(label);
+  return `<span class="channel-picture channel-picture-fallback" style="width:${size}px;height:${size}px;--pic-tone:${channelTone(
+    repositoryId,
+  )}">${esc(initials)}</span>`;
 }
 
 /**
@@ -166,11 +212,12 @@ function channelRail(activeRepositoryId) {
   const repositories = [...state.repositories].sort((left, right) =>
     left.id.localeCompare(right.id),
   );
+  // No collapse control at the head of this column any more. There was one
+  // here and a second one in the crown directly beside it, both drawn with
+  // the same glyph and both doing the same thing — the crown's is the only
+  // one now, and it keeps its place in the crown whether the sidebar is open
+  // or folded away. See `chanCrown`.
   return `<nav class="channel-rail" aria-label="Channels">
-    <button type="button" class="channel-rail-toggle" data-act="chan-collapse-toggle"
-      title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
-      aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
-      aria-pressed="${state.chanCollapsed === true}">${icon("columns")}</button>
     <div class="channel-rail-list">
       ${repositories
         .map((repo) => {
@@ -1530,6 +1577,74 @@ function section(label, act, value, title, cls, key) {
   </div>`;
 }
 
+/**
+ * The one place this channel is named, and the one control that folds the
+ * navigation away.
+ *
+ * It used to be drawn twice. The banner across the top of the shell opened
+ * with the channel's name and its picture, and the sidebar's own crown —
+ * directly underneath it, forty pixels down and eight pixels to the left —
+ * opened with the same name and the same picture again. Two identities for
+ * one room, stacked, and neither of them the obvious one to press.
+ *
+ * There is one now, and it stands in the navigation's own width at the head
+ * of the bar: the picture, the name, and the control that collapses the
+ * columns beneath it. Everything to the right of it in that bar belongs to
+ * the conversation instead — see `chanHeader`.
+ *
+ * The collapse control lives here rather than in the rail because a control
+ * that changes the width of the navigation should not move when the
+ * navigation changes width. Collapsed, the crown narrows to the rail and this
+ * is the only thing left in it, on the rail's own centre line.
+ */
+function chanCrown(activeRepositoryId) {
+  const channel = esc(activeRepositoryId ?? "");
+  const label = repositoryLabel(activeRepositoryId ?? "");
+  const fold = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
+  return `<div class="chan-crown">
+    <!-- The name is in the label as well as in the button, because this is
+         the only place the room is named now: an accessible name of "Channel
+         info" replaces the text inside it, which would have left a reader
+         using a screen reader with no way to hear which channel they are
+         in. -->
+    <button type="button" class="chan-brand" data-act="channel-info"
+      data-value="${channel}" title="Channel info"
+      aria-label="${esc(label)} — channel info">
+      ${channelPictureMarkup(activeRepositoryId ?? "", 26)}
+      <!-- The id on the name itself, as it was on the banner's before this:
+           a channel keeps the id every task, run and API path addresses it
+           by however many times it is renamed. -->
+      <span class="brand-text" title="${channel}"><b>${esc(label)}</b></span>
+    </button>
+    ${
+      // The two controls the rail used to own, for the case where there is
+      // no rail. Making a second channel is the only way out of the
+      // single-channel case, and the picture beside the name is the only
+      // place that picture can be set — neither may go away with the
+      // switcher they happened to be standing next to.
+      showsChannelRail()
+        ? ""
+        : `<label class="icon-btn chan-crown-picture"
+             title="Change picture for ${esc(label)}"
+             aria-label="Change picture for ${esc(label)}">${icon("pencil")}
+             <input type="file" accept="image/*" data-act="channel-picture-pick"
+               data-repository="${channel}" hidden>
+           </label>
+           ${iconButton("plus", {
+             act: "channel-new",
+             value: activeRepositoryId ?? "",
+             title: "New channel",
+             cls: "chan-crown-new",
+           })}`
+    }
+    <button type="button" class="icon-btn desk-only chan-collapse-btn"
+      data-act="chan-collapse-toggle"
+      title="${fold}"
+      aria-pressed="${state.chanCollapsed === true}"
+      aria-label="${fold}">${icon("columns")}</button>
+  </div>`;
+}
+
 function chanSidebar(activeRepositoryId) {
   const roster = channelAgentsFor(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
@@ -1542,51 +1657,19 @@ function chanSidebar(activeRepositoryId) {
 
   const channel = esc(activeRepositoryId ?? "");
   return `<aside class="chan-sidebar" aria-label="Channel tools and account">
-    <!-- The collapse control belongs to the surface it changes. It stays in
-         this crown when the sidebar becomes an icon rail, so expanding it
-         never requires hunting in the conversation header. -->
-    <div class="chan-sidebar-top">
-      <button type="button" class="chan-brand" data-act="channel-info"
-        data-value="${channel}" title="Channel info" aria-label="Channel info">
-        ${channelPictureMarkup(activeRepositoryId ?? "", 28)}
-        <span class="brand-text"><b>${esc(
-          repositoryLabel(activeRepositoryId ?? ""),
-        )}</b></span>
-      </button>
-      <button type="button" class="icon-btn desk-only chan-collapse-btn"
-        data-act="chan-collapse-toggle"
-        title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
-        aria-pressed="${state.chanCollapsed === true}"
-        aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}">${icon(
-          "columns",
-        )}</button>
-      ${
-        // The two controls the rail used to own, for the case where there is
-        // no rail. Making a second channel is the only way out of the
-        // single-channel case, and the picture beside the name is the only
-        // place that picture can be set — neither may go away with the
-        // switcher they happened to be standing next to.
-        showsChannelRail()
-          ? ""
-          : `<label class="icon-btn chan-crown-picture"
-               title="Change picture for ${esc(repositoryLabel(activeRepositoryId ?? ""))}"
-               aria-label="Change picture for ${esc(repositoryLabel(activeRepositoryId ?? ""))}">${icon("pencil")}
-               <input type="file" accept="image/*" data-act="channel-picture-pick"
-                 data-repository="${channel}" hidden>
-             </label>
-             ${iconButton("plus", {
-               act: "channel-new",
-               value: activeRepositoryId ?? "",
-               title: "New channel",
-               cls: "chan-crown-new",
-             })}`
-      }
-      ${iconButton("close", {
-        act: "chan-sidebar-close",
-        title: "Close",
-        cls: "drawer-close",
-      })}
-    </div>
+    <!-- No crown in here. The channel's picture and name are drawn once, in
+         \`chanCrown\`, at the head of the bar across the top of the shell —
+         where they stand in this column's own width. What is left in this
+         panel is what the panel is for: the two places to browse, the
+         roster, and the account.
+
+         The drawer's own way out rides on the quick links rather than on a
+         row of its own: on a phone this panel is off-canvas, and the row
+         that used to hold the close button was the same row that held the
+         name it no longer draws.
+
+         The backticks are escaped because this comment is inside a template
+         literal, where a bare one would close the string. -->
     <nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace">
       <button type="button" class="chan-quick-link${state.chanThreadList === true ? " on" : ""}"
         data-act="channel-threads-toggle" aria-pressed="${state.chanThreadList === true}"
@@ -1598,6 +1681,11 @@ function chanSidebar(activeRepositoryId) {
         title="Browse repository files">
         ${icon("folder")}<span>Files</span>
       </button>
+      ${iconButton("close", {
+        act: "chan-sidebar-close",
+        title: "Close",
+        cls: "drawer-close",
+      })}
     </nav>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
@@ -1818,10 +1906,28 @@ function previewLink(repositoryId) {
   </span>`;
 }
 
+/**
+ * The bar across the top of the shell: the crown at its head, and everything
+ * this conversation is and can be done to, after it.
+ *
+ * The bar spans the whole shell and nothing underneath it can move it — a
+ * thread opening narrows the conversation, not the bar. What changed is who
+ * owns which part of it. The first zone is the navigation's, exactly as wide
+ * as the columns below it, and it is where the channel is named (see
+ * `chanCrown`). The rest is the conversation's own header: how many people
+ * and agents are in the room, whether it is muted, whether a preview is up,
+ * and the actions on the room itself.
+ *
+ * Which is why there is no name in it any more. The crown three hundred
+ * pixels to the left already says which room this is, and a second copy of
+ * the same word on the same line was the loudest thing in a bar whose job is
+ * to be quiet.
+ */
 function chanHeader(repositoryId) {
   const roster = channelAgentsFor(repositoryId);
   const people = channelPeopleFor(repositoryId);
   return `<header class="chan-head">
+    ${chanCrown(repositoryId)}
     <!-- No hamburger. It opened the outer app rail, which stopped being
          rendered when this sidebar became the navigation, so between 600 and
          900 pixels the header led with a button that did nothing at all. The
@@ -1848,14 +1954,10 @@ function chanHeader(repositoryId) {
       aria-expanded="${state.chanSidebarOpen === true}"
       title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
+    <!-- What the room is, rather than what it is called: the crown at the
+         head of this bar carries the name, and the id it is addressed by.
+         One line, because with the name gone there is only ever one. -->
     <div class="ch-title">
-      <!-- What the repository is called, which is its id until somebody
-           renames it from the menu on the right of this header. The id stays
-           the title attribute: it is what every task, run and API path
-           addresses, so a renamed channel must still be identifiable. -->
-      <div class="ch-name" title="${esc(repositoryId ?? "")}">${esc(
-        repositoryLabel(repositoryId ?? ""),
-      )}</div>
       <div class="ch-desc">
         <!-- Counted, not spelled out. "3 agents, 2 teammates" is six words
              for two numbers, and it grew or shrank with the plural — the two
@@ -7177,6 +7279,9 @@ export function renderChats() {
   return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}${rail ? "" : " no-rail"}${columns > 1 ? ` panels-${columns}` : ""}">
     <!-- The channel's banner, first in the shell and first in the reading
          order, because it is the bar across the top of everything below it.
+         It opens with the crown — the one place this room is named, standing
+         in the navigation's own width — and carries the conversation's own
+         header after it.
          It used to be the conversation column's own first row, which meant a
          thread or a file opening beside the conversation narrowed the column
          and shoved the channel's name, counts and actions leftward with it —

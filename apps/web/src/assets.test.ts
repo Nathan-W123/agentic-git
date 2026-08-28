@@ -1022,16 +1022,28 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     chats.indexOf("function chanSidebar"),
     chats.indexOf("/* ---------------------------------------------------------- chan main"),
   );
+  const crown = chats.slice(
+    chats.indexOf("function chanCrown"),
+    chats.indexOf("function chanSidebar"),
+  );
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
     chats.indexOf("function threadParticipants"),
   );
 
-  // The control stays with the surface it changes; the conversation header
-  // keeps only the phone button that opens the off-canvas drawer.
-  assert.match(sidebar, /class="chan-sidebar-top"/u);
-  assert.match(sidebar, /data-act="chan-collapse-toggle"/u);
-  assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
+  // The control belongs to the crown, which stands in the navigation's own
+  // width in both states — so it neither moves nor multiplies when the
+  // sidebar folds. There is exactly one of it in the screen; the rail's copy
+  // of the same button, beside it and drawn with the same glyph, is gone. The
+  // sidebar keeps only the phone button that opens the off-canvas drawer.
+  assert.match(crown, /class="chan-crown"/u);
+  assert.match(crown, /data-act="chan-collapse-toggle"/u);
+  assert.doesNotMatch(sidebar, /data-act="chan-collapse-toggle"/u);
+  assert.equal(
+    chats.split('data-act="chan-collapse-toggle"').length - 1,
+    1,
+    "one collapse control, in one place, in both states",
+  );
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
   // Account actions stay behind the avatar, while Settings is always visible
@@ -1071,7 +1083,7 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.match(chats, /function channelPictureMarkup/u);
   assert.match(
     chats,
-    /function channelPictureMarkup[\s\S]*?const label = repositoryLabel\(repositoryId\);[\s\S]*?const initials =\s*label\s*\.split/u,
+    /function channelPictureMarkup[\s\S]*?const label = repositoryLabel\(repositoryId\);[\s\S]*?const initials = channelInitials\(label\);/u,
     "an unset channel picture should follow the repository's current display name",
   );
   assert.match(chats, /function channelRail/u);
@@ -1086,13 +1098,17 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     css,
     /\.chats-shell\.chan-collapsed[^}]*\.channel-rail[^}]*display: none;/u,
   );
+  // And the room the reader is in is said three ways, because a rail of
+  // near-identical marks cannot answer "which one am I in" with a hairline
+  // and a tenth of an accent: a longer, thicker bar, a stronger wash, and a
+  // ring around the mark itself.
   assert.match(
     css,
-    /\.channel-rail-entry\.active::before \{[\s\S]{0,180}width: 2px;[\s\S]{0,140}background: var\(--salmon\);/u,
+    /\.channel-rail-entry\.active::before \{[\s\S]{0,180}width: 3px;[\s\S]{0,140}background: var\(--salmon\);/u,
   );
   assert.match(
     css,
-    /\.channel-rail-entry\.active \.channel-rail-button \{[\s\S]{0,120}var\(--salmon\)/u,
+    /\.channel-rail-entry\.active \.channel-rail-button \{[\s\S]{0,200}var\(--salmon\) 16%[\s\S]{0,120}box-shadow: inset 0 0 0 1px/u,
   );
   assert.match(
     css,
@@ -1105,9 +1121,11 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     sidebarRule ?? "",
     /transition: width var\(--motion-content\) var\(--ease-motion\);/u,
   );
+  // Three rows, not four: the crown that used to open this panel is drawn
+  // once at the head of the banner.
   assert.match(
     css,
-    /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
+    /grid-template-rows: auto minmax\(0, 1fr\) auto;/u,
   );
 
   // Changing the class on the existing shell gives the width transition an
@@ -7380,8 +7398,8 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   assert.match(css, /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);/u);
 
   // Nothing may only be reachable from a surface that can be absent. The rail
-  // owned two controls of its own, so the sidebar's crown carries them while
-  // the rail is away.
+  // owned two controls of its own, so the crown carries them while the rail
+  // is away.
   assert.match(
     chats,
     /showsChannelRail\(\)\s*\?\s*""\s*:\s*`<label class="icon-btn chan-crown-picture"/u,
@@ -7389,7 +7407,7 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   assert.match(chats, /act: "channel-new",[\s\S]{0,120}cls: "chan-crown-new"/u);
   assert.doesNotMatch(
     chats,
-    /chan-crown-picture[\s\S]{0,400}desk-only/u,
+    /class="icon-btn desk-only chan-crown-picture"|cls: "desk-only chan-crown-new"/u,
     "the stand-in controls must survive the phone, where the rail also would not be drawn",
   );
 
