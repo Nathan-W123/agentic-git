@@ -477,8 +477,10 @@ test("one play control beside the pin runs whatever the channel's app is", async
   const data = await publicFile("data.js");
   const css = await publicFile("styles.css");
 
-  // Beside the pin, in the header line the counts live on — and drawn like
-  // them, because the tool tray it used to sit in no longer exists.
+  // Beside the pin, on the one line that says what state this room is in —
+  // and drawn as a count rather than a tool button, because the tray it used
+  // to sit in no longer exists and a boxed icon among these would read as a
+  // control that arrived by accident.
   const headerStart = chats.indexOf("function chanHeader(repositoryId)");
   const header = chats.slice(
     headerStart,
@@ -488,18 +490,20 @@ test("one play control beside the pin runs whatever the channel's app is", async
   assert.match(header, /\$\{previewControl\(repositoryId\)\}/u);
   assert.match(
     header,
-    /icon\("robotBust"\)[\s\S]*?<span aria-hidden="true">\|<\/span>[\s\S]*?\$\{previewControl\(repositoryId\)\}/u,
+    /ch-count ch-muted[\s\S]*?\$\{previewControl\(repositoryId\)\}/u,
+    "the muted mark and the preview control share the room's own line",
   );
+  // And nothing stands between them. The separator existed to hold the two
+  // roster counts apart from these controls; with the counts on the lists
+  // they count, it divided the controls from nothing at all.
+  assert.doesNotMatch(header, /<span aria-hidden="true">\|<\/span>/u);
   const control = chats.slice(
     chats.indexOf("function previewControl(repositoryId)"),
     chats.indexOf("function previewLink(repositoryId)"),
   );
-  // `on` is written as the head of a template expression, not a closed class
-  // string: a preview whose build did not finish is running *and* wrong, and
-  // appends `warn` to say so. Matching the literal `on"` asserted the shape
-  // this had before that state existed, and went red the moment it landed.
-  assert.match(control, /class="ch-count ch-preview-toggle on\$\{/u);
-  assert.match(control, /" warn"/u);
+  // The running state carries the "on" class; a build that did not finish
+  // adds " warn" after it, so the class list does not end there.
+  assert.match(control, /class="ch-count ch-preview-toggle on/u);
   assert.match(control, /data-act="preview-stop"/u);
   assert.match(control, /data-act="preview-start"/u);
   assert.match(control, /icon\("play"\)/u);
@@ -1028,16 +1032,28 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     chats.indexOf("function chanSidebar"),
     chats.indexOf("/* ---------------------------------------------------------- chan main"),
   );
+  const crown = chats.slice(
+    chats.indexOf("function chanCrown"),
+    chats.indexOf("function chanSidebar"),
+  );
   const header = chats.slice(
     chats.indexOf("function chanHeader"),
     chats.indexOf("function threadParticipants"),
   );
 
-  // The control stays with the surface it changes; the conversation header
-  // keeps only the phone button that opens the off-canvas drawer.
-  assert.match(sidebar, /class="chan-sidebar-top"/u);
-  assert.match(sidebar, /data-act="chan-collapse-toggle"/u);
-  assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
+  // The control belongs to the crown, which stands in the navigation's own
+  // width in both states — so it neither moves nor multiplies when the
+  // sidebar folds. There is exactly one of it in the screen; the rail's copy
+  // of the same button, beside it and drawn with the same glyph, is gone. The
+  // sidebar keeps only the phone button that opens the off-canvas drawer.
+  assert.match(crown, /class="chan-crown"/u);
+  assert.match(crown, /data-act="chan-collapse-toggle"/u);
+  assert.doesNotMatch(sidebar, /data-act="chan-collapse-toggle"/u);
+  assert.equal(
+    chats.split('data-act="chan-collapse-toggle"').length - 1,
+    1,
+    "one collapse control, in one place, in both states",
+  );
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
   // Account actions stay behind the avatar, while Settings is always visible
@@ -1077,7 +1093,7 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
   assert.match(chats, /function channelPictureMarkup/u);
   assert.match(
     chats,
-    /function channelPictureMarkup[\s\S]*?const label = repositoryLabel\(repositoryId\);[\s\S]*?const initials =\s*label\s*\.split/u,
+    /function channelPictureMarkup[\s\S]*?const label = repositoryLabel\(repositoryId\);[\s\S]*?const initials = channelInitials\(label\);/u,
     "an unset channel picture should follow the repository's current display name",
   );
   assert.match(chats, /function channelRail/u);
@@ -1092,13 +1108,17 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     css,
     /\.chats-shell\.chan-collapsed[^}]*\.channel-rail[^}]*display: none;/u,
   );
+  // And the room the reader is in is said three ways, because a rail of
+  // near-identical marks cannot answer "which one am I in" with a hairline
+  // and a tenth of an accent: a longer, thicker bar, a stronger wash, and a
+  // ring around the mark itself.
   assert.match(
     css,
-    /\.channel-rail-entry\.active::before \{[\s\S]{0,180}width: 2px;[\s\S]{0,140}background: var\(--salmon\);/u,
+    /\.channel-rail-entry\.active::before \{[\s\S]{0,180}width: 3px;[\s\S]{0,140}background: var\(--salmon\);/u,
   );
   assert.match(
     css,
-    /\.channel-rail-entry\.active \.channel-rail-button \{[\s\S]{0,120}var\(--salmon\)/u,
+    /\.channel-rail-entry\.active \.channel-rail-button \{[\s\S]{0,200}var\(--salmon\) 16%[\s\S]{0,120}box-shadow: inset 0 0 0 1px/u,
   );
   assert.match(
     css,
@@ -1111,9 +1131,11 @@ test("the channel rail stays visible when the tool sidebar collapses", async () 
     sidebarRule ?? "",
     /transition: width var\(--motion-content\) var\(--ease-motion\);/u,
   );
+  // Three rows, not four: the crown that used to open this panel is drawn
+  // once at the head of the banner.
   assert.match(
     css,
-    /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
+    /grid-template-rows: auto minmax\(0, 1fr\) auto;/u,
   );
 
   // Changing the class on the existing shell gives the width transition an
@@ -1220,6 +1242,29 @@ test("each roster is compact, unlabelled when empty, and folds on its heading", 
   assert.match(chats, /class="chan-sec-toggle"\s*\n?\s*data-act="roster-section-toggle"/u);
   assert.match(chats, /aria-expanded="\$\{open\}"/u);
   assert.match(chats, /class="chan-sec-add" data-act="\$\{act\}"/u);
+
+  // "People · 3": the length of the list, on its heading. Outside the fold
+  // button, because that button carries an explicit accessible name and
+  // anything put inside it would never be read out; the separator beside the
+  // figure is hidden from the accessibility tree because it says nothing.
+  const heading = chats.slice(
+    chats.indexOf("function section(label, act, value, title, cls, key, count)"),
+    chats.indexOf("function chanCrown"),
+  );
+  assert.notEqual(heading, "", "section still takes a count");
+  assert.match(heading, /class="chan-sec-count" title="\$\{count\} \$\{esc\(/u);
+  assert.match(heading, /class="chan-sec-dot" aria-hidden="true"/u);
+  assert.ok(
+    heading.indexOf("</button>") < heading.indexOf("${tally}"),
+    "the count is read as its own text, not swallowed by the fold button",
+  );
+  assert.match(
+    heading,
+    /count === undefined \|\| count === null\s*\?\s*""/u,
+    "a section with nothing to count draws no figure",
+  );
+  assert.match(css, /\.chan-sec-count \{[\s\S]{0,220}margin-right: auto;/u);
+  assert.match(css, /\.chan-sec-toggle \{[\s\S]{0,300}flex: 0 1 auto;/u);
   assert.match(
     css,
     /\.chan-roster\.chan-roster-closed \{[\s\S]{0,160}grid-template-rows: 0fr;/u,
@@ -5749,8 +5794,14 @@ test("people and agents render directly without a main branch node", async () =>
   );
   assert.doesNotMatch(header, /repository\?\.branch/u);
   assert.doesNotMatch(header, /class="ch-sep"/u);
-  assert.match(header, /class="ch-count" title="\$\{people\.length\}/u);
-  assert.match(header, /class="ch-count" title="\$\{roster\.length\}/u);
+
+  // How many of each is said on the heading of the list it is the length of,
+  // not as a chip in a header three hundred pixels away from both lists. The
+  // header no longer counts anything, and neither figure is read from there.
+  assert.match(sidebar, /"chan-sec-people", "people", people\.length\)/u);
+  assert.match(sidebar, /"chan-sec-agents", "agents", roster\.length\)/u);
+  assert.doesNotMatch(header, /icon\("personBust"\)|icon\("robotBust"\)/u);
+  assert.doesNotMatch(header, /people\.length|roster\.length/u);
 });
 
 test("clicking an agent opens its details while chat and history stay explicit", async () => {
@@ -5839,6 +5890,21 @@ test("agent history is a dense active-then-finished task list", async () => {
   assert.match(css, /\.agent-history-active \+ \.agent-history-finished/u);
   assert.match(css, /\.agent-history-finished \.agent-history-row/u);
 
+  // A row, not a card. Five columns of which one was this agent's own face
+  // repeated down the list came to 74px an entry; the row is 56px and its
+  // facts share one line under the request.
+  assert.match(
+    css,
+    /\.agent-history-row \{[^}]*min-height: 56px;/su,
+  );
+  assert.doesNotMatch(history, /statusAgentFace\(agent, 26, repositoryId\)/u);
+  assert.doesNotMatch(history, /class="ah-face"/u);
+  assert.doesNotMatch(history, /class="ah-preview-label"/u);
+  assert.match(history, /class="ah-meta"/u);
+  // File count is optional and only stated when there is one.
+  assert.match(history, /const changed = Array\.isArray\(task\.changedFiles\)/u);
+  assert.match(history, /class="ah-files"/u);
+
   // The outcome is a word in a tinted pill, not a coloured ring a reader has
   // to already know the palette to decode.
   assert.match(history, /function historyStatusPill\(status\)/u);
@@ -5859,8 +5925,8 @@ test("agent history is a dense active-then-finished task list", async () => {
   assert.match(history, /Yesterday at \$\{time\}/u);
   assert.match(history, /historyWhen\(task\.submittedAt\)/u);
 
-  // Who ran it, and what came back from it.
-  assert.match(history, /statusAgentFace\(agent, 26, repositoryId\)/u);
+  // What came back, still shown — as the tail of the row's own line of facts
+  // rather than as a bordered column of prose beside it.
   assert.match(history, /function taskOutputPreview\(task\)/u);
   assert.match(history, /task\?\.summary/u);
   assert.match(history, /class="ah-preview-text"/u);
@@ -5872,6 +5938,14 @@ test("agent history is a dense active-then-finished task list", async () => {
     history,
     /FINISHED_HISTORY_STATUS\.has\(task\.status\)\s*\?\s*iconButton\("refresh", \{[\s\S]*?act: "task-retry"/u,
   );
+  // Secondary until wanted: hover, keyboard focus, or a device with no hover
+  // at all. They take no layout either way, so revealing them moves nothing.
+  assert.match(
+    css,
+    /\.agent-history-row \.ah-actions \{[^}]*opacity: 0;/su,
+  );
+  assert.match(css, /\.agent-history-row:focus-within \.ah-actions/u);
+  assert.match(css, /@media \(hover: none\) \{\s*\.agent-history-row \.ah-actions/u);
 
   // Search and filter above the list, held in state so a background poll
   // rebuilding the panel cannot widen it back to everything.
@@ -5894,6 +5968,9 @@ test("agent history is a dense active-then-finished task list", async () => {
     app,
     /if \(act === "agent-history-search"\) \{\s*\n\s*state\.agentHistoryQuery = node\.value;/u,
   );
+  // Filtering rebuilds the list, so a row that animated in would replay that
+  // entrance on every keystroke in the search box.
+  assert.match(css, /\.agent-history-row \{[^}]*animation: none;/su);
   assert.match(css, /\.agent-history-head/u);
   assert.match(css, /\.agent-history-list/u);
 });
@@ -5902,7 +5979,7 @@ test("the spec tab is where an agent is made org-wide or kept personal", async (
   const app = await browserSource();
   const chats = await publicFile("screen-chats.js");
   const spec = chats.slice(
-    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function specPill(text,"),
     chats.indexOf("function agentPanel()"),
   );
   const handlerStart = app.indexOf('case "channel-agent-visibility"');
@@ -5935,7 +6012,7 @@ test("agent details use the reference profile with supported controls", async ()
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
   const spec = chats.slice(
-    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function specPill(text,"),
     chats.indexOf("function agentPanel()"),
   );
   const panel = chats.slice(
@@ -5943,71 +6020,118 @@ test("agent details use the reference profile with supported controls", async ()
     chats.indexOf("function dmPanel()"),
   );
 
-  // The supplied profile's split composition is explicit: banner-backed
-  // identity on the left and compact activity, settings, channels and usage
-  // on the right. This keeps the normal desktop profile to one viewport.
-  assert.match(spec, /class="aspec-identity-card"/u);
-  assert.match(spec, /class="aspec-banner"/u);
-  assert.match(spec, /statusAgentFace\(agent, 76, repositoryId\)/u);
-  assert.match(spec, /class="aspec-main"/u);
-  assert.match(spec, /class="aspec-pane aspec-activity-pane"/u);
-  assert.match(spec, /class="aspec-pane aspec-settings-pane"/u);
-  assert.match(spec, /class="aspec-pane aspec-channels-pane"/u);
-  assert.match(spec, /class="aspec-pane aspec-usage-section"/u);
+  // Four zones on one surface, in the order the reference profiles order
+  // them: who it is, what it is doing, what it runs on, where it works. The
+  // banner-topped identity card beside a column of five outlined panes came
+  // to about 744px of content in a 523px panel, so the settings this panel
+  // exists for were below the fold at the size it is normally read at.
+  assert.match(spec, /function agentIdentityZone\(agent, repositoryId,/u);
+  assert.match(spec, /function agentCurrentWorkZone\(agent, repositoryId,/u);
+  assert.match(spec, /function agentRuntimeZone\(agent, repositoryId,/u);
+  assert.match(spec, /function agentContextZone\(agent, repositoryId,/u);
+  assert.match(
+    spec,
+    /agentIdentityZone\([\s\S]*?agentCurrentWorkZone\([\s\S]*?agentRuntimeZone\([\s\S]*?agentContextZone\(/u,
+  );
+  assert.match(spec, /class="aspec-zone aspec-identity"/u);
+  assert.match(spec, /class="aspec-zone aspec-work/u);
+  assert.match(spec, /class="aspec-zone aspec-runtime"/u);
+  assert.match(spec, /class="aspec-zone aspec-context"/u);
+  assert.match(spec, /statusAgentFace\(agent, 52, repositoryId\)/u);
   assert.match(panel, /<aside class="thread-panel agent-detail-panel">/u);
   assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(820px, 76vw\)/su);
-  assert.match(
-    css,
-    /\.agent-spec \.aspec-content\s*\{[^}]*grid-template-columns:\s*minmax\(220px, 0\.72fr\) minmax\(390px, 1\.28fr\)/su,
-  );
-  assert.match(css, /@container \(max-width: 650px\)/u);
 
-  // The head is a row — face beside the name — with the short facts under it
-  // as a strip of pills, not as stacked label-over-value pairs. Each of those
-  // pairs cost two lines and a column to state one word.
-  assert.match(spec, /class="aspec-identity-head"/u);
-  assert.match(spec, /class="aspec-pills"/u);
-  // The pill shows `repositoryLabel(repositoryId)` rather than the raw id, so
-  // a repository that has been renamed is named correctly here instead of
-  // still announcing whatever it was called when it was created.
-  assert.match(spec, /specPill\(`#\$\{repositoryLabel\(repositoryId\)\}`/u);
-  assert.match(spec, /specPill\(statusText, \{ dot: status \}\)/u);
-  assert.doesNotMatch(spec, /class="aspec-(?:status|profile-facts)"/u);
-  assert.doesNotMatch(css, /\.agent-spec \.aspec-profile-facts/u);
-  assert.match(css, /\.agent-spec \.aspec-pill\s*\{[^}]*border-radius: 999px;/su);
-  // A band of colour, not a hero image: the banner used to push the profile a
-  // screen down from the panel header for a gradient nobody reads.
+  // The tall banner, the nested cards and the repeated outlines are gone: one
+  // outer boundary, zones separated by space, and exactly one tinted surface
+  // — the work, because it is the only part of the page that changes on its
+  // own.
+  assert.doesNotMatch(spec, /class="aspec-banner"/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-banner/u);
+  assert.doesNotMatch(spec, /class="aspec-identity-card"/u);
+  assert.doesNotMatch(spec, /class="aspec-pane/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-pane\b/u);
+  assert.match(css, /\.agent-spec \.aspec-content\s*\{[^}]*gap: 18px;/su);
+
+  // Reserved height, so a phase arriving or a percentage moving never shifts
+  // the controls underneath it.
+  assert.match(css, /\.agent-spec \.aspec-work\s*\{[^}]*min-height: 56px;/su);
+  assert.match(css, /\.agent-spec \.aspec-work\.is-active\s*\{[^}]*min-height: 72px;/su);
+  // And the phase itself is an ordinary phase slot, so the render loop's
+  // coalescing owns the crossfade rather than a second mechanism here.
+  assert.match(spec, /data-phase-slot="agent-profile:\$\{esc\(agent\.id\)\}"/u);
+  assert.match(spec, /class="aspec-work-phase phase-slot"/u);
+
+  // Continuing the work is the primary action. History is a secondary control
+  // beside it — it used to be the full-width button that opened the page.
+  assert.match(
+    spec,
+    /class="aspec-action aspec-action-primary"[\s\S]*?data-act="channel-thread-open"[\s\S]*?<span>Open thread<\/span>/u,
+  );
+  assert.match(
+    spec,
+    /class="aspec-action aspec-action-primary"[\s\S]*?data-act="agent-panel-tab" data-value="chat">[\s\S]*?<span>Message \$\{esc\(first\)\}<\/span>/u,
+  );
+  assert.match(
+    spec,
+    /class="aspec-action aspec-action-quiet"\s*\n\s*data-act="agent-panel-tab" data-value="history">[\s\S]*?<span>History<\/span>/u,
+  );
+  assert.match(css, /\.agent-spec \.aspec-action-quiet\s*\{/u);
   assert.match(
     css,
-    /\.agent-spec \.aspec-banner\s*\{[^}]*height: clamp\(58px, 9vh, 74px\);/su,
+    /\.agent-spec \.aspec-action:focus-visible[^{]*\{[^}]*outline: 2px solid var\(--accent-line\);/su,
   );
+
+  // Identity states status, connection, ownership and room once each, as one
+  // line of text. The duplicate pill strip that repeated the header is gone.
+  assert.match(spec, /class="aspec-identity-facts"/u);
+  assert.match(spec, /text: statusText, dot: status/u);
+  assert.match(spec, /text: `#\$\{repositoryLabel\(repositoryId\)\}`/u);
+  assert.doesNotMatch(spec, /class="aspec-pills"/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-pills/u);
+  assert.doesNotMatch(spec, /class="aspec-(?:status|profile-facts)"/u);
+  assert.match(css, /\.agent-spec \.aspec-identity\s*\{[^}]*min-height: 88px;/su);
+
+  // Rename, delete and the rest of the rare actions are the roster row's own
+  // menu rather than a second answer to the same question.
+  assert.match(spec, /act: "roster-agent-menu"/u);
+  assert.match(spec, /cls: "aspec-more"/u);
 
   // One caption per control, doubling the settings block's height to repeat
   // its own labels, is a title attribute now.
   assert.doesNotMatch(spec, /class="aspec-field-hint"/u);
   assert.doesNotMatch(css, /\.agent-spec \.aspec-field-hint/u);
-  assert.match(spec, /const field = \(label, control, hint = ""\)[\s\S]*?title="\$\{esc\(hint\)\}"/u);
+  assert.match(
+    spec,
+    /const field = \(label, control, hint = "", aside = ""\)[\s\S]*?title="\$\{esc\(hint\)\}"/u,
+  );
+  // "Editable" said what the presence of a dropdown already says.
+  assert.doesNotMatch(spec, /aspec-editing/u);
+  assert.doesNotMatch(css, /\.agent-spec \.aspec-editing/u);
 
-  // Conversation destinations are visible controls on the landing page, not
-  // icon-only knowledge hidden in the panel header. Private chat keeps the
-  // existing owner/personal rule; history is available for every agent.
+  // The provider's caveat is a 32px "i" beside the field it is about, not a
+  // paragraph under the whole block on every visit. A deployment that could
+  // not report at all is a fault and stays on the page.
+  assert.match(spec, /function specInfoButton\(act, value, title\)/u);
+  assert.match(spec, /specInfoButton\(\s*"agent-provider-note",/u);
+  assert.match(spec, /export function agentProviderNotePopoverHtml\(agent, providerId\)/u);
   assert.match(
     spec,
-    /const canChatPrivately = agent\.mine === true && agent\.visibility !== "org";/u,
+    /const blocking =\s*\n\s*agent\.mine === true && state\.providerOptions\[providerId\] === null;/u,
   );
-  assert.match(
-    spec,
-    /canChatPrivately[\s\S]*?<button type="button" class="aspec-action aspec-action-primary"[\s\S]*?data-act="agent-panel-tab" data-value="chat">[\s\S]*?<span>Message<\/span>/u,
-  );
-  assert.match(
-    spec,
-    /<button type="button" class="aspec-action" data-act="agent-panel-tab"[\s\S]*?data-value="history">[\s\S]*?<span>History<\/span>/u,
-  );
-  assert.match(css, /\.agent-spec \.aspec-action\s*\{/u);
+  assert.match(spec, /class="aspec-alert" role="status"/u);
+  assert.match(css, /\.agent-spec \.aspec-info\s*\{[^}]*width: 32px;/su);
+  assert.doesNotMatch(spec, /class="aspec-settings-pane"/u);
+
+  // Channels and usage sit side by side, and the rooms that do not fit are a
+  // popover rather than a clipped strip.
+  assert.match(spec, /export function agentChannelsPopoverHtml\(agent, repositoryId\)/u);
+  assert.match(spec, /data-act="agent-channels-more" data-value="\$\{esc\(agent\.id\)\}"/u);
   assert.match(
     css,
-    /\.agent-spec \.aspec-action:focus-visible[^{]*\{[^}]*outline: 2px solid var\(--accent-line\);/su,
+    /\.agent-spec \.aspec-context\s*\{[^}]*grid-template-columns: minmax\(0, 0\.8fr\) minmax\(0, 1\.2fr\);/su,
   );
+  assert.match(css, /@container \(max-width: 430px\)/u);
+
   // The retired wrapper was the stray centred hairline/box above the profile.
   assert.doesNotMatch(panel, /class="agent-panel-head"/u);
   assert.doesNotMatch(css, /^\.agent-panel-head\s*\{/mu);
@@ -6022,6 +6146,15 @@ test("agent details use the reference profile with supported controls", async ()
     /\.agent-spec \.aspec-native-select\s*\{[^}]*appearance: auto;/su,
   );
   assert.match(css, /\.agent-spec \.aspec-field-label\s*\{/u);
+  // 36-40px controls, and a border that strengthens on hover and focus.
+  assert.match(
+    css,
+    /\.agent-spec \.aspec-native-select,\n\.agent-spec \.aspec-field-value \{[^}]*height: 36px;/su,
+  );
+  assert.match(
+    css,
+    /\.agent-spec \.aspec-native-select:hover,\n\.agent-spec \.aspec-native-select:focus \{[^}]*border-color: var\(--border-strong\);/su,
+  );
   assert.doesNotMatch(spec, /class="aspec-chip"/u);
   assert.doesNotMatch(css, /\.agent-spec \.aspec-nav/u);
   assert.doesNotMatch(spec, /class="aspec-nav"/u);
@@ -6039,15 +6172,6 @@ test("agent details use the reference profile with supported controls", async ()
     assert.match(spec, new RegExp(`data-act="${action}"|"${action}"`, "u"));
   }
   assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
-  // The live assignment opens its thread the same way a history row does.
-  assert.match(spec, /const openCurrentTask =/u);
-  assert.match(
-    spec,
-    /taskMessage === undefined\s*\?\s*""\s*:\s*` role="button" tabindex="0" data-act="channel-thread-open"/u,
-  );
-  assert.match(spec, /data-value="\$\{esc\(taskMessage\.id\)\}"/u);
-  assert.match(css, /\.agent-spec \.aspec-activity\[role="button"\]/u);
-  assert.match(spec, /assignments\.map\(\(\{ repository \}\) => repository\)/u);
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
   assert.match(spec, /const readOnly =/u);
@@ -6080,7 +6204,7 @@ test("agent details omit roles while keeping channel membership", async () => {
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
   const spec = chats.slice(
-    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function specPill(text,"),
     chats.indexOf("function agentPanel()"),
   );
   for (const source of [spec, app]) {
@@ -7188,8 +7312,8 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   assert.match(css, /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);/u);
 
   // Nothing may only be reachable from a surface that can be absent. The rail
-  // owned two controls of its own, so the sidebar's crown carries them while
-  // the rail is away.
+  // owned two controls of its own, so the crown carries them while the rail
+  // is away.
   assert.match(
     chats,
     /showsChannelRail\(\)\s*\?\s*""\s*:\s*`<label class="icon-btn chan-crown-picture"/u,
@@ -7197,7 +7321,7 @@ test("the channel rail is drawn only when there is a channel to switch to", asyn
   assert.match(chats, /act: "channel-new",[\s\S]{0,120}cls: "chan-crown-new"/u);
   assert.doesNotMatch(
     chats,
-    /chan-crown-picture[\s\S]{0,400}desk-only/u,
+    /class="icon-btn desk-only chan-crown-picture"|cls: "desk-only chan-crown-new"/u,
     "the stand-in controls must survive the phone, where the rail also would not be drawn",
   );
 
@@ -7247,6 +7371,58 @@ test("inactive channel rail icons show a live unread count", async () => {
     app,
     /function markChannelReadIfWatching[\s\S]{0,400}activeChannelId\(\) !== repositoryId/u,
   );
+});
+
+test("reply previews collapse multiline content and omit hidden attachment references", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function replyPreviewText(");
+  const end = chats.indexOf("\n/** The compact address above an inline reply.", start);
+  assert.notEqual(start, -1, "the shared reply preview helper should exist");
+  assert.notEqual(end, -1, "the reply preview helper should have a boundary");
+
+  const preview = new Function(
+    "ATTACHMENT_PATTERN",
+    `${chats.slice(start, end)}\nreturn replyPreviewText;`,
+  )(
+    /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu,
+  ) as (entry: { content?: string; deletedAt?: string }) => string;
+  const attachment =
+    "![Attached image](attachment:0123456789abcdef0123456789abcdef.png)";
+
+  assert.equal(
+    preview({ content: `First line\n  second line\n${attachment}` }),
+    "First line second line",
+  );
+  assert.equal(preview({ content: attachment }), "Attached image");
+  assert.equal(
+    preview({ content: "words that are replaced", deletedAt: "now" }),
+    "This message was deleted",
+  );
+});
+
+test("a reply's reference keeps clear of the avatar it sits above", async () => {
+  const [chats, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+  const block = (selector: string): string => {
+    const start = css.indexOf(`\n${selector} {`);
+    assert.notEqual(start, -1, `${selector} is missing`);
+    return css.slice(start, css.indexOf("}", start));
+  };
+
+  assert.match(
+    row,
+    /messageReference\(inlineReplyTo, repositoryId\)[\s\S]*<span class="cmsg-avatar">[\s\S]*<div class="cmsg-body">/u,
+  );
+  assert.match(block(".cmsg-row"), /flex-wrap: wrap;/u);
+  assert.match(block(".cmsg-ref"), /flex: 0 0 100%;/u);
+  assert.doesNotMatch(block(".cmsg-ref"), /margin: 0 0 2px -28px;/u);
+  assert.match(block(".cmsg-ref-elbow"), /margin-left: 16px;/u);
 });
 
 test("a message keeps react and reply, and puts the rest behind one menu", async () => {

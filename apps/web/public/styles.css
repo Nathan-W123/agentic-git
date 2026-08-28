@@ -678,20 +678,36 @@ svg.ui-icon {
   overflow: hidden;
 }
 
-/* The sidebar crown owns both the product home and the control that changes
-   its width. Keeping those together means the control remains at the top of
-   the rail in both states instead of jumping into the conversation header. */
-.chan-sidebar-top {
+/* The crown: the channel's picture, its name, and the control that folds the
+   navigation away — the head of the banner, cut to the navigation's own
+   width so it stands over the columns it belongs to and the conversation's
+   header begins where they end.
+
+   It used to be a row inside the sidebar, one bar-height below a banner that
+   opened with the same picture and the same name. Two crowns for one room.
+   This is the one, and the width is what ties it to the navigation: it
+   travels with the sidebar's own fold, on the same duration and the same
+   curve, so the pair reads as one column changing width rather than as two
+   surfaces that happen to move at once. */
+.chan-crown {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 52px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-soft);
+  /* The banner's own left padding is already inside this, so the picture
+     lands exactly where the sidebar's crown put it and the right edge lands
+     on the sidebar's. */
+  width: calc(var(--nav-w) - 18px);
+  min-width: 0;
+  align-self: stretch;
   overflow: hidden;
+  /* The sidebar's own right edge, carried up through the bar: one line from
+     the bottom of the screen to the top says where the navigation ends and
+     the conversation begins, which is the whole point of dividing the bar. */
+  border-right: 1px solid var(--border-soft);
   transition:
-    gap var(--motion-content) var(--ease-motion),
-    padding var(--motion-content) var(--ease-motion);
+    width var(--motion-content) var(--ease-motion),
+    gap var(--motion-content) var(--ease-motion);
 }
 
 /* The picture control that stands in for the rail's own when there is no
@@ -802,13 +818,21 @@ svg.ui-icon {
 
 .brand-text {
   display: grid;
+  min-width: 0;
   line-height: 1.2;
 }
 
+/* Cut rather than wrapped: the crown is one line inside a bar of a fixed
+   height, and a two-line repository name would print over the hairline under
+   it. The id is on the element's own title for whoever needs the whole of
+   it. */
 .brand-text b {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The outer app rail — `.sidebar`, `.brand`, `.repo-switch`, `.nav`,
@@ -4838,11 +4862,32 @@ button.chip.lg:hover {
      header is fixed to the viewport rather than to the shell, and the panel
      takes the whole screen. */
   --chan-head-h: calc(56px + var(--safe-top));
+  /* And how wide the navigation is, from the shell's left edge to the right
+     edge of the sidebar: the padding this shell starts with, the rail, and
+     the sidebar itself. The crown at the head of the banner is cut to this,
+     so the one place the channel is named stands in the same column as the
+     navigation it names — and folds with it. Written as one number here
+     because four rules need to agree about it.
+
+     No gutter inside it any more. The rail and the sidebar used to be two
+     cards eight pixels apart, so this had to carry that gap as well; they are
+     one continuous surface now, divided by a hairline, and what is left is
+     the shell's own outer inset plus the two widths. Get the number wrong and
+     the crown's edge stops landing on the sidebar's. */
+  --nav-w: calc(8px + var(--rail-w) + var(--chan-sidebar-w));
   /* And how tall a side panel's own header is — one short row of tools, set
      once here because every panel shares `.thread-head`. */
   --thread-head-h: 38px;
   display: flex;
-  gap: 8px;
+  /* Nothing between the regions. The rail, the navigation and the
+     conversation were three rounded, separately outlined cards floating eight
+     pixels apart on the background — three boundaries to read past before
+     reaching the one thing on this screen anybody came for. They are one
+     surface now: a single outer boundary around the group, and a hairline
+     where one region ends and the next begins. The panels on the right keep
+     their gutter and their own card — they arrive and leave, and a surface
+     that comes and goes is not part of the frame. */
+  gap: 0;
   height: 100%;
   min-height: 0;
   padding: 8px;
@@ -4868,6 +4913,32 @@ button.chip.lg:hover {
   padding-top: 8px;
 }
 
+/* The navigation is narrower in the two states where one of its columns is
+   away, and the crown is cut to whatever is left. Collapsed, that is the rail
+   alone — which is exactly enough for the one control that brings the sidebar
+   back. */
+.chats-shell.no-rail {
+  --nav-w: calc(8px + var(--chan-sidebar-w));
+}
+
+@media (min-width: 601px) {
+  .chats-shell.chan-collapsed,
+  .chats-shell.no-rail.chan-collapsed {
+    --nav-w: calc(8px + var(--rail-w));
+  }
+
+  /* With no rail there is nothing to the sidebar's left, so the group's left
+     edge and its rounding fall to it — the same two things the rail carries
+     when it is there. A boundary the whole surface shares cannot go missing
+     because one of the regions inside it did. Above the phone tier only:
+     below it this panel is an off-canvas drawer against the left of the
+     screen, which has no left edge to draw. */
+  .chats-shell.no-rail > .chan-sidebar {
+    border-left: 1px solid var(--border-soft);
+    border-radius: var(--radius-xl) 0 0 var(--radius-xl);
+  }
+}
+
 /* A dedicated channel switcher stays narrow while the adjacent sidebar is
    free to hold tools and the active channel's roster. */
 .channel-rail {
@@ -4879,11 +4950,17 @@ button.chip.lg:hover {
   gap: 9px;
   padding: 12px 7px;
   background: var(--bg-panel);
+  /* Not a card of its own. This is the left end of one continuous surface, so
+     it carries the group's left edge and its rounding, and its right border
+     is the hairline between the switcher and the panel beside it — the same
+     line the crown draws above them both. */
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-xl) 0 0 var(--radius-xl);
 }
 
-.channel-rail-toggle,
+/* No collapse control at the head of this column any more — it is in the
+   crown, which keeps it in one place whether the sidebar is open or folded
+   away. See `.chan-crown`. */
 .channel-rail-new,
 .channel-rail-button {
   display: grid;
@@ -4895,7 +4972,6 @@ button.chip.lg:hover {
   transition: background 0.13s ease, color 0.13s ease, border-radius 0.13s ease;
 }
 
-.channel-rail-toggle:hover,
 .channel-rail-new:hover,
 .channel-rail-button:hover {
   background: var(--surface-3);
@@ -4903,7 +4979,6 @@ button.chip.lg:hover {
   border-radius: var(--radius-sm);
 }
 
-.channel-rail-toggle:focus-visible,
 .channel-rail-new:focus-visible,
 .channel-rail-button:focus-visible {
   outline: 2px solid var(--accent-line);
@@ -4911,18 +4986,23 @@ button.chip.lg:hover {
   color: var(--text);
 }
 
+/* Where the reader is, said three ways at once: the room's mark is lit, it
+   carries a ring of the accent, and the bar beside it is longer and thicker
+   than the hairline it used to be. A tenth of an accent behind a 36px picture
+   was the whole of the old signal, and against a channel with a photograph of
+   its own it disappeared entirely — which is how a rail of near-identical
+   marks ended up with no answer to "which one am I in". */
 .channel-rail-entry.active .channel-rail-button {
-  background: color-mix(in srgb, var(--salmon) 10%, transparent);
+  background: color-mix(in srgb, var(--salmon) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--salmon) 46%, transparent);
   color: var(--text);
   border-radius: var(--radius-sm);
 }
 
-.channel-rail-toggle,
 .channel-rail-new {
   height: 34px;
 }
 
-.channel-rail-toggle svg,
 .channel-rail-new svg {
   width: 17px;
   height: 17px;
@@ -4965,9 +5045,9 @@ button.chip.lg:hover {
   content: "";
   position: absolute;
   left: -7px;
-  width: 2px;
-  height: 24px;
-  border-radius: 0 2px 2px 0;
+  width: 3px;
+  height: 30px;
+  border-radius: 0 3px 3px 0;
   background: var(--salmon);
 }
 
@@ -4979,9 +5059,16 @@ button.chip.lg:hover {
   object-fit: cover;
 }
 
+/* A channel with no picture of its own wears two letters and one steady
+   tint, both derived from what it is called and what it is (see
+   `channelInitials` and `channelTone` in screen-chats.js). One letter on one
+   grey was not a distinguishing mark: two channels whose names began with the
+   same letter drew the same square, and the rail is nothing but squares.
+   `--pic-tone` comes in on the element, so the fallback still has a colour
+   here if it ever arrives without one. */
 .channel-picture-fallback {
-  background: var(--surface-3);
-  color: var(--text-2);
+  background: color-mix(in srgb, var(--pic-tone, var(--muted)) 20%, var(--surface-3));
+  color: color-mix(in srgb, var(--pic-tone, var(--text-2)) 45%, var(--text));
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -5039,23 +5126,32 @@ button.chip.lg:hover {
   width: var(--chan-sidebar-w);
   flex: none;
   display: grid;
-  /* Crown, search, everything else in one scroller, then the account footer.
-     The panel used to be four rows with two scrollbars in it — a
-     capped channel list above an independently scrolling roster — which is
-     two things to drag inside 256 pixels and a band of dead panel whenever
-     neither list was long enough to fill its share. `.chan-scroll` is the
-     one that moves. */
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* Quick links, everything else in one scroller, then the account footer.
+     Three rows rather than four: the crown that used to open this panel is
+     drawn once at the head of the banner now, where it stands in this
+     column's own width. The panel before that was four rows with two
+     scrollbars in it — a capped channel list above an independently scrolling
+     roster — which is two things to drag inside 256 pixels and a band of dead
+     panel whenever neither list was long enough to fill its share.
+     `.chan-scroll` is the one that moves. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-xl);
-  overflow-x: hidden;
-  transition: width var(--motion-content) var(--ease-motion);
-  /* The quiet edge matches the reference's nested panes and remains subtle
-     because the neighbouring surfaces already provide most of the separation.
+  /* The middle of the group, so it has no edge of its own on the left: the
+     rail's right border is already the line between them, and a second one
+     drawn a pixel away is the seam that made these read as two cards. What it
+     does own is the right-hand hairline — the one the crown continues up
+     through the banner, and the only thing on the screen that says where the
+     navigation ends and the conversation begins. The two ends of the group
+     carry the rounding; this one is square at both corners.
+
      Off-canvas on a phone the drawer also carries `--shadow-pop`, where the
      edge becomes a crisp boundary between the drawer and its scrim. */
+  border: 1px solid var(--border-soft);
+  border-left: 0;
+  border-radius: 0;
+  overflow-x: hidden;
+  transition: width var(--motion-content) var(--ease-motion);
 }
 
 .chan-sidebar-head {
@@ -5069,23 +5165,29 @@ button.chip.lg:hover {
   flex: 1;
 }
 
+/* Two places to go, and no card around them. The outline and the sunken fill
+   made a nested pane out of two links — a box inside the panel, inside the
+   boundary around the whole application — and every row in it then had to be
+   read as a row inside something. They are what they are without it: two
+   rows at the top of the column, held apart from the roster below by their
+   own spacing rather than by a line. */
 .chan-sidebar-head.chan-quick-links {
   display: grid;
   gap: 2px;
-  margin: 7px 8px 5px;
-  padding: 4px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-inset) 58%, transparent);
+  margin: 8px 8px 4px;
+  padding: 0;
 }
 
+/* Full-height rows rather than the compressed ones a nested card had room
+   for: the target is the row, and 38px is the height every other list row in
+   this column stands at. */
 .chan-quick-link {
   display: flex;
   align-items: center;
   gap: 9px;
-  min-height: 34px;
-  padding: 6px 8px;
-  border-radius: 7px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 8px;
   color: var(--text-2);
   font-size: 13px;
   font-weight: 500;
@@ -5183,7 +5285,10 @@ button.chip.lg:hover {
    ends be seen at once. The "+" stays outside this button, so adding to a
    list never doubles as folding it away. */
 .chan-sec-toggle {
-  flex: 1;
+  /* Only as wide as the word, so the count that follows reads as part of the
+     heading — "People · 3" — rather than as a figure stranded against the
+     "+" at the far edge. */
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -5216,6 +5321,31 @@ button.chip.lg:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* How long the list under this heading is. It replaces a pair of chips in the
+   conversation's header, which counted these two lists from the other side of
+   the screen. Outside the fold button because that button has an accessible
+   name of its own and would have swallowed the number; `margin-right: auto`
+   is what keeps the "+" at the edge now that the heading no longer stretches
+   to push it there. */
+.chan-sec-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  flex: none;
+  margin-right: auto;
+  min-width: 0;
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* The separator, and only that: it carries no meaning a reader would miss if
+   it never rendered, which is why it is hidden from the accessibility tree in
+   the markup. */
+.chan-sec-dot {
+  color: var(--text-4);
 }
 
 .chan-sec-add {
@@ -5918,8 +6048,14 @@ button.chip.lg:hover {
      conversation too, instead of the transcript reading as a panel floating
      inside a darker frame. */
   background: var(--room-tint);
-  border-radius: var(--radius-xl);
-  box-shadow: inset 0 0 0 1px var(--border-soft);
+  /* The right end of the same surface. The ring that used to be drawn all the
+     way round it is down to the three edges the group actually has here: the
+     hairline on the left is the sidebar's, already there, and drawing a
+     second one against it was what boxed the conversation off from the
+     navigation it belongs to. */
+  border: 1px solid var(--border-soft);
+  border-left: 0;
+  border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
   overflow: hidden;
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
@@ -6131,27 +6267,28 @@ button.chip.lg:hover {
   border-bottom: 1px solid var(--border-soft);
 }
 
+/* The mark that says the rest of this bar is about a room. It leads the
+   conversation's own zone now that the name is in the crown, so it is drawn
+   at the weight the name used to have rather than as a glyph beside it. */
 .chan-head .ch-hash {
-  width: 19px;
-  height: 19px;
+  width: 18px;
+  height: 18px;
   color: var(--text-3);
   flex: none;
 }
 
+/* No `.ch-name` in here. The channel is named once, in the crown at the head
+   of this bar; what is left is one line of what the room is — its counts, its
+   muted state, its preview — centred in the bar rather than stacked under a
+   title. Half a point larger than it was for the same reason: it is the line
+   now, not the subtitle of one. */
 .chan-head .ch-title {
   min-width: 0;
 }
 
-.chan-head .ch-name {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
 .chan-head .ch-desc {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-3);
-  margin-top: 1px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6533,6 +6670,24 @@ button.chip.lg:hover {
   color: var(--text-2);
 }
 
+/* A private conversation has no avatar gutter or thread branch to connect
+   through. Its reference belongs to the bubble instead: a short quote rule
+   that sizes to its contents and follows incoming and outgoing alignment. */
+.dm-msg > .cmsg-ref {
+  flex: none;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 3px;
+  padding: 2px 4px 2px 7px;
+  border-left: 2px solid var(--border-soft);
+  gap: 5px;
+}
+
+.dm-mine > .cmsg-ref {
+  align-self: flex-end;
+}
+
 /* 16px in: half of the 32px avatar, so the stroke comes down the middle of the
    avatar column and stops just above the face rather than crossing it. The
    two-pixel stroke and broad rounded corner make this a short floating path,
@@ -6552,12 +6707,18 @@ button.chip.lg:hover {
 
 .cmsg-ref-name {
   flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
   color: var(--text-2);
 }
 
 /* One line, however long the message it points at. */
 .cmsg-ref-text {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -8308,15 +8469,15 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .agent-history-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--border-soft);
 }
 
 .agent-history-head .search {
-  flex: 1 1 180px;
-  min-width: 140px;
+  flex: 1 1 170px;
+  min-width: 130px;
 }
 
 .agent-history .ah-filter {
@@ -8333,38 +8494,52 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .agent-history-list {
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 12px 12px;
+  padding: 6px 12px 12px;
 }
 
 .agent-history-active,
 .agent-history-finished {
   display: grid;
-  gap: 8px;
+  gap: 4px;
 }
 
 .agent-history-active + .agent-history-finished {
-  margin-top: 12px;
+  margin-top: 10px;
 }
 
 /* The one word above each half. The list used to separate them with a rule,
    which said there were two groups without saying which was which. */
 .agent-history .ah-section-label {
+  padding: 6px 2px 2px;
   font-size: 11px;
   letter-spacing: 0.02em;
   color: var(--text-3);
 }
 
+/*
+ * One row, 56–64px, and no card.
+ *
+ * Every row used to be a bordered card of five columns, one of which was this
+ * agent's own face repeated down the list and another a column of prose
+ * beside a request already cut to one line. That came to 74px a row plus a
+ * gap, so a panel-height list held six entries and read as a stack of tiles.
+ * A row is a row now: outcome, request, and the facts under it.
+ */
 .agent-history-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1.4fr) auto minmax(0, 1fr) auto;
+  min-height: 56px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   font-size: 12px;
   line-height: 1.35;
-  background: var(--bg-card);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
+  /* Filtering rebuilds this list, and a row that animated in would replay
+     that entrance on every keystroke in the search box. */
+  animation: none;
+  transition: background var(--motion-pop) ease, border-color var(--motion-pop) ease;
 }
 
 /* Only the rows that go somewhere look like they do. A task with no channel
@@ -8374,26 +8549,33 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   cursor: pointer;
 }
 
-.agent-history-row[role="button"]:hover {
-  border-color: var(--accent-line);
+.agent-history-row[role="button"]:hover,
+.agent-history-row[role="button"]:focus-visible {
+  border-color: var(--border-soft);
+  background: var(--bg-hover);
+}
+
+.agent-history-row[role="button"]:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: -2px;
 }
 
 /* The outcome, said in a word rather than left to a ring's colour. */
 .agent-history-row .ah-status {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 9px;
+  gap: 5px;
+  padding: 3px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 10.5px;
   white-space: nowrap;
   background: color-mix(in srgb, var(--muted) 10%, transparent);
   color: var(--text-2);
 }
 
 .agent-history-row .ah-status .ui-icon {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
 }
 
 .agent-history-row .ah-status-ok {
@@ -8428,32 +8610,34 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+  font-size: 12.5px;
+}
+
+/* Time, how much it touched, and what came back — one line of facts under the
+   request rather than a column of its own. */
+.agent-history-row .ah-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3);
+  font-size: 11px;
 }
 
 /* An absolute time, not an age: this list is scanned for "the one from
    yesterday afternoon", which "2 days ago" cannot answer. */
 .agent-history-row .ah-when {
-  color: var(--text-3);
-  font-size: 11px;
+  flex: none;
   font-variant-numeric: tabular-nums;
 }
 
-.agent-history-row .ah-face {
-  display: grid;
-  place-items: center;
-}
-
-.agent-history-row .ah-preview {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-  padding-left: 12px;
-  border-left: 1px solid var(--border-soft);
-}
-
-.agent-history-row .ah-preview-label {
-  font-size: 11px;
+.agent-history-row .ah-files {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-card);
   color: var(--text-2);
+  font-size: 10.5px;
 }
 
 .agent-history-row .ah-preview-text {
@@ -8461,353 +8645,118 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-3);
-  font-size: 11px;
 }
 
+/* Secondary until they are wanted. A resting list of twenty rows used to carry
+   forty buttons; these appear for the row under the pointer and for the row
+   the keyboard is on, and take no layout either way. */
 .agent-history-row .ah-actions {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--motion-pop) ease;
 }
 
-/* Finished work keeps the same card but reads as archive: softer type. */
+.agent-history-row:hover .ah-actions,
+.agent-history-row:focus-within .ah-actions,
+.agent-history-row:focus-visible .ah-actions {
+  opacity: 1;
+}
+
+/* Finished work keeps the same row and reads as archive: softer type. */
 .agent-history-finished .agent-history-row {
   color: var(--text-2);
 }
 
-/* A narrow panel drops the preview column rather than squeezing five things
-   into a width that fits three. The outcome, the request and the controls are
-   what the row is for; the summary is one hover away on the conversation. */
-@container (max-width: 620px) {
-  .agent-history-row {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
+/* A touch reader has no hover, so the controls are simply there. */
+@media (hover: none) {
+  .agent-history-row .ah-actions {
+    opacity: 1;
   }
+}
 
-  .agent-history-row .ah-preview {
+/* A narrow panel drops the trailing summary rather than squeezing three facts
+   into a width that fits one. The outcome, the request, the time and the
+   controls are what the row is for. */
+@container (max-width: 480px) {
+  .agent-history-row .ah-preview-text {
     display: none;
   }
 }
 
 /* ---------------------------------------------------- agent spec (details) --
- * The agent's own page: who it is, what it is configured as here, what it is
- * doing, what it is *for* in each channel, and what it has spent. Everything
- * on it that can be changed is changed in place — a settings dialog opened
- * from a details tab would be a second description of the same agent, and the
- * two would disagree the moment one of them was edited.
+ * The agent's own page: who it is, what it is doing, what it is configured as
+ * here, and where it works. Everything on it that can be changed is changed in
+ * place — a settings dialog opened from a details tab would be a second
+ * description of the same agent, and the two would disagree the moment one of
+ * them was edited.
+ *
+ * Four zones on one surface, separated by space. It used to be a
+ * banner-topped identity card beside a column of five outlined panes: eleven
+ * borders and six headings around about 744px of content, in a panel with
+ * 523px to give it. Every zone that is a card is a card the reader has to
+ * discount before they can read the page, and the height those cards spent on
+ * padding and rules is the height the development information needed.
+ *
+ * The one outer boundary is the panel itself. The one tinted surface is the
+ * current work, because it is the only part of the page that changes on its
+ * own.
  */
 .agent-spec {
   min-height: 0;
+  /* One natural scroller, and normally unused: at the 518px panel width this
+     is read at, the four zones come to about 470px of the 523px available.
+     It exists for the exceptions the page must never clip — a provider fault,
+     a long task title, an account reporting four usage windows. */
   overflow-y: auto;
-  padding: 20px 18px 24px;
-}
-
-.agent-spec .aspec-head {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  margin-bottom: 22px;
-}
-
-.agent-spec .aspec-face {
-  position: relative;
-  display: inline-flex;
-  flex: none;
-}
-
-.agent-spec .aspec-identity {
-  min-width: 0;
-}
-
-.agent-spec .aspec-head h2 {
-  margin: 0;
-  font-size: 20px;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-spec .aspec-sub {
-  margin-top: 3px;
-  color: var(--text-3);
-  font-size: 12px;
-}
-
-.agent-spec .aspec-section {
-  margin-bottom: 22px;
-}
-
-.agent-spec .aspec-section:last-child {
-  margin-bottom: 0;
-}
-
-.agent-spec .aspec-label {
-  color: var(--text-3);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-}
-
-.agent-spec .aspec-section > .aspec-label {
-  display: block;
-  margin-bottom: 8px;
-}
-
-.agent-spec .aspec-label-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-  min-height: 22px;
-}
-
-.agent-spec .aspec-count {
-  color: var(--text-3);
-  font-size: 10.5px;
-}
-
-/* The orchestration list: what is spending, how hard it thinks, and what it is
-   for here. Each setting is a line — label left, the value that answers it
-   right — separated by the same hairline the transcript uses between messages
-   rather than boxed one card per fact. Six bordered cards to carry six short
-   words was mostly border, and the borders were the loudest thing on a page
-   whose content is four words and a percentage. */
-.agent-spec .aspec-rows {
-  display: grid;
-  border-top: 1px solid var(--border-soft);
-}
-
-.agent-spec .aspec-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 40px;
-  padding: 6px 2px;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.agent-spec .aspec-row-label {
-  flex: none;
-  max-width: 45%;
-  color: var(--text-3);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-spec .aspec-row-value {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: 0;
-  flex: 1;
-}
-
-.agent-spec .aspec-row-text {
-  min-width: 0;
-  color: var(--text);
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The same `mini-select` the composer uses, sitting at the end of its row.
-   Chromeless until it is pointed at, so a settable value looks like the value
-   it is rather than like a form control queued up beside three others. */
-.agent-spec .aspec-row .mini-select {
-  max-width: 100%;
-  padding: 4px 6px;
-  background: none;
-  font-size: 13px;
-  color: var(--text);
-}
-
-.agent-spec .aspec-row .mini-select:hover {
-  background: var(--bg-hover);
-}
-
-.agent-spec .aspec-row .mini-select select {
-  max-width: 168px;
-  font-size: 13px;
-  color: var(--text);
-  text-align: right;
-}
-
-/* The one container left on the page, and it holds the one thing that is
-   actually happening. */
-.agent-spec .aspec-box {
-  min-width: 0;
-  padding: 11px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-  background: var(--bg-inset);
-}
-
-.agent-spec .aspec-live {
-  border-color: var(--accent-line);
-  background: var(--accent-wash);
-}
-
-.agent-spec .aspec-task {
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.agent-spec .aspec-task-meta {
-  margin-top: 6px;
-  color: var(--text-3);
-  font-size: 10.5px;
-  text-transform: capitalize;
-}
-
-.agent-spec .aspec-note {
-  margin-top: 8px;
-  color: var(--text-3);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-/* A section whose whole body is one quiet line — an idle agent, usage that is
-   somebody else's to see — starts level with the heading above it rather than
-   indented from it by a margin meant to separate a note from content. */
-.agent-spec .aspec-label + .aspec-note,
-.agent-spec .aspec-label-row + .aspec-note {
-  margin-top: 0;
-  font-size: 12.5px;
-}
-
-.agent-spec .aspec-box .aspec-note {
-  margin-top: 0;
-  font-size: 12px;
-}
-
-.agent-spec .aspec-usage {
-  display: grid;
-  gap: 10px;
-}
-
-.agent-spec .aspec-usage-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 6px;
-  color: var(--text-2);
-  font-size: 12px;
-}
-
-.agent-spec .aspec-usage-head strong {
-  font-variant-numeric: tabular-nums;
-}
-
-.agent-spec .aspec-meter {
-  height: 7px;
-  border-radius: 999px;
-  background: var(--bg-card);
-  overflow: hidden;
-}
-
-.agent-spec .aspec-meter i {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  border-radius: inherit;
-}
-
-.agent-spec .aspec-usage-reset,
-.agent-spec .aspec-usage-plan,
-.agent-spec .aspec-usage-source {
-  margin-top: 4px;
-  color: var(--text-3);
-  font-size: 10.5px;
-}
-
-.agent-spec .aspec-usage-plan {
-  color: var(--text-2);
-}
-
-/* The full agent page borrows the reference profile's two-part composition:
-   a banner-backed identity card on the left and a compact activity/settings
-   pane on the right. The right side is deliberately dense enough to fit at a
-   normal laptop height; the page only becomes a scroller when the viewport or
-   a user-resized panel genuinely cannot hold it. */
-.agent-spec {
+  /* Measured against the panel, not the window: this panel is dragged wider
+     and narrower, and a viewport query would keep two columns in a column the
+     reader has just squeezed to a third of the screen. */
   container-type: inline-size;
-  padding: 16px;
   background: var(--bg);
 }
 
 .agent-spec .aspec-content {
   display: grid;
-  width: 100%;
-  max-width: 980px;
-  min-height: 100%;
-  margin: 0 auto;
-  grid-template-columns: minmax(220px, 0.72fr) minmax(390px, 1.28fr);
+  align-content: start;
+  /* The zone separation, and the only thing separating them. */
+  gap: 18px;
+  padding: 16px 16px 20px;
+}
+
+/* Every zone is a plain region of the one surface. Only the current work has
+   a background, and only the identity has a wash. */
+.agent-spec .aspec-zone {
+  min-width: 0;
+}
+
+/* ---- identity ---------------------------------------------------------- */
+
+/*
+ * 88–104px: face, name, and the four facts that identify this agent.
+ *
+ * The tall banner is gone. What is left of it is a wash that fades out under
+ * the name — a hint of the agent's own colour at the top of its page rather
+ * than a ninth of the panel given to a gradient nobody reads. The status,
+ * room, connection and ownership are one wrapping line of text; as bordered
+ * pills they repeated, in a second visual language, what the header and the
+ * zones below already say.
+ */
+.agent-spec .aspec-identity {
+  position: relative;
+  display: grid;
+  min-height: 88px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
   gap: 14px;
-  align-content: center;
-}
-
-.agent-spec .aspec-identity-card,
-.agent-spec .aspec-pane {
-  border: 1px solid var(--border-soft);
+  padding: 14px 14px 14px 12px;
   border-radius: 14px;
-  background: var(--bg-panel);
-  box-shadow: var(--shadow-card);
-}
-
-/*
- * The card is as tall as what it says. It used to stretch to the height of
- * the column of panes beside it, which was fine while it held a stack of
- * labelled facts and is a pane of empty ground now that those are pills.
- */
-.agent-spec .aspec-identity-card {
-  align-self: start;
-  min-width: 0;
-  overflow: hidden;
-}
-
-/*
- * A band of the agent's colour, not a hero image. It was a sixth of the
- * viewport tall and carried nothing — the profile below it had to start a
- * screen down from the panel's own header for a gradient nobody reads.
- */
-.agent-spec .aspec-banner {
-  height: clamp(58px, 9vh, 74px);
   background: linear-gradient(
-    145deg,
-    color-mix(in srgb, var(--aspec-accent, var(--accent)) 58%, var(--surface-2)),
-    color-mix(in srgb, var(--aspec-accent, var(--accent)) 16%, var(--surface-2))
+    160deg,
+    color-mix(in srgb, var(--aspec-accent, var(--accent)) 13%, var(--bg-panel)),
+    var(--bg) 82%
   );
-}
-
-.agent-spec .aspec-identity-body {
-  padding: 0 18px 18px;
-}
-
-/*
- * Face and name on one line, the way the reference names a thing beside its
- * mark. Stacked, they cost the top of the panel three full-width lines — an
- * avatar, a display name at heading size, and a provider under it — before
- * anything about the connection had been said.
- */
-.agent-spec .aspec-identity-head {
-  display: flex;
-  min-width: 0;
-  align-items: flex-end;
-  gap: 12px;
-  margin-top: -34px;
-}
-
-.agent-spec .aspec-identity-id {
-  min-width: 0;
-  flex: 1;
-  padding-bottom: 3px;
 }
 
 .agent-spec .aspec-face {
@@ -8815,56 +8764,460 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   display: flex;
   width: fit-content;
   flex: none;
-  padding: 4px;
+  padding: 3px;
   border-radius: 50%;
   background: var(--bg-panel);
 }
 
 .agent-spec .aspec-face .status-dot {
-  right: 4px;
-  bottom: 5px;
+  right: 2px;
+  bottom: 2px;
   width: 10px;
   height: 10px;
   border: 3px solid var(--bg-panel);
 }
 
-.agent-spec .aspec-identity-body h2 {
-  margin: 0;
-  color: var(--text);
-  font-size: clamp(19px, 3.4cqi, 25px);
-  font-weight: 680;
-  line-height: 1.15;
-  letter-spacing: -0.03em;
-  overflow-wrap: anywhere;
+.agent-spec .aspec-identity-id {
+  min-width: 0;
 }
 
-.agent-spec .aspec-handle {
-  margin-top: 2px;
-  color: var(--text-2);
-  font-size: 12px;
+.agent-spec .aspec-identity-id h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 680;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/*
- * The strip of tags under the name: what it is doing, which room this is,
- * whose connection it is. They wrap as a row rather than stacking as
- * labelled pairs, which is the whole saving — three facts on one line
- * instead of six.
- */
-.agent-spec .aspec-pills {
+/* The facts, as one line of text with separators. They wrap to a second line
+   on a narrow panel rather than being cut, which is the whole 88–104px
+   allowance: one row of them or two. */
+.agent-spec .aspec-identity-facts {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.agent-spec .aspec-fact {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-fact .status-dot {
+  position: static;
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border: 0;
+}
+
+.agent-spec .aspec-sep {
+  color: var(--text-3);
+}
+
+/* Rename, delete, and whatever else this account may do to this agent — the
+   same menu the roster row offers, because it is the same set of rare
+   actions and there should not be two answers to what they are. */
+.agent-spec .aspec-more {
+  flex: none;
+  align-self: start;
+}
+
+/* ---- current work ------------------------------------------------------ */
+
+/*
+ * The one tinted surface, and the only zone whose height is reserved.
+ *
+ * 56px idle and 72px running, never past the 96px a wrapped narrow panel
+ * comes to. Inside either state it does not move at all: the phase line is a
+ * fixed slot, so a status arriving, a percentage changing or a phase being
+ * replaced never shifts the runtime grid under it, and the extra room while
+ * something is running is what absorbs the primary action appearing when the
+ * task's own message is finally found. The reserve is the point — this is the
+ * part of the page that changes on its own, and it sits directly above the
+ * four controls somebody is reaching for.
+ */
+.agent-spec .aspec-work {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 13px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.agent-spec .aspec-work.is-active {
+  min-height: 72px;
+  flex-wrap: wrap;
+  border-color: color-mix(
+    in srgb,
+    var(--aspec-accent, var(--accent)) 34%,
+    var(--border)
+  );
+  background: color-mix(
+    in srgb,
+    var(--aspec-accent, var(--accent)) 10%,
+    var(--bg-card)
+  );
+}
+
+.agent-spec .aspec-work-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 190px;
+  gap: 2px;
+}
+
+.agent-spec .aspec-work-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 620;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* An ordinary `phase-slot`: the render loop owns its crossfade and its
+   coalescing, exactly as it does for a thread link in the transcript. One
+   reserved line, so nothing under it moves when the words change. */
+.agent-spec .aspec-work-phase {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+
+.agent-spec .aspec-work-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-spec .aspec-action {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: 600 12px/1 var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--motion-pop) ease,
+    border-color var(--motion-pop) ease;
+}
+
+.agent-spec .aspec-action svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.agent-spec .aspec-action:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+/* Continuing the work is the primary action; the history is a way of looking
+   at it. The full-width History button that used to open this page — the
+   loudest control on it, for the one destination that is never what somebody
+   opening an agent wanted — is the quiet one beside it now. */
+.agent-spec .aspec-action-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.agent-spec .aspec-action-primary:hover {
+  border-color: color-mix(in srgb, var(--accent) 88%, #000);
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+
+.agent-spec .aspec-action-quiet {
+  background: none;
+  border-color: var(--border-soft);
+  color: var(--text-2);
+}
+
+/* Immediate on keyboard focus: no transition is declared for `outline`, so
+   the ring is on the frame the focus lands. */
+.agent-spec .aspec-action:focus-visible,
+.agent-spec .aspec-info:focus-visible,
+.agent-spec .aspec-pill-more:focus-visible,
+.agent-spec .aspec-native-select:focus-visible,
+.agent-spec .mini-editable input:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+/* ---- runtime ----------------------------------------------------------- */
+
+/*
+ * 124–152px: the four things this agent runs on, two by two.
+ *
+ * No heading and no "Editable" badge. The badge told a reader what the
+ * presence of a dropdown already tells them, and the heading named a group
+ * that is the only group of controls on the page.
+ */
+/* 124px: two rows of label-over-control at 56px each with 12px between them.
+   Written down rather than left implied, because this is the zone the panel
+   exists for and the one whose height everything else was competing with. */
+.agent-spec .aspec-runtime {
+  min-height: 124px;
+}
+
+.agent-spec .aspec-settings {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 12px;
+}
+
+.agent-spec .aspec-field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.agent-spec .aspec-field-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
   gap: 6px;
-  margin-top: 13px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.agent-spec .aspec-native-select,
+.agent-spec .aspec-field-value {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: 500 13px/1.35 var(--font);
+  transition: border-color var(--motion-pop) ease, background var(--motion-pop) ease;
+}
+
+.agent-spec .aspec-native-select {
+  appearance: auto;
+  cursor: pointer;
+}
+
+/* Quiet until it is pointed at, and unmistakably a control once it is. */
+.agent-spec .aspec-native-select:hover,
+.agent-spec .aspec-native-select:focus {
+  border-color: var(--border-strong);
+  background: var(--bg-card-2);
+}
+
+.agent-spec .aspec-field-value {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The typed-model field, for the provider that reports no list. Same box as
+   the selects beside it rather than the composer's chromeless pill, so the
+   four fields read as one row of controls. */
+.agent-spec .mini-editable {
+  width: 100%;
+  /* The composer caps this at 168px so a typed model cannot push the pills
+     beside it off the row. Here it is a field in a two-column grid and the
+     column is already the cap. */
+  max-width: none;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-card);
+  transition: border-color var(--motion-pop) ease, background var(--motion-pop) ease;
+}
+
+.agent-spec .mini-editable:hover,
+.agent-spec .mini-editable:focus-within {
+  border-color: var(--border-strong);
+  background: var(--bg-card-2);
+}
+
+.agent-spec .mini-editable input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: 500 13px/1.35 var(--font);
+}
+
+/* A 32px target beside the label it belongs to, in place of the paragraph
+   that used to sit under the whole block. */
+.agent-spec .aspec-info {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  margin: -8px 0 -8px -4px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background var(--motion-pop) ease, color var(--motion-pop) ease;
+}
+
+.agent-spec .aspec-info svg {
+  width: 13px;
+  height: 13px;
+}
+
+.agent-spec .aspec-info:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* Every icon target on this panel is at least 32px square without the row it
+   sits in growing to match: the extra is taken back as block margin, so the
+   box a finger gets is larger than the box the layout sees. Inline margins
+   are left alone — pulling those in would overlap the target beside it, which
+   is the opposite of the point. */
+.agent-spec .icon-btn.sm,
+.agent-history-row .icon-btn.sm {
+  width: 32px;
+  height: 32px;
+  margin-block: -3px;
+}
+
+/* A deployment that could not report its options at all. Not a caveat and not
+   hidden: it changes whether the field above it can be trusted. */
+.agent-spec .aspec-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--orange) 34%, var(--border-soft));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--orange) 8%, transparent);
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.agent-spec .aspec-alert svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin-top: 1px;
+  color: var(--orange);
+}
+
+/* ---- context ----------------------------------------------------------- */
+
+/*
+ * 72–96px: where it works and what it has spent, side by side.
+ *
+ * As two headed, bordered panes stacked one above the other, these two facts
+ * — "#KUMI" and a percentage — took a third of the panel.
+ */
+.agent-spec .aspec-context {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px 18px;
+  padding-top: 14px;
+  /* The one faint divider on the page: usage and channels are read as facts
+     about the agent rather than as more of the settings above them. */
+  border-top: 1px solid var(--border-soft);
+}
+
+.agent-spec .aspec-context-cell {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 6px;
+}
+
+.agent-spec .aspec-cell-head {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-spec .aspec-cell-label {
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.agent-spec .aspec-count {
+  display: inline-grid;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0 5px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.agent-spec .aspec-cell-head .icon-btn {
+  margin-left: auto;
+}
+
+.agent-spec .aspec-channel-list {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .agent-spec .aspec-pill {
   display: inline-flex;
   max-width: 100%;
   min-width: 0;
-  height: 23px;
+  height: 24px;
   align-items: center;
   gap: 6px;
   padding: 0 9px;
@@ -8872,8 +9225,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   border-radius: 999px;
   background: var(--bg-card);
   color: var(--text-2);
-  font-size: 11px;
-  font-weight: 500;
+  font: 500 11.5px/1 var(--font);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -8887,259 +9239,14 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   border: 0;
 }
 
-.agent-spec .aspec-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 15px;
-}
-
-.agent-spec .aspec-action {
-  display: inline-flex;
-  min-width: 0;
-  min-height: 36px;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 7px 11px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg-card);
-  color: var(--text);
-  font: 600 12px/1 var(--font);
+.agent-spec .aspec-pill-more {
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background var(--motion-pop) ease, border-color var(--motion-pop) ease;
 }
 
-.agent-spec .aspec-action svg {
-  width: 14px;
-  height: 14px;
-}
-
-.agent-spec .aspec-action:hover {
+.agent-spec .aspec-pill-more:hover {
   border-color: var(--border-strong);
   background: var(--bg-hover);
-}
-
-.agent-spec .aspec-action:focus-visible,
-.agent-spec .aspec-native-select:focus-visible,
-.agent-spec .aspec-activity[role="button"]:focus-visible {
-  outline: 2px solid var(--accent-line);
-  outline-offset: 2px;
-}
-
-.agent-spec .aspec-action-primary {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-ink);
-}
-
-.agent-spec .aspec-action-primary:hover {
-  border-color: color-mix(in srgb, var(--accent) 88%, #000);
-  background: color-mix(in srgb, var(--accent) 88%, #000);
-}
-
-.agent-spec .aspec-main {
-  display: grid;
-  min-width: 0;
-  gap: 10px;
-  align-content: center;
-}
-
-.agent-spec .aspec-pane {
-  min-width: 0;
-  padding: 13px 14px;
-}
-
-.agent-spec .aspec-pane-head {
-  display: flex;
-  min-height: 20px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-
-.agent-spec .aspec-pane-title {
-  margin: 0;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 1.3;
-}
-
-.agent-spec .aspec-activity-pane > .aspec-pane-title {
-  margin-bottom: 10px;
-}
-
-.agent-spec .aspec-activity {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 11px;
-  padding: 10px 11px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: var(--bg-card);
-}
-
-.agent-spec .aspec-activity.is-active {
-  border-color: color-mix(
-    in srgb,
-    var(--aspec-accent, var(--accent)) 34%,
-    var(--border)
-  );
-  background: color-mix(
-    in srgb,
-    var(--aspec-accent, var(--accent)) 10%,
-    var(--bg-card)
-  );
-}
-
-.agent-spec .aspec-activity[role="button"] {
-  cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
-}
-
-.agent-spec .aspec-activity[role="button"]:hover {
-  border-color: var(--aspec-accent, var(--accent));
-  background: color-mix(
-    in srgb,
-    var(--aspec-accent, var(--accent)) 15%,
-    var(--bg-card)
-  );
-}
-
-.agent-spec .aspec-activity-mark {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  flex: none;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--bg-card-2);
-  color: var(--aspec-accent, var(--accent));
-}
-
-.agent-spec .aspec-activity-mark svg {
-  width: 17px;
-  height: 17px;
-}
-
-.agent-spec .aspec-activity-copy {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.agent-spec .aspec-activity-copy strong,
-.agent-spec .aspec-activity-copy span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-spec .aspec-activity-copy strong {
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.agent-spec .aspec-activity-copy span {
-  color: var(--text-3);
-  font-size: 10.5px;
-  text-transform: capitalize;
-}
-
-.agent-spec .aspec-editing,
-.agent-spec .aspec-count {
-  display: inline-grid;
-  min-height: 20px;
-  padding: 2px 7px;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--bg-card);
-  color: var(--text-3);
-  font-size: 9.5px;
-  font-weight: 600;
-}
-
-.agent-spec .aspec-settings {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px 10px;
-}
-
-.agent-spec .aspec-field {
-  display: grid;
-  min-width: 0;
-  gap: 4px;
-}
-
-.agent-spec .aspec-field-label {
-  color: var(--text-2);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-
-.agent-spec .aspec-native-select,
-.agent-spec .aspec-field-value {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  padding: 6px 9px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-card);
-  color: var(--text);
-  font: 500 12px/1.35 var(--font);
-}
-
-.agent-spec .aspec-native-select {
-  appearance: auto;
-  cursor: pointer;
-}
-
-.agent-spec .aspec-native-select:hover {
-  border-color: var(--border-strong);
-  background: var(--bg-card-2);
-}
-
-.agent-spec .aspec-field-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-spec .aspec-settings-pane > .aspec-note {
-  margin: 8px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-soft);
-  font-size: 10px;
-  line-height: 1.35;
-}
-
-.agent-spec .aspec-bottom-grid {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: minmax(130px, 0.72fr) minmax(190px, 1.28fr);
-  gap: 10px;
-}
-
-.agent-spec .aspec-channel-list {
-  display: flex;
-  max-height: 58px;
-  flex-wrap: wrap;
-  gap: 6px;
-  overflow: hidden;
-}
-
-.agent-spec .aspec-note {
-  margin-top: 7px;
-  color: var(--text-3);
-  font-size: 10.5px;
-  line-height: 1.4;
 }
 
 .agent-spec .aspec-usage-card {
@@ -9147,64 +9254,160 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 }
 
 .agent-spec .aspec-usage {
+  display: grid;
   gap: 7px;
 }
 
 .agent-spec .aspec-usage-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 4px;
-  font-size: 10.5px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.agent-spec .aspec-usage-head strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 .agent-spec .aspec-meter {
   height: 5px;
+  border-radius: 999px;
   background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.agent-spec .aspec-meter i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
 }
 
 .agent-spec .aspec-usage-reset,
 .agent-spec .aspec-usage-plan,
-.agent-spec .aspec-usage-source {
+.agent-spec .aspec-usage-source,
+.agent-spec .aspec-note {
   margin-top: 2px;
-  font-size: 9.5px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.4;
 }
 
-@container (max-width: 650px) {
-  .agent-spec .aspec-content {
-    grid-template-columns: 1fr;
-    align-content: start;
-  }
-
-  .agent-spec .aspec-identity-card {
-    align-self: auto;
-  }
-
-  .agent-spec .aspec-banner {
-    height: 62px;
-  }
+.agent-spec .aspec-usage-plan {
+  color: var(--text-2);
 }
 
+/* ---- what the "i" and the "+n more" open -------------------------------- */
+
+.aspec-note-pop h4,
+.aspec-channels-pop h4 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.aspec-note-pop p {
+  margin: 0 0 10px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.aspec-note-pop dl {
+  display: grid;
+  margin: 0;
+  gap: 4px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.aspec-note-pop dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.aspec-note-pop dt {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.aspec-note-pop dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aspec-channels-pop ul {
+  display: grid;
+  margin: 0;
+  gap: 2px;
+  padding: 0;
+  list-style: none;
+}
+
+.aspec-channels-pop li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.aspec-channels-pop li.here {
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+.aspec-channels-pop li span {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+/* ---- narrow panels and phones ------------------------------------------ */
+
+/* Under about a 430px panel the two-up grids have nothing left to give, so
+   they stack rather than squeezing a model name into 90px. */
 @container (max-width: 430px) {
   .agent-spec .aspec-settings,
-  .agent-spec .aspec-bottom-grid {
+  .agent-spec .aspec-context {
     grid-template-columns: 1fr;
+  }
+
+  .agent-spec .aspec-work {
+    flex-wrap: wrap;
+  }
+
+  .agent-spec .aspec-work-actions {
+    width: 100%;
+  }
+
+  .agent-spec .aspec-action {
+    flex: 1;
   }
 }
 
+/* A phone shows the panel as a full-height sheet. The page keeps its single
+   scroller: nothing inside it scrolls on its own, so there is no inner region
+   to get trapped in. */
 @media (max-width: 600px) {
-  .agent-spec {
-    padding: 12px;
-  }
-
   .agent-spec .aspec-content {
-    display: block;
+    gap: 16px;
+    padding: 12px 12px 18px;
   }
 
-  .agent-spec .aspec-identity-card,
-  .agent-spec .aspec-main {
-    margin-bottom: 10px;
-  }
-
-  .agent-spec .aspec-main {
-    display: grid;
+  .agent-spec .aspec-identity {
+    min-height: 0;
   }
 }
 
@@ -9250,6 +9453,16 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   border-radius: var(--radius-xl);
   box-shadow: -14px 0 30px -24px rgb(0 0 0 / 60%);
   z-index: 4;
+}
+
+/* The gutter the shell used to hand out to everybody. The navigation and the
+   conversation gave theirs up to become one surface; a panel keeps its, and
+   its card with it, because it is not part of that surface — it is opened, it
+   is dragged wider, it is closed again, and a frame with a hole in it
+   whenever a thread is shut is not a frame. Applies between two panels as
+   well, which is the gap they already had. */
+.chats-shell > .thread-panel {
+  margin-left: 8px;
 }
 
 /* A panel kind is the draggable tab: it names its own surface, and dragging
@@ -9354,6 +9567,14 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
     backwards;
 }
 
+/* Same beat, for the one panel whose body is not `.thread-body`: the agent
+   profile's contents live in `.agent-panel-view` so that a change of view can
+   move them without the shell around them moving too. */
+.thread-panel.panel-entering > .agent-panel-view {
+  animation: panel-content-in var(--motion-content) var(--ease-motion) 40ms
+    backwards;
+}
+
 /* A tab joining a column that already has one in it opens the room for
    itself rather than appearing in it.
 
@@ -9436,6 +9657,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   .chats-shell.panels-2 .thread-panel.panel-entering,
   .chats-shell.panels-3 .thread-panel.panel-entering,
   .thread-panel.panel-entering > .thread-head,
+  .thread-panel.panel-entering > .agent-panel-view,
   .thread-panel.panel-entering > .thread-body {
     animation: none;
   }
@@ -9453,6 +9675,93 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
 .agent-detail-panel {
   width: var(--panel-w, min(820px, 76vw));
   min-width: min(520px, 100%);
+}
+
+/*
+ * The panel's middle row, and the only part of it that changes when the
+ * profile becomes the history.
+ *
+ * Profile, history and private chat are three states of one surface rather
+ * than three panels, so the shell — its width, its grip, its header, its
+ * close — is the same element throughout and never replays an opening for a
+ * change of view.
+ */
+.agent-detail-panel > .agent-panel-view {
+  display: grid;
+  min-height: 0;
+}
+
+/* The swap itself: inner content only, and only on a real press. `app.js`
+   adds this for exactly one animation from the `agent-panel-tab` handler,
+   because a poll tick redraws this element too and CSS cannot tell the two
+   apart. */
+.agent-panel-view.agent-view-swapping {
+  animation: agent-view-swap var(--motion-panel-out) var(--ease-motion);
+}
+
+@keyframes agent-view-swap {
+  from {
+    opacity: 0;
+  }
+}
+
+/*
+ * Opening and closing the profile.
+ *
+ * Shorter and shallower than a thread's: this panel is the widest of them and
+ * a 16px travel at a 26px pace reads as a slab arriving rather than as a
+ * surface being made room for. The width is still part of the animation, so
+ * the conversation beside it gives up its column over the same interval — one
+ * event with two halves, not a panel sliding over a transcript that jumped a
+ * frame earlier. The two-and-three-panel selectors are here to outrank
+ * `panel-join`, which is the same movement with the same width growth.
+ */
+.chats-shell .agent-detail-panel.panel-entering,
+.chats-shell.panels-2 .agent-detail-panel.panel-entering,
+.chats-shell.panels-3 .agent-detail-panel.panel-entering {
+  animation: agent-panel-in var(--motion-panel-out) var(--ease-motion);
+}
+
+.chats-shell .agent-detail-panel.panel-leaving {
+  animation: agent-panel-out var(--motion-panel-out) var(--ease-motion) forwards;
+}
+
+@keyframes agent-panel-in {
+  from {
+    opacity: 0;
+    width: 0;
+    transform: translateX(10px);
+  }
+}
+
+@keyframes agent-panel-out {
+  to {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* No travel and no crossfade worth waiting on: the view is simply the other
+     one. The panel's own entrance is already switched off with every other
+     `.thread-panel` above. */
+  .chats-shell .agent-detail-panel.panel-entering,
+  .chats-shell.panels-2 .agent-detail-panel.panel-entering,
+  .chats-shell.panels-3 .agent-detail-panel.panel-entering,
+  .agent-panel-view.agent-view-swapping {
+    animation: none;
+  }
+
+  .agent-spec .aspec-action,
+  .agent-spec .aspec-info,
+  .agent-spec .aspec-pill-more,
+  .agent-spec .aspec-native-select,
+  .agent-spec .aspec-field-value,
+  .agent-history-row,
+  .agent-history-row .ah-actions {
+    transition-duration: 0.08s;
+    transition-property: opacity, background-color, border-color, color;
+  }
 }
 
 .panel-grip {
@@ -9502,6 +9811,17 @@ body.resizing-panel {
 body.resizing-panel .thread-panel,
 body.resizing-panel .chan-main,
 body.resizing-panel .chan-sidebar {
+  transition: none;
+  animation: none;
+}
+
+/* `animation` and `transition` are not inherited, so the rule above only
+   quiets the panel itself. The profile is the one panel whose contents are a
+   page of their own — controls that ease on hover, a meter, a work zone that
+   changes size with the phase — and a drag is direct manipulation of the
+   width all of them are laid out against. Nothing inside it eases while the
+   pointer is holding the edge. */
+body.resizing-panel .agent-detail-panel * {
   transition: none;
   animation: none;
 }
@@ -10776,6 +11096,11 @@ dialog.modal[open]::backdrop {
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
     width: 0;
+    /* Folded to nothing, and its hairline with it. A border is drawn whatever
+       the width, so what was left of this panel was a line standing a pixel
+       from the rail's own — the seam the single boundary exists to remove.
+       The rail's right border is the navigation's edge while it is away. */
+    border-right-width: 0;
   }
 
   /* Except when it is the last column standing. The control that expands the
@@ -10785,6 +11110,9 @@ dialog.modal[open]::backdrop {
      laid out as while collapsed. */
   .chats-shell.no-rail.chan-collapsed > .chan-sidebar {
     width: var(--rail-w);
+    /* Here it is the whole navigation rather than a fold beside the rail, so
+       it keeps the edge the rule above takes away. */
+    border-right-width: 1px;
   }
 
   /* The crown's two stand-in controls fold away with the rest of it: sixty
@@ -10794,10 +11122,12 @@ dialog.modal[open]::backdrop {
     display: none;
   }
 
-  .chats-shell.chan-collapsed .chan-sidebar-top {
+  /* Collapsed, the crown is the rail's width and holds one control. No
+     padding of its own and no centring: the banner's 18px already places a
+     40px button on the rail's own centre line, which is where the "+" and
+     every channel mark below it stand. */
+  .chats-shell.chan-collapsed .chan-crown {
     gap: 0;
-    justify-content: center;
-    padding: 10px 0 6px;
   }
 
   /* Folded to nothing rather than merely hidden: left at `flex: 1` it still
@@ -11234,10 +11564,6 @@ dialog.modal[open]::backdrop {
     padding: 8px 5px;
   }
 
-  .channel-rail-toggle {
-    display: none;
-  }
-
   .channel-rail-new,
   .channel-rail-button {
     width: 40px;
@@ -11272,10 +11598,26 @@ dialog.modal[open]::backdrop {
     display: inline-grid !important;
   }
 
-  /* See `.drawer-close` above — the drawer's own way out, next to the search
-     box it opens with. */
+  /* See `.drawer-close` above — the drawer's own way out. It rides on the
+     quick links now that the crown it used to sit in is drawn at the head of
+     the banner: one column of links, and the cross beside them, centred on
+     the pair rather than stacked underneath as a third row. */
   .drawer-close {
     display: inline-grid;
+  }
+
+  .chan-quick-links {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .chan-quick-links .chan-quick-link {
+    grid-column: 1;
+  }
+
+  .chan-quick-links .drawer-close {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: center;
   }
 
   /* Off-canvas, and draggable.
@@ -11420,23 +11762,32 @@ dialog.modal[open]::backdrop {
   }
 
   /* The channel is already named, in the widest type on the row; the small
-     bubble beside the name was spending 19px plus a gap saying so again. */
+     bubble beside the counts was spending 19px plus a gap saying so again. */
   .chats-shell .chan-head .ch-hash {
     display: none;
   }
 
-  /* Whatever room is left after the two buttons, and no more — a long
-     channel name otherwise pushes the actions button off the right edge
-     rather than being cut where it runs out of banner. */
-  .chats-shell .chan-head .ch-title {
-    flex: 1;
-    min-width: 0;
+  /* There is no navigation column to stand over here — the sidebar is a
+     drawer — so the crown takes whatever the row has left and the name is
+     cut when it runs out. The drawer button leads the row regardless of
+     where it sits in the markup: on a phone the way back to the navigation
+     is the first thing at the top left, and on a desk it is not drawn at
+     all. */
+  .chats-shell .chan-head .chan-crown {
+    flex: 1 1 auto;
+    width: auto;
+    border-right: 0;
   }
 
-  .chats-shell .chan-head .ch-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .chan-head .chan-sidebar-btn {
+    order: -1;
+  }
+
+  /* And the counts take only what they need, so a long name is cut before
+     they are. */
+  .chats-shell .chan-head .ch-title {
+    flex: 0 1 auto;
+    min-width: 0;
   }
 
   /* Same shape of overflow as the header, and the same fix: the counts and
@@ -11486,6 +11837,11 @@ dialog.modal[open]::backdrop {
     min-width: 0;
     border: 0;
     border-radius: 0;
+    /* No gutter beside a surface that has nothing beside it. The desktop
+       margin is what keeps a panel off the conversation it opened from;
+       pinned to both edges of the phone, it would only push the panel eight
+       pixels off the screen. */
+    margin-left: 0;
     /* Pinned to the viewport, so the shell's padding does not reach it: it
        covers the banner here rather than starting below it, which is what
        gives a thread the whole phone. */
@@ -11494,6 +11850,17 @@ dialog.modal[open]::backdrop {
 
   .chats-shell.panel-splitting .chan-main {
     box-shadow: none;
+  }
+
+  /* The whole boundary, on the one region that is left. The navigation is a
+     drawer here, so with no rail beside it the conversation is the entire
+     surface and takes back the left edge and the rounding the group's right
+     end had given up. With a rail it is still a group of two, and the pair is
+     drawn exactly as it is on a desk: the rail carries the left end, this
+     carries the right, and the hairline between them is the rail's. */
+  .chats-shell.no-rail > .chan-main {
+    border-left: 1px solid var(--border-soft);
+    border-radius: var(--radius-xl);
   }
 
   /* Nothing to drag full-screen wider than the screen. */
@@ -12444,6 +12811,7 @@ dialog.modal[open]::backdrop {
 .composer-thread {
   display: flex;
   align-items: center;
+  min-width: 0;
   gap: 8px;
   margin: 0 12px 6px;
   padding: 6px 8px 6px 10px;
@@ -12467,6 +12835,7 @@ dialog.modal[open]::backdrop {
 }
 
 .composer-thread .ct-title {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -228,6 +228,8 @@ import {
   signInForInvitation,
 } from "./data.js";
 import {
+  agentChannelsPopoverHtml,
+  agentProviderNotePopoverHtml,
   captureChannelScroll,
   channelMessageHasTaskThread,
   channelInfoPopoverHtml,
@@ -1486,9 +1488,10 @@ async function submitInviteSignIn(form) {
  * The outer rail — brand, repository switcher, Chats/Settings links, account
  * card, plan card — stopped being rendered when the channel sidebar became the
  * navigation, and then sat in this file for a while as markup nothing could
- * reach. Everything it held has somewhere else to be: the brand is the crown
- * of `chanSidebar` (screen-chats.js), Settings and the account are at its foot,
- * and the failure-only health line is there with them.
+ * reach. Everything it held has somewhere else to be: the brand is `chanCrown`
+ * (screen-chats.js), at the head of the channel banner and cut to the width of
+ * the navigation under it; Settings and the account are at the foot of
+ * `chanSidebar`, and the failure-only health line is there with them.
  * Its stylesheet block, its phone drawer, the `nav-scrim` and the hamburger
  * that opened it went with it — a menu button that opens a panel which is no
  * longer rendered is worse than no button at all.
@@ -5620,6 +5623,53 @@ function returnFocusFromThread(messageId) {
   $("[data-act='channel-input']")?.focus({ preventScroll: true });
 }
 
+/**
+ * Profile becoming history, or history becoming profile.
+ *
+ * Only the inner content moves. The panel, its width, its grip and its header
+ * are the same elements before and after, so animating the shell would say a
+ * surface had opened when what happened is that one already open changed what
+ * it was showing.
+ *
+ * Driven from the press rather than from the render diff, for the same reason
+ * `MOTION_SURFACES` exists: a poll tick redraws this element too, and CSS
+ * cannot tell "the reader pressed History" from "the stream delivered a
+ * message". One press, one crossfade.
+ */
+function playAgentViewSwap() {
+  const view = $(".agent-detail-panel .agent-panel-view");
+  if (view === null || motionIsUnwanted()) {
+    return;
+  }
+  animateOnce(view, "agent-view-swapping", false);
+}
+
+/**
+ * Where the press came from, after the press has been redrawn out of
+ * existence.
+ *
+ * Both views offer the way back to the other, so "the trigger" survives the
+ * swap as a role rather than as an element: the control that now does the
+ * reverse of what was just done. Preferring the region the reader pressed in
+ * keeps the keyboard where it was — the header if they used the header, the
+ * work zone's own History button if they used that.
+ */
+function returnFocusToAgentPanelTrigger(view, fromHead) {
+  const panel = $(".agent-detail-panel");
+  if (panel === null) {
+    return;
+  }
+  const back = view === "spec" ? "history" : "spec";
+  const found = $$(
+    `[data-act="agent-panel-tab"][data-value="${back}"]`,
+    panel,
+  );
+  const inHead = found.find((node) => node.closest(".thread-head") !== null);
+  const inBody = found.find((node) => node.closest(".thread-head") === null);
+  const target = (fromHead ? inHead : inBody) ?? inHead ?? inBody;
+  target?.focus({ preventScroll: true });
+}
+
 function sidePanelOpen() {
   return (
     state.catchUp !== undefined ||
@@ -8977,9 +9027,16 @@ document.addEventListener("click", (event) => {
       state.agentHistoryFilter = value;
       render();
       return;
-    case "agent-panel-tab":
+    case "agent-panel-tab": {
+      // Which control this came from, taken before the render throws it away.
+      // Profile and history each offer a way back in the header, and the
+      // profile offers a second one beside the work it is about; focus goes
+      // back to whichever of the two the reader actually pressed.
+      const fromHead = node.closest(".thread-head") !== null;
       state.agentPanelTab = value;
       render();
+      playAgentViewSwap();
+      returnFocusToAgentPanelTrigger(value, fromHead);
       // Returning from chat or history opens the specification just as surely
       // as clicking the roster row does, so it gets the same fresh reading.
       if (value === "spec") {
@@ -8995,10 +9052,16 @@ document.addEventListener("click", (event) => {
         }
       }
       return;
+    }
     case "agent-panel-close":
       clearRightPanel("agent");
       state.activeAgentPanel = undefined;
       render();
+      // The profile was over the conversation, and the conversation is where
+      // an org agent is actually tasked — the work zone's own primary action
+      // is this one for exactly that reason. Same landing the thread panel
+      // gives back when the message it was opened from is out of the page.
+      $("[data-act='channel-input']")?.focus({ preventScroll: true });
       return;
     // Expanding a file happens where it is read — in the transcript — so this
     // only toggles which paths are open, with no route change to lose the
@@ -9169,6 +9232,47 @@ document.addEventListener("click", (event) => {
     case "channel-info":
       showPopover(node, channelInfoPopoverHtml(value));
       return;
+    /**
+     * The provider caveat that used to be a permanent paragraph.
+     *
+     * Codex reports its model list from a cache its CLI writes locally, and
+     * saying so took three lines under the settings of every profile on every
+     * visit — for something that changes what one field accepts and nothing
+     * else. It is the "i" beside that field now, and this is where the words
+     * went. A deployment that could not answer at all still says so on the
+     * page: that is a fault, not a caveat.
+     */
+    case "agent-provider-note": {
+      const about = channelAgentsFor(activeChannelId()).find(
+        (agent) => agent.id === value,
+      );
+      if (about === undefined) {
+        return;
+      }
+      showPopover(
+        node,
+        agentProviderNotePopoverHtml(about, about.provider ?? about.id),
+        { width: 300 },
+      );
+      return;
+    }
+    // The rooms the context strip had no width for. The channel the panel was
+    // opened from is always the one shown, so this is only ever "and where
+    // else" — a list, not a decision, hence a popover rather than a menu.
+    case "agent-channels-more": {
+      const listed = channelAgentsFor(activeChannelId()).find(
+        (agent) => agent.id === value,
+      );
+      if (listed === undefined) {
+        return;
+      }
+      showPopover(
+        node,
+        agentChannelsPopoverHtml(listed, activeChannelId()),
+        { width: 260 },
+      );
+      return;
+    }
     case "channel-agent-add":
       addChannelAgent(activeChannelId(), value);
       render();

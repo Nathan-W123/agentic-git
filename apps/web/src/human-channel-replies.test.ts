@@ -208,6 +208,10 @@ test("the direct-reply composer names its target and resets after sending", asyn
   );
 
   assert.match(chip, /directReply \? "Replying to" : "Continuing in"/u);
+  assert.match(
+    chip,
+    /const preview = directReply[\s\S]*replyPreviewText\(root\)[\s\S]*replyPreviewText\(\{ content: threadTitle\(root\) \}\);/u,
+  );
   assert.match(chip, /directReply \? `\$\{author\.name\}: ` : ""/u);
   assert.match(chip, /title\.slice\(0, 70\)/u);
   assert.match(
@@ -224,6 +228,33 @@ test("the direct-reply composer names its target and resets after sending", asyn
     /if \(directReply\) \{\s*scrollChannel\(\);/u,
   );
   assert.doesNotMatch(submit, /state\.scrollToMessage = continuing;/u);
+});
+
+test("reply previews collapse multiline content and omit hidden attachment references", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function replyPreviewText(");
+  const end = chats.indexOf("\n/** The compact address above an inline reply.", start);
+  assert.notEqual(start, -1, "the shared reply preview helper should exist");
+  assert.notEqual(end, -1, "the reply preview helper should have a boundary");
+
+  const preview = new Function(
+    "ATTACHMENT_PATTERN",
+    `${chats.slice(start, end)}\nreturn replyPreviewText;`,
+  )(
+    /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu,
+  ) as (entry: { content?: string; deletedAt?: string }) => string;
+  const attachment =
+    "![Attached image](attachment:0123456789abcdef0123456789abcdef.png)";
+
+  assert.equal(
+    preview({ content: `First line\n  second line\n${attachment}` }),
+    "First line second line",
+  );
+  assert.equal(preview({ content: attachment }), "Attached image");
+  assert.equal(
+    preview({ content: "words that are replaced", deletedAt: "now" }),
+    "This message was deleted",
+  );
 });
 
 test("a reply's reference keeps clear of the avatar it sits above", async () => {
