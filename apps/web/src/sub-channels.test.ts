@@ -41,27 +41,6 @@ test("every read and write says which room it means", async () => {
   }
 });
 
-test("switching rooms drops what was keyed by repository alone", async () => {
-  const data = await publicFile("data.js");
-  const selector = data.slice(data.indexOf("export function selectSubChannel"));
-  const body = selector.slice(0, selector.indexOf("\n}"));
-
-  // Every one of these is keyed by repository id, so without clearing them
-  // the new room opens showing the old room's messages.
-  for (const cleared of [
-    "state.channelMessages",
-    "state.channelEarlier",
-    "state.channelPinned",
-    "state.channelLoaded",
-    "state.channelRosterLoaded",
-  ]) {
-    assert.ok(
-      body.includes(cleared),
-      `${cleared} should be cleared when the open room changes`,
-    );
-  }
-});
-
 test("an undivided repository keeps the interface it always had", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
@@ -122,4 +101,74 @@ test("a private room is drawn as private, and a typing ping stays in its room", 
     noteTyping.slice(0, noteTyping.indexOf("\n}")),
     /frame\.channelId !== open/u,
   );
+});
+
+test("switching rooms clears every cache it names, and cannot half-finish", async () => {
+  const data = await publicFile("data.js");
+
+  // Run the real function rather than read it. This file pins the browser by
+  // the shape of its source, which is right for markup — and is exactly what
+  // let this one ship: `selectSubChannel` deleted `state.channelPinned`, and
+  // the state it meant is `channelPins`. Every regex here passed while
+  // `delete undefined[repositoryId]` threw in the browser.
+  //
+  // The throw was costly out of proportion to the pins it dropped. It came
+  // after four caches were already cleared and before
+  // `channelLoaded.delete`, so the transcript read as loaded and empty and
+  // nothing refetched it; `sub-channel-open` never reached its `render()`, so
+  // a room click did nothing; and `createSubChannel`, which calls this last,
+  // reported failure for a channel the server had already created.
+  const start = data.indexOf("export function selectSubChannel");
+  assert.notEqual(start, -1, "selectSubChannel was not found");
+  const body = data
+    .slice(start, data.indexOf("\n}", start) + 2)
+    .replace("export function", "function");
+
+  const state = {
+    activeSubChannel: {} as Record<string, string>,
+    channelMessages: { repo: ["stale"] } as Record<string, unknown>,
+    channelEarlier: { repo: 1 } as Record<string, unknown>,
+    channelHasMore: { repo: true } as Record<string, unknown>,
+    channelFailed: { repo: "boom" } as Record<string, unknown>,
+    channelPins: { repo: ["pinned"] } as Record<string, unknown>,
+    channelLoaded: new Set(["repo"]),
+    channelRosterLoaded: new Set(["repo"]),
+  };
+  const selectSubChannel = new Function(
+    "state",
+    `${body}; return selectSubChannel;`,
+  )(state) as (repositoryId: string, channelId: string) => void;
+
+  selectSubChannel("repo", "chan_backend");
+
+  assert.equal(state.activeSubChannel["repo"], "chan_backend");
+  for (const key of [
+    "channelMessages",
+    "channelEarlier",
+    "channelHasMore",
+    "channelFailed",
+    "channelPins",
+  ] as const) {
+    assert.equal(
+      state[key]["repo"],
+      undefined,
+      `${key} still holds the previous room's data`,
+    );
+  }
+  // The one that matters most: left set, the new room reads as already
+  // loaded and its transcript never arrives.
+  assert.equal(state.channelLoaded.has("repo"), false);
+  assert.equal(state.channelRosterLoaded.has("repo"), false);
+
+  // Every name it clears has to be somewhere `state` actually declares.
+  const names = /for \(const key of \[([\s\S]*?)\]\)/u.exec(data.slice(start));
+  assert.ok(names !== null, "the cleared-cache list was not found");
+  for (const quoted of (names[1] ?? "").match(/"[a-zA-Z]+"/gu) ?? []) {
+    const key = quoted.slice(1, -1);
+    assert.match(
+      data,
+      new RegExp(`^  ${key}: `, "mu"),
+      `selectSubChannel clears ${key}, which state never declares`,
+    );
+  }
 });

@@ -3744,11 +3744,34 @@ export function selectSubChannel(repositoryId, channelId) {
   state.activeSubChannel[repositoryId] = channelId;
   // Everything below is keyed by repository, so switching rooms has to clear
   // it or the new room opens showing the old one's transcript.
-  delete state.channelMessages[repositoryId];
-  delete state.channelEarlier[repositoryId];
-  delete state.channelHasMore[repositoryId];
-  delete state.channelFailed[repositoryId];
-  delete state.channelPinned[repositoryId];
+  //
+  // Named in a list and cleared in a loop rather than written as six
+  // statements. One of them said `channelPinned`, and the state it meant is
+  // `channelPins` — so `delete undefined[repositoryId]` threw partway
+  // through, which cost far more than the pins it was trying to drop:
+  //
+  //   - the four caches before it were already gone, but the throw skipped
+  //     `channelLoaded.delete`, so the transcript read as loaded and empty
+  //     and nothing refetched it — messages "disappeared" on every switch;
+  //   - `sub-channel-open` never reached its `render()`, so a room click did
+  //     nothing visible and every room still read as the one before it;
+  //   - `createSubChannel` calls this last, so a channel that had already
+  //     been created on the server reported "Could not create that channel".
+  //
+  // A loop cannot half-finish the way a run of statements can, and a name
+  // that is not in `state` is now a no-op instead of a thrown TypeError.
+  for (const key of [
+    "channelMessages",
+    "channelEarlier",
+    "channelHasMore",
+    "channelFailed",
+    "channelPins",
+  ]) {
+    const bucket = state[key];
+    if (bucket !== undefined && bucket !== null) {
+      delete bucket[repositoryId];
+    }
+  }
   state.channelLoaded.delete(repositoryId);
   state.channelRosterLoaded.delete(repositoryId);
 }
