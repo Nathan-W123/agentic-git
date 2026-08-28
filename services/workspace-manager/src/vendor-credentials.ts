@@ -153,11 +153,6 @@ export interface ResolveVendorCredentialsOptions {
   stagingDir?: string;
 }
 
-/** Environment variable names a vendor credential plan may set. */
-export function credentialEnvNames(kind: VendorCliKind): string[] {
-  return ["HOME", ...Object.keys(PROFILES[kind].env("/home/agent"))];
-}
-
 async function isFile(candidate: string): Promise<boolean> {
   try {
     return (await stat(candidate)).isFile();

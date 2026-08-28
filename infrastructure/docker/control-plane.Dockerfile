@@ -64,6 +64,23 @@ RUN find node_modules/onnxruntime-node/bin -mindepth 2 -maxdepth 2 -type d \
   && find node_modules/onnxruntime-node -type f \
       \( -name 'libonnxruntime_providers_cuda.*' \
       -o -name 'libonnxruntime_providers_tensorrt.*' \) -delete
+# The same package pulls in `onnxruntime-web` — 92 MB of WebAssembly for a
+# runtime that does not exist here. `@huggingface/transformers` picks its
+# backend through its `exports` map, and the `node` condition resolves to a
+# prebuilt bundle that imports `onnxruntime-node` and `onnxruntime-common`
+# and nothing else; the web backend is only reachable from the browser entry,
+# which this image never loads. Verified rather than reasoned: with the
+# package moved aside, the chatter filter still loads and still classifies
+# ("lol nice one" chatter, "fix the auth bug in server.ts" not).
+#
+# `sharp`'s musl build is the same story at smaller scale. It arrives as a
+# transitive dependency, for image preprocessing this deployment never asks
+# for, and it ships one libvips per libc. This base is bookworm-slim, so the
+# musl copy is 17 MB that could not be loaded even if something wanted it —
+# while the glibc copy beside it, which sharp would actually use, stays.
+RUN rm -rf node_modules/onnxruntime-web \
+  && rm -rf node_modules/@img/sharp-libvips-linuxmusl-* \
+      node_modules/@img/sharp-linuxmusl-*
 # The model itself, fetched once here rather than on the first message in a
 # channel: a container with no egress to huggingface.co still filters, and
 # nobody's first sentence waits on a 22 MB download.

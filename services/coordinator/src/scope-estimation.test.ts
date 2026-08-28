@@ -436,3 +436,77 @@ test("an estimate that ran out of room is not a footprint", () => {
     estimate.notes.join(" | "),
   );
 });
+
+test("a word this file's names are made of is evidence, whatever the repository thinks of it", () => {
+  // `likelySymbolsIn` used to filter the objective through the stop list
+  // `estimateScope` uses. That list is right at its own scale and wrong at
+  // this one: "response", "update", "error", "result" and their kin are
+  // dropped because every module in a repository has one, which says nothing
+  // about a file with two declarations where exactly one of them is a
+  // response. Borrowed here it left these objectives with no tokens at all —
+  // and one function name in twenty in this repository has *every* fragment
+  // on that list, so no objective could name those however precisely it tried.
+  //
+  // The property the list was standing in for is measured directly a few
+  // lines below anyway, and better: a fragment half the file carries is
+  // rejected by the frequency ceiling, in this file, at this size.
+  assert.deepEqual(
+    likelySymbolsIn("update the response builder", [
+      { name: "responseCache" },
+      { name: "listOrders" },
+    ]),
+    ["responseCache"],
+  );
+  assert.deepEqual(
+    likelySymbolsIn("the error path is wrong", [
+      { name: "errorPath" },
+      { name: "listOrders" },
+    ]),
+    ["errorPath"],
+  );
+});
+
+test("a common word is still refused when the file is made of it", () => {
+  // The other half of the same change: dropping those words from the list is
+  // only safe because the ceiling still throws them out where they genuinely
+  // choose nothing. Twenty of these forty declarations carry "file", so
+  // "file" is the file's subject and not a claim on half of it.
+  const wide = Array.from({ length: 40 }, (_, index) =>
+    index % 2 === 0
+      ? { name: `fileThing${String(index)}` }
+      : { name: `otherThing${String(index)}` },
+  );
+  assert.deepEqual(likelySymbolsIn("rework the file handling", wide), []);
+});
+
+test("an inflected objective meets the identifier it is about", () => {
+  // Objectives are prose and full of verb inflections; `stem` folds regular
+  // plurals and nothing else, so "retrying" never met `retry`, "caching" never
+  // met `cache`, and "scheduling" never met `schedule`. Both sides are run
+  // through the same lemmatizer instead, so they still meet in the middle —
+  // a normalised form is only ever compared against another normalised form.
+  assert.deepEqual(
+    likelySymbolsIn("the queue is retrying too often", [
+      { name: "retryDelay" },
+      { name: "renderBanner" },
+    ]),
+    ["retryDelay"],
+  );
+  assert.deepEqual(
+    likelySymbolsIn("stop caching the sidebar", [
+      { name: "cacheSidebar" },
+      { name: "renderBanner" },
+    ]),
+    ["cacheSidebar"],
+  );
+  // Honestly stated: wink reduces inflections, not nominalizations. "-ion" and
+  // "-er" stay as written, so this misses, and a hand-written suffix rule for
+  // them wants measuring before it is trusted with where a line is drawn.
+  assert.deepEqual(
+    likelySymbolsIn("add pagination to the list", [
+      { name: "paginate" },
+      { name: "renderBanner" },
+    ]),
+    [],
+  );
+});

@@ -1468,22 +1468,6 @@ export function iconButton(
 /* ------------------------------------------------------- panel shapes ---- */
 
 /**
- * A labelled rail: a quiet label on the left, its content beside it.
- *
- * The shape a page reaches for when a row needs saying what it *is* without
- * spending a heading on it. The labels stack into one narrow column down the
- * left, so the eye reads the contents as a list of properties rather than as
- * a stack of unrelated widgets, and nothing has to be bordered off to be
- * legible.
- */
-export function sectionRail(label, body, { stacked = false } = {}) {
-  return `<div class="rail${stacked ? " stacked" : ""}">
-    <span class="rail-label">${esc(label)}</span>
-    <span class="rail-body">${body}</span>
-  </div>`;
-}
-
-/**
  * A run of chips on one line, wrapping, with anything trailing kept last.
  *
  * Each item is either a plain string or `{label, iconName, tone, title, act,

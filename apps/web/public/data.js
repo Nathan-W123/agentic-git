@@ -2029,14 +2029,6 @@ export function typingOn(repositoryId, threadId) {
   return live;
 }
 
-/** A message of theirs arriving means they are done typing, not still at it. */
-export function clearTyping(repositoryId, threadId, userId) {
-  const surface = state.typing[typingKey(repositoryId, threadId)];
-  if (surface !== undefined && userId !== undefined) {
-    delete surface[userId];
-  }
-}
-
 export function closeSocket() {
   // Closing on purpose: clear the intent first so the close event below
   // does not schedule the reconnect it schedules for accidental closes.
@@ -2050,10 +2042,6 @@ export function closeSocket() {
     }
     state.socket = undefined;
   }
-}
-
-export function socketLive() {
-  return state.socket?.readyState === WebSocket.OPEN;
 }
 
 /* ---------------------------------------------------------- api tokens ---- */
@@ -2236,28 +2224,6 @@ export const DEFAULT_ACCENT_SECONDARY = "#a894b6";
  * picks one in Appearance.
  */
 export const DEFAULT_AGENT_COLOR = "#f3efe8";
-
-/**
- * The palette offered in settings.
- *
- * Widely separated hues, all legible on the dark ground, led by the off white
- * an agent wears until somebody chooses otherwise — the default belongs among
- * the choices rather than only behind them. Kept short on purpose: an agent
- * colour is only useful as an identity if a team's choices are easy to tell
- * apart, and a continuous picker guarantees two people eventually land on
- * near-identical blues.
- */
-export const PALETTE = [
-  { value: "#f3efe8", label: "Off white" },
-  { value: "#8b5cf6", label: "Violet" },
-  { value: "#4f8ef7", label: "Blue" },
-  { value: "#2fae7f", label: "Green" },
-  { value: "#e0663d", label: "Orange" },
-  { value: "#d88973", label: "Clay" },
-  { value: "#3fa8b5", label: "Teal" },
-  { value: "#d7a13b", label: "Amber" },
-  { value: "#a894b6", label: "Lilac" },
-];
 
 function validColor(value) {
   return typeof value === "string" && /^#[0-9a-f]{6}$/iu.test(value.trim())
@@ -2606,17 +2572,6 @@ export function waitingTasks() {
   return state.tasks.filter((task) => task.status === "awaiting_approval");
 }
 
-export function completedToday() {
-  const dayStart = new Date();
-  dayStart.setHours(0, 0, 0, 0);
-  return state.tasks.filter(
-    (task) =>
-      task.status === "integrated" &&
-      task.completedAt !== undefined &&
-      new Date(task.completedAt).getTime() >= dayStart.getTime(),
-  ).length;
-}
-
 /**
  * How far along a task is.
  *
@@ -2848,28 +2803,6 @@ export function heldFiles() {
     }
   }
   return held;
-}
-
-export function conflictCount() {
-  const active = new Set(activeTasks().map((task) => task.id));
-  return state.audit.filter((entry) => {
-    const event = entry.event ?? entry;
-    return event.type === "conflict_detected" && active.has(event.taskId);
-  }).length;
-}
-
-export function systemHealth() {
-  if (state.approvals.some((approval) => approval.status === "pending")) {
-    return { label: "Review", tone: "orange" };
-  }
-  const failing = state.tasks.filter((task) => task.status === "failed").length;
-  if (failing > 0 && conflictCount() > 0) {
-    return { label: "Degraded", tone: "red" };
-  }
-  if (failing > 0) {
-    return { label: "Fair", tone: "orange" };
-  }
-  return { label: "Good", tone: "green" };
 }
 
 /* ------------------------------------------------------------- agents ---- */
@@ -3281,27 +3214,6 @@ const ACTIVITY_LABEL = {
   task_failed: "Task failed",
   lease_released: "Lock released",
 };
-
-export function coordinatorActivity(limit = 6) {
-  const rows = [];
-  for (const entry of state.audit) {
-    const event = entry.event ?? entry;
-    const label = ACTIVITY_LABEL[event.type];
-    if (label === undefined) {
-      continue;
-    }
-    const task = state.tasks.find((candidate) => candidate.id === event.taskId);
-    rows.push({
-      at: event.occurredAt,
-      title: label,
-      detail: activityDetail(event, task),
-      agent: task?.agentId,
-      type: event.type,
-    });
-  }
-  rows.sort((left, right) => String(right.at).localeCompare(String(left.at)));
-  return rows.slice(0, limit);
-}
 
 function activityDetail(event, task) {
   const files = event.data?.expectedFiles ?? event.data?.files;
@@ -6854,12 +6766,6 @@ export function keptRightPanels() {
   }
   state.rightPanelStack = active === undefined ? [] : [active];
   return state.rightPanelStack;
-}
-
-/** The surface holding the right edge — the one a phone shows at all. */
-export function newestRightPanel() {
-  const kept = keptRightPanels();
-  return kept.length === 0 ? undefined : kept[kept.length - 1];
 }
 
 /* -------------------------------------------------------- look and feel ---- */

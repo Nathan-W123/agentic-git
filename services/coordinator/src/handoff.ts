@@ -403,11 +403,4 @@ export function handoffResources(handoff: TaskHandoff): string[] {
 
 export const HANDOFF_AUDIT_TYPE = "handoff_recorded" as const;
 
-/** Extracts the deferred resources a handoff is waiting on, if any. */
-export function handoffBlockers(handoff: TaskHandoff): string[] {
-  return [
-    ...new Set(handoff.open.flatMap((entry) => entry.blockedBy)),
-  ].sort();
-}
-
 export type { DeferredResource };

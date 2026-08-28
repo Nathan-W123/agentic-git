@@ -300,8 +300,3 @@ export function deferredScopeObjective(
     "is already integrated into canonical; do not redo it."
   );
 }
-
-/** Whether an admission left work that a follow-up task has to pick up. */
-export function hasDeferredScope(admission: PlanAdmission): boolean {
-  return planAdmissionPartial(admission);
-}
