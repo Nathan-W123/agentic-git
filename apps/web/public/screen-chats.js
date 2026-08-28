@@ -2301,16 +2301,36 @@ function holdNoticeRef(entry, repositoryId) {
   return messageReference(root, repositoryId);
 }
 
+/** One clean line of message text for reply references and composer targets. */
+function replyPreviewText(entry) {
+  if (entry?.deletedAt !== undefined) {
+    return "This message was deleted";
+  }
+
+  let attachmentCount = 0;
+  let attachmentLabel = "";
+  const visible = String(entry?.content ?? "")
+    .replace(ATTACHMENT_PATTERN, (_reference, alt) => {
+      attachmentCount += 1;
+      attachmentLabel ||= String(alt ?? "").trim();
+      return " ";
+    })
+    .replace(/\s+/gu, " ")
+    .trim();
+  const line =
+    visible ||
+    (attachmentCount === 1
+      ? attachmentLabel || "Attached image"
+      : attachmentCount > 1
+        ? `${attachmentCount} attached images`
+        : "");
+  return line.length > 80 ? `${line.slice(0, 77)}…` : line;
+}
+
 /** The compact address above an inline reply. */
 function messageReference(root, repositoryId) {
   const author = channelAuthor(repositoryId, root);
-  const line =
-    root.deletedAt !== undefined
-      ? "This message was deleted"
-      : (String(root.content ?? "")
-          .split(/\n/u)
-          .map((part) => part.trim())
-          .find((part) => part.length > 0) ?? "");
+  const line = replyPreviewText(root);
   return `<button type="button" class="cmsg-ref" data-act="channel-pin-jump"
       data-value="${esc(root.id)}">
       <span class="cmsg-ref-elbow" aria-hidden="true"></span>
@@ -2325,9 +2345,7 @@ function messageReference(root, repositoryId) {
             )
       }
       <span class="cmsg-ref-name">${esc(author.name)}</span>
-      <span class="cmsg-ref-text">${esc(
-        line.length > 80 ? `${line.slice(0, 77)}…` : line,
-      )}</span>
+      <span class="cmsg-ref-text">${esc(line)}</span>
     </button>`;
 }
 
@@ -6111,19 +6129,12 @@ function directMessageReference(message, messages, otherName) {
   }
   const authorName =
     target.authorId === currentUserId() ? currentUserName() : otherName;
-  const line =
-    String(target.content ?? "")
-      .split(/\n/u)
-      .map((part) => part.trim())
-      .find((part) => part.length > 0) ?? "";
-  return `<button type="button" class="cmsg-ref" data-act="dm-reference-jump"
+  const line = replyPreviewText(target);
+  return `<button type="button" class="cmsg-ref cmsg-ref-dm" data-act="dm-reference-jump"
       data-value="${esc(target.id)}">
-      <span class="cmsg-ref-elbow" aria-hidden="true"></span>
       ${avatar(authorName, 16)}
       <span class="cmsg-ref-name">${esc(authorName)}</span>
-      <span class="cmsg-ref-text">${esc(
-        line.length > 80 ? `${line.slice(0, 77)}…` : line,
-      )}</span>
+      <span class="cmsg-ref-text">${esc(line)}</span>
     </button>`;
 }
 
@@ -6155,7 +6166,7 @@ function directReplyChip(target, otherName) {
   }
   const authorName =
     target.authorId === currentUserId() ? currentUserName() : otherName;
-  const title = `${authorName}: ${String(target.content ?? "").trim()}`;
+  const title = `${authorName}: ${replyPreviewText(target)}`;
   return `<div class="composer-thread">
     ${icon("reply")}
     <span class="ct-label">Replying to</span>
@@ -6447,7 +6458,7 @@ function threadReplyChip(target, repositoryId) {
     return "";
   }
   const author = channelAuthor(repositoryId, target);
-  const title = `${author.name}: ${String(target.content ?? "").trim()}`;
+  const title = `${author.name}: ${replyPreviewText(target)}`;
   return `<div class="composer-thread">
     ${icon("reply")}
     <span class="ct-label">Replying to</span>
@@ -8117,7 +8128,10 @@ function composerThreadChip(repositoryId) {
   }
   const directReply = root.kind === "user" && root.taskId === undefined;
   const author = channelAuthor(repositoryId, root);
-  const title = `${directReply ? `${author.name}: ` : ""}${threadTitle(root)}`;
+  const preview = directReply
+    ? replyPreviewText(root)
+    : replyPreviewText({ content: threadTitle(root) });
+  const title = `${directReply ? `${author.name}: ` : ""}${preview}`;
   return `<div class="composer-thread">
     ${icon("reply")}
     <span class="ct-label">${directReply ? "Replying to" : "Continuing in"}</span>

@@ -6670,6 +6670,24 @@ button.chip.lg:hover {
   color: var(--text-2);
 }
 
+/* A private conversation has no avatar gutter or thread branch to connect
+   through. Its reference belongs to the bubble instead: a short quote rule
+   that sizes to its contents and follows incoming and outgoing alignment. */
+.dm-msg > .cmsg-ref {
+  flex: none;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 3px;
+  padding: 2px 4px 2px 7px;
+  border-left: 2px solid var(--border-soft);
+  gap: 5px;
+}
+
+.dm-mine > .cmsg-ref {
+  align-self: flex-end;
+}
+
 /* 16px in: half of the 32px avatar, so the stroke comes down the middle of the
    avatar column and stops just above the face rather than crossing it. The
    two-pixel stroke and broad rounded corner make this a short floating path,
@@ -6689,12 +6707,18 @@ button.chip.lg:hover {
 
 .cmsg-ref-name {
   flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
   color: var(--text-2);
 }
 
 /* One line, however long the message it points at. */
 .cmsg-ref-text {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -12787,6 +12811,7 @@ dialog.modal[open]::backdrop {
 .composer-thread {
   display: flex;
   align-items: center;
+  min-width: 0;
   gap: 8px;
   margin: 0 12px 6px;
   padding: 6px 8px 6px 10px;
@@ -12810,6 +12835,7 @@ dialog.modal[open]::backdrop {
 }
 
 .composer-thread .ct-title {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

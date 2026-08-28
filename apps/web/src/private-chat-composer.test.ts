@@ -148,6 +148,32 @@ test("a private chat sends the selected reply reference and clears it after send
   assert.match(chats, /data-act="dm-reference-jump"/u);
 });
 
+test("direct-message references use bubble-specific geometry on both sides", async () => {
+  const [chats, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+  const reference = chats.slice(
+    chats.indexOf("function directMessageReference("),
+    chats.indexOf("function continuesDirectMessageGroup("),
+  );
+
+  assert.match(reference, /class="cmsg-ref cmsg-ref-dm"/u);
+  assert.match(reference, /replyPreviewText\(target\)/u);
+  assert.doesNotMatch(
+    reference,
+    /cmsg-ref-elbow/u,
+    "a direct message should not borrow the channel avatar connector",
+  );
+
+  const incoming = /\n\.dm-msg > \.cmsg-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  const outgoing = /\n\.dm-mine > \.cmsg-ref \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(incoming ?? "", /flex: none;/u);
+  assert.match(incoming ?? "", /width: fit-content;/u);
+  assert.match(incoming ?? "", /border-left: 2px solid/u);
+  assert.match(outgoing ?? "", /align-self: flex-end;/u);
+});
+
 test("a private chat keeps the channel's command and name pickers", async () => {
   const chat = await publicFile("chat.js");
   const chats = await publicFile("screen-chats.js");
