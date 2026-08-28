@@ -1343,6 +1343,25 @@ export type AuditEventType =
   /** A (user, provider) agent was added to or removed from a channel's opt-in roster. */
   | "channel_agent_membership_changed"
   /**
+   * A sub-channel was created inside a repository. `data.visibility` says
+   * whether people outside its membership can see it at all.
+   */
+  | "channel_created"
+  /**
+   * A sub-channel's name or visibility changed. Visibility especially: it is
+   * the difference between a channel the rest of the project can read and one
+   * it cannot see exists, so the change is worth a record of who made it.
+   */
+  | "channel_updated"
+  /** A person was added to, or removed from, a sub-channel's membership. */
+  | "channel_member_changed"
+  /**
+   * A sub-channel was removed. Recorded for the same reason
+   * `channel_message_deleted` is: afterwards this is the only trace that the
+   * conversation existed and who ended it.
+   */
+  | "channel_deleted"
+  /**
    * A thread removed, or a channel cleared. Recorded because the messages
    * themselves are gone afterwards — this is the only remaining trace that
    * an account of somebody's work once existed and who removed it.
