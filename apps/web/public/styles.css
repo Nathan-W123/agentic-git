@@ -236,7 +236,12 @@ svg {
 
 /* Every product glyph comes through the shared icon renderer. This class is
    deliberately light-touch: each control still owns the icon's optical size,
-   while the pack owns alignment and rendering consistently everywhere. */
+   while the pack owns alignment and rendering consistently everywhere.
+
+   The pack is Basil Solid Bold, so a glyph is filled geometry rather than a
+   stroked outline: nothing here sets `fill` or `stroke`, because doing so
+   from a stylesheet is how half a set ends up in a different weight from the
+   other half. Colour arrives through `color`, which the fills inherit. */
 svg.ui-icon {
   flex: none;
   overflow: visible;
@@ -2112,12 +2117,13 @@ svg.ui-icon {
   height: 14px;
 }
 
+/* A favourite is told apart by colour alone. The star used to be an outline
+   that this rule filled in, which no longer says anything: in a solid pack
+   both states are filled, and filling an already-filled star is a rule that
+   looks like it does something. `aria-pressed` carries the state either
+   way. */
 .star.on {
   color: var(--orange);
-}
-
-.star.on svg {
-  fill: currentColor;
 }
 
 .star:hover {
@@ -2895,6 +2901,12 @@ svg.ui-icon {
   --composer-inset: 0;
   --composer-send-shape: var(--radius-sm);
   --composer-spacer-layout: block;
+  /* The resting single-row box, as the demo draws it: a 48px pill, and the
+     room its two bare glyphs take out of the line beside them — the 14px
+     edge, the 17px icon and the 12px gap after it. Both are variables
+     because the thread's box is the same row at a smaller size. */
+  --composer-rest-height: 48px;
+  --composer-side-reserve: 43px;
 
   margin: 0 12px 12px;
   display: var(--composer-layout);
@@ -2915,26 +2927,28 @@ svg.ui-icon {
    regular field-over-toolbar layout below takes over. */
 .composer:has(.composer-field):not(.is-multiline) {
   position: relative;
-  min-height: 50px;
+  min-height: var(--composer-rest-height);
 }
 
 .composer:has(.composer-field):not(.is-multiline) .composer-field {
-  min-height: 50px;
+  min-height: var(--composer-rest-height);
 }
 
 .composer:has(.composer-field):not(.is-multiline) .composer-field textarea,
 .composer:has(.composer-field):not(.is-multiline) .composer-mirror {
-  min-height: 50px;
-  padding-left: 54px;
-  padding-right: 54px;
+  min-height: var(--composer-rest-height);
+  padding-left: var(--composer-side-reserve);
+  padding-right: var(--composer-side-reserve);
 }
 
+/* The row lies over the whole pill rather than inside a smaller box within
+   it, so the glyphs sit on the same `0 14px` edge the text is measured
+   against and nothing has to agree twice about where the sides are. */
 .composer:has(.composer-field):not(.is-multiline) .composer-bar {
   position: absolute;
   z-index: 1;
-  inset: 4px 8px;
-  min-height: 42px;
-  padding: 0;
+  inset: 0;
+  min-height: 0;
   pointer-events: none;
 }
 
@@ -2955,15 +2969,21 @@ svg.ui-icon {
   order: 0;
 }
 
+/* Every control on the row is a glyph rather than a button. A box, a fill or
+   a corner radius around one of these draws a second surface inside a box
+   that is already one, which is the difference between the bar as it was and
+   the bar the demo shows. Colour is the whole of the hover state. */
 .composer-bar .composer-plus {
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--text-3);
 }
 
 .composer-bar .composer-plus:hover {
-  background: var(--bg-hover);
+  background: none;
   color: var(--text);
 }
 
@@ -3081,9 +3101,9 @@ svg.ui-icon {
 .composer-bar {
   display: var(--composer-bar-layout);
   align-items: center;
-  gap: 5px;
+  gap: 12px;
   min-height: 42px;
-  padding: 0 11px 10px;
+  padding: 0 14px;
 }
 
 .composer-bar .spacer {
@@ -3093,13 +3113,22 @@ svg.ui-icon {
 }
 
 .composer-bar .icon-btn {
-  width: 26px;
-  height: 26px;
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: none;
 }
 
-.composer-bar .icon-btn svg {
-  width: 15px;
-  height: 15px;
+.composer-bar .icon-btn:hover {
+  background: none;
+  border-color: transparent;
+}
+
+.composer-bar .icon-btn svg,
+.composer-bar .composer-plus svg {
+  width: 17px;
+  height: 17px;
 }
 
 .mini-select {
@@ -3170,8 +3199,8 @@ svg.ui-icon {
   display: grid;
   place-items: center;
   order: 3;
-  width: 32px;
-  height: 32px;
+  width: auto;
+  height: auto;
   border-radius: var(--composer-send-shape, var(--radius-sm));
   background: transparent;
   color: var(--salmon);
@@ -3181,8 +3210,11 @@ svg.ui-icon {
   transition: transform var(--motion-press) var(--ease-motion);
 }
 
+/* The fill went with the box: hovering a bare glyph that is already the one
+   coloured thing on the row has nothing left to say. The press is still
+   answered — see `.send-btn:active`. */
 .send-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--salmon) 12%, transparent);
+  background: none;
   color: var(--salmon);
 }
 
@@ -3227,8 +3259,8 @@ svg.ui-icon {
 }
 
 .send-btn svg {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
 }
 
 /* --------------------------------------------------------- summary pop ---- */
@@ -7981,6 +8013,41 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   box-shadow: none;
 }
 
+/* The reply box, which is not the channel's box made narrower.
+ *
+ * A thread is a side conversation and its box says so: shorter than the pill
+ * in the room (the demo's 40px against 48px), squarer, and carrying nothing
+ * but the words until there is a reason for more. `composer-lite` is put on
+ * the form by `threadPanel` in screen-chats.js — an opt-in, so the private
+ * chat and the direct-message panel, which share this wrapper and keep their
+ * full toolbars, are not caught by it.
+ *
+ * The vertical padding comes down with the height. Both metrics are set on
+ * the textarea and the mirror together, because they are one string drawn
+ * twice and a pixel between them moves the caret off its letters. */
+.thread-composer-wrap .composer.composer-lite {
+  --composer-shape: var(--radius);
+  --composer-rest-height: 40px;
+  --composer-side-reserve: 41px;
+  --composer-pad-top: 9px;
+  --composer-pad-bottom: 9px;
+}
+
+/* Nothing staged, nothing typed, nobody in it: the picker and the arrow are
+   not drawn, and the placeholder starts on the box's own 12px edge — the
+   resting box in the demo. Both come back on the first keystroke or the first
+   focus, which is the moment either of them has anything to act on; they
+   never leave the markup, so what they do is unchanged. */
+.thread-composer-wrap .composer.composer-lite:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
+  --composer-side-reserve: 12px;
+}
+
+.thread-composer-wrap
+  .composer.composer-lite:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
+  .composer-bar {
+  visibility: hidden;
+}
+
 /* The thread picker belongs to the inset composer rather than to the full
    panel edge, and opens above it without covering the reply being typed. */
 .thread-composer-wrap .mention-pop {
@@ -12025,9 +12092,23 @@ dialog.modal[open]::backdrop {
     height: 15px;
   }
 
-  .composer-bar .icon-btn {
+  /* The composer's glyphs are bare on desktop; a finger still needs a target,
+     so here they get their box back — the send arrow with them, since it is
+     the one control on the row that is pressed every time. */
+  .composer-bar .icon-btn,
+  .send-btn {
     width: 34px;
     height: 34px;
+  }
+
+  /* And the resting row has to give that box the room it now takes: the edge,
+     the 34px target and the gap after it, on each side of the line. */
+  .composer {
+    --composer-side-reserve: 60px;
+  }
+
+  .thread-composer-wrap .composer.composer-lite {
+    --composer-side-reserve: 58px;
   }
 
   .chan-account {
@@ -13521,6 +13602,15 @@ dialog.modal[open]::backdrop {
   visibility: visible;
   opacity: 1;
   border: 0;
+}
+
+/* The compact shelf above a conversation keeps its own 132px scroller so it
+   cannot squeeze the transcript. Inside the dedicated panel, the panel body
+   is already the scroller; let the pin list grow into that available height
+   instead of clipping after a few rows and leaving the rest of it empty. */
+.pins-panel .chan-pins-list {
+  max-height: none;
+  overflow-y: visible;
 }
 
 @media (max-width: 1180px) and (min-width: 601px) {

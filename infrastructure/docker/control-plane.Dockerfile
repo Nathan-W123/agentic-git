@@ -299,11 +299,14 @@ ENV COORD_GITHUB_CLIENT_ID=Ov23liGI2B1T62b0ifdC
 # unpack happens once per container. It holds no secrets: the program is
 # identical for every user, and each user's sign-in stays in their own home.
 ENV COORD_COPILOT_PKG_CACHE=/var/cache/coord/copilot
+# Per-task vendor credential homes. Codex refuses to create PATH-alias helper
+# binaries when CODEX_HOME sits under /tmp, so homes are staged here instead.
+ENV COORD_CREDENTIAL_STAGING=/var/cache/coord/credentials
 WORKDIR /app
 COPY --from=build /app /app
 COPY infrastructure/docker/control-plane-entrypoint.sh /usr/local/bin/coord-control-plane
 RUN chmod +x /usr/local/bin/coord-control-plane \
-  && mkdir -p /data /var/cache/coord/copilot \
+  && mkdir -p /data /var/cache/coord/copilot /var/cache/coord/credentials \
   && chown node:node /data \
   && chown -R node:node /var/cache/coord
 # No `USER node` here, and the entrypoint is why.

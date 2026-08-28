@@ -16,6 +16,7 @@ import {
   captureBrowserSession,
   captureClaudeSession,
   captureCredentialKey,
+  credentialStagingRoot,
   openCredentialHome,
   resolveCredentialKey,
   restoreBrowserSession,
@@ -1167,4 +1168,56 @@ test("a Codex run's rate limits survive the home they were written in", async (t
     "the rollout written under CODEX_HOME was not carried out of the home",
   );
   assert.match(usageSnapshot ?? "", /used_percent/u);
+});
+
+test("credential homes honor COORD_CREDENTIAL_STAGING", async (t) => {
+  const directory = await scratch(t);
+  const stagingRoot = path.join(directory, "credential-staging");
+  await mkdir(stagingRoot, { recursive: true });
+
+  const previous = process.env["COORD_CREDENTIAL_STAGING"];
+  process.env["COORD_CREDENTIAL_STAGING"] = stagingRoot;
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_CREDENTIAL_STAGING"];
+    } else {
+      process.env["COORD_CREDENTIAL_STAGING"] = previous;
+    }
+  });
+
+  assert.equal(credentialStagingRoot(), stagingRoot);
+
+  const vault = store(directory);
+  await vault.put("user-1", "codex", {
+    kind: "api_key",
+    secret: "sk-staged-home",
+  });
+  const credential = await vault.get("user-1", "codex");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "codex", credential });
+  try {
+    assert.ok(
+      home.path.startsWith(stagingRoot),
+      "the home must be created under the configured staging root",
+    );
+    assert.ok(
+      (home.env["CODEX_HOME"] ?? "").startsWith(home.path),
+      "CODEX_HOME must sit inside the staged home",
+    );
+  } finally {
+    await home.close();
+  }
+});
+
+test("credentialStagingRoot falls back to the process temp directory", () => {
+  const previous = process.env["COORD_CREDENTIAL_STAGING"];
+  delete process.env["COORD_CREDENTIAL_STAGING"];
+  try {
+    assert.equal(credentialStagingRoot(), os.tmpdir());
+  } finally {
+    if (previous !== undefined) {
+      process.env["COORD_CREDENTIAL_STAGING"] = previous;
+    }
+  }
 });

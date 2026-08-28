@@ -316,6 +316,7 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
   const uiPath = path.join(defaultPublicDirectory(), "ui.js");
   const ui = (await import(pathToFileURL(uiPath).href)) as {
     ICONS: Record<string, string>;
+    vendorMark: (kind: string) => string;
   };
   const iconNames = new Set<string>();
 
@@ -348,30 +349,37 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
   }
 
-  // Basil is one heavy rounded line on a 24px grid. Pin the shared wrapper
-  // here so adding a glyph cannot quietly introduce a second optical weight,
-  // lose its theme colour, or become visible to a screen reader as
-  // meaningless content — and so the sets it was replaced from cannot creep
-  // back one icon at a time.
+  // Basil Solid Bold is filled geometry on a 24px grid, not a traced line.
+  // Pin the shared wrapper here so adding a glyph cannot quietly introduce a
+  // second optical weight, lose its theme colour, or become visible to a
+  // screen reader as meaningless content — and so the outline cut this set
+  // replaced cannot creep back one icon at a time. A single stroked glyph in
+  // a solid row is the difference the eye reads before it reads the picture,
+  // which is why `stroke-width` is forbidden outright rather than pinned to
+  // an agreed value.
   for (const [name, glyph] of Object.entries(ui.ICONS)) {
     assert.match(
       glyph,
       /^<svg viewBox="0 0 24 24"/u,
       `${name} keeps the 24px grid`,
     );
-    assert.match(
+    assert.match(glyph, /fill="currentColor"/u, `${name} follows text colour`);
+    assert.match(glyph, /stroke="none"/u, `${name} is filled, not stroked`);
+    assert.doesNotMatch(
       glyph,
-      /stroke="currentColor"/u,
-      `${name} follows text colour`,
+      /stroke-width|stroke-linecap|stroke-linejoin|stroke="(?!none)/u,
+      `${name} draws no stroked geometry`,
     );
-    assert.match(glyph, /stroke-width="2"/u, `${name} uses Basil's stroke`);
-    assert.match(glyph, /stroke-linecap="round"/u, `${name} has rounded ends`);
-    assert.match(glyph, /stroke-linejoin="round"/u, `${name} has rounded joins`);
+    assert.doesNotMatch(
+      glyph,
+      /fill="none"/u,
+      `${name} leaves no shape unfilled`,
+    );
     assert.match(glyph, /aria-hidden="true"/u, `${name} is decorative`);
     assert.match(glyph, /focusable="false"/u, `${name} cannot take focus`);
     assert.match(
       glyph,
-      /data-icon-style="basil"/u,
+      /data-icon-style="basil-solid"/u,
       `${name} identifies the selected icon treatment`,
     );
     assert.match(
@@ -381,10 +389,21 @@ test("dashboard interface glyphs all use the shared icon set", async () => {
     );
     assert.doesNotMatch(
       glyph,
-      /ui-icon-(?:underlay|ink)|stroke-width="(?:2\.35|3\.15)"|translate\(\.3 \.35\)/u,
+      /ui-icon-(?:underlay|ink)|translate\(\.3 \.35\)/u,
       `${name} has one clean geometry pass`,
     );
   }
+
+  // The fallback vendor mark is the one glyph outside ICONS that the panels
+  // draw beside them at the same size, so it has to be cut the same way. It
+  // was the last outlined drawing in this file.
+  const fallback = ui.vendorMark("a-vendor-with-no-mark");
+  assert.match(fallback, /fill="currentColor"/u, "the fallback mark is filled");
+  assert.doesNotMatch(
+    fallback,
+    /stroke-width|stroke-linecap|stroke-linejoin/u,
+    "the fallback mark draws no stroked geometry",
+  );
 
   const chats = assets.get("/screen-chats.js")?.body.toString("utf8") ?? "";
   const styles = assets.get("/styles.css")?.body.toString("utf8") ?? "";
@@ -465,6 +484,14 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
   assert.match(chats, /class="chan-pins-surface"/u);
   assert.match(chats, /chan-pins-list-frame" aria-hidden="false"/u);
   assert.match(styles, /\.pins-panel \.chan-pins \{[\s\S]*display: block/u);
+  // The compact transcript shelf stays bounded, but the dedicated panel lets
+  // its existing body scroller own the full list instead of nesting a short
+  // scroller above unused space.
+  assert.match(styles, /\.chan-pins-list \{[\s\S]*?max-height: 132px;/u);
+  assert.match(
+    styles,
+    /\.pins-panel \.chan-pins-list \{[\s\S]*?max-height: none;[\s\S]*?overflow-y: visible;/u,
+  );
   assert.match(styles, /\.thread-panel\.panel-entering \{[\s\S]*hierarchy-panel-in/u);
   assert.match(styles, /prefers-reduced-motion: reduce/u);
 
