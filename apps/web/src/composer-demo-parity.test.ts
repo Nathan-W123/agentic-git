@@ -11,10 +11,11 @@ import { defaultPublicDirectory } from "./assets.js";
  * KUMI.WEBSITE draws two composers: `.shot-composer`, the room's bar — a 48px
  * pill with a bare plus, the line, and a bare arrow, laid out as `0 14px` with
  * a 12px gap — and `.th-composer`, the thread's, which is shorter, squarer and
- * carries no icons at all. The dashboard had drifted from both: its glyphs
- * were sitting in 26-30px buttons with their own borders and hover fills, the
- * row was padded `0 11px 10px` at a 5px gap, the pill was 50px, and the thread
- * reused the room's composer wholesale.
+ * carries no icons at all. The dashboard follows that compact shape but keeps
+ * its attachment plus visible: hiding it until focus changes the text inset
+ * under a person's caret. Its glyphs had also drifted into 26-30px buttons
+ * with borders and hover fills, the row was padded `0 11px 10px` at a 5px gap,
+ * the pill was 50px, and the thread reused the room's composer wholesale.
  *
  * Asserted against the source, the way the rest of this browser surface is:
  * the dashboard ships as plain ES modules with no bundler, and the test run
@@ -162,17 +163,12 @@ test("the private-agent and DM composers keep the full toolbar layout", async ()
 
   // They share the thread's wrapper, so the lighter shape has to be scoped
   // past it — a rule on the wrapper alone would catch all three.
-  for (const rule of [
-    /\.thread-composer-wrap \.composer\.composer-lite \{/u,
-    /\.thread-composer-wrap\n?\s*\.composer\.composer-lite:not\(\.is-expanded\)/u,
-  ]) {
-    assert.match(css, rule);
-  }
+  assert.match(css, /\.thread-composer-wrap \.composer\.composer-lite \{/u);
   assert.match(chat, /class="thread-composer-wrap chat-composer-wrap"/u);
   assert.match(chats, /class="thread-composer-wrap dm-composer-wrap/u);
 });
 
-test("the thread composer uses its own shorter 40px composer-lite variant", async () => {
+test("the thread composer uses its own shorter 40px composer-lite variant with a persistent plus", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
 
@@ -203,19 +199,20 @@ test("the thread composer uses its own shorter 40px composer-lite variant", asyn
     /\.composer-field textarea,\s*\.composer-mirror \{\s*padding: var\(--composer-pad-top\) var\(--composer-pad-x\) var\(--composer-pad-bottom\);/u,
   );
 
-  // Icon-free at rest: empty, unfocused and staging nothing, the row is not
-  // drawn and the placeholder starts on the box's own edge.
-  assert.match(
+  // The leading control is present before focus and the text always reserves
+  // its space. A resting-state override used to hide the whole bar and cut
+  // the reserve to 12px; focusing then inserted the plus under the caret and
+  // moved the person's expected typing position.
+  assert.doesNotMatch(
     css,
     /\.thread-composer-wrap \.composer\.composer-lite:not\(\.is-expanded\):not\(:focus-within\):has\(textarea:placeholder-shown\) \{\s*--composer-side-reserve: 12px;/u,
   );
-  assert.match(
+  assert.doesNotMatch(
     css,
     /:not\(\.is-expanded\):not\(:focus-within\):has\(textarea:placeholder-shown\)\s*\n?\s*\.composer-bar \{\s*visibility: hidden;/u,
   );
 
-  // Hidden, not removed. Everything the row does still exists and comes back
-  // the moment there is something for it to act on.
+  // The attachment affordance and the rest of the row remain in the markup.
   assert.match(panel, /iconButton\("plus", \{\s*act: "thread-attach"/u);
   assert.match(panel, /data-act="channel-thread-attach-input"/u);
   assert.match(panel, /<button class="send-btn" type="submit"/u);

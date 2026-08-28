@@ -6670,10 +6670,10 @@ function threadPanel(repositoryId, selectedMessageId) {
         removeAct: "thread-attachment-remove",
       })}
       <!-- composer-lite is the thread's own resting shape: shorter and
-           squarer than the room's pill, and showing nothing but the words
-           until it is written in. Opt-in rather than inherited, because the
-           private chat and the direct-message panel sit in this same wrapper
-           and keep their full toolbars. -->
+           squarer than the room's pill, with its leading "+" present before
+           focus so the reply caret never has to move around it. Opt-in rather
+           than inherited, because the private chat and the direct-message
+           panel sit in this same wrapper and keep their full toolbars. -->
       <form class="composer composer-lite${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit" data-value="${esc(messageId)}">
         <div class="composer-field">
           <div class="composer-mirror" data-composer-mirror aria-hidden="true"
