@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  mergePlanScope,
   planAdmissionApproved,
   planAdmissionPartial,
   type AgentPlan,
+  type ScopeChangeRequest,
 } from "@coord/shared-types";
 
 import {
@@ -1789,4 +1791,50 @@ test("an objective made of ordinary words still locates the holder's function", 
   assert.deepEqual(lease?.ranges, [
     { startLine: 60, endLine: Number.MAX_SAFE_INTEGER },
   ]);
+});
+
+test("an approved expansion cannot shrink a holder that named no symbols", () => {
+  // Widening `declared.symbols` after a scope approval is right for a plan
+  // that named functions — it stops the holder being read as the smaller plan
+  // it arrived as. It is wrong for one that named none. Empty means the agent
+  // took the file whole, so writing the approved symbol into an empty list
+  // does not enlarge that claim, it replaces it: a holder of every line
+  // becomes a holder of one function, and the rest of the file is handed to
+  // whoever asked next. The expansion is recorded in `expectedSymbols`
+  // regardless, so nothing is lost by leaving the empty list alone.
+  const widened = mergePlanScope(
+    plan("task_b", {
+      expectedFiles: ["src/pricing/total.js"],
+      expectedSymbols: [],
+      declared: { symbols: [] },
+    }),
+    {
+      id: "scope_1" as ScopeChangeRequest["id"],
+      taskId: "task_b" as ScopeChangeRequest["taskId"],
+      additionalFiles: [],
+      additionalSymbols: ["auditNote"],
+      additionalApis: [],
+      additionalSchemas: [],
+      additionalConfigKeys: [],
+      additionalTests: [],
+      additionalServices: [],
+      reason: "the audit note belongs beside the total",
+      occurredAt: new Date().toISOString(),
+    },
+  );
+  assert.deepEqual(widened.declared?.symbols, []);
+
+  const admission = admit(
+    mixedCandidate(),
+    [widened],
+    new PlanAdmissionController(),
+    placed(),
+  );
+  // Whole file to its holder, exactly as before the expansion.
+  assert.equal(
+    admission.ownershipGrants.find(
+      (entry) => entry.resourceId === "src/pricing/total.js",
+    ),
+    undefined,
+  );
 });

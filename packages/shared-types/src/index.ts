@@ -2142,7 +2142,16 @@ export function mergePlanScope(
     // never enriched, so `expectedSymbols` is already the agent's own words
     // and widening those above is the whole job. Only a snapshot that exists
     // is extended, because only then is there a narrower list to go stale.
-    ...(plan.declared?.symbols === undefined
+    //
+    // An empty list stays empty, and that is the whole of the care needed
+    // here. Empty means the agent named the file and no functions in it,
+    // which partial admission reads as the whole file being its own — so
+    // widening `[]` to the one symbol an expansion asked for would not
+    // enlarge that claim, it would *replace* it, turning a holder of every
+    // line into a holder of one function and handing the rest to somebody
+    // else. The expansion is still recorded in `expectedSymbols` above.
+    ...(plan.declared?.symbols === undefined ||
+    plan.declared.symbols.length === 0
       ? {}
       : {
           declared: {
