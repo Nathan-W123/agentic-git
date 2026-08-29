@@ -72,6 +72,7 @@ import {
   releaseFromBlanketClaim,
   type HolderDeclaration,
 } from "./blanket-claim.js";
+import { registerBlanketHolder } from "./blanket-holders.js";
 import {
   GitWorktreeWorkspaceManager,
   type AdvanceWorkspaceInput,
@@ -596,6 +597,18 @@ export interface CoordinatorDependencies {
    */
   blanketDeclarationTimeoutMs?: number;
   /**
+   * How long `pause` is given before the ask is abandoned.
+   *
+   * Separate from the answer's own deadline because it fails differently and
+   * costs more: a `requestReplan` that never returns holds up one narrowing,
+   * while a `pause` that never returns holds up whatever is waiting behind it
+   * — an arrival's admission decision, or the teardown of a settling task,
+   * both of which await the freeze in flight. One run was measured blocking
+   * fifty seconds here. Ten seconds is a control-plane call to a live process,
+   * not an agent round trip; a test drives it down.
+   */
+  blanketPauseTimeoutMs?: number;
+  /**
    * Who puts an agent's question to a person, and brings back what they said.
    *
    * Absent on a deployment with nobody to ask — a CLI run, a benchmark — in
@@ -982,6 +995,22 @@ export interface BlanketFreezeRequest {
    * never to a wrong grant.
    */
   declare?(): Promise<HolderDeclaration | undefined>;
+  /**
+   * Set when the narrowing is being driven by a task that has just arrived,
+   * rather than by the holder's own timer.
+   *
+   * There is one narrowing path now — an arrival used to freeze the claim
+   * itself, synchronously, on a path that had no way to ask the holder
+   * anything, so the ask never fired in production at all. What survives of
+   * that path is what it knew and this one does not: which of the holder's
+   * estimated files the arrival is asking for and the holder has never been
+   * seen in. They are already off the plan by the time this is passed; it
+   * travels so the record can still say what was handed over to whom.
+   */
+  arrival?: {
+    /** Estimated ground given to the arrival because the holder was never in it. */
+    releasedFiles: readonly string[];
+  };
 }
 
 /** The remainder of a partially admitted task, once its granted half landed. */
@@ -1119,6 +1148,16 @@ const DEFAULT_WORKING_CHANGE_POLL_MS = 10_000;
 const DEFAULT_BLANKET_DECLARATION_TIMEOUT_MS = 120_000;
 
 /**
+ * How long `pause` and `resume` are each given before the ask gives up.
+ *
+ * See {@link CoordinatorDependencies.blanketPauseTimeoutMs}: the ask is
+ * reached from an arriving task's admission decision now, not only from a
+ * timer nobody is waiting on, so a control-plane call that never returns has
+ * somebody behind it.
+ */
+const DEFAULT_BLANKET_PAUSE_TIMEOUT_MS = 10_000;
+
+/**
  * The ask itself.
  *
  * Written the way `EMPTY_SYMBOLS_CORRECTION` and `PLAN_SHAPE_INSTRUCTIONS`
@@ -1205,6 +1244,8 @@ export class Coordinator {
   private readonly workingChangePollMs: number;
   /** See {@link CoordinatorDependencies.blanketDeclarationTimeoutMs}. */
   private readonly blanketDeclarationTimeoutMs: number;
+  /** See {@link CoordinatorDependencies.blanketPauseTimeoutMs}. */
+  private readonly blanketPauseTimeoutMs: number;
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
   private readonly conversations: ConversationRegistry;
@@ -1240,6 +1281,8 @@ export class Coordinator {
     this.blanketDeclarationTimeoutMs =
       dependencies.blanketDeclarationTimeoutMs ??
       DEFAULT_BLANKET_DECLARATION_TIMEOUT_MS;
+    this.blanketPauseTimeoutMs =
+      dependencies.blanketPauseTimeoutMs ?? DEFAULT_BLANKET_PAUSE_TIMEOUT_MS;
     this.questions = dependencies.questions;
     this.questionDeadlineMs =
       dependencies.questionDeadlineMs ?? DEFAULT_QUESTION_DEADLINE_MS;
@@ -5186,6 +5229,41 @@ export class Coordinator {
     let inFlight: Promise<void> = Promise.resolve();
     let stopped = false;
 
+    // The ask, built once and published for exactly as long as this holder is
+    // executing.
+    //
+    // It used to be built inline in the tick below, which is the whole reason
+    // it never fired: an arriving task narrows the claim off the lease table
+    // in milliseconds, and the first tick is ten seconds away. Registering it
+    // is what gives that arrival — running in another coordinator run, with
+    // its own authority instance and no idea what an adapter is — a way to
+    // reach the session before it decides.
+    //
+    // Only where there is actually a session to ask. An adapter that cannot
+    // pause must not be asked at all: `run` refuses a second process while one
+    // is live, so asking without a pause would fail the round the holder is in
+    // the middle of.
+    const declare =
+      entry.adapter.pause === undefined ||
+      entry.adapter.requestReplan === undefined
+        ? undefined
+        : async (): Promise<HolderDeclaration | undefined> =>
+            await this.askHolderToDeclare(
+              entry,
+              waveVersion,
+              recorder,
+              runAudit,
+              input.repository.id,
+            );
+    const unregister =
+      declare === undefined
+        ? (): void => undefined
+        : registerBlanketHolder({
+            task: entry.task,
+            repositoryId: input.repository.id,
+            declare,
+          });
+
     const tick = async (): Promise<void> => {
       if (stopped || !isBlanketClaim(entry.plan)) {
         return;
@@ -5203,23 +5281,7 @@ export class Coordinator {
           baseVersion: waveVersion,
           observe: async () => await list(workspace),
           estimatedFiles: entry.blanketEstimate ?? [],
-          // Only where there is actually a session to ask. An adapter that
-          // cannot pause must not be asked at all: `run` refuses a second
-          // process while one is live, so asking without a pause would fail
-          // the round the holder is in the middle of.
-          ...(entry.adapter.pause === undefined ||
-          entry.adapter.requestReplan === undefined
-            ? {}
-            : {
-                declare: async () =>
-                  await this.askHolderToDeclare(
-                    entry,
-                    waveVersion,
-                    recorder,
-                    runAudit,
-                    input.repository.id,
-                  ),
-              }),
+          ...(declare === undefined ? {} : { declare }),
         });
       } catch {
         return;
@@ -5227,6 +5289,12 @@ export class Coordinator {
       if (frozen === undefined) {
         return;
       }
+      // What comes back is not always this tick's work: a task that arrived
+      // while this run was between ticks narrows the claim itself, and the
+      // authority answers with what the claim became rather than letting this
+      // overwrite it. Either way the plan below is the durable one, and
+      // adopting it is how this run stops telling its agent it holds a
+      // repository somebody else has been admitted into.
       if (frozen.claim?.kind === "declared") {
         // The next round's prompt is built from what this holder now holds.
         // Without this the execution prompt goes on telling it that it has
@@ -5286,6 +5354,10 @@ export class Coordinator {
 
     return {
       stop: async () => {
+        // Unpublished before anything else. A task being torn down is about to
+        // have its session cancelled, and an arrival landing in that window
+        // must find nothing to ask rather than pause a process on its way out.
+        unregister();
         stopped = true;
         clearInterval(timer);
         await inFlight.catch(() => undefined);
@@ -5325,10 +5397,34 @@ export class Coordinator {
     if (adapter.pause === undefined || adapter.requestReplan === undefined) {
       return undefined;
     }
-    try {
-      await adapter.pause(entry.session.id);
-    } catch {
-      // Not paused, so not asked. Nothing has changed about the session.
+    // Bounded, because somebody is behind it now.
+    //
+    // A pause was measured taking fifty seconds in one run. That used to cost
+    // nothing anybody could see — the ask ran on a timer, and the only thing
+    // waiting on it was the next tick. It is now reached from an arriving
+    // task's admission decision and from this task's own teardown, and neither
+    // may be held open by a CLI that has stopped answering.
+    const pausing = adapter.pause(entry.session.id);
+    const paused = await withDeadline(
+      pausing.then(() => true),
+      this.blanketPauseTimeoutMs,
+    );
+    if (paused !== true) {
+      // Not paused, so not asked. Nothing has changed about the session —
+      // except that a pause abandoned on the clock may still land, and a
+      // holder left stopped forever would be a worse failure than the one
+      // being avoided. There is no way to un-ask it, so the resume is queued
+      // behind whatever it eventually does.
+      void pausing.then(
+        async () => {
+          try {
+            await adapter.resume(entry.session.id);
+          } catch {
+            // Best effort by definition: nothing is waiting on this any more.
+          }
+        },
+        () => undefined,
+      );
       return undefined;
     }
     let declaration: HolderDeclaration | undefined;
@@ -5366,9 +5462,21 @@ export class Coordinator {
     } catch {
       declaration = undefined;
     }
-    try {
-      await adapter.resume(entry.session.id);
-    } catch (error) {
+    // Bounded like the pause, and for the same reason: a `resume` that hangs
+    // would hold the arrival's decision open just as surely as a `pause` that
+    // does, and the caller cannot tell the difference from outside.
+    let resumeFailure: unknown;
+    const resumed = await withDeadline(
+      adapter.resume(entry.session.id).then(
+        () => true,
+        (error: unknown) => {
+          resumeFailure = error;
+          return false;
+        },
+      ),
+      this.blanketPauseTimeoutMs,
+    );
+    if (resumed !== true) {
       // Visible rather than swallowed. The worktree is intact and nothing was
       // killed, so the holder is no worse off than a session whose CLI died
       // mid-round — but somebody has to be able to see that it happened.
@@ -5380,7 +5488,10 @@ export class Coordinator {
         {
           repositoryId,
           resumeFailed: true,
-          explanation: describeError(error),
+          explanation:
+            resumeFailure === undefined
+              ? "the session did not resume within the pause deadline"
+              : describeError(resumeFailure),
         },
       ).catch(() => undefined);
       return undefined;

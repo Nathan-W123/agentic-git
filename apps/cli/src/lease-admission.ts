@@ -8,6 +8,7 @@ import {
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
+  blanketHolderSession,
   blanketPlan,
   contestedPlanResources,
   declaredPlanFromClaim,
@@ -94,6 +95,60 @@ function conflictFingerprint(data: Readonly<Record<string, unknown>>): string {
 }
 
 /**
+ * The answer, or nothing once the deadline passes.
+ *
+ * The ask is not cancelled — there is no way to un-ask an agent, and the
+ * coordinator resumes it either way — only stopped being waited for, and a
+ * late rejection is absorbed so it cannot surface as an unhandled rejection
+ * after the decision that wanted it has been made.
+ */
+async function answerWithin<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work.catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * What a narrowing driven by an arrival adds to its record.
+ *
+ * Says who asked, because this is not the holder noticing anything — somebody
+ * else needed the room and took it — and what the arrival was given off the
+ * holder's estimate, which is what makes that estimate's slack measurable
+ * after the fact rather than only in a benchmark. Empty for the holder's own
+ * poll, which is nobody's arrival.
+ */
+function arrivalRecord(
+  request: BlanketFreezeRequest,
+  observedFiles: number,
+): Record<string, unknown> {
+  if (request.arrival === undefined) {
+    return {};
+  }
+  return {
+    narrowedOnArrival: true,
+    // Zero is a real answer — a holder that has not written yet — and worth
+    // telling apart on the record from a read that failed, which never
+    // reaches here at all.
+    observedFiles,
+    releasedFiles: [...request.arrival.releasedFiles],
+  };
+}
+
+/**
  * Arbitration for tasks running in this process, against every other task
  * running in the same repository — including those belonging to other runs.
  *
@@ -132,6 +187,8 @@ export class LeasePlanAuthority implements PlanAuthority {
    * that has said where it is going has said it.
    */
   private readonly asked = new Set<TaskId>();
+  /** See the constructor option of the same name. */
+  private readonly blanketAskTimeoutMs: number;
 
   public constructor(options: {
     store: CoordinationStore;
@@ -166,6 +223,19 @@ export class LeasePlanAuthority implements PlanAuthority {
      * same git client every other caller uses.
      */
     workspaces?: WorkspaceManager;
+    /**
+     * How long an arriving task will wait for a blanket holder to say what
+     * the rest of its work needs, before narrowing it the old way instead.
+     *
+     * The ask reaches a live agent process through the coordinator, and this
+     * is the one place it is on the critical path of somebody else's
+     * admission decision. Bounded at the retry interval, which is the honest
+     * comparison: an arrival never waits longer for an answer than it would
+     * have waited to simply ask again. On the deadline the claim is frozen
+     * exactly as it is today and the arrival takes its retry — the behaviour
+     * that shipped, never a grant.
+     */
+    blanketAskTimeoutMs?: number;
   }) {
     this.store = options.store;
     this.leaseIdForTask = options.leaseIdForTask;
@@ -178,6 +248,8 @@ export class LeasePlanAuthority implements PlanAuthority {
     this.workspaces =
       options.workspaces ??
       new GitWorktreeWorkspaceManager(this.repositories.getGitClient());
+    this.blanketAskTimeoutMs =
+      options.blanketAskTimeoutMs ?? DEFAULT_PLAN_RETRY_MS;
   }
 
   public async admit(
@@ -245,6 +317,7 @@ export class LeasePlanAuthority implements PlanAuthority {
         // and has never written to is released to it here rather than held
         // for the rest of the holder's run — see `narrowBlanketHolder`.
         uniqueRepositoryPaths(request.plan.expectedFiles),
+        request.projectId,
       );
       if (narrowed !== undefined) {
         active = active.map((entry) =>
@@ -590,20 +663,81 @@ export class LeasePlanAuthority implements PlanAuthority {
    * reason.
    */
   public async freezeBlanketClaim(
-    request: BlanketFreezeRequest,
+    input: BlanketFreezeRequest,
   ): Promise<AgentPlan | undefined> {
-    if (!isBlanketClaim(request.plan)) {
+    if (!isBlanketClaim(input.plan)) {
       return undefined;
     }
-    const leaseId = this.leaseIdForTask.get(request.task.id);
-    if (leaseId === undefined) {
-      return undefined;
-    }
+    // Reap anything whose holder stopped heartbeating first: a lapsed lease is
+    // not work in progress, and freezing one would rewrite a dead task's plan.
     await this.store.expireWorkLeases(new Date().toISOString());
-    const lease = await this.store.getWorkLease(leaseId);
+    const leaseId = this.leaseIdForTask.get(input.task.id);
+    const lease =
+      leaseId === undefined
+        ? // Not a task this run is executing, which is the arrival's case:
+          // the holder belongs to another run, and the lease table is the
+          // only thing the two of them can both see. Narrowing it from here
+          // is the operation the arrival path has always performed — the same
+          // compare-and-swap, the same `replaceApproved`, and never wider
+          // than what the holder already had.
+          (
+            await this.store.listWorkLeases({ status: "active" })
+          ).find((candidate) => candidate.taskId === input.task.id)
+        : await this.store.getWorkLease(leaseId);
     if (lease === undefined || lease.status !== "active") {
       return undefined;
     }
+    // What this holder actually holds, which is not necessarily what the
+    // caller thinks it holds.
+    //
+    // The caller is a poll on a run that has been executing for a while, and
+    // the plan it passes is the one it had in memory when the claim was
+    // granted. Meanwhile an arrival can have narrowed the same claim off the
+    // lease table — and then a freeze against the caller's copy would *widen*
+    // the holder back to its original estimate, over ground the arrival has
+    // since been granted. Two tasks would hold one file and neither side
+    // would say so.
+    //
+    // So the durable record decides, in both directions: a claim already
+    // converted is answered with what it became, and one still whole may be
+    // narrowed but never re-widened past what it currently names.
+    const stored = lease.plan?.plan;
+    if (
+      stored !== undefined &&
+      stored.taskId === input.plan.taskId &&
+      !isBlanketClaim(stored)
+    ) {
+      // Already an ordinary plan. Answering with it rather than `undefined`
+      // is what lets the caller adopt the truth — a coordinator whose tick
+      // gets nothing back goes on believing it holds the repository, and goes
+      // on telling its agent so.
+      return stored;
+    }
+    // Files this holder has already handed back of its own accord are not
+    // ground to freeze on either: somebody may have been granted them since,
+    // and the caller's copy of the plan predates the release. The estimate
+    // gets the same treatment as the plan, because the freeze narrows to the
+    // estimate whenever the holder has written nothing — a stale estimate
+    // re-widens a claim exactly as effectively as a stale plan does.
+    const givenBack = new Set(
+      stored?.claim?.kind === "blanket" ? (stored.claim.released ?? []) : [],
+    );
+    const stillHeld = (file: string): boolean => !givenBack.has(file);
+    const request: BlanketFreezeRequest =
+      givenBack.size === 0
+        ? input
+        : {
+            ...input,
+            plan: {
+              ...input.plan,
+              expectedFiles: uniqueRepositoryPaths(
+                input.plan.expectedFiles,
+              ).filter((file) => stillHeld(file)),
+            },
+            estimatedFiles: uniqueRepositoryPaths(input.estimatedFiles).filter(
+              (file) => stillHeld(file),
+            ),
+          };
     const others = (
       await this.store.listWorkLeases({
         status: "active",
@@ -731,6 +865,7 @@ export class LeasePlanAuthority implements PlanAuthority {
         directories:
           frozen.claim?.kind === "frozen" ? frozen.claim.directories : [],
         arrivedTasks: others.map((candidate) => candidate.taskId).sort(),
+        ...arrivalRecord(request, changes.length),
       },
     });
     return frozen;
@@ -845,6 +980,12 @@ export class LeasePlanAuthority implements PlanAuthority {
         // zero here, which is the healthy shape.
         observedFiles: touched.length,
         arrivedTasks: others.map((candidate) => candidate.taskId).sort(),
+        ...(request.arrival === undefined
+          ? {}
+          : {
+              narrowedOnArrival: true,
+              releasedFiles: [...request.arrival.releasedFiles],
+            }),
       },
     });
     return converted;
@@ -1269,6 +1410,8 @@ export class LeasePlanAuthority implements PlanAuthority {
      * anything.
      */
     wanted: readonly string[] = [],
+    /** The arrival's project, so a narrowing it caused is recorded under it. */
+    projectId?: string,
   ): Promise<ActivePlan | undefined> {
     const leases = await this.store.listWorkLeases({ status: "active" });
     const held = leases.find(
@@ -1342,6 +1485,67 @@ export class LeasePlanAuthority implements PlanAuthority {
               (path) => !released.includes(normalizeRepositoryPath(path)),
             ),
           };
+    // Asked, where the holder is reachable — and it is the arrival that asks.
+    //
+    // This used to be two narrowing paths that could not both be right. The
+    // holder's own ten-second poll carried the ask; the arrival narrowed the
+    // claim itself, synchronously, with no way to reach a session — and an
+    // arrival decides off the lease table in single-digit milliseconds, so it
+    // always got there first and the holder was never asked at all. The
+    // measured run asked nobody and sequenced the arrival nine milliseconds
+    // in, nine seconds before the tick that would have asked.
+    //
+    // So there is one narrowing path, and it goes through the freeze that
+    // already contains the ask: the union with `observe()`, the one-ask bound
+    // shared with the poll, and every fallback. What stays here is what only
+    // an arrival knows — which of the holder's guesses somebody is actually
+    // asking for — and that is already off `kept` by this point.
+    const asking = blanketHolderSession(holder.taskId, held.repositoryId);
+    if (asking !== undefined) {
+      const declared = await this.freezeBlanketClaim({
+        task: asking.task,
+        plan: kept,
+        planRevision: held.plan.admission.planRevision ?? 1,
+        repository,
+        ...(projectId === undefined ? {} : { projectId }),
+        // The holder's own base, never the arrival's: a diff taken against
+        // the wrong base is not a weaker observation, it is a fictional one.
+        baseVersion: { ...baseVersion, revision: held.baseRevision },
+        estimatedFiles: uniqueRepositoryPaths(kept.expectedFiles),
+        // Re-read at the moment of the freeze rather than reusing the read
+        // above, and a read that fails throws rather than answering "nothing
+        // written" — which is the difference between narrowing a holder and
+        // erasing it.
+        observe: async () => {
+          const fresh = await this.observeHolder(holder.taskId, repository);
+          if (fresh === undefined) {
+            throw new Error(
+              `The working changes of task ${holder.taskId} could not be read`,
+            );
+          }
+          // Field by field, so no `ranges` this manager may learn to report
+          // can reach the freeze: a claim narrowed on somebody else's arrival
+          // holds its files whole.
+          return fresh.map((change) => ({
+            path: change.path,
+            status: change.status,
+          }));
+        },
+        // Bounded, because this one is on the critical path of a decision.
+        // Past the deadline the ask is abandoned — it is not cancelled, the
+        // holder is resumed by the coordinator either way — and the claim is
+        // frozen exactly as it is below. The arrival then waits a retry,
+        // which is the behaviour that ships today.
+        declare: async () =>
+          await answerWithin(asking.declare(), this.blanketAskTimeoutMs),
+        arrival: { releasedFiles: released },
+      }).catch(() => undefined);
+      if (declared !== undefined && !isBlanketClaim(declared)) {
+        return { ...holder, plan: declared };
+      }
+      // Anything the ask could not buy falls through to the freeze below,
+      // which is exactly what would have happened without it.
+    }
     const frozen = freezePlanFromWorkingChanges(kept, [
       ...kept.expectedFiles.map((path) => ({
         path,
