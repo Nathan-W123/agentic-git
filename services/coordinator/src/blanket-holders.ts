@@ -65,6 +65,25 @@ const holders = new Map<TaskId, BlanketHolderSession>();
 const asking = new Map<TaskId, Promise<HolderDeclaration | undefined>>();
 
 /**
+ * What a holder has already said, kept for as long as it is executing.
+ *
+ * Asking is expensive in a way the shape of the code hides: it pauses a live
+ * vendor session, waits for a model round trip, and resumes. Callers bound
+ * that wait, and the bound is short because a decision is sitting on it — so
+ * in production the first arrival routinely gives up before the answer lands.
+ *
+ * Without this the answer was then thrown away. `askBlanketHolderOnce` dropped
+ * its entry the moment the promise settled, so a declaration that arrived one
+ * second past somebody's deadline reached nobody, and the next arrival started
+ * a fresh ask against the same holder — pausing it again, for an answer it had
+ * already given. Every arrival could pay that, and none of them need to.
+ *
+ * Keeping it costs nothing and is not stale: a holder's declaration is a
+ * statement about the rest of its own run, and the entry dies with the run.
+ */
+const answered = new Map<TaskId, HolderDeclaration | undefined>();
+
+/**
  * Asks this holder, or joins the ask already running against it.
  *
  * The entry is dropped once it settles, so a later contention episode asks
@@ -76,13 +95,24 @@ const asking = new Map<TaskId, Promise<HolderDeclaration | undefined>>();
 export async function askBlanketHolderOnce(
   session: BlanketHolderSession,
 ): Promise<HolderDeclaration | undefined> {
+  // Already said, so do not pause it to hear the same thing twice. This is
+  // the common case once a caller has timed out: the answer landed after its
+  // deadline and is waiting here for whoever comes next.
+  if (answered.has(session.task.id)) {
+    return answered.get(session.task.id);
+  }
   const running = asking.get(session.task.id);
   if (running !== undefined) {
     return await running;
   }
-  const started = (async () => await session.declare())().catch(
-    () => undefined,
-  );
+  const started = (async () => await session.declare())()
+    .catch(() => undefined)
+    .then((declaration) => {
+      // Recorded when it settles rather than when it is consumed, because the
+      // caller that started it may be long gone.
+      answered.set(session.task.id, declaration);
+      return declaration;
+    });
   asking.set(session.task.id, started);
   try {
     return await started;
@@ -111,6 +141,10 @@ export function registerBlanketHolder(
       // promise is already settling or abandoned, and a late joiner would get
       // an answer about a holder that no longer exists.
       asking.delete(session.task.id);
+      // Same reason, and it is what keeps the cache honest: a declaration is
+      // a statement about the rest of one run's work, so it must not outlive
+      // that run.
+      answered.delete(session.task.id);
     }
   };
 }
