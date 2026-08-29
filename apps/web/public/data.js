@@ -5823,6 +5823,17 @@ const repositoryPath = (repositoryId, suffix = "") =>
 export async function deleteRepository(repositoryId) {
   await api(repositoryPath(repositoryId), { method: "DELETE" });
   delete state.repositoryGrants[repositoryId];
+  delete state.subChannels[repositoryId];
+  delete state.activeSubChannel[repositoryId];
+  // Deletion is reached from the header of the channel being deleted, so the
+  // room on screen is normally the one that has just stopped existing.
+  // `loadContext` clears the id held in memory, but the remembered one
+  // outlives a reload and would put this browser straight back on a
+  // repository the server no longer has.
+  if (state.repositoryId === repositoryId) {
+    state.repositoryId = "";
+    persist("ag.repo", "");
+  }
   await loadContext();
 }
 

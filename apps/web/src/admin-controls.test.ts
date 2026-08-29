@@ -12,10 +12,11 @@ import { defaultPublicDirectory } from "./assets.js";
  * the test run has no DOM.
  *
  * Two things a person could not previously do. Changing roles and removing
- * somebody was either absent or reachable only through the API, and
- * renaming or deleting a repository had no control at all — the menu that
- * carried deletion was anchored to a repositories grid this interface stopped
- * rendering, so nothing on screen opened it.
+ * somebody was either absent or reachable only through the API, and deleting
+ * a repository had no control at all — the menu that carried deletion was
+ * anchored to a repositories grid this interface stopped rendering, so
+ * nothing on screen opened it. Deletion hangs off the channel header's own
+ * menu now, built by the same helper and behind the same owner gate.
  */
 async function publicFile(name: string): Promise<string> {
   return await readFile(path.join(defaultPublicDirectory(), name), "utf8");
@@ -110,7 +111,7 @@ test("a repository owner grant changes the People-row title", async () => {
   );
 });
 
-test("a channel keeps repository destruction out of its conversation menu", async () => {
+test("the channel menu offers owner-gated repository deletion", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
 
@@ -123,7 +124,27 @@ test("a channel keeps repository destruction out of its conversation menu", asyn
   assert.match(items, /label: "Copy link"/u);
   assert.match(items, /label: "Repository"/u);
   assert.match(items, /label: "Sync from GitHub"/u);
-  assert.doesNotMatch(items, /channel-rename-repo|channel-delete-repo|channel-leave/u);
+  // Deleting comes last, from the shared helper — so the channel header and
+  // the repository card cannot drift into offering it to different people.
+  assert.match(items, /\.\.\.repositoryMenuItems\(repositoryId\)/u);
+  // Renaming and leaving stay out of it: destruction is what had no surface.
+  assert.doesNotMatch(items, /channel-rename-repo|channel-leave/u);
+
+  const shared = slice(
+    app,
+    "function repositoryMenuItems(repositoryId)",
+    "function conversationMenuItems(repositoryId)",
+  );
+  assert.match(shared, /if \(!canDeleteRepository\(repositoryId\)\) \{\s*return \[\];/u);
+  assert.match(shared, /act: "channel-delete-repo"/u);
+  assert.match(shared, /label: "Delete repository"/u);
+  assert.match(shared, /danger: true/u);
+
+  // And the row reaches the action that asks for the typed phrase.
+  assert.match(
+    app,
+    /case "channel-delete-repo":\s*void deleteRepositoryAction\(value\);/u,
+  );
 });
 
 test("the agent surfaces name a renamed channel by its new name", async () => {
@@ -150,10 +171,11 @@ test("repository deletion stays owner-gated outside channel information", async 
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");
 
-  // The repository menu retains the owner gate; the read-only channel
-  // information panel deliberately carries no destructive control.
+  // The repository card's menu builds its destructive row from the same
+  // gated helper; the read-only channel information panel deliberately
+  // carries no destructive control at all.
   const repoMenu = slice(app, 'case "repo-menu":', 'case "repo-sync":');
-  assert.match(repoMenu, /canDeleteRepository\(value\)/u);
+  assert.match(repoMenu, /\.\.\.repositoryMenuItems\(value\)/u);
   const popover = slice(
     chats,
     "export function channelInfoPopoverHtml(repositoryId)",
