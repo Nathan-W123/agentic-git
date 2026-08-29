@@ -5985,6 +5985,7 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.doesNotMatch(open, /notifications/u);
   assert.match(panel, /const requestedTab = state\.agentPanelTab \?\? "spec";/u);
   assert.match(panel, /: agentSpec\(agent, repositoryId\)/u);
+  // This compact header face is the panel's one presence indicator.
   assert.match(panel, /\$\{statusAgentFace\(agent, 20, repositoryId\)\}/u);
   assert.doesNotMatch(panel, /statusDot\(/u);
 
@@ -6185,7 +6186,14 @@ test("agent details use the reference profile with supported controls", async ()
   assert.match(spec, /class="aspec-zone aspec-work/u);
   assert.match(spec, /class="aspec-zone aspec-runtime"/u);
   assert.match(spec, /class="aspec-zone aspec-context"/u);
-  assert.match(spec, /statusAgentFace\(agent, 52, repositoryId\)/u);
+  // The large identity face still receives live progress, but does not repeat
+  // the header presence dot; the status text does not add another dot either.
+  assert.match(
+    spec,
+    /statusAgentFace\(agent, 52, repositoryId, \{\s*showPresence: false,\s*\}\)/u,
+  );
+  assert.match(spec, /const facts = \[\s*\{ text: statusText \},/u);
+  assert.doesNotMatch(spec, /\{ text: statusText, dot:/u);
   assert.match(panel, /<aside class="thread-panel agent-detail-panel">/u);
   assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(820px, 76vw\)/su);
 
@@ -6230,9 +6238,10 @@ test("agent details use the reference profile with supported controls", async ()
   );
 
   // Identity states status, connection, ownership and room once each, as one
-  // line of text. The duplicate pill strip that repeated the header is gone.
+  // line of text without repeating the header's presence dot. The duplicate
+  // pill strip that repeated the header is gone.
   assert.match(spec, /class="aspec-identity-facts"/u);
-  assert.match(spec, /text: statusText, dot: status/u);
+  assert.match(spec, /\{ text: statusText \}/u);
   assert.match(spec, /text: `#\$\{repositoryLabel\(repositoryId\)\}`/u);
   assert.doesNotMatch(spec, /class="aspec-pills"/u);
   assert.doesNotMatch(css, /\.agent-spec \.aspec-pills/u);

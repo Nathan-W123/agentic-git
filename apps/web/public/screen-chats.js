@@ -729,9 +729,10 @@ function statusDot(status, title) {
 }
 
 /** One agent icon with either its status dot or its live progress pie. */
-function statusAgentFace(agent, size, repositoryId) {
+function statusAgentFace(agent, size, repositoryId, indicator = {}) {
   const status = agentStatus(agent, repositoryId);
   return agentFace(agent, size, {
+    ...indicator,
     status,
     progress: agentWorkingProgress(agent, repositoryId),
   });
@@ -5981,7 +5982,7 @@ function agentSpec(agent, repositoryId) {
     accent === undefined ? "" : ` style="--aspec-accent:${accent}"`
   }>
     <div class="aspec-content">
-      ${agentIdentityZone(agent, repositoryId, { status, statusText, providerId })}
+      ${agentIdentityZone(agent, repositoryId, { statusText, providerId })}
       ${agentCurrentWorkZone(agent, repositoryId, {
         task,
         taskMessage,
@@ -6004,9 +6005,9 @@ function agentSpec(agent, repositoryId) {
  * under was a ninth of the panel carrying nothing; what is left of it is a
  * wash behind this zone alone.
  */
-function agentIdentityZone(agent, repositoryId, { status, statusText, providerId }) {
+function agentIdentityZone(agent, repositoryId, { statusText, providerId }) {
   const facts = [
-    { text: statusText, dot: status },
+    { text: statusText },
     { text: agentLabelOf(providerId), title: providerId },
     {
       text:
@@ -6020,7 +6021,9 @@ function agentIdentityZone(agent, repositoryId, { status, statusText, providerId
     },
   ].filter((fact) => fact.text !== "");
   return `<section class="aspec-zone aspec-identity" aria-label="Identity">
-    <span class="aspec-face">${statusAgentFace(agent, 52, repositoryId)}</span>
+    <span class="aspec-face">${statusAgentFace(agent, 52, repositoryId, {
+      showPresence: false,
+    })}</span>
     <div class="aspec-identity-id">
       <h2 title="${esc(agent.name)}">${esc(agent.name)}</h2>
       <div class="aspec-identity-facts">
@@ -6030,11 +6033,7 @@ function agentIdentityZone(agent, repositoryId, { status, statusText, providerId
               `${index === 0 ? "" : `<span class="aspec-sep" aria-hidden="true">·</span>`}
               <span class="aspec-fact"${
                 fact.title === undefined ? "" : ` title="${esc(fact.title)}"`
-              }>${
-                fact.dot === undefined
-                  ? ""
-                  : `<span class="status-dot status-${esc(fact.dot)}"></span>`
-              }${esc(fact.text)}</span>`,
+              }>${esc(fact.text)}</span>`,
           )
           .join("")}
       </div>
