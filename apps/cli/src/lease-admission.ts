@@ -103,19 +103,45 @@ function conflictFingerprint(data: Readonly<Record<string, unknown>>): string {
  * late rejection is absorbed so it cannot surface as an unhandled rejection
  * after the decision that wanted it has been made.
  */
+/**
+ * Raised when the ask ran out of budget with the holder still thinking.
+ *
+ * Distinct from the holder having nothing to say, and the distinction is the
+ * whole point: an answer that has not arrived yet is still coming, and
+ * freezing on its absence throws it away.
+ */
+class BlanketAskPending extends Error {
+  public constructor() {
+    super("the blanket holder had not answered within the ask budget");
+    this.name = "BlanketAskPending";
+  }
+}
+
+/**
+ * The work, or `undefined` if it failed — but a throw if the deadline is what
+ * ended it.
+ *
+ * The two used to be the same answer, and treating them alike is what made a
+ * slow holder permanent. See the call site.
+ */
 async function answerWithin<T>(
   work: Promise<T>,
   timeoutMs: number,
 ): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([
+    const timedOut = Symbol("timed-out");
+    const outcome = await Promise.race([
       work.catch(() => undefined),
-      new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      new Promise<typeof timedOut>((resolve) => {
+        timer = setTimeout(() => resolve(timedOut), timeoutMs);
         timer.unref?.();
       }),
     ]);
+    if (outcome === timedOut) {
+      throw new BlanketAskPending();
+    }
+    return outcome as T | undefined;
   } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -778,9 +804,35 @@ export class LeasePlanAuthority implements PlanAuthority {
       this.asked.add(request.task.id);
       try {
         declaration = await request.declare();
-      } catch {
-        // Every failure falls back to today's behaviour. Degrade to a wait,
-        // never to a wrong grant.
+      } catch (error) {
+        if (error instanceof BlanketAskPending) {
+          // The holder is still answering. Freezing here is not "fall back to
+          // today's behaviour" — it is worse than it, because the freeze is
+          // permanent: it covers the estimate unioned with every path the
+          // holder has touched, and a frozen claim is never narrowed again.
+          // One answer that arrived a second late therefore locked the whole
+          // repository for the rest of the run, and the answer, when it came,
+          // had nothing left to narrow.
+          //
+          // Leaving the claim blanket is the recoverable state. The arrival
+          // takes the retry it would have taken anyway, the ask is still in
+          // flight in the holder registry, and the next arrival joins the
+          // same promise and finds it settled. Nothing waits forever: a
+          // blanket claim is exactly what the force-admit bound in `admit`
+          // exists for.
+          //
+          // Cleared so that next arrival actually asks — the entry went in
+          // before the call to stop a recursive double-ask, and an ask that
+          // never completed is not one this authority has made.
+          this.asked.delete(request.task.id);
+          // Rethrown rather than answered, because the plain freeze this
+          // method falls through to is not the only one: `narrowBlanketHolder`
+          // has its own below the call, and returning `undefined` here would
+          // simply land in that instead. The signal has to reach the caller.
+          throw error;
+        }
+        // Every other failure falls back to today's behaviour. Degrade to a
+        // wait, never to a wrong grant.
         declaration = undefined;
       }
     }
@@ -1506,6 +1558,7 @@ export class LeasePlanAuthority implements PlanAuthority {
     // asking for — and that is already off `kept` by this point.
     const asking = blanketHolderSession(holder.taskId, held.repositoryId);
     if (asking !== undefined) {
+      let askPending = false;
       const declared = await this.freezeBlanketClaim({
         task: asking.task,
         plan: kept,
@@ -1552,12 +1605,29 @@ export class LeasePlanAuthority implements PlanAuthority {
             this.blanketAskTimeoutMs,
           ),
         arrival: { releasedFiles: released },
-      }).catch(() => undefined);
+      }).catch((error: unknown) => {
+        if (error instanceof BlanketAskPending) {
+          askPending = true;
+        }
+        return undefined;
+      });
       if (declared !== undefined && !isBlanketClaim(declared)) {
         return { ...holder, plan: declared };
       }
-      // Anything the ask could not buy falls through to the freeze below,
-      // which is exactly what would have happened without it.
+      if (askPending) {
+        // Still blanket, deliberately. The freeze below covers the estimate
+        // unioned with everything the holder has touched and can never be
+        // narrowed again, so running it on an answer that is merely late
+        // discards that answer permanently — which is how a holder that named
+        // one file of three ended up holding all three for the rest of its
+        // run. The arrival takes the retry it was going to take anyway; the
+        // ask is still in flight; the next arrival joins the same promise and
+        // finds it settled. The force-admit bound in `admit` is what stops
+        // this being unbounded.
+        return undefined;
+      }
+      // Anything else the ask could not buy falls through to the freeze
+      // below, which is exactly what would have happened without it.
     }
     const frozen = freezePlanFromWorkingChanges(kept, [
       ...kept.expectedFiles.map((path) => ({

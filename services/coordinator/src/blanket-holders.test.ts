@@ -73,10 +73,26 @@ test("arrivals landing together share one ask rather than one each", async () =>
   stop();
 });
 
-test("a later contention episode asks again", async () => {
-  // The bound is one ask at a time, not one ask ever. A holder joined, left
-  // alone, and joined again has told nobody anything about the second
-  // arrival, and the entry has to be gone for that to be askable.
+test("a holder that has answered is not paused to answer again", async () => {
+  // This used to assert the opposite — one ask at a time, not one ask ever, on
+  // the reasoning that a second arrival has been told nothing about itself.
+  // That reasoning does not survive what the answer actually is. A holder is
+  // asked what the rest of *its own* work needs; the reply is about the run,
+  // not about whoever happened to arrive, so a second arrival re-asking gets
+  // the same sentence back and pays a paused vendor session for it.
+  //
+  // It was also the more expensive half of a live failure. The ask is bounded
+  // because a decision waits on it, and the bound is short next to a pause and
+  // a model round trip, so in production the first arrival usually gives up
+  // first. The answer then landed, was dropped on settle, and reached nobody —
+  // and the next arrival started the whole thing again. Repeatedly pausing one
+  // live session is precisely what this module was written to stop; doing it
+  // across time rather than in parallel is the same harm.
+  //
+  // Reuse is the conservative direction as well as the cheap one: a
+  // declaration made earlier describes more remaining work than one made
+  // later, so an arrival decided against it is told the holder needs more, not
+  // less.
   let asks = 0;
   const stop = registerBlanketHolder(
     holder("task_b", async () => {
@@ -87,11 +103,37 @@ test("a later contention episode asks again", async () => {
   const session = blanketHolderSession("task_b" as TaskId);
   assert.ok(session);
 
-  await askBlanketHolderOnce(session);
-  await askBlanketHolderOnce(session);
+  const first = await askBlanketHolderOnce(session);
+  const second = await askBlanketHolderOnce(session);
 
-  assert.equal(asks, 2);
+  assert.equal(asks, 1, "the holder was paused again for an answer it had given");
+  assert.deepEqual(second, first);
   stop();
+});
+
+test("a new run of the same task is asked afresh", async () => {
+  // Where "not one ask ever" is actually true: the boundary is the holder's
+  // execution, not the contention episode. A declaration is a statement about
+  // the rest of one run's work and must not outlive it — deregistering clears
+  // it along with any ask in flight.
+  let asks = 0;
+  const declare = async (): Promise<{ files: string[]; symbols: string[] }> => {
+    asks += 1;
+    return { files: ["src/total.js"], symbols: ["orderTotal"] };
+  };
+  const stop = registerBlanketHolder(holder("task_b2", declare));
+  const first = blanketHolderSession("task_b2" as TaskId);
+  assert.ok(first);
+  await askBlanketHolderOnce(first);
+  stop();
+
+  const restarted = registerBlanketHolder(holder("task_b2", declare));
+  const second = blanketHolderSession("task_b2" as TaskId);
+  assert.ok(second);
+  await askBlanketHolderOnce(second);
+
+  assert.equal(asks, 2, "a fresh run reused the previous run's declaration");
+  restarted();
 });
 
 test("a failing ask answers undefined for everyone waiting on it", async () => {

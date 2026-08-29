@@ -252,6 +252,8 @@ class HolderAgent implements AgentAdapter {
       repository: CanonicalRepository;
       workspaces: WorkspaceManager;
       declaration: { files: string[]; symbols: string[] };
+      /** How long the holder takes to answer the ask, as a real one does. */
+      replanDelayMs?: number;
     },
   ) {}
 
@@ -295,6 +297,13 @@ class HolderAgent implements AgentAdapter {
     request: ReplanRequest,
   ): Promise<AgentPlan> {
     this.replans.push(structuredClone(request));
+    const delay = this.options.replanDelayMs ?? 0;
+    if (delay > 0) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        timer.unref?.();
+      });
+    }
     return {
       taskId: request.taskId,
       objective: "the rest of the pricing work",
@@ -525,6 +534,8 @@ async function holdingRun(options: {
   store: InMemoryCoordinationStore;
   worker: string;
   declaration: { files: string[]; symbols: string[] };
+  replanDelayMs?: number;
+  blanketAskTimeoutMs?: number;
 }): Promise<{
   agent: HolderAgent;
   task: TaskDefinition;
@@ -546,6 +557,9 @@ async function holdingRun(options: {
     repository: options.repository,
     workspaces,
     declaration: options.declaration,
+    ...(options.replanDelayMs === undefined
+      ? {}
+      : { replanDelayMs: options.replanDelayMs }),
   });
   const coordinator = new Coordinator({
     repositories: options.repositories,
@@ -555,6 +569,9 @@ async function holdingRun(options: {
       store: options.store,
       leaseIdForTask: new Map([[holder.task.id, holder.leaseId]]),
       workspaces,
+      ...(options.blanketAskTimeoutMs === undefined
+        ? {}
+        : { blanketAskTimeoutMs: options.blanketAskTimeoutMs }),
     }),
     workingChangePollMs: NEVER_TICKS_MS,
   });
@@ -824,6 +841,103 @@ test("a partially admitted agent is told what it was granted", async () => {
         constraints.includes("test/order-pricing.test.js"),
       `the deferred files were never named to the agent: ${JSON.stringify(decision.constraints)}`,
     );
+  } finally {
+    held.agent.release.resolve();
+    await settle(held.finished);
+    await real.cleanup();
+  }
+});
+
+test("a holder too slow to answer does not get frozen over everything", async () => {
+  // Why the reported failure kept changing shape between runs.
+  //
+  // Asking a blanket holder means pausing a live vendor session, waiting for
+  // a model round trip, and resuming. The budget for all of that is
+  // `blanketAskTimeoutMs`, which defaults to the plan retry — fifteen
+  // seconds. In every test before this one the holder is a fake that answers
+  // in microseconds, so the ask always lands. A real one is behind a pause
+  // that has been measured at fifty seconds on its own, so it usually does
+  // not.
+  //
+  // What happened on a timeout was not "ask again later". `declaration`
+  // came back undefined and the code fell through to the plain freeze, which
+  // writes a claim covering the estimate unioned with every path the holder
+  // has touched — by then, all three files. A frozen claim is never
+  // re-narrowed, so that was permanent: one slow answer and no arrival could
+  // be admitted for the rest of the holder's run.
+  //
+  // The observable tell is the refusal naming all three files rather than the
+  // two the holder never declared.
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  const held = await holdingRun({
+    ...real,
+    store,
+    worker,
+    declaration: {
+      files: ["src/order-pricing.js"],
+      symbols: ["basePrice", "lineTotal"],
+    },
+    // Slower than the budget below: a holder that answers, but not in time.
+    replanDelayMs: 400,
+    blanketAskTimeoutMs: 40,
+  });
+
+  try {
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a currency prefix to totals",
+      real.version,
+    );
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+      workspaces: held.workspaces,
+      blanketAskTimeoutMs: 40,
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: {
+        taskId: second.task.id,
+        objective: "add a currency prefix where a total is shown",
+        intent: "add a currency prefix",
+        expectedFiles: [
+          "src/order-pricing.js",
+          "test/order-pricing.test.js",
+          "src/checkout.js",
+        ],
+        expectedSymbols: ["formatTotal", "testOrderTotal", "checkoutSummary"],
+        dependencies: [],
+        commands: [],
+        externalAccess: [],
+        riskLevel: "low",
+      },
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+
+    const lease = await store.getWorkLease(held.leaseId);
+    const claim = lease?.plan?.plan.claim;
+    // The claim must not have been frozen on the strength of an answer that
+    // never arrived. Either it is still blanket — the arrival takes a retry
+    // and the next one finds the answer settled — or the answer landed after
+    // all and it is `declared`. What it must never be is `frozen`, which is
+    // the one state nothing can narrow again.
+    assert.notEqual(
+      claim?.kind,
+      "frozen",
+      "a timed-out ask froze the claim permanently over everything the holder had touched",
+    );
+    // And the arrival must not have been told the holder owns the file it
+    // never named.
+    if (decision.outcome !== "admitted") {
+      assert.ok(
+        !(decision.explanation ?? "").includes("src/order-pricing.js"),
+        `the file the holder was going to declare was locked by the timeout: ${decision.explanation}`,
+      );
+    }
   } finally {
     held.agent.release.resolve();
     await settle(held.finished);
