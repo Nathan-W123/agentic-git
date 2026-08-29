@@ -671,7 +671,32 @@ export class PlanAdmissionController {
     }
     const whole =
       claimed ?? this.decide(input.plan, input, this.occupancy(input));
-    if (planAdmissionApproved(whole) || input.partialAdmission === false) {
+    // The lineage bound does not apply to a claim.
+    //
+    // `partialAdmission: false` means "this task has had its one split" — the
+    // rule that stops a task shedding scope round after round, each round
+    // paying for another agent run. That argument is about a refusal this
+    // plan's own declarations earned: conflict scoring compared it against a
+    // holder's and found overlap, and splitting again would shed more of the
+    // same scope.
+    //
+    // A claim is not that. It is a holder saying "these paths are mine"
+    // without reference to what this plan asked for, so the files it does not
+    // cover were never in contention and shedding them is not shedding at
+    // all. Vetoing here cost an arrival every file nobody held: measured on
+    // the real path, a plan naming five files with three claimed had the
+    // other two withheld too, and `admitPartially` — which grants them, and
+    // was verified to grant them the moment the flag is true — was never
+    // called. No sets were miscomputed; none were computed.
+    //
+    // Termination still holds, and by a shorter argument than the lineage
+    // rule's: a claim-driven split can only fire while somebody else's claim
+    // is live, and each one grants strictly the paths that claim does not
+    // cover. There is nothing left to shed on a second pass.
+    if (
+      planAdmissionApproved(whole) ||
+      (input.partialAdmission === false && claimed === undefined)
+    ) {
       return whole;
     }
     // A plan whose declarations verification could not connect to the
