@@ -14653,13 +14653,19 @@ dialog.modal[open]::backdrop {
   opacity: 0.7;
 }
 
-/* The channel settings popover. */
+/* The channel settings popover. Tight on purpose: three one-line actions and
+   a short list of names had the spacing of a settings page, and a room of two
+   people filled half the screen to say so. */
+.sub-channel-manage {
+  gap: 6px;
+}
+
 .sub-channel-manage .pop-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  padding: 2px 2px 8px;
+  padding: 0 2px 4px;
 }
 
 .chan-channel-vis {
@@ -14670,12 +14676,18 @@ dialog.modal[open]::backdrop {
 .sub-channel-manage .pop-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding-bottom: 8px;
+  gap: 1px;
+  padding-bottom: 2px;
+}
+
+.sub-channel-manage .btn-quiet {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12.5px;
 }
 
 .sub-channel-manage .pop-sec {
-  padding: 6px 2px 4px;
+  padding: 2px 2px 0;
   font-size: 10.5px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -14690,34 +14702,124 @@ dialog.modal[open]::backdrop {
   overflow-y: auto;
 }
 
-.sub-channel-member {
+/* `.util-empty` carries no styling of its own anywhere in the app, so the
+   two notes this list can show — loading, and nobody left to add — are given
+   the size and colour of the names they stand in for. */
+.sub-channel-members .util-empty {
+  padding: 3px 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* A member and the "+" are the same row: one name, and the control that
+   belongs to it revealed under the pointer. Both are `<details>`, so what
+   each one offers opens in the flow of the list rather than floating over a
+   container that scrolls and would clip it. */
+.sub-channel-member,
+.sub-channel-add {
+  border-radius: 7px;
+}
+
+.scm-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 5px 8px;
-  border: 0;
+  padding: 3px 8px;
   border-radius: 7px;
-  background: transparent;
   color: var(--text);
-  font: inherit;
   font-size: 12.5px;
-  text-align: left;
+  list-style: none;
   cursor: pointer;
 }
 
-.sub-channel-member:hover {
+.scm-row::-webkit-details-marker {
+  display: none;
+}
+
+.scm-row:hover,
+.sub-channel-member[open] > .scm-row,
+.sub-channel-add[open] > .scm-row {
   background: var(--surface-2, rgba(255, 255, 255, 0.05));
 }
 
-.sub-channel-member-state {
+.scm-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.scm-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Revealed the way a roster row's "..." is — see `.roster-row .rr-more`. */
+.scm-more {
   flex: 0 0 auto;
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  display: inline-flex;
+  opacity: 0;
+  color: var(--muted);
+  transition: opacity 0.12s ease;
+}
+
+.scm-more svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sub-channel-member:hover .scm-more,
+.sub-channel-member[open] .scm-more,
+.scm-row:focus-visible .scm-more {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* Nothing hovers on a touch screen, so the dots simply stay. */
+  .scm-more {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scm-more {
+    transition: none;
+  }
+}
+
+.scm-add {
   color: var(--muted);
 }
 
-.sub-channel-member.on .sub-channel-member-state {
-  color: var(--accent, currentColor);
+.scm-plus {
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+.scm-plus svg {
+  width: 13px;
+  height: 13px;
+}
+
+.sub-channel-add .scm-name {
+  flex: 1;
+}
+
+.scm-menu {
+  display: grid;
+  gap: 1px;
+  padding: 2px 0 2px 8px;
+}
+
+.scm-menu .btn-quiet {
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 12.5px;
+}
+
+/* The gap that sets Delete apart from the two edits above it is not wanted
+   here, where removing somebody is the only thing the menu holds. */
+.scm-menu .btn-quiet.btn-danger {
+  margin-top: 0;
 }
