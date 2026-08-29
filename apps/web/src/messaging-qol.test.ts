@@ -800,6 +800,16 @@ test("pinned messages stay available and open at their thread root", async () =>
     'case "channel-pin-jump":',
   );
   assert.match(chats, /data-act="channel-pinned-open"/u);
+  const banner = slice(
+    chats,
+    "function pinnedBanner(",
+    "\nfunction composerThreadChip(",
+  );
+  assert.doesNotMatch(
+    banner,
+    /\$\{icon\("pin"\)\}/u,
+    "the pinned-message pullout should not repeat the pin icon",
+  );
   assert.match(action, /state\.activeChannelThread = value;/u);
   assert.match(action, /state\.scrollToThreadMessage = value;/u);
   // The thread joins the column rather than emptying it: a plan or a file

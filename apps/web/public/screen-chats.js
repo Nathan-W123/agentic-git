@@ -6746,7 +6746,7 @@ function primaryConversation(repositoryId) {
 }
 
 /**
- * The thread header's one control over the run it is watching: pause, or play.
+ * The thread's one control over the run it is watching: pause, or play.
  *
  * This was a cross, and a cross in a header full of crosses meant one thing
  * in the two places it appeared — the panel's own close is the other — and
@@ -6761,6 +6761,13 @@ function primaryConversation(repositoryId) {
  * has always worked — never both at once, so there is nothing to choose
  * between and no second cross to mistake for the first. The auditor toggle in
  * the roster reads the same pair for the same reason.
+ *
+ * It sits in the composer beside the arrow rather than up in the header,
+ * because stopping the run and saying the next thing are the same decision
+ * taken in the same second, and the hand is already at the box. Sized and
+ * classed to belong on that row — the stylesheet keeps it drawn while the
+ * rest of the row is resting, since a paused thread has to offer its play
+ * without being typed into first.
  *
  * No confirm on either. Asking "are you sure?" is what you owe somebody
  * before you throw their work away; pausing keeps it, and a question in front
@@ -6779,6 +6786,8 @@ function threadTaskControl(root) {
       act: "thread-task-resume",
       value: taskId,
       title: "Resume this task",
+      small: true,
+      cls: "composer-run-btn",
     });
   }
   if (!threadIsWorking(root)) {
@@ -6788,6 +6797,8 @@ function threadTaskControl(root) {
     act: "thread-task-pause",
     value: taskId,
     title: "Pause this task",
+    small: true,
+    cls: "composer-run-btn",
   });
 }
 
@@ -6834,7 +6845,6 @@ function threadPanel(repositoryId, selectedMessageId) {
       ${panelKind("Thread", "channel-threads-toggle", `thread:${messageId}`)}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
-      ${threadTaskControl(root)}
       ${iconButton("pin", {
         act: "channel-pin",
         value: messageId,
@@ -6902,6 +6912,12 @@ function threadPanel(repositoryId, selectedMessageId) {
             : ""}
           <span class="spacer"></span>
           ${composerCount("thread", state.threadDraft)}
+          <!-- Pause, or play, for the run this thread is following — beside
+               the arrow because stopping the work and saying the next thing
+               are one decision, and the hand is already here. Drawn only
+               when there is a run to act on, and kept visible by the
+               stylesheet even while the rest of this row is resting. -->
+          ${threadTaskControl(root)}
           <button class="send-btn" type="submit" title="Send"${
             threadSendable ? "" : " disabled"
           }>${icon("arrowRight")}</button>
@@ -7633,7 +7649,90 @@ export function coOwnerPanelHtml(repositoryId) {
     </div>`;
 }
 
-/** The repository's own record, for the info popover's small facts. */
+/**
+ * The account id behind a person record, whichever shape it arrived in.
+ *
+ * The organization member list nests the account under `user`; a room's own
+ * people list flattens it to `id`. Reading only the first shape is what once
+ * left the id empty here, exactly as `personRow` records.
+ */
+export function subChannelPersonId(person) {
+  return person.user?.id ?? person.userId ?? person.id ?? "";
+}
+
+/** What to call them, from either shape, falling back to the bare id. */
+export function subChannelPersonName(person) {
+  return (
+    person.user?.displayName ??
+    person.user?.email ??
+    person.name ??
+    subChannelPersonId(person)
+  );
+}
+
+/**
+ * Everybody in the workspace who is not in this room yet.
+ *
+ * Kept out of the members list rather than listed beside it with a tag: a
+ * room of two in a workspace of twenty used to be twenty rows, and finding
+ * who was actually in it meant reading the word at the end of every one.
+ */
+export function subChannelAddablePeople(repositoryId, inRoom) {
+  return channelPeopleFor(repositoryId).filter(
+    (person) => !inRoom.has(subChannelPersonId(person)),
+  );
+}
+
+/**
+ * One person in the room: their name, and a "..." that appears under the
+ * pointer holding the one thing that can be done to the row.
+ *
+ * The same hover reveal a roster row's `.rr-more` uses, and for the same
+ * reason: removal lit permanently beside every name is one mis-click from
+ * emptying the room. Opened in place rather than floated, because the list
+ * scrolls and an anchored menu would be clipped by its own container.
+ */
+export function subChannelMemberRowHtml(channelId, person) {
+  const id = subChannelPersonId(person);
+  const name = subChannelPersonName(person);
+  return `<details class="sub-channel-member">
+    <summary class="scm-row" title="More for ${esc(name)}">
+      <span class="scm-name">${esc(name)}</span>
+      <span class="scm-more" aria-hidden="true">${icon("dots")}</span>
+    </summary>
+    <div class="scm-menu">
+      <button type="button" class="btn-quiet btn-danger"
+        data-act="sub-channel-member-toggle"
+        data-value="${esc(`${channelId}|${id}|out`)}">Remove from this channel</button>
+    </div>
+  </details>`;
+}
+
+/** The "+" at the foot of the members list, and who it can add. */
+export function subChannelMemberAddHtml(channelId, people) {
+  return `<details class="sub-channel-add">
+    <summary class="scm-row scm-add" title="Add someone to this channel">
+      <span class="scm-plus">${icon("plus")}</span>
+      <span class="scm-name">Add someone</span>
+    </summary>
+    ${
+      people.length === 0
+        ? `<div class="util-empty">Everybody here is already in.</div>`
+        : `<div class="scm-menu">
+             ${people
+               .map(
+                 (person) => `<button type="button" class="btn-quiet"
+                   data-act="sub-channel-member-toggle"
+                   data-value="${esc(
+                     `${channelId}|${subChannelPersonId(person)}|in`,
+                   )}">${esc(subChannelPersonName(person))}</button>`,
+               )
+               .join("")}
+           </div>`
+    }
+  </details>`;
+}
+
 /**
  * Who is in one room, and the controls for changing that.
  *
@@ -7651,7 +7750,17 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
   }
   const members = state.subChannelMembers[channelId];
   const inRoom = new Set((members ?? []).map((member) => member.userId));
-  const people = channelPeopleFor(repositoryId);
+  const roster = channelPeopleFor(repositoryId);
+  // Driven by the room's own list, not by the workspace's: the membership
+  // endpoint answers with ids alone, and somebody holding a repository grant
+  // the organization list has never heard of still has a row — under their id
+  // if that is all this browser knows them by.
+  const seated = (members ?? []).map(
+    (member) =>
+      roster.find((person) => subChannelPersonId(person) === member.userId) ?? {
+        id: member.userId,
+      },
+  );
   const general = channel.slug === "general";
   return `<div class="pop-body sub-channel-manage">
     <div class="pop-head">
@@ -7678,31 +7787,18 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
              ${
                members === undefined
                  ? `<div class="util-empty">Loading…</div>`
-                 : people.length === 0
-                   ? `<div class="util-empty">Nobody else in this workspace yet.</div>`
-                   : people
-                       .map((person) => {
-                         // Two shapes reach here, exactly as `personRow`
-                         // documents: the organization list nests the account
-                         // under `user`, the room's own list flattens it.
-                         const id =
-                           person.user?.id ?? person.userId ?? person.id ?? "";
-                         const on = inRoom.has(id);
-                         return `<button type="button" class="sub-channel-member${
-                           on ? " on" : ""
-                         }" data-act="sub-channel-member-toggle"
-                           data-value="${esc(`${channelId}|${id}|${on ? "out" : "in"}`)}"
-                           aria-pressed="${on}">
-                           <span>${esc(
-                             person.user?.displayName ??
-                               person.user?.email ??
-                               person.name ??
-                               id,
-                           )}</span>
-                           <span class="sub-channel-member-state">${on ? "In" : "Add"}</span>
-                         </button>`;
-                       })
-                       .join("")
+                 : `${
+                     seated.length === 0
+                       ? `<div class="util-empty">Nobody is in this channel yet.</div>`
+                       : seated
+                           .map((person) =>
+                             subChannelMemberRowHtml(channelId, person),
+                           )
+                           .join("")
+                   }${subChannelMemberAddHtml(
+                     channelId,
+                     subChannelAddablePeople(repositoryId, inRoom),
+                   )}`
              }
            </div>`
     }
@@ -8506,7 +8602,6 @@ function pinnedBanner(repositoryId) {
     <div class="chan-pins-surface">
       <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
         aria-expanded="true">
-        ${icon("pin")}
         <span>${pins.length} pinned</span>
         <span class="spacer"></span>
         ${icon("chevronDown")}

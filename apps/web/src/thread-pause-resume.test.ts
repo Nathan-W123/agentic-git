@@ -1,11 +1,11 @@
 /**
- * The thread header's transport control, read out of the shipped browser
- * sources.
+ * The thread's transport control, read out of the shipped browser sources.
  *
  * Source text rather than a rendered DOM because that is how every other
  * assertion about this screen is made here: `screen-chats.js` is served to the
  * browser as it is written, and the thing worth protecting is a property of
- * what it renders — a pause, a play, and exactly one cross in the header.
+ * what it renders — a pause, a play, one cross in the header, and the pair
+ * sitting on the composer row beside the arrow rather than up in the chrome.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -82,10 +82,62 @@ test("the thread header keeps exactly one cross, and it closes the panel", async
     /act: "channel-thread-close"[\s\S]*?cls: "panel-close"/u,
     "the one cross left is the panel's own close",
   );
-  assert.match(
+  // And the run control is no longer up here at all — it went down to the
+  // box, where the next thing to say is already being typed.
+  assert.doesNotMatch(
     header,
-    /\$\{threadTaskControl\(root\)\}/u,
-    "the pause/play control belongs in the header beside it",
+    /threadTaskControl\(root\)/u,
+    "the transport control belongs on the composer row, not in the chrome",
+  );
+});
+
+test("the pause and play control sits in the thread composer beside send", async () => {
+  const source = await chatScreen();
+  const panelStart = source.indexOf(
+    "function threadPanel(repositoryId, selectedMessageId)",
+  );
+  assert.notEqual(panelStart, -1, "the thread panel should still exist");
+  const panel = source.slice(panelStart);
+
+  // Stopping the run and saying the next thing are one decision taken in one
+  // second, so the button for the first is under the hand that is already on
+  // the second. Immediately before the arrow, which is where a reader looks
+  // for the controls that act on this thread.
+  assert.match(
+    panel,
+    /\$\{threadTaskControl\(root\)\}\s*\n\s*<button class="send-btn" type="submit"/u,
+    "the run control should sit on the composer bar, just before send",
+  );
+
+  const control = taskControl(source);
+  // Sized and classed for that row: a bare glyph beside the plus and the
+  // arrow rather than the panel-header button it used to be.
+  assert.equal(
+    (control.match(/cls: "composer-run-btn"/gu) ?? []).length,
+    2,
+    "both faces of the control belong to the composer row",
+  );
+  assert.equal((control.match(/small: true/gu) ?? []).length, 2);
+
+  const css = await readFile(
+    path.join(packageRoot, "public", "styles.css"),
+    "utf8",
+  );
+  // The rest of the row waits for the box to be entered. This one cannot: a
+  // thread somebody parked has to offer its play to a reader with no
+  // intention of typing, so it is drawn while the row around it is not.
+  assert.match(
+    css,
+    /\.composer-run-btn \{[\s\S]{0,80}visibility: visible;/u,
+    "the run control must survive the resting composer bar",
+  );
+  // Ordered rather than placed, like everything else on this row.
+  assert.match(css, /\.composer-run-btn \{[\s\S]{0,80}order: 2;/u);
+  // And with a glyph standing there, the placeholder stops before it.
+  assert.match(
+    css,
+    /:has\(textarea:placeholder-shown\):has\(\.composer-run-btn\) \{\s*--composer-side-reserve: 41px;/u,
+    "the resting box must reserve room for the control it is showing",
   );
 });
 

@@ -91,8 +91,41 @@ test("only an administrator is offered the settings a room has", async () => {
     assert.ok(app.includes(`case "${act}"`), `${act} should be handled`);
   }
   // #general is the fallback room for every unaddressed message, so it is
-  // not renamed, hidden or removed from here.
-  assert.match(chats, /Everybody in the project is in #general/u);
+  // not renamed, hidden or removed from here. Pinned by what the popover
+  // actually says now: the old wording had been rewritten on screen and this
+  // line went on asserting a sentence no reader had seen in a long while.
+  assert.match(chats, /can read and post in #general/u);
+});
+
+test("the channel settings popover lists only in-room members with add and remove controls", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
+
+  // The list is built from the room's own membership, not from the whole
+  // workspace with a word on the end of each row saying which half it was in.
+  assert.match(chats, /export function subChannelMemberRowHtml/u);
+  assert.match(chats, /export function subChannelAddablePeople/u);
+  assert.doesNotMatch(chats, /sub-channel-member-state/u);
+
+  // Adding runs through the same already-handled action as removing, in the
+  // other direction — there is no second endpoint behind the "+".
+  assert.match(chats, /export function subChannelMemberAddHtml/u);
+  for (const direction of ["\\|out", "\\|in"]) {
+    assert.match(
+      chats,
+      new RegExp(`sub-channel-member-toggle[\\s\\S]{0,220}${direction}`, "u"),
+    );
+  }
+
+  // Both shapes of person record resolve through one pair of readers, so a
+  // row cannot fall back to "Someone" on one list and a name on the other.
+  assert.match(chats, /export function subChannelPersonId/u);
+  assert.match(chats, /export function subChannelPersonName/u);
+
+  // The "..." is revealed the way a roster row's is, rather than sitting lit
+  // beside every name.
+  assert.match(styles, /\.scm-more \{[\s\S]*?opacity: 0;/u);
+  assert.match(styles, /\.sub-channel-member:hover \.scm-more/u);
 });
 
 test("a private room is drawn as private, and a typing ping stays in its room", async () => {

@@ -995,13 +995,14 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
 const CHANNEL_HOLD_PREFIX = "⏸ Waiting on you";
 const CHANNEL_RELEASE_PREFIX = "▶ Go-ahead received";
 /**
- * How work somebody parked says so, and how it is found again.
+ * How work somebody parked used to say so, and how it is still recognised.
  *
- * Its own opening rather than {@link CHANNEL_HOLD_PREFIX} because the two
- * mean different things to the reader: a hold is the agent waiting for an
- * answer, a pause is the reader having stopped the agent. They retire the
- * same way, though — both are answered by {@link CHANNEL_RELEASE_PREFIX} —
- * so a thread paused across a deploy still knows to say when it restarts.
+ * Nothing writes this any more: pausing and resuming are a button changing
+ * face, and a thread does not need to be told in words what its own control
+ * is already showing. The opening is kept because threads paused before that
+ * changed still carry the line, and the release walk below has to stop at it
+ * — otherwise one of those threads getting its go-ahead would answer a
+ * marker it cannot see, or say nothing at all.
  */
 const CHANNEL_PAUSED_PREFIX = "⏸ Paused";
 /**
@@ -16093,6 +16094,15 @@ export class ApiGateway {
     if (root === undefined) {
       return;
     }
+    // Saying the next thing in a paused thread replaces what was parked in
+    // it. Before anything is routed, because the reply below is about to be
+    // dispatched as work of its own and the two must not both be live.
+    await this.stopPausedTaskForThread({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      taskId: root.taskId,
+      actorId: input.viewerId,
+    });
     const candidates = await this.resolveChannelMentionCandidates(
       input.projectId,
       input.repositoryId,
@@ -20513,14 +20523,16 @@ export class ApiGateway {
   }
 
   /**
-   * Pause or resume one task, and say so in the thread it belongs to.
+   * Pause or resume one task, without writing a word into its thread.
    *
-   * One method for both because they are one control: the button in a thread
-   * header is a pause while work is running and a play while it is parked,
-   * and the two halves must agree about what a thread is told and when. Both
-   * refuse loudly rather than silently — a pause that finds nothing to pause
-   * has almost always raced the task's own ending, and answering 200 would
-   * leave a play button standing over work that finished.
+   * One method for both because they are one control: the button beside the
+   * thread's send arrow is a pause while work is running and a play while it
+   * is parked, and the two halves have to agree about what happens to the
+   * watch. Neither says anything — the button has already changed face, and a
+   * thread is a record of the work rather than a commentary on its buttons.
+   * Both still refuse loudly rather than silently: a pause that finds nothing
+   * to pause has almost always raced the task's own ending, and answering 200
+   * would leave a play standing over work that finished.
    */
   private async pauseOrResumeTask(
     task: SubmittedTask,
@@ -20557,7 +20569,10 @@ export class ApiGateway {
       // and would put an abandonment notice under a thread somebody paused on
       // purpose. The resume below starts a fresh watch.
       this.watchedChannelTasks.delete(task.id);
-      await this.announceTaskPaused(task, actorId);
+      // Nothing is written into the thread. The button the person just
+      // pressed has already changed face to a play, which is the whole of
+      // what there is to say; a line apologising for the stop underneath it
+      // is the app narrating its own controls back at the person using them.
       return { task: await this.rereadTask(task) };
     }
     const operation = this.options.operations.resumeTask;
@@ -20583,17 +20598,10 @@ export class ApiGateway {
     }
     const messageId = task.conversationId;
     if (messageId !== undefined) {
-      // The same release line a held plan's go-ahead writes, because to a
-      // reader they are the same event: the thread starts moving again.
-      await this.announceHoldReleased({
-        projectId,
-        repositoryId: task.repositoryId,
-        messageId,
-        authorId: actorId,
-        viewerId: actorId,
-        taskId: task.id,
-        resumed: true,
-      });
+      // Silent here too, for the same reason the pause is: the work starting
+      // again announces itself by working, and the thread is about to fill
+      // with what it does. Only the watch is re-attached.
+      //
       // Narration has to be re-attached by hand: pausing stopped the watch,
       // so a resumed run would otherwise do its work in silence. The cursor
       // is read from the log rather than remembered, because a pause can sit
@@ -20624,6 +20632,85 @@ export class ApiGateway {
       }),
     ).catch(() => undefined);
     return { task: await this.rereadTask(task) };
+  }
+
+  /**
+   * A reply into a paused thread ends the run that was parked in it.
+   *
+   * Pause keeps the work; typing again replaces it. Both halves of that are
+   * needed for the button to mean anything: without the second, a thread
+   * somebody paused and then redirected keeps a play sitting over an
+   * instruction that has been superseded, and pressing it later puts two runs
+   * on the same thread answering two different questions. Without the first,
+   * pause would be a cancel with a friendlier glyph. A thread nobody replies
+   * in is not touched at all, which is what leaves it paused and resumable
+   * for as long as its person wants.
+   *
+   * Only `paused`. A reply while an agent is actually running is follow-on
+   * work, which the caller already chains behind the live task, and stopping
+   * that would throw away work in progress that nobody asked to stop.
+   *
+   * Says nothing. The watcher is dropped before the cancel so the progress
+   * pump does not narrate `task_cancelled` into the thread as "This was
+   * cancelled." — the person is looking at the message they just sent, and an
+   * obituary for the one it replaced is noise in front of it.
+   */
+  private async stopPausedTaskForThread(input: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string | undefined;
+    actorId: string;
+  }): Promise<void> {
+    if (input.taskId === undefined) {
+      return;
+    }
+    const task = (
+      await this.options.store
+        .listSubmittedTasks({ repositoryId: input.repositoryId })
+        .catch(() => [] as SubmittedTask[])
+    ).find((entry) => entry.id === input.taskId);
+    if (task?.status !== "paused") {
+      return;
+    }
+    this.watchedChannelTasks.delete(task.id);
+    // With the watcher gone, nothing else will take back the room's standing
+    // "starts once the other one is done" — the pump that normally does it is
+    // no longer following this task.
+    await this.withdrawArbitrationNotice({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      taskId: task.id,
+    });
+    const reason = "Superseded by a new message in its thread";
+    const operation = this.options.operations.cancelTasks;
+    if (operation === undefined) {
+      // Store-only deployments keep the shape `/cancel` uses: the row flips,
+      // and the event lands too, so a task never leaves the accounting
+      // silently even where there is no operation to run.
+      await this.options.store
+        .cancelSubmittedTask(task.id)
+        .catch(() => undefined);
+      await this.options.store
+        .appendAudit(undefined, {
+          type: "task_cancelled",
+          taskId: task.id,
+          data: {
+            projectId: input.projectId,
+            repositoryId: input.repositoryId,
+            actorId: input.actorId,
+            reason,
+          },
+        })
+        .catch(() => undefined);
+      return;
+    }
+    await operation({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      taskIds: [task.id],
+      reason,
+      actorId: input.actorId,
+    }).catch(() => undefined);
   }
 
   /**
@@ -20677,38 +20764,6 @@ export class ApiGateway {
       .listSubmittedTasks({ repositoryId: task.repositoryId })
       .catch(() => [] as SubmittedTask[]);
     return rows.find((entry) => entry.id === task.id) ?? task;
-  }
-
-  /**
-   * Marks a thread as parked, once.
-   *
-   * Written into the thread rather than the room because it is a fact about
-   * this task, and read back by {@link threadIsHolding} so the resume line
-   * knows there is something to answer even after a deploy. Silent for a task
-   * with no thread — a one-shot dispatch that never opened one has nowhere to
-   * say this and nothing that would read it.
-   */
-  private async announceTaskPaused(
-    task: SubmittedTask,
-    actorId: string,
-  ): Promise<void> {
-    const messageId = task.conversationId;
-    if (messageId === undefined) {
-      return;
-    }
-    // The hold marker and the pause marker answer to the same release, so a
-    // pause standing in the thread is remembered the same way.
-    this.announcedChannelHolds.add(task.id);
-    await this.appendChannelThreadReply({
-      projectId: task.projectId ?? "",
-      repositoryId: task.repositoryId,
-      messageId,
-      kind: "outcome",
-      authorId: actorId,
-      content:
-        `${CHANNEL_PAUSED_PREFIX} — stopped here, and nothing is running. ` +
-        `Press play in this thread when you want it picked back up.`,
-    }).catch(() => undefined);
   }
 
   /**

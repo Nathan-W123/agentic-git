@@ -178,6 +178,22 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   );
   assert.match(app, /function positionSwitcher\(layer\)/u);
   assert.match(app, /box\.bottom \+ 6/u);
+
+  // The results are exactly as wide as the bar they drop out of. The panel
+  // used to stop at a fixed cap while the search control grows with its
+  // track, so on a wide window the two edges disagreed. The width is measured
+  // off the trigger and capped only by the viewport; the floor and the
+  // narrow-screen full-width branch stay.
+  const position = slice(app, "function positionSwitcher(layer) {", "function closeSwitcher(");
+  assert.match(position, /const box = trigger\.getBoundingClientRect\(\);/u);
+  assert.match(position, /const room = window\.innerWidth - margin \* 2;/u);
+  assert.match(position, /Math\.min\(\s*room,/u);
+  assert.match(
+    position,
+    /Math\.max\(280, box\.width, window\.innerWidth < 560 \? room : 0\)/u,
+  );
+  assert.doesNotMatch(position, /520/u);
+  assert.match(position, /card\.style\.width = `\$\{width\}px`;/u);
   assert.match(switcher, /role="combobox"/u);
   assert.match(switcher, /aria-controls="qs-list"/u);
   assert.match(switcher, /role="listbox"/u);
