@@ -8602,7 +8602,6 @@ function pinnedBanner(repositoryId) {
     <div class="chan-pins-surface">
       <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
         aria-expanded="true">
-        ${icon("pin")}
         <span>${pins.length} pinned</span>
         <span class="spacer"></span>
         ${icon("chevronDown")}
