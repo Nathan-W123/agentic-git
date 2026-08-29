@@ -30,11 +30,11 @@ function slice(source: string, from: string, to: string): string {
   return source.slice(start, end);
 }
 
-test("the People row's menu offers role, co-owner and KUMI controls", async () => {
+test("the person details panel offers role, co-owner and KUMI controls", async () => {
   const chats = await publicFile("screen-chats.js");
   const menu = slice(
     chats,
-    "export function personMenuItems(userId)",
+    "export function personManagementItems(userId)",
     "const AUDITOR_ROLE",
   );
 
@@ -110,30 +110,20 @@ test("a repository owner grant changes the People-row title", async () => {
   );
 });
 
-test("a channel offers renaming and deleting its repository", async () => {
+test("a channel keeps repository destruction out of its conversation menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
-  const data = await publicFile("data.js");
 
   // The menu is anchored to the channel header, which is what makes it
   // reachable: nothing else on screen opens it.
   assert.match(chats, /act: "channel-menu"/u);
 
-  const menu = slice(app, 'case "channel-menu":', 'case "channel-agent-menu"');
-  assert.match(menu, /act: "channel-rename-repo"/u);
-  assert.match(menu, /act: "channel-delete-repo"/u);
-  assert.match(menu, /canManageRepository\(value\)/u);
-  assert.match(menu, /canDeleteRepository\(value\)/u);
-
-  assert.match(app, /async function renameRepositoryAction\(repositoryId\)/u);
-  assert.match(app, /case "channel-rename-repo":/u);
-
-  // Renaming changes what the repository is called and nothing else: the id
-  // keeps addressing the channel, its tasks and its files.
-  assert.match(data, /export async function renameRepository\(repositoryId, name\)/u);
-  assert.match(data, /method: "PATCH",\n {4}body: \{ name: trimmed \}/u);
-  assert.match(data, /export function repositoryLabel\(repositoryId\)/u);
-  assert.match(chats, /repositoryLabel\(repositoryId \?\? ""\)/u);
+  const items = slice(app, "function conversationMenuItems(repositoryId)", "async function copyConversationLink");
+  assert.match(items, /label: "Channel details"/u);
+  assert.match(items, /label: "Copy link"/u);
+  assert.match(items, /label: "Repository"/u);
+  assert.match(items, /label: "Sync from GitHub"/u);
+  assert.doesNotMatch(items, /channel-rename-repo|channel-delete-repo|channel-leave/u);
 });
 
 test("the agent surfaces name a renamed channel by its new name", async () => {
@@ -155,23 +145,13 @@ test("the agent surfaces name a renamed channel by its new name", async () => {
   assert.doesNotMatch(digest, /repository\?\.name/u);
 });
 
-test("the channel menu offers delete repository only to owners and co-owners", async () => {
+test("repository deletion stays owner-gated outside channel information", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");
 
-  // Renaming and deleting are gated separately now: an administrator, or the
-  // person who created the repository, may still rename it, but deleting it
-  // asks for ownership — the organization's owner, or a co-owner holding an
-  // `owner` grant on this repository.
-  const menu = slice(app, 'case "channel-menu":', 'case "channel-agent-menu"');
-  const rename = slice(menu, 'canManageRepository(value)', 'canDeleteRepository(value)');
-  assert.doesNotMatch(rename, /act: "channel-delete-repo"/u);
-  const remove = slice(menu, 'canDeleteRepository(value)', ']);');
-  assert.match(remove, /act: "channel-delete-repo"/u);
-  assert.doesNotMatch(remove, /act: "channel-rename-repo"/u);
-
-  // The same rule in the repository menu and in the channel-info popover.
+  // The repository menu retains the owner gate; the read-only channel
+  // information panel deliberately carries no destructive control.
   const repoMenu = slice(app, 'case "repo-menu":', 'case "repo-sync":');
   assert.match(repoMenu, /canDeleteRepository\(value\)/u);
   const popover = slice(
@@ -179,8 +159,7 @@ test("the channel menu offers delete repository only to owners and co-owners", a
     "export function channelInfoPopoverHtml(repositoryId)",
     "renderChats",
   );
-  assert.match(popover, /const canDelete = canDeleteRepository\(repositoryId\)/u);
-  assert.match(popover, /canDelete\s*\n\s*\? `<button[^`]*channel-delete-repo/u);
+  assert.doesNotMatch(popover, /channel-delete-repo|channel-leave/u);
 
   // The helper itself: an organization owner, or an `owner` grant on this
   // exact repository. Admins and the creator are deliberately not enough.
@@ -245,7 +224,7 @@ test("agent identity and membership controls belong only to its owner", async ()
   );
   assert.match(
     menu,
-    /if \(agent\.mine === true\) \{\s*items\.push\(\{\s*act: "channel-agent-remove"/u,
+    /if \(agent\.mine === true\) \{[\s\S]*?items\.push\(\{ separator: true \}\);[\s\S]*?act: "channel-agent-remove"/u,
   );
   assert.doesNotMatch(menu, /channel-agent-remove-any/u);
 

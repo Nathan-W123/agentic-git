@@ -3284,6 +3284,11 @@ svg.ui-icon {
   animation: scrim-in var(--motion-scrim) ease;
 }
 
+.pop-layer-clear .pop-scrim {
+  background: transparent;
+  animation: none;
+}
+
 @keyframes scrim-in {
   from {
     opacity: 0;
@@ -3308,13 +3313,19 @@ svg.ui-icon {
   padding: 16px;
   display: grid;
   gap: 14px;
-  animation: pop-in var(--motion-pop) var(--ease-motion);
+  transform-origin: var(--popover-origin-x, calc(100% - 16px)) top;
+  animation: pop-in 130ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.popover-above {
+  --popover-enter-y: 2px;
+  transform-origin: var(--popover-origin-x, calc(100% - 16px)) bottom;
 }
 
 @keyframes pop-in {
   from {
     opacity: 0;
-    transform: translateY(-5px);
+    transform: translateY(var(--popover-enter-y, -2px)) scale(0.985);
   }
 }
 
@@ -3329,7 +3340,7 @@ svg.ui-icon {
 }
 
 .pop-layer.pop-closing .popover {
-  animation: pop-out var(--motion-panel-out) var(--ease-motion) forwards;
+  animation: pop-out 100ms cubic-bezier(0.32, 0.72, 0, 1) forwards;
 }
 
 .pop-layer.pop-closing .pop-scrim {
@@ -3339,7 +3350,7 @@ svg.ui-icon {
 @keyframes pop-out {
   to {
     opacity: 0;
-    transform: translateY(-5px);
+    transform: translateY(var(--popover-enter-y, -2px)) scale(0.985);
   }
 }
 
@@ -3354,8 +3365,24 @@ svg.ui-icon {
      hold and *then* blink out — more motion noticed, not less. Taken
      straight to its destination instead; ui.js drops the node on the same
      timer either way. */
-  .pop-layer.pop-closing {
-    display: none;
+  .popover {
+    animation: pop-fade-in 80ms linear;
+  }
+
+  .pop-layer.pop-closing .popover {
+    animation: pop-fade-out 80ms linear forwards;
+  }
+}
+
+@keyframes pop-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes pop-fade-out {
+  to {
+    opacity: 0;
   }
 }
 
@@ -10070,7 +10097,17 @@ body.resizing-panel .agent-detail-panel * {
 /* --------------------------------------------------------------- menu ---- */
 
 .popover:has(.menu) {
-  padding: 6px;
+  padding: 4px;
+}
+
+.action-menu {
+  min-width: 156px;
+  max-width: 224px;
+  background: #24211f;
+  border: 1px solid rgba(181, 174, 165, 0.16);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.42),
+    0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
 .menu {
@@ -10081,18 +10118,24 @@ body.resizing-panel .agent-detail-panel * {
 .menu-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: 8px;
+  min-height: 30px;
+  padding: 6px 8px;
+  border-radius: 6px;
   font-size: 12.5px;
-  color: var(--text-2);
+  line-height: 18px;
+  font-weight: 500;
+  color: #e7e1da;
   text-align: left;
+  transition: background-color 80ms ease, color 80ms ease;
 }
 
-.menu-item:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible:not(:disabled) {
+  background: rgba(216, 137, 115, 0.09);
+  color: #e7e1da;
+  outline: none;
 }
 
 .menu-item:disabled {
@@ -10101,8 +10144,8 @@ body.resizing-panel .agent-detail-panel * {
 }
 
 .menu-item svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
   flex: none;
   color: var(--text-3);
 }
@@ -10123,11 +10166,21 @@ body.resizing-panel .agent-detail-panel * {
   white-space: nowrap;
 }
 
-.menu-item-hint {
-  font-size: 10.5px;
-  line-height: 1.35;
-  color: var(--text-3);
-  white-space: normal;
+.menu-item-meta {
+  margin-left: auto;
+  color: #9e968d;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.menu-label {
+  padding: 4px 8px 2px;
+  color: #9e968d;
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 /* The one item in a menu that destroys something, in the same red the rest of
@@ -10151,7 +10204,13 @@ body.resizing-panel .agent-detail-panel * {
 .menu-sep {
   height: 1px;
   margin: 4px 2px;
-  background: var(--border-soft);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+@media (pointer: coarse) {
+  .menu-item {
+    min-height: 44px;
+  }
 }
 
 /* -------------------------------------------------------- colour picker ---- */
@@ -10813,8 +10872,6 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-intro {
-  display: grid;
-  gap: 12px;
   padding-bottom: 22px;
 }
 
@@ -10892,7 +10949,46 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
   padding-top: 2px;
+}
+
+.catch-up-file-preview {
+  display: contents;
+}
+
+.catch-up-file-more {
+  min-width: 0;
+}
+
+.catch-up-file-more[open] {
+  flex: 1 0 100%;
+}
+
+.catch-up-file-more-toggle {
+  appearance: none;
+  list-style: none;
+  cursor: pointer;
+}
+
+.catch-up-file-more-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.catch-up-file-overflow {
+  margin-top: 6px;
+}
+
+.catch-up-more-open,
+.catch-up-file-more[open] .catch-up-more-closed {
+  display: none;
+}
+
+.catch-up-file-more[open] .catch-up-more-open {
+  display: inline;
 }
 
 .catch-up-file {
@@ -10903,7 +10999,9 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-file:hover,
-.catch-up-file:focus-visible {
+.catch-up-file:focus-visible,
+.catch-up-file-more-toggle:hover,
+.catch-up-file-more-toggle:focus-visible {
   border-color: var(--accent);
   background: var(--bg-hover);
   color: var(--text);
@@ -13402,6 +13500,38 @@ dialog.modal[open]::backdrop {
   margin: 0;
 }
 
+.person-management {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.person-management h3 {
+  margin: 0 0 2px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.person-management .btn {
+  justify-content: flex-start;
+}
+
+.person-management-separator {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border-soft);
+}
+
+.channel-info-summary {
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
 .secondary-facts {
   width: 100%;
   display: grid;
@@ -14189,7 +14319,10 @@ dialog.modal[open]::backdrop {
 .qs-layer {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  /* Above the phone's channel header, drawers and full-screen panels. The
+     switcher is the active overlay and its input must not disappear beneath
+     the channel chrome that launched it. */
+  z-index: 85;
   display: grid;
   place-items: start center;
   padding-top: 12vh;
@@ -14198,19 +14331,34 @@ dialog.modal[open]::backdrop {
 /* Search opens from the top bar, so its results continue directly beneath
    that bar instead of appearing as a detached modal halfway down the screen. */
 .qs-layer-search {
-  padding-top: calc(48px + var(--safe-top));
+  display: block;
+  padding: 0;
+}
+
+.qs-layer-search .qs-card {
+  position: absolute;
+}
+
+.qs-layer-search .pop-scrim {
+  background: transparent;
+  animation: none;
+}
+
+.qs-layer-search.qs-layer-keyboard .pop-scrim {
+  background: rgba(4, 5, 9, 0.08);
 }
 
 .qs-card {
   position: relative;
-  width: min(560px, calc(100vw - 32px));
-  max-height: 70vh;
+  width: min(520px, calc(100vw - 20px));
+  max-height: 304px;
   display: flex;
   flex-direction: column;
   background: var(--bg-card-2);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg, 12px);
-  box-shadow: var(--shadow-pop);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.42),
+    0 1px 0 rgba(255, 255, 255, 0.025);
   overflow: hidden;
 }
 
@@ -14220,8 +14368,10 @@ dialog.modal[open]::backdrop {
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 15px;
-  padding: 14px 16px;
+  box-sizing: border-box;
+  height: 44px;
+  font-size: 13px;
+  padding: 0 12px;
   outline: none;
 }
 
@@ -14231,19 +14381,36 @@ dialog.modal[open]::backdrop {
 
 .qs-list {
   overflow-y: auto;
-  padding: 6px;
+  max-height: 260px;
+  padding: 4px;
   display: grid;
   gap: 1px;
+}
+
+.qs-group-label {
+  margin: 4px 4px 0;
+  padding: 4px 4px 2px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-4);
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 600;
+}
+
+.qs-group-label:first-child {
+  margin-top: 0;
+  border-top: 0;
 }
 
 .qs-item {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: 8px;
-  font-size: 13px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
   color: var(--text-2);
   text-align: left;
 }
@@ -14268,7 +14435,6 @@ dialog.modal[open]::backdrop {
   white-space: nowrap;
 }
 
-.qs-kind,
 .qs-empty {
   color: var(--text-4);
   font-size: 11.5px;

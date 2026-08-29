@@ -117,7 +117,7 @@ test("an unread direct message has a number somewhere on screen", async () => {
   // The menu row opens the conversations themselves, each with its own count.
   const list = slice(app, "function showDirectMessageMenu(node) {", "\n/**\n * Opens the already-cached");
   assert.match(list, /act: "dm-open"/u);
-  assert.match(list, /hint: `\$\{conversation\.unread\} unread`/u);
+  assert.match(list, /meta: String\(conversation\.unread\)/u);
 });
 
 test("a notification opens what it is about", async () => {
@@ -150,28 +150,41 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
 
-  assert.match(app, /function openSwitcher\(\)/u);
+  assert.match(app, /function openSwitcher\(\{ keyboard = false \} = \{\}\)/u);
   assert.match(app, /event\.key\.toLowerCase\(\) === "k"/u);
   assert.match(app, /function switcherEntries\(query\)/u);
   const entries = slice(app, "function switcherEntries(query) {", "function paintSwitcher()");
   assert.match(entries, /state\.repositories\.map/u);
-  assert.match(entries, /kind: "Workspace"/u);
+  assert.match(entries, /group: "Workspaces"/u);
+  assert.match(entries, /group: "People"/u);
+  assert.match(entries, /group: "Navigation"/u);
   assert.match(entries, /state\.dmPeople/u);
   assert.match(entries, /route: "notifications"/u);
+  assert.match(entries, /\.slice\(0, 7\)/u);
   assert.doesNotMatch(entries, /route: "agents"|My agents/iu);
 
   // Drawn in `#layer-root`, outside the shell the poll replaces — an overlay
-  // inside the app root would be swept away mid-search.
+  // inside the app root would be swept away mid-search. It also stays above
+  // the phone's channel header and full-screen panels, whose stack reaches 80.
   assert.match(app, /document\.querySelector\("#layer-root"\)\.append\(layer\)/u);
-  assert.match(css, /\.qs-layer \{/u);
-  const switcher = slice(app, "function openSwitcher() {", "/** What the keys do");
+  assert.match(css, /\.qs-layer \{[^}]*z-index: 85;/u);
+  const switcher = slice(app, "function openSwitcher({ keyboard = false } = {}) {", "/** What the keys do");
   const shortcuts = slice(app, "function openShortcutSheet() {", "/** Whether the keyboard");
-  assert.match(switcher, /layer\.className = "qs-layer qs-layer-search"/u);
+  assert.match(switcher, /qs-layer-search\$\{keyboard \? " qs-layer-keyboard"/u);
   assert.doesNotMatch(shortcuts, /qs-layer-search/u);
   assert.match(
     css,
-    /\.qs-layer-search \{[^}]*padding-top: calc\(48px \+ var\(--safe-top\)\);/u,
+    /\.qs-layer-search \{[^}]*display: block;[^}]*padding: 0;/u,
   );
+  assert.match(app, /function positionSwitcher\(layer\)/u);
+  assert.match(app, /box\.bottom \+ 6/u);
+  assert.match(switcher, /role="combobox"/u);
+  assert.match(switcher, /aria-controls="qs-list"/u);
+  assert.match(switcher, /role="listbox"/u);
+  assert.match(app, /role="option" tabindex="-1" aria-selected=/u);
+  assert.match(app, /aria-activedescendant/u);
+  assert.match(css, /\.qs-group-label \{/u);
+  assert.match(css, /\.qs-layer-search\.qs-layer-keyboard \.pop-scrim \{\s*background: rgba\(4, 5, 9, 0\.08\);/u);
 
   // The single-key shortcuts must never eat a character out of somebody's
   // sentence.
@@ -182,21 +195,18 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(app, /class="global-search" data-act="switch-open"/u);
 });
 
-test("settings is visible beside the account menu", async () => {
+test("settings is grouped inside the account menu", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  // Settings is an explicit control at the bottom-right of the sidebar rather
-  // than another destination hidden behind the account avatar.
+  // Profile destinations share one purpose-sized menu and the duplicate
+  // adjacent settings icon is absent.
   assert.match(chats, /class="chan-account" data-act="user-menu"/u);
-  assert.match(
-    chats,
-    /class="icon-btn chan-settings" data-act="nav"\s*data-value="settings"/u,
-  );
-  assert.match(chats, /class="icon-btn chan-settings"[\s\S]{0,160}icon\("gear"\)/u);
+  assert.doesNotMatch(chats, /class="icon-btn chan-settings"/u);
   const menu = slice(app, 'case "user-menu":', 'case "switch-close":');
   assert.match(menu, /\.\.\.accountDestinations\(\)/u);
-  assert.doesNotMatch(menu, /value: "settings"|label: "Settings"/u);
+  assert.match(app, /value: "settings", label: "Settings"/u);
+  assert.match(menu, /\{ width: 184 \}/u);
 
   // Direct messages comes from the shared list, and the menu offers neither
   // Notifications nor an agent roster.

@@ -1930,26 +1930,46 @@ export function showModal({
 /** Where focus goes when the popover closes. */
 let popoverReturn;
 
-/** Anchored popover, used by the Code screen's Summary. */
-export function showPopover(anchor, html, { width = 400 } = {}) {
+/** Anchored information surface, with semantics chosen by its caller. */
+export function showPopover(
+  anchor,
+  html,
+  {
+    width = 400,
+    role = "dialog",
+    className = "",
+    scrim = true,
+    modal = false,
+  } = {},
+) {
   closePopover();
   // Remembered so focus can go back where it came from: a popover that dumps
   // focus at the top of the document strands anyone navigating by keyboard.
   popoverReturn = anchor instanceof HTMLElement ? anchor : undefined;
   const layer = document.createElement("div");
-  layer.className = "pop-layer";
+  layer.className = `pop-layer${scrim ? "" : " pop-layer-clear"}`;
   layer.id = "pop-layer";
   layer.innerHTML = `<div class="pop-scrim" data-act="pop-close"></div>
-    <div class="popover" role="dialog" style="width:${width}px">${html}</div>`;
+    <div class="popover${className ? ` ${esc(className)}` : ""}"
+      role="${esc(role)}"${modal ? ' aria-modal="true"' : ""}
+      style="width:${width}px">${html}</div>`;
   $("#layer-root").append(layer);
 
   const pop = $(".popover", layer);
   const box = anchor.getBoundingClientRect();
-  const margin = 12;
-  let left = box.right - width;
-  left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+  const margin = 10;
+  const popWidth = pop.getBoundingClientRect().width;
+  let left = box.right - popWidth;
+  left = Math.max(
+    margin,
+    Math.min(left, window.innerWidth - popWidth - margin),
+  );
   pop.style.left = `${left}px`;
-  const gap = 8;
+  pop.style.setProperty(
+    "--popover-origin-x",
+    `${Math.max(12, Math.min(popWidth - 12, box.left + box.width / 2 - left))}px`,
+  );
+  const gap = 6;
   const popHeight = pop.getBoundingClientRect().height;
   const below = box.bottom + gap;
   const above = box.top - popHeight - gap;
@@ -1965,6 +1985,7 @@ export function showPopover(anchor, html, { width = 400 } = {}) {
         ? above
         : Math.max(margin, Math.min(below, maxTop));
   pop.style.top = `${top}px`;
+  pop.classList.toggle("popover-above", top < box.top);
 
   layer.addEventListener("click", (event) => {
     if (event.target.closest("[data-act='pop-close']")) {
@@ -1978,6 +1999,11 @@ export function showPopover(anchor, html, { width = 400 } = {}) {
   focusable()[0]?.focus();
   layer.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      event.preventDefault();
+      closePopover();
+      return;
+    }
+    if (role === "menu" && event.key === "Tab") {
       closePopover();
       return;
     }
@@ -2013,31 +2039,107 @@ export function showPopover(anchor, html, { width = 400 } = {}) {
  * in the app is the same red — the colour is what tells somebody, before they
  * click, that this item is not like the others.
  *
- * A `hint` is the second line under a label, for the menus that offer a
- * choice rather than a command and would otherwise need the reader to already
- * know the difference.
+ * Hints stay available as native titles rather than growing a command into a
+ * two-line card. `meta` is the concise right slot for a count or shortcut.
  */
-export function showMenu(anchor, items) {
-  const body = items
+export function showMenu(anchor, items, { width } = {}) {
+  const normalized = [];
+  for (const item of items) {
+    const previous = normalized.at(-1);
+    if (
+      item.danger === true &&
+      normalized.length > 0 &&
+      previous?.separator !== true &&
+      previous?.group !== true
+    ) {
+      normalized.push({ separator: true });
+    }
+    normalized.push(item);
+  }
+  const longestLabel = normalized.reduce(
+    (length, item) => Math.max(length, String(item.label ?? "").length),
+    0,
+  );
+  const menuWidth =
+    width ?? (longestLabel > 24 ? 224 : longestLabel > 16 ? 196 : 176);
+  const body = normalized
     .map((item) =>
       item.separator === true
-        ? `<div class="menu-sep"></div>`
+        ? `<div class="menu-sep" role="separator"></div>`
+        : item.group === true
+          ? `<div class="menu-label" role="presentation">${esc(item.label)}</div>`
         : `<button type="button" class="menu-item${
             item.danger === true ? " menu-item-danger" : ""
-          }" data-act="${item.act}"${
+          }" role="menuitem" tabindex="-1" data-act="${item.act}"${
             item.value === undefined ? "" : ` data-value="${esc(item.value)}"`
-          }${item.disabled === true ? " disabled" : ""}>${
+          }${item.hint === undefined ? "" : ` title="${esc(item.hint)}"`}${
+            item.disabled === true ? ' disabled aria-disabled="true"' : ""
+          }>${
             item.iconName === undefined ? "" : icon(item.iconName)
           }<span class="menu-item-text"><span class="menu-item-label">${esc(
             item.label,
-          )}</span>${
-            item.hint === undefined
+          )}</span></span>${
+            item.meta === undefined
               ? ""
-              : `<span class="menu-item-hint">${esc(item.hint)}</span>`
-          }</span></button>`,
+              : `<span class="menu-item-meta">${esc(item.meta)}</span>`
+          }</button>`,
     )
     .join("");
-  return showPopover(anchor, `<div class="menu">${body}</div>`, { width: 216 });
+  const pop = showPopover(anchor, `<div class="menu">${body}</div>`, {
+    width: menuWidth,
+    role: "menu",
+    className: "action-menu",
+    scrim: false,
+  });
+  anchor.setAttribute("aria-haspopup", "menu");
+  anchor.setAttribute("aria-expanded", "true");
+  pop.setAttribute("aria-label", "Actions");
+  const menu = $(".menu", pop);
+  const choices = () => $$(".menu-item:not(:disabled)", menu);
+  const focusAt = (index) => {
+    const nodes = choices();
+    if (nodes.length === 0) {
+      return;
+    }
+    const target = nodes[(index + nodes.length) % nodes.length];
+    for (const node of nodes) {
+      node.tabIndex = node === target ? 0 : -1;
+    }
+    target.focus();
+  };
+  let typeahead = "";
+  let typeaheadTimer;
+  menu.addEventListener("keydown", (event) => {
+    const nodes = choices();
+    const current = nodes.indexOf(document.activeElement);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusAt(current + (event.key === "ArrowDown" ? 1 : -1));
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      focusAt(event.key === "Home" ? 0 : nodes.length - 1);
+      return;
+    }
+    if (event.key.length !== 1 || event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+    typeahead += event.key.toLocaleLowerCase();
+    window.clearTimeout(typeaheadTimer);
+    typeaheadTimer = window.setTimeout(() => {
+      typeahead = "";
+    }, 500);
+    const match = nodes.findIndex((node) =>
+      node.textContent.trim().toLocaleLowerCase().startsWith(typeahead),
+    );
+    if (match >= 0) {
+      event.preventDefault();
+      focusAt(match);
+    }
+  });
+  focusAt(0);
+  return pop;
 }
 
 /**
@@ -2049,7 +2151,7 @@ export function showMenu(anchor, items) {
  * popover that disappears one frame early is the blink the exit exists to
  * prevent. If the token moves, this moves with it.
  */
-const POP_EXIT_MS = 200;
+const POP_EXIT_MS = 120;
 
 export function closePopover() {
   const open = $("#pop-layer");
@@ -2072,6 +2174,7 @@ export function closePopover() {
   open.classList.add("pop-closing");
   open.inert = true;
   window.setTimeout(() => open.remove(), POP_EXIT_MS);
+  popoverReturn?.setAttribute("aria-expanded", "false");
   popoverReturn?.focus();
   popoverReturn = undefined;
 }
