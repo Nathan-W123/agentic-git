@@ -4941,16 +4941,6 @@ function switcherEntries(query) {
         value: person.id,
         iconName: "users",
       })),
-    ...[
-      { route: "chats", label: "Chats" },
-      { route: "notifications", label: "Notifications" },
-    ].map((screen) => ({
-      group: "Navigation",
-      label: screen.label,
-      act: "switch-screen",
-      value: screen.route,
-      iconName: "arrowRight",
-    })),
     {
       group: "Navigation",
       label: "Settings",
