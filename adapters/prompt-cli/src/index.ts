@@ -1272,6 +1272,26 @@ const STRING_ARRAY_JSON_SCHEMA = {
 } as const;
 
 /** Two fields, so a settled objective and risk level cannot be rewritten. */
+/**
+ * The correction for a declaration that named files and nothing in them.
+ *
+ * Quieter than an empty file list and costs more here than anywhere else: on
+ * this round another task is already waiting, and an empty symbol list claims
+ * every named file whole, so the ask that was supposed to release it releases
+ * nothing.
+ */
+const EMPTY_DECLARATION_CORRECTION = [
+  "Your previous answer named files but no functions, classes or methods, " +
+    "which keeps every file you named whole — the task waiting on you cannot " +
+    "be admitted into any of them until you finish, which is the opposite of " +
+    "what this question is for.",
+  "You have the workspace in front of you. Open the files you named and read " +
+    "out the declarations you will add, change or remove — including ones " +
+    "that do not exist yet.",
+  "If your remaining edits genuinely belong to no declaration — a config " +
+    "value, a bare data file, comments — answer with an empty list again.",
+].join("\n");
+
 const DECLARATION_JSON_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: false,
@@ -1905,32 +1925,72 @@ export class PromptCliAdapter implements AgentAdapter {
           "declare its remaining scope",
       );
     }
-    const stdout = await this.run(
-      record,
-      context.workspacePath,
-      this.profile.planningArgs(
-        this.model,
-        this.effort,
-        this.profile.name === "claude" ? DECLARATION_JSON_SCHEMA : undefined,
-      ),
-      this.declarationPrompt(record, request),
-      this.planningTimeoutMs,
-      "planning",
-    );
-    const answer = extractJsonObject(
-      this.profile.unwrap(stdout),
-      "the scope declaration",
-    );
-    const declared = answer as {
-      expectedFiles?: unknown;
-      expectedSymbols?: unknown;
-    };
     const strings = (value: unknown): string[] =>
       Array.isArray(value)
         ? value.filter((entry): entry is string => typeof entry === "string")
         : [];
-    const files = strings(declared.expectedFiles);
-    const symbols = strings(declared.expectedSymbols);
+    const ask = async (
+      prompt: string,
+    ): Promise<{ files: string[]; symbols: string[] }> => {
+      const stdout = await this.run(
+        record,
+        context.workspacePath,
+        this.profile.planningArgs(
+          this.model,
+          this.effort,
+          this.profile.name === "claude" ? DECLARATION_JSON_SCHEMA : undefined,
+        ),
+        prompt,
+        this.planningTimeoutMs,
+        "planning",
+      );
+      const declared = extractJsonObject(
+        this.profile.unwrap(stdout),
+        "the scope declaration",
+      ) as { expectedFiles?: unknown; expectedSymbols?: unknown };
+      return {
+        files: strings(declared.expectedFiles),
+        symbols: strings(declared.expectedSymbols),
+      };
+    };
+
+    const asked = this.declarationPrompt(record, request);
+    let { files, symbols } = await ask(asked);
+    // Named files and nothing in them, which is the answer that looks like
+    // cooperation and behaves like refusal.
+    //
+    // A declared file with no declarations is held whole — `declaredSpans`
+    // reads an empty symbol list as "all of it" — so the arrival this ask
+    // exists to unblock is blocked by the answer to it. And it is invisible
+    // from the outside: the refusal names the files the *claim* covers, and a
+    // file held this way is not one of them, so it drops out of the message
+    // while still doing the blocking. Six rounds of a field report were spent
+    // on the resulting shape, in which a holder appears to hold two files and
+    // an arrival waits on a third nobody can see.
+    //
+    // Codex already re-asks this on its planning round, with the same
+    // reasoning and the same one-round bound. Nothing did on the declaration
+    // round, which is the one that matters most: by here another task is
+    // already waiting.
+    //
+    // One round, and an honest second empty is taken at its word — a sweep
+    // that belongs to no declaration legitimately names none.
+    if (files.length > 0 && symbols.length === 0) {
+      this.emit(record, {
+        event: "progress",
+        message:
+          `${this.profile.name} named files but no declarations; asking once ` +
+          "more so the waiting task can share them",
+        occurredAt: new Date().toISOString(),
+      });
+      const retried = await ask(
+        [asked, EMPTY_DECLARATION_CORRECTION].join("\n"),
+      ).catch(() => undefined);
+      if (retried !== undefined && retried.symbols.length > 0) {
+        files = retried.files;
+        symbols = retried.symbols;
+      }
+    }
     this.emit(record, {
       event: "progress",
       message:
