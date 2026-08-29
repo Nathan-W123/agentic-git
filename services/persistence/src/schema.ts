@@ -1470,6 +1470,28 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "repository-pictures",
     statements: [`ALTER TABLE repositories ADD COLUMN picture TEXT`],
   },
+  {
+    // Two lies the room list has been telling, fixed together because they are
+    // the same lie.
+    //
+    // `open` was the *less* permissive of the two non-private states —
+    // everybody reads, only members post — while `public` was the fully open
+    // one. Every reader of `visibility === "open"` assumed the opposite, and
+    // the interface duly labelled an `open` room "Read-only", which is what it
+    // is. The value now says what it means.
+    //
+    // And `#general` was stored `open` while behaving as `public`: the gateway
+    // special-cases its slug so anybody may post, so the room every project
+    // has was labelled read-only on a screen that also said, correctly, that
+    // it is always open. Storing what is true removes the special case's
+    // reason to exist rather than papering over it.
+    version: 51,
+    name: "honest-sub-channel-visibility",
+    statements: [
+      `UPDATE sub_channels SET visibility = 'read_only' WHERE visibility = 'open'`,
+      `UPDATE sub_channels SET visibility = 'public' WHERE slug = 'general'`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

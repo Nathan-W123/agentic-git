@@ -261,7 +261,7 @@ export const state = {
   /* Navigation */
   route: "chats",
   repositoryId: initialRepositoryId,
-  /** Main chat, a person DM, or an agent conversation in the active workspace. */
+  /** A channel, a person DM, or an agent conversation in the active workspace. */
   primaryDestination: initialPrimaryDestination,
   /** The last primary destination in every workspace this browser has visited. */
   workspaceDestinations: initialWorkspaceDestinations,
@@ -2544,10 +2544,18 @@ export function currentUserId() {
  * a membership carrying an account, the other is a list of who can be written
  * to — so this reads either rather than picking a winner.
  *
- * The id is the last resort and not a name at all. It is kept because showing
- * something is better than showing "Unknown", but seeing one means the record
- * for that person never arrived, which is a loading problem rather than a
- * naming one.
+ * When neither list has them, the answer is a short honest label rather than
+ * the raw id. A forty-character `user_35c1aa1e-4043-492b-9433-ec23d8b2eb73`
+ * sitting where a name goes is not "showing something": it is unreadable, it
+ * says nothing about who wrote the message, and it puts an internal
+ * identifier on a screen people screenshot. "Someone (35c1aa1e)" is the same
+ * information at a glance, and the fragment is kept so two unresolved people
+ * do not read as one.
+ *
+ * Seeing one at all means the record for that person never arrived — a
+ * repository-scoped grantee the organization list has never heard of, or a
+ * roster still in flight — so it is a loading problem rather than a naming
+ * one, and the label should say so rather than dress an id up as a name.
  */
 export function memberName(userId) {
   // The org member list first, then every room list and the DM roster: a
@@ -2564,15 +2572,33 @@ export function memberName(userId) {
     ) ??
     rooms.find((entry) => entry.userId === userId || entry.user?.id === userId) ??
     state.dmPeople.find((entry) => entry.id === userId);
-  return (
+  const known =
     member?.user?.displayName ??
     member?.user?.email ??
     member?.displayName ??
     member?.name ??
-    member?.email ??
-    userId ??
-    "Unknown"
-  );
+    member?.email;
+  if (typeof known === "string" && known.trim() !== "") {
+    return known;
+  }
+  return unresolvedMemberName(userId);
+}
+
+/**
+ * What somebody is called before their record has arrived.
+ *
+ * `user_35c1aa1e-4043-…` is an id, not a name, and printing it where a name
+ * goes tells the reader nothing except that something is wrong. This says the
+ * same thing in words, and keeps enough of the id to tell two strangers apart
+ * — and to look one up when somebody asks who wrote a message.
+ */
+export function unresolvedMemberName(userId) {
+  const id = String(userId ?? "").trim();
+  if (id === "") {
+    return "Unknown";
+  }
+  const fragment = id.replace(/^user_/u, "").split("-")[0] ?? "";
+  return fragment === "" ? "Unknown" : `Someone (${fragment})`;
 }
 
 /** Everyone with a seat on this project — the collaborator avatars. */
@@ -3781,9 +3807,18 @@ export function selectSubChannel(repositoryId, channelId) {
 
 /** Creates a room. `name` is squeezed into a `#handle` by the server. */
 export async function createSubChannel(repositoryId, name, visibility) {
+  // The dialog's three choices, all three of them. This collapsed everything
+  // that was not `private` into the read-only state, so picking "Open — anyone
+  // in the project can find it, read it, and post" built a room only its
+  // members could post in, and said nothing about having done so. The dialog
+  // grew a third option and this call was never told.
+  //
+  // Passed through rather than re-listed here: the server validates the value
+  // and falls back to read-only on anything it does not recognise, which is
+  // the right default and the only place it should be decided.
   const response = await api(channelsPath(repositoryId), {
     method: "POST",
-    body: { name, visibility: visibility === "private" ? "private" : "open" },
+    body: { name, visibility },
   });
   await loadSubChannels(repositoryId);
   const created = response?.channel;
@@ -5823,6 +5858,14 @@ export async function setAuditorPaused(repositoryId, paused) {
  * offering to start a second.
  */
 export async function loadPreview(repositoryId) {
+  // No repository named, nothing to ask about. Without this the empty-
+  // workspace screen — where `activeChannelId()` is "" — asked the server
+  // about `/repositories//preview`, a path with a hole in it that can only
+  // ever 404. Harmless in itself, and exactly the kind of guaranteed error
+  // that fills an error tracker with noise nobody can act on.
+  if (!repositoryId) {
+    return null;
+  }
   try {
     const response = await api(repositoryPath(repositoryId, "/preview"));
     state.previews[repositoryId] = response?.preview ?? null;

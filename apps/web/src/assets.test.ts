@@ -2128,10 +2128,12 @@ test("the composer placeholder names the room it will post into", async () => {
     body,
     /Message \$\{subChannelLabel\(\s*repositoryId,\s*activeSubChannelId\(repositoryId\),?\s*\)\}/u,
   );
-  // An undivided repository has one room and no choice to report, so it reads
-  // exactly as it did before rooms existed.
-  assert.match(body, /subChannelsFor\(repositoryId\)\.length > 1/u);
-  assert.match(body, /Message #\$\{repositoryLabel\(repositoryId\)\}/u);
+  // Including when the repository has only one room. That case used to fall
+  // back to the workspace's own name, so an undivided repository read exactly
+  // as it did before rooms existed — which was right until the header started
+  // naming the room. A reader then saw "#general" above the transcript and
+  // "#acme-app" in the box below it: two names for one place.
+  assert.doesNotMatch(body, /Message #\$\{repositoryLabel\(repositoryId\)\}/u);
 });
 
 test("the chat panel shows a bare progress bar and no token statistics", async () => {

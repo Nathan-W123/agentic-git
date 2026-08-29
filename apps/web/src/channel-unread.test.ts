@@ -102,3 +102,78 @@ test("opening a room clears its badge without waiting for the server", async () 
   const styles = await publicFile("styles.css");
   assert.match(styles, /\.chan-channel-unread \{/u);
 });
+
+test("creating a room sends the visibility that was chosen", async () => {
+  const data = await publicFile("data.js");
+
+  // The dialog offers three visibilities. This call used to collapse anything
+  // that was not `private` into the restrictive one, so picking "Open — anyone
+  // in the project can find it, read it, and post" quietly built a room only
+  // its members could post in. Run the real function and watch what it sends.
+  const start = data.indexOf("export async function createSubChannel");
+  assert.notEqual(start, -1, "createSubChannel was not found");
+  const body = data
+    .slice(start, data.indexOf("\n}", start) + 2)
+    .replace("export async function", "async function");
+
+  const sent: unknown[] = [];
+  const createSubChannel = new Function(
+    "api",
+    "channelsPath",
+    "loadSubChannels",
+    "selectSubChannel",
+    `${body}; return createSubChannel;`,
+  )(
+    async (_path: string, init: { body: unknown }) => {
+      sent.push(init.body);
+      return { channel: { id: "chan_new" } };
+    },
+    () => "/channels",
+    async () => undefined,
+    () => undefined,
+  ) as (r: string, n: string, v: string) => Promise<unknown>;
+
+  for (const visibility of ["public", "read_only", "private"]) {
+    await createSubChannel("repo", "frontend", visibility);
+  }
+  assert.deepEqual(sent, [
+    { name: "frontend", visibility: "public" },
+    { name: "frontend", visibility: "read_only" },
+    { name: "frontend", visibility: "private" },
+  ]);
+});
+
+test("the composer names the room, not the workspace", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // The header names the room, so the composer has to as well. It used to fall
+  // back to the workspace name when there was only one room, which read as
+  // "#general" above the transcript and "#acme-app" in the box below it.
+  assert.doesNotMatch(chats, /Message #\$\{repositoryLabel\(repositoryId\)\}/u);
+  assert.match(chats, /`Message \$\{subChannelLabel\(/u);
+
+  // And the specific sentences that outlived the concept are gone. Named one
+  // by one rather than scanned for: "Main chat" also appears in comments that
+  // explain what replaced it, and those are worth keeping — a scan that cannot
+  // tell a comment inside a template literal from copy inside one fails on the
+  // history rather than on the bug.
+  const app = await publicFile("app.js");
+  const retired = [
+    // Said the messages were session-scoped. They are written to the control
+    // plane and outlive the tab, so this was false as well as stale — and it
+    // was shown at the moment somebody decides whether to type something real.
+    "Main chat for your session",
+    "with Main chat, people, agents, threads, and files together",
+    "Main chat could not be loaded",
+    "Post to Main chat instead",
+    "Main chat activity",
+    "how its Main chat has been used",
+    "This clears Main chat",
+    "Everything Main chat answers to",
+  ];
+  for (const phrase of retired) {
+    assert.ok(
+      !app.includes(phrase) && !chats.includes(phrase),
+      `"${phrase}" is still shown to a reader`,
+    );
+  }
+});

@@ -9648,6 +9648,46 @@ test("a repository can be renamed without its id moving, and only by somebody wh
   );
 });
 
+test("a room is created with the visibility that was asked for", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "vis-repo");
+  const channels = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/vis-repo/channels`;
+
+  // Each of the three the dialog offers, plus the old name for the middle one
+  // and a value nobody recognises, which falls back to the safe end.
+  for (const [asked, stored] of [
+    ["public", "public"],
+    ["read_only", "read_only"],
+    ["private", "private"],
+    ["open", "read_only"],
+    ["nonsense", "read_only"],
+  ] as const) {
+    const slug = `room-${asked}`;
+    const created = await owner.request(channels, {
+      method: "POST",
+      body: { slug, name: slug, visibility: asked },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(
+      created.data.channel.visibility,
+      stored,
+      `asked for ${asked}`,
+    );
+  }
+
+  // And #general is public — everybody reads it and everybody posts in it,
+  // which is what the gateway has always enforced by slug. It used to be
+  // stored `read_only`'s old name and so was labelled "Read-only" on a screen
+  // that also said, correctly, that it is always open.
+  const listed = await owner.request(channels);
+  const general = (listed.data.channels as { slug: string; visibility: string; canPost: boolean }[])
+    .find((channel) => channel.slug === "general");
+  assert.equal(general?.visibility, "public", JSON.stringify(listed.data));
+  assert.equal(general?.canPost, true);
+});
+
 test("the room list carries each room's unread count for the caller", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -19274,6 +19314,8 @@ test("a repository's rooms are listed, gated and addressed one at a time", async
 
   // Opened to the project, the same room becomes readable by everybody and
   // postable only by its members.
+  // `open` is the old name for `read_only` and is still accepted, so a browser
+  // holding a cached bundle keeps working across the deploy that renamed it.
   const opened = await owner.request(`${base}/channels/${design}`, {
     method: "PATCH",
     body: { visibility: "open" },

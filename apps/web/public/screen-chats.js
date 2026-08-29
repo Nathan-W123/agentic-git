@@ -1737,7 +1737,15 @@ function chanCrown(activeRepositoryId) {
  * The gear only appears for somebody who can actually administer it, so the
  * row stays a single target for everybody else.
  */
-/** How a stored visibility reads wherever a room is described in one line. */
+/**
+ * How a stored visibility reads wherever a room is described in one line.
+ *
+ * Every unrecognised value reads as read-only, which is the safe direction:
+ * a room described as more restricted than it is misleads nobody into saying
+ * something they meant to keep in. The old `open` — the same state under the
+ * name it had before the values were made honest — lands there too, so a page
+ * held open across the deploy keeps labelling rooms correctly.
+ */
 function subChannelVisibilityLabel(visibility) {
   if (visibility === "private") {
     return "Private";
@@ -3679,7 +3687,7 @@ function channelLoadFailure(repositoryId) {
   return `<div class="chan-messages" id="chan-messages" role="status"
     aria-live="polite" data-scroll-key="channel:${esc(repositoryId)}">${emptyState(
       "chatBubble",
-      "Main chat could not be loaded",
+      "This channel could not be loaded",
       `${failure.message ?? "The request did not complete"}${status}`,
       `<button type="button" class="btn btn-sm" data-act="channel-retry-load"
         data-value="${esc(repositoryId)}">Try again</button>`,
@@ -3702,7 +3710,7 @@ function messageList(repositoryId) {
     )}${emptyState(
       "chatBubble",
       "No messages yet",
-      "Say hello — messages sent here stay in this workspace's Main chat for your session.",
+      "Say hello — messages sent here stay in this channel for everyone in it.",
       // Also on the empty branch: an empty channel is exactly where somebody
       // starting to type matters most, and leaving it off here meant the dots
       // could not appear until the room already had a message in it.
@@ -4517,15 +4525,17 @@ function composer(repositoryId) {
           placeholder="${
             state.composerThreadId === undefined
               ? esc(
-                  // The room, when the workspace has more than one; the
-                  // workspace itself when it does not, so an undivided
-                  // repository reads exactly as it always did.
-                  subChannelsFor(repositoryId).length > 1
-                    ? `Message ${subChannelLabel(
-                        repositoryId,
-                        activeSubChannelId(repositoryId),
-                      )}`
-                    : `Message #${repositoryLabel(repositoryId)}`,
+                  // The room, always. This used to name the *workspace* when
+                  // there was only one room, so an undivided repository read
+                  // exactly as it did before rooms existed — which was right
+                  // until the header started naming the room. A reader then
+                  // saw "#general" above the transcript and "#acme-app" in the
+                  // box they were typing into: two names for one place, and
+                  // neither of them wrong on its own.
+                  `Message ${subChannelLabel(
+                    repositoryId,
+                    activeSubChannelId(repositoryId),
+                  )}`,
                 )
               : replyTarget?.kind === "user" &&
                   replyTarget.taskId === undefined
@@ -4753,7 +4763,7 @@ function conversationInfoPanel(repositoryId) {
   </aside>`;
 }
 
-/** Pinned messages are context beside Main chat, never another transcript. */
+/** Pinned messages are context beside the channel, never another transcript. */
 function pinnedMessagesPanel(repositoryId) {
   const wasOpen = state.pinsOpen;
   state.pinsOpen = true;
@@ -7841,7 +7851,7 @@ export function renderChats() {
       ${emptyState(
         "chatBubble",
         "No workspaces yet",
-        "Create or import a repository to open its workspace, with Main chat, people, agents, threads, and files together.",
+        "Create or import a repository to open its workspace, with channels, people, agents, threads, and files together.",
         `<button class="btn btn-primary" data-act="repo-create" style="margin-top:6px">${icon(
           "plus",
         )} Create new repository</button>
@@ -8678,7 +8688,7 @@ function composerThreadChip(repositoryId) {
     <span class="spacer"></span>
     ${iconButton("close", {
       act: "composer-thread-clear",
-      title: "Post to Main chat instead",
+      title: "Post to the channel instead",
       small: true,
     })}
   </div>`;

@@ -1429,7 +1429,7 @@ export interface ChannelAgentMember {
  * Stored as plain text with no CHECK constraint in either SQL backend, so a
  * fourth state would need no migration either.
  */
-export type SubChannelVisibility = "open" | "private" | "public";
+export type SubChannelVisibility = "read_only" | "private" | "public";
 
 /** The slug every repository's default sub-channel is created under. */
 export const GENERAL_SUB_CHANNEL_SLUG = "general";
