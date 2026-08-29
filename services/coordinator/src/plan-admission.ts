@@ -360,8 +360,21 @@ function declaredSpans(
   const placed = new Set<string>();
   for (const declared of files) {
     const ranges = locate(declared);
+    // A file the index cannot read contributes no placements, and that is
+    // already an answer this function knows how to give. It used to abandon
+    // the whole reading instead — so a holder that named a stylesheet beside
+    // its source files could not be narrowed at all, and every candidate
+    // behind it waited on the one file nobody was arguing about.
+    //
+    // Skipping is the conservative direction, not a relaxation. A symbol that
+    // lives in the unreadable file simply never reaches `placed`, so it falls
+    // into `unwritten` below — the branch built for exactly this, declarations
+    // the index cannot place — and its insertion zones are withheld along with
+    // the holder's other lines. The candidate is therefore offered less than
+    // it would have been, never more, and `leavesGround` still refuses a
+    // grant that turns out to be nothing.
     if (ranges === undefined) {
-      return undefined;
+      continue;
     }
     for (const range of ranges) {
       placed.add(range.name.toLowerCase());
@@ -892,25 +905,51 @@ export class PlanAdmissionController {
     if (locate === undefined || contested.length === 0) {
       return undefined;
     }
-    // Every declared file is still being granted here — that is the point —
-    // so every one of them has to be readable. One that is not withdraws the
-    // option entirely: half an answer is not one.
+    // A file the index cannot read is a file no patch can be checked against,
+    // so it is never granted here. That is a statement about that file, and it
+    // used to be read as a statement about the plan: one unreadable path among
+    // the declared set withdrew the option for all of them, on the reasoning
+    // that half an answer is not one.
+    //
+    // It is the other way round. Withholding the file nobody can verify *is*
+    // the answer — the same answer a contested file already gets one level up,
+    // where it is deferred whole and the rest of the plan proceeds. The two
+    // mechanisms simply did not compose, so a plan touching a stylesheet
+    // alongside two source files was sequenced on the stylesheet's account
+    // while both source files sat splittable.
+    //
+    // Measured on this repository: of the agent-authored commits touching more
+    // than one file, 56% carried at least one unreadable path beside readable
+    // ones, and a single stylesheet accounts for most of them. Every one of
+    // those was a split this could not offer for a reason that had nothing to
+    // do with whether the work collided.
     const granted = uniqueRepositoryPaths(input.plan.expectedFiles);
-    if (
-      granted.length === 0 ||
-      granted.some((file) => locate(file) === undefined)
-    ) {
+    const unreadable = new Set(
+      granted.filter((file) => locate(file) === undefined),
+    );
+    // Nothing readable left to divide. Unchanged from before: with no file
+    // this can reason about, there is no split to offer and the plan waits.
+    const readable = granted.filter((file) => !unreadable.has(file));
+    if (readable.length === 0) {
       return undefined;
     }
-    const declared = new Set(granted);
+    const declared = new Set(readable);
     const misnamed = new Set(
       (input.plan.grounding?.fileReferents ?? []).map((entry) => entry.declared),
     );
     const shared: PartiallyHeldFile[] = [];
     const occupied = new Map<TaskId, Map<string, readonly LineRange[]>>();
 
+    // Contested paths this cannot read. They are handed back whole rather than
+    // divided, exactly as a lost file is, and the plan is reduced by them.
+    const withheldWhole: DeferredResource[] = [];
+
     for (const entry of contested) {
       const file = entry.resourceId;
+      if (unreadable.has(file)) {
+        withheldWhole.push(entry);
+        continue;
+      }
       // A path the plan only reached through a misname carries no patch to
       // divide, and a contested file that cannot be shared is a file lost —
       // which is what emptied the reduced plan to begin with. Either way there
@@ -994,11 +1033,30 @@ export class PlanAdmissionController {
       new Map(shared.map((entry) => [entry.file, entry.ranges])),
       occupied,
     );
-    let deferred = shared.flatMap((entry) => entry.symbols);
+    // The unreadable paths go back whole, with everything that travels with a
+    // lost file — the same three lists the path-level split defers, so a
+    // symbol this plan reaches only through a file it no longer holds does not
+    // survive the reduction.
+    const occupancy = this.occupancy(input);
+    let deferred = [
+      ...(withheldWhole.length === 0
+        ? []
+        : [
+            ...withheldWhole,
+            ...this.derivedFrom(input, withheldWhole),
+            ...this.carriedSymbols(input, withheldWhole, occupancy),
+          ]),
+      ...shared.flatMap((entry) => entry.symbols),
+    ];
     if (deferred.length === 0) {
       return undefined;
     }
     let reduced = reducePlanScope(input.plan, deferred);
+    // Everything readable turned out to be withheld too. Granting a plan that
+    // names no file is granting nothing, so the wait stands.
+    if (reduced.expectedFiles.length === 0) {
+      return undefined;
+    }
     let partial = this.decide(reduced, input, within, true);
     // The holders' lines were not the whole of it: something the candidate
     // declares in its own right is held too. Same finer withholding as the

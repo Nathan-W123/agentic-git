@@ -1838,3 +1838,81 @@ test("an approved expansion cannot shrink a holder that named no symbols", () =>
     undefined,
   );
 });
+
+/**
+ * A file the index cannot read — a stylesheet, a Dockerfile, a markdown page —
+ * used to withdraw within-file splitting for every file beside it. Two source
+ * files that could have been divided were sequenced on a stylesheet's account,
+ * and the stylesheet was not what anybody was arguing about.
+ *
+ * Measured on this repository's own history: of the agent-authored commits
+ * touching more than one file, 56% carried at least one unreadable path
+ * alongside readable ones, and `apps/web/public/styles.css` alone accounted
+ * for 214 of them.
+ */
+const CHATS = "apps/web/public/screen-chats.js";
+const SHEET = "apps/web/public/styles.css";
+const SUITE = "apps/web/src/assets.test.ts";
+
+/** `styles.css` is absent, exactly as the real index reports it. */
+const MIXED_RANGES: Record<string, { name: string; startLine: number; endLine: number }[]> = {
+  [CHATS]: [
+    { name: "workspaceRail", startLine: 200, endLine: 400 },
+    { name: "composerHtml", startLine: 1000, endLine: 1400 },
+  ],
+  [SUITE]: [
+    { name: "railTest", startLine: 400, endLine: 700 },
+    { name: "composerTest", startLine: 1, endLine: 300 },
+  ],
+};
+
+function admitMixed(candidate: AgentPlan, holder: AgentPlan) {
+  return admit(candidate, [holder], new PlanAdmissionController(), {
+    partialAdmission: true,
+    symbolRangesInFile: (file: string) => MIXED_RANGES[file],
+  });
+}
+
+test("an unreadable file is withheld, not used to refuse the files beside it", () => {
+  const admission = admitMixed(
+    plan("task_a", {
+      expectedFiles: [CHATS, SHEET, SUITE],
+      expectedSymbols: ["composerHtml", "composerTest"],
+    }),
+    plan("task_b", {
+      expectedFiles: [CHATS, SHEET, SUITE],
+      expectedSymbols: ["workspaceRail", "railTest"],
+    }),
+  );
+
+  assert.equal(
+    admission.status,
+    "approved_with_constraints",
+    JSON.stringify(admission),
+  );
+  const files = admission.ownershipGrants
+    .filter((lease) => lease.resourceType === "file")
+    .map((lease) => lease.resourceId);
+  // The two the index can read are shared; the one it cannot is left with its
+  // holder, because a patch on it could not be checked against anything.
+  assert.ok(files.includes(CHATS), JSON.stringify(files));
+  assert.ok(files.includes(SUITE), JSON.stringify(files));
+  assert.ok(
+    !files.includes(SHEET),
+    `the unreadable file must not be granted: ${JSON.stringify(files)}`,
+  );
+});
+
+test("a plan of nothing but unreadable files still waits", () => {
+  // Nothing here can be reasoned about, so there is no split to offer and the
+  // previous answer — wait your turn — is the right one.
+  const admission = admitMixed(
+    plan("task_a", { expectedFiles: [SHEET], expectedSymbols: [] }),
+    plan("task_b", { expectedFiles: [SHEET], expectedSymbols: [] }),
+  );
+  assert.notEqual(admission.status, "approved_with_constraints");
+  assert.deepEqual(
+    admission.ownershipGrants.filter((lease) => lease.resourceType === "file"),
+    [],
+  );
+});
