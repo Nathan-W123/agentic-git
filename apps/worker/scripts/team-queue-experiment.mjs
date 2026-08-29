@@ -156,6 +156,39 @@ if (!["agent", "last-writer-wins"].includes(conflictResolution)) {
   throw new Error("--resolve-conflicts must be agent or last-writer-wins");
 }
 
+/**
+ * Whether the last debt either arm owes is paid or merely reported.
+ *
+ * A merged tree can be textually clean, build, and still have lost a task's
+ * behaviour — which is exactly what `behaviouralSurvival` was written to
+ * detect. Detecting it is not paying for it. A real team's clock does not stop
+ * when the tests go red; it stops when somebody has found what broke and put
+ * it back, and that is usually the most expensive part of the whole exercise.
+ *
+ * Until now the harness stopped at the diagnosis. The uncoordinated arm was
+ * therefore reported as cheaper than it is: it got the merge for free at the
+ * end, and the repair for free after that, while the coordinated arm pays for
+ * correctness continuously — every integration is validated before it is
+ * promoted, so the cost is already inside its wall clock. The comparison was
+ * biased *against* coordination, which is a strange way to lose an argument.
+ *
+ * `agent` puts the same model that did the coding onto the broken tree with
+ * its failing tests and clocks time-to-green, exactly as `--resolve-conflicts`
+ * already does for merge markers. `off` keeps the previous behaviour so runs
+ * recorded before this existed stay comparable.
+ *
+ * Applied to *both* arms, deliberately. If coordination never accrues the debt
+ * then its repair cost is zero, and a measured zero beside a measured non-zero
+ * is the finding. Exempting the coordinated arm by construction would be
+ * assuming the result.
+ */
+const repairLostWork = flag("repair-lost-work", "agent");
+if (!["agent", "off"].includes(repairLostWork)) {
+  throw new Error("--repair-lost-work must be agent or off");
+}
+/** How many times an agent may be sent back at a tree that is still red. */
+const repairAttempts = Number(flag("repair-attempts", "2"));
+
 const bands = flag("bands", "deep,partial,independent")
   .split(",")
   .map((entry) => entry.trim())
@@ -647,6 +680,108 @@ async function survival(finalTreePath, patches, byTaskId) {
         lines.length > 0 && surviving.length > 0 && surviving.length < lines.length,
     };
   });
+}
+
+/** Every repair either arm was made to pay for, and what it cost. */
+const lostWorkRepairs = [];
+
+/**
+ * Puts an agent on a tree whose tests are red, and clocks time-to-green.
+ *
+ * The step the harness used to leave unpriced. `behaviouralSurvival` says
+ * *that* a task's behaviour is gone; somebody still has to find out which
+ * change went missing in the merge and put it back, and on a real codebase
+ * that is the expensive half. Charging nothing for it made the arm that
+ * accrues the debt look cheaper than the arm that never does.
+ *
+ * Run in the tree itself, like the conflict resolver, because the tests that
+ * decide whether it worked are in there and the agent has to be able to run
+ * them. Told in as many words not to weaken a test to make it pass: deleting
+ * the assertion that noticed the loss would score as a repair and is the exact
+ * failure this measurement exists to catch.
+ *
+ * Bounded by `--repair-attempts`. A tree still red after that is reported red
+ * with everything spent on it — an honest expensive failure, which is a real
+ * outcome for this workflow and must not be rounded down to a clean one.
+ */
+async function repairLostWorkWithAgent(treePath, arm, failing, testCommand) {
+  if (repairLostWork !== "agent") {
+    return undefined;
+  }
+  const command = process.env["COORD_AGENT_CMD"]?.trim() ?? "";
+  if (command.length === 0) {
+    throw new Error("COORD_AGENT_CMD must name the agent executable");
+  }
+  const rawArgs = process.env["COORD_AGENT_ARGS"]?.trim() ?? "";
+  const effort = process.env["COORD_AGENT_EFFORT"]?.trim() ?? "";
+  const prompt = [
+    "Merging several tasks into this repository lost work: the tree builds,",
+    "but behaviour that individual tasks implemented is no longer there.",
+    "",
+    ...(failing.length === 0
+      ? ["The suite is red. Find what is broken."]
+      : ["Tasks whose own tests now fail:", ...failing.map((id) => "- " + id)]),
+    "",
+    "Find what each of those changes did, and restore it, so that node --test",
+    "passes with every task's behaviour present at once.",
+    "",
+    "Do not weaken, skip or delete a test to make it pass. A test that fails",
+    "here is reporting a real loss, and removing it hides the loss instead of",
+    "repairing it. Do not revert another task's change to make room.",
+    "",
+    "Reply with a one-line summary of what was missing.",
+  ].join("\n");
+
+  const startedAt = Date.now();
+  const attempts = [];
+  let green = false;
+  for (let attempt = 1; attempt <= Math.max(1, repairAttempts); attempt += 1) {
+    const output = await runProcess(
+      command,
+      [
+        "-p",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        ...(rawArgs.length === 0 ? [] : JSON.parse(rawArgs)),
+        ...(effort.length === 0 ? [] : ["--effort", effort]),
+      ],
+      {
+        cwd: treePath,
+        input: prompt,
+        timeoutMs: 30 * 60 * 1000,
+        maxOutputBytes: 32 * 1024 * 1024,
+      },
+    );
+    const usage = parseClaudeUsage(output.stdout) ?? undefined;
+    green = await testCommand(treePath);
+    attempts.push({
+      attempt,
+      exitCode: output.exitCode,
+      green,
+      ...(usage === undefined
+        ? {}
+        : {
+            tokens: usage.totalTokens,
+            ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+          }),
+    });
+    if (green) {
+      break;
+    }
+  }
+  const record = {
+    arm,
+    failingTaskIds: [...failing],
+    attempts,
+    attemptsUsed: attempts.length,
+    green,
+    elapsedMs: Date.now() - startedAt,
+    tokens: attempts.reduce((sum, entry) => sum + (entry.tokens ?? 0), 0),
+    costUsd: attempts.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0),
+  };
+  lostWorkRepairs.push(record);
+  return record;
 }
 
 /**
@@ -1333,6 +1468,44 @@ async function once() {
       };
     };
 
+    /**
+     * The debt this arm still owes after its tree exists, paid and clocked.
+     *
+     * Both arms go through here. The coordinated arm is expected to owe
+     * nothing — it validates every integration before promoting it — and a
+     * measured zero beside the other arm's measured cost is the comparison.
+     * Skipping it for one arm would be assuming the answer.
+     */
+    const payRepairDebt = async (treePath, kind, outcomeSoFar) => {
+      const failing = (outcomeSoFar.behaviouralSurvival ?? [])
+        .filter((entry) => entry.judged && !entry.passed)
+        .map((entry) => entry.scenarioTaskId ?? entry.taskId)
+        .filter((id) => id !== undefined);
+      const red = outcomeSoFar.validation?.passed === false;
+      if (!red && failing.length === 0) {
+        // Nothing lost and nothing broken: the debt is zero, and recording the
+        // zero matters as much as recording a cost. An absent field would read
+        // as "not measured".
+        return { owed: false, elapsedMs: 0, tokens: 0, costUsd: 0, green: true };
+      }
+      const repaired = await repairLostWorkWithAgent(
+        treePath,
+        kind,
+        failing,
+        async (dir) => {
+          try {
+            await run("node", ["--test"], { cwd: dir, maxBuffer: 32 * 1024 * 1024 });
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      );
+      return repaired === undefined
+        ? { owed: true, measured: false, failingTaskIds: failing }
+        : { owed: true, measured: true, ...repaired };
+    };
+
     let outcome;
     if (arm === "uncoordinated") {
       const merged = await mergeUncoordinated(plane, root, completionOrder);
@@ -1379,6 +1552,17 @@ async function once() {
         outcome.survival,
         outcome.behaviouralSurvival,
       );
+      outcome.repairAfterLoss = await payRepairDebt(
+        merged.mergePath,
+        "uncoordinated",
+        outcome,
+      );
+      // Judged again after the repair, because the number that matters is
+      // what survived once somebody had finished putting it back — not what
+      // survived the merge.
+      outcome.behaviouralSurvivalAfterRepair = outcome.repairAfterLoss.owed
+        ? await behaviouralSurvival(merged.mergePath, plane, root)
+        : outcome.behaviouralSurvival;
     } else {
       const settled = await coordinatedOutcome(plane, root);
       outcome = {
@@ -1395,6 +1579,14 @@ async function once() {
         outcome.survival,
         outcome.behaviouralSurvival,
       );
+      outcome.repairAfterLoss = await payRepairDebt(
+        settled.finalPath,
+        "coordinated",
+        outcome,
+      );
+      outcome.behaviouralSurvivalAfterRepair = outcome.repairAfterLoss.owed
+        ? await behaviouralSurvival(settled.finalPath, plane, root)
+        : outcome.behaviouralSurvival;
     }
 
     return {
@@ -1421,6 +1613,33 @@ async function once() {
        * can be set to zero by a reader who thinks it is wrong.
        */
       wallClockMs: elapsedMs + (outcome.repairPenaltyMs ?? 0),
+      /**
+       * What it cost to reach a tree that is both merged *and* still does
+       * everything the tasks built — the number this comparison is actually
+       * about.
+       *
+       * `wallClockMs` stops at a merged tree, which is where the harness used
+       * to stop asking questions. A tree that merged cleanly and quietly lost
+       * a feature is not a cheaper tree, and pricing it as one is what made
+       * the uncoordinated arm look better than it is. This adds the measured
+       * repair on top. Reported beside the other two rather than replacing
+       * them, so a reader who disputes the repair can still see the halves.
+       */
+      correctTreeWallClockMs:
+        elapsedMs +
+        (outcome.repairPenaltyMs ?? 0) +
+        (outcome.repairAfterLoss?.elapsedMs ?? 0),
+      repairAfterLossMs: outcome.repairAfterLoss?.elapsedMs ?? 0,
+      repairAfterLossTokens: outcome.repairAfterLoss?.tokens ?? 0,
+      /**
+       * Whether the tree was correct at the end, after everything was paid.
+       * A run that spent its repair budget and stayed red is an expensive
+       * failure, and must not be read as a clean finish.
+       */
+      endedCorrect:
+        outcome.validation?.passed === true &&
+        (outcome.repairAfterLoss?.owed !== true ||
+          outcome.repairAfterLoss?.green === true),
       budgetExhausted: elapsedMs >= runBudgetMs && metrics.tasksOutstanding > 0,
       completionOrder,
       metrics,
@@ -1510,5 +1729,9 @@ console.log(
     `linesLost=${String(lw.tasksLosingWork)}/${String(lw.tasksWithChangesets)} ` +
     `resolveTime=${String(Math.round((record.outcome.resolutionElapsedMs ?? 0) / 1000))}s ` +
     `resolveTokens=${String(record.outcome.resolutionTokens ?? 0)} ` +
-    `finalTests=${record.outcome.validation.passed ? "pass" : "FAIL"} -> ${file}`,
+    `repairTime=${String(Math.round((record.repairAfterLossMs ?? 0) / 1000))}s ` +
+    `repairTokens=${String(record.repairAfterLossTokens ?? 0)} ` +
+    `correctWall=${String(Math.round((record.correctTreeWallClockMs ?? 0) / 1000))}s ` +
+    `finalTests=${record.outcome.validation.passed ? "pass" : "FAIL"} ` +
+    `endedCorrect=${record.endedCorrect ? "yes" : "NO"} -> ${file}`,
 );
