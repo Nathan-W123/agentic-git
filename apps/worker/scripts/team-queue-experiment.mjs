@@ -83,6 +83,7 @@ import { WorkerClient } from "../dist/client.js";
 import { Worker } from "../dist/worker.js";
 import { TEAM_QUEUE_SCENARIO } from "./team-queue-scenario.mjs";
 import { TEAM_QUEUE_WIRED_SCENARIO } from "./team-queue-wired-scenario.mjs";
+import { buildRealScenario } from "./team-queue-real-scenario.mjs";
 
 const run = promisify(execFile);
 
@@ -188,6 +189,75 @@ if (!["agent", "off"].includes(repairLostWork)) {
 }
 /** How many times an agent may be sent back at a tree that is still red. */
 const repairAttempts = Number(flag("repair-attempts", "2"));
+
+/**
+ * How many times the uncoordinated arm stops to reconcile, rather than once.
+ *
+ * The arm was written for a control of one person holding several branches and
+ * merging them at the end. That is the wrong control for several people
+ * sharing a remote, which is the case this product is for: co-founders do not
+ * work in isolation for a whole task and reconcile once. They push partway,
+ * pull what has landed, find out it does not build, fix that, and carry on —
+ * and every one of those rounds pays the whole cost again, the merge and the
+ * rebuild and the re-test.
+ *
+ * Merging once at the end charges that loop a single time, which quietly makes
+ * the control cheaper than the workflow it stands for.
+ *
+ * `1` is the recorded behaviour and stays the default, so a run repeated
+ * against an old artefact still measures the same thing. Above 1, the arm's
+ * patches are applied in that many rounds and the tree is validated between
+ * them, so a break introduced in round one is discovered — and, with
+ * `--repair-lost-work=agent`, paid for — before round two lands on top of it.
+ *
+ * This is an approximation and worth naming as one: the agents still coded in
+ * isolation, so it does not model somebody reading a colleague's change and
+ * writing differently because of it. It models the reconciliation, which is
+ * the expensive half and the half a merge-at-the-end never charged for.
+ */
+const reconcileRounds = Math.max(1, Number(flag("reconcile-rounds", "1")));
+
+/**
+ * What "the tests pass" means for the tree under measurement.
+ *
+ * Hardcoded to `node --test` while the only corpus was a handful of files with
+ * a flat test directory. A real repository does not necessarily answer to
+ * that — this monorepo needs a build before its tests mean anything — and a
+ * benchmark that reports a red tree because it ran the wrong command is
+ * measuring its own configuration.
+ *
+ * Passed as a shell-free argv: `--test-command='npm test'` splits on spaces,
+ * which is enough for every command a repository's own README would give and
+ * avoids inheriting a shell's quoting rules into a measurement.
+ */
+const testCommandArgv = flag("test-command", "node --test")
+  .split(" ")
+  .map((part) => part.trim())
+  .filter((part) => part.length > 0);
+if (testCommandArgv.length === 0) {
+  throw new Error("--test-command cannot be empty");
+}
+
+/**
+ * Runs the tree's tests, wherever the tree is. One definition, so the
+ * validation gate, the behavioural survival check and the repair loop cannot
+ * disagree about what passing means.
+ */
+async function runTreeTests(cwd) {
+  const [command, ...args] = testCommandArgv;
+  try {
+    const { stdout } = await run(command, args, {
+      cwd,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return { passed: true, output: stdout.slice(-4000) };
+  } catch (error) {
+    return {
+      passed: false,
+      output: `${error.stdout ?? ""}${error.stderr ?? ""}`.slice(-4000),
+    };
+  }
+}
 
 const bands = flag("bands", "deep,partial,independent")
   .split(",")
@@ -309,13 +379,44 @@ async function bootControlPlane(root, scenario) {
   // arm and every task starts from a byte-identical base commit.
   const sourcePath = path.join(root, "src-repo");
   const repositories = new RepositoryService();
-  await repositories.initializeWorkingRepository(sourcePath);
-  for (const [file, contents] of Object.entries(scenario.seed)) {
-    const target = path.join(sourcePath, file);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, contents, "utf8");
+  if (scenario.sourceRepository !== undefined) {
+    // A real repository at a real revision. Cloned rather than written file by
+    // file: the point of this scenario is a tree nobody shaped for the
+    // benchmark, and a quarter of a million lines is not a string map.
+    //
+    // Detached and then committed onto a fresh `main` so the seed looks
+    // exactly like the synthetic one downstream — one branch, one base commit,
+    // no history for an agent to read the answers out of. A task whose
+    // objective is a commit subject would otherwise be able to find that
+    // commit and copy it, which would measure nothing.
+    await run("git", [
+      "clone",
+      "--quiet",
+      "--no-local",
+      "--depth",
+      "1",
+      "--branch",
+      scenario.sourceRepository.revision,
+      scenario.sourceRepository.path,
+      sourcePath,
+    ]).catch(async () => {
+      // `--branch` only takes a branch or tag; a raw revision needs the long
+      // way round.
+      await run("git", ["clone", "--quiet", "--no-local", scenario.sourceRepository.path, sourcePath]);
+      await git(sourcePath, "checkout", "--quiet", "--detach", scenario.sourceRepository.revision);
+    });
+    await rm(path.join(sourcePath, ".git"), { recursive: true, force: true });
+    await repositories.initializeWorkingRepository(sourcePath);
+    await repositories.commitAll(sourcePath, "seed");
+  } else {
+    await repositories.initializeWorkingRepository(sourcePath);
+    for (const [file, contents] of Object.entries(scenario.seed)) {
+      const target = path.join(sourcePath, file);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, contents, "utf8");
+    }
+    await repositories.commitAll(sourcePath, "seed");
   }
-  await repositories.commitAll(sourcePath, "seed");
   const seedRevision = (await git(sourcePath, "rev-parse", "HEAD")).trim();
 
   const store = SqliteCoordinationStore.open(path.join(root, "state.db"));
@@ -1017,7 +1118,12 @@ async function mergeUncoordinated(plane, root, order) {
 
   const patches = [];
   const merges = [];
+  const rounds = [];
   let conflictedFiles = 0;
+  // Where each round ends, in the completion order. One round is the recorded
+  // behaviour: everything lands, then the tree is judged once.
+  const roundSize = Math.ceil(order.length / reconcileRounds) || order.length;
+  let handled = 0;
   for (const taskId of order) {
     const known = plane.byTaskId.get(taskId);
     const canonical =
@@ -1113,30 +1219,81 @@ async function mergeUncoordinated(plane, root, order) {
       () => undefined,
     );
     merges.push({ taskId, status, conflictedFiles: conflicted });
+
+    // The end of a round: what a team does after pulling is build it and run
+    // it, and find out there and then whether the thing still works. Charged
+    // here rather than once at the end, because a team that reconciles four
+    // times pays for four rebuilds and four rounds of finding out.
+    handled += 1;
+    const lastOfRound = handled % roundSize === 0 || handled === order.length;
+    if (reconcileRounds > 1 && lastOfRound) {
+      const roundIndex = Math.ceil(handled / roundSize);
+      const startedAt = Date.now();
+      const check = await runTreeTests(mergePath);
+      const round = {
+        round: roundIndex,
+        tasksLanded: handled,
+        passed: check.passed,
+        checkMs: Date.now() - startedAt,
+      };
+      if (!check.passed) {
+        // Broken by this round's merge. A real team stops and fixes it before
+        // the next pull lands on top, and the fix is the part that was never
+        // priced. The last round is left to the caller's own repair pass so
+        // the same break is not paid for twice.
+        const repaired =
+          handled === order.length
+            ? undefined
+            : await repairLostWorkWithAgent(
+                mergePath,
+                "uncoordinated-round",
+                [],
+                async (dir) => (await runTreeTests(dir)).passed,
+              );
+        if (repaired !== undefined) {
+          round.repairMs = repaired.elapsedMs;
+          round.repairTokens = repaired.tokens;
+          round.repairedGreen = repaired.green;
+          await git(mergePath, "add", "-A");
+          await git(
+            mergePath,
+            "commit",
+            "--quiet",
+            "-m",
+            `reconcile round ${String(roundIndex)}`,
+          ).catch(() => undefined);
+        }
+      }
+      rounds.push(round);
+    }
   }
 
   // The final tree is only worth reporting on if it is a tree a team would
   // have shipped, so it is validated exactly as the coordinated arm validates
   // every integration.
-  let validation;
-  try {
-    const { stdout } = await run("node", ["--test"], {
-      cwd: mergePath,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    validation = { passed: true, output: stdout.slice(-4000) };
-  } catch (error) {
-    validation = {
-      passed: false,
-      output: `${error.stdout ?? ""}${error.stderr ?? ""}`.slice(-4000),
-    };
-  }
+  const validation = await runTreeTests(mergePath);
 
   return {
     mergePath,
     merges,
     patches,
     conflictedFiles,
+    /**
+     * What each reconciliation round cost. Empty at the default of one round,
+     * where the tree is judged once at the end and there is nothing to report
+     * between.
+     */
+    reconcileRounds,
+    rounds,
+    reconcileMs: rounds.reduce(
+      (sum, entry) => sum + entry.checkMs + (entry.repairMs ?? 0),
+      0,
+    ),
+    reconcileTokens: rounds.reduce(
+      (sum, entry) => sum + (entry.repairTokens ?? 0),
+      0,
+    ),
+    roundsRed: rounds.filter((entry) => !entry.passed).length,
     // With a real resolution pass the repair is measured, so the invented
     // penalty is not also charged. `last-writer-wins` keeps the penalty
     // because nothing was actually repaired there.
@@ -1186,19 +1343,7 @@ async function coordinatedOutcome(plane, root) {
     });
   }
 
-  let validation;
-  try {
-    const { stdout } = await run("node", ["--test"], {
-      cwd: finalPath,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    validation = { passed: true, output: stdout.slice(-4000) };
-  } catch (error) {
-    validation = {
-      passed: false,
-      output: `${error.stdout ?? ""}${error.stderr ?? ""}`.slice(-4000),
-    };
-  }
+  const validation = await runTreeTests(finalPath);
   return { finalPath, patches, validation };
 }
 
@@ -1361,18 +1506,42 @@ const scenarioName =
   process.argv
     .find((entry) => entry.startsWith("--scenario="))
     ?.slice("--scenario=".length) ?? "team-queue";
-const baseScenario = SCENARIOS.get(scenarioName);
+/**
+ * `real` is built rather than looked up: it reads a repository's own history
+ * at run time, so it cannot be a constant in a table. See
+ * `team-queue-real-scenario.mjs` for why a fixture's contention rate cannot
+ * answer what arbitration is worth.
+ */
+const baseScenario =
+  scenarioName === "real"
+    ? await buildRealScenario({
+        repositoryPath: path.resolve(flag("repo", process.cwd())),
+        head: flag("base", "HEAD"),
+        count: Number(flag("tasks", "8")),
+        validationCommands: [
+          {
+            executable: testCommandArgv[0],
+            args: testCommandArgv.slice(1),
+            label: "repository tests",
+          },
+        ],
+      })
+    : SCENARIOS.get(scenarioName);
 if (baseScenario === undefined) {
   throw new Error(
-    `--scenario must be one of ${[...SCENARIOS.keys()].join(", ")}, ` +
+    `--scenario must be one of ${[...SCENARIOS.keys()].join(", ")}, real, ` +
       `got ${scenarioName}`,
   );
 }
 
 async function once() {
-  const selected = baseScenario.tasks.filter((entry) =>
-    bands.includes(entry.band),
-  );
+  // The real scenario's tasks all carry one band, because its contention is
+  // observed rather than designed. Filtering by the synthetic bands would
+  // select nothing, so a scenario that declares its own is taken whole.
+  const selected =
+    scenarioName === "real"
+      ? baseScenario.tasks
+      : baseScenario.tasks.filter((entry) => bands.includes(entry.band));
   if (selected.length === 0) {
     throw new Error(`--bands selected no tasks: ${bands.join(",")}`);
   }
@@ -1492,14 +1661,7 @@ async function once() {
         treePath,
         kind,
         failing,
-        async (dir) => {
-          try {
-            await run("node", ["--test"], { cwd: dir, maxBuffer: 32 * 1024 * 1024 });
-            return true;
-          } catch {
-            return false;
-          }
-        },
+        async (dir) => (await runTreeTests(dir)).passed,
       );
       return repaired === undefined
         ? { owed: true, measured: false, failingTaskIds: failing }
@@ -1540,6 +1702,11 @@ async function once() {
         resolutionElapsedMs: merged.resolutionElapsedMs,
         resolutionTokens: merged.resolutionTokens,
         resolutionsFailed: merged.resolutionsFailed,
+        reconcileRounds: merged.reconcileRounds,
+        rounds: merged.rounds,
+        reconcileMs: merged.reconcileMs,
+        reconcileTokens: merged.reconcileTokens,
+        roundsRed: merged.roundsRed,
         validation: merged.validation,
         survival: await survival(merged.mergePath, merged.patches, plane.byTaskId),
       };
@@ -1628,6 +1795,7 @@ async function once() {
       correctTreeWallClockMs:
         elapsedMs +
         (outcome.repairPenaltyMs ?? 0) +
+        (outcome.reconcileMs ?? 0) +
         (outcome.repairAfterLoss?.elapsedMs ?? 0),
       repairAfterLossMs: outcome.repairAfterLoss?.elapsedMs ?? 0,
       repairAfterLossTokens: outcome.repairAfterLoss?.tokens ?? 0,
@@ -1729,6 +1897,8 @@ console.log(
     `linesLost=${String(lw.tasksLosingWork)}/${String(lw.tasksWithChangesets)} ` +
     `resolveTime=${String(Math.round((record.outcome.resolutionElapsedMs ?? 0) / 1000))}s ` +
     `resolveTokens=${String(record.outcome.resolutionTokens ?? 0)} ` +
+    `rounds=${String(record.outcome.reconcileRounds ?? 1)}(red ${String(record.outcome.roundsRed ?? 0)}) ` +
+    `reconcileTime=${String(Math.round((record.outcome.reconcileMs ?? 0) / 1000))}s ` +
     `repairTime=${String(Math.round((record.repairAfterLossMs ?? 0) / 1000))}s ` +
     `repairTokens=${String(record.repairAfterLossTokens ?? 0)} ` +
     `correctWall=${String(Math.round((record.correctTreeWallClockMs ?? 0) / 1000))}s ` +
