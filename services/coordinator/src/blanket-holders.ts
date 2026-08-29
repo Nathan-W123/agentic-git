@@ -45,6 +45,55 @@ export interface BlanketHolderSession {
 const holders = new Map<TaskId, BlanketHolderSession>();
 
 /**
+ * The ask each holder currently has in flight, shared by everyone waiting.
+ *
+ * The bound on asking — one per holder per contention episode — lived on the
+ * authority, and that was only ever true by accident. An authority is built
+ * per run (`runPendingTasks` makes a fresh one), so two arrivals in one worker
+ * hold two different `asked` sets while this registry is one module-level map.
+ * Sequentially it looked right: the first arrival converted the claim durably
+ * and the rest never reached the ask. Concurrently, three arrivals measured
+ * three pauses and three replans against one live session — which is the thing
+ * the coordinator warns about, since a vendor CLI refuses a second process
+ * while one is live — and all three then failed.
+ *
+ * So the bound belongs where the holder does. The first caller starts the ask
+ * and everybody else waits on the same promise, which is better than merely
+ * refusing them: they wanted the answer, not the asking, and now they all get
+ * it from one pause.
+ */
+const asking = new Map<TaskId, Promise<HolderDeclaration | undefined>>();
+
+/**
+ * Asks this holder, or joins the ask already running against it.
+ *
+ * The entry is dropped once it settles, so a later contention episode asks
+ * again — the bound is one ask at a time per holder, not one ask ever. A
+ * rejection is normalized to `undefined` here rather than propagated, because
+ * every caller treats a failed ask as "fall back to the freeze" and a shared
+ * promise must not deliver a rejection to callers that never made the call.
+ */
+export async function askBlanketHolderOnce(
+  session: BlanketHolderSession,
+): Promise<HolderDeclaration | undefined> {
+  const running = asking.get(session.task.id);
+  if (running !== undefined) {
+    return await running;
+  }
+  const started = (async () => await session.declare())().catch(
+    () => undefined,
+  );
+  asking.set(session.task.id, started);
+  try {
+    return await started;
+  } finally {
+    if (asking.get(session.task.id) === started) {
+      asking.delete(session.task.id);
+    }
+  }
+}
+
+/**
  * Publishes a way to ask this holder, for the lifetime of its execution.
  *
  * Answers the deregistration, which is identity-checked: a second run that has
@@ -58,6 +107,10 @@ export function registerBlanketHolder(
   return () => {
     if (holders.get(session.task.id) === session) {
       holders.delete(session.task.id);
+      // Nothing may join an ask against a session that is going away: the
+      // promise is already settling or abandoned, and a late joiner would get
+      // an answer about a holder that no longer exists.
+      asking.delete(session.task.id);
     }
   };
 }
