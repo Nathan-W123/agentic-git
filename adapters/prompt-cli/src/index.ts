@@ -1272,6 +1272,58 @@ const STRING_ARRAY_JSON_SCHEMA = {
 } as const;
 
 /** Two fields, so a settled objective and risk level cannot be rewritten. */
+/**
+ * The correction for a declaration that named files and nothing in them.
+ *
+ * Quieter than an empty file list and costs more here than anywhere else: on
+ * this round another task is already waiting, and an empty symbol list claims
+ * every named file whole, so the ask that was supposed to release it releases
+ * nothing.
+ */
+/**
+ * The correction for a plan whose every named file is absent from the tree.
+ *
+ * Not "some are new" — every one. A task that creates files names paths that
+ * do not exist yet and is right to; a task that names three paths and hits
+ * none of them did not look. Watched live: an agent asked to change a search
+ * bar planned `src/components/search-bar.tsx` and symbol `SearchBar` in a
+ * repository whose search bar lives in `app.js`, having been handed a
+ * planning worktree it never read.
+ *
+ * The cost lands on arbitration, which is why it is worth a round here. A
+ * plan nothing in the repository can vouch for cannot be proven disjoint from
+ * anything, so if any running task shares its objective the two are sequenced
+ * — and the sequencing is correct, which is what makes it expensive: nobody
+ * downstream can tell a genuinely conflicting plan from one that simply named
+ * the wrong files, so nobody downstream can fix it. Here it is still cheap: a
+ * second prompt, in the same worktree, before anything is arbitrated.
+ *
+ * One round, and a second answer naming the same paths is taken at its word:
+ * creating a whole subtree is a real task and it names nothing that exists.
+ */
+const UNFOUND_FILES_CORRECTION = [
+  "None of the files you named exist in this repository. That is worth a " +
+    "second look before anything is decided on it: a plan whose paths cannot " +
+    "be found is treated as unverifiable, and any task already running that " +
+    "shares your objective will be put ahead of you.",
+  "You have the repository in front of you. List the directory, find the " +
+    "files that actually hold the code you described, and name those.",
+  "If you really are creating all of these — a new module, a new subtree — " +
+    "answer with the same paths again.",
+].join("\n");
+
+const EMPTY_DECLARATION_CORRECTION = [
+  "Your previous answer named files but no functions, classes or methods, " +
+    "which keeps every file you named whole — the task waiting on you cannot " +
+    "be admitted into any of them until you finish, which is the opposite of " +
+    "what this question is for.",
+  "You have the workspace in front of you. Open the files you named and read " +
+    "out the declarations you will add, change or remove — including ones " +
+    "that do not exist yet.",
+  "If your remaining edits genuinely belong to no declaration — a config " +
+    "value, a bare data file, comments — answer with an empty list again.",
+].join("\n");
+
 const DECLARATION_JSON_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: false,
@@ -1735,6 +1787,30 @@ export class PromptCliAdapter implements AgentAdapter {
         );
       } else if (
         plan.expectedFiles.length > 0 &&
+        !plan.expectedFiles.some((file) =>
+          existsSync(path.join(workspace.path, file)),
+        )
+      ) {
+        // Checked here rather than left to the index because here it is still
+        // free: the planning worktree is the repository, on disk, and a path
+        // either resolves in it or does not. The index reaches the same
+        // verdict later, by which time the plan has been submitted and the
+        // only remaining move is to refuse it.
+        this.emit(record, {
+          event: "progress",
+          message:
+            `${this.profile.name} named ${String(plan.expectedFiles.length)} ` +
+            "file(s), none of which exist; asking once more before it is " +
+            "arbitrated against work that does",
+          occurredAt: new Date().toISOString(),
+        });
+        plan = await this.runPlanning(
+          record,
+          workspace.path,
+          [this.planPrompt(record.input), UNFOUND_FILES_CORRECTION].join("\n"),
+        );
+      } else if (
+        plan.expectedFiles.length > 0 &&
         plan.expectedSymbols.length === 0
       ) {
         // `else if`, not a second gate: one correction round per planning,
@@ -1905,32 +1981,72 @@ export class PromptCliAdapter implements AgentAdapter {
           "declare its remaining scope",
       );
     }
-    const stdout = await this.run(
-      record,
-      context.workspacePath,
-      this.profile.planningArgs(
-        this.model,
-        this.effort,
-        this.profile.name === "claude" ? DECLARATION_JSON_SCHEMA : undefined,
-      ),
-      this.declarationPrompt(record, request),
-      this.planningTimeoutMs,
-      "planning",
-    );
-    const answer = extractJsonObject(
-      this.profile.unwrap(stdout),
-      "the scope declaration",
-    );
-    const declared = answer as {
-      expectedFiles?: unknown;
-      expectedSymbols?: unknown;
-    };
     const strings = (value: unknown): string[] =>
       Array.isArray(value)
         ? value.filter((entry): entry is string => typeof entry === "string")
         : [];
-    const files = strings(declared.expectedFiles);
-    const symbols = strings(declared.expectedSymbols);
+    const ask = async (
+      prompt: string,
+    ): Promise<{ files: string[]; symbols: string[] }> => {
+      const stdout = await this.run(
+        record,
+        context.workspacePath,
+        this.profile.planningArgs(
+          this.model,
+          this.effort,
+          this.profile.name === "claude" ? DECLARATION_JSON_SCHEMA : undefined,
+        ),
+        prompt,
+        this.planningTimeoutMs,
+        "planning",
+      );
+      const declared = extractJsonObject(
+        this.profile.unwrap(stdout),
+        "the scope declaration",
+      ) as { expectedFiles?: unknown; expectedSymbols?: unknown };
+      return {
+        files: strings(declared.expectedFiles),
+        symbols: strings(declared.expectedSymbols),
+      };
+    };
+
+    const asked = this.declarationPrompt(record, request);
+    let { files, symbols } = await ask(asked);
+    // Named files and nothing in them, which is the answer that looks like
+    // cooperation and behaves like refusal.
+    //
+    // A declared file with no declarations is held whole — `declaredSpans`
+    // reads an empty symbol list as "all of it" — so the arrival this ask
+    // exists to unblock is blocked by the answer to it. And it is invisible
+    // from the outside: the refusal names the files the *claim* covers, and a
+    // file held this way is not one of them, so it drops out of the message
+    // while still doing the blocking. Six rounds of a field report were spent
+    // on the resulting shape, in which a holder appears to hold two files and
+    // an arrival waits on a third nobody can see.
+    //
+    // Codex already re-asks this on its planning round, with the same
+    // reasoning and the same one-round bound. Nothing did on the declaration
+    // round, which is the one that matters most: by here another task is
+    // already waiting.
+    //
+    // One round, and an honest second empty is taken at its word — a sweep
+    // that belongs to no declaration legitimately names none.
+    if (files.length > 0 && symbols.length === 0) {
+      this.emit(record, {
+        event: "progress",
+        message:
+          `${this.profile.name} named files but no declarations; asking once ` +
+          "more so the waiting task can share them",
+        occurredAt: new Date().toISOString(),
+      });
+      const retried = await ask(
+        [asked, EMPTY_DECLARATION_CORRECTION].join("\n"),
+      ).catch(() => undefined);
+      if (retried !== undefined && retried.symbols.length > 0) {
+        files = retried.files;
+        symbols = retried.symbols;
+      }
+    }
     this.emit(record, {
       event: "progress",
       message:

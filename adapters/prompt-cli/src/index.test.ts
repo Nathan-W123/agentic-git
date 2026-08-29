@@ -1695,6 +1695,103 @@ test("claude: a plan that names no files is asked for again, once", async (t) =>
   assert.deepEqual(plan.expectedFiles, ["src/value.js"]);
 });
 
+test("claude: a plan whose every file is absent is asked for again, once", async (t) => {
+  // The failure this catches, watched live: asked to change a search bar, an
+  // agent planned `src/components/search-bar.tsx` and symbol `SearchBar` in a
+  // repository whose search bar lives in `app.js`. It had a planning worktree
+  // and never read it.
+  //
+  // Nothing downstream can repair that. A plan the index cannot vouch for is
+  // unverifiable, so it cannot be proven disjoint from anything, and any
+  // running task sharing its objective goes first — correctly, which is what
+  // makes it expensive: the refusal is right, and nobody downstream can tell a
+  // real conflict from a plan that named the wrong files. Here it is still one
+  // more prompt against the same worktree.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(String(options.input ?? ""));
+      return output(
+        claudeEnvelope(
+          JSON.stringify(
+            prompts.length === 1
+              ? {
+                  ...PLAN,
+                  expectedFiles: ["src/components/search-bar.tsx"],
+                  expectedSymbols: ["SearchBar"],
+                }
+              : PLAN,
+          ),
+        ),
+      );
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.equal(prompts.length, 2, "the agent was not asked to look again");
+  assert.match(prompts[1] ?? "", /prepare a coordination plan\./u);
+  assert.match(prompts[1] ?? "", /None of the files you named exist/u);
+  // The consequence, so the second attempt knows what it is avoiding rather
+  // than only that it was wrong.
+  assert.match(prompts[1] ?? "", /shares your objective will be put ahead/u);
+  assert.deepEqual(plan.expectedFiles, ["src/value.js"]);
+});
+
+test("claude: a plan that really is creating files is taken at its word", async (t) => {
+  // One round, like its siblings. Creating a new module is a real task and it
+  // names nothing that exists, so a second answer repeating the same paths is
+  // an answer, not a failure to comply — and failing it here would refuse the
+  // one shape this correction cannot tell apart from the mistake.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const invented = {
+    ...PLAN,
+    expectedFiles: ["src/brand-new/module.js"],
+    expectedSymbols: ["brandNew"],
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(String(options.input ?? ""));
+      return output(claudeEnvelope(JSON.stringify(invented)));
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.equal(prompts.length, 2, "asked more than once");
+  assert.deepEqual(
+    plan.expectedFiles,
+    ["src/brand-new/module.js"],
+    "a genuine creation was overridden by the correction",
+  );
+});
+
 test("claude: a second empty plan is narrated as the condition it is, not failed", async (t) => {
   // Asked once and only once. Failing the task instead would re-commit an
   // error this adapter has already backed out of: an audit or a report
@@ -2172,6 +2269,177 @@ test("claude: a paused blanket holder declares its remaining scope and carries o
   const changeSet = await adapter.collectChanges(session.id);
   assert.equal(changeSet.patches.length, 1);
   await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: a declaration of files and no symbols is asked once more", async () => {
+  // The answer that looks like cooperation and behaves like refusal.
+  //
+  // A declared file with no declarations in it is held whole — an empty
+  // symbol list reads as "all of it" — so the arrival this ask exists to
+  // release is blocked by the answer to it. Worse, it is invisible: the
+  // refusal names the files the *claim* covers, and a file held this way is
+  // not one of them, so it drops out of the message while still doing the
+  // blocking. A holder appears to hold two files and the waiter is stuck on a
+  // third that nobody can see.
+  //
+  // Codex already re-asks this, on its planning round, for the same reason.
+  // Nothing did on the declaration round — the one where another task is
+  // already waiting, so the cost is being paid as it happens.
+  const fixture = await createFixture();
+  const inputs: Array<{ input: string; cwd: string; schema: string }> = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    inputs.push({
+      input: String(options.input),
+      cwd: String(options.cwd),
+      schema: String(args[args.indexOf("--json-schema") + 1]),
+    });
+    if (inputs.length === 1) {
+      // The first execution round. It ends with a scope request, which parks
+      // the loop somewhere the coordinator can reach it.
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            ...COMPLETION,
+            outcome: "scope_change_requested",
+            requestId: "scope_1",
+            symbolsChanged: [],
+            explanation: "",
+            additionalFiles: ["src/value.js"],
+            reason: "needs the value file",
+          }),
+        ),
+      );
+    }
+    if (inputs.length === 2) {
+      // Files, and nothing in them.
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            expectedFiles: ["src/value.js"],
+            expectedSymbols: [],
+          }),
+        ),
+      );
+    }
+    if (inputs.length === 3) {
+      // Asked again, it reads the declarations out of the file.
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            expectedFiles: ["src/value.js"],
+            expectedSymbols: ["value"],
+          }),
+        ),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const version = await fixture.repositories.getCanonicalVersion(
+    fixture.repository,
+  );
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: version,
+    repositoryId: fixture.repository.id,
+  });
+  // No planning round trip at all: this is a task alone in its repository.
+  await adapter.acceptBlanketClaim(session.id, BLANKET_PLAN);
+
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: version,
+  });
+  let scopeRequested = (): void => undefined;
+  const asked = new Promise<void>((resolve) => {
+    scopeRequested = resolve;
+  });
+  await adapter.streamEvents(session.id, (event) => {
+    if (event.event === "scope_change_requested") {
+      scopeRequested();
+    }
+  });
+  const executing = adapter.sendContext(session.id, contextFor(workspace));
+  await asked;
+
+  // Stopped at a round boundary. Nothing is killed and no round is aborted.
+  await adapter.pause(session.id);
+  const declared = await adapter.requestReplan(
+    session.id,
+    replanRequestFor(version),
+  );
+  try {
+  assert.deepEqual(declared.expectedFiles, ["src/value.js"]);
+  assert.deepEqual(
+    declared.expectedSymbols,
+    ["value"],
+    "the empty declaration was taken at its word, so the file stays whole",
+  );
+  assert.equal(inputs.length, 3, "the holder was not asked a second time");
+  // Once, not until it complies: an honest second empty is taken at its word,
+  // because a sweep that belongs to no declaration legitimately names none.
+  assert.match(
+    inputs[2]?.input ?? "",
+    /named files but no functions, classes or methods/u,
+  );
+  assert.match(inputs[2]?.input ?? "", /cannot be admitted into any of them/u);
+
+  const ask = inputs[1];
+  assert.notEqual(ask, undefined);
+  // Asked in the execution workspace, over the conversation already running —
+  // not in a planning workspace, which `acceptBlanketClaim` destroyed.
+  assert.equal(ask?.cwd, workspace.path);
+  assert.match(ask?.input ?? "", /Another task has started in this repository/u);
+  assert.match(ask?.input ?? "", /Do not edit anything in this round/u);
+  // Two fields and no more: risk, commands and objective are settled, and
+  // re-asking them invites the model to rewrite them.
+  const schema = JSON.parse(ask?.schema ?? "{}") as { required?: string[] };
+  assert.deepEqual(schema.required, ["expectedFiles", "expectedSymbols"]);
+
+  } finally {
+  // Let the parked round finish either way: on a failed assertion the pending
+  // `sendContext` would otherwise keep this test alive forever, and a hang
+  // reads as a timeout rather than as the assertion that actually failed.
+  // That is the difference between a regression test that names its cause and
+  // one that only stops.
+  await adapter.acceptBlanketClaim(session.id, {
+    ...PLAN,
+    expectedFiles: ["src/value.js"],
+    expectedSymbols: ["value"],
+  });
+  await adapter.resolveScopeChange(session.id, {
+    requestId: "scope_1",
+    taskId: TASK.id,
+    decision: "approved",
+    revisedPlan: { ...PLAN, expectedFiles: ["src/value.js"] },
+    constraints: [],
+    ownershipGrants: [],
+    explanation: "Granted",
+    decidedAt: new Date().toISOString(),
+  });
+  await adapter.resume(session.id);
+  await executing;
+  await rm(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("claude: a session that was never paused refuses to be asked", async () => {

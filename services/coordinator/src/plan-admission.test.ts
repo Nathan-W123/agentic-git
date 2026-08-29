@@ -2175,3 +2175,181 @@ test("one claim-held file does not cancel the split on a shareable one", () => {
     `the holder's declared function was granted away: ${JSON.stringify(deferred)}`,
   );
 });
+
+test("a file that leaves no ground is withheld even when a sibling leaves plenty", () => {
+  // The inverse of the bug above, and the reason both are worth stating: a
+  // per-file verdict evaluated across the plan fails in whichever direction
+  // the quantifier points. `admitWithinFiles` used to ask
+  // `shared.some(leavesGround)` — so one file with real remainder satisfied
+  // the bar for every file beside it, including files whose entire indexed
+  // extent is the holder's.
+  //
+  // `full.ts` is nothing but the holder's one function. Alone in a plan it is
+  // correctly refused: what would be "granted" is the space past the last line
+  // anyone placed, arbitrated against nothing, which is the illusory split
+  // `leavesGround` exists to decline. Adding `wide.ts` — genuinely divisible,
+  // nobody disputes it — used to buy a lease on that empty tail as well.
+  const ranges: Record<
+    string,
+    { name: string; startLine: number; endLine: number }[]
+  > = {
+    "src/full.ts": [{ name: "whole", startLine: 1, endLine: 30 }],
+    "src/wide.ts": [
+      { name: "heldPart", startLine: 1, endLine: 10 },
+      { name: "freePart", startLine: 11, endLine: 20 },
+    ],
+  };
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/full.ts", "src/wide.ts"],
+      expectedSymbols: ["freePart"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/full.ts", "src/wide.ts"],
+        expectedSymbols: ["whole", "heldPart"],
+        declared: { symbols: ["whole", "heldPart"] },
+      }),
+    ],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: (file: string) => ranges[file] ?? [] },
+  );
+
+  // The divisible file is still granted — this must not become a refusal.
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.ok(
+    grantedResources(admission).includes("file:src/wide.ts"),
+    "the genuinely divisible file was withheld too",
+  );
+  // And the file with nothing left in it is not.
+  assert.ok(
+    !grantedResources(admission).includes("file:src/full.ts"),
+    "a file whose every placed line is the holder's was granted its tail",
+  );
+  assert.ok(
+    (admission.deferredResources ?? []).some(
+      (resource) =>
+        resource.resourceType === "file" && resource.resourceId === "src/full.ts",
+    ),
+    "the groundless file was not deferred to its holder",
+  );
+});
+
+test("one unreadable file does not cancel the symbol split for the rest", () => {
+  // Third instance of the same shape, and the last one in this path: a
+  // stylesheet nobody contests, sitting in a plan beside two source files,
+  // used to withdraw symbol withholding from all of them — `contestedSymbols`
+  // read `locate` over every granted file and returned nothing if any came
+  // back unreadable.
+  //
+  // The guarantee that gate stood in for is enforced a few lines below it
+  // instead: every withheld symbol must have been placed, and a symbol living
+  // only in an unreadable file is placed nowhere. So the split is still
+  // declined exactly where enforcement would be blind — and no longer where
+  // it would not.
+  //
+  // Reaching that stage takes a collision the file-level split cannot answer:
+  // the holder names `a.ts` and a function that lives in `b.ts`, so dropping
+  // the contested file leaves the symbol overlap standing and the decision
+  // has to go on to ask which symbols can be withheld.
+  const ranges: Record<
+    string,
+    { name: string; startLine: number; endLine: number }[] | undefined
+  > = {
+    "src/a.ts": [{ name: "held", startLine: 1, endLine: 10 }],
+    "src/b.ts": [
+      { name: "other", startLine: 1, endLine: 10 },
+      { name: "mine", startLine: 11, endLine: 20 },
+    ],
+    // The index cannot read it, which is what `undefined` means here.
+    "styles.css": undefined,
+  };
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/a.ts", "src/b.ts", "styles.css"],
+      expectedSymbols: ["mine", "other"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/a.ts"],
+        expectedSymbols: ["held", "other"],
+        declared: { symbols: ["held", "other"] },
+      }),
+    ],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: (file: string) => ranges[file] },
+  );
+
+  assert.equal(
+    admission.status,
+    "approved_with_constraints",
+    `the stylesheet cancelled the symbol split: ${admission.explanation}`,
+  );
+  assert.ok(
+    grantedResources(admission).includes("file:src/b.ts"),
+    "the source file was withheld on the stylesheet's account",
+  );
+  assert.ok(
+    (admission.deferredResources ?? []).some(
+      (resource) =>
+        resource.resourceType === "symbol" && resource.resourceId === "other",
+    ),
+    "the contested symbol was granted away rather than withheld",
+  );
+});
+
+test("a refusal says why the split was not offered", () => {
+  // Six rounds of a field report were spent guessing at this from the
+  // outside. "Executing work holds a.js, b.js" is the same sentence whether
+  // the splitter was never reached, reached and found nothing to divide, or
+  // reached and refused the division — and each of those wants a different
+  // response from whoever is reading it. Every theory fitted the symptom, and
+  // the message could not rule any of them out.
+  //
+  // The holder here named the file and no function in it, which is the case
+  // that actually bites: a declaration with no symbols occupies the whole
+  // file, so there is no line to draw and the arrival waits behind a file its
+  // holder may have been nowhere near.
+  const ranges: Record<
+    string,
+    { name: string; startLine: number; endLine: number }[]
+  > = {
+    "src/pricing.js": [
+      { name: "basePrice", startLine: 1, endLine: 10 },
+      { name: "orderTotal", startLine: 11, endLine: 20 },
+    ],
+  };
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/pricing.js"],
+      expectedSymbols: ["orderTotal"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/pricing.js"],
+        expectedSymbols: [],
+        // Named the file, named nothing in it.
+        declared: { symbols: [] },
+      }),
+    ],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: (file: string) => ranges[file] ?? [] },
+  );
+
+  assert.notEqual(
+    admission.status,
+    "approved_with_constraints",
+    "this scenario is supposed to be the refusing one",
+  );
+  assert.ok(
+    admission.explanation.includes("held whole") ||
+      admission.explanation.includes("no line"),
+    `the refusal still does not say why it refused: ${admission.explanation}`,
+  );
+  // And it has to keep saying who holds what, which is the first thing anyone
+  // reading it wants.
+  assert.ok(
+    admission.explanation.includes("src/pricing.js"),
+    `the refusal stopped naming the contested file: ${admission.explanation}`,
+  );
+});

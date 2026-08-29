@@ -628,6 +628,23 @@ function partiallyAdmitted(
   };
 }
 
+/**
+ * Why partial admission declined, in one clause, for the refusal to carry.
+ *
+ * A sequenced plan used to say only which files somebody else holds, and that
+ * cannot distinguish the three states an operator actually needs to tell
+ * apart: the split was never attempted, it was attempted and there was
+ * nothing to divide, or it was attempted and the division was refused. Six
+ * rounds of a field report were spent guessing between them from the outside,
+ * with each theory fitting the symptom.
+ *
+ * It is a string on a refusal rather than a structured field because it is
+ * read by a person deciding whether to reword a task, not by code.
+ */
+interface SplitDecline {
+  reason?: string;
+}
+
 export class PlanAdmissionController {
   public constructor(
     private readonly conflicts: ConflictDetector = new ConflictDetector(),
@@ -712,10 +729,20 @@ export class PlanAdmissionController {
     // *every* file is being created and *every* plan is ungrounded, so
     // refusing all splitting here meant partial admission could never fire
     // during the phase of a project when tasks overlap most.
-    if (planGroundingConfidence(input.plan) === "ungrounded") {
-      return this.admitDeclaredPaths(input, whole) ?? whole;
+    const decline: SplitDecline = {};
+    const split =
+      planGroundingConfidence(input.plan) === "ungrounded"
+        ? this.admitDeclaredPaths(input, whole, decline)
+        : this.admitPartially(input, whole, decline);
+    if (split !== undefined) {
+      return split;
     }
-    return this.admitPartially(input, whole) ?? whole;
+    // The refusal stands, but it now says what was tried. Appended rather
+    // than replacing the explanation, because which files are held is still
+    // the first thing anyone wants to know.
+    return decline.reason === undefined
+      ? whole
+      : { ...whole, explanation: `${whole.explanation} (${decline.reason})` };
   }
 
   /**
@@ -730,21 +757,27 @@ export class PlanAdmissionController {
   private admitDeclaredPaths(
     input: PlanAdmissionInput,
     whole: PlanAdmission,
+    decline: SplitDecline = {},
   ): PlanAdmission | undefined {
     const occupancy = this.occupancy(input);
     const contested = this.contestedFiles(input, occupancy);
     if (contested.length === 0) {
       // The refusal was not about file overlap, so there is no path split
       // that answers it.
+      decline.reason = "the refusal was not about file overlap";
       return undefined;
     }
     const deferred = [...contested, ...this.derivedFrom(input, contested)];
     const reduced = reducePlanScope(input.plan, deferred);
     if (reduced.expectedFiles.length === 0) {
+      decline.reason =
+        "every file this plan named is contested, and an ungrounded plan has " +
+        "no index to draw a line inside one";
       return undefined;
     }
     const partial = this.decide(reduced, input, occupancy, true);
     if (!planAdmissionApproved(partial)) {
+      decline.reason = `the reduced plan was still refused: ${partial.explanation}`;
       return undefined;
     }
     // The evidence recorded is the collision this split was an answer to, and
@@ -814,6 +847,7 @@ export class PlanAdmissionController {
   private admitPartially(
     input: PlanAdmissionInput,
     whole: PlanAdmission,
+    decline: SplitDecline = {},
   ): PlanAdmission | undefined {
     const occupancy = this.occupancy(input);
     const contested = this.contestedFiles(input, occupancy);
@@ -864,7 +898,7 @@ export class PlanAdmissionController {
     // turn, so the only thing left to try is a line drawn inside the files
     // rather than around them.
     if (reduced.expectedFiles.length === 0) {
-      return this.admitWithinFiles(input, whole, contested);
+      return this.admitWithinFiles(input, whole, contested, decline);
     }
     let partial =
       deferred.length === 0
@@ -877,16 +911,24 @@ export class PlanAdmissionController {
     if (!planAdmissionApproved(partial)) {
       const symbols = this.contestedSymbols(input, reduced, narrowed);
       if (symbols.length === 0) {
+        decline.reason =
+          "dropping the contested files left a collision no withheld symbol " +
+          "could answer";
         return undefined;
       }
       deferred = [...deferred, ...symbols];
       reduced = reducePlanScope(input.plan, deferred);
       if (reduced.expectedFiles.length === 0) {
+        decline.reason = "withholding the collided symbols emptied the plan";
         return undefined;
       }
       partial = this.decide(reduced, input, narrowed, true);
     }
     if (!planAdmissionApproved(partial) || deferred.length === 0) {
+      decline.reason =
+        deferred.length === 0
+          ? "there was nothing to withhold"
+          : `the divided plan was still refused: ${partial.explanation}`;
       return undefined;
     }
     return partiallyAdmitted(whole, partial, reduced, deferred);
@@ -925,9 +967,14 @@ export class PlanAdmissionController {
     input: PlanAdmissionInput,
     whole: PlanAdmission,
     contested: readonly DeferredResource[],
+    decline: SplitDecline = {},
   ): PlanAdmission | undefined {
     const locate = input.symbolRangesInFile;
     if (locate === undefined || contested.length === 0) {
+      decline.reason =
+        locate === undefined
+          ? "no symbol index was available to draw a line inside a file"
+          : "nothing was contested to divide";
       return undefined;
     }
     // A file the index cannot read is a file no patch can be checked against,
@@ -956,6 +1003,9 @@ export class PlanAdmissionController {
     // this can reason about, there is no split to offer and the plan waits.
     const readable = granted.filter((file) => !unreadable.has(file));
     if (readable.length === 0) {
+      decline.reason =
+        `the index could not read any of ${granted.join(", ")}, so no patch ` +
+        "to them could be checked against a holder's lines";
       return undefined;
     }
     const declared = new Set(readable);
@@ -1060,22 +1110,48 @@ export class PlanAdmissionController {
         withheldWhole.push(entry);
         continue;
       }
+      // Granting a plan the tail of a file whose every placed line is
+      // somebody else's is not a split, and it is what the enriched symbol
+      // claim produces on a file made only of declarations. Asked per file,
+      // because that is what it is a statement about.
+      //
+      // It used to be asked across the plan — `shared.some(...)` — which is
+      // the inverse of the bug the loop above was just fixed for, and fails
+      // the other way. There one undividable file withdrew the split from
+      // every sibling; here one file that leaves real remainder let every
+      // sibling through, including files whose entire indexed extent is the
+      // holder's. Measured: a candidate alone on such a file is correctly
+      // sequenced, and adding one unrelated shareable file to the same plan
+      // buys it an exclusive lease on everything past that file's last placed
+      // line — the append region arbitrated against nothing, which is the
+      // illusory split this function exists to decline.
+      //
+      // `partitionContested` already asks it per file and says so in as many
+      // words: "`admitWithinFiles` withdraws the whole split on that; here
+      // only this file is withdrawn." Now they agree.
+      const ranges = normalizeRanges(spans);
+      if (!leavesGround(locate(file) ?? [], ranges)) {
+        for (const byFile of occupied.values()) {
+          byFile.delete(file);
+        }
+        withheldWhole.push(entry);
+        continue;
+      }
       shared.push({
         file,
-        ranges: normalizeRanges(spans),
+        ranges,
         symbols: withheldSymbolsFor(file, spans, entry),
       });
     }
 
-    // Granting a plan the tail of a file whose every placed line is somebody
-    // else's is not a split, and it is what the enriched symbol claim produces
-    // on a file made only of declarations. At least one of these files has to
-    // leave real ground behind, or the plan waits as it did before.
-    if (
-      !shared.some((entry) =>
-        leavesGround(locate(entry.file) ?? [], entry.ranges),
-      )
-    ) {
+    // Nothing survived as divisible, so there is no line to draw and the plan
+    // waits exactly as it did before.
+    if (shared.length === 0) {
+      decline.reason =
+        "every contested file is held whole — " +
+        withheldWhole
+          .map((entry) => `${entry.resourceId}: ${entry.reason}`)
+          .join("; ");
       return undefined;
     }
     const within = this.occupancy(
@@ -1099,12 +1175,14 @@ export class PlanAdmissionController {
       ...shared.flatMap((entry) => entry.symbols),
     ];
     if (deferred.length === 0) {
+      decline.reason = "the split would have withheld nothing";
       return undefined;
     }
     let reduced = reducePlanScope(input.plan, deferred);
     // Everything readable turned out to be withheld too. Granting a plan that
     // names no file is granting nothing, so the wait stands.
     if (reduced.expectedFiles.length === 0) {
+      decline.reason = "every file this plan named was withheld";
       return undefined;
     }
     let partial = this.decide(reduced, input, within, true);
@@ -1114,16 +1192,20 @@ export class PlanAdmissionController {
     if (!planAdmissionApproved(partial)) {
       const symbols = this.contestedSymbols(input, reduced, within);
       if (symbols.length === 0) {
+        decline.reason =
+          "the division left a collision no withheld symbol could answer";
         return undefined;
       }
       deferred = [...deferred, ...symbols];
       reduced = reducePlanScope(input.plan, deferred);
       if (reduced.expectedFiles.length === 0) {
+        decline.reason = "withholding the collided symbols emptied the plan";
         return undefined;
       }
       partial = this.decide(reduced, input, within, true);
     }
     if (!planAdmissionApproved(partial)) {
+      decline.reason = `the divided plan was still refused: ${partial.explanation}`;
       return undefined;
     }
     return partiallyAdmitted(whole, partial, reduced, deferred);
@@ -1664,10 +1746,22 @@ export class PlanAdmissionController {
     if (locate === undefined) {
       return [];
     }
+    // A file the index cannot read contributes no placements, and that is all
+    // it does. It used to end the whole symbol split — one unreadable path
+    // among the granted set and no symbol was offered for any of them, so a
+    // plan touching a stylesheet beside two source files was sequenced on the
+    // stylesheet's account. That is the same shape as the two gates above it,
+    // and it fails for the same reason: the verdict is about one file and was
+    // applied to the plan.
+    //
+    // Nothing is loosened by dropping it, because the guarantee it was
+    // standing in for is enforced directly below: `contested.every(...)`
+    // requires every withheld symbol to have been placed, and a symbol that
+    // lives only in an unreadable file is placed nowhere, so the split is
+    // still declined for exactly the cases that need it. What changes is that
+    // a withheld symbol the index *can* place is no longer discarded because
+    // some unrelated file in the same plan is a stylesheet.
     const ranges = reduced.expectedFiles.map((file) => locate(file));
-    if (ranges.some((entry) => entry === undefined)) {
-      return [];
-    }
     const contested = this.contested(
       input,
       reduced,
