@@ -1280,6 +1280,38 @@ const STRING_ARRAY_JSON_SCHEMA = {
  * every named file whole, so the ask that was supposed to release it releases
  * nothing.
  */
+/**
+ * The correction for a plan whose every named file is absent from the tree.
+ *
+ * Not "some are new" — every one. A task that creates files names paths that
+ * do not exist yet and is right to; a task that names three paths and hits
+ * none of them did not look. Watched live: an agent asked to change a search
+ * bar planned `src/components/search-bar.tsx` and symbol `SearchBar` in a
+ * repository whose search bar lives in `app.js`, having been handed a
+ * planning worktree it never read.
+ *
+ * The cost lands on arbitration, which is why it is worth a round here. A
+ * plan nothing in the repository can vouch for cannot be proven disjoint from
+ * anything, so if any running task shares its objective the two are sequenced
+ * — and the sequencing is correct, which is what makes it expensive: nobody
+ * downstream can tell a genuinely conflicting plan from one that simply named
+ * the wrong files, so nobody downstream can fix it. Here it is still cheap: a
+ * second prompt, in the same worktree, before anything is arbitrated.
+ *
+ * One round, and a second answer naming the same paths is taken at its word:
+ * creating a whole subtree is a real task and it names nothing that exists.
+ */
+const UNFOUND_FILES_CORRECTION = [
+  "None of the files you named exist in this repository. That is worth a " +
+    "second look before anything is decided on it: a plan whose paths cannot " +
+    "be found is treated as unverifiable, and any task already running that " +
+    "shares your objective will be put ahead of you.",
+  "You have the repository in front of you. List the directory, find the " +
+    "files that actually hold the code you described, and name those.",
+  "If you really are creating all of these — a new module, a new subtree — " +
+    "answer with the same paths again.",
+].join("\n");
+
 const EMPTY_DECLARATION_CORRECTION = [
   "Your previous answer named files but no functions, classes or methods, " +
     "which keeps every file you named whole — the task waiting on you cannot " +
@@ -1752,6 +1784,30 @@ export class PromptCliAdapter implements AgentAdapter {
           record,
           workspace.path,
           [this.planPrompt(record.input), EMPTY_PLAN_CORRECTION].join("\n"),
+        );
+      } else if (
+        plan.expectedFiles.length > 0 &&
+        !plan.expectedFiles.some((file) =>
+          existsSync(path.join(workspace.path, file)),
+        )
+      ) {
+        // Checked here rather than left to the index because here it is still
+        // free: the planning worktree is the repository, on disk, and a path
+        // either resolves in it or does not. The index reaches the same
+        // verdict later, by which time the plan has been submitted and the
+        // only remaining move is to refuse it.
+        this.emit(record, {
+          event: "progress",
+          message:
+            `${this.profile.name} named ${String(plan.expectedFiles.length)} ` +
+            "file(s), none of which exist; asking once more before it is " +
+            "arbitrated against work that does",
+          occurredAt: new Date().toISOString(),
+        });
+        plan = await this.runPlanning(
+          record,
+          workspace.path,
+          [this.planPrompt(record.input), UNFOUND_FILES_CORRECTION].join("\n"),
         );
       } else if (
         plan.expectedFiles.length > 0 &&
