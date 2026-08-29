@@ -159,6 +159,8 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(entries, /group: "Workspaces"/u);
   assert.match(entries, /group: "People"/u);
   assert.match(entries, /group: "Navigation"/u);
+  assert.match(entries, /switcherMessageRows\(query\)/u);
+  assert.match(entries, /group: "Messages"/u);
   assert.match(entries, /state\.dmPeople/u);
   // Navigation is Settings and nothing else. Chats is the screen the switcher
   // is already drawn over, and the backlog of everything every agent has done
@@ -214,6 +216,42 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(app, /if \(event\.key === "\?"\)/u);
   assert.match(app, /function openShortcutSheet\(\)/u);
   assert.match(app, /class="global-search" data-act="switch-open"/u);
+});
+
+test("the quick switcher can find messages in the open channel", async () => {
+  const app = await publicFile("app.js");
+
+  assert.match(app, /function channelMessageMatchesSwitcherQuery\(/u);
+  assert.match(app, /function switcherMessageLabel\(/u);
+  assert.match(app, /function switcherMessageRows\(query\)/u);
+  assert.match(app, /function openSwitcherMessage\(messageId\)/u);
+
+  const messageRows = slice(
+    app,
+    "function switcherMessageRows(query) {",
+    "function switcherEntries(query) {",
+  );
+  assert.match(messageRows, /state\.route !== "chats"/u);
+  assert.match(messageRows, /state\.channelLoaded\.has\(repositoryId\)/u);
+  assert.match(messageRows, /channelMessageMatchesSwitcherQuery\(repositoryId, entry, term\)/u);
+  assert.match(messageRows, /group: "Messages"/u);
+  assert.match(messageRows, /act: "switch-message"/u);
+  assert.match(messageRows, /channelMessagesFor\(repositoryId\)/u);
+
+  const openMessage = slice(
+    app,
+    "function openSwitcherMessage(messageId) {",
+    "function openSwitcher({ keyboard = false } = {}) {",
+  );
+  assert.match(openMessage, /state\.scrollToMessage = messageId/u);
+  assert.match(openMessage, /closeSwitcher\(false\)/u);
+
+  const action = slice(app, 'case "switch-message":', '\n    case "switch-screen":');
+  assert.match(action, /openSwitcherMessage\(value\)/u);
+
+  // Loaded channel messages only — the removed in-channel search UI stays gone.
+  assert.doesNotMatch(app, /channel-msg-search/u);
+  assert.doesNotMatch(app, /Search the messages in this channel/u);
 });
 
 test("settings is grouped inside the account menu", async () => {

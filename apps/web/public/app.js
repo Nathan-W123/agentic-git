@@ -95,6 +95,7 @@ import {
   renameRepository,
   repositoryLabel,
   leaveRepository,
+  channelAuthor,
   channelMessagesFor,
   deleteAllChannelThreads,
   deleteChannelMessageEntry,
@@ -4922,9 +4923,66 @@ document.addEventListener("drop", (event) => {
  */
 let switcherIndex = 0;
 
+/** Plain searchable text from a loaded channel message or thread reply. */
+function switcherMessagePlainText(entry) {
+  return String(entry?.content ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function channelMessageMatchesSwitcherQuery(repositoryId, entry, term) {
+  if (term === "" || entry.deletedAt !== undefined) {
+    return false;
+  }
+  if (switcherMessagePlainText(entry).toLowerCase().includes(term)) {
+    return true;
+  }
+  return String(channelAuthor(repositoryId, entry).name ?? "")
+    .toLowerCase()
+    .includes(term);
+}
+
+function switcherMessageLabel(repositoryId, entry) {
+  const author = channelAuthor(repositoryId, entry).name ?? "";
+  const line = switcherMessagePlainText(entry);
+  const preview = line.length > 60 ? `${line.slice(0, 57)}…` : line;
+  return preview === "" ? author : `${author}: ${preview}`;
+}
+
+function switcherMessageRows(query) {
+  const term = query.trim().toLowerCase();
+  if (term === "" || state.route !== "chats") {
+    return [];
+  }
+  const repositoryId = activeChannelId();
+  if (repositoryId === "" || !state.channelLoaded.has(repositoryId)) {
+    return [];
+  }
+  const matches = [];
+  for (const root of channelMessagesFor(repositoryId)) {
+    for (const entry of [root, ...(root.replies ?? [])]) {
+      if (channelMessageMatchesSwitcherQuery(repositoryId, entry, term)) {
+        matches.push(entry);
+      }
+    }
+  }
+  return matches
+    .slice()
+    .reverse()
+    .slice(0, 4)
+    .map((entry) => ({
+      group: "Messages",
+      label: switcherMessageLabel(repositoryId, entry),
+      act: "switch-message",
+      value: entry.id,
+      iconName: "chatBubble",
+    }));
+}
+
 function switcherEntries(query) {
   const term = query.trim().toLowerCase();
   const rows = [
+    ...switcherMessageRows(query),
     ...state.repositories.map((repo) => ({
       group: "Workspaces",
       label: repositoryLabel(repo.id),
@@ -4950,10 +5008,14 @@ function switcherEntries(query) {
     },
   ];
   const matches = rows.filter(
-    (row) => term === "" || row.label.toLowerCase().includes(term),
+    (row) =>
+      term === "" ||
+      row.group === "Messages" ||
+      row.label.toLowerCase().includes(term),
   );
   const selected = new Set();
   for (const [group, limit] of [
+    ["Messages", 4],
     ["Workspaces", 3],
     ["People", 2],
     ["Navigation", 2],
@@ -5044,6 +5106,15 @@ function closeSwitcher(restoreFocus = true) {
   }
 }
 
+function openSwitcherMessage(messageId) {
+  closeSwitcher(false);
+  if (state.route !== "chats") {
+    navigate("chats");
+  }
+  state.scrollToMessage = messageId;
+  render();
+}
+
 function openSwitcher({ keyboard = false } = {}) {
   if (document.querySelector("#qs-layer") !== null) {
     closeSwitcher();
@@ -5059,7 +5130,7 @@ function openSwitcher({ keyboard = false } = {}) {
       keyboard ? ' aria-modal="true"' : ""
     }>
       <input class="qs-input" data-act="switch-input" type="text" role="combobox"
-        placeholder="Go to a workspace, conversation, or screen…"
+        placeholder="Go to a workspace, conversation, screen, or message…"
         aria-label="Go to" aria-autocomplete="list" aria-expanded="true"
         aria-controls="qs-list" autocomplete="off">
       <div class="qs-list" id="qs-list" role="listbox"></div>
@@ -5084,7 +5155,7 @@ function openSwitcher({ keyboard = false } = {}) {
 /** What the keys do, said in one place rather than learned by accident. */
 function openShortcutSheet() {
   const pairs = [
-    ["Ctrl / ⌘ + K", "Go to a workspace, conversation, or screen"],
+    ["Ctrl / ⌘ + K", "Go to a workspace, conversation, screen, or message"],
     ["?", "This list"],
     ["Esc", "Close whatever is stacked over the conversation"],
     ["Enter", "Send; Shift + Enter starts a new line"],
@@ -8745,6 +8816,9 @@ document.addEventListener("click", (event) => {
       navigate("chats");
       render();
       loadOpenedDirectMessage(value);
+      return;
+    case "switch-message":
+      openSwitcherMessage(value);
       return;
     case "switch-screen":
       closeSwitcher(false);
