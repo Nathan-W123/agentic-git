@@ -124,6 +124,7 @@ test("the channel menu offers owner-gated repository deletion", async () => {
   assert.match(items, /label: "Copy link"/u);
   assert.match(items, /label: "Repository"/u);
   assert.match(items, /label: "Sync from GitHub"/u);
+  assert.doesNotMatch(items, /separator: true/u);
   // Deleting comes last, from the shared helper — so the channel header and
   // the repository card cannot drift into offering it to different people.
   assert.match(items, /\.\.\.repositoryMenuItems\(repositoryId\)/u);
@@ -139,6 +140,7 @@ test("the channel menu offers owner-gated repository deletion", async () => {
   assert.match(shared, /act: "channel-delete-repo"/u);
   assert.match(shared, /label: "Delete repository"/u);
   assert.match(shared, /danger: true/u);
+  assert.doesNotMatch(shared, /separator: true/u);
 
   // And the row reaches the action that asks for the typed phrase.
   assert.match(

@@ -7817,7 +7817,6 @@ function repositoryMenuItems(repositoryId) {
     return [];
   }
   return [
-    { separator: true },
     {
       act: "channel-delete-repo",
       value: repositoryId,
@@ -7854,7 +7853,6 @@ function conversationMenuItems(repositoryId) {
     },
     ...(state.repositories.find((repo) => repo.id === repositoryId)?.provider === "github"
       ? [
-          { separator: true },
           { group: true, label: "Repository" },
           {
             act: "channel-sync",
@@ -7864,8 +7862,8 @@ function conversationMenuItems(repositoryId) {
           },
         ]
       : []),
-    // Last, and separated: everything above changes what this conversation
-    // does, and this one ends it.
+    // Last: everything above changes what this conversation does, and this
+    // one ends it.
     ...repositoryMenuItems(repositoryId),
   ];
 }
