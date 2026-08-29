@@ -4815,22 +4815,26 @@ function catchUpPanel() {
   // read a `name` field no repository has, so a renamed channel's digest
   // kept announcing itself by the id the rename was meant to retire.
   const repositoryName = repositoryLabel(catchUp.repositoryId);
-  const workers = new Map();
-  let touched = 0;
   const rows = catchUp.tasks
     .map((task) => {
       const changedFiles = Array.isArray(task.changedFiles)
         ? task.changedFiles
         : [];
       const taskRepositoryId = task.repositoryId ?? catchUp.repositoryId;
-      touched += changedFiles.length;
       // Resolved from the task itself rather than by scanning the roster
       // here, so a digest drawn before the roster lands still attributes its
       // rows to the vendor that ran them instead of to nobody.
       const worker = agentForTask(task, taskRepositoryId);
-      if (worker !== undefined) {
-        workers.set(worker.id, worker);
-      }
+      const changedFilePills = changedFiles.map(
+        (path) => `<button type="button" class="pill catch-up-file"
+            data-act="chan-file-open" data-value="${esc(path)}"
+            data-task="${esc(task.id)}" data-repository="${esc(taskRepositoryId)}"
+            title="Open ${esc(path)}">${icon(
+              "file",
+            )}<span class="pill-label">${esc(path)}</span></button>`,
+      );
+      const shownFilePills = changedFilePills.slice(0, 2);
+      const moreFilePills = changedFilePills.slice(2);
       const summary =
         String(task.summary ?? "").trim() ||
         "Completed and landed successfully.";
@@ -4867,17 +4871,24 @@ function catchUpPanel() {
       ${
         changedFiles.length === 0
           ? ""
-          : `<div class="pill-bar catch-up-files" aria-label="Files changed by this task">
-          ${changedFiles
-            .map(
-              (path) => `<button type="button" class="pill catch-up-file"
-            data-act="chan-file-open" data-value="${esc(path)}"
-            data-task="${esc(task.id)}" data-repository="${esc(taskRepositoryId)}"
-            title="Open ${esc(path)}">${icon(
-              "file",
-            )}<span class="pill-label">${esc(path)}</span></button>`,
-            )
-            .join("")}
+          : `<div class="catch-up-files" aria-label="Files changed by this task">
+          <div class="pill-bar catch-up-file-preview">${shownFilePills.join("")}</div>
+          ${
+            moreFilePills.length === 0
+              ? ""
+              : `<details class="catch-up-file-more"${
+                  state.changesOpen[task.id] === true ? " open" : ""
+                }>
+              <summary class="pill catch-up-file-more-toggle"
+                data-act="changed-files-toggle" data-value="${esc(task.id)}">
+                <span class="catch-up-more-closed">+${String(
+                  moreFilePills.length,
+                )} more</span>
+                <span class="catch-up-more-open">Show less</span>
+              </summary>
+              <div class="pill-bar catch-up-file-overflow">${moreFilePills.join("")}</div>
+            </details>`
+          }
         </div>`
       }
     </li>`;
@@ -4898,26 +4909,6 @@ function catchUpPanel() {
         <h2><strong>${esc(String(count))}</strong> ${
           count === 1 ? "task" : "tasks"
         } done</h2>
-        ${pillBar(
-          [
-            ...[...workers.values()].map((worker) => ({
-              icon: "agent",
-              agent: worker,
-              label: agentPillName(worker),
-              title: `${agentPillName(worker)} completed work while you were away`,
-            })),
-            touched === 0
-              ? undefined
-              : {
-                  icon: "file",
-                  label: `${String(touched)} ${
-                    touched === 1 ? "file" : "files"
-                  }`,
-                  title: "Files changed while you were away",
-                },
-          ],
-          "while you were away",
-        )}
       </div>
       <ul class="catch-up-task-list" aria-label="Completed tasks">${rows}</ul>
     </div>

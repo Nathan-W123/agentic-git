@@ -10872,8 +10872,6 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-intro {
-  display: grid;
-  gap: 12px;
   padding-bottom: 22px;
 }
 
@@ -10951,7 +10949,46 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
   padding-top: 2px;
+}
+
+.catch-up-file-preview {
+  display: contents;
+}
+
+.catch-up-file-more {
+  min-width: 0;
+}
+
+.catch-up-file-more[open] {
+  flex: 1 0 100%;
+}
+
+.catch-up-file-more-toggle {
+  appearance: none;
+  list-style: none;
+  cursor: pointer;
+}
+
+.catch-up-file-more-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.catch-up-file-overflow {
+  margin-top: 6px;
+}
+
+.catch-up-more-open,
+.catch-up-file-more[open] .catch-up-more-closed {
+  display: none;
+}
+
+.catch-up-file-more[open] .catch-up-more-open {
+  display: inline;
 }
 
 .catch-up-file {
@@ -10962,7 +10999,9 @@ dialog.modal[open]::backdrop {
 }
 
 .catch-up-file:hover,
-.catch-up-file:focus-visible {
+.catch-up-file:focus-visible,
+.catch-up-file-more-toggle:hover,
+.catch-up-file-more-toggle:focus-visible {
   border-color: var(--accent);
   background: var(--bg-hover);
   color: var(--text);

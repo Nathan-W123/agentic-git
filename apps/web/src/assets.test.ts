@@ -2900,8 +2900,7 @@ test("catch-up pills use each named agent's actual mark", async () => {
     /agentFace\(pill\.agent, 18, \{ showPresence: false \}\)/u,
   );
   assert.match(catchUpBody, /agent: worker/u);
-  assert.match(catchUpBody, /\.\.\.\[\.\.\.workers\.values\(\)\]\.map/u);
-  assert.doesNotMatch(catchUpBody, /label: `\$\{String\(workers\.size\)\} agents`/u);
+  assert.doesNotMatch(catchUpBody, /workers\.values|touched/u);
 
   // Naming an agent is enough: a pill that says it is an agent's takes the
   // agent's mark even where the record behind it is missing, so there is no
@@ -2918,6 +2917,28 @@ test("catch-up pills use each named agent's actual mark", async () => {
   assert.match(catchUpBody, /agentForTask\(task, taskRepositoryId\)/u);
   const data = await publicFile("data.js");
   assert.match(data, /export function agentForTask\(/u);
+});
+
+test("catch-up digest keeps changed-file lists compact until expanded", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const styles = await publicFile("styles.css");
+  const catchUpStart = chats.indexOf("function catchUpPanel()");
+  const catchUpBody = chats.slice(
+    catchUpStart,
+    chats.indexOf("\n/**", catchUpStart),
+  );
+
+  assert.match(catchUpBody, /changedFilePills\.slice\(0, 2\)/u);
+  assert.match(catchUpBody, /changedFilePills\.slice\(2\)/u);
+  assert.match(catchUpBody, /state\.changesOpen\[task\.id\]/u);
+  assert.match(catchUpBody, /data-act="changed-files-toggle"/u);
+  assert.match(catchUpBody, /data-act="chan-file-open"/u);
+  assert.match(catchUpBody, /data-task="\$\{esc\(task\.id\)\}"/u);
+  assert.match(
+    catchUpBody,
+    /data-repository="\$\{esc\(taskRepositoryId\)\}"/u,
+  );
+  assert.match(styles, /\.catch-up-file-more\[open\]/u);
 });
 
 test("every provider this deployment connects to has its own mark", async () => {
