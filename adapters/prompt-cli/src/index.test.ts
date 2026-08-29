@@ -1695,6 +1695,103 @@ test("claude: a plan that names no files is asked for again, once", async (t) =>
   assert.deepEqual(plan.expectedFiles, ["src/value.js"]);
 });
 
+test("claude: a plan whose every file is absent is asked for again, once", async (t) => {
+  // The failure this catches, watched live: asked to change a search bar, an
+  // agent planned `src/components/search-bar.tsx` and symbol `SearchBar` in a
+  // repository whose search bar lives in `app.js`. It had a planning worktree
+  // and never read it.
+  //
+  // Nothing downstream can repair that. A plan the index cannot vouch for is
+  // unverifiable, so it cannot be proven disjoint from anything, and any
+  // running task sharing its objective goes first — correctly, which is what
+  // makes it expensive: the refusal is right, and nobody downstream can tell a
+  // real conflict from a plan that named the wrong files. Here it is still one
+  // more prompt against the same worktree.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(String(options.input ?? ""));
+      return output(
+        claudeEnvelope(
+          JSON.stringify(
+            prompts.length === 1
+              ? {
+                  ...PLAN,
+                  expectedFiles: ["src/components/search-bar.tsx"],
+                  expectedSymbols: ["SearchBar"],
+                }
+              : PLAN,
+          ),
+        ),
+      );
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.equal(prompts.length, 2, "the agent was not asked to look again");
+  assert.match(prompts[1] ?? "", /prepare a coordination plan\./u);
+  assert.match(prompts[1] ?? "", /None of the files you named exist/u);
+  // The consequence, so the second attempt knows what it is avoiding rather
+  // than only that it was wrong.
+  assert.match(prompts[1] ?? "", /shares your objective will be put ahead/u);
+  assert.deepEqual(plan.expectedFiles, ["src/value.js"]);
+});
+
+test("claude: a plan that really is creating files is taken at its word", async (t) => {
+  // One round, like its siblings. Creating a new module is a real task and it
+  // names nothing that exists, so a second answer repeating the same paths is
+  // an answer, not a failure to comply — and failing it here would refuse the
+  // one shape this correction cannot tell apart from the mistake.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const prompts: string[] = [];
+  const invented = {
+    ...PLAN,
+    expectedFiles: ["src/brand-new/module.js"],
+    expectedSymbols: ["brandNew"],
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner: async (_executable, _args, options = {}) => {
+      prompts.push(String(options.input ?? ""));
+      return output(claudeEnvelope(JSON.stringify(invented)));
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  const plan = await adapter.requestPlan(session.id);
+
+  assert.equal(prompts.length, 2, "asked more than once");
+  assert.deepEqual(
+    plan.expectedFiles,
+    ["src/brand-new/module.js"],
+    "a genuine creation was overridden by the correction",
+  );
+});
+
 test("claude: a second empty plan is narrated as the condition it is, not failed", async (t) => {
   // Asked once and only once. Failing the task instead would re-commit an
   // error this adapter has already backed out of: an audit or a report
