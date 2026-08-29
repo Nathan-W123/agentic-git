@@ -1696,6 +1696,40 @@ export class Coordinator {
             // writing it" from "never arbitrated", and only the decision knows.
             if (answer.admission !== undefined) {
               entry.admission = answer.admission;
+              // And say so to the agent. The wave loop above wrote
+              // `entry.decision` from scheduling alone — "Approved for the
+              // next non-conflicting execution wave", no constraints — and
+              // that object is what `sendContext` hands over. A partial
+              // admission that never reaches the agent is not a partial
+              // admission: it is told it holds the file outright, so it edits
+              // the function the holder is inside, `splitChangeSet` divides
+              // that hunk back out, and where the withheld symbols were the
+              // bulk of the work the granted patch set comes back empty and
+              // the whole task is requeued. The agent run is spent and
+              // discarded — the exact outcome partial admission exists to
+              // avoid, and it cost the split to reach it.
+              //
+              // The remote path never had this problem: `worker.ts` builds
+              // its decision from the admission directly. Only the in-process
+              // coordinator dropped it, so the same admission was followable
+              // over the wire and not in the same process.
+              entry.decision = {
+                ...entry.decision,
+                decision:
+                  answer.admission.status === "approved"
+                    ? entry.decision.decision
+                    : "approved_with_constraints",
+                // Scheduling's constraints stay: they are about blockers and
+                // approvals, which the admission says nothing about.
+                constraints: [
+                  ...entry.decision.constraints,
+                  ...answer.admission.constraints,
+                ],
+                explanation:
+                  answer.admission.status === "approved"
+                    ? entry.decision.explanation
+                    : answer.admission.explanation,
+              };
             }
             admittedWave.push(entry);
             continue;

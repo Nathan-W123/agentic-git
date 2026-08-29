@@ -1060,22 +1060,43 @@ export class PlanAdmissionController {
         withheldWhole.push(entry);
         continue;
       }
+      // Granting a plan the tail of a file whose every placed line is
+      // somebody else's is not a split, and it is what the enriched symbol
+      // claim produces on a file made only of declarations. Asked per file,
+      // because that is what it is a statement about.
+      //
+      // It used to be asked across the plan — `shared.some(...)` — which is
+      // the inverse of the bug the loop above was just fixed for, and fails
+      // the other way. There one undividable file withdrew the split from
+      // every sibling; here one file that leaves real remainder let every
+      // sibling through, including files whose entire indexed extent is the
+      // holder's. Measured: a candidate alone on such a file is correctly
+      // sequenced, and adding one unrelated shareable file to the same plan
+      // buys it an exclusive lease on everything past that file's last placed
+      // line — the append region arbitrated against nothing, which is the
+      // illusory split this function exists to decline.
+      //
+      // `partitionContested` already asks it per file and says so in as many
+      // words: "`admitWithinFiles` withdraws the whole split on that; here
+      // only this file is withdrawn." Now they agree.
+      const ranges = normalizeRanges(spans);
+      if (!leavesGround(locate(file) ?? [], ranges)) {
+        for (const byFile of occupied.values()) {
+          byFile.delete(file);
+        }
+        withheldWhole.push(entry);
+        continue;
+      }
       shared.push({
         file,
-        ranges: normalizeRanges(spans),
+        ranges,
         symbols: withheldSymbolsFor(file, spans, entry),
       });
     }
 
-    // Granting a plan the tail of a file whose every placed line is somebody
-    // else's is not a split, and it is what the enriched symbol claim produces
-    // on a file made only of declarations. At least one of these files has to
-    // leave real ground behind, or the plan waits as it did before.
-    if (
-      !shared.some((entry) =>
-        leavesGround(locate(entry.file) ?? [], entry.ranges),
-      )
-    ) {
+    // Nothing survived as divisible, so there is no line to draw and the plan
+    // waits exactly as it did before.
+    if (shared.length === 0) {
       return undefined;
     }
     const within = this.occupancy(
@@ -1664,10 +1685,22 @@ export class PlanAdmissionController {
     if (locate === undefined) {
       return [];
     }
+    // A file the index cannot read contributes no placements, and that is all
+    // it does. It used to end the whole symbol split — one unreadable path
+    // among the granted set and no symbol was offered for any of them, so a
+    // plan touching a stylesheet beside two source files was sequenced on the
+    // stylesheet's account. That is the same shape as the two gates above it,
+    // and it fails for the same reason: the verdict is about one file and was
+    // applied to the plan.
+    //
+    // Nothing is loosened by dropping it, because the guarantee it was
+    // standing in for is enforced directly below: `contested.every(...)`
+    // requires every withheld symbol to have been placed, and a symbol that
+    // lives only in an unreadable file is placed nowhere, so the split is
+    // still declined for exactly the cases that need it. What changes is that
+    // a withheld symbol the index *can* place is no longer discarded because
+    // some unrelated file in the same plan is a stylesheet.
     const ranges = reduced.expectedFiles.map((file) => locate(file));
-    if (ranges.some((entry) => entry === undefined)) {
-      return [];
-    }
     const contested = this.contested(
       input,
       reduced,

@@ -381,6 +381,142 @@ class HolderAgent implements AgentAdapter {
   }
 }
 
+/**
+ * The other side of the same run: an agent that does exactly what it is told,
+ * so that what it is told is what the test measures.
+ */
+class ArrivingAgent implements AgentAdapter {
+  public readonly contexts: CoordinatorContext[] = [];
+  private readonly sessions = new Map<
+    string,
+    { input: StartTaskInput; context?: CoordinatorContext }
+  >();
+
+  public constructor(
+    private readonly options: {
+      agentId: string;
+      repository: CanonicalRepository;
+      workspaces: WorkspaceManager;
+    },
+  ) {}
+
+  public async getCapabilities(): Promise<AgentCapabilities> {
+    return {
+      canPlan: true,
+      canEditFiles: true,
+      canRunCommands: false,
+      canUseTools: false,
+      supportsStreaming: false,
+      supportsPause: true,
+    };
+  }
+
+  public async startTask(input: StartTaskInput): Promise<AgentSession> {
+    const session: AgentSession = {
+      id: createId("session"),
+      agentId: this.options.agentId,
+      taskId: input.task.id,
+      startedAt: new Date().toISOString(),
+    };
+    this.sessions.set(session.id, { input });
+    return session;
+  }
+
+  public async acceptBlanketClaim(): Promise<void> {
+    throw new Error("an arrival must not be handed a blanket claim");
+  }
+
+  public async requestPlan(sessionId: string): Promise<AgentPlan> {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) {
+      throw new Error(`Unknown session ${sessionId}`);
+    }
+    return {
+      taskId: session.input.task.id,
+      objective: "add a currency prefix where a total is shown",
+      intent: "add a currency prefix",
+      expectedFiles: [
+        "src/order-pricing.js",
+        "test/order-pricing.test.js",
+        "src/checkout.js",
+      ],
+      expectedSymbols: ["formatTotal", "testOrderTotal", "checkoutSummary"],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low",
+    };
+  }
+
+  public async requestReplan(): Promise<AgentPlan> {
+    throw new Error("the arrival was not expected to be asked to replan");
+  }
+
+  public async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) {
+      throw new Error(`Unknown session ${sessionId}`);
+    }
+    session.context = context;
+    this.contexts.push(structuredClone(context));
+    const target = path.join(context.workspacePath, "src", "order-pricing.js");
+    const before = await readFile(target, "utf8");
+    await writeFile(
+      target,
+      before.replace("return total.toFixed(2);", "return `$${total.toFixed(2)}`;"),
+      "utf8",
+    );
+  }
+
+  public async pause(): Promise<void> {
+    return undefined;
+  }
+
+  public async resume(): Promise<void> {
+    return undefined;
+  }
+
+  public async resolveScopeChange(): Promise<void> {
+    return undefined;
+  }
+
+  public async cancel(): Promise<void> {
+    return undefined;
+  }
+
+  public async collectChanges(sessionId: string): Promise<ChangeSet> {
+    const session = this.sessions.get(sessionId);
+    if (session?.context === undefined) {
+      throw new Error("the arrival never entered its edit phase");
+    }
+    const workspace: TaskWorkspace = {
+      id: session.context.decision.workspaceId ?? createId("workspace"),
+      taskId: session.input.task.id,
+      path: session.context.workspacePath,
+      rootPath: session.context.workspacePath,
+      repository: this.options.repository,
+      baseVersion: session.context.canonicalVersion,
+      isolation: "git-worktree",
+      createdAt: new Date().toISOString(),
+    };
+    return await this.options.workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "did what it was told",
+    });
+  }
+
+  public async streamEvents(
+    _sessionId: string,
+    _handler: (event: AgentEvent) => void,
+  ): Promise<void> {
+    return undefined;
+  }
+}
+
 async function holdingRun(options: {
   root: string;
   repository: CanonicalRepository;
@@ -577,6 +713,117 @@ test("an arrival is chunk-admitted to the one file a claim does not cover", asyn
         `${symbol} was granted away from its holder: ${JSON.stringify(deferredIds)}`,
       );
     }
+  } finally {
+    held.agent.release.resolve();
+    await settle(held.finished);
+    await real.cleanup();
+  }
+});
+
+test("a partially admitted agent is told what it was granted", async () => {
+  // The split firing is only half of it. The other half is the agent finding
+  // out, and on the in-process coordinator path it did not.
+  //
+  // The wave loop stored `entry.admission` — needed later, so collection can
+  // tell "withheld, somebody else is writing it" from "never arbitrated" —
+  // but built `entry.decision` from wave scheduling alone: "Approved for the
+  // next non-conflicting execution wave", no constraints, no ranges. That
+  // object is what `sendContext` hands the agent. So an agent that had just
+  // been granted one file around two of its functions was told it was
+  // approved, full stop.
+  //
+  // What follows is not a near miss. Believing it owns the file, the agent
+  // edits the holder's function; `splitChangeSet` divides that hunk back out;
+  // and where the withheld symbols were the bulk of the work the granted
+  // patch set comes back empty and the whole task is requeued. The agent run
+  // is spent and thrown away — the exact outcome partial admission exists to
+  // prevent, reached by way of partial admission.
+  //
+  // The remote path never had this: `worker.ts` builds its decision straight
+  // from the admission. Only the in-process coordinator dropped it, so the
+  // same admission was followable over the wire and not in the same process.
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  const held = await holdingRun({
+    ...real,
+    store,
+    worker,
+    declaration: {
+      files: ["src/order-pricing.js"],
+      symbols: ["basePrice", "lineTotal"],
+    },
+  });
+
+  try {
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a currency prefix to totals",
+      real.version,
+    );
+    const agent = new ArrivingAgent({
+      agentId: "agent-b",
+      repository: real.repository,
+      workspaces: held.workspaces,
+    });
+    // A real coordinator run rather than a bare `admit` call — the gap was
+    // entirely between the authority's answer and what the run did with it,
+    // so a test that calls `admit` directly cannot see it.
+    const coordinator = new Coordinator({
+      repositories: real.repositories,
+      workspaces: held.workspaces,
+      store,
+      planAuthority: new LeasePlanAuthority({
+        store,
+        leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+        workspaces: held.workspaces,
+      }),
+      workingChangePollMs: NEVER_TICKS_MS,
+    });
+    await Promise.race([
+      coordinator
+        .run({
+          repository: real.repository,
+          workspaceRoot: path.join(real.root, "workspaces-b"),
+          integrationRoot: path.join(real.root, "integration-b"),
+          tasks: [{ task: second.task, adapter: agent }],
+        })
+        .catch((error: unknown) => error),
+      new Promise((resolve) => {
+        const timer = setTimeout(resolve, 90_000);
+        timer.unref?.();
+      }),
+    ]);
+
+    assert.equal(
+      agent.contexts.length,
+      1,
+      "the arrival never reached its edit phase",
+    );
+    const decision = agent.contexts[0]!.decision;
+    assert.equal(
+      decision.decision,
+      "approved_with_constraints",
+      `the agent was told a partial admission was a plain approval: ${decision.explanation}`,
+    );
+    assert.ok(
+      decision.explanation.startsWith("Partially admitted"),
+      `the agent got the scheduling explanation, not the admission's: ${decision.explanation}`,
+    );
+    // The one that matters: it has to be able to tell which lines are not its
+    // own, or it cannot avoid them.
+    const constraints = decision.constraints.join("\n");
+    for (const symbol of ["basePrice", "lineTotal"]) {
+      assert.ok(
+        constraints.includes(symbol),
+        `nothing told the agent to stay out of ${symbol}: ${JSON.stringify(decision.constraints)}`,
+      );
+    }
+    assert.ok(
+      constraints.includes("src/checkout.js") &&
+        constraints.includes("test/order-pricing.test.js"),
+      `the deferred files were never named to the agent: ${JSON.stringify(decision.constraints)}`,
+    );
   } finally {
     held.agent.release.resolve();
     await settle(held.finished);
