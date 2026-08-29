@@ -36,6 +36,7 @@ api,
   canManageOrganization,
   imagesNeedFetching,
   canManageRepository,
+  subChannelUnread,
   iAmSystemAdmin,
   channelAgentsFor,
   channelAuthor,
@@ -1747,6 +1748,7 @@ function subChannelVisibilityLabel(visibility) {
 function subChannelRow(repositoryId, channel, active) {
   const manage = canManageSubChannels(repositoryId);
   const label = `#${channel.slug}`;
+  const unread = subChannelUnread(repositoryId, channel.id);
   return `<div class="chan-channel-row${active ? " on" : ""}">
     <button type="button" class="chan-channel"
       data-act="sub-channel-open" data-value="${esc(channel.id)}"
@@ -1763,6 +1765,16 @@ function subChannelRow(repositoryId, channel, active) {
       ${
         channel.canPost === false
           ? `<span class="chan-channel-note" title="You can read this channel but not post in it">read&nbsp;only</span>`
+          : ""
+      }
+      ${
+        // What is waiting in a room the reader is not in. Suppressed on the
+        // room already open, where the count is about to be zero anyway and a
+        // badge on the row you are reading is just noise.
+        unread > 0 && !active
+          ? `<span class="chan-channel-unread" aria-label="${String(unread)} unread ${
+              unread === 1 ? "message" : "messages"
+            }">${unread > 99 ? "99+" : String(unread)}</span>`
           : ""
       }
     </button>

@@ -14389,6 +14389,30 @@ dialog.modal[open]::backdrop {
   opacity: 0.55;
 }
 
+/* What is waiting in a room the reader is not in. Inline at the end of the
+   row rather than pinned to a corner like the workspace rail's badge: this row
+   is a full-width line of text, so a count sits at the end of it the way a
+   count does in every list of rooms people already use. Tabular figures keep
+   two- and three-digit counts the same width, so the column of names above and
+   below does not shift as the numbers change. */
+.chan-channel-unread {
+  flex: 0 0 auto;
+  min-width: 17px;
+  height: 16px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--salmon);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A muted workspace raises no badge at all, so there is nothing to dim here —
+   `subChannelUnread` returns zero and the element is never drawn. */
+
 .chan-channel-menu {
   flex: 0 0 auto;
   opacity: 0;

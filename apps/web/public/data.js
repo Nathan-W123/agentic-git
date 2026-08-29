@@ -3735,6 +3735,9 @@ export async function ensureSubChannels(repositoryId, rerender) {
 
 /** Opens one room, remembering it for this repository. */
 export function selectSubChannel(repositoryId, channelId) {
+  // Opening a room is reading it. Cleared here rather than waiting for the
+  // next room-list read, so the badge goes on the frame the room opens on.
+  noteSubChannelRead(repositoryId, channelId);
   if (!repositoryId || !channelId) {
     return;
   }
@@ -5015,6 +5018,16 @@ export async function refreshChannelMessages(repositoryId) {
     } finally {
       state.channelLoading.delete(repositoryId);
     }
+  }
+  // The room list carries every room's unread count, and this is the one
+  // signal that says a room's contents changed. Without re-reading it here a
+  // badge could only appear on a reload: the reconcile refreshes the room the
+  // reader is in, which is the room whose badge does not matter.
+  //
+  // Best-effort and unawaited — a failed count is a stale badge, never a
+  // failed reconcile.
+  if (state.subChannelsLoaded.has(repositoryId)) {
+    void loadSubChannels(repositoryId).catch(() => undefined);
   }
   return await loadChannel(repositoryId);
 }
@@ -6403,6 +6416,47 @@ export function channelUnreadCount(repositoryId, { mentionsOnly = false } = {}) 
     state.channelRead[repositoryId] ?? 0,
     mentionsOnly,
   );
+}
+
+/**
+ * How much of one room the reader has not seen, for the sidebar badge.
+ *
+ * Counted by the server and carried on the room record, not derived here.
+ * The local count `channelUnreadCount` uses works because the open room's
+ * messages are in the cache; no other room's are, so a per-room figure
+ * computed in the browser would read zero for every room except the one the
+ * reader is already looking at — which is the one room a badge is useless on.
+ *
+ * A muted workspace raises no badge, for the reason set out on
+ * {@link channelUnreadCount}: the messages stay, the divider stays, and being
+ * told about them is exactly what a mute declines.
+ */
+export function subChannelUnread(repositoryId, channelId) {
+  if (!repositoryId || !channelId || isChannelMuted(repositoryId)) {
+    return 0;
+  }
+  const channel = (state.subChannels[repositoryId] ?? []).find(
+    (entry) => entry.id === channelId,
+  );
+  const unread = Number(channel?.unread ?? 0);
+  return Number.isFinite(unread) && unread > 0 ? Math.floor(unread) : 0;
+}
+
+/**
+ * Clears one room's badge in this browser, ahead of the server agreeing.
+ *
+ * Opening a room is reading it, and the reader should not watch a badge they
+ * have just cleared sit there until the next room-list read lands. The server
+ * is told separately by `markChannelRead`; this is only what the screen shows
+ * in between.
+ */
+export function noteSubChannelRead(repositoryId, channelId) {
+  const channel = (state.subChannels[repositoryId] ?? []).find(
+    (entry) => entry.id === channelId,
+  );
+  if (channel !== undefined) {
+    channel.unread = 0;
+  }
 }
 
 /** Whether this account has silenced a room. */

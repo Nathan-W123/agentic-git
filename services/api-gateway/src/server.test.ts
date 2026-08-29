@@ -9648,6 +9648,78 @@ test("a repository can be renamed without its id moving, and only by somebody wh
   );
 });
 
+test("the room list carries each room's unread count for the caller", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "unread-repo");
+  const channelsPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/unread-repo/channels`;
+
+  const created = await owner.request(channelsPath, {
+    method: "POST",
+    body: { slug: "backend", name: "backend", visibility: "open" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const backendId = created.data.channel.id;
+
+  // Somebody else's messages: one root plus a reply in #general, one root in
+  // #backend. A reply counts — a thread answered while you were away is
+  // something you missed.
+  const other = await runtime.store.createUser({
+    email: "unread-other@example.com",
+    displayName: "Other",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: other.id,
+    role: "developer",
+  });
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId: "unread-repo",
+    projectId: DEFAULT_PROJECT_ID,
+    authorId: other.id,
+    content: "Something in general.",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId: "unread-repo",
+    messageId: root.id,
+    authorId: other.id,
+    content: "And an answer.",
+  });
+  await runtime.store.appendChannelMessage({
+    repositoryId: "unread-repo",
+    projectId: DEFAULT_PROJECT_ID,
+    channelId: backendId,
+    authorId: other.id,
+    content: "Something in backend.",
+  });
+
+  const listed = await owner.request(channelsPath);
+  assert.equal(listed.status, 200, JSON.stringify(listed.data));
+  const rooms = new Map(
+    (listed.data.channels as { id: string; slug: string; unread: number }[]).map(
+      (channel) => [channel.slug, channel],
+    ),
+  );
+  assert.equal(rooms.get("general")?.unread, 2, JSON.stringify(listed.data));
+  assert.equal(rooms.get("backend")?.unread, 1, JSON.stringify(listed.data));
+
+  // Reading one room clears that room's badge and leaves the other's alone.
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/unread-repo/channel/read?channelId=${encodeURIComponent(backendId)}`,
+    { method: "POST" },
+  );
+  const after = await owner.request(channelsPath);
+  const afterRooms = new Map(
+    (after.data.channels as { slug: string; unread: number }[]).map(
+      (channel) => [channel.slug, channel],
+    ),
+  );
+  assert.equal(afterRooms.get("backend")?.unread, 0, JSON.stringify(after.data));
+  assert.equal(afterRooms.get("general")?.unread, 2, JSON.stringify(after.data));
+});
+
 test("a workspace picture is the workspace's: set only by a manager, read by everyone", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

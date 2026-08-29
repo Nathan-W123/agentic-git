@@ -2035,6 +2035,26 @@ export interface CoordinationStore {
     repositoryId: string,
     channelId?: string,
   ): Promise<ChannelMessageCounts>;
+  /**
+   * How much one person has not read in each room of a repository, keyed by
+   * channel id. A room with nothing unread is absent rather than zero.
+   *
+   * Every room in one query, because the caller is drawing a sidebar: asking
+   * per room would be a round trip per badge, and the badges are the reason
+   * anybody looks at the sidebar at all.
+   *
+   * Replies count. A thread somebody answered while you were away is a thing
+   * you missed, and counting only roots would leave the busiest rooms — the
+   * ones where the work actually happens — showing nothing.
+   *
+   * Your own messages never count, and neither do deleted ones. A room you
+   * have never opened has no cursor, so all of it is unread, which is the
+   * honest answer for a room you have never opened.
+   */
+  countUnreadByChannel(
+    repositoryId: string,
+    userId: UserId,
+  ): Promise<Record<string, number>>;
 
   /**
    * The sub-channels inside one repository, `#general` first and the rest by
