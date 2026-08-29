@@ -450,15 +450,31 @@ test("pinned messages can be hidden and shown without being unpinned", async () 
     chats.indexOf("/** Compatibility for callers while the conversation header"),
   );
 
-  // Main chat owns the shortcut directly, so a header hierarchy change cannot
-  // strand it behind a selector for markup that no longer exists. Other
-  // destinations do not offer pins from the workspace's main transcript.
-  assert.match(header, /const pinsOpen = main && activeSecondaryContext\(\) === "pins";/u);
-  assert.match(header, /main\s*\? `<button type="button" class="icon-btn ch-pins-toggle/u);
-  assert.match(header, /data-act="channel-pins-toggle"/u);
-  assert.match(header, /pinsOpen \? "Hide pinned messages" : "Show pinned messages"/u);
-  assert.match(header, /aria-pressed="\$\{pinsOpen\}"/u);
-  assert.match(header, /\$\{icon\("pin"\)\}<\/button>/u);
+  // The workspace owns the shortcut, in its own list of destinations beside
+  // Threads and Files — what it opens is the main transcript's shelf whatever
+  // has the conversation pane, so it is not the conversation header's to
+  // carry. It owns it directly, so a hierarchy change cannot strand it behind
+  // a selector for markup that no longer exists.
+  const pins = chats.slice(
+    chats.indexOf("function pinsQuickLink()"),
+    chats.indexOf("function chanSidebar(activeRepositoryId)"),
+  );
+  assert.notEqual(pins, "", "the pins quick link should exist");
+  assert.match(pins, /const pinsOpen = activeSecondaryContext\(\) === "pins";/u);
+  assert.match(pins, /class="chan-quick-link ch-pins-toggle/u);
+  assert.match(pins, /data-act="channel-pins-toggle"/u);
+  assert.match(pins, /pinsOpen \? "Hide pinned messages" : "Show pinned messages"/u);
+  assert.match(pins, /aria-pressed="\$\{pinsOpen\}"/u);
+  assert.match(pins, /\$\{icon\("pin"\)\}<span>Pins<\/span>/u);
+  // Drawn in the group the other two destinations are in, and nowhere else.
+  assert.match(chats, /function chanSidebar[\s\S]*?\$\{pinsQuickLink\(\)\}/u);
+  assert.doesNotMatch(header, /ch-pins-toggle|channel-pins-toggle/u);
+  // The banner repaints the control's pressed state without a render, so the
+  // class it looks for has to be the one the quick link carries.
+  assert.match(
+    app,
+    /function paintPinnedMessagesShortcut\(open\)[\s\S]{0,200}querySelector\("\.ch-pins-toggle"\)/u,
+  );
 
   // The delegated action uses the one secondary slot and never calls the
   // pin/unpin operation.
@@ -506,26 +522,40 @@ test("one play control beside the pin runs whatever the channel's app is", async
   const data = await publicFile("data.js");
   const css = await publicFile("styles.css");
 
-  // Beside the pin, on the one line that says what state this room is in —
-  // and drawn as a count rather than a tool button, because the tray it used
-  // to sit in no longer exists and a boxed icon among these would read as a
+  // Beside the pin, in the workspace's own list of destinations — and drawn
+  // as a quick link rather than a tool button, because that is what every row
+  // around it is and an unlabelled glyph among named rows would read as a
   // control that arrived by accident.
-  const headerStart = chats.indexOf("function conversationHeader(repositoryId)");
-  // The whole function, not the stretch before the spacer. The room's own
-  // line — the muted mark, the pin, the play control — sits after the spacer
-  // now, so the old boundary cut away exactly what this test is about.
-  const header = chats.slice(headerStart, chats.indexOf("\n}", headerStart));
-  assert.notEqual(headerStart, -1, "the channel header should exist");
-  // Guarded on `main`: the play control runs the channel's app, and a DM or
-  // an agent thread has no app to run.
-  assert.match(header, /\$\{main \? previewControl\(repositoryId\) : ""\}/u);
-  assert.match(
-    header,
-    /ch-count ch-muted[\s\S]*?previewControl\(repositoryId\)/u,
-    "the muted mark and the preview control share the room's own line",
+  const navStart = chats.indexOf(
+    '<nav class="chan-sidebar-head chan-quick-links"',
   );
-  // And nothing stands between them. The separator existed to hold the two
-  // roster counts apart from these controls; with the counts on the lists
+  assert.notEqual(navStart, -1, "the workspace destinations should exist");
+  const nav = chats.slice(navStart, chats.indexOf("</nav>", navStart));
+  assert.match(nav, /\$\{previewControl\(activeRepositoryId\)\}/u);
+  assert.match(
+    nav,
+    /\$\{pinsQuickLink\(\)\}[\s\S]*?\$\{previewControl\(activeRepositoryId\)\}/u,
+    "the pin and the play control are neighbours in the workspace's own list",
+  );
+  // The address follows the control that started it rather than sitting on
+  // the conversation's row, where it was the one thing that grew without
+  // limit.
+  assert.match(
+    nav,
+    /\$\{previewControl\(activeRepositoryId\)\}[\s\S]*?\$\{previewLink\(activeRepositoryId\)\}/u,
+  );
+  const headerStart = chats.indexOf("function conversationHeader(repositoryId)");
+  assert.notEqual(headerStart, -1, "the channel header should exist");
+  // The whole function, not the stretch before the spacer — the muted mark
+  // sits after it, so the old boundary cut away the part this looks at.
+  const header = chats.slice(headerStart, chats.indexOf("\n}", headerStart));
+  // And the header calls neither. It names the destination that has the pane
+  // and carries what acts on that; the app a workspace runs is neither. The
+  // comment left behind naming where they went is the point of leaving one,
+  // so this looks for the calls rather than the words.
+  assert.doesNotMatch(header, /previewControl\(|previewLink\(/u);
+  // Nothing stands between the rows either. The separator existed to hold the
+  // two roster counts apart from these controls; with the counts on the lists
   // they count, it divided the controls from nothing at all.
   assert.doesNotMatch(header, /<span aria-hidden="true">\|<\/span>/u);
   const control = chats.slice(
@@ -534,7 +564,12 @@ test("one play control beside the pin runs whatever the channel's app is", async
   );
   // The running state carries the "on" class; a build that did not finish
   // adds " warn" after it, so the class list does not end there.
-  assert.match(control, /class="ch-count ch-preview-toggle on/u);
+  assert.match(control, /class="chan-quick-link ch-preview-toggle on/u);
+  // Every state says which one it is in a word, so the row is readable
+  // without hovering it.
+  assert.match(control, /<span>Run app<\/span>/u);
+  assert.match(control, /<span>Stop app<\/span>/u);
+  assert.match(control, /<span>Starting…<\/span>/u);
   assert.match(control, /data-act="preview-stop"/u);
   assert.match(control, /data-act="preview-start"/u);
   assert.match(control, /icon\("play"\)/u);

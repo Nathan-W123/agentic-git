@@ -45,6 +45,21 @@ test("global, workspace, conversation, and secondary chrome have separate owners
   assert.match(chats, /function conversationHeader\(repositoryId\)/u);
   assert.match(conversationChrome, /class="conversation-tools"/u);
   assert.doesNotMatch(conversationChrome, /ch-hash|icon\("chatBubble"/u);
+  // The pinned shelf and the app the workspace runs are the workspace's, not
+  // this row's: they were readable only as two small glyphs among controls
+  // that act on whichever destination has the pane, and they act on neither.
+  // They are named rows in the workspace's own navigation now, and the header
+  // is left with what belongs to the conversation it names.
+  // Calls, not mentions: the header keeps a comment saying where the three of
+  // them went, which is the whole point of leaving one.
+  assert.doesNotMatch(
+    conversationChrome,
+    /ch-pins-toggle|previewControl\(|previewLink\(/u,
+  );
+  assert.match(
+    chats,
+    /function chanSidebar[\s\S]*?\$\{pinsQuickLink\(\)\}[\s\S]*?\$\{previewControl\(activeRepositoryId\)\}/u,
+  );
   // Open-ended: the tag carries a phone-only `aria-hidden`/`inert` pair after
   // these attributes, so pinning the closing bracket here asserted a shape the
   // markup stopped having.

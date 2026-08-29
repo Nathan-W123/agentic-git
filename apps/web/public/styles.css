@@ -8232,15 +8232,24 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   background: var(--bg-inset);
 }
 
-/* The running app's address, in the channel header beside the controls. Shown
+/* The running app's address, in the workspace's navigation under the row that
+   started it. Indented to that row's label rather than its glyph, so it reads
+   as belonging to the control above instead of as a third destination. Shown
    as the bare host:port it is — a loopback link is only openable on the
    machine running the control plane, and dressing it up as an ordinary link
    would hide that. */
 .preview-live {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 4px;
-  padding-left: 6px;
+  min-width: 0;
+  /* 8px of the row's padding, its 14px glyph and the 9px gap after it — the
+     compact quick-link measurements the workspace hierarchy section settles
+     on, which are the ones that reach the screen. */
+  padding: 0 8px 4px 31px;
+  /* The phone lays this group out in two columns for a close control that is
+     no longer inside it; the address belongs with the rows regardless. */
+  grid-column: 1;
 }
 
 /* The auditor's own lines, in whatever accent the reader chose. Applied to the
@@ -8261,6 +8270,11 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   color: var(--accent-bright);
   text-decoration: none;
   white-space: nowrap;
+  /* The column is 256px wide and a port number is the end of the address, so
+     a long host is trimmed rather than allowed to widen the panel. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .preview-link:hover {
@@ -12456,32 +12470,34 @@ dialog.modal[open]::backdrop {
   height: 13px;
 }
 
-/* Run this channel's app, beside the pin. A button that borrows the counts'
-   type and colour rather than the tool button's box: it sits inside a line of
-   small grey glyphs, and a bordered control among them would read as having
-   arrived from somewhere else. The pin toggle strips its own chrome inline for
-   the same reason. */
+/* Run this workspace's app, beside the pin in the column of destinations. It
+   is a quick link and takes that row wholesale — see `.chan-quick-link`; what
+   is left here is only the three states it can be in, which are colour and
+   nothing else. A silhouette of its own would make one row in a short list
+   read as a different kind of thing. */
 .ch-preview-toggle {
-  border: 0;
-  background: none;
-  padding: 0;
-  color: inherit;
-  font: inherit;
   cursor: pointer;
-  border-radius: var(--radius-xs, 4px);
 }
 
-/* Brightness rather than a colour, so the same feedback works in all three
-   states. A hover rule that names a colour would either lose to the running
-   and stopped rules or overwrite what they are saying. */
-.ch-preview-toggle:hover {
-  opacity: 0.7;
-}
-
-/* Running. The accent is the only thing on this line that is not grey, which
-   is the point — "your app is up" is worth finding without reading. */
+/* Running. The accent, on the glyph and the word together, is the only thing
+   in this column that is not grey — which is the point: "your app is up" is
+   worth finding without reading. Deliberately not the row's selected
+   treatment: the wash and the salmon edge mean "this is the destination you
+   are looking at", and the app being up is not a place. */
 .ch-preview-toggle.on {
+  background: none;
+  box-shadow: none;
   color: var(--accent-bright);
+}
+
+.ch-preview-toggle.on svg {
+  color: var(--accent-bright);
+}
+
+/* Which leaves hover to say the row is pressable, as it does for every other
+   row here. */
+.ch-preview-toggle.on:hover {
+  background: var(--bg-hover);
 }
 
 /* Ready to run again, but the last attempt stopped on its own. Colour only —
@@ -12490,11 +12506,15 @@ dialog.modal[open]::backdrop {
   color: var(--warn, #f59e0b);
 }
 
+.ch-preview-toggle.warn svg {
+  color: var(--warn, #f59e0b);
+}
+
 /* Starting, which is a state and not an instant. A cold start installs and
    builds before anything listens, and a button that reads as untouched for a
    minute gets pressed again — which used to kill the start it was waiting
-   for. Breathing rather than spinning: it belongs to a line of small grey
-   glyphs, and it is saying "still working", not "wait for me". */
+   for. The row says so in a word, and breathes rather than spinning: it is
+   saying "still working", not "wait for me". */
 .ch-preview-toggle.starting {
   color: var(--accent-bright);
   cursor: progress;
@@ -12505,8 +12525,12 @@ dialog.modal[open]::backdrop {
   animation: pulse 2.4s ease-in-out infinite;
 }
 
+.ch-preview-toggle.starting svg {
+  color: var(--accent-bright);
+}
+
 /* Motion is the only thing carrying "still working" here, so what is left
-   without it is the accent and the title. */
+   without it is the accent, the word and the title. */
 @media (prefers-reduced-motion: reduce) {
   .ch-preview-toggle.starting {
     animation: none;
@@ -13360,23 +13384,16 @@ dialog.modal[open]::backdrop {
   overflow: hidden;
 }
 
-.conversation-tools .preview-live {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.conversation-tools .preview-link {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* The preview address used to be fenced in here as well, because it was the
+   one thing on this row that grew without limit. It belongs to the workspace
+   and is drawn under the control that starts it now — see `.preview-live`. */
 
 /* The way out of a destination that has taken the message pane over — the
    same control, in the same shape and behind the same fence, that every
    right-hand panel carries in its own header. It is deliberately last and
-   deliberately not allowed to shrink: a long name or a preview address
-   crowds this row on a phone, and the one control a reader is looking for
-   when they want out is the one that must never be the thing clipped. */
+   deliberately not allowed to shrink: a long name crowds this row on a phone,
+   and the one control a reader is looking for when they want out is the one
+   that must never be the thing clipped. */
 .conversation-header .panel-close {
   flex: none;
   position: relative;
@@ -13689,8 +13706,8 @@ dialog.modal[open]::backdrop {
     max-width: 58%;
   }
 
-  .conversation-tools .preview-live,
-  .conversation-tools .preview-starting,
+  /* The preview address was dropped here too while it lived on this row. It
+     is in the drawer now, which is a column with room for it. */
   .conversation-tools .ch-muted {
     display: none;
   }

@@ -1777,6 +1777,29 @@ function subChannelRow(repositoryId, channel, active) {
   </div>`;
 }
 
+/**
+ * The pinned shelf, in the workspace's own list of destinations.
+ *
+ * It used to be a boxed icon on the conversation's header row, where it sat
+ * among the controls that act on whichever destination has the pane — a DM, an
+ * agent thread, an open file — while what it opens belongs to the workspace's
+ * main transcript regardless of which of those is showing. It reads as what it
+ * is beside Threads and Files: another place in this workspace to go.
+ *
+ * The class the header's shortcut carried travels with it, because the pin
+ * banner repaints this control's pressed state directly rather than through a
+ * render — see `paintPinnedMessagesShortcut`.
+ */
+function pinsQuickLink() {
+  const pinsOpen = activeSecondaryContext() === "pins";
+  const title = pinsOpen ? "Hide pinned messages" : "Show pinned messages";
+  return `<button type="button" class="chan-quick-link ch-pins-toggle${
+    pinsOpen ? " on" : ""
+  }" data-act="channel-pins-toggle"
+        title="${title}" aria-label="${title}"
+        aria-pressed="${pinsOpen}">${icon("pin")}<span>Pins</span></button>`;
+}
+
 function chanSidebar(activeRepositoryId) {
   const roster = channelAgentsFor(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
@@ -1815,6 +1838,15 @@ function chanSidebar(activeRepositoryId) {
         title="Browse workspace files">
         ${icon("folder")}<span>Files</span>
       </button>
+      <!-- The pin and the play control, which used to be two small glyphs on
+           the conversation's header row. Both are about the workspace rather
+           than about whichever conversation has the pane, so this is where
+           they say what they are: rows with names, the width of the column,
+           beside the two destinations they were always siblings of. The
+           running app's address follows the control that started it. -->
+      ${pinsQuickLink()}
+      ${previewControl(activeRepositoryId)}
+      ${previewLink(activeRepositoryId)}
     </nav>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
@@ -1940,7 +1972,7 @@ function previewStopped(repositoryId) {
 }
 
 /**
- * The control, beside the pin in the channel's own header line.
+ * The control, beside the pin in the workspace's own list of destinations.
  *
  * One button for a repository in any language. Nothing here knows what the
  * app is: pressing it asks the control plane to read the checkout and work
@@ -1950,9 +1982,11 @@ function previewStopped(repositoryId) {
  * button serves a Node dev server, a Django app, a Go binary, a page of
  * static HTML, and the one thing nobody has thought of yet.
  *
- * Drawn as a count rather than a tool button because of where it sits: the
- * counts and the pin are this line's vocabulary, and a boxed icon among them
- * reads as a different control that arrived by accident.
+ * Drawn as a quick link because of where it sits: Threads, Files and the pin
+ * are this column's vocabulary, and an unlabelled glyph among named rows
+ * reads as a control that arrived by accident. Which of the three things it
+ * is doing — running, stopped, still starting — is the row's own colour and
+ * its own word, so nothing about it needs hovering to be read.
  */
 function previewControl(repositoryId) {
   if (!repositoryId) {
@@ -1965,10 +1999,10 @@ function previewControl(repositoryId) {
   // control that still looks pressable is an invitation to find that out.
   if (state.previewsStarting?.has(repositoryId) === true) {
     const busy = "Starting — installing and building can take a minute";
-    return `<button type="button" class="ch-count ch-preview-toggle starting"
+    return `<button type="button" class="chan-quick-link ch-preview-toggle starting"
         data-act="preview-start" data-value="${esc(repositoryId)}" disabled
         title="${esc(busy)}" aria-label="${esc(busy)}" aria-busy="true">
-        ${icon("play")}</button>`;
+        ${icon("play")}<span>Starting…</span></button>`;
   }
   const running = previewRunning(repositoryId);
   if (running !== undefined) {
@@ -1984,11 +2018,11 @@ function previewControl(repositoryId) {
         ? "Stop the running app"
         : `Running, but its build did not finish — ${partial}. The page may ` +
           `be blank or out of date. Press to stop it.`;
-    return `<button type="button" class="ch-count ch-preview-toggle on${
+    return `<button type="button" class="chan-quick-link ch-preview-toggle on${
       partial === undefined ? "" : " warn"
     }" data-act="preview-stop" data-value="${esc(repositoryId)}"
         title="${esc(why)}" aria-label="${esc(why)}">
-        ${icon("close")}</button>`;
+        ${icon("close")}<span>Stop app</span></button>`;
   }
   const stopped = previewStopped(repositoryId);
   // The output is the diagnosis and it is the only copy: nothing else in the
@@ -2001,13 +2035,15 @@ function previewControl(repositoryId) {
           (stopped.recentOutput ?? []).slice(-3).join(" ").trim() ||
           "it printed nothing"
         }. Press to run it again.`;
-  return `<button type="button" class="ch-count ch-preview-toggle${
+  return `<button type="button" class="chan-quick-link ch-preview-toggle${
     stopped === undefined ? "" : " warn"
   }" data-act="preview-start" data-value="${esc(repositoryId)}"
-      title="${esc(why)}" aria-label="${esc(why)}">${icon("play")}</button>`;
+      title="${esc(why)}" aria-label="${esc(why)}">${icon(
+        "play",
+      )}<span>Run app</span></button>`;
 }
 
-/** The address, which stays in the header because it is state, not a control. */
+/** The address, under the row that started it, because it is state, not a control. */
 function previewLink(repositoryId) {
   if (!repositoryId) {
     return "";
@@ -2042,8 +2078,8 @@ function previewLink(repositoryId) {
       ? ""
       : ` — build did not finish: ${preview.buildFailure}`;
   // No stop control beside it: the address is state, and the control that
-  // starts and stops it is one control, on the channel's own line beside the
-  // pin — see `previewControl`.
+  // starts and stops it is one control, in the row directly above it beside
+  // the pin — see `previewControl`.
   return `<span class="preview-live">
     <a class="preview-link" href="${esc(proxied)}" target="_blank"
       rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}${esc(note)}">
@@ -2134,7 +2170,6 @@ function conversationHeader(repositoryId) {
             ? "Workspace files"
             : "Workspace threads";
   const main = destination.kind === "main";
-  const pinsOpen = main && activeSecondaryContext() === "pins";
   return `<header class="chan-head conversation-header" aria-label="${esc(label)} conversation header">
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       aria-expanded="${state.chanSidebarOpen === true}"
@@ -2152,17 +2187,11 @@ function conversationHeader(repositoryId) {
             )}Muted</span>`
           : ""
       }
-      ${
-        main
-          ? `<button type="button" class="icon-btn ch-pins-toggle${pinsOpen ? " on" : ""}"
-              data-act="channel-pins-toggle"
-              title="${pinsOpen ? "Hide pinned messages" : "Show pinned messages"}"
-              aria-label="${pinsOpen ? "Hide pinned messages" : "Show pinned messages"}"
-              aria-pressed="${pinsOpen}">${icon("pin")}</button>`
-          : ""
-      }
-      ${main ? previewControl(repositoryId) : ""}
-      ${main ? previewLink(repositoryId) : ""}
+      <!-- The pin and the play control used to sit here, and the running
+           app's address after them. All three are about the workspace, not
+           about the destination this row names, so they are rows in the
+           workspace's own navigation now — see \`pinsQuickLink\` and
+           \`previewControl\`. What is left is what acts on this conversation. -->
       ${
         destination.kind === "dm"
           ? iconButton("users", {
