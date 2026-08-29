@@ -1991,3 +1991,248 @@ test("claude: a task asked with no conversation still carries the order not to a
   assert.match(replanning, /never answer that you lack context/u);
   assert.doesNotMatch(replanning, /The conversation this was asked inside/u);
 });
+
+/**
+ * The ask that turns a repository-wide claim into a plan somebody else can
+ * work beside.
+ *
+ * The session is mid-execution, holding the whole repository because it was
+ * never asked to describe itself. When a second task arrives it is stopped at
+ * a round boundary, asked two questions in the workspace it is already in, and
+ * resumed — the conversation is warm throughout, no process is killed, and no
+ * round is aborted.
+ */
+const BLANKET_PLAN: AgentPlan = {
+  ...PLAN,
+  expectedFiles: [],
+  expectedSymbols: [],
+  claim: { kind: "blanket", grantedAt: "2026-01-01T00:00:00.000Z" },
+};
+
+function replanRequestFor(version: {
+  sequence: number;
+  revision: string;
+  branch: string;
+  createdAt: string;
+}) {
+  return {
+    taskId: TASK.id,
+    previousPlan: BLANKET_PLAN,
+    canonicalChange: {
+      previousVersion: version,
+      canonicalVersion: version,
+      changedFiles: [],
+      changedSymbols: [],
+      changedApis: [],
+      changedSchemas: [],
+      changedConfigKeys: [],
+      changedTests: [],
+      changedServices: [],
+      reason: "Another task has started in this repository.",
+    },
+    constraints: ["Another task has started in this repository."],
+  };
+}
+
+test("claude: a paused blanket holder declares its remaining scope and carries on", async () => {
+  const fixture = await createFixture();
+  const inputs: Array<{ input: string; cwd: string; schema: string }> = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    inputs.push({
+      input: String(options.input),
+      cwd: String(options.cwd),
+      schema: String(args[args.indexOf("--json-schema") + 1]),
+    });
+    if (inputs.length === 1) {
+      // The first execution round. It ends with a scope request, which parks
+      // the loop somewhere the coordinator can reach it.
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            ...COMPLETION,
+            outcome: "scope_change_requested",
+            requestId: "scope_1",
+            symbolsChanged: [],
+            explanation: "",
+            additionalFiles: ["src/value.js"],
+            reason: "needs the value file",
+          }),
+        ),
+      );
+    }
+    if (inputs.length === 2) {
+      // The declaration ask.
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            expectedFiles: ["src/value.js"],
+            expectedSymbols: ["value"],
+          }),
+        ),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const version = await fixture.repositories.getCanonicalVersion(
+    fixture.repository,
+  );
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: version,
+    repositoryId: fixture.repository.id,
+  });
+  // No planning round trip at all: this is a task alone in its repository.
+  await adapter.acceptBlanketClaim(session.id, BLANKET_PLAN);
+
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: version,
+  });
+  let scopeRequested = (): void => undefined;
+  const asked = new Promise<void>((resolve) => {
+    scopeRequested = resolve;
+  });
+  await adapter.streamEvents(session.id, (event) => {
+    if (event.event === "scope_change_requested") {
+      scopeRequested();
+    }
+  });
+  const executing = adapter.sendContext(session.id, contextFor(workspace));
+  await asked;
+
+  // Stopped at a round boundary. Nothing is killed and no round is aborted.
+  await adapter.pause(session.id);
+  const declared = await adapter.requestReplan(
+    session.id,
+    replanRequestFor(version),
+  );
+  assert.deepEqual(declared.expectedFiles, ["src/value.js"]);
+  assert.deepEqual(declared.expectedSymbols, ["value"]);
+  assert.equal(declared.taskId, TASK.id, "the task id is set, never trusted");
+
+  const ask = inputs[1];
+  assert.notEqual(ask, undefined);
+  // Asked in the execution workspace, over the conversation already running —
+  // not in a planning workspace, which `acceptBlanketClaim` destroyed.
+  assert.equal(ask?.cwd, workspace.path);
+  assert.match(ask?.input ?? "", /Another task has started in this repository/u);
+  assert.match(ask?.input ?? "", /Do not edit anything in this round/u);
+  // Two fields and no more: risk, commands and objective are settled, and
+  // re-asking them invites the model to rewrite them.
+  const schema = JSON.parse(ask?.schema ?? "{}") as { required?: string[] };
+  assert.deepEqual(schema.required, ["expectedFiles", "expectedSymbols"]);
+
+  // The narrowed plan is what the next round is prompted with.
+  await adapter.acceptBlanketClaim(session.id, {
+    ...PLAN,
+    expectedFiles: ["src/value.js"],
+    expectedSymbols: ["value"],
+  });
+  // Answering the scope request lets the loop run on — into the pause.
+  await adapter.resolveScopeChange(session.id, {
+    requestId: "scope_1",
+    taskId: TASK.id,
+    decision: "approved",
+    revisedPlan: { ...PLAN, expectedFiles: ["src/value.js"] },
+    constraints: [],
+    ownershipGrants: [],
+    explanation: "Granted",
+    decidedAt: new Date().toISOString(),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(
+    inputs.length,
+    2,
+    "a paused session must not start another round",
+  );
+
+  await adapter.resume(session.id);
+  await executing;
+  assert.equal(inputs.length, 3, "resuming continues the same conversation");
+  const changeSet = await adapter.collectChanges(session.id);
+  assert.equal(changeSet.patches.length, 1);
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: a session that was never paused refuses to be asked", async () => {
+  const fixture = await createFixture();
+  const runner: PromptCliProcessRunner = async () =>
+    output(claudeEnvelope(JSON.stringify(PLAN)));
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const version = await fixture.repositories.getCanonicalVersion(
+    fixture.repository,
+  );
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: version,
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.acceptBlanketClaim(session.id, BLANKET_PLAN);
+
+  // Not executing yet: there is no remaining scope to declare, and no
+  // execution workspace to declare it in.
+  await assert.rejects(
+    adapter.requestReplan(session.id, replanRequestFor(version)),
+    /has not started executing/u,
+  );
+  await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: resume clears the pause even when it is called twice", async () => {
+  // The failure this guards: an ask whose resume goes wrong must never leave a
+  // holder parked forever. `resume` drops the pause before it releases the
+  // waiter, so the session is unpaused whatever happens next.
+  const fixture = await createFixture();
+  const runner: PromptCliProcessRunner = async () =>
+    output(claudeEnvelope(JSON.stringify(PLAN)));
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.pause(session.id);
+  await adapter.resume(session.id);
+  await adapter.resume(session.id);
+  await assert.rejects(
+    adapter.resume("session_that_never_existed"),
+    /Unknown claude session/u,
+  );
+  await rm(fixture.root, { recursive: true, force: true });
+});

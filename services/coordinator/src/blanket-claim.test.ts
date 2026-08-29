@@ -13,6 +13,8 @@ import {
 
 import {
   blanketPlan,
+  declaredPlanFromClaim,
+  filesOutsideClaim,
   freezePlanFromWorkingChanges,
   frozenTouchedRanges,
   releaseFromBlanketClaim,
@@ -463,4 +465,221 @@ test("a released file survives being read back out of storage", () => {
   ) as ReturnType<typeof blanketPlan>;
   assertAgentPlan(older);
   assert.equal(claimCoversPath(older, "src/a.ts"), true);
+});
+
+/**
+ * What a blanket claim becomes when its holder is asked rather than watched.
+ *
+ * The freeze above is derived from behaviour alone: it never adds a symbol and
+ * it keeps a claim over every file it names. Both of those independently stop
+ * the arriving task being split into those files, which is why chunk admission
+ * could never fire between the first and second task in a repository. These
+ * cover the shape that replaces it and, above all, what it must never give
+ * away.
+ */
+
+test("a declared plan carries the words a freeze could never produce", () => {
+  const converted = declaredPlanFromClaim(
+    blanketPlan(TASK),
+    { files: ["src/render/canvas.ts"], symbols: ["drawFrame"] },
+    [],
+    "2026-01-01T00:00:00.000Z",
+  );
+
+  assert.notEqual(converted, undefined);
+  assert.equal(isBlanketClaim(converted!), false);
+  assert.equal(converted?.claim?.kind, "declared");
+  assert.deepEqual(converted?.expectedFiles, ["src/render/canvas.ts"]);
+  assert.deepEqual(converted?.expectedSymbols, ["drawFrame"]);
+  // The plan's own words, which is what arbitration reads before enrichment
+  // widens `expectedSymbols` to every symbol in every file it named.
+  assert.deepEqual(converted?.declared?.symbols, ["drawFrame"]);
+  // And the line the whole change rests on: the declared files are *not*
+  // occupied by the claim, so they can be shared around those declarations.
+  assert.equal(claimOccupiesPath(converted!, "src/render/canvas.ts"), false);
+  // It is still a valid plan after a round trip through storage.
+  assertAgentPlan(JSON.parse(JSON.stringify(converted)));
+});
+
+test("the footprint is the union of what was said and what was touched", () => {
+  const converted = declaredPlanFromClaim(
+    blanketPlan(TASK),
+    { files: ["src/render/canvas.ts"], symbols: ["drawFrame"] },
+    [{ path: "src/audio/mixer.ts" }],
+  );
+
+  // Never just the answer. A holder that has already written in a function it
+  // forgets to mention must keep it, or its work is handed to somebody else
+  // and silently overwritten.
+  assert.deepEqual(converted?.expectedFiles, [
+    "src/audio/mixer.ts",
+    "src/render/canvas.ts",
+  ]);
+  assert.deepEqual(
+    converted?.claim?.kind === "declared" ? converted.claim.held : [],
+    ["src/audio/mixer.ts"],
+  );
+  // Held whole, because a line range read off a worktree is a new-side hunk
+  // number and the spans it would be matched against are base-side positions.
+  assert.equal(claimOccupiesPath(converted!, "src/audio/mixer.ts"), true);
+  assert.equal(claimCoversPath(converted!, "src/audio/mixer.ts"), true);
+  // And nothing beyond what it holds: a declared claim carries no directory
+  // latitude, so it grants nothing the declarations do not already say.
+  assert.equal(claimCoversPath(converted!, "src/audio/other.ts"), false);
+});
+
+test("an answer with no usable symbol is not a conversion", () => {
+  // An ordinary plan with no symbols is refused by every splitting path
+  // anyway, so converting would cost the holder its directory latitude and
+  // buy the arrival nothing. The caller falls back to the freeze.
+  assert.equal(
+    declaredPlanFromClaim(
+      blanketPlan(TASK),
+      { files: ["src/render/canvas.ts"], symbols: [] },
+      [],
+    ),
+    undefined,
+  );
+  assert.equal(
+    declaredPlanFromClaim(blanketPlan(TASK), { files: [], symbols: ["x"] }, []),
+    undefined,
+  );
+  // Absolute paths, escapes and directories are dropped in normalization; if
+  // nothing survives there is no answer left to convert.
+  assert.equal(
+    declaredPlanFromClaim(
+      blanketPlan(TASK),
+      { files: ["/etc/passwd", "../escape.ts", "src/"], symbols: ["x"] },
+      [],
+    ),
+    undefined,
+  );
+  // And a plan that is not a blanket claim is never converted at all.
+  assert.equal(
+    declaredPlanFromClaim(
+      plan("task_x", ["src/a.ts"]),
+      { files: ["src/a.ts"], symbols: ["x"] },
+      [],
+    ),
+    undefined,
+  );
+});
+
+test("a declared holder is split around its declarations, not queued behind them", () => {
+  const converted = declaredPlanFromClaim(
+    blanketPlan(TASK),
+    { files: ["src/pricing/total.js"], symbols: ["orderTotal"] },
+    [],
+  );
+  const decided = new PlanAdmissionController().admit({
+    plan: {
+      ...plan("task_second", ["src/pricing/total.js"]),
+      expectedSymbols: ["formatTotal"],
+    },
+    agentId: "agent-b",
+    baseRevision: "a".repeat(40),
+    baseVersion: 1,
+    active: [{ taskId: TASK.id, agentId: "agent-a", plan: converted! }],
+    symbolRangesInFile: (file) =>
+      file === "src/pricing/total.js"
+        ? [
+            { name: "orderTotal", startLine: 40, endLine: 80 },
+            { name: "formatTotal", startLine: 100, endLine: 140 },
+          ]
+        : [],
+  });
+
+  // The thing that could not happen before: the arrival is admitted into the
+  // holder's own file, with only the holder's declarations withheld.
+  assert.equal(decided.status, "approved_with_constraints");
+  assert.deepEqual(
+    decided.deferredResources?.map((resource) => resource.resourceId),
+    ["orderTotal"],
+  );
+  assert.deepEqual(decided.deferredResources?.[0]?.locations, [
+    { file: "src/pricing/total.js", startLine: 40, endLine: 80 },
+  ]);
+});
+
+test("a file a declared holder holds whole is still lost whole", () => {
+  const converted = declaredPlanFromClaim(
+    blanketPlan(TASK),
+    { files: ["src/pricing/total.js"], symbols: ["orderTotal"] },
+    [{ path: "src/audit/log.js" }],
+  );
+  const decided = new PlanAdmissionController().admit({
+    plan: {
+      ...plan("task_second", ["src/audit/log.js"]),
+      expectedSymbols: ["writeEntry"],
+    },
+    agentId: "agent-b",
+    baseRevision: "a".repeat(40),
+    baseVersion: 1,
+    active: [{ taskId: TASK.id, agentId: "agent-a", plan: converted! }],
+    symbolRangesInFile: (file) =>
+      file === "src/audit/log.js"
+        ? [{ name: "writeEntry", startLine: 10, endLine: 20 }]
+        : [],
+  });
+
+  // The holder was writing here and forgot to say so. A claim is the only
+  // vocabulary that says "whole, regardless of declarations", and this is the
+  // one thing the conversion must never trade away.
+  assert.equal(decided.status, "sequenced");
+  assert.deepEqual(decided.blockedBy, [TASK.id]);
+});
+
+test("a converted holder is still bound to the plan it declared", () => {
+  const converted = declaredPlanFromClaim(
+    blanketPlan(TASK),
+    { files: ["src/render/canvas.ts"], symbols: ["drawFrame"] },
+    [{ path: "src/audio/mixer.ts" }],
+  );
+  // Both halves of the footprint are writable, which is what the union is for.
+  assertChangeSetWithinPlan(
+    converted!,
+    changeSet(["src/render/canvas.ts", "src/audio/mixer.ts"]),
+  );
+  // And a file it never named is an escape, arbitrated mid-run through the
+  // widening path rather than written silently.
+  assert.throws(
+    () => assertChangeSetWithinPlan(converted!, changeSet(["src/new/file.ts"])),
+    ScopeExpansionError,
+  );
+});
+
+test("a converted holder writing where it said it would is not an escape", () => {
+  // The trap in reading a declared claim the way a frozen one is read. It
+  // occupies only the files it never named — that is what lets everything it
+  // *did* name be shared — so "not in the claim" would call every declared
+  // file an escape, sending the holder back through arbitration on every
+  // collection against a candidate that has since been admitted into the
+  // other half of the same file. Refused, and the holder failed for doing
+  // exactly what it said it would do.
+  const converted = declaredPlanFromClaim(
+    blanketPlan(TASK),
+    { files: ["src/render/canvas.ts"], symbols: ["drawFrame"] },
+    [{ path: "src/audio/mixer.ts" }],
+  );
+
+  assert.deepEqual(
+    filesOutsideClaim(converted!, [
+      "src/render/canvas.ts",
+      "src/audio/mixer.ts",
+    ]),
+    [],
+  );
+  // A file it never named is still arbitrated, which is the path that keeps a
+  // mid-run creation from being written over somebody else's grant.
+  assert.deepEqual(filesOutsideClaim(converted!, ["src/new/thing.ts"]), [
+    "src/new/thing.ts",
+  ]);
+  // And a frozen claim answers exactly as it did before.
+  const frozen = freezePlanFromWorkingChanges(blanketPlan(TASK), [
+    { path: "src/render/canvas.ts", status: "modified" },
+  ]);
+  assert.deepEqual(filesOutsideClaim(frozen, ["src/render/canvas.ts"]), []);
+  assert.deepEqual(filesOutsideClaim(frozen, ["src/render/mesh.ts"]), [
+    "src/render/mesh.ts",
+  ]);
 });

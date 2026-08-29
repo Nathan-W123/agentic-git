@@ -261,7 +261,47 @@ export interface FrozenPlanClaim {
   touched?: TouchedFileRanges[];
 }
 
-export type PlanClaim = BlanketPlanClaim | FrozenPlanClaim;
+/**
+ * What a blanket claim becomes when its holder is asked to describe itself.
+ *
+ * The freeze above is derived from behaviour alone, and that is its whole
+ * limitation: it carries no symbols — freezing never adds any — and it exempts
+ * every file it names from being shared. So the task arriving behind it hits
+ * two independent refusals, and partial admission could never fire between the
+ * first and second task in a repository at all.
+ *
+ * This is the answer to that. The holder is paused mid-run, asked which files
+ * and declarations the rest of its work needs, and resumed; what it says
+ * becomes an ordinary plan — real `expectedFiles`, real `declared.symbols` —
+ * which arbitration can split like any other.
+ *
+ * What survives as a claim is only `held`: the files this holder has already
+ * been observed writing in and did *not* mention. Those must stay whole to it
+ * — a holder that has written in a function it forgot to name would otherwise
+ * have that function handed to somebody else and silently overwritten — and a
+ * claim is the only vocabulary that says "whole, regardless of declarations".
+ *
+ * Deliberately no `directories`. A holder that has just said where it is going
+ * does not need creation latitude, and latitude arbitration does not read is
+ * latitude that only ever lets its holder write over somebody else's grant.
+ */
+export interface DeclaredPlanClaim {
+  kind: "declared";
+  declaredAt: string;
+  /**
+   * Files the holder was observed in but did not name, held whole.
+   *
+   * A subset of `expectedFiles` by construction, so it never grants anything
+   * the declarations do not already carry; it only withdraws those files from
+   * being shared.
+   */
+  held: string[];
+}
+
+export type PlanClaim =
+  | BlanketPlanClaim
+  | FrozenPlanClaim
+  | DeclaredPlanClaim;
 
 export interface CanonicalVersion {
   sequence: number;
@@ -1269,6 +1309,17 @@ export type AuditEventType =
    */
   | "blanket_claim_granted"
   | "blanket_claim_frozen"
+  /**
+   * A repository-wide holder was paused, asked what the rest of its work
+   * needs, and turned into an ordinary plan carrying those declarations — so
+   * the task that arrived behind it can be admitted into the same files.
+   *
+   * Distinct from `blanket_claim_frozen`, which is the fallback: a freeze is
+   * derived from behaviour alone and carries no symbols, so nothing can be
+   * shared with it. Which of the two a contention episode produced is the
+   * difference between the arrival running now and the arrival waiting.
+   */
+  | "blanket_claim_declared"
   | "changeset_collected"
   /** Patches a partial admission held back, kept for the follow-up task. */
   | "changeset_withheld"
@@ -1794,6 +1845,13 @@ export function isBlanketClaim(plan: Pick<AgentPlan, "claim">): boolean {
   return plan.claim?.kind === "blanket";
 }
 
+/** The directories a frozen claim covers, or nothing for any other plan. */
+export function claimedDirectories(
+  plan: Pick<AgentPlan, "claim">,
+): readonly string[] {
+  return plan.claim?.kind === "frozen" ? plan.claim.directories : [];
+}
+
 /**
  * Whether a claim — as opposed to the declarations beside it — covers a path.
  *
@@ -1810,6 +1868,12 @@ export function claimCoversPath(
   }
   if (plan.claim.kind === "blanket") {
     return !(plan.claim.released ?? []).includes(file);
+  }
+  if (plan.claim.kind === "declared") {
+    // Exactly the files held whole, and nothing beyond them. Everything else
+    // this holder may write it declared, and declarations are read the
+    // ordinary way — so this grants nothing the plan did not already say.
+    return uniqueRepositoryPaths(plan.claim.held).includes(file);
   }
   return plan.claim.directories.some((directory) =>
     file.startsWith(directory),
@@ -1842,6 +1906,13 @@ export function claimOccupiesPath(
   }
   if (plan.claim.kind === "blanket") {
     return !uniqueRepositoryPaths(plan.claim.released ?? []).includes(file);
+  }
+  if (plan.claim.kind === "declared") {
+    // `held`, and pointedly not `expectedFiles`. This one line is what makes a
+    // converted holder splittable: read the declared files as occupied, as a
+    // frozen claim does, and `partitionContested` exempts every one of them
+    // and the whole exercise of asking buys nothing.
+    return uniqueRepositoryPaths(plan.claim.held).includes(file);
   }
   // Normalized, like every other reader of `expectedFiles` in an admission
   // decision. This was the one comparing raw strings, and it is the one that
@@ -1888,10 +1959,20 @@ function isPlanClaim(value: unknown): value is PlanClaim {
     kind?: unknown;
     grantedAt?: unknown;
     frozenAt?: unknown;
+    declaredAt?: unknown;
     directories?: unknown;
+    held?: unknown;
     touched?: unknown;
     released?: unknown;
   };
+  if (claim.kind === "declared") {
+    // Checked rather than trusted, for the same reason the other two are: a
+    // plan is read back out of storage, and these paths decide which files
+    // another task is refused.
+    return (
+      typeof claim.declaredAt === "string" && isStringArray(claim.held)
+    );
+  }
   if (claim.kind === "blanket") {
     return (
       typeof claim.grantedAt === "string" &&

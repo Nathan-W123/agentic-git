@@ -914,3 +914,497 @@ test("nothing is released by a holder that has written nothing yet", async () =>
     await real.cleanup();
   }
 });
+
+/**
+ * The case backlog item #14 says was never covered: a holder that really is a
+ * blanket claim.
+ *
+ * Every partial-admission test in the repository constructs a holder with no
+ * claim at all, which a solo-started agent never is. A real one is handed the
+ * whole repository without being asked to describe itself, so it carries
+ * `expectedSymbols: []` and a claim — and each of those independently stops
+ * the arrival being split into its files. Freezing does not fix either: it
+ * never adds symbols and it keeps a claim. So partial admission could never
+ * fire between the first and second task in a repository, which is the order
+ * people actually work in.
+ *
+ * What follows drives the whole sequence against the real store and a real
+ * index: solo claim, second arrival, the holder asked and answering, and the
+ * arrival admitted *into the same file*.
+ */
+
+/** One file with four functions in it, which is what makes sharing possible. */
+async function sharedRepository(): Promise<{
+  repository: CanonicalRepository;
+  version: CanonicalVersion;
+  cleanup: () => Promise<void>;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-declared-"));
+  const source = path.join(root, "source");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(source);
+  await mkdir(path.join(source, "src"), { recursive: true });
+  await writeFile(
+    path.join(source, "src", "shared.ts"),
+    [
+      "export function holderOne(): number {",
+      "  return 1;",
+      "}",
+      "",
+      "export function holderTwo(): number {",
+      "  return 2;",
+      "}",
+      "",
+      "export function candidateOne(): number {",
+      "  return 3;",
+      "}",
+      "",
+      "export function candidateTwo(): number {",
+      "  return 4;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    path.join(source, "src", "quiet.ts"),
+    "export function quiet(): number {\n  return 0;\n}\n",
+    "utf8",
+  );
+  await repositories.commitAll(source, "seed");
+  const repository = await repositories.importLocalRepository(
+    source,
+    path.join(root, "canonical.git"),
+    "repo_a",
+  );
+  return {
+    repository,
+    version: await repositories.getCanonicalVersion(repository),
+    cleanup: async () => {
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+/** A holder alone in the repository, holding all of it, with no estimate. */
+async function soloHolder(
+  store: InMemoryCoordinationStore,
+  worker: string,
+  repository: CanonicalRepository,
+  version: CanonicalVersion,
+): Promise<{
+  leaseId: string;
+  task: TaskDefinition;
+  authority: LeasePlanAuthority;
+  claim: AgentPlan;
+}> {
+  const first = await leaseFor(store, worker, "rewrite the renderer", version);
+  const authority = new LeasePlanAuthority({
+    store,
+    leaseIdForTask: new Map([[first.task.id, first.leaseId]]),
+  });
+  const claim = await authority.claimRepository({
+    task: first.task,
+    repository,
+    estimatedFiles: [],
+    baseVersion: version,
+  });
+  assert.notEqual(claim, undefined, "the holder should hold the repository");
+  assert.ok(isBlanketClaim(claim!));
+  return { ...first, authority, claim: claim! };
+}
+
+function candidatePlan(
+  taskId: string,
+  files: string[],
+  symbols: string[],
+): AgentPlan {
+  return {
+    taskId,
+    objective: "add a currency prefix where a candidate value is shown",
+    intent: "add a currency prefix",
+    expectedFiles: files,
+    expectedSymbols: symbols,
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+}
+
+/** Whether two inclusive line ranges share a line. */
+function intersects(
+  left: { startLine: number; endLine: number },
+  right: { startLine: number; endLine: number },
+): boolean {
+  return left.startLine <= right.endLine && right.startLine <= left.endLine;
+}
+
+test("a task arriving behind a blanket claim is admitted into the holder's own file", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const holder = await soloHolder(store, worker, real.repository, real.version);
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a currency prefix",
+      real.version,
+    );
+
+    // The ask. A real holder is paused, asked this, and resumed; here the
+    // adapter round trip is the closure the coordinator supplies, exactly as
+    // `observe` is.
+    let asked = 0;
+    const frozen = await holder.authority.freezeBlanketClaim({
+      task: holder.task,
+      plan: holder.claim,
+      planRevision: 1,
+      repository: real.repository,
+      baseVersion: real.version,
+      estimatedFiles: [],
+      observe: async () => [],
+      declare: async () => {
+        asked += 1;
+        return {
+          files: ["src/shared.ts"],
+          symbols: ["holderOne", "holderTwo"],
+        };
+      },
+    });
+
+    assert.equal(asked, 1, "the holder is asked exactly once");
+    assert.notEqual(frozen, undefined, "the claim should have been converted");
+    assert.equal(
+      frozen?.claim?.kind,
+      "declared",
+      `a converted holder must not keep a frozen claim: ${JSON.stringify(frozen?.claim)}`,
+    );
+    // The two things freezing could never produce, and without both of which
+    // the arrival cannot be split into this file.
+    assert.deepEqual(frozen?.expectedSymbols, ["holderOne", "holderTwo"]);
+    assert.deepEqual(frozen?.declared?.symbols, ["holderOne", "holderTwo"]);
+    assert.deepEqual(
+      frozen?.claim?.kind === "declared" ? frozen.claim.held : ["unset"],
+      [],
+      "nothing was touched-and-unmentioned, so nothing is held whole",
+    );
+
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: candidatePlan(second.task.id, ["src/shared.ts"], ["candidateOne"]),
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+
+    assert.equal(
+      decision.outcome,
+      "admitted",
+      `the arrival should have been admitted: ${JSON.stringify(decision)}`,
+    );
+    if (decision.outcome !== "admitted") {
+      return;
+    }
+    assert.deepEqual(
+      decision.plan.expectedFiles,
+      ["src/shared.ts"],
+      "the arrival is granted the holder's own file, not a different one",
+    );
+    const admission = decision.admission;
+    assert.notEqual(
+      admission,
+      undefined,
+      "a whole-file grant would mean the holder was not narrowed at all",
+    );
+    assert.equal(admission?.status, "approved_with_constraints");
+
+    // What was refused: the functions the holder named, and only those.
+    const withheld = (admission?.deferredResources ?? []).flatMap(
+      (resource) => resource.locations ?? [],
+    );
+    assert.ok(withheld.length > 0, JSON.stringify(admission?.deferredResources));
+    assert.ok(
+      (admission?.deferredResources ?? []).some(
+        (resource) => resource.resourceId === "holderOne",
+      ),
+      `the holder's declarations should be the withheld half: ${JSON.stringify(admission?.deferredResources)}`,
+    );
+
+    // What was granted: a lease on the same file, carrying the complement.
+    const granted = (admission?.ownershipGrants ?? []).find(
+      (lease) =>
+        lease.resourceType === "file" && lease.resourceId === "src/shared.ts",
+    );
+    assert.notEqual(granted, undefined, "no file lease was granted");
+    assert.notEqual(
+      granted?.ranges,
+      undefined,
+      "a lease with no ranges is the whole file, which is not a split",
+    );
+    // The assertion the whole change exists for: the two halves do not touch.
+    for (const held of withheld) {
+      for (const range of granted?.ranges ?? []) {
+        assert.equal(
+          intersects(held, range),
+          false,
+          `granted ${JSON.stringify(range)} overlaps withheld ${JSON.stringify(held)}`,
+        );
+      }
+    }
+
+    const declared = await store.listAuditEvents({
+      types: ["blanket_claim_declared"],
+    });
+    assert.equal(declared.length, 1, "the conversion is on the record");
+  } finally {
+    await real.cleanup();
+  }
+});
+
+test("a file the holder has written in but did not mention stays whole to it", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const holder = await soloHolder(store, worker, real.repository, real.version);
+    await leaseFor(store, worker, "touch the quiet file", real.version);
+    const second = await leaseFor(store, worker, "and again", real.version);
+
+    const frozen = await holder.authority.freezeBlanketClaim({
+      task: holder.task,
+      plan: holder.claim,
+      planRevision: 1,
+      repository: real.repository,
+      baseVersion: real.version,
+      estimatedFiles: [],
+      // Already writing in quiet.ts, and about to forget to say so.
+      observe: async () => [
+        { path: "src/quiet.ts", status: "modified" as const },
+      ],
+      declare: async () => ({
+        files: ["src/shared.ts"],
+        symbols: ["holderOne"],
+      }),
+    });
+
+    // The footprint is the union, never the answer alone. A holder whose
+    // written work was handed to somebody else would have it overwritten in
+    // silence, and neither side would notice.
+    assert.ok(
+      frozen?.expectedFiles.includes("src/quiet.ts"),
+      `the observed file was dropped: ${JSON.stringify(frozen?.expectedFiles)}`,
+    );
+    assert.deepEqual(
+      frozen?.claim?.kind === "declared" ? frozen.claim.held : [],
+      ["src/quiet.ts"],
+      "touched and unmentioned must be held whole, not shared around symbols",
+    );
+
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: candidatePlan(second.task.id, ["src/quiet.ts"], ["quiet"]),
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+    const granted =
+      decision.outcome === "admitted" ? decision.plan.expectedFiles : [];
+    assert.ok(
+      !granted.includes("src/quiet.ts"),
+      `a file the holder is already writing in was granted away: ${JSON.stringify(decision)}`,
+    );
+  } finally {
+    await real.cleanup();
+  }
+});
+
+test("a file the holder has not touched yet is still its own once it names it", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const holder = await soloHolder(store, worker, real.repository, real.version);
+    const second = await leaseFor(store, worker, "work on quiet", real.version);
+
+    const frozen = await holder.authority.freezeBlanketClaim({
+      task: holder.task,
+      plan: holder.claim,
+      planRevision: 1,
+      repository: real.repository,
+      baseVersion: real.version,
+      estimatedFiles: [],
+      // Nothing written anywhere: this holder is still reading.
+      observe: async () => [],
+      declare: async () => ({
+        files: ["src/quiet.ts"],
+        symbols: ["quiet"],
+      }),
+    });
+    assert.deepEqual(frozen?.expectedFiles, ["src/quiet.ts"]);
+
+    const arriving = new LeasePlanAuthority({
+      store,
+      leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+    });
+    const decision = await arriving.admit({
+      task: second.task,
+      plan: candidatePlan(second.task.id, ["src/quiet.ts"], ["quiet"]),
+      planRevision: 1,
+      baseVersion: real.version,
+      repository: real.repository,
+    });
+    // `quiet` is the only declaration in the file and the holder named it, so
+    // there is nothing left to grant — a forecast is a claim exactly as a
+    // written line is, which is the contract every planned agent runs under.
+    const granted =
+      decision.outcome === "admitted" ? decision.plan.expectedFiles : [];
+    assert.ok(
+      !granted.includes("src/quiet.ts"),
+      `a file the holder declared was granted away: ${JSON.stringify(decision)}`,
+    );
+  } finally {
+    await real.cleanup();
+  }
+});
+
+test("a holder that does not answer falls back to today's freeze", async () => {
+  for (const [label, answer] of [
+    ["no answer", async () => undefined],
+    ["throws", async () => { throw new Error("the CLI died"); }],
+    ["empty", async () => ({ files: [], symbols: [] })],
+    ["files but no symbols", async () => ({ files: ["src/shared.ts"], symbols: [] })],
+    ["symbols but no files", async () => ({ files: [], symbols: ["holderOne"] })],
+    ["junk paths", async () => ({ files: ["/etc/passwd", "../escape.ts"], symbols: ["x"] })],
+  ] as Array<[string, () => Promise<{ files: string[]; symbols: string[] } | undefined>]>) {
+    const real = await sharedRepository();
+    const { store, worker } = await seed(real.repository);
+    try {
+      const holder = await soloHolder(
+        store,
+        worker,
+        real.repository,
+        real.version,
+      );
+      const second = await leaseFor(store, worker, "arrive", real.version);
+
+      const frozen = await holder.authority.freezeBlanketClaim({
+        task: holder.task,
+        plan: holder.claim,
+        planRevision: 1,
+        repository: real.repository,
+        baseVersion: real.version,
+        estimatedFiles: [],
+        observe: async () => [
+          { path: "src/shared.ts", status: "modified" as const },
+        ],
+        declare: answer,
+      });
+
+      // Degrade to a wait, never to a wrong grant: exactly the freeze that
+      // shipped, on the observed writes alone.
+      assert.equal(frozen?.claim?.kind, "frozen", label);
+      assert.deepEqual(frozen?.expectedSymbols, [], label);
+      assert.deepEqual(
+        await store.listAuditEvents({ types: ["blanket_claim_declared"] }),
+        [],
+        label,
+      );
+
+      const arriving = new LeasePlanAuthority({
+        store,
+        leaseIdForTask: new Map([[second.task.id, second.leaseId]]),
+      });
+      const decision = await arriving.admit({
+        task: second.task,
+        plan: candidatePlan(
+          second.task.id,
+          ["src/shared.ts"],
+          ["candidateOne"],
+        ),
+        planRevision: 1,
+        baseVersion: real.version,
+        repository: real.repository,
+      });
+      assert.notEqual(
+        decision.outcome,
+        "admitted",
+        `${label}: the arrival must wait exactly as it does today`,
+      );
+    } finally {
+      await real.cleanup();
+    }
+  }
+});
+
+test("an adapter that cannot be asked is never asked", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const holder = await soloHolder(store, worker, real.repository, real.version);
+    await leaseFor(store, worker, "arrive", real.version);
+
+    // No `declare` at all — the worker path, or an adapter without
+    // pause/requestReplan. The field is optional and absent means today.
+    const frozen = await holder.authority.freezeBlanketClaim({
+      task: holder.task,
+      plan: holder.claim,
+      planRevision: 1,
+      repository: real.repository,
+      baseVersion: real.version,
+      estimatedFiles: [],
+      observe: async () => [
+        { path: "src/shared.ts", status: "modified" as const },
+      ],
+    });
+    assert.equal(frozen?.claim?.kind, "frozen");
+    assert.deepEqual(
+      await store.listAuditEvents({ types: ["blanket_claim_declared"] }),
+      [],
+    );
+  } finally {
+    await real.cleanup();
+  }
+});
+
+test("three tasks arriving behind one holder ask it once, not three times", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    const holder = await soloHolder(store, worker, real.repository, real.version);
+    for (const objective of ["first arrival", "second arrival", "third"]) {
+      await leaseFor(store, worker, objective, real.version);
+    }
+
+    let asked = 0;
+    const request = {
+      task: holder.task,
+      plan: holder.claim,
+      planRevision: 1,
+      repository: real.repository,
+      baseVersion: real.version,
+      estimatedFiles: [],
+      observe: async () => [],
+      declare: async () => {
+        asked += 1;
+        return { files: ["src/shared.ts"], symbols: ["holderOne"] };
+      },
+    };
+    // The holder's own poll, ticking while three tasks queue behind it.
+    await holder.authority.freezeBlanketClaim(request);
+    await holder.authority.freezeBlanketClaim(request);
+    await holder.authority.freezeBlanketClaim(request);
+
+    // One ask per holder per contention episode. Pausing a working agent three
+    // times because three people started tasks is not a cost this can carry.
+    assert.equal(asked, 1, `the holder was paused ${String(asked)} times`);
+  } finally {
+    await real.cleanup();
+  }
+});

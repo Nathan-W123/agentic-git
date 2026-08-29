@@ -132,6 +132,27 @@ const FORCED_QUESTION_INSTRUCTIONS = [
     "which is where you implement the task.",
 ].join("\n");
 
+/** See the prompt-cli adapter's constant of the same name. */
+const DECLARATION_SHAPE_INSTRUCTIONS = [
+  "Do not edit anything in this round.",
+  "Answer with exactly one JSON object and nothing else. No prose, no code " +
+    "fence. The object must have exactly these two keys:",
+  "  expectedFiles (repository-relative paths you will still edit),",
+  "  expectedSymbols (the functions, classes and methods in them you will " +
+    "add, change or remove, including ones that do not exist yet)",
+].join("\n");
+
+/** Two fields, so a settled objective and risk level cannot be rewritten. */
+const DECLARATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["expectedFiles", "expectedSymbols"],
+  properties: {
+    expectedFiles: { type: "array", items: { type: "string" } },
+    expectedSymbols: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
 const PLAN_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -438,6 +459,15 @@ interface CodexSession {
   eventHandlers: Set<(event: AgentEvent) => void>;
   controller: AbortController | undefined;
   active: Promise<ProcessOutput> | undefined;
+  /**
+   * A pause taken at a round boundary, and the promise the loop waits on.
+   *
+   * There is no process to signal — `codex exec` is a process per round — so
+   * "paused" can only mean "does not start the next one". See the prompt-cli
+   * adapter's `pause` for why that is what makes the mid-run declaration ask
+   * legal at all.
+   */
+  paused: { promise: Promise<void>; resume: () => void } | undefined;
   scopeDecisions: ScopeChangeDecision[];
   /** One entry per `codex exec` invocation this session made. */
   tokenUsage: CodexTokenUsage[];
@@ -1100,6 +1130,7 @@ export class CodexAdapter implements AgentAdapter {
       pendingAction: new Map(),
       actionResults: [],
       contention: [],
+      paused: undefined,
       resume: undefined,
       cancelled: false,
     };
@@ -1169,6 +1200,7 @@ export class CodexAdapter implements AgentAdapter {
       pendingAction: new Map(),
       actionResults: [],
       contention: [],
+      paused: undefined,
       resume,
       cancelled: false,
     };
@@ -1295,6 +1327,14 @@ export class CodexAdapter implements AgentAdapter {
     request: ReplanRequest,
   ): Promise<AgentPlan> {
     const record = this.requireSession(sessionId);
+    // The mid-execution branch. See the prompt-cli adapter for why this lives
+    // inside the existing verb: a repository-wide holder joined by another
+    // task is asked what the rest of its work needs, and that is a replan in
+    // shape but not one in effect — no planning workspace, no re-planning of a
+    // task the session is halfway through, and `record.input` untouched.
+    if (isBlanketClaim(request.previousPlan)) {
+      return await this.declareRemainingScope(record, request);
+    }
     if (record.context !== undefined) {
       throw new Error(
         `Session ${sessionId} cannot replan after execution context was sent`,
@@ -1344,6 +1384,67 @@ export class CodexAdapter implements AgentAdapter {
     }
   }
 
+  /**
+   * Asks a paused repository-wide holder which files and declarations the rest
+   * of its work needs, in the execution workspace over the live thread.
+   *
+   * Two fields, because risk, commands and objective are settled and re-asking
+   * them invites a rewrite. `record.plan` is not overwritten here: what this
+   * session may write is the arbitrated plan the coordinator hands back
+   * through `acceptBlanketClaim`, not its own answer.
+   */
+  private async declareRemainingScope(
+    record: CodexSession,
+    request: ReplanRequest,
+  ): Promise<AgentPlan> {
+    const context = record.context;
+    if (context === undefined) {
+      throw new Error(
+        `Session ${record.session.id} has not started executing, so it has ` +
+          "no remaining scope to declare",
+      );
+    }
+    if (record.paused === undefined) {
+      throw new Error(
+        `Session ${record.session.id} must be paused before it is asked to ` +
+          "declare its remaining scope",
+      );
+    }
+    const output = await this.withSchema(
+      DECLARATION_SCHEMA,
+      async (schemaPath) =>
+        await this.runCodex(
+          record,
+          context.workspacePath,
+          "read-only",
+          schemaPath,
+          [
+            ...request.constraints,
+            `Answer deadline: ${this.planningTimeoutMs} ms.`,
+            `Task id: ${record.input.task.id}`,
+            `Objective: ${taskRequest(record.input.task.objective)}`,
+            DECLARATION_SHAPE_INSTRUCTIONS,
+          ].join("\n"),
+          this.planningTimeoutMs,
+          "planning",
+        ),
+    );
+    const answer = parseJsonObject(output, "planning") as {
+      expectedFiles?: unknown;
+      expectedSymbols?: unknown;
+    };
+    const strings = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string")
+        : [];
+    return {
+      ...structuredClone(request.previousPlan),
+      taskId: record.input.task.id,
+      expectedFiles: strings(answer.expectedFiles),
+      expectedSymbols: strings(answer.expectedSymbols),
+    };
+  }
+
   public async sendContext(
     sessionId: string,
     context: CoordinatorContext,
@@ -1370,6 +1471,13 @@ export class CodexAdapter implements AgentAdapter {
     });
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
+      // A pause taken between rounds is honoured before the next invocation,
+      // never during one: nothing is running while this waits, which is what
+      // lets the coordinator ask this session a question over the same thread.
+      const paused = record.paused;
+      if (paused !== undefined) {
+        await paused.promise;
+      }
       const forceQuestion = this.forcedQuestionPending(record);
       const output = await this.withSchema(
         forceQuestion ? FORCED_QUESTION_SCHEMA : COMPLETION_SCHEMA,
@@ -1653,12 +1761,38 @@ export class CodexAdapter implements AgentAdapter {
     }));
   }
 
-  public async pause(_sessionId: string): Promise<void> {
-    throw new Error("CodexAdapter does not support pausing ephemeral executions");
+  /**
+   * Stops this session at the next round boundary, killing nothing. The round
+   * in flight is awaited rather than aborted, so the agent keeps its work and
+   * its worktree is untouched.
+   */
+  public async pause(sessionId: string): Promise<void> {
+    const record = this.requireSession(sessionId);
+    if (record.cancelled) {
+      throw new Error(`Session ${sessionId} was cancelled`);
+    }
+    if (record.paused === undefined) {
+      let release = (): void => undefined;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      record.paused = { promise, resume: release };
+    }
+    const active = record.active;
+    if (active !== undefined) {
+      try {
+        await active;
+      } catch {
+        // The operation that owns the process reports its own failure.
+      }
+    }
   }
 
-  public async resume(_sessionId: string): Promise<void> {
-    throw new Error("CodexAdapter does not support resuming ephemeral executions");
+  public async resume(sessionId: string): Promise<void> {
+    const record = this.requireSession(sessionId);
+    const paused = record.paused;
+    record.paused = undefined;
+    paused?.resume();
   }
 
   public async resolveScopeChange(

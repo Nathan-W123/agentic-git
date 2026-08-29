@@ -67,7 +67,11 @@ import {
   planAdmissionApproved,
   planAdmissionPartial,
 } from "@coord/shared-types";
-import { releaseFromBlanketClaim } from "./blanket-claim.js";
+import {
+  filesOutsideClaim,
+  releaseFromBlanketClaim,
+  type HolderDeclaration,
+} from "./blanket-claim.js";
 import {
   GitWorktreeWorkspaceManager,
   type AdvanceWorkspaceInput,
@@ -585,6 +589,13 @@ export interface CoordinatorDependencies {
    */
   workingChangePollMs?: number;
   /**
+   * How long a repository-wide holder is given to answer when it is paused
+   * and asked what the rest of its work needs. Defaults to two minutes; a
+   * test drives it down so an agent that never answers does not stall a
+   * teardown for that long.
+   */
+  blanketDeclarationTimeoutMs?: number;
+  /**
    * Who puts an agent's question to a person, and brings back what they said.
    *
    * Absent on a deployment with nobody to ask — a CLI run, a benchmark — in
@@ -949,6 +960,28 @@ export interface BlanketFreezeRequest {
    * back to keeping the claim whole.
    */
   estimatedFiles: readonly string[];
+  /**
+   * Asks the holder itself what the rest of its work needs, or is absent.
+   *
+   * Supplied by the coordinator exactly as {@link observe} is, and called by
+   * the authority at the moment of its choosing — which is after it has proved
+   * somebody else is here and before it computes the narrowing. The authority
+   * never learns what an adapter is; the coordinator never learns whether
+   * anybody has arrived.
+   *
+   * The holder is paused at a round boundary, asked, and resumed. What comes
+   * back is a *declaration*, not an observation: the files and declarations it
+   * says it still has to work on. It is never the whole footprint — the caller
+   * unions it with `observe()`, because a holder that has already written in a
+   * function it forgets to mention must keep that function.
+   *
+   * Absent means freeze exactly as before this existed: no session to reach, a
+   * worker-side authority, or an adapter without `pause`/`requestReplan`. So
+   * does every failure — the answer is `undefined` when the agent does not
+   * answer, times out, returns nothing or returns junk. Degrade to a wait,
+   * never to a wrong grant.
+   */
+  declare?(): Promise<HolderDeclaration | undefined>;
 }
 
 /** The remainder of a partially admitted task, once its granted half landed. */
@@ -1075,6 +1108,71 @@ const DEFAULT_QUESTION_DEADLINE_MS = 15 * 60 * 1000;
 const DEFAULT_WORKING_CHANGE_POLL_MS = 10_000;
 
 /**
+ * How long a paused holder is given to say what the rest of its work needs.
+ *
+ * Bounded because `stop()` awaits the freeze in flight, so a session that has
+ * stopped answering would otherwise hold up the teardown of a settling task
+ * for as long as an execution round is allowed to take. Two minutes is one
+ * short answer from a warm conversation with a wide margin, not a planning
+ * budget: the question is two fields long and the workspace is already open.
+ */
+const DEFAULT_BLANKET_DECLARATION_TIMEOUT_MS = 120_000;
+
+/**
+ * The ask itself.
+ *
+ * Written the way `EMPTY_SYMBOLS_CORRECTION` and `PLAN_SHAPE_INSTRUCTIONS`
+ * are: consequence first, the rest of the work only, never the whole task.
+ * The holder is mid-execution, so the danger is that it reads this as "plan
+ * again" and rewrites an objective that is already settled.
+ */
+const BLANKET_DECLARATION_REASON = [
+  "Another task has started in this repository. You were handed the whole of",
+  "it without being asked to describe yourself; that ends now, and what you",
+  "name here is what you keep.",
+  "Do not restate or re-plan the task. Name only what is still ahead of you:",
+  "the repository-relative files you will edit from this point on, and the",
+  "functions, classes and methods in them you will add, change or remove —",
+  "including ones that do not exist yet.",
+  "What you have already edited is kept for you whether you list it or not;",
+  "you do not need to defend it here.",
+  "expectedSymbols decides whether the other task can work in the same file as",
+  "you while you work: name the declarations and it is admitted around them,",
+  "name none and you keep every file whole and it waits for you to finish.",
+  "You have the workspace in front of you — read the declarations out of the",
+  "files rather than guessing them from the objective.",
+  "Do not edit anything in this round.",
+].join("\n");
+
+/**
+ * The promise, or nothing once the deadline passes.
+ *
+ * The underlying work is not cancelled — there is no way to un-ask an agent —
+ * only stopped being waited for, and its rejection is absorbed so a late
+ * failure cannot surface as an unhandled rejection long after the caller has
+ * moved on.
+ */
+async function withDeadline<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work.catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * Fifteen minutes, like the question deadline and for the same reason: long
  * enough that somebody who stepped away can still pick their conversation
  * back up warm, short enough that an abandoned one is not a process held for
@@ -1105,6 +1203,8 @@ export class Coordinator {
   private readonly store: CoordinationStore | undefined;
   private readonly repairConflicts: boolean;
   private readonly workingChangePollMs: number;
+  /** See {@link CoordinatorDependencies.blanketDeclarationTimeoutMs}. */
+  private readonly blanketDeclarationTimeoutMs: number;
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
   private readonly conversations: ConversationRegistry;
@@ -1137,6 +1237,9 @@ export class Coordinator {
     this.repairConflicts = dependencies.repairConflicts ?? true;
     this.workingChangePollMs =
       dependencies.workingChangePollMs ?? DEFAULT_WORKING_CHANGE_POLL_MS;
+    this.blanketDeclarationTimeoutMs =
+      dependencies.blanketDeclarationTimeoutMs ??
+      DEFAULT_BLANKET_DECLARATION_TIMEOUT_MS;
     this.questions = dependencies.questions;
     this.questionDeadlineMs =
       dependencies.questionDeadlineMs ?? DEFAULT_QUESTION_DEADLINE_MS;
@@ -5100,12 +5203,42 @@ export class Coordinator {
           baseVersion: waveVersion,
           observe: async () => await list(workspace),
           estimatedFiles: entry.blanketEstimate ?? [],
+          // Only where there is actually a session to ask. An adapter that
+          // cannot pause must not be asked at all: `run` refuses a second
+          // process while one is live, so asking without a pause would fail
+          // the round the holder is in the middle of.
+          ...(entry.adapter.pause === undefined ||
+          entry.adapter.requestReplan === undefined
+            ? {}
+            : {
+                declare: async () =>
+                  await this.askHolderToDeclare(
+                    entry,
+                    waveVersion,
+                    recorder,
+                    runAudit,
+                    input.repository.id,
+                  ),
+              }),
         });
       } catch {
         return;
       }
       if (frozen === undefined) {
         return;
+      }
+      if (frozen.claim?.kind === "declared") {
+        // The next round's prompt is built from what this holder now holds.
+        // Without this the execution prompt goes on telling it that it has
+        // the whole repository, which is the opposite of the truth.
+        try {
+          await entry.adapter.acceptBlanketClaim?.(entry.session.id, frozen);
+        } catch {
+          // Best effort. The plan is already durable and arbitration is
+          // already correct; the holder merely believes it holds more than it
+          // does, which is exactly today's post-freeze state, and its escapes
+          // are caught by the widening path below.
+        }
       }
       entry.plan = frozen;
       entry.planRevision += 1;
@@ -5161,6 +5294,101 @@ export class Coordinator {
   }
 
   /**
+   * Pauses a repository-wide holder, asks it what the rest of its work needs,
+   * and resumes it.
+   *
+   * The one ask that turns a claim nobody wrote into a plan arbitration can
+   * split. It is a `requestReplan` and not a `requestPlan`: `requestPlan`
+   * needs the planning workspace `acceptBlanketClaim` destroyed, and would
+   * re-plan the whole task cold. A {@link ReplanRequest} already carries a
+   * previous plan and constraints, which is exactly this ask's shape, and the
+   * adapters answer it in the execution workspace over the warm resume token
+   * when the previous plan is a blanket claim.
+   *
+   * The pause is what makes it legal at all — a session refuses a second
+   * process while one is live — so the ask can only land at a round boundary.
+   * Nothing is killed and no round is aborted.
+   *
+   * Every failure answers `undefined`, which the authority reads as "freeze as
+   * before". A `resume` that fails after a successful ask is the one failure
+   * that is not swallowed: it is recorded, because a session that will not
+   * continue is the run's teardown to own and not something to hide.
+   */
+  private async askHolderToDeclare(
+    entry: PlannedTask,
+    waveVersion: CanonicalVersion,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+    repositoryId: string,
+  ): Promise<HolderDeclaration | undefined> {
+    const adapter = entry.adapter;
+    if (adapter.pause === undefined || adapter.requestReplan === undefined) {
+      return undefined;
+    }
+    try {
+      await adapter.pause(entry.session.id);
+    } catch {
+      // Not paused, so not asked. Nothing has changed about the session.
+      return undefined;
+    }
+    let declaration: HolderDeclaration | undefined;
+    try {
+      const answer = await withDeadline(
+        adapter.requestReplan(entry.session.id, {
+          taskId: entry.task.id,
+          previousPlan: entry.plan,
+          canonicalChange: {
+            previousVersion: waveVersion,
+            canonicalVersion: waveVersion,
+            changedFiles: [],
+            changedSymbols: [],
+            changedApis: [],
+            changedSchemas: [],
+            changedConfigKeys: [],
+            changedTests: [],
+            changedServices: [],
+            reason: BLANKET_DECLARATION_REASON,
+          },
+          constraints: [BLANKET_DECLARATION_REASON],
+        }),
+        this.blanketDeclarationTimeoutMs,
+      );
+      if (
+        answer !== undefined &&
+        answer.expectedFiles.length > 0 &&
+        answer.expectedSymbols.length > 0
+      ) {
+        declaration = {
+          files: [...answer.expectedFiles],
+          symbols: [...answer.expectedSymbols],
+        };
+      }
+    } catch {
+      declaration = undefined;
+    }
+    try {
+      await adapter.resume(entry.session.id);
+    } catch (error) {
+      // Visible rather than swallowed. The worktree is intact and nothing was
+      // killed, so the holder is no worse off than a session whose CLI died
+      // mid-round — but somebody has to be able to see that it happened.
+      await this.trace(
+        recorder,
+        runAudit,
+        "blanket_claim_declared",
+        entry.task.id,
+        {
+          repositoryId,
+          resumeFailed: true,
+          explanation: describeError(error),
+        },
+      ).catch(() => undefined);
+      return undefined;
+    }
+    return declaration;
+  }
+
+  /**
    * Widens a frozen claim to cover files written after it was taken, or fails
    * the task saying which file somebody else holds and who.
    *
@@ -5176,7 +5404,10 @@ export class Coordinator {
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
   ): Promise<void> {
-    if (entry.plan.claim?.kind !== "frozen") {
+    if (
+      entry.plan.claim?.kind !== "frozen" &&
+      entry.plan.claim?.kind !== "declared"
+    ) {
       return;
     }
     // Measured against what the claim occupies, not against what it permits.
@@ -5185,13 +5416,10 @@ export class Coordinator {
     // path under one may since have been granted to somebody else. Reading
     // them here too would let this holder write it anyway, with nothing
     // anywhere saying two tasks had authored the same file.
-    const escaped = [
-      ...new Set(
-        changeSet.patches
-          .map((patch) => patch.path)
-          .filter((file) => !claimOccupiesPath(entry.plan, file)),
-      ),
-    ].sort();
+    const escaped = filesOutsideClaim(
+      entry.plan,
+      changeSet.patches.map((patch) => patch.path),
+    );
     if (escaped.length === 0) {
       return;
     }
