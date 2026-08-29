@@ -2071,3 +2071,107 @@ test("a claim-blocked arrival still gets the files the claim does not cover", ()
     "a claimed file was granted away",
   );
 });
+
+test("one claim-held file does not cancel the split on a shareable one", () => {
+  // The production shape, reported twice. A holder was promoted alone, took a
+  // blanket claim, was asked to declare, and named one file of the three it
+  // was working in; the other two stayed in `claim.held` — written in, never
+  // named. An arrival then named all three. Two were the holder's by claim and
+  // rightly withheld. The third was contested only by declaration, the two
+  // plans named different functions in it, and it is exactly the case chunk
+  // admission exists for — yet the arrival was sequenced with nothing.
+  //
+  // `admitWithinFiles` walks the contested files and, for each, asks its
+  // holders for lines to withhold. A claim-held path has none by design: a
+  // claim says what a task may reach, not what it declared, and the watched
+  // ranges that might stand in for declarations are new-side hunk numbers
+  // against a base-revision index, so reading them grants away the very
+  // function the holder is inside. That much is right and unchanged here.
+  //
+  // What was wrong is what it did about it. "This file cannot be divided" was
+  // returned as `undefined` — no split at all — so the first claim-held path
+  // in the loop ended the attempt for every other file, including ones with a
+  // perfectly good line to draw. The loop already had the correct answer a few
+  // lines above, for a file the index cannot read: push it to `withheldWhole`
+  // and carry on. The two never composed. Now every "not this file" verdict
+  // takes that same exit.
+  const ranges: Record<
+    string,
+    { name: string; startLine: number; endLine: number }[]
+  > = {
+    "src/checkout.js": [{ name: "checkout", startLine: 1, endLine: 20 }],
+    "src/order-pricing.js": [
+      { name: "applyDiscount", startLine: 1, endLine: 10 },
+      { name: "computeTax", startLine: 11, endLine: 20 },
+    ],
+    "test/order-pricing.test.js": [
+      { name: "suite", startLine: 1, endLine: 30 },
+    ],
+  };
+  const admission = admit(
+    plan("task_rhea", {
+      expectedFiles: [
+        "src/checkout.js",
+        "src/order-pricing.js",
+        "test/order-pricing.test.js",
+      ],
+      expectedSymbols: ["computeTax"],
+    }),
+    [
+      plan("task_zeus", {
+        // What `declaredPlanFromClaim` writes when the ask is answered: the
+        // declarations the holder gave, and `expectedFiles` widened to the
+        // union of those with every path it was observed writing in — which
+        // is why `held` is a subset of it by construction.
+        expectedFiles: [
+          "src/checkout.js",
+          "src/order-pricing.js",
+          "test/order-pricing.test.js",
+        ],
+        expectedSymbols: ["applyDiscount"],
+        declared: { symbols: ["applyDiscount"] },
+        // Written in, never named — so held whole, and not shareable.
+        claim: {
+          kind: "declared" as const,
+          declaredAt: new Date().toISOString(),
+          held: ["src/checkout.js", "test/order-pricing.test.js"],
+        },
+      }),
+    ],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: (file: string) => ranges[file] ?? [] },
+  );
+
+  assert.equal(
+    admission.status,
+    "approved_with_constraints",
+    `the shareable file was withheld on the claim-held files' account: ${admission.explanation}`,
+  );
+  // The file both plans named, split at the line: the holder's declared
+  // function withheld, the rest of the file granted.
+  assert.ok(
+    grantedResources(admission).includes("file:src/order-pricing.js"),
+    "the shareable file was not granted",
+  );
+  assert.deepEqual(
+    admission.ownershipGrants
+      .filter((lease) => lease.resourceId === "src/order-pricing.js")
+      .flatMap((lease) => lease.ranges ?? [])
+      .map((range) => range.startLine),
+    [11],
+    "the grant reached into the holder's own function",
+  );
+  // Both claim-held paths stay whole with their holder.
+  const deferred = (admission.deferredResources ?? []).map(
+    (resource) => `${resource.resourceType}:${resource.resourceId}`,
+  );
+  assert.ok(
+    deferred.includes("file:src/checkout.js") &&
+      deferred.includes("file:test/order-pricing.test.js"),
+    `a claim-held file was granted away: ${JSON.stringify(deferred)}`,
+  );
+  assert.ok(
+    deferred.includes("symbol:applyDiscount"),
+    `the holder's declared function was granted away: ${JSON.stringify(deferred)}`,
+  );
+});
