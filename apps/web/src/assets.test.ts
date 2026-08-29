@@ -5204,7 +5204,7 @@ test("task progress is monotonic and progress bars animate between keyed values"
     status: string;
     claimedAt?: string;
   }) => number;
-  const lifecycle = [
+  const stages = [
     "submitted",
     "planning",
     "planned",
@@ -5216,7 +5216,8 @@ test("task progress is monotonic and progress bars animate between keyed values"
     "awaiting_approval",
     "validating",
     "integrated",
-  ].map((status) => taskProgress({ status }));
+  ];
+  const lifecycle = stages.map((status) => taskProgress({ status }));
   assert.deepEqual(
     lifecycle,
     [...lifecycle].sort((left, right) => left - right),
@@ -5231,13 +5232,27 @@ test("task progress is monotonic and progress bars animate between keyed values"
     claimedAt: new Date(Date.now() - 60_000).toISOString(),
   });
   const runningFloor = taskProgress({ status: "running" });
+  const waitingFloor = taskProgress({ status: "awaiting_approval" });
+  // An agent picking a task up is the start of the work, so it has to read as
+  // the start of the bar. A bar already near half full before anything had
+  // been done was the whole complaint.
+  assert.ok(
+    claimedFloor <= 10 && runningFloor <= 12,
+    "an agent starting work should read as barely begun",
+  );
+  const prelude = lifecycle.slice(0, stages.indexOf("running") + 1);
+  const steps = prelude.slice(1).map((value, index) => value - prelude[index]!);
+  assert.ok(
+    Math.max(...steps) <= 5,
+    "reaching execution should step in small increments, not leap",
+  );
   assert.ok(
     claimedMid > claimedFloor,
     "coding should advance inside its stage when planned files are touched",
   );
   assert.ok(
-    claimedMid < runningFloor,
-    "within-stage coding progress must stay below the next lifecycle floor",
+    claimedMid < waitingFloor,
+    "within-stage coding progress must stay inside the executing band",
   );
 
   const barStart = ui.indexOf("export function bar(percent");

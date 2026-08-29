@@ -7795,6 +7795,39 @@ function showDirectMessageMenu(node) {
   );
 }
 
+/**
+ * The repository-scoped rows a menu offers on top of the conversation's own,
+ * shared by the channel header's menu and the repository card's.
+ *
+ * Deleting is the reason they are shared. The control existed, was routed and
+ * was permitted, but it was written out only inside the repository card's
+ * menu — and that card stopped being rendered, so nothing on screen opened
+ * it and a repository could no longer be deleted from the interface at all.
+ * Building the rows once, here, means the header of the channel somebody is
+ * actually looking at offers exactly the same control under exactly the same
+ * gate.
+ *
+ * That gate is unchanged: an organization owner, or a co-owner of this exact
+ * repository (`canDeleteRepository`) — an admin who may rename it is still
+ * not offered it, the server refuses anybody else regardless, and the action
+ * behind the row still asks for the repository's name to be typed out.
+ */
+function repositoryMenuItems(repositoryId) {
+  if (!canDeleteRepository(repositoryId)) {
+    return [];
+  }
+  return [
+    { separator: true },
+    {
+      act: "channel-delete-repo",
+      value: repositoryId,
+      label: "Delete repository",
+      iconName: "trash",
+      danger: true,
+    },
+  ];
+}
+
 function conversationMenuItems(repositoryId) {
   const channel = subChannelsFor(repositoryId).find(
     (candidate) => candidate.id === activeSubChannelId(repositoryId),
@@ -7831,6 +7864,9 @@ function conversationMenuItems(repositoryId) {
           },
         ]
       : []),
+    // Last, and separated: everything above changes what this conversation
+    // does, and this one ends it.
+    ...repositoryMenuItems(repositoryId),
   ];
 }
 
@@ -8761,17 +8797,9 @@ document.addEventListener("click", (event) => {
           : []),
         // Deleting asks for more than managing does: an owner, or a co-owner
         // of this repository. An admin who may rename it is not offered it.
-        ...(canDeleteRepository(value)
-          ? [
-              {
-                act: "channel-delete-repo",
-                value,
-                label: "Delete repository",
-                iconName: "trash",
-                danger: true,
-              },
-            ]
-          : []),
+        // Built by the shared helper, so this menu and the channel header's
+        // cannot drift apart on who is offered it.
+        ...repositoryMenuItems(value),
         { separator: true },
         { act: "copy-id", value, label: "Copy repository id", iconName: "file" },
       ]);
