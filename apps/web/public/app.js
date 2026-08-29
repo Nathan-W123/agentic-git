@@ -5029,7 +5029,16 @@ function positionSwitcher(layer) {
   }
   const box = trigger.getBoundingClientRect();
   const margin = 10;
-  const width = Math.min(520, Math.max(280, box.width, window.innerWidth < 560 ? window.innerWidth - 20 : 0));
+  // The panel is as wide as the field it drops out of. A fixed cap left the
+  // results stopping short of a search bar that grows to the width of its
+  // track, which reads as a misaligned box rather than one control. The
+  // viewport is the only ceiling; the floor keeps the list legible where the
+  // bar collapses to an icon.
+  const room = window.innerWidth - margin * 2;
+  const width = Math.min(
+    room,
+    Math.max(280, box.width, window.innerWidth < 560 ? room : 0),
+  );
   card.style.width = `${width}px`;
   card.style.left = `${Math.max(margin, Math.min(box.left, window.innerWidth - width - margin))}px`;
   card.style.top = `${box.bottom + 6}px`;
