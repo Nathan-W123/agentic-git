@@ -2297,3 +2297,59 @@ test("one unreadable file does not cancel the symbol split for the rest", () => 
     "the contested symbol was granted away rather than withheld",
   );
 });
+
+test("a refusal says why the split was not offered", () => {
+  // Six rounds of a field report were spent guessing at this from the
+  // outside. "Executing work holds a.js, b.js" is the same sentence whether
+  // the splitter was never reached, reached and found nothing to divide, or
+  // reached and refused the division — and each of those wants a different
+  // response from whoever is reading it. Every theory fitted the symptom, and
+  // the message could not rule any of them out.
+  //
+  // The holder here named the file and no function in it, which is the case
+  // that actually bites: a declaration with no symbols occupies the whole
+  // file, so there is no line to draw and the arrival waits behind a file its
+  // holder may have been nowhere near.
+  const ranges: Record<
+    string,
+    { name: string; startLine: number; endLine: number }[]
+  > = {
+    "src/pricing.js": [
+      { name: "basePrice", startLine: 1, endLine: 10 },
+      { name: "orderTotal", startLine: 11, endLine: 20 },
+    ],
+  };
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/pricing.js"],
+      expectedSymbols: ["orderTotal"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/pricing.js"],
+        expectedSymbols: [],
+        // Named the file, named nothing in it.
+        declared: { symbols: [] },
+      }),
+    ],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: (file: string) => ranges[file] ?? [] },
+  );
+
+  assert.notEqual(
+    admission.status,
+    "approved_with_constraints",
+    "this scenario is supposed to be the refusing one",
+  );
+  assert.ok(
+    admission.explanation.includes("held whole") ||
+      admission.explanation.includes("no line"),
+    `the refusal still does not say why it refused: ${admission.explanation}`,
+  );
+  // And it has to keep saying who holds what, which is the first thing anyone
+  // reading it wants.
+  assert.ok(
+    admission.explanation.includes("src/pricing.js"),
+    `the refusal stopped naming the contested file: ${admission.explanation}`,
+  );
+});
