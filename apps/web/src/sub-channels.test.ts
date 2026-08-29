@@ -134,10 +134,18 @@ test("switching rooms clears every cache it names, and cannot half-finish", asyn
     channelLoaded: new Set(["repo"]),
     channelRosterLoaded: new Set(["repo"]),
   };
+  // Injected, because `selectSubChannel` now clears the room's unread badge on
+  // the way in. Recorded rather than stubbed away: opening a room is reading
+  // it, and a switch that forgot to say so would leave a badge on the room the
+  // reader is looking at.
+  const cleared: string[] = [];
   const selectSubChannel = new Function(
     "state",
+    "noteSubChannelRead",
     `${body}; return selectSubChannel;`,
-  )(state) as (repositoryId: string, channelId: string) => void;
+  )(state, (repositoryId: string, channelId: string) =>
+    cleared.push(`${repositoryId}/${channelId}`),
+  ) as (repositoryId: string, channelId: string) => void;
 
   selectSubChannel("repo", "chan_backend");
 
@@ -159,6 +167,7 @@ test("switching rooms clears every cache it names, and cannot half-finish", asyn
   // loaded and its transcript never arrives.
   assert.equal(state.channelLoaded.has("repo"), false);
   assert.equal(state.channelRosterLoaded.has("repo"), false);
+  assert.deepEqual(cleared, ["repo/chan_backend"]);
 
   // Every name it clears has to be somewhere `state` actually declares.
   const names = /for \(const key of \[([\s\S]*?)\]\)/u.exec(data.slice(start));

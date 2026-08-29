@@ -4752,6 +4752,60 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return row === undefined ? undefined : text(row, "read_at");
   }
 
+  public async countUnreadByChannel(
+    repositoryId: string,
+    userId: string,
+  ): Promise<Record<string, number>> {
+    // One pass over the roots and one over the replies, each joined to this
+    // reader's cursor for the room the message is in. A room with no cursor
+    // has never been opened, so `read_at` is NULL and every message in it
+    // counts — which is what `COALESCE(read_at, '')` says, the empty string
+    // sorting before every ISO timestamp.
+    const general = generalChannelId(repositoryId);
+    const unread: Record<string, number> = {};
+    const add = (rows: Row[]): void => {
+      for (const row of rows) {
+        const channelId = text(row, "channel_id");
+        unread[channelId] = (unread[channelId] ?? 0) + integer(row, "total");
+      }
+    };
+    add(
+      this.db
+        .prepare(
+          `SELECT COALESCE(m.channel_id, ?) AS channel_id, COUNT(*) AS total
+             FROM channel_messages m
+             LEFT JOIN channel_read_cursors c
+               ON c.repository_id = m.repository_id
+              AND c.channel_id = COALESCE(m.channel_id, ?)
+              AND c.user_id = ?
+            WHERE m.repository_id = ?
+              AND m.deleted_at IS NULL
+              AND m.author_id <> ?
+              AND m.created_at > COALESCE(c.read_at, '')
+            GROUP BY COALESCE(m.channel_id, ?)`,
+        )
+        .all(general, general, userId, repositoryId, userId, general) as Row[],
+    );
+    add(
+      this.db
+        .prepare(
+          `SELECT COALESCE(m.channel_id, ?) AS channel_id, COUNT(*) AS total
+             FROM channel_message_replies r
+             JOIN channel_messages m ON m.id = r.message_id
+             LEFT JOIN channel_read_cursors c
+               ON c.repository_id = m.repository_id
+              AND c.channel_id = COALESCE(m.channel_id, ?)
+              AND c.user_id = ?
+            WHERE m.repository_id = ?
+              AND r.author_id <> ?
+              AND r.created_at > COALESCE(c.read_at, '')
+            GROUP BY COALESCE(m.channel_id, ?)`,
+        )
+        .all(general, general, userId, repositoryId, userId, general) as Row[],
+    );
+    return unread;
+  }
+
   public async setChannelMuted(
     repositoryId: string,
     userId: string,

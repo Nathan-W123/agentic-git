@@ -9589,8 +9589,14 @@ export class ApiGateway {
           () => true,
           () => false,
         );
+        // Every room's unread count for this caller in one query, so the
+        // sidebar can draw a badge per room without a request per badge.
+        const unread = await this.options.store.countUnreadByChannel(
+          repositoryId,
+          principal.user.id,
+        );
         const visible: Array<
-          SubChannel & { member: boolean; canPost: boolean }
+          SubChannel & { member: boolean; canPost: boolean; unread: number }
         > = [];
         for (const channel of channels) {
           const member =
@@ -9617,6 +9623,10 @@ export class ApiGateway {
               member ||
               channel.visibility === "public" ||
               channel.slug === GENERAL_SUB_CHANNEL_SLUG,
+            // How much of this room the caller has not read. Zero rather than
+            // absent, so the browser never has to tell "no badge" apart from
+            // "the server did not say".
+            unread: unread[channel.id] ?? 0,
           });
         }
         this.sendJson(response, 200, { channels: visible, canManage: admin });
