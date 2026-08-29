@@ -263,7 +263,6 @@ import {
   renderChats,
   resizeComposers,
   rosterMenuItems,
-  personMenuItems,
   messageOverflowMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
@@ -1534,6 +1533,7 @@ function topbar() {
       }
     </div>
     <button type="button" class="global-search" data-act="switch-open"
+      aria-haspopup="dialog" aria-expanded="false" aria-controls="qs-list"
       aria-label="Search and commands" title="Search and commands (Ctrl or Command K)">
       ${icon("search")}<span>Search</span><kbd>⌘K</kbd>
     </button>
@@ -1575,8 +1575,9 @@ function accountDestinations() {
       act: "dm-list",
       label: "Direct messages",
       iconName: "chatBubble",
-      ...(dms === 0 ? {} : { hint: `${dms} unread` }),
+      ...(dms === 0 ? {} : { meta: String(dms) }),
     },
+    { act: "nav", value: "settings", label: "Settings", iconName: "gear" },
   ];
 }
 
@@ -4925,7 +4926,7 @@ function switcherEntries(query) {
   const term = query.trim().toLowerCase();
   const rows = [
     ...state.repositories.map((repo) => ({
-      kind: "Workspace",
+      group: "Workspaces",
       label: repositoryLabel(repo.id),
       act: "switch-channel",
       value: repo.id,
@@ -4934,7 +4935,7 @@ function switcherEntries(query) {
     ...state.dmPeople
       .filter((person) => person.id !== currentUserId())
       .map((person) => ({
-        kind: "Person",
+        group: "People",
         label: person.name ?? memberName(person.id) ?? person.id,
         act: "switch-person",
         value: person.id,
@@ -4944,23 +4945,40 @@ function switcherEntries(query) {
       { route: "chats", label: "Chats" },
       { route: "notifications", label: "Notifications" },
     ].map((screen) => ({
-      kind: "Screen",
+      group: "Navigation",
       label: screen.label,
       act: "switch-screen",
       value: screen.route,
       iconName: "arrowRight",
     })),
     {
-      kind: "Dialog",
+      group: "Navigation",
       label: "Settings",
       act: "switch-screen",
       value: "settings",
       iconName: "gear",
     },
   ];
-  return rows
-    .filter((row) => term === "" || row.label.toLowerCase().includes(term))
-    .slice(0, 40);
+  const matches = rows.filter(
+    (row) => term === "" || row.label.toLowerCase().includes(term),
+  );
+  const selected = new Set();
+  for (const [group, limit] of [
+    ["Workspaces", 3],
+    ["People", 2],
+    ["Navigation", 2],
+  ]) {
+    for (const row of matches.filter((candidate) => candidate.group === group).slice(0, limit)) {
+      selected.add(row);
+    }
+  }
+  for (const row of matches) {
+    if (selected.size >= 7) {
+      break;
+    }
+    selected.add(row);
+  }
+  return matches.filter((row) => selected.has(row)).slice(0, 7);
 }
 
 function paintSwitcher() {
@@ -4979,24 +4997,55 @@ function paintSwitcher() {
     rows.length === 0
       ? `<div class="qs-empty">Nothing matches that</div>`
       : rows
-          .map(
-            (row, index) => `<button type="button" class="qs-item${
-              index === switcherIndex ? " active" : ""
-            }" data-act="${row.act}" data-value="${esc(row.value)}">
+          .map((row, index) => {
+            const previous = rows[index - 1];
+            const heading = previous?.group === row.group
+              ? ""
+              : `<div class="qs-group-label" role="presentation">${esc(row.group)}</div>`;
+            return `${heading}<button type="button" id="qs-option-${index}"
+              class="qs-item${index === switcherIndex ? " active" : ""}"
+              role="option" tabindex="-1" aria-selected="${index === switcherIndex}"
+              data-act="${row.act}" data-value="${esc(row.value)}">
               ${icon(row.iconName)}
               <span class="qs-label">${esc(row.label)}</span>
-              <span class="qs-kind">${esc(row.kind)}</span>
-            </button>`,
-          )
+            </button>`;
+          })
           .join("");
+  if (input !== null) {
+    if (rows.length === 0) {
+      input.removeAttribute("aria-activedescendant");
+    } else {
+      input.setAttribute("aria-activedescendant", `qs-option-${switcherIndex}`);
+    }
+  }
   list.querySelector(".qs-item.active")?.scrollIntoView({ block: "nearest" });
 }
 
-function closeSwitcher() {
-  document.querySelector("#qs-layer")?.remove();
+function positionSwitcher(layer) {
+  const trigger = document.querySelector(".global-search");
+  const card = layer.querySelector(".qs-card");
+  if (trigger === null || card === null) {
+    return;
+  }
+  const box = trigger.getBoundingClientRect();
+  const margin = 10;
+  const width = Math.min(520, Math.max(280, box.width, window.innerWidth < 560 ? window.innerWidth - 20 : 0));
+  card.style.width = `${width}px`;
+  card.style.left = `${Math.max(margin, Math.min(box.left, window.innerWidth - width - margin))}px`;
+  card.style.top = `${box.bottom + 6}px`;
 }
 
-function openSwitcher() {
+function closeSwitcher(restoreFocus = true) {
+  const open = document.querySelector("#qs-layer");
+  open?.remove();
+  const trigger = document.querySelector(".global-search");
+  trigger?.setAttribute("aria-expanded", "false");
+  if (open !== null && restoreFocus) {
+    trigger?.focus();
+  }
+}
+
+function openSwitcher({ keyboard = false } = {}) {
   if (document.querySelector("#qs-layer") !== null) {
     closeSwitcher();
     return;
@@ -5005,17 +5054,32 @@ function openSwitcher() {
   switcherIndex = 0;
   const layer = document.createElement("div");
   layer.id = "qs-layer";
-  layer.className = "qs-layer qs-layer-search";
+  layer.className = `qs-layer qs-layer-search${keyboard ? " qs-layer-keyboard" : ""}`;
   layer.innerHTML = `<div class="pop-scrim" data-act="switch-close"></div>
-    <div class="qs-card" role="dialog" aria-label="Go to">
-      <input class="qs-input" data-act="switch-input" type="text"
+    <div class="qs-card" role="dialog" aria-label="Go to"${
+      keyboard ? ' aria-modal="true"' : ""
+    }>
+      <input class="qs-input" data-act="switch-input" type="text" role="combobox"
         placeholder="Go to a workspace, conversation, or screen…"
-        aria-label="Go to" autocomplete="off">
-      <div class="qs-list" role="listbox"></div>
+        aria-label="Go to" aria-autocomplete="list" aria-expanded="true"
+        aria-controls="qs-list" autocomplete="off">
+      <div class="qs-list" id="qs-list" role="listbox"></div>
     </div>`;
   document.querySelector("#layer-root").append(layer);
+  document.querySelector(".global-search")?.setAttribute("aria-expanded", "true");
+  positionSwitcher(layer);
   paintSwitcher();
-  layer.querySelector("[data-act='switch-input']")?.focus();
+  const input = layer.querySelector("[data-act='switch-input']");
+  input?.focus();
+  if (keyboard) {
+    layer.addEventListener("keydown", (event) => {
+      if (event.key === "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        input?.focus();
+      }
+    });
+  }
 }
 
 /** What the keys do, said in one place rather than learned by accident. */
@@ -5055,7 +5119,7 @@ function typingSomewhere(target) {
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
-    openSwitcher();
+    openSwitcher({ keyboard: true });
     return;
   }
   const inSwitcher = event.target?.dataset?.act === "switch-input";
@@ -5065,13 +5129,16 @@ document.addEventListener("keydown", (event) => {
       closeSwitcher();
       return;
     }
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault();
       const rows = switcherEntries(event.target.value);
       if (rows.length > 0) {
-        switcherIndex =
-          (switcherIndex + (event.key === "ArrowDown" ? 1 : rows.length - 1)) %
-          rows.length;
+        switcherIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? rows.length - 1
+            : (switcherIndex + (event.key === "ArrowDown" ? 1 : rows.length - 1)) %
+              rows.length;
         paintSwitcher();
       }
       return;
@@ -7671,6 +7738,9 @@ function openUserDirectMessage(userId) {
  * it works where the team can see it. Both are reached from the roster.
  */
 function showDirectMessageMenu(node) {
+  const anchor = node.closest(".pop-layer") === null
+    ? node
+    : (document.querySelector(".chan-account") ?? node);
   const conversations = [...state.dmConversations]
     .filter((conversation) => isDirectMessagePerson(conversation.userId))
     .sort(
@@ -7693,7 +7763,7 @@ function showDirectMessageMenu(node) {
       iconName: "chatBubble",
       ...(Number(conversation.unread ?? 0) === 0
         ? {}
-        : { hint: `${conversation.unread} unread` }),
+        : { meta: String(conversation.unread) }),
     })),
     ...(conversations.length > 0 && others.length > 0
       ? [{ separator: true }]
@@ -7703,11 +7773,11 @@ function showDirectMessageMenu(node) {
       value: person.id,
       label: person.name ?? memberName(person.id) ?? person.id,
       iconName: "users",
-      hint: personOnline(person.id) ? "Here now" : "Send a message",
+      ...(personOnline(person.id) ? { meta: "online" } : {}),
     })),
   ];
   showMenu(
-    node,
+    anchor,
     rows.length === 0
       ? [
           {
@@ -7717,7 +7787,57 @@ function showDirectMessageMenu(node) {
           },
         ]
       : rows,
+    { width: 224 },
   );
+}
+
+function conversationMenuItems(repositoryId) {
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === activeSubChannelId(repositoryId),
+  );
+  const channelLabel = `#${channel?.slug ?? repositoryLabel(repositoryId)}`;
+  return [
+    {
+      act: "channel-info",
+      value: repositoryId,
+      label: "Channel details",
+      iconName: "info",
+    },
+    {
+      act: "channel-mute",
+      value: repositoryId,
+      label: `${isChannelMuted(repositoryId) ? "Unmute" : "Mute"} ${channelLabel}`,
+      iconName: isChannelMuted(repositoryId) ? "bell" : "bellOff",
+    },
+    {
+      act: "channel-copy-link",
+      value: repositoryId,
+      label: "Copy link",
+      iconName: "copy",
+    },
+    ...(state.repositories.find((repo) => repo.id === repositoryId)?.provider === "github"
+      ? [
+          { separator: true },
+          { group: true, label: "Repository" },
+          {
+            act: "channel-sync",
+            value: repositoryId,
+            label: "Sync from GitHub",
+            iconName: "sync",
+          },
+        ]
+      : []),
+  ];
+}
+
+async function copyConversationLink() {
+  writeChatLocation();
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    toast("Conversation link copied", "ok");
+  } catch {
+    toast("Could not copy the conversation link", "error");
+  }
 }
 
 /**
@@ -8561,7 +8681,7 @@ document.addEventListener("click", (event) => {
         ...accountDestinations(),
         { separator: true },
         { act: "logout", label: "Sign out", iconName: "logout" },
-      ]);
+      ], { width: 184 });
       return;
     case "switch-open":
       openSwitcher();
@@ -8576,7 +8696,7 @@ document.addEventListener("click", (event) => {
       if (channelFileEdited() && !confirmDiscardEdit()) {
         return;
       }
-      closeSwitcher();
+      closeSwitcher(false);
       navigate("chats");
       openChannel(value, render);
       return;
@@ -8584,13 +8704,13 @@ document.addEventListener("click", (event) => {
       if (!openUserDirectMessage(value)) {
         return;
       }
-      closeSwitcher();
+      closeSwitcher(false);
       navigate("chats");
       render();
       loadOpenedDirectMessage(value);
       return;
     case "switch-screen":
-      closeSwitcher();
+      closeSwitcher(false);
       navigate(value);
       return;
     /**
@@ -8624,6 +8744,17 @@ document.addEventListener("click", (event) => {
               { act: "channel-rename-repo", value, label: "Rename repository…", iconName: "pencil" },
             ]
           : []),
+        ...(canLeaveRepository()
+          ? [
+              {
+                act: "channel-leave",
+                value,
+                label: `Leave ${repositoryLabel(value)}`,
+                iconName: "logout",
+                danger: true,
+              },
+            ]
+          : []),
         // Deleting asks for more than managing does: an owner, or a co-owner
         // of this repository. An admin who may rename it is not offered it.
         ...(canDeleteRepository(value)
@@ -8646,10 +8777,8 @@ document.addEventListener("click", (event) => {
       closePopover();
       void syncRepositoryFromGitHub(value, render);
       return;
-    // Left open deliberately, unlike the two above: muting is the one control
-    // in this popover somebody might want to try and immediately undo, and the
-    // popover redraws in place to show which way it now reads.
     case "channel-mute":
+      closePopover();
       void muteChannelAction(value);
       return;
     /* Chats */
@@ -9655,14 +9784,7 @@ document.addEventListener("click", (event) => {
      * what the row would not.
      */
     case "roster-agent-menu":
-      showMenu(node, rosterMenuItems(value));
-      return;
-    /**
-     * The menu on a People row — promote / demote / remove co-owner, the
-     * same actions that used to live in the channel-info panel.
-     */
-    case "roster-person-menu":
-      showMenu(node, personMenuItems(value));
+      showMenu(node, rosterMenuItems(value), { width: 184 });
       return;
     /**
      * The rest of what can be done to a message — copy, pin, edit, revert,
@@ -9672,7 +9794,7 @@ document.addEventListener("click", (event) => {
      * conditions rather than being rebuilt at the click.
      */
     case "channel-message-menu":
-      showMenu(node, messageOverflowMenuItems(value));
+      showMenu(node, messageOverflowMenuItems(value), { width: 156 });
       return;
     /** Replaces the rendered name with its inline editor. */
     case "channel-settings-toggle": {
@@ -9715,6 +9837,7 @@ document.addEventListener("click", (event) => {
       void toggleAuditingAction(activeChannelId(), value !== "true");
       return;
     case "channel-info":
+      closePopover();
       moveRightPanel("conversation-info", "right");
       setChanDrawer(false);
       render();
@@ -9845,7 +9968,7 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "channel-grant-revoke": {
-      // `value` is `${repositoryId}:${userId}` — see `personMenuItems` /
+      // `value` is `${repositoryId}:${userId}` — see `personManagementItems` /
       // `coOwnerPanelHtml` in screen-chats.js.
       closePopover();
       const separatorIndex = value.indexOf(":");
@@ -10185,76 +10308,11 @@ document.addEventListener("click", (event) => {
      * had nowhere at all to go.
      */
     case "channel-menu":
-      showMenu(node, [
-        // Only for repositories that actually have a GitHub origin: a menu
-        // must never offer what the platform cannot do for this one.
-        ...(state.repositories.find((repo) => repo.id === value)?.provider ===
-        "github"
-          ? [
-              {
-                act: "channel-sync",
-                value,
-                label: "Sync from GitHub",
-                iconName: "sync",
-              },
-            ]
-          : []),
-        // Quietening the room. Offered to everybody who can see the channel,
-        // because it changes nothing but this account's own interruptions —
-        // no role gates deciding you would rather not be pinged.
-        {
-          act: "channel-mute",
-          value,
-          label: isChannelMuted(value)
-            ? `Unmute #${repositoryLabel(value)}`
-            : `Mute #${repositoryLabel(value)}`,
-          iconName: isChannelMuted(value) ? "bell" : "bellOff",
-        },
-        // Leaving is only offered to somebody who can actually leave. Access
-        // that comes from an organization role reaches every repository the
-        // organization owns, so there is no per-repository grant to give up —
-        // the server says so with a 409, and offering the button anyway meant
-        // the only item in this menu was one that could not work.
-        ...(canLeaveRepository()
-          ? [
-              {
-                act: "channel-leave",
-                value,
-                label: `Leave #${value}`,
-                iconName: "logout",
-              },
-            ]
-          : []),
-        // Renaming is the admin's counterpart: somebody whose access is
-        // organization-wide cannot leave a repository, but can rename it.
-        // Without this the menu had nothing to offer them at all. A rename
-        // changes only what the repository is called — the id keeps
-        // addressing the channel, its tasks and its files.
-        ...(canManageRepository(value)
-          ? [
-              {
-                act: "channel-rename-repo",
-                value,
-                label: `Rename #${repositoryLabel(value)}`,
-                iconName: "pencil",
-              },
-            ]
-          : []),
-        // Deleting is not: it is irreversible and takes everyone else's
-        // history with it, so only an owner or a co-owner of this repository
-        // is offered it.
-        ...(canDeleteRepository(value)
-          ? [
-              {
-                act: "channel-delete-repo",
-                value,
-                label: `Delete #${repositoryLabel(value)}`,
-                iconName: "trash",
-                danger: true,
-              },
-            ]
-          : []),
-      ]);
+      showMenu(node, conversationMenuItems(value), { width: 196 });
+      return;
+    case "channel-copy-link":
+      closePopover();
+      void copyConversationLink();
       return;
     /**
      * Agents join a channel the same way people do — from the channel's own
@@ -10329,6 +10387,8 @@ document.addEventListener("click", (event) => {
       });
       showPopover(node, subChannelManagePopoverHtml(repositoryId, value), {
         width: 280,
+        className: "info-popover",
+        scrim: false,
       });
       return;
     }

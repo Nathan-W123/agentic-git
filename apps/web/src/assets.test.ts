@@ -1106,21 +1106,17 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
   );
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
-  // Account actions stay behind the avatar, while Settings is always visible
-  // at the bottom-right of the sidebar.
+  // Account actions stay together behind the avatar; Settings is not repeated
+  // as an adjacent icon.
   assert.match(sidebar, /class="chan-sidebar-foot"/u);
-  assert.match(
-    sidebar,
-    /class="icon-btn chan-settings" data-act="nav"\s*data-value="settings"/u,
-  );
-  assert.match(sidebar, /class="icon-btn chan-settings"[\s\S]{0,160}icon\("gear"\)/u);
+  assert.doesNotMatch(sidebar, /class="icon-btn chan-settings"/u);
   assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
   const userMenu = app.slice(
     app.indexOf('case "user-menu":'),
     app.indexOf('case "switch-close":'),
   );
-  assert.doesNotMatch(userMenu, /value: "settings"|label: "Settings"/u);
-  assert.match(css, /\.chan-sidebar-foot \{[\s\S]{0,180}grid-template-columns: minmax\(0, 1fr\) auto;/u);
+  assert.match(app, /value: "settings", label: "Settings"/u);
+  assert.match(userMenu, /\{ width: 184 \}/u);
   assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
   // The roster scroller must not paint WebKit's dual-axis corner above the
   // account row — a bright square and hairline that sat on the dark panel.
@@ -1130,7 +1126,6 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
     /\.chan-scroll \{\s*overflow-x: hidden;\s*overflow-y: auto;/u,
   );
   assert.match(css, /\.chan-scroll::-webkit-scrollbar \{\s*height: 0;/u);
-  assert.match(css, /@media \(max-width: 600px\)[\s\S]*\.chan-settings \{\s*width: 44px;\s*height: 44px;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
     sidebar,
@@ -6409,7 +6404,7 @@ test("a roster row offers rename and delete only for the viewer's agent", async 
   assert.match(menu, /iconName: "pencil"/u);
   assert.match(
     menu,
-    /if \(agent\.mine === true\) \{\s*items\.push\(\{\s*act: "channel-agent-remove",[\s\S]*?label: "Delete"/u,
+    /if \(agent\.mine === true\) \{[\s\S]*?items\.push\(\{ separator: true \}\);[\s\S]*?act: "channel-agent-remove",[\s\S]*?label: "Delete"/u,
   );
   assert.match(menu, /danger: true/u);
   assert.doesNotMatch(menu, /channel-agent-remove-any/u);
@@ -7171,16 +7166,16 @@ test("channel stats live in settings and people rows own co-owner actions", asyn
     chats.indexOf("function personRow(person)"),
     chats.indexOf("/** The role the roster acts on."),
   );
-  assert.match(person, /act: "roster-person-menu"/u);
-  assert.match(person, /iconButton\("dots"/u);
-  assert.match(chats, /export function personMenuItems\(/u);
+  assert.match(person, /data-act="person-profile-open"/u);
+  assert.doesNotMatch(person, /roster-person-menu|iconButton\("dots"/u);
+  assert.match(chats, /export function personManagementItems\(/u);
   assert.match(chats, /act: "channel-grant-promote"/u);
   assert.match(chats, /act: "channel-grant-revoke"/u);
   assert.match(chats, /label: "Promote to co-owner"/u);
   assert.match(chats, /label: "Demote from co-owner"/u);
 
-  assert.match(app, /case "roster-person-menu":/u);
-  assert.match(app, /showMenu\(node, personMenuItems\(value\)\)/u);
+  assert.doesNotMatch(app, /case "roster-person-menu":/u);
+  assert.match(chats, /const management = personManagementItems\(userId\);/u);
   assert.match(app, /ensureRepositoryGrants\(activeChannelId\(\)/u);
 });
 
@@ -7554,7 +7549,7 @@ test("a message keeps react and reply, and puts the rest behind one menu", async
   assert.match(menu, /canManageRepository\(repositoryId\)/u);
   assert.match(menu, /danger: true,/u);
 
-  assert.match(app, /case "channel-message-menu":\s*\n\s*showMenu\(node, messageOverflowMenuItems\(value\)\);/u);
+  assert.match(app, /case "channel-message-menu":\s*\n\s*showMenu\(node, messageOverflowMenuItems\(value\), \{ width: 156 \}\);/u);
   // Every one of those actions can now be taken from inside a popover, and a
   // menu still standing after its item was taken reads as a click that did
   // nothing.
@@ -7571,6 +7566,27 @@ test("a message keeps react and reply, and puts the rest behind one menu", async
       `${act} should dismiss the menu it can be taken from`,
     );
   }
+});
+
+test("compact action menus share accessible behavior without sharing one width", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+
+  assert.match(ui, /role: "menu"/u);
+  assert.match(ui, /role="menuitem" tabindex="-1"/u);
+  assert.match(ui, /role="separator"/u);
+  assert.match(ui, /event\.key === "ArrowDown" \|\| event\.key === "ArrowUp"/u);
+  assert.match(ui, /event\.key === "Home" \|\| event\.key === "End"/u);
+  assert.match(ui, /typeahead \+=/u);
+  assert.match(ui, /popoverReturn\?\.focus\(\)/u);
+  assert.match(app, /rosterMenuItems\(value\), \{ width: 184 \}/u);
+  assert.match(app, /messageOverflowMenuItems\(value\), \{ width: 156 \}/u);
+  assert.match(chats, /items\.push\(\{ separator: true \}\);[\s\S]*?label: "Delete"/u);
+  assert.match(css, /\.action-menu \{[\s\S]*?min-width: 156px;[\s\S]*?max-width: 224px;/u);
+  assert.match(css, /@media \(pointer: coarse\) \{\s*\.menu-item \{\s*min-height: 44px;/u);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?pop-fade-in 80ms/u);
 });
 
 test("the transcript reads in a column rather than across the window", async () => {

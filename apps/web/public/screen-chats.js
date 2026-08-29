@@ -31,8 +31,6 @@ import {
 api,
   canEditChannelEntry,
   canDeleteChannelEntry,
-  canDeleteRepository,
-  canLeaveRepository,
   canManageOrganization,
   imagesNeedFetching,
   canManageRepository,
@@ -1241,19 +1239,15 @@ function personRow(person) {
   const me = userId === currentUserId();
   const online = personOnline(userId);
   const unread = dmUnreadFrom(userId);
-  // Change role / promote / remove live behind the same "…" pattern the agent
-  // roster uses — never on the channel-info panel. Only drawn when there is
-  // something to offer; an empty menu is a dead control.
-  const hasMenu = personMenuItems(userId).length > 0;
   const destination = primaryDestinationForWorkspace(repositoryId);
   const selected = destination.kind === "dm" && destination.id === userId;
   // Writing to yourself is not a conversation, so your own row is a label
-  // rather than a button — everyone else's opens the thread with them.
+  // rather than a button — everyone else's opens their details directly.
   return `<div class="roster-row">
     <div class="roster-row-main${selected ? " selected" : ""}"${
       me
         ? ""
-        : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}" aria-current="${selected ? "page" : "false"}"`
+        : ` role="button" tabindex="0" data-act="person-profile-open" data-value="${esc(userId)}" aria-current="${selected ? "page" : "false"}" aria-label="View details for ${esc(name)}"`
     }>
       ${
         // The same card an agent's face carries, from the same builders. A
@@ -1290,23 +1284,12 @@ function personRow(person) {
         }
       </span>
       ${unread > 0 ? `<span class="rr-badge">${unread}</span>` : ""}
-      ${
-        hasMenu
-          ? `<span class="rr-more">${iconButton("dots", {
-              act: "roster-person-menu",
-              value: userId,
-              title: `More for ${name}`,
-              small: true,
-            })}</span>`
-          : ""
-      }
     </div>
   </div>`;
 }
 
 /**
- * What the "..." on a People row offers — role, co-owner, and removal —
- * mirroring {@link rosterMenuItems} for agents.
+ * Management controls shown inside a person's details panel.
  *
  * Two scopes, in the order somebody in a channel thinks of them. The
  * repository-scoped pair comes first: co-owner is the capability that means
@@ -1315,25 +1298,15 @@ function personRow(person) {
  * admin or owner, because those change what somebody can reach in every
  * repository the organization has, not just this one.
  *
- * Built here for the same reason the agent menu is: every condition is the
- * one the row itself is drawn from (who can moderate, who already holds a
- * grant, what role the person holds). Splitting that across files is how a
- * menu ends up offering what the row would not.
+ * Built here because every condition is the one the row itself is drawn from:
+ * who can moderate, who already holds a grant, and what role the person holds.
  */
-export function personMenuItems(userId) {
+export function personManagementItems(userId) {
   const repositoryId = activeChannelId();
   if (!repositoryId || !userId || userId === currentUserId()) {
     return [];
   }
-  const items = [
-    {
-      act: "person-profile-open",
-      value: userId,
-      label: "View details",
-      hint: "Open this person's profile beside the conversation",
-      iconName: "users",
-    },
-  ];
+  const items = [];
   const canManageChannel = canManageRepository(repositoryId);
   const grants = state.repositoryGrants[repositoryId] ?? [];
   const coOwner = grants.some(
@@ -1579,6 +1552,9 @@ export function rosterMenuItems(agentId) {
     });
   }
   if (agent.mine === true) {
+    if (items.length > 0 && items.at(-1)?.separator !== true) {
+      items.push({ separator: true });
+    }
     items.push({
       act: "channel-agent-remove",
       value: agent.id,
@@ -1886,8 +1862,7 @@ function chanSidebar(activeRepositoryId) {
         </div>
       </div>
     </div>
-    <!-- Account destinations stay with the profile; the app-wide Settings
-         destination is visible beside it instead of hidden in that menu. -->
+    <!-- Account destinations stay together in the profile menu. -->
     <div class="chan-sidebar-foot">
       ${
         state.health === undefined
@@ -1905,10 +1880,6 @@ function chanSidebar(activeRepositoryId) {
           ${countBadge(dmUnreadTotal())}
         </span>
         <span class="chan-account-copy"><b>${esc(user)}</b></span>
-      </button>
-      <button type="button" class="icon-btn chan-settings" data-act="nav"
-        data-value="settings" title="Settings" aria-label="Settings">
-        ${icon("gear")}
       </button>
     </div>
   </aside>`;
@@ -2187,7 +2158,7 @@ function conversationHeader(repositoryId) {
             : iconButton("dots", {
                 act: "channel-menu",
                 value: repositoryId ?? "",
-                title: "Conversation actions",
+                title: `${label} actions`,
               })
       }
       ${primaryDestinationClose(destination)}
@@ -4698,6 +4669,16 @@ function personProfilePanel(repositoryId, userId) {
       )}</span><b>${esc(fact.value)}</b></div>`,
     )
     .join("");
+  const management = personManagementItems(userId);
+  const controls = management
+    .map((item) =>
+      item.separator === true
+        ? `<div class="person-management-separator"></div>`
+        : `<button type="button" class="btn btn-sm${item.danger === true ? " btn-danger" : ""}"
+            data-act="${item.act}" data-value="${esc(item.value)}"
+            title="${esc(item.hint ?? item.label)}">${icon(item.iconName)} ${esc(item.label)}</button>`,
+    )
+    .join("");
   return `<aside class="thread-panel person-detail-panel" aria-label="Person details">
     ${panelGrip()}
     <header class="thread-head">
@@ -4719,6 +4700,13 @@ function personProfilePanel(repositoryId, userId) {
               userId,
             )}">Message ${esc(name)}</button>`
       }
+      ${
+        controls === ""
+          ? ""
+          : `<section class="person-management" aria-label="Manage ${esc(name)}">
+               <h3>Manage access</h3>${controls}
+             </section>`
+      }
     </div>
   </aside>`;
 }
@@ -4733,7 +4721,10 @@ function conversationInfoPanel(repositoryId) {
     ${panelGrip()}
     <header class="thread-head">
       ${panelKind("Information")}
-      <span class="thread-title">${esc(repositoryLabel(repositoryId))}</span>
+      <span class="thread-title">${esc(
+        subChannelLabel(repositoryId, activeSubChannelId(repositoryId)) ||
+          `#${repositoryLabel(repositoryId)}`,
+      )}</span>
       <span class="spacer"></span>
       ${panelClose("secondary-context-close", "Close conversation information (Esc)")}
     </header>
@@ -7585,7 +7576,7 @@ function addableAgents(repositoryId) {
 /**
  * Current per-repository grants — kept for callers that still want a compact
  * list. Promote / demote / remove now live on People-row menus
- * ({@link personMenuItems}); channel info no longer hosts this panel.
+ * ({@link personManagementItems}); channel info no longer hosts this panel.
  *
  * Read straight from `state.repositoryGrants`, populated by
  * `ensureRepositoryGrants` when the chats screen loads rather than fetched
@@ -7658,7 +7649,7 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
     </div>
     ${
       general
-        ? `<div class="util-hint">Everybody in the project is in #general, and it is always open. Add another channel to have a room with its own list.</div>`
+        ? `<div class="channel-info-summary">Everyone in this workspace can read and post in #general.</div>`
         : `<div class="pop-row">
              <button type="button" class="btn-quiet" data-act="sub-channel-rename"
                data-value="${esc(channelId)}">Rename</button>
@@ -7706,107 +7697,18 @@ export function subChannelManagePopoverHtml(repositoryId, channelId) {
 }
 
 export function channelInfoPopoverHtml(repositoryId) {
-  const repository = state.repositories.find((repo) => repo.id === repositoryId);
-  const roster = channelAgentsFor(repositoryId);
-  const addable = addableAgents(repositoryId);
-  // Deleting asks for ownership rather than for management: an organization
-  // owner, or a co-owner of this repository. Somebody who may rename it and
-  // moderate it is not offered the one control nobody can undo.
-  const canDelete = canDeleteRepository(repositoryId);
-  const canLeave = canLeaveRepository();
-  // Stats moved to Settings (`channelStatsCard`); co-owner promote / demote /
-  // remove moved to People-row menus (`personMenuItems`). Channel info keeps
-  // branch, remote, agents, sync, leave, and delete.
-  return `<div class="pop-head"><h3>${esc(repositoryLabel(repositoryId))}</h3><span class="spacer"></span>
+  const channel = subChannelsFor(repositoryId).find(
+    (candidate) => candidate.id === activeSubChannelId(repositoryId),
+  );
+  const label = `#${channel?.slug ?? repositoryLabel(repositoryId)}`;
+  const summary = channel?.slug === "general"
+    ? `Everyone in ${repositoryLabel(repositoryId)} can read and post here.`
+    : channel?.canPost === false
+      ? "This channel is visible to you, but you cannot post in it."
+      : "This channel keeps its conversation and participants together.";
+  return `<div class="pop-head"><h3>${esc(label)}</h3><span class="spacer"></span>
       ${iconButton("close", { act: "pop-close", title: "Close", small: true })}</div>
-    <div class="pop-block">
-      <h4>Branch</h4>
-      <p>${esc(repository?.branch ?? "main")}</p>
-    </div>
-    <div class="pop-block">
-      <h4>Remote</h4>
-      <p>${esc(repository?.remoteUrl ?? "No remote recorded")}</p>
-    </div>
-    <div class="pop-block">
-      <h4>Agents in this workspace</h4>
-      <p>${roster.map((agent) => esc(agent.name)).join(", ") || "None yet"}</p>
-    </div>
-    ${
-      addable.length === 0
-        ? ""
-        : `<div class="pop-block">
-             <h4>Add one of your agents</h4>
-             <div class="pop-agent-add-list">
-               ${addable
-                 .map(
-                   (agent) => `<button type="button" class="pop-agent-add"
-                     data-act="channel-agent-add" data-value="${esc(agent.id)}">
-                     ${agentFace(agent, 22)}
-                     <span>${esc(agent.name)}</span>
-                     <span class="pop-agent-add-cta">Add to this workspace</span>
-                   </button>`,
-                 )
-                 .join("")}
-             </div>
-           </div>`
-    }
-    ${
-      // Bringing the repository up to date with GitHub. It lived on the
-      // repositories screen, which this interface no longer has — leaving a
-      // person whose pull had just been refused with nowhere to settle it.
-      // Offered only where there is a GitHub origin to sync from.
-      state.repositories.find((repo) => repo.id === repositoryId)?.provider ===
-      "github"
-        ? `<div class="pop-block">
-             <button type="button" class="btn btn-sm"
-               data-act="channel-sync" data-value="${esc(repositoryId)}">
-               ${icon("sync")} Sync from GitHub
-             </button>
-             <p>Brings this project up to date with what has landed on
-               GitHub. Needed before pushing when the two have both moved
-               on.</p>
-           </div>`
-        : ""
-    }
-    <div class="pop-block">
-      ${
-        // Beside rename, sync and delete rather than in a settings screen of
-        // its own: this popover is where a person already comes to change what
-        // this channel does, and muting is the one of those four that is only
-        // about them. Everyone else's badges, notifications and sounds are
-        // untouched.
-        isChannelMuted(repositoryId)
-          ? `<button type="button" class="btn btn-sm" data-act="channel-mute"
-               data-value="${esc(repositoryId)}" aria-pressed="true">
-               ${icon("bell")} Unmute this workspace
-             </button>
-             <p>Muted. Badges, notifications and sounds from this workspace are
-               off for you — everyone else in it is unaffected.</p>`
-          : `<button type="button" class="btn btn-sm" data-act="channel-mute"
-               data-value="${esc(repositoryId)}" aria-pressed="false">
-               ${icon("bellOff")} Mute this workspace
-             </button>
-             <p>Stops this workspace raising badges, notifications and sounds
-               for you. Messages still arrive, and nobody else's view
-               changes.</p>`
-      }
-    </div>
-    <div class="pop-block pop-block-danger">
-      ${
-        canDelete
-          ? `<button type="button" class="btn btn-sm btn-danger" data-act="channel-delete-repo" data-value="${esc(repositoryId)}">
-               ${icon("close")} Delete repository
-             </button>`
-          : ""
-      }
-      ${
-        canLeave
-          ? `<button type="button" class="btn btn-sm" data-act="channel-leave" data-value="${esc(repositoryId)}">
-               Leave this chat
-             </button>`
-          : ""
-      }
-    </div>`;
+    <div class="pop-body channel-info-summary"><p>${esc(summary)}</p></div>`;
 }
 
 /* -------------------------------------------------------------- screen ---- */
