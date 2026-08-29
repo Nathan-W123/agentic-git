@@ -806,6 +806,17 @@ interface PromptCliSession {
    * by handing the files back.
    */
   contention: ScopeContentionNotice[];
+  /**
+   * A pause taken at a round boundary, and the promise the loop waits on.
+   *
+   * There is no process to signal: this CLI is a process per round, so
+   * "paused" can only mean "does not start the next one". `pause` sets this
+   * and waits for the round in flight to end, which is what makes it safe to
+   * ask the session a question — `run` refuses a second process while one is
+   * live. `resume` resolves it and the loop carries on with the same warm
+   * conversation, having killed nothing and aborted no round.
+   */
+  paused: { promise: Promise<void>; resume: () => void } | undefined;
   cancelled: boolean;
 }
 
@@ -1111,6 +1122,24 @@ const EMPTY_SYMBOLS_CORRECTION = [
     "`intent`.",
 ].join("\n");
 
+/**
+ * What a repository-wide holder is asked when somebody else turns up.
+ *
+ * Same voice as EMPTY_SYMBOLS_CORRECTION above: the consequence first, because
+ * the field is otherwise read as bookkeeping. The rest of the work only — this
+ * session is mid-execution and must not be invited to re-plan a task it is
+ * halfway through — and read out of the files rather than guessed, because
+ * this answer decides what somebody else is refused.
+ */
+const DECLARATION_SHAPE_INSTRUCTIONS = [
+  "Do not edit anything in this round.",
+  "Answer with exactly one JSON object and nothing else. No prose, no code " +
+    "fence. The object must have exactly these two keys:",
+  "  expectedFiles (repository-relative paths you will still edit),",
+  "  expectedSymbols (the functions, classes and methods in them you will " +
+    "add, change or remove, including ones that do not exist yet)",
+].join("\n");
+
 const PLAN_SHAPE_INSTRUCTIONS = [
   "Answer with exactly one JSON object and nothing else. No prose, no code fence.",
   "The object must have exactly these keys (use empty arrays where nothing applies):",
@@ -1241,6 +1270,17 @@ const STRING_ARRAY_JSON_SCHEMA = {
   type: "array",
   items: { type: "string" },
 } as const;
+
+/** Two fields, so a settled objective and risk level cannot be rewritten. */
+const DECLARATION_JSON_SCHEMA = JSON.stringify({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    expectedFiles: STRING_ARRAY_JSON_SCHEMA,
+    expectedSymbols: STRING_ARRAY_JSON_SCHEMA,
+  },
+  required: ["expectedFiles", "expectedSymbols"],
+});
 
 const PLAN_JSON_SCHEMA = JSON.stringify({
   type: "object",
@@ -1569,6 +1609,7 @@ export class PromptCliAdapter implements AgentAdapter {
       pendingAction: new Map(),
       actionResults: [],
       contention: [],
+      paused: undefined,
       resume: undefined,
       cancelled: false,
     });
@@ -1640,6 +1681,7 @@ export class PromptCliAdapter implements AgentAdapter {
       pendingAction: new Map(),
       actionResults: [],
       contention: [],
+      paused: undefined,
       resume,
       cancelled: false,
     });
@@ -1747,11 +1789,17 @@ export class PromptCliAdapter implements AgentAdapter {
     plan: AgentPlan,
   ): Promise<void> {
     const record = this.requireSession(sessionId);
+    const narrowing = !isBlanketClaim(plan);
     record.plan = structuredClone(plan);
     await this.destroyPlanningWorkspace(record);
     this.emit(record, {
       event: "progress",
-      message: `${this.profile.name} holds the whole repository and started without planning`,
+      // Mid-execution this is a narrowing, not a session starting without
+      // planning: the same call is what hands a converted holder the plan it
+      // now actually holds, and the next round's prompt is built from it.
+      message: narrowing
+        ? `${this.profile.name} now holds ${String(plan.expectedFiles.length)} file(s) rather than the whole repository`
+        : `${this.profile.name} holds the whole repository and started without planning`,
       occurredAt: new Date().toISOString(),
     });
   }
@@ -1761,6 +1809,22 @@ export class PromptCliAdapter implements AgentAdapter {
     request: ReplanRequest,
   ): Promise<AgentPlan> {
     const record = this.requireSession(sessionId);
+    // One branch inside the existing verb rather than a new one.
+    //
+    // A repository-wide holder joined by another task is asked, mid-run, what
+    // the rest of its work needs. That is a `ReplanRequest` in shape — a
+    // previous plan and constraints — but it cannot take the path below:
+    // that path rebuilds a planning workspace at canonical, and this session
+    // has none (`acceptBlanketClaim` destroyed it) and no reason to re-plan a
+    // task it is halfway through. So it is answered in place, in the execution
+    // workspace, over the resume token that already rides every invocation.
+    //
+    // Entered only for a blanket claim mid-execution. Anything else keeps the
+    // guard exactly as it was, or an ordinary replan would silently stop
+    // replanning.
+    if (isBlanketClaim(request.previousPlan)) {
+      return await this.declareRemainingScope(record, request);
+    }
     if (record.context !== undefined) {
       throw new Error(
         `Session ${sessionId} cannot replan after execution context was sent`,
@@ -1804,6 +1868,100 @@ export class PromptCliAdapter implements AgentAdapter {
     }
   }
 
+  /**
+   * Asks a paused repository-wide holder which files and declarations the
+   * rest of its work needs.
+   *
+   * In the execution workspace, over the warm resume token, with no planning
+   * workspace built and `record.input` untouched: nothing about the task is
+   * being re-decided, only described. Two fields are asked for and no more —
+   * risk, commands and objective are settled, and re-asking them invites the
+   * model to rewrite them.
+   *
+   * The answer is returned as an `AgentPlan` because that is what the verb
+   * returns, but it is a declaration: the caller unions it with what the
+   * holder has already been observed touching, and only the two fields are
+   * read. `record.plan` is deliberately not overwritten here — the coordinator
+   * hands back the arbitrated plan through `acceptBlanketClaim`, and what this
+   * session may write is that, not its own answer.
+   */
+  private async declareRemainingScope(
+    record: PromptCliSession,
+    request: ReplanRequest,
+  ): Promise<AgentPlan> {
+    const context = record.context;
+    if (context === undefined) {
+      throw new Error(
+        `Session ${record.session.id} has not started executing, so it has ` +
+          "no remaining scope to declare",
+      );
+    }
+    if (record.paused === undefined) {
+      // Refused rather than attempted. `run` throws on a concurrent process,
+      // so asking a session that has not been stopped at a round boundary
+      // would fail the round it is in the middle of.
+      throw new Error(
+        `Session ${record.session.id} must be paused before it is asked to ` +
+          "declare its remaining scope",
+      );
+    }
+    const stdout = await this.run(
+      record,
+      context.workspacePath,
+      this.profile.planningArgs(
+        this.model,
+        this.effort,
+        this.profile.name === "claude" ? DECLARATION_JSON_SCHEMA : undefined,
+      ),
+      this.declarationPrompt(record, request),
+      this.planningTimeoutMs,
+      "planning",
+    );
+    const answer = extractJsonObject(
+      this.profile.unwrap(stdout),
+      "the scope declaration",
+    );
+    const declared = answer as {
+      expectedFiles?: unknown;
+      expectedSymbols?: unknown;
+    };
+    const strings = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string")
+        : [];
+    const files = strings(declared.expectedFiles);
+    const symbols = strings(declared.expectedSymbols);
+    this.emit(record, {
+      event: "progress",
+      message:
+        symbols.length === 0
+          ? `${this.profile.name} was asked what it still needs and named no declarations, so it keeps its files whole`
+          : `${this.profile.name} declared ${String(files.length)} file(s) and ${String(symbols.length)} declaration(s) it still needs`,
+      occurredAt: new Date().toISOString(),
+    });
+    return {
+      ...structuredClone(request.previousPlan),
+      // Set, never trusted: this adapter started the session and knows which
+      // task it is for.
+      taskId: record.input.task.id,
+      expectedFiles: files,
+      expectedSymbols: symbols,
+    };
+  }
+
+  private declarationPrompt(
+    record: PromptCliSession,
+    request: ReplanRequest,
+  ): string {
+    return [
+      ...request.constraints,
+      `Answer deadline: ${this.planningTimeoutMs} ms.`,
+      `Task id: ${record.input.task.id}`,
+      `Objective: ${taskRequest(record.input.task.objective)}`,
+      DECLARATION_SHAPE_INSTRUCTIONS,
+    ].join("\n");
+  }
+
   public async sendContext(
     sessionId: string,
     context: CoordinatorContext,
@@ -1830,6 +1988,14 @@ export class PromptCliAdapter implements AgentAdapter {
     });
 
     for (let round = 0; round < MAX_SCOPE_ROUNDS; round += 1) {
+      // A pause taken between rounds is honoured here, before the next CLI
+      // invocation rather than during one. Nothing is running while this
+      // waits, which is what lets the coordinator ask this session a question
+      // over the same warm conversation.
+      const paused = record.paused;
+      if (paused !== undefined) {
+        await paused.promise;
+      }
       const forceQuestion = this.forcedQuestionPending(record);
       const stdout = await this.run(
         record,
@@ -2042,16 +2208,43 @@ export class PromptCliAdapter implements AgentAdapter {
     );
   }
 
-  public async pause(_sessionId: string): Promise<void> {
-    throw new Error(
-      "PromptCliAdapter does not support pausing ephemeral executions",
-    );
+  /**
+   * Stops this session at the next round boundary, without killing anything.
+   *
+   * The round in flight is awaited rather than aborted — the agent keeps the
+   * work it has done and its worktree is untouched — and the execution loop
+   * then waits above its next invocation until {@link resume} is called. That
+   * gap is the only moment the session can be asked anything: `run` refuses a
+   * second process while one is live.
+   */
+  public async pause(sessionId: string): Promise<void> {
+    const record = this.requireSession(sessionId);
+    if (record.cancelled) {
+      throw new Error(`Session ${sessionId} was cancelled`);
+    }
+    if (record.paused === undefined) {
+      let release = (): void => undefined;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      record.paused = { promise, resume: release };
+    }
+    const active = record.active;
+    if (active !== undefined) {
+      try {
+        await active;
+      } catch {
+        // The operation that owns the process reports its own failure; a
+        // pause that arrived while a round was failing is not a second one.
+      }
+    }
   }
 
-  public async resume(_sessionId: string): Promise<void> {
-    throw new Error(
-      "PromptCliAdapter does not support resuming ephemeral executions",
-    );
+  public async resume(sessionId: string): Promise<void> {
+    const record = this.requireSession(sessionId);
+    const paused = record.paused;
+    record.paused = undefined;
+    paused?.resume();
   }
 
   public async resolveScopeChange(

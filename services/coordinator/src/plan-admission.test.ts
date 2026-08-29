@@ -1916,3 +1916,103 @@ test("a plan of nothing but unreadable files still waits", () => {
     [],
   );
 });
+
+/**
+ * The holder every partial-admission test above is missing: one that really
+ * carries a claim.
+ *
+ * `declaringHolder` is a plan an agent wrote, with no claim on it. A task
+ * admitted alone in its repository is not that — it is handed the whole thing
+ * without being asked to describe itself, and freezing that claim keeps a
+ * claim and adds no symbols, so both guards above refuse it. A *declared*
+ * claim is what it becomes once it has been asked, and these are the two
+ * things it has to do: get out of the way of the files it named, and stay
+ * whole over the ones it was writing in and forgot to mention.
+ */
+function declaredHolder(held: string[] = []): AgentPlan {
+  return {
+    ...declaringHolder(),
+    declared: { symbols: ["orderTotal"] },
+    claim: {
+      kind: "declared" as const,
+      declaredAt: new Date().toISOString(),
+      held,
+    },
+  };
+}
+
+test("a holder that declared its scope shares the file it named", () => {
+  const admission = admit(
+    mixedCandidate(),
+    [declaredHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  // Exactly what a claimless holder gets — which is the point. A frozen claim
+  // in the same position takes total.js whole (see the test above this file's
+  // holder-claim section), and that is the difference between the arrival
+  // running now and the arrival waiting for the holder to finish.
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/format/currency.js",
+    "file:src/pricing/total.js",
+    "symbol:formatTotal",
+    "symbol:showPrice",
+  ]);
+  assert.deepEqual(admission.deferredResources?.[0]?.locations, [
+    { file: "src/pricing/total.js", startLine: 40, endLine: 80 },
+  ]);
+});
+
+test("a holder keeps whole a file it was writing in and never named", () => {
+  // `held` is the touched-and-unmentioned set, and it has to be contested by
+  // the claim itself rather than left to whether conflict scoring noticed it:
+  // the whole reason it is recorded is that the holder forgot to mention it.
+  //
+  // Both rules in one decision. The file the holder *declared* is shared
+  // around its declarations; the file it never named but has been writing in
+  // is lost whole, because a line range read off a worktree cannot protect it
+  // at symbol granularity and a half-protected file is worse than a wait.
+  const admission = admit(
+    plan("task_a", {
+      objective: "render a currency prefix when a price is displayed",
+      expectedFiles: [
+        "src/pricing/total.js",
+        "src/format/currency.js",
+        "src/format/free.js",
+      ],
+      expectedSymbols: ["formatTotal", "showPrice", "freeThing"],
+    }),
+    [declaredHolder(["src/format/currency.js"])],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.equal(
+    grantedResources(admission).includes("file:src/format/currency.js"),
+    false,
+    `a file the holder is already writing in was granted away: ${JSON.stringify(admission)}`,
+  );
+  assert.ok(
+    admission.deferredResources?.some(
+      (resource) =>
+        resource.resourceType === "file" &&
+        resource.resourceId === "src/format/currency.js" &&
+        resource.heldBy.includes("task_b"),
+    ),
+    JSON.stringify(admission.deferredResources),
+  );
+  // And the declared file is still shared, in the same breath.
+  assert.ok(
+    grantedResources(admission).includes("file:src/pricing/total.js"),
+    JSON.stringify(admission),
+  );
+  assert.ok(
+    admission.deferredResources?.some(
+      (resource) => resource.resourceId === "orderTotal",
+    ),
+    JSON.stringify(admission.deferredResources),
+  );
+});
