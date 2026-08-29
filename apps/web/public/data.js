@@ -2624,21 +2624,33 @@ export function waitingTasks() {
  *
  * The pipeline has fixed stages, so each status owns a floor. While a stage is
  * still open — especially while coding — progress also moves *inside* that
- * band toward the next stage's floor, from files touched and time on the run.
- * Stage changes alone used to be the only updates; the bar then only looked
- * smooth because CSS eased between those jumps.
+ * stage's band, from files touched and time on the run. Stage changes alone
+ * used to be the only updates; the bar then only looked smooth because CSS
+ * eased between those jumps.
+ *
+ * The floors are deliberately crowded at the bottom. Everything before an
+ * agent starts — submitting, planning, the plan landing, the queue, the claim
+ * — is a short prelude to the work, not a third of it, so it occupies the
+ * first few percent and steps through it a point or two at a time. A bar that
+ * read 44% the instant an agent picked the task up, and 62% the moment it
+ * started running, was announcing most of the work as done before any of it
+ * had happened, and it moved in leaps of a fifth of the bar. Execution now
+ * begins just off zero and climbs through the long middle band as the run
+ * emits signals, which is where a run actually spends its life.
  */
 export const STAGE_PROGRESS = {
-  submitted: 4,
-  planning: 18,
-  planned: 30,
-  approved: 30,
-  queued: 36,
-  claimed: 44,
-  running: 62,
-  replanning: 72,
+  submitted: 1,
+  planning: 2,
+  planned: 6,
+  approved: 6,
+  queued: 7,
+  // An agent has the task and is working: this is the start of the work, so
+  // it reads as the start of the bar.
+  claimed: 8,
+  running: 11,
+  replanning: 14,
   awaiting_approval: 78,
-  validating: 88,
+  validating: 84,
   // An open conversational task's turn has landed in full; the task waits
   // for the next message, not for more work.
   open: 100,
@@ -2680,6 +2692,26 @@ const STAGE_INTERPOLATE = new Set([
   "validating",
 ]);
 
+/**
+ * The statuses that all mean "an agent is coding this right now".
+ *
+ * They are the same work under three names — the worker claims a task, a
+ * replay runs one, a rejected plan replans one — and a task reaches execution
+ * through exactly one of them rather than passing from one to the next. So
+ * none of them is a step past the others: each owns the whole executing band,
+ * from just off zero to the hand-off to validation.
+ */
+const STAGE_EXECUTING = new Set(["claimed", "running", "replanning"]);
+
+/**
+ * Top of the executing band.
+ *
+ * Below every stage that waits on a person or on validation, so a run still
+ * coding never draws level with one that has finished coding, however long it
+ * has been at it.
+ */
+const EXECUTING_CEILING = 74;
+
 function stageCeiling(status) {
   const floor = STAGE_PROGRESS[status] ?? 0;
   const index = STAGE_ORDER.indexOf(status);
@@ -2693,6 +2725,23 @@ function stageCeiling(status) {
     }
   }
   return 100;
+}
+
+/**
+ * The span an open stage climbs through — where it starts, and what it climbs
+ * toward while it stays open.
+ *
+ * Usually the next lifecycle floor. Executing stages are the exception: they
+ * share one long band, because the next floor above `claimed` is another name
+ * for the same coding, and stopping there would leave the bar pinned three
+ * points from where it started for the whole of a run.
+ */
+function stageBand(status) {
+  const floor = STAGE_PROGRESS[status] ?? 0;
+  const ceiling = STAGE_EXECUTING.has(status)
+    ? EXECUTING_CEILING
+    : stageCeiling(status);
+  return { floor, ceiling: Math.max(floor, ceiling) };
 }
 
 /** Declared files for one task, from the plan the coordinator recorded. */
@@ -2775,7 +2824,9 @@ function codingTimeShare(task) {
     return 0;
   }
   const elapsed = Math.max(0, Date.now() - started);
-  // ~12 minutes to ~90% of the band; the stage change still owns the last step.
+  // ~12 minutes to ~90% of the clock's own share of the band, which is only
+  // part of it: the stage change still owns the last step, and the files
+  // touched own the rest.
   return 0.9 * (1 - Math.exp(-elapsed / (12 * 60 * 1000)));
 }
 
@@ -2795,18 +2846,23 @@ export function taskProgress(task) {
   if (typeof state === "undefined" || task?.id === undefined) {
     return floor;
   }
-  const ceiling = stageCeiling(status);
+  const { ceiling } = stageBand(status);
   if (ceiling <= floor) {
     return floor;
   }
   let share = codingTimeShare(task);
-  if (status === "claimed" || status === "running" || status === "replanning") {
-    // Files are the honest coding signal; time fills the gaps between them.
-    share = Math.max(codingFileShare(task), share * 0.55);
+  if (STAGE_EXECUTING.has(status)) {
+    // Files are the honest coding signal and the clock fills the gaps between
+    // them, but neither owns the executing band alone. Handing the whole band
+    // to the files would move the bar a third of its length for one file of a
+    // three-file plan — the same leap this replaced, wearing a smaller name.
+    // Weighted together, each signal a run emits is worth a few points.
+    share = share * 0.6 + codingFileShare(task) * 0.5;
   } else if (status === "validating") {
     share = Math.max(0.4, share);
   }
-  return Math.round(floor + (ceiling - floor) * Math.min(1, share));
+  // The clock alone never finishes a stage: the last step is the next status.
+  return Math.round(floor + (ceiling - floor) * Math.min(0.95, share));
 }
 
 /**
