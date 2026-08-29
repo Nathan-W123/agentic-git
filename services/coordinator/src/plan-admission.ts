@@ -976,17 +976,23 @@ export class PlanAdmissionController {
         continue;
       }
       // A path the plan only reached through a misname carries no patch to
-      // divide, and a contested file that cannot be shared is a file lost —
-      // which is what emptied the reduced plan to begin with. Either way there
-      // is no split here, only the wait the caller already decided on.
+      // divide, and a contested file with no holder to draw a line against
+      // cannot be shared either. Both are statements about *this file* — it
+      // goes back whole, like an unreadable one — and neither says anything
+      // about the other files in the loop.
       if (
         !declared.has(file) ||
         misnamed.has(file) ||
         entry.heldBy.length === 0
       ) {
-        return undefined;
+        withheldWhole.push(entry);
+        continue;
       }
       const spans: NamedRange[] = [];
+      // Set when some holder of this file cannot be reduced to lines. It ends
+      // the scan of *this* file, not the loop: the file is withheld whole and
+      // the remaining contested files are still divided on their own merits.
+      let undividable = false;
       for (const holder of entry.heldBy) {
         const active = input.active.find((plan) => plan.taskId === holder);
         // A claim that occupies this path is a statement about what a task is
@@ -1017,9 +1023,17 @@ export class PlanAdmissionController {
         // is a wrong grant on the evidence's own terms rather than merely an
         // optimistic one.
         //
-        // A waiter behind a claim nobody wrote therefore waits. That is the
-        // safe direction: over-sequencing costs time, and the alternative
-        // costs correctness silently.
+        // A waiter behind a claim nobody wrote therefore waits for *that
+        // file*. That is the safe direction: over-sequencing costs time, and
+        // the alternative costs correctness silently. What it must not do is
+        // end the split for the other files, which is what it used to do —
+        // one claim-held path among the contested set returned `undefined`
+        // and the plan waited on all of them. Measured on the production
+        // shape that reported this: a holder claim-held two files and
+        // declared a third, an arrival named all three, and the third — where
+        // the two named different functions, the case chunk admission exists
+        // for — was withheld on the first two's account. The file-level
+        // answer composes with the line-level one; it does not replace it.
         const held =
           active === undefined
             ? undefined
@@ -1027,13 +1041,24 @@ export class PlanAdmissionController {
                 ? undefined
                 : declaredSpans(active.plan, file, locate));
         if (held === undefined || held.length === 0) {
-          return undefined;
+          undividable = true;
+          break;
         }
         spans.push(...held);
         const byFile =
           occupied.get(holder) ?? new Map<string, readonly LineRange[]>();
         byFile.set(file, normalizeRanges(held));
         occupied.set(holder, byFile);
+      }
+      if (undividable) {
+        // Anything already recorded for this file describes a division that is
+        // not happening, and leaving it behind would narrow a holder's lease
+        // over a file it is about to be given whole.
+        for (const byFile of occupied.values()) {
+          byFile.delete(file);
+        }
+        withheldWhole.push(entry);
+        continue;
       }
       shared.push({
         file,
