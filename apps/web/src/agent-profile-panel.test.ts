@@ -179,10 +179,16 @@ test("the profile says what is running in a slot that reserves its height", asyn
     "a status change is a 140ms crossfade, inside the 120-160ms the panel asks for",
   );
 
-  // The work zone itself is still. The face beside the name is the one
-  // continuous signal a running agent gets.
+  // The work zone itself is still. The large face keeps the run's progress
+  // fill, but its presence dot and the second dot beside the status text are
+  // suppressed because the panel header already carries that signal.
   assert.doesNotMatch(rule(css, ".agent-spec .aspec-work"), /animation/u);
-  assert.match(spec, /statusAgentFace\(agent, 52, repositoryId\)/u);
+  assert.match(
+    spec,
+    /statusAgentFace\(agent, 52, repositoryId, \{\s*showPresence: false,\s*\}\)/u,
+  );
+  assert.match(spec, /const facts = \[\s*\{ text: statusText \},/u);
+  assert.doesNotMatch(spec, /\{ text: statusText, dot:/u);
 });
 
 test("continuing the work is the primary action and History is beside it", async () => {

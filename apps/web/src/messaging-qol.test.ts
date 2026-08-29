@@ -84,12 +84,25 @@ test("channel messages and workspace links use compact, bounded surfaces", async
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
 
-  // Threads and Files are one semantic navigation group with matching rows,
-  // instead of two loose controls occupying their own unrelated spacing.
+  // Threads, Files, the pinned shelf and the app this workspace runs are one
+  // semantic navigation group with matching rows, instead of loose controls
+  // occupying their own unrelated spacing — or, for the last two, a pair of
+  // unlabelled glyphs on the conversation's header row.
   assert.match(
     chats,
     /<nav class="chan-sidebar-head chan-quick-links" aria-label="Workspace destinations">/u,
   );
+  const quickLinkRows =
+    /<nav class="chan-sidebar-head chan-quick-links"[\s\S]*?<\/nav>/u.exec(chats)?.[0] ??
+    "";
+  for (const row of [
+    ">Threads</span>",
+    ">Files</span>",
+    "${pinsQuickLink()}",
+    "${previewControl(activeRepositoryId)}",
+  ]) {
+    assert.ok(quickLinkRows.includes(row), `the group should carry ${row}`);
+  }
   // A group, not a card. The outline and the sunken fill around them made a
   // pane inside the panel inside the boundary around the whole application —
   // three nested edges to read before two links — so the group keeps its

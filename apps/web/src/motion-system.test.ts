@@ -274,7 +274,7 @@ test("everything that runs while nothing has happened shares one clock", async (
     ".thread-item-active .ti-live",
     // A room that has not loaded yet.
     ".skeleton",
-    // A preview still starting, in the room's own header.
+    // A preview still starting, in the workspace's own list of destinations.
     ".ch-preview-toggle.starting",
   ]) {
     assert.equal(cadence(selector), "2.4s ease-in-out", `${selector} keeps the clock`);
