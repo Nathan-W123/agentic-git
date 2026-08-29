@@ -2043,26 +2043,13 @@ export function showPopover(
  * two-line card. `meta` is the concise right slot for a count or shortcut.
  */
 export function showMenu(anchor, items, { width } = {}) {
-  const normalized = [];
-  for (const item of items) {
-    const previous = normalized.at(-1);
-    if (
-      item.danger === true &&
-      normalized.length > 0 &&
-      previous?.separator !== true &&
-      previous?.group !== true
-    ) {
-      normalized.push({ separator: true });
-    }
-    normalized.push(item);
-  }
-  const longestLabel = normalized.reduce(
+  const longestLabel = items.reduce(
     (length, item) => Math.max(length, String(item.label ?? "").length),
     0,
   );
   const menuWidth =
     width ?? (longestLabel > 24 ? 224 : longestLabel > 16 ? 196 : 176);
-  const body = normalized
+  const body = items
     .map((item) =>
       item.separator === true
         ? `<div class="menu-sep" role="separator"></div>`

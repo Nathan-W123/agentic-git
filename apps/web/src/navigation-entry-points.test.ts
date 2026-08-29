@@ -44,7 +44,7 @@ test("the account menu carries account destinations", async () => {
   assert.match(destinations, /act: "dm-list"/u);
   // Notifications is not one of them. Pressing your own name is how you reach
   // your own things, and the backlog of everything every agent has done is not
-  // that — it keeps the topbar bell and the quick switcher.
+  // that — it keeps its own route, which a hash link still lands on.
   assert.doesNotMatch(destinations, /act: "go-notifications"/u);
   // Agent connections are managed in Settings, not exposed as a product
   // route from this menu.
@@ -82,8 +82,9 @@ test("the Chats sidebar has no notification shortcut", async () => {
   const chats = await publicFile("screen-chats.js");
 
   // The topbar bell was deliberately removed; its absence is pinned in
-  // assets.test.ts, on the topbar itself. Notifications keeps its route and is
-  // reached by name in the quick switcher.
+  // assets.test.ts, on the topbar itself, and the quick switcher no longer
+  // offers it by name either. Notifications keeps its route and the action
+  // behind it, which is what a hash link lands on.
   assert.match(app, /case "go-notifications":/u);
 
   // The always-visible control at the lower left is deliberately gone.
@@ -159,7 +160,11 @@ test("the keyboard can reach a workspace, a conversation, or a screen", async ()
   assert.match(entries, /group: "People"/u);
   assert.match(entries, /group: "Navigation"/u);
   assert.match(entries, /state\.dmPeople/u);
-  assert.match(entries, /route: "notifications"/u);
+  // Navigation is Settings and nothing else. Chats is the screen the switcher
+  // is already drawn over, and the backlog of everything every agent has done
+  // is not what a search for a room or a person should offer to send you to.
+  assert.doesNotMatch(entries, /route: "notifications"/u);
+  assert.doesNotMatch(entries, /route: "chats"|label: "Chats"/u);
   assert.match(entries, /\.slice\(0, 7\)/u);
   assert.doesNotMatch(entries, /route: "agents"|My agents/iu);
 

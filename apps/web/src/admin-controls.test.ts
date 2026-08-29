@@ -114,6 +114,7 @@ test("a repository owner grant changes the People-row title", async () => {
 test("the channel menu offers owner-gated repository deletion", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await publicFile("app.js");
+  const ui = await publicFile("ui.js");
 
   // The menu is anchored to the channel header, which is what makes it
   // reachable: nothing else on screen opens it.
@@ -141,6 +142,17 @@ test("the channel menu offers owner-gated repository deletion", async () => {
   assert.match(shared, /label: "Delete repository"/u);
   assert.match(shared, /danger: true/u);
   assert.doesNotMatch(shared, /separator: true/u);
+
+  // Danger changes the row's colour, but does not silently insert a divider
+  // between Sync from GitHub and Delete repository.
+  const menu = slice(
+    ui,
+    "export function showMenu(anchor, items",
+    "export function closePopover",
+  );
+  assert.match(menu, /const body = items\s*\.map/u);
+  assert.match(menu, /item\.separator === true\s*\? `<div class="menu-sep"/u);
+  assert.doesNotMatch(menu, /normalized|previous\?\.separator/u);
 
   // And the row reaches the action that asks for the typed phrase.
   assert.match(
