@@ -2016,3 +2016,58 @@ test("a holder keeps whole a file it was writing in and never named", () => {
     JSON.stringify(admission.deferredResources),
   );
 });
+
+test("a claim-blocked arrival still gets the files the claim does not cover", () => {
+  // Reported from production, and the plainest possible failure: an arrival
+  // named five files, a holder's frozen claim covered three, and the arrival
+  // was made to wait for all five. The two nobody held were never in
+  // contention — the claim does not mention them and conflict scoring found
+  // nothing against them — so withholding them bought the holder nothing and
+  // cost the arrival its whole run.
+  //
+  // The cause was not in the splitting machinery, which was measured doing
+  // the right thing the moment it was reached: contested came to exactly the
+  // three claimed files, the two free ones survived `reducePlanScope`, and
+  // `decide` approved them. It was the veto above it. `partialAdmission:
+  // false` — "this task has already had its one split" — returned the whole
+  // refusal before any of that ran.
+  //
+  // That bound is about a refusal a plan's own declarations earned. A claim
+  // is a holder speaking about its paths without reference to this plan, so
+  // there is no scope being shed and the bound has nothing to say.
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: [
+        "src/pricing/total.js",
+        "src/format/currency.js",
+        "src/tax/rates.js",
+      ],
+      expectedSymbols: ["formatTotal", "showPrice", "taxFor"],
+    }),
+    [
+      {
+        ...declaringHolder(),
+        expectedFiles: ["src/pricing/total.js", "src/format/currency.js"],
+        claim: {
+          kind: "frozen" as const,
+          directories: [],
+          frozenAt: new Date().toISOString(),
+        },
+      },
+    ],
+    new PlanAdmissionController(),
+    // The lineage bound spent, exactly as it was in production.
+    { ...placed(), partialAdmission: false },
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.ok(
+    grantedResources(admission).includes("file:src/tax/rates.js"),
+    "the file nobody claimed was withheld anyway",
+  );
+  // And the claimed ones are still the holder's.
+  assert.ok(
+    !grantedResources(admission).includes("file:src/pricing/total.js"),
+    "a claimed file was granted away",
+  );
+});
