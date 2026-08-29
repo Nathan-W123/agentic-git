@@ -5083,7 +5083,9 @@ for (const backend of backends) {
         DEFAULT_PROJECT_ID,
       );
       assert.equal(general.slug, "general");
-      assert.equal(general.visibility, "open");
+      // Public, not read-only: everybody in the project posts in #general, and
+      // the row now says what the gateway has always enforced.
+      assert.equal(general.visibility, "public");
       assert.equal(first.channelId, general.id);
 
       // Asking twice is the same room, not a second one with the same name.
@@ -5253,10 +5255,10 @@ for (const backend of backends) {
       const renamed = await store.updateSubChannel(
         "repo_rooms",
         design.id,
-        { slug: "Design Review", visibility: "open" },
+        { slug: "Design Review", visibility: "read_only" },
       );
       assert.equal(renamed.slug, "design review");
-      assert.equal(renamed.visibility, "open");
+      assert.equal(renamed.visibility, "read_only");
 
       // #general is where every unaddressed message falls back to, so a
       // repository must never be left without one.
@@ -5288,6 +5290,100 @@ for (const backend of backends) {
         await store.getChannelReadCursor("repo_rooms", alice.id, general.id),
         "2026-03-01T10:00:00.000Z",
       );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: unread is per room, per reader, and counts replies`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_unread",
+        path: "/tmp/repo_unread.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "alice-unread@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "bob-unread@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+      await store.ensureGeneralSubChannel("repo_unread", DEFAULT_PROJECT_ID);
+      const general = (await store.listSubChannels("repo_unread"))[0]!;
+      const backend2 = await store.createSubChannel({
+        repositoryId: "repo_unread",
+        projectId: DEFAULT_PROJECT_ID,
+        slug: "backend",
+        name: "backend",
+        visibility: "read_only",
+        createdBy: alice.id,
+      });
+
+      const root = await store.appendChannelMessage({
+        repositoryId: "repo_unread",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: bob.id,
+        content: "Something in general.",
+      });
+      await store.addChannelReply({
+        repositoryId: "repo_unread",
+        messageId: root.id,
+        authorId: bob.id,
+        content: "And an answer in the same thread.",
+      });
+      // Alice's own message is not something Alice missed.
+      await store.appendChannelMessage({
+        repositoryId: "repo_unread",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Alice talking to herself.",
+      });
+      await store.appendChannelMessage({
+        repositoryId: "repo_unread",
+        projectId: DEFAULT_PROJECT_ID,
+        channelId: backend2.id,
+        authorId: bob.id,
+        content: "Something in #backend.",
+      });
+
+      // A root plus its reply in #general, one root in #backend. Alice's own
+      // message counts for Bob and not for her, which is the per-reader half.
+      const forAlice = await store.countUnreadByChannel("repo_unread", alice.id);
+      assert.equal(forAlice[general.id], 2, JSON.stringify(forAlice));
+      assert.equal(forAlice[backend2.id], 1, JSON.stringify(forAlice));
+      const forBob = await store.countUnreadByChannel("repo_unread", bob.id);
+      assert.equal(forBob[general.id], 1, JSON.stringify(forBob));
+      assert.equal(forBob[backend2.id], undefined, JSON.stringify(forBob));
+
+      // Reading one room clears that room and leaves the other alone — the
+      // whole point of a per-room cursor.
+      await store.markChannelRead(
+        "repo_unread",
+        alice.id,
+        new Date(Date.now() + 1000).toISOString(),
+        general.id,
+      );
+      const afterRead = await store.countUnreadByChannel("repo_unread", alice.id);
+      assert.equal(afterRead[general.id], undefined, JSON.stringify(afterRead));
+      assert.equal(afterRead[backend2.id], 1, JSON.stringify(afterRead));
+
+      // A room nobody has opened is entirely unread rather than silently zero.
+      const stranger = await store.createUser({
+        email: "stranger-unread@example.invalid",
+        displayName: "Stranger",
+        passwordDigest: "unused",
+      });
+      const forStranger = await store.countUnreadByChannel(
+        "repo_unread",
+        stranger.id,
+      );
+      assert.equal(forStranger[general.id], 3, JSON.stringify(forStranger));
     } finally {
       await store.close();
       await cleanup();

@@ -1614,10 +1614,10 @@ function channelStatsCard() {
           </div>
         </div>`;
   return `<section class="card channel-stats-card">
-    <div class="panel-head"><div><h3>Main chat activity</h3>
+    <div class="panel-head"><div><h3>Channel activity</h3>
       <p>${
         repositoryId === ""
-          ? "Open a workspace to see how its Main chat has been used."
+          ? "Open a workspace to see how its channels have been used."
           : `A look back at #${esc(repositoryId)} — the work this room has held.`
       }</p></div></div>
     ${tiles}
@@ -2879,7 +2879,7 @@ const SUB_CHANNEL_VISIBILITIES = [
     detail: "Anyone in the project can find it, read it, and post.",
   },
   {
-    value: "open",
+    value: "read_only",
     title: "Read-only",
     detail: "Anyone can find and read it. Only members post.",
   },
@@ -2978,7 +2978,7 @@ async function clearThreadsAction(repositoryId) {
   const confirmed = await showModal({
     title: `Delete all ${String(threads)} thread${threads === 1 ? "" : "s"}?`,
     subtitle:
-      "This clears Main chat — every message and every thread in it. " +
+      "This clears this channel — every message and every thread in it. " +
       "There is no undo.",
     confirm: "Delete everything",
   });
@@ -7637,7 +7637,11 @@ function renderNow() {
     // page, so a reload has to find the one already running rather than offer
     // to start a second. `undefined` is "not asked yet"; `null` is "asked,
     // there is none", which is why this tests for the former.
-    if (state.previews[activeChannelId()] === undefined) {
+    // A workspace has to exist before it can have an app running in it.
+    if (
+      activeChannelId() !== "" &&
+      state.previews[activeChannelId()] === undefined
+    ) {
       const channel = activeChannelId();
       // Claimed before the request so a second render in the same tick does
       // not fire it again.
@@ -8836,7 +8840,7 @@ document.addEventListener("click", (event) => {
               {
                 act: "channel-slash-key",
                 label: "Run a command",
-                hint: "Everything Main chat answers to",
+                hint: "Everything this channel answers to",
                 iconName: "terminal",
               },
               { act: "channel-mention-key", label: "Mention someone", iconName: "at" },
@@ -10354,7 +10358,7 @@ document.addEventListener("click", (event) => {
             <input class="input" name="name" maxlength="60" required autofocus
               placeholder="frontend">
           </label>
-          ${visibilityChoicesHtml("open")}`,
+          ${visibilityChoicesHtml("read_only")}`,
       }).then((values) => {
         const name = String(values?.name ?? "").trim();
         if (values === undefined || name === "") {
@@ -10363,7 +10367,7 @@ document.addEventListener("click", (event) => {
         return createSubChannel(
           repositoryId,
           name,
-          String(values.visibility ?? "open"),
+          String(values.visibility ?? "read_only"),
         ).then(() => {
           render();
           void ensureChannelMessages(repositoryId, render);
@@ -10429,7 +10433,7 @@ document.addEventListener("click", (event) => {
       void showModal({
         title: `Who can use #${current?.slug ?? "this channel"}?`,
         confirm: "Save",
-        body: visibilityChoicesHtml(current?.visibility ?? "open"),
+        body: visibilityChoicesHtml(current?.visibility ?? "read_only"),
       }).then((values) => {
         if (values === undefined || values.visibility === current?.visibility) {
           return;

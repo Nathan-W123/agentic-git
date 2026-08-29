@@ -10,13 +10,16 @@ import {
   PlanAdmissionController,
   blanketPlan,
   contestedPlanResources,
+  declaredPlanFromClaim,
   deferredScopeObjective,
   freezePlanFromWorkingChanges,
   isDeferredScopeFollowUp,
+  usableRepositoryPath,
   type ActivePlan,
   type BlanketClaimRequest,
   type BlanketFreezeRequest,
   type DeferredScopeRequest,
+  type HolderDeclaration,
   type PlanAdmissionRequest,
   type SalvagedConflictRequest,
   type PlanAuthority,
@@ -35,10 +38,11 @@ import {
   type WorkspaceManager,
 } from "@coord/workspace-manager";
 import {
+  claimOccupiesPath,
   isBlanketClaim,
+  normalizeRepositoryPath,
   planAdmissionApproved,
   planAdmissionPartial,
-  normalizeRepositoryPath,
   reducePlanScope,
   uniqueRepositoryPaths,
   type AgentPlan,
@@ -118,6 +122,16 @@ export class LeasePlanAuthority implements PlanAuthority {
   private readonly workspaces: WorkspaceManager;
   /** When each task was first told to wait, for the bound below. */
   private readonly waitingSince = new Map<TaskId, number>();
+  /**
+   * Holders that have already been asked to describe themselves.
+   *
+   * One ask per holder per contention episode, not one per arrival and not
+   * one per retry: a holder joined by three tasks must not be paused three
+   * times. Added *before* the ask, so the recursive `stale` retry below and
+   * any re-entry cannot produce a second one, and never cleared — an agent
+   * that has said where it is going has said it.
+   */
+  private readonly asked = new Set<TaskId>();
 
   public constructor(options: {
     store: CoordinationStore;
@@ -609,7 +623,45 @@ export class LeasePlanAuthority implements PlanAuthority {
       )
       .map((candidate) => candidate.id)
       .sort();
+    // Asked before the worktree is read, and asked once.
+    //
+    // This is the ask that makes the difference between the arrival running
+    // and the arrival waiting: a freeze carries no symbols — freezing never
+    // adds any — and exempts every file it names, so partial admission could
+    // never fire between the first and second task in a repository at all.
+    // Here the holder is paused, asked what the rest of its work needs, and
+    // resumed, and what it says becomes an ordinary plan.
+    //
+    // The `asked` entry goes in before the call, not after, so the recursive
+    // retry below cannot produce a second ask and neither can a second or
+    // third arrival: one ask per holder per contention episode.
+    let declaration: HolderDeclaration | undefined;
+    if (request.declare !== undefined && !this.asked.has(request.task.id)) {
+      this.asked.add(request.task.id);
+      try {
+        declaration = await request.declare();
+      } catch {
+        // Every failure falls back to today's behaviour. Degrade to a wait,
+        // never to a wrong grant.
+        declaration = undefined;
+      }
+    }
     const changes = await request.observe();
+    if (declaration !== undefined) {
+      const declared = await this.declareBlanketClaim(
+        request,
+        lease,
+        others,
+        approvedLeaseIds,
+        declaration,
+        changes,
+      );
+      if (declared !== undefined) {
+        return declared;
+      }
+      // Anything the answer could not buy falls through to the plain freeze
+      // below, which is exactly what would have happened without it.
+    }
     // Nothing written yet is not a reason to keep the whole repository.
     //
     // It used to be. A freeze on no observed writes would not narrow the
@@ -682,6 +734,143 @@ export class LeasePlanAuthority implements PlanAuthority {
       },
     });
     return frozen;
+  }
+
+  /**
+   * Turns a repository-wide claim into an ordinary plan carrying what its
+   * holder just said it needs, or nothing when that cannot be done safely.
+   *
+   * The footprint is the union of the answer and the observation, never the
+   * answer alone — {@link declaredPlanFromClaim} is where that union is made,
+   * and the files the holder was seen in but did not mention are recorded on
+   * the converted claim as `held`, whole.
+   *
+   * Arbitrated against the other approved holders rather than against nothing.
+   * The plain freeze can pass `active: []` because a narrowing of a claim that
+   * covered the repository keeps only what it already held; this is not purely
+   * a narrowing — the answer can name a file the arrival has already been
+   * granted — so it has to be decided like any other plan. An answer-only file
+   * that collides is dropped and the rest re-decided; a collision on a file
+   * this holder has already *written in* abandons the conversion altogether,
+   * because an observed file is already its work and must never be traded away.
+   */
+  private async declareBlanketClaim(
+    request: BlanketFreezeRequest,
+    lease: WorkLease,
+    others: readonly WorkLease[],
+    approvedLeaseIds: readonly string[],
+    declaration: HolderDeclaration,
+    observed: ReadonlyArray<{ path: string }>,
+  ): Promise<AgentPlan | undefined> {
+    const active = await this.approvedPlansAmong(others);
+    const occupiedElsewhere = (file: string): boolean =>
+      active.some(
+        (entry) =>
+          claimOccupiesPath(entry.plan, file) ||
+          uniqueRepositoryPaths(entry.plan.expectedFiles).includes(file),
+      );
+    const touched = uniqueRepositoryPaths(
+      observed.map((change) => change.path).filter(usableRepositoryPath),
+    );
+    if (touched.some((file) => occupiedElsewhere(file))) {
+      // Somebody else has been granted a file this holder is already writing
+      // in. Nothing about that is fixed by narrowing it further, and trading
+      // the file away would overwrite work already done. The freeze keeps it.
+      return undefined;
+    }
+    // Normalized only after the answer has been proved usable: an absolute
+    // path or one escaping the repository is not something to resolve against
+    // another holder's files, it is something to drop. `normalizeRepositoryPath`
+    // throws on both, which is right for a plan and wrong for a model's answer.
+    const kept = declaration.files
+      .filter(usableRepositoryPath)
+      .filter((file) => !occupiedElsewhere(normalizeRepositoryPath(file)));
+    const converted = declaredPlanFromClaim(
+      request.plan,
+      { files: kept, symbols: declaration.symbols },
+      observed,
+    );
+    if (converted === undefined) {
+      // No usable file, or no usable symbol. A converted plan with no symbols
+      // is worse than the freeze it would replace: nobody can be admitted
+      // around a holder that declared none, and the holder would have given up
+      // the directory latitude a freeze grants it for nothing.
+      return undefined;
+    }
+    const admission: PlanAdmission = this.admissions.admit({
+      plan: converted,
+      agentId: request.task.agentId,
+      baseRevision: request.baseVersion.revision,
+      baseVersion: request.baseVersion.sequence,
+      active,
+      planRevision: request.planRevision + 1,
+      // All or nothing: a partially admitted holder would leave a file it is
+      // already writing in outside the plan its changeset is validated against.
+      partialAdmission: false,
+    });
+    if (!planAdmissionApproved(admission)) {
+      return undefined;
+    }
+    const saved = await this.store.saveWorkLeasePlan({
+      leaseId: lease.id,
+      submission: { plan: converted, admission },
+      observedApprovedLeaseIds: [...approvedLeaseIds],
+      // The same legitimate rewrite of an approved contract the freeze
+      // performs, and narrower in the way that matters: every file this keeps
+      // it already held under a claim that covered the repository.
+      replaceApproved: true,
+    });
+    if (saved.outcome !== "saved") {
+      // A refused write re-reads rather than reusing this decision, and the
+      // `asked` entry set before the ask is what keeps that recursion from
+      // asking a second time.
+      return undefined;
+    }
+    const held =
+      converted.claim?.kind === "declared" ? converted.claim.held : [];
+    await this.store.appendAudit(undefined, {
+      type: "blanket_claim_declared",
+      taskId: request.task.id,
+      data: {
+        ...(request.projectId === undefined
+          ? {}
+          : { projectId: request.projectId }),
+        repositoryId: request.repository.id,
+        leaseId: lease.id,
+        files: converted.expectedFiles,
+        symbols: converted.expectedSymbols,
+        held,
+        // How much of the footprint came from the worktree rather than from
+        // the answer. A holder that names everything it has touched reads as
+        // zero here, which is the healthy shape.
+        observedFiles: touched.length,
+        arrivedTasks: others.map((candidate) => candidate.taskId).sort(),
+      },
+    });
+    return converted;
+  }
+
+  /** The approved plans among a set of leases, as arbitration reads them. */
+  private async approvedPlansAmong(
+    leases: readonly WorkLease[],
+  ): Promise<ActivePlan[]> {
+    const approved = leases.filter(
+      (candidate) =>
+        candidate.plan !== undefined &&
+        planAdmissionApproved(candidate.plan.admission),
+    );
+    if (approved.length === 0) {
+      return [];
+    }
+    const tasks = await this.store.listSubmittedTasks({});
+    const agentFor = new Map(tasks.map((task) => [task.id, task.agentId]));
+    return approved.map(
+      (candidate): ActivePlan => ({
+        taskId: candidate.taskId,
+        agentId: agentFor.get(candidate.taskId) ?? candidate.workerId,
+        plan: (candidate.plan as { plan: AgentPlan }).plan,
+      }),
+    );
   }
 
   /**

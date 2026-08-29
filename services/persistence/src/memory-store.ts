@@ -3074,7 +3074,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       projectId,
       slug: GENERAL_SUB_CHANNEL_SLUG,
       name: GENERAL_SUB_CHANNEL_SLUG,
-      visibility: "open",
+      visibility: "public",
       createdAt: new Date().toISOString(),
     };
     this.subChannels.set(id, channel);
@@ -3099,7 +3099,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       projectId: input.projectId,
       slug,
       name: input.name?.trim() === "" ? slug : (input.name?.trim() ?? slug),
-      visibility: input.visibility ?? "open",
+      visibility: input.visibility ?? "read_only",
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
@@ -3295,6 +3295,48 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         channelId ?? this.generalChannelId(repositoryId),
       ),
     );
+  }
+
+  public async countUnreadByChannel(
+    repositoryId: string,
+    userId: string,
+  ): Promise<Record<string, number>> {
+    // Deliberately the same three rules the SQL backends encode, in the same
+    // order, because this store and those have drifted apart before and the
+    // contract test compares them: a message counts when it is not this
+    // reader's own, is not deleted, and is newer than this reader's cursor
+    // for the room it is in. No cursor means the room was never opened, and
+    // "" sorts before every ISO timestamp, so all of it counts.
+    const unread: Record<string, number> = {};
+    for (const message of this.channelMessages.values()) {
+      if (message.repositoryId !== repositoryId) {
+        continue;
+      }
+      const channelId = message.channelId || this.generalChannelId(repositoryId);
+      const readAt =
+        this.channelReadCursors.get(
+          this.channelReadKey(repositoryId, userId, channelId),
+        ) ?? "";
+      let count = 0;
+      if (
+        message.deletedAt === undefined &&
+        message.authorId !== userId &&
+        message.createdAt > readAt
+      ) {
+        count += 1;
+      }
+      // Replies are not filtered on the root's deletion: a tombstoned root
+      // keeps its thread, and an answer in it is still something you missed.
+      for (const reply of message.replies) {
+        if (reply.authorId !== userId && reply.createdAt > readAt) {
+          count += 1;
+        }
+      }
+      if (count > 0) {
+        unread[channelId] = (unread[channelId] ?? 0) + count;
+      }
+    }
+    return unread;
   }
 
   public async setChannelMuted(

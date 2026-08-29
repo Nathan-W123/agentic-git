@@ -4272,7 +4272,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO sub_channels
          (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
-       VALUES ($1, $2, $3, $4, $4, 'open', $5, NULL)
+       VALUES ($1, $2, $3, $4, $4, 'public', $5, NULL)
        ON CONFLICT (repository_id, slug) DO NOTHING`,
       [
         generalChannelId(repositoryId),
@@ -4306,7 +4306,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       projectId: input.projectId,
       slug,
       name: trimmed === undefined || trimmed === "" ? slug : trimmed,
-      visibility: input.visibility ?? "open",
+      visibility: input.visibility ?? "read_only",
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };
@@ -4537,6 +4537,55 @@ export class PostgresCoordinationStore implements CoordinationStore {
       [repositoryId, channelId ?? generalChannelId(repositoryId), userId],
     );
     return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  public async countUnreadByChannel(
+    repositoryId: string,
+    userId: string,
+  ): Promise<Record<string, number>> {
+    // See the SQLite store for why this is two grouped counts rather than one
+    // join, and why a room with no cursor reads as entirely unread.
+    const general = generalChannelId(repositoryId);
+    const unread: Record<string, number> = {};
+    const add = (rows: Row[]): void => {
+      for (const row of rows) {
+        const channelId = text(row, "channel_id");
+        unread[channelId] = (unread[channelId] ?? 0) + integer(row, "total");
+      }
+    };
+    add(
+      await this.rows(
+        `SELECT COALESCE(m.channel_id, $1) AS channel_id, COUNT(*) AS total
+           FROM channel_messages m
+           LEFT JOIN channel_read_cursors c
+             ON c.repository_id = m.repository_id
+            AND c.channel_id = COALESCE(m.channel_id, $1)
+            AND c.user_id = $2
+          WHERE m.repository_id = $3
+            AND m.deleted_at IS NULL
+            AND m.author_id <> $2
+            AND m.created_at > COALESCE(c.read_at, '')
+          GROUP BY COALESCE(m.channel_id, $1)`,
+        [general, userId, repositoryId],
+      ),
+    );
+    add(
+      await this.rows(
+        `SELECT COALESCE(m.channel_id, $1) AS channel_id, COUNT(*) AS total
+           FROM channel_message_replies r
+           JOIN channel_messages m ON m.id = r.message_id
+           LEFT JOIN channel_read_cursors c
+             ON c.repository_id = m.repository_id
+            AND c.channel_id = COALESCE(m.channel_id, $1)
+            AND c.user_id = $2
+          WHERE m.repository_id = $3
+            AND r.author_id <> $2
+            AND r.created_at > COALESCE(c.read_at, '')
+          GROUP BY COALESCE(m.channel_id, $1)`,
+        [general, userId, repositoryId],
+      ),
+    );
+    return unread;
   }
 
   public async setChannelMuted(

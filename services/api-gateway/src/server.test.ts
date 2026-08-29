@@ -9648,6 +9648,118 @@ test("a repository can be renamed without its id moving, and only by somebody wh
   );
 });
 
+test("a room is created with the visibility that was asked for", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "vis-repo");
+  const channels = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/vis-repo/channels`;
+
+  // Each of the three the dialog offers, plus the old name for the middle one
+  // and a value nobody recognises, which falls back to the safe end.
+  for (const [asked, stored] of [
+    ["public", "public"],
+    ["read_only", "read_only"],
+    ["private", "private"],
+    ["open", "read_only"],
+    ["nonsense", "read_only"],
+  ] as const) {
+    const slug = `room-${asked}`;
+    const created = await owner.request(channels, {
+      method: "POST",
+      body: { slug, name: slug, visibility: asked },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(
+      created.data.channel.visibility,
+      stored,
+      `asked for ${asked}`,
+    );
+  }
+
+  // And #general is public — everybody reads it and everybody posts in it,
+  // which is what the gateway has always enforced by slug. It used to be
+  // stored `read_only`'s old name and so was labelled "Read-only" on a screen
+  // that also said, correctly, that it is always open.
+  const listed = await owner.request(channels);
+  const general = (listed.data.channels as { slug: string; visibility: string; canPost: boolean }[])
+    .find((channel) => channel.slug === "general");
+  assert.equal(general?.visibility, "public", JSON.stringify(listed.data));
+  assert.equal(general?.canPost, true);
+});
+
+test("the room list carries each room's unread count for the caller", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "unread-repo");
+  const channelsPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/unread-repo/channels`;
+
+  const created = await owner.request(channelsPath, {
+    method: "POST",
+    body: { slug: "backend", name: "backend", visibility: "open" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const backendId = created.data.channel.id;
+
+  // Somebody else's messages: one root plus a reply in #general, one root in
+  // #backend. A reply counts — a thread answered while you were away is
+  // something you missed.
+  const other = await runtime.store.createUser({
+    email: "unread-other@example.com",
+    displayName: "Other",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: other.id,
+    role: "developer",
+  });
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId: "unread-repo",
+    projectId: DEFAULT_PROJECT_ID,
+    authorId: other.id,
+    content: "Something in general.",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId: "unread-repo",
+    messageId: root.id,
+    authorId: other.id,
+    content: "And an answer.",
+  });
+  await runtime.store.appendChannelMessage({
+    repositoryId: "unread-repo",
+    projectId: DEFAULT_PROJECT_ID,
+    channelId: backendId,
+    authorId: other.id,
+    content: "Something in backend.",
+  });
+
+  const listed = await owner.request(channelsPath);
+  assert.equal(listed.status, 200, JSON.stringify(listed.data));
+  const rooms = new Map(
+    (listed.data.channels as { id: string; slug: string; unread: number }[]).map(
+      (channel) => [channel.slug, channel],
+    ),
+  );
+  assert.equal(rooms.get("general")?.unread, 2, JSON.stringify(listed.data));
+  assert.equal(rooms.get("backend")?.unread, 1, JSON.stringify(listed.data));
+
+  // Reading one room clears that room's badge and leaves the other's alone.
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/unread-repo/channel/read?channelId=${encodeURIComponent(backendId)}`,
+    { method: "POST" },
+  );
+  const after = await owner.request(channelsPath);
+  const afterRooms = new Map(
+    (after.data.channels as { slug: string; unread: number }[]).map(
+      (channel) => [channel.slug, channel],
+    ),
+  );
+  assert.equal(afterRooms.get("backend")?.unread, 0, JSON.stringify(after.data));
+  assert.equal(afterRooms.get("general")?.unread, 2, JSON.stringify(after.data));
+});
+
 test("a workspace picture is the workspace's: set only by a manager, read by everyone", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -19202,6 +19314,8 @@ test("a repository's rooms are listed, gated and addressed one at a time", async
 
   // Opened to the project, the same room becomes readable by everybody and
   // postable only by its members.
+  // `open` is the old name for `read_only` and is still accepted, so a browser
+  // holding a cached bundle keeps working across the deploy that renamed it.
   const opened = await owner.request(`${base}/channels/${design}`, {
     method: "PATCH",
     body: { visibility: "open" },

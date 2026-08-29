@@ -1555,11 +1555,18 @@ export class PlanAdmissionController {
     // yet, not a hold over every existing path beneath them. Add the occupied
     // ones explicitly to the same contested-resource set partial admission
     // already knows how to reduce and enforce.
+    //
+    // A declared claim is here for the same reason and holds far less: only
+    // the files its holder was seen writing in and did not name. Those have to
+    // be contested by the claim as well as by declaration, rather than being
+    // left to whether conflict scoring happened to notice them — the point of
+    // recording them at all is that the holder forgot to mention them.
     for (const file of uniqueRepositoryPaths(input.plan.expectedFiles)) {
       for (const holder of input.active) {
         if (
           holder.taskId === input.plan.taskId ||
-          holder.plan.claim?.kind !== "frozen" ||
+          (holder.plan.claim?.kind !== "frozen" &&
+            holder.plan.claim?.kind !== "declared") ||
           !claimOccupiesPath(holder.plan, file)
         ) {
           continue;
@@ -1573,7 +1580,7 @@ export class PlanAdmissionController {
           heldBy: [...heldBy].sort(),
           reason: [
             ...(existing === undefined ? [] : [existing.reason]),
-            `covered by frozen claim held by ${holder.taskId}`,
+            `covered by ${holder.plan.claim.kind} claim held by ${holder.taskId}`,
           ]
             .filter((reason, index, all) => all.indexOf(reason) === index)
             .sort()

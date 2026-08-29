@@ -1,5 +1,9 @@
+import path from "node:path";
+
 import {
+  claimOccupiesPath,
   normalizeRepositoryPath,
+  uniqueRepositoryPaths,
   type AgentPlan,
   type FilePatchStatus,
   type LineRange,
@@ -184,4 +188,141 @@ export function frozenTouchedRanges(
   return entry === undefined || entry.ranges.length === 0
     ? undefined
     : entry.ranges;
+}
+
+/** What a paused blanket holder said the rest of its work needs. */
+export interface HolderDeclaration {
+  files: readonly string[];
+  symbols: readonly string[];
+}
+
+/**
+ * The ordinary plan a blanket claim becomes once its holder has described
+ * itself, or nothing when the answer cannot be used.
+ *
+ * The footprint is the **union** of what the holder says it will do and what
+ * it has already been observed touching. Never just the answer: a holder that
+ * has written in a function it forgets to mention must keep that function, or
+ * its work is handed to somebody else and silently overwritten. `observed` is
+ * what supplies that second half, and the files in it the answer did not name
+ * are recorded on the claim as `held` — whole, because a line range read off a
+ * worktree is a new-side hunk number and the spans it would have to be matched
+ * against are base-side index positions, so it cannot protect a file at symbol
+ * granularity honestly. Coarse and right beats fine and wrong in this
+ * direction: the cost is a big file the holder brushed once and forgot.
+ *
+ * Answers `undefined` — leaving the caller to fall back to the plain freeze —
+ * when the answer yields no usable file or no usable symbol. A converted plan
+ * with no symbols is worse than the freeze it replaces: `partitionContested`
+ * and `declaredSpans` both refuse to narrow a holder that declared none, so
+ * the arrival would gain nothing while the holder had surrendered the
+ * directory latitude a freeze would have given it.
+ */
+export function declaredPlanFromClaim(
+  plan: AgentPlan,
+  declaration: HolderDeclaration,
+  observed: ReadonlyArray<{ path: string }>,
+  declaredAt: string = new Date().toISOString(),
+): AgentPlan | undefined {
+  if (plan.claim?.kind !== "blanket") {
+    return undefined;
+  }
+  const said = uniqueRepositoryPaths(
+    declaration.files.filter((file) => usableRepositoryPath(file)),
+  );
+  const symbols = [
+    ...new Set(
+      declaration.symbols
+        .map((symbol) => symbol.trim())
+        .filter((symbol) => symbol.length > 0),
+    ),
+  ].sort();
+  if (said.length === 0 || symbols.length === 0) {
+    return undefined;
+  }
+  const touched = uniqueRepositoryPaths(
+    observed.map((change) => change.path).filter(usableRepositoryPath),
+  );
+  const files = uniqueRepositoryPaths([
+    ...said,
+    ...touched,
+    ...plan.expectedFiles,
+  ]);
+  // Touched and unmentioned. A file the holder named is shareable around its
+  // declarations even if it has already been writing there — that is the
+  // holder's own answer about its own file, and the same contract every
+  // planned agent runs under.
+  const held = touched.filter((file) => !said.includes(file));
+  return {
+    ...structuredClone(plan),
+    expectedFiles: files,
+    expectedSymbols: symbols,
+    // The plan's own words, which is what `declaredSpans` reads before
+    // enrichment widens `expectedSymbols` to every symbol in every named file.
+    declared: {
+      ...(plan.declared ?? {}),
+      symbols,
+    },
+    claim: { kind: "declared", declaredAt, held },
+  };
+}
+
+/**
+ * Whether a path a model produced can be used as a repository path at all.
+ *
+ * Absolute paths, paths that escape the repository and directory names are
+ * dropped rather than argued with: this answer decides which files another
+ * task is refused, and a path nobody can resolve refuses nothing safely.
+ */
+export function usableRepositoryPath(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.endsWith("/")) {
+    return false;
+  }
+  if (path.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/u.test(trimmed)) {
+    return false;
+  }
+  try {
+    // `normalizeRepositoryPath` throws on anything it will not resolve, which
+    // is right for a plan and wrong for a model's answer: here an unusable
+    // path is dropped, not raised.
+    const normalized = normalizeRepositoryPath(trimmed);
+    return normalized.length > 0 && !normalized.split("/").includes("..");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The paths in a change set that a holder's claim does not already account
+ * for — the ones that have to be arbitrated before they can be kept.
+ *
+ * A frozen claim occupies every file its plan declared, so this is simply
+ * "not in the claim". A declared claim occupies far less on purpose — only
+ * the files its holder was writing in and did not mention — because that is
+ * what lets everything it *did* name be shared around its declarations. Read
+ * naively here, that would make every declared file look like an escape, and
+ * a holder writing in the file it just told us about would be sent back
+ * through arbitration on every collection, against a candidate that has since
+ * been admitted into the other half of it: refused, and the holder failed for
+ * doing exactly what it said it would do.
+ *
+ * So the question this asks is the wider one — is the path covered by this
+ * plan *at all* — which is the same question {@link assertChangeSetWithinPlan}
+ * answers when it path-binds a holder to its declarations.
+ */
+export function filesOutsideClaim(
+  plan: Pick<AgentPlan, "claim" | "expectedFiles">,
+  paths: readonly string[],
+): string[] {
+  const declared = uniqueRepositoryPaths(plan.expectedFiles);
+  return [
+    ...new Set(
+      paths.filter(
+        (file) =>
+          !claimOccupiesPath(plan, file) &&
+          !(plan.claim?.kind === "declared" && declared.includes(file)),
+      ),
+    ),
+  ].sort();
 }

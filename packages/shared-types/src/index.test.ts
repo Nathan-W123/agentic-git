@@ -7,7 +7,11 @@ import {
   assertAgentPlan,
   assertChangeSet,
   assertProjectPolicy,
+  claimCoversPath,
+  claimOccupiesPath,
+  claimedDirectories,
   deferredFilePaths,
+  isBlanketClaim,
   normalizeRepositoryPath,
   planAdmissionApproved,
   substituteGroundedNames,
@@ -717,5 +721,56 @@ test("a stored objective reads back as the request the person wrote", () => {
   assert.equal(
     requestFromObjective(`Add an orchestrate command ${FORCE_QUESTION_MARKER}`),
     `Add an orchestrate command ${FORCE_QUESTION_MARKER}`,
+  );
+});
+
+test("a declared claim is read back as one, and a malformed one is refused", () => {
+  // The claim a repository-wide holder is turned into once it has been asked
+  // what the rest of its work needs. What it *keeps* holding whole is `held`
+  // and nothing else — the files it was seen writing in and did not mention —
+  // so the files it declared can be shared around its declarations.
+  const plan: unknown = {
+    taskId: "task_1",
+    objective: "Change a file",
+    expectedFiles: ["src/a.ts", "src/b.ts"],
+    expectedSymbols: ["alpha"],
+    declared: { symbols: ["alpha"] },
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+    claim: {
+      kind: "declared",
+      declaredAt: "2026-01-01T00:00:00.000Z",
+      held: ["src/b.ts"],
+    },
+  };
+  assertAgentPlan(plan);
+
+  assert.equal(isBlanketClaim(plan), false);
+  assert.deepEqual(claimedDirectories(plan), []);
+  // The line the whole mechanism rests on: a declared file is not occupied by
+  // the claim, so arbitration reads the plan's words instead of exempting it.
+  assert.equal(claimOccupiesPath(plan, "src/a.ts"), false);
+  assert.equal(claimOccupiesPath(plan, "src/b.ts"), true);
+  // And no directory latitude: a holder that has just said where it is going
+  // does not need room arbitration cannot see.
+  assert.equal(claimCoversPath(plan, "src/a.ts"), false);
+  assert.equal(claimCoversPath(plan, "src/b.ts"), true);
+  assert.equal(claimCoversPath(plan, "src/c.ts"), false);
+
+  // Checked rather than trusted: a plan is read back out of storage, and these
+  // paths decide which files another task is refused.
+  assert.throws(() =>
+    assertAgentPlan({
+      ...(plan as unknown as Record<string, unknown>),
+      claim: { kind: "declared", declaredAt: "2026-01-01T00:00:00.000Z" },
+    }),
+  );
+  assert.throws(() =>
+    assertAgentPlan({
+      ...(plan as unknown as Record<string, unknown>),
+      claim: { kind: "declared", held: ["src/b.ts"] },
+    }),
   );
 });
