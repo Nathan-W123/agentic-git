@@ -1535,7 +1535,7 @@ function topbar() {
     <button type="button" class="global-search" data-act="switch-open"
       aria-haspopup="dialog" aria-expanded="false" aria-controls="qs-list"
       aria-label="Search and commands" title="Search and commands (Ctrl or Command K)">
-      <span>Search</span><kbd>⌘K</kbd>
+      <span>Search</span>
     </button>
     <div class="topbar-actions">
       <button type="button" class="icon-btn topbar-icon-btn" data-act="shortcuts-open"
