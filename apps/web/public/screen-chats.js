@@ -6746,7 +6746,7 @@ function primaryConversation(repositoryId) {
 }
 
 /**
- * The thread header's one control over the run it is watching: pause, or play.
+ * The thread's one control over the run it is watching: pause, or play.
  *
  * This was a cross, and a cross in a header full of crosses meant one thing
  * in the two places it appeared — the panel's own close is the other — and
@@ -6761,6 +6761,13 @@ function primaryConversation(repositoryId) {
  * has always worked — never both at once, so there is nothing to choose
  * between and no second cross to mistake for the first. The auditor toggle in
  * the roster reads the same pair for the same reason.
+ *
+ * It sits in the composer beside the arrow rather than up in the header,
+ * because stopping the run and saying the next thing are the same decision
+ * taken in the same second, and the hand is already at the box. Sized and
+ * classed to belong on that row — the stylesheet keeps it drawn while the
+ * rest of the row is resting, since a paused thread has to offer its play
+ * without being typed into first.
  *
  * No confirm on either. Asking "are you sure?" is what you owe somebody
  * before you throw their work away; pausing keeps it, and a question in front
@@ -6779,6 +6786,8 @@ function threadTaskControl(root) {
       act: "thread-task-resume",
       value: taskId,
       title: "Resume this task",
+      small: true,
+      cls: "composer-run-btn",
     });
   }
   if (!threadIsWorking(root)) {
@@ -6788,6 +6797,8 @@ function threadTaskControl(root) {
     act: "thread-task-pause",
     value: taskId,
     title: "Pause this task",
+    small: true,
+    cls: "composer-run-btn",
   });
 }
 
@@ -6834,7 +6845,6 @@ function threadPanel(repositoryId, selectedMessageId) {
       ${panelKind("Thread", "channel-threads-toggle", `thread:${messageId}`)}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
-      ${threadTaskControl(root)}
       ${iconButton("pin", {
         act: "channel-pin",
         value: messageId,
@@ -6902,6 +6912,12 @@ function threadPanel(repositoryId, selectedMessageId) {
             : ""}
           <span class="spacer"></span>
           ${composerCount("thread", state.threadDraft)}
+          <!-- Pause, or play, for the run this thread is following — beside
+               the arrow because stopping the work and saying the next thing
+               are one decision, and the hand is already here. Drawn only
+               when there is a run to act on, and kept visible by the
+               stylesheet even while the rest of this row is resting. -->
+          ${threadTaskControl(root)}
           <button class="send-btn" type="submit" title="Send"${
             threadSendable ? "" : " disabled"
           }>${icon("arrowRight")}</button>

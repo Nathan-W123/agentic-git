@@ -7713,6 +7713,44 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
   visibility: hidden;
 }
 
+/* The run control is the exception to the resting row.
+ *
+ * Everything else on this bar acts on a message that has not been written
+ * yet, so it can afford to wait for the box to be entered. Pause and play act
+ * on work that is already running, and a thread somebody parked has to offer
+ * its play to a reader who has no intention of typing — hiding it until the
+ * box is focused would make the only way back to a paused run a click into a
+ * composer nobody wanted. Set on the button rather than on the row, because
+ * `visibility` is inherited and a value of its own is what un-hides one child
+ * of a hidden parent.
+ *
+ * The order puts it with the count, on the send side: everything on this row
+ * is ordered rather than placed, so a second icon button would otherwise fall
+ * back beside the plus at the far left. */
+.thread-composer-wrap .composer.composer-lite .composer-bar .composer-run-btn {
+  order: 2;
+  visibility: visible;
+}
+
+/* And with a glyph standing on the right of a resting box, the words have to
+   stop before they reach it — so the reserve the resting rule above gives up
+   comes back, which is the same geometry this box has the moment it is
+   focused. Written as the resting selector plus the control, so the rule it
+   answers stays exactly as it was. */
+.thread-composer-wrap
+  .composer.composer-lite:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown):has(.composer-run-btn) {
+  --composer-side-reserve: 41px;
+}
+
+/* And again at the touch metrics, where every glyph on this row is given a
+   34px box back and the resting reserve is 58px rather than 41. */
+@media (max-width: 600px) {
+  .thread-composer-wrap
+    .composer.composer-lite:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown):has(.composer-run-btn) {
+    --composer-side-reserve: 58px;
+  }
+}
+
 /* The thread picker belongs to the inset composer rather than to the full
    panel edge, and opens above it without covering the reply being typed. */
 .thread-composer-wrap .mention-pop {

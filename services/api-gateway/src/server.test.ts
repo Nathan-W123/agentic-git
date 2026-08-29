@@ -821,7 +821,16 @@ async function startRuntime(
         input.vendor === undefined ? undefined : `test-agent-${input.vendor}`;
       const explicit =
         input.taskIds === undefined ? undefined : new Set(input.taskIds);
-      const cancellable = new Set(["submitted", "claimed", "planned", "open"]);
+      // `paused` is in the set for the same reason apps/cli has it: changing
+      // your mind about parked work is cancelling it. Sweeps still skip it
+      // below, beside `open`.
+      const cancellable = new Set([
+        "submitted",
+        "claimed",
+        "planned",
+        "open",
+        "paused",
+      ]);
       const cancelled: Array<{
         id: string;
         agentId: string;
@@ -838,6 +847,7 @@ async function startRuntime(
           explicit !== undefined
             ? !explicit.has(task.id)
             : task.status === "open" ||
+              task.status === "paused" ||
               (agentId !== undefined && task.agentId !== agentId) ||
               (input.ownerId !== undefined &&
                 task.submittedBy !== input.ownerId)
@@ -847,7 +857,7 @@ async function startRuntime(
         const was =
           task.status === "claimed"
             ? ("running" as const)
-            : task.status === "planned"
+            : task.status === "planned" || task.status === "paused"
               ? ("held" as const)
               : task.status === "open"
                 ? ("waiting" as const)
@@ -15052,6 +15062,168 @@ test("pausing a task parks it, and playing it puts the same work back", async (t
     (await runtime.store.listSubmittedTasks({ repositoryId })).length,
     1,
   );
+});
+
+test("pausing and resuming write nothing into the thread", async (t) => {
+  // The control is a button that changes face. A line under it saying it was
+  // pressed is the app narrating its own chrome back at the person using it,
+  // and two of them — one for the stop, one for the start — turn a thread
+  // about the work into a thread about the buttons.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "quiet-pause");
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: ownerId,
+    content: "@Claude rewrite the importer",
+  });
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rewrite the importer",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+    conversationId: root.id,
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, root.id, task.id);
+
+  const threadReplies = async (): Promise<string[]> => {
+    const stored = await runtime.store.getChannelMessage(
+      repositoryId,
+      root.id,
+      ownerId,
+    );
+    return (stored?.replies ?? []).map((reply) => reply.content);
+  };
+
+  assert.equal(
+    (await owner.request(`/api/v1/tasks/${task.id}/pause`, {
+      method: "POST",
+      body: {},
+    })).status,
+    200,
+  );
+  assert.deepEqual(await threadReplies(), []);
+
+  const runsBefore = runtime.runCalls.length;
+  assert.equal(
+    (await owner.request(`/api/v1/tasks/${task.id}/resume`, {
+      method: "POST",
+      body: {},
+    })).status,
+    200,
+  );
+  // Resume's last act is kicking the repository, so waiting on that is
+  // waiting for everything the resume does — including anything it might
+  // have written.
+  await waitFor(
+    async () => runtime.runCalls.length > runsBefore,
+    "resuming did not start the repository's work again",
+  );
+  assert.deepEqual(
+    await threadReplies(),
+    [],
+    "the transport control narrated itself into the thread",
+  );
+});
+
+test("a new message in a thread stops its paused task", async (t) => {
+  // Pause keeps the work; saying the next thing replaces it. Without the
+  // second half a redirected thread keeps a play button over an instruction
+  // that has been superseded, and pressing it later puts two runs on one
+  // thread answering two different questions.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "superseded-pause");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const openThread = async (
+    content: string,
+    objective: string,
+  ): Promise<{ rootId: string; taskId: string }> => {
+    const root = await runtime.store.appendChannelMessage({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      kind: "user",
+      authorId: ownerId,
+      content,
+    });
+    const task = await runtime.store.submitTask({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      objective,
+      agentId: "anthropic",
+      validationCommands: [],
+      submittedBy: ownerId,
+      conversationId: root.id,
+    });
+    await runtime.store.setChannelMessageTask(repositoryId, root.id, task.id);
+    assert.equal(
+      (await owner.request(`/api/v1/tasks/${task.id}/pause`, {
+        method: "POST",
+        body: {},
+      })).status,
+      200,
+    );
+    return { rootId: root.id, taskId: task.id };
+  };
+
+  const spoken = await openThread(
+    "@Claude rewrite the importer",
+    "rewrite the importer",
+  );
+  // A second parked thread nobody goes back to, which is the whole of the
+  // other half: a pause is only reversible if it survives being ignored.
+  const untouched = await openThread(
+    "@Claude tidy the fixtures",
+    "tidy the fixtures",
+  );
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(spoken.rootId)}/replies`,
+    { method: "POST", body: { content: "actually, leave the importer alone" } },
+  );
+  assert.equal(replied.status, 201);
+
+  const statusOf = async (taskId: string): Promise<string | undefined> =>
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (entry) => entry.id === taskId,
+    )?.status;
+  await waitFor(
+    async () => (await statusOf(spoken.taskId)) === "cancelled",
+    "a reply into a paused thread left the superseded run parked",
+  );
+  assert.ok(
+    runtime.cancelCalls.some((call) => call.taskIds?.includes(spoken.taskId)),
+    `the stop never reached the operation: ${JSON.stringify(runtime.cancelCalls)}`,
+  );
+  assert.equal(
+    await statusOf(untouched.taskId),
+    "paused",
+    "a thread nobody replied in lost its pause",
+  );
+  // And it says nothing about it. The person is looking at the message they
+  // just sent; an obituary for the one it replaced is noise in front of it.
+  const stored = await runtime.store.getChannelMessage(
+    repositoryId,
+    spoken.rootId,
+    ownerId,
+  );
+  for (const reply of stored?.replies ?? []) {
+    assert.doesNotMatch(
+      reply.content,
+      /cancel|stopped|paused/iu,
+      `the supersede narrated itself: ${reply.content}`,
+    );
+  }
 });
 
 test("pausing finished work is refused, and so is resuming what is not paused", async (t) => {
