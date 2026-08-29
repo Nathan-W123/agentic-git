@@ -8,6 +8,7 @@ import {
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
+  askBlanketHolderOnce,
   blanketHolderSession,
   blanketPlan,
   contestedPlanResources,
@@ -767,8 +768,11 @@ export class LeasePlanAuthority implements PlanAuthority {
     // resumed, and what it says becomes an ordinary plan.
     //
     // The `asked` entry goes in before the call, not after, so the recursive
-    // retry below cannot produce a second ask and neither can a second or
-    // third arrival: one ask per holder per contention episode.
+    // retry below cannot produce a second ask. It is not the whole bound
+    // though — it is per authority instance, and a run builds its own — so
+    // concurrent arrivals are held to one ask by the holder registry instead,
+    // which both callers now go through. This set is what stops the same
+    // authority asking twice; the registry is what stops two of them.
     let declaration: HolderDeclaration | undefined;
     if (request.declare !== undefined && !this.asked.has(request.task.id)) {
       this.asked.add(request.task.id);
@@ -1536,8 +1540,17 @@ export class LeasePlanAuthority implements PlanAuthority {
         // holder is resumed by the coordinator either way — and the claim is
         // frozen exactly as it is below. The arrival then waits a retry,
         // which is the behaviour that ships today.
+        // Through the registry, not straight at the session. `this.asked`
+        // cannot bound this: an authority is built per run, so two arrivals in
+        // one worker hold two of them while the holder registry is one map —
+        // measured as three concurrent pauses and replans against one live
+        // session, which a vendor CLI refuses. The registry keys the ask to the
+        // holder, so simultaneous arrivals share one pause and one answer.
         declare: async () =>
-          await answerWithin(asking.declare(), this.blanketAskTimeoutMs),
+          await answerWithin(
+            askBlanketHolderOnce(asking),
+            this.blanketAskTimeoutMs,
+          ),
         arrival: { releasedFiles: released },
       }).catch(() => undefined);
       if (declared !== undefined && !isBlanketClaim(declared)) {
