@@ -4272,7 +4272,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO sub_channels
          (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
-       VALUES ($1, $2, $3, $4, $4, 'open', $5, NULL)
+       VALUES ($1, $2, $3, $4, $4, 'public', $5, NULL)
        ON CONFLICT (repository_id, slug) DO NOTHING`,
       [
         generalChannelId(repositoryId),
@@ -4306,7 +4306,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       projectId: input.projectId,
       slug,
       name: trimmed === undefined || trimmed === "" ? slug : trimmed,
-      visibility: input.visibility ?? "open",
+      visibility: input.visibility ?? "read_only",
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };

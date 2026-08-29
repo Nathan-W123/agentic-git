@@ -4353,14 +4353,18 @@ function subChannelSlug(raw: string): string {
 
 /** `private` only when it says so; anything else is an open room. */
 function subChannelVisibility(raw: unknown): SubChannelVisibility {
-  // `open` is the default for anything unrecognised, which is what an older
-  // client sending nothing gets: readable by the project, posted in by its
-  // members. Widening the default to `public` would quietly hand posting
+  // `read_only` is the default for anything unrecognised, which is what an
+  // older client sending nothing gets: readable by the project, posted in by
+  // its members. Widening the default to `public` would quietly hand posting
   // rights to everybody on a request that never asked for them.
+  //
+  // `open` is that same state under its old name, and is still accepted so a
+  // browser holding a cached bundle keeps working across the deploy that
+  // renames it. It was never the permissive value, whatever it sounded like.
   if (raw === "private" || raw === "public") {
     return raw;
   }
-  return "open";
+  return "read_only";
 }
 
 function isCoordinatorNotice(message: {
@@ -9622,6 +9626,9 @@ export class ApiGateway {
             canPost:
               member ||
               channel.visibility === "public" ||
+              // Redundant since #general is stored `public`, and kept because
+              // a database restored from before that migration would other-
+              // wise make the room every project has read-only for everybody.
               channel.slug === GENERAL_SUB_CHANNEL_SLUG,
             // How much of this room the caller has not read. Zero rather than
             // absent, so the browser never has to tell "no badge" apart from
@@ -13673,7 +13680,7 @@ export class ApiGateway {
     }
     // Both non-private states are readable by anybody in the project; they
     // differ only in who may post, which `canPostInSubChannel` decides.
-    if (channel.visibility === "open" || channel.visibility === "public") {
+    if (channel.visibility === "read_only" || channel.visibility === "public") {
       return channel;
     }
     if (

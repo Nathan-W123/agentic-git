@@ -4466,7 +4466,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO sub_channels
            (id, repository_id, project_id, slug, name, visibility, created_at, created_by)
-         VALUES (?, ?, ?, ?, ?, 'open', ?, NULL)
+         VALUES (?, ?, ?, ?, ?, 'public', ?, NULL)
          ON CONFLICT(repository_id, slug) DO NOTHING`,
       )
       .run(
@@ -4497,7 +4497,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       projectId: input.projectId,
       slug,
       name: name === undefined || name === "" ? slug : name,
-      visibility: input.visibility ?? "open",
+      visibility: input.visibility ?? "read_only",
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };

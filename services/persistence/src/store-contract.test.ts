@@ -5083,7 +5083,9 @@ for (const backend of backends) {
         DEFAULT_PROJECT_ID,
       );
       assert.equal(general.slug, "general");
-      assert.equal(general.visibility, "open");
+      // Public, not read-only: everybody in the project posts in #general, and
+      // the row now says what the gateway has always enforced.
+      assert.equal(general.visibility, "public");
       assert.equal(first.channelId, general.id);
 
       // Asking twice is the same room, not a second one with the same name.
@@ -5253,10 +5255,10 @@ for (const backend of backends) {
       const renamed = await store.updateSubChannel(
         "repo_rooms",
         design.id,
-        { slug: "Design Review", visibility: "open" },
+        { slug: "Design Review", visibility: "read_only" },
       );
       assert.equal(renamed.slug, "design review");
-      assert.equal(renamed.visibility, "open");
+      assert.equal(renamed.visibility, "read_only");
 
       // #general is where every unaddressed message falls back to, so a
       // repository must never be left without one.
@@ -5319,7 +5321,7 @@ for (const backend of backends) {
         projectId: DEFAULT_PROJECT_ID,
         slug: "backend",
         name: "backend",
-        visibility: "open",
+        visibility: "read_only",
         createdBy: alice.id,
       });
 

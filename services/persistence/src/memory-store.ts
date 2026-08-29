@@ -3074,7 +3074,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       projectId,
       slug: GENERAL_SUB_CHANNEL_SLUG,
       name: GENERAL_SUB_CHANNEL_SLUG,
-      visibility: "open",
+      visibility: "public",
       createdAt: new Date().toISOString(),
     };
     this.subChannels.set(id, channel);
@@ -3099,7 +3099,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       projectId: input.projectId,
       slug,
       name: input.name?.trim() === "" ? slug : (input.name?.trim() ?? slug),
-      visibility: input.visibility ?? "open",
+      visibility: input.visibility ?? "read_only",
       createdAt: new Date().toISOString(),
       ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
     };

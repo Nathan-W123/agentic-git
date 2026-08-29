@@ -51,9 +51,13 @@ test("an undivided repository keeps the interface it always had", async () => {
     chats,
     /channels\.length > 1 \|\| canManageSubChannels\(activeRepositoryId\)/u,
   );
-  // The composer placeholder falls back to the workspace name.
-  assert.match(chats, /subChannelsFor\(repositoryId\)\.length > 1/u);
-  assert.match(chats, /Message #\$\{repositoryLabel\(repositoryId\)\}/u);
+  // The composer names the room — including the only room. It used to fall
+  // back to the workspace name here, which was the whole point of this test
+  // until the header began naming the room and the two started disagreeing on
+  // screen. What "unchanged" has to mean is that nothing appears that a reader
+  // did not have before, not that the two halves of one sentence disagree.
+  assert.doesNotMatch(chats, /Message #\$\{repositoryLabel\(repositoryId\)\}/u);
+  assert.match(chats, /`Message \$\{subChannelLabel\(/u);
   // And the URL gains no query parameter it did not have.
   assert.match(app, /subChannelsFor\(workspaceId\)\.length > 1/u);
   assert.match(app, /query\.set\("channel", channelId\)/u);
