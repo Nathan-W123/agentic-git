@@ -141,7 +141,14 @@ jobs:
           set -euo pipefail
           missing=0
           checked=0
-          for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
+          # -h, and it is load-bearing. Given more than one file, grep prefixes
+          # every match with the filename it came from, so each entry arrived as
+          # `apps/web/public/download.js:Kumi-mac-arm64.dmg` — which matches no
+          # platform pattern, leaving `checked` at zero and this step announcing
+          # that the page offers nothing for any platform at all. It passed when
+          # the links lived in a single file and started failing silently the
+          # day a second one was added.
+          for file in $(grep -hoE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
               apps/web/public/download.html apps/web/public/download.js | sort -u); do
             case "$file" in
               "Kumi-$KEY-"*) ;;
@@ -197,7 +204,14 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
+          # -h, and it is load-bearing. Given more than one file, grep prefixes
+          # every match with the filename it came from, so each entry arrived as
+          # `apps/web/public/download.js:Kumi-mac-arm64.dmg` — which matches no
+          # platform pattern, leaving `checked` at zero and this step announcing
+          # that the page offers nothing for any platform at all. It passed when
+          # the links lived in a single file and started failing silently the
+          # day a second one was added.
+          for file in $(grep -hoE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
               apps/web/public/download.html apps/web/public/download.js | sort -u); do
             if [ -f "installers/$file" ]; then
               echo "  ok       $file"
