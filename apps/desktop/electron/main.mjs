@@ -262,11 +262,13 @@ function buildMenu() {
     },
     { type: "separator" },
     {
-      // Windows cannot run an agent while it sleeps — Microsoft's position is
-      // that desktop applications are stopped for the whole of modern standby
-      // — so the only way to be available overnight is not to sleep. Offered
-      // rather than assumed, and it gives way to battery either way.
-      label: "Keep This Machine Awake for Work (while plugged in)",
+      // Named for what it actually does. The platform call underneath is
+      // `SetThreadExecutionState`, and Microsoft is explicit that it "cannot
+      // be used to prevent the user from putting the computer to sleep" — a
+      // closed lid, the power button and Start > Sleep all go straight past
+      // it. It stops the machine idling out, and nothing more, so the label
+      // says idle rather than implying a promise it cannot keep.
+      label: "Don't Sleep While Idle (plugged in, lid open)",
       type: "checkbox",
       checked: awakeForWork,
       click: (item) => void toggleKeepAwake(item.checked),
@@ -306,6 +308,23 @@ function buildMenu() {
  */
 async function toggleKeepAwake(wanted) {
   awakeForWork = wanted === true;
+  // Said once, when the expectation is being formed. Somebody turning this on
+  // is picturing a laptop working overnight, and the lid is exactly how they
+  // would try it — better to be told now than to close it and find nothing
+  // ran. The remedy is a system setting, and deliberately theirs to make: an
+  // app that quietly rewrote what a person's lid does would be overstepping.
+  if (awakeForWork) {
+    await dialog.showMessageBox({
+      type: "info",
+      message: "This machine will stay awake while it is plugged in.",
+      detail:
+        "Closing the lid will still put it to sleep — no application can " +
+        "override that. To keep working with the lid closed, set your " +
+        "system's lid-close action to “Do nothing”.\n\nOn battery it " +
+        "sleeps as usual, and agents wait until it is plugged in again.",
+      buttons: ["OK"],
+    });
+  }
   const saved = await readSettings();
   await writeSettings(
     saved.server,
