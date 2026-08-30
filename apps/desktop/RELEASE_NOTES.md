@@ -1,9 +1,31 @@
-Kumi as a desktop app: a window onto your own deployment, signed in through
-your browser.
+Kumi as a desktop app: the machine that runs your agents.
 
-The dashboard still lives on your server. This is the window that loads it, so
-updates to Kumi itself reach you the moment they are deployed — you only need a
-new download when the window changes, which is rare.
+This is the release where that changes. Earlier builds were a window onto your
+deployment; this one carries the worker too, so agents execute here, on the
+Claude and Codex logins already signed in on this machine. Your code and your
+vendor session stay on it — the deployment only ever learns which files an
+agent asked to hold.
+
+Nothing to switch on. Install it, sign in, and it starts. The menu bar says
+whether it is running, and names the reason if it is not — an agent CLI that
+is not installed or not signed in here is the usual one.
+
+The dashboard still lives on your server, so improvements to Kumi itself reach
+you the moment they are deployed; you only need a new download when the app
+around it changes.
+
+## What it does not do
+
+It cannot work while the machine is asleep. Windows stops desktop applications
+for the whole of modern standby and no application can override a closed lid,
+so a task submitted while this machine is shut waits for it rather than running
+somewhere else. **Agents** › **Don't Sleep While Idle** keeps a plugged-in
+machine from dropping off on its own, which covers being away from the desk
+but not the lid.
+
+On battery it does not take work at all. A laptop that claims a task and then
+loses its network holds that task until the lease expires, and waiting visibly
+is the better failure.
 
 ## Which file
 
