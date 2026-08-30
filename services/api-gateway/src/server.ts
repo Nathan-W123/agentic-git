@@ -141,6 +141,7 @@ import {
 } from "./slash.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { CollabWebSocketHub } from "./collab-websocket.js";
+import { shouldRedirectToDownload } from "./desktop-app-only.js";
 import { WorkerEventHub } from "./worker-events.js";
 import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
 import {
@@ -22809,11 +22810,28 @@ export class ApiGateway {
     // separates "a client-side route" from "a file that does not exist":
     // /app and /some/client/route fall back to the document, /app.js and a
     // typoed /app.jss stay honest 404s.
+    const exact = this.options.staticAssets?.get(url.pathname);
+    const fallingBackToDashboard =
+      exact === undefined && !url.pathname.includes(".");
+    // Only the dashboard document, and only when it is being reached by a
+    // desktop browser on a deployment that distributes an app. Assets, the
+    // API and every other route are left alone: the app loads all of them
+    // from this same origin, so a gate that caught them would break the
+    // client it exists to favour. `/download` is an exact asset, so it is
+    // never the falling-back path and can always be reached.
+    if (
+      fallingBackToDashboard &&
+      shouldRedirectToDownload(request.headers["user-agent"])
+    ) {
+      response.writeHead(302, { location: "/download" });
+      response.end();
+      return;
+    }
     const asset =
-      this.options.staticAssets?.get(url.pathname) ??
-      (url.pathname.includes(".")
-        ? undefined
-        : this.options.staticAssets?.get("/index.html"));
+      exact ??
+      (fallingBackToDashboard
+        ? this.options.staticAssets?.get("/index.html")
+        : undefined);
     if (asset === undefined) {
       throw new HttpError(404, "not_found", "Asset was not found");
     }

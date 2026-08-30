@@ -64,6 +64,12 @@ services:
       # work is for. Off here, because a single-box install where this
       # container *is* the executor must keep working.
       COORD_LOCAL_AGENTS_ONLY: ${COORD_LOCAL_AGENTS_ONLY:-}
+      # "1" sends desktop browsers asking for the dashboard to /download
+      # instead. Phones are let through, because there is no phone build to
+      # send them to, and the app identifies itself so it is never redirected
+      # away from the page it exists to show. A signpost, not a control: the
+      # marker is client-supplied and anybody can copy it.
+      COORD_DESKTOP_APP_ONLY: ${COORD_DESKTOP_APP_ONLY:-}
     ports:
       - "${COORD_PORT:-4317}:4317"
     volumes:
