@@ -22,14 +22,25 @@
  * The bundle is smoke-tested before this script will call it good: a bundle
  * that cannot load is worth catching here rather than on a user's machine,
  * where the symptom is an agent that silently never starts.
+ *
+ * ### Why the API and not the CLI
+ *
+ * This shelled out to `npx esbuild` and died on Windows with
+ * `ENOENT: spawnSync npx`. `npx` there is `npx.cmd`, a batch file, and Node
+ * has refused to run one through `execFile` without an explicit shell since
+ * the 2024 argument-injection fix. Reaching for `npx.cmd` or `shell: true`
+ * would work and would also put a quoted command line back in the middle of a
+ * build — the exact shape `process-runner.ts` goes to such lengths to avoid.
+ * The library has a JavaScript API, so nothing needs to be spawned at all and
+ * the platform question stops existing.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { mkdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ESBUILD = "esbuild@0.25.0";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = path.join(root, "apps/worker/dist/index.js");
 const outDir = path.join(root, "apps/desktop/resources");
@@ -44,20 +55,31 @@ if (!statSync(entry, { throwIfNoEntry: false })?.isFile()) {
 
 mkdirSync(outDir, { recursive: true });
 
-execFileSync(
-  "npx",
-  [
-    "--yes",
-    ESBUILD,
-    entry,
-    "--bundle",
-    "--platform=node",
-    "--format=cjs",
-    "--target=node24",
-    `--outfile=${outFile}`,
-  ],
-  { stdio: "inherit", cwd: root },
-);
+// Resolved from the workspace root rather than imported by specifier: this
+// script is not a package with its own dependencies, and esbuild is installed
+// beside the other packaging tools without being written into any manifest.
+const require = createRequire(`${root}/package.json`);
+let esbuild;
+try {
+  esbuild = require("esbuild");
+} catch {
+  console.error(
+    "esbuild is not installed. It is a packaging tool rather than a\n" +
+      "dependency, so fetch it the same way the release workflow does:\n" +
+      "  npm install --no-save esbuild@^0.25.0",
+  );
+  process.exit(1);
+}
+
+await esbuild.build({
+  entryPoints: [entry],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node24",
+  outfile: outFile,
+  logLevel: "info",
+});
 
 // Loading the whole module graph is the part that breaks, and it breaks the
 // same way every time: an unbundleable `require` throws before `main` runs.
