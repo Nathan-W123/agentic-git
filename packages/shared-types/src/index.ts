@@ -2725,3 +2725,90 @@ export function projectBudgets(
   assertProjectPolicy(policy);
   return policy.budgets ?? {};
 }
+
+/* ------------------------------------------------- recently touched ---- */
+
+/** One repository-relative path, and how recent and how frequent its edits are. */
+export interface TouchedFile {
+  path: string;
+  /** Landed changesets in the sample that patched it. */
+  changes: number;
+  /** When it last landed, ISO 8601. */
+  lastTouchedAt: string;
+  /** Recency-weighted weight of evidence. Higher is a likelier next touch. */
+  score: number;
+}
+
+/** One landed patch, as the stores read them back. */
+export interface TouchedFileSample {
+  path: string;
+  /** The landing time of the changeset that carried it, ISO 8601. */
+  at: string;
+}
+
+/**
+ * How long a landed edit stays worth half of what it was worth when it landed.
+ *
+ * A week, because that is roughly the span over which a repository's active
+ * area moves. Shorter and a Monday forgets the previous Friday; longer and a
+ * finished project keeps recommending itself after the team has left it.
+ */
+const TOUCH_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The files a repository has been working in lately, likeliest first.
+ *
+ * Frequency alone recommends whatever is edited constantly — a barrel file, a
+ * lockfile, the one module every feature passes through — which is exactly
+ * what nobody needs pointing out. Recency alone recommends whatever happened
+ * to land last, including a one-off. Each edit is therefore worth one point
+ * decayed by its age, so a file edited twice yesterday outranks one edited
+ * five times last month, and both outrank the barrel file nobody has touched
+ * this week.
+ *
+ * Pure, and given `now` rather than reading a clock, so the same sample always
+ * ranks the same way and a test can place its own edits in time.
+ */
+export function rankTouchedFiles(
+  samples: readonly TouchedFileSample[],
+  now: number,
+  limit = 12,
+): TouchedFile[] {
+  const byPath = new Map<string, { changes: number; last: string; score: number }>();
+  for (const sample of samples) {
+    const at = Date.parse(sample.at);
+    // An unparseable timestamp is evidence the edit happened and no evidence
+    // of when. Counted, but at the floor, so a malformed row cannot outrank a
+    // real one.
+    const age = Number.isNaN(at) ? Number.POSITIVE_INFINITY : Math.max(0, now - at);
+    const weight = age === Number.POSITIVE_INFINITY
+      ? 0
+      : 2 ** (-age / TOUCH_HALF_LIFE_MS);
+    const path = normalizeRepositoryPath(sample.path);
+    if (path === "") {
+      continue;
+    }
+    const seen = byPath.get(path);
+    if (seen === undefined) {
+      byPath.set(path, { changes: 1, last: sample.at, score: weight });
+      continue;
+    }
+    seen.changes += 1;
+    seen.score += weight;
+    if (Number.isNaN(Date.parse(seen.last)) || at > Date.parse(seen.last)) {
+      seen.last = sample.at;
+    }
+  }
+  return [...byPath.entries()]
+    .map(([path, seen]) => ({
+      path,
+      changes: seen.changes,
+      lastTouchedAt: seen.last,
+      score: seen.score,
+    }))
+    // Ties broken by path so the order is total: two files with identical
+    // evidence must not swap places between calls.
+    .sort((left, right) =>
+      right.score - left.score || left.path.localeCompare(right.path))
+    .slice(0, Math.max(0, limit));
+}

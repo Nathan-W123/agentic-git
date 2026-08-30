@@ -492,6 +492,69 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: only landed patches count as recently touched`, async () => {
+    // The hint an arriving agent is given points at where work goes, so it is
+    // read from integrated changesets alone. A changeset that never landed is
+    // often one that touched the wrong thing, and recommending it would teach
+    // the next agent the previous one's mistake.
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      // A second changeset in the same run that never integrates.
+      await store.saveChangeSet(runId, {
+        ...CHANGESET,
+        id: "cs_never_landed",
+        taskId: CHANGESET.taskId,
+        patches: [
+          {
+            path: "src/abandoned.js",
+            status: "modified",
+            patch: CHANGESET.patches[0]?.patch ?? "",
+          },
+        ],
+      });
+
+      const touched = await store.recentlyTouchedFiles({
+        repositoryId: REPOSITORY.id,
+      });
+      const paths = touched.map((sample) => sample.path);
+      assert.ok(
+        paths.includes("src/counter.js"),
+        `the landed patch is missing: ${JSON.stringify(paths)}`,
+      );
+      assert.ok(
+        !paths.includes("src/abandoned.js"),
+        `a changeset that never integrated was recommended: ${JSON.stringify(paths)}`,
+      );
+      // Every sample carries when it landed, which is what the ranking needs.
+      for (const sample of touched) {
+        assert.ok(
+          !Number.isNaN(Date.parse(sample.at)),
+          `sample has no usable timestamp: ${JSON.stringify(sample)}`,
+        );
+      }
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: another repository's work is not recommended`, async () => {
+    // The rail is per repository and so is this: a hint that leaked paths from
+    // a repository the agent cannot see would be unverifiable by definition.
+    const { store, cleanup } = await backend.open();
+    try {
+      await populate(store);
+      const touched = await store.recentlyTouchedFiles({
+        repositoryId: "repo_does_not_exist",
+      });
+      assert.deepEqual(touched, []);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: saving a changeset twice is idempotent`, async () => {
     const { store, cleanup } = await backend.open();
     try {

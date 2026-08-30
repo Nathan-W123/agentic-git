@@ -19,6 +19,7 @@ import type {
   ScopeChangeRequest,
   SequencedAuditEvent,
   TaskDefinition,
+  TouchedFileSample,
   TaskId,
   TaskStatus,
   UserId,
@@ -1965,6 +1966,23 @@ export interface CoordinationStore {
     resolvedBy: UserId,
     at: string,
   ): Promise<ChangesetComment>;
+  /**
+   * Where work has actually been landing in this repository, most recent first.
+   *
+   * Read from integrated changesets rather than every changeset: a changeset
+   * that never landed is often one that touched the wrong thing, and this is
+   * meant to point an arriving agent at where the work is, not at where the
+   * last one went wrong.
+   *
+   * Returns raw samples — one row per landed patch — because the ranking is
+   * `rankTouchedFiles`, and writing its decay three times in three dialects of
+   * SQL is three chances to have it disagree with itself.
+   */
+  recentlyTouchedFiles(input: {
+    repositoryId: string;
+    /** How many landed patches to read back. Defaults to a few hundred. */
+    limit?: number;
+  }): Promise<TouchedFileSample[]>;
   saveIntegration(runId: string, result: IntegrationResult): Promise<void>;
   saveCanonicalVersion(
     repositoryId: string,
