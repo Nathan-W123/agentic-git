@@ -91,6 +91,29 @@ export function legacyAdmissionLoop(): boolean {
   return process.env["COORD_LEGACY_ADMISSION_LOOP"] === "1";
 }
 
+/**
+ * Whether this deployment refuses to execute agents itself.
+ *
+ * The control plane can run a task in process, and on the hosted deployment
+ * that is the expensive half of the bill: an agent holds its memory for as
+ * long as it runs and every prompt it sends leaves as egress. Both of those
+ * belong to whoever's machine the work is for, and a desktop worker puts them
+ * there — but only if the control plane stops taking the work first, because
+ * it drains the queue the moment a task lands.
+ *
+ * Off by default, so a self-hosted deployment and the local `coord` CLI are
+ * unchanged: a single-machine install where the control plane *is* the
+ * executor stays exactly as it was. Turning it on is a hosting decision,
+ * which is why it is an environment variable rather than a code path.
+ *
+ * With it on, a task whose owner has no machine listening waits rather than
+ * running somewhere else. That is the point, and it is worth being plain
+ * about: this trades "always runs" for "only ever runs where it should".
+ */
+export function localAgentsOnly(): boolean {
+  return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
+}
+
 /** A worker holds a task for this long before it must heartbeat again. */
 export const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 60 * 1000;

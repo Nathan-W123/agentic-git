@@ -56,6 +56,7 @@ import {
   configuredBlanketClaims,
   configuredRepositoryParallelism,
   legacyAdmissionLoop,
+  localAgentsOnly,
   reservedOwners,
   tasksWaitingOnActiveWork,
   WORK_LEASE_TTL_MS,
@@ -280,6 +281,13 @@ export async function leaseQueuedWork(
   },
 ): Promise<Array<{ task: SubmittedTask; lease: WorkLease }>> {
   const leased: Array<{ task: SubmittedTask; lease: WorkLease }> = [];
+  // Before anything else, because the cheapest way for a deployment not to run
+  // an agent is not to look for one. A queue left alone here is a queue a
+  // desktop worker can still take from; the task is not lost, it is waiting
+  // for the machine it belongs to.
+  if (localAgentsOnly()) {
+    return leased;
+  }
   const parallelism = configuredRepositoryParallelism();
   // Scoped to this project's organization, and deliberately so. A worker only
   // ever accepts work from its own tenant, so an unscoped reservation would
