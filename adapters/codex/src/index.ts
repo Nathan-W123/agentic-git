@@ -2064,6 +2064,13 @@ export class CodexAdapter implements AgentAdapter {
     timeoutMs: number,
     phase: CodexPhase,
   ): Promise<string> {
+    // See the prompt-cli adapter's guard: an abandoned declaration ask leaves a
+    // vendor process running past the call that wanted it, and throwing here
+    // failed a task that had done nothing wrong. Wait for it — it ends on its
+    // own timeout — and throw only for a caller that is genuinely concurrent.
+    if (record.active !== undefined) {
+      await record.active.catch(() => undefined);
+    }
     if (record.active !== undefined) {
       throw new Error(`Session ${record.session.id} already has an active Codex process`);
     }

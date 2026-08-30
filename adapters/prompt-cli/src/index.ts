@@ -2571,6 +2571,25 @@ export class PromptCliAdapter implements AgentAdapter {
     timeoutMs: number,
     phase: "planning" | "execution",
   ): Promise<string> {
+    // An in-flight round is not always a concurrent caller.
+    //
+    // The coordinator asks a blanket holder to declare its remaining scope by
+    // racing `requestReplan` against a deadline, and that deadline abandons
+    // the call without cancelling it — deliberately, because there is no way
+    // to un-ask an agent. So a slow answer outlives the caller that wanted it,
+    // and the vendor process is still running when the holder is resumed. The
+    // very next execution round then hit this guard and threw, and nothing up
+    // the stack catches it: the whole task failed, having done nothing wrong,
+    // because somebody else arrived and asked it a question.
+    //
+    // Waiting is the answer rather than throwing. The abandoned round ends on
+    // its own timeout, the one-process invariant is kept because the wait
+    // outlasts it, and the task loses a little time instead of everything.
+    // Only a caller still finding a process after that wait is a genuinely
+    // concurrent one, and it still throws.
+    if (record.active !== undefined) {
+      await record.active.catch(() => undefined);
+    }
     if (record.active !== undefined) {
       throw new Error(
         `Session ${record.session.id} already has an active ${this.profile.name} process`,
