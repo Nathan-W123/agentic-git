@@ -51,6 +51,7 @@ import {
 } from "@coord/workspace-manager";
 
 import { LeaseLostError, WorkerClient, isTransportFailure } from "./client.js";
+import { signalHost } from "./host-signal.js";
 import type { WorkNudge } from "./nudge.js";
 import {
   shouldClaimWork,
@@ -341,6 +342,10 @@ export class Worker {
     }
 
     this.activeLease = assignment.lease.id;
+    // The busy window is exactly the lease's lifetime. The desktop app holds
+    // the machine awake for this and nothing longer, so that volunteering a
+    // laptop does not mean it never sleeps again.
+    signalHost("busy");
     this.activeSession = undefined;
     this.activeCancellation = undefined;
     this.cancellationRequested = false;
@@ -469,6 +474,7 @@ export class Worker {
       return { worked: true, taskId: assignment.task.id, accepted: false, reason: detail };
     } finally {
       clearInterval(beat);
+      signalHost("idle");
       await heartbeat?.catch(() => undefined);
       await this.cancelActiveSession();
       this.activeLease = undefined;

@@ -25,7 +25,7 @@
  * quietly start spending someone's model quota, and the machine is theirs to
  * volunteer. The choice is remembered, so it is asked exactly once.
  */
-import { app, utilityProcess } from "electron";
+import { app, powerSaveBlocker, utilityProcess } from "electron";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import os from "node:os";
@@ -51,6 +51,8 @@ const HEALTHY_RUN_MS = 60_000;
 
 let child;
 let stopping = false;
+/** The id of the sleep block held while a task is running, if any. */
+let awake;
 let failures = 0;
 let restartTimer;
 
@@ -252,7 +254,21 @@ export async function startWorker(here, session, onEvent) {
   child.stderr?.on("data", (line) => {
     onEvent?.({ state: "running", detail: String(line).trim() });
   });
+  // Held for the lease's lifetime and no longer. Sleeping halfway through an
+  // agent's execution loses the work and strands the lease until it expires;
+  // holding the machine open for as long as the worker is merely *enabled*
+  // would mean volunteering a laptop stopped it ever sleeping again. The child
+  // knows where that window starts and ends, so it says so.
+  child.on("message", (message) => {
+    if (message?.type === "busy") {
+      holdAwake();
+    } else if (message?.type === "idle") {
+      releaseAwake();
+    }
+  });
+
   child.once("exit", (code) => {
+    releaseAwake();
     const ranForMs = Date.now() - startedAt;
     child = undefined;
     if (stopping) {
@@ -276,8 +292,30 @@ export async function startWorker(here, session, onEvent) {
  * SIGTERM by handing its lease back, so the task it was holding is picked up
  * again straight away instead of waiting out a five-minute expiry.
  */
+function holdAwake() {
+  if (awake !== undefined) {
+    return;
+  }
+  // `prevent-app-suspension` keeps the system from sleeping while leaving the
+  // display free to switch off, which is the right shape for work nobody is
+  // watching. Electron supplies it on every platform, so this needs no native
+  // code, no elevation and no service.
+  awake = powerSaveBlocker.start("prevent-app-suspension");
+}
+
+function releaseAwake() {
+  if (awake === undefined) {
+    return;
+  }
+  if (powerSaveBlocker.isStarted(awake)) {
+    powerSaveBlocker.stop(awake);
+  }
+  awake = undefined;
+}
+
 export function stopWorker() {
   stopping = true;
+  releaseAwake();
   if (restartTimer !== undefined) {
     clearTimeout(restartTimer);
     restartTimer = undefined;
