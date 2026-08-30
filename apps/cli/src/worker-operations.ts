@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -104,7 +105,60 @@ const HEARTBEAT_INTERVAL_MS = 60 * 1000;
  * throughput without touching correctness. Operators tune it with
  * COORD_REPOSITORY_PARALLELISM; workers cannot choose it for themselves.
  */
-export const DEFAULT_REPOSITORY_PARALLELISM = 4;
+/**
+ * The most concurrent leases any evidence supports in one repository.
+ *
+ * Not a tuning knob. The only live run above it — five — livelocked, with
+ * four of ten tasks never completing; the fixes that followed were verified
+ * at four, and nothing in `docs/benchmarks/data/` has ever recorded a higher
+ * setting completing. Two fixed budgets also stop paying above it:
+ * `MAX_ADMISSION_ATTEMPTS` is 4 against a compare-and-set over every approved
+ * lease in the repository, and `STALE_REASSESSMENT_BUDGET` is 1 while the
+ * number of results racing to promote grows with N.
+ *
+ * Raising it wants a throughput-vs-N sweep that does not exist yet: the
+ * benchmark harness drives the coordinator directly and never takes a lease,
+ * so it cannot measure this at all.
+ */
+const VERIFIED_PARALLELISM_CEILING = 4;
+
+/** What one agent is priced at where this repository states a price. */
+const AGENT_MEMORY_BYTES = 2 * 1024 ** 3;
+/** The sidecar a sandboxed agent carries beside it. */
+const AGENT_SIDECAR_BYTES = 0.25 * 1024 ** 3;
+/** Left for the control plane, which on a single box is a CPU consumer too. */
+const HOST_RESERVE_BYTES = 2 * 1024 ** 3;
+
+/**
+ * How many concurrent leases this host can actually hold, derived rather than
+ * guessed.
+ *
+ * Memory is the term that binds. An agent is a vendor CLI waiting on model
+ * round trips far more than it is a CPU consumer, so cores are a poor divisor
+ * — a formula built on them lands at one agent on a four-core box and puts
+ * the system back where partial admission can never fire. What each agent
+ * genuinely holds is its own process, its own worktree and its share of the
+ * index caches, and that is measurable: this repository prices an agent at
+ * 2 GiB, plus a quarter for the egress sidecar when sandboxed.
+ *
+ * Clamped both ways. Never above what has actually been observed completing,
+ * because the ceiling is an evidence statement rather than a capacity one;
+ * never below one, because the stores serialise to one absent a value and a
+ * zero would stop the repository entirely.
+ */
+export function derivedRepositoryParallelism(
+  totalMemoryBytes: number = os.totalmem(),
+): number {
+  const usable = totalMemoryBytes - HOST_RESERVE_BYTES;
+  const fits = Math.floor(usable / (AGENT_MEMORY_BYTES + AGENT_SIDECAR_BYTES));
+  return Math.max(1, Math.min(fits, VERIFIED_PARALLELISM_CEILING));
+}
+
+/**
+ * @deprecated Read {@link derivedRepositoryParallelism} instead. Kept because
+ * it is exported and named in tests and documentation.
+ */
+export const DEFAULT_REPOSITORY_PARALLELISM = VERIFIED_PARALLELISM_CEILING;
 
 export function configuredRepositoryParallelism(explicit?: number): number {
   if (explicit !== undefined) {
@@ -112,7 +166,7 @@ export function configuredRepositoryParallelism(explicit?: number): number {
   }
   const raw = process.env["COORD_REPOSITORY_PARALLELISM"]?.trim() ?? "";
   if (raw.length === 0) {
-    return DEFAULT_REPOSITORY_PARALLELISM;
+    return derivedRepositoryParallelism();
   }
   const value = Number.parseInt(raw, 10);
   if (!Number.isSafeInteger(value) || value < 1) {

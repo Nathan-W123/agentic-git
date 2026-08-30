@@ -53,6 +53,7 @@ import {
   leaseWork,
   workerOperations,
   type WorkAssignment,
+  derivedRepositoryParallelism,
 } from "./worker-operations.js";
 import { CoordinatorProject } from "./project.js";
 
@@ -4471,4 +4472,21 @@ test("a hosting process shares one repository index across admissions", async ()
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }
+});
+
+test("repository parallelism is derived from the host and clamped both ways", () => {
+  const GiB = 1024 ** 3;
+  // A small box gets one, not four. Four agents priced at 2 GiB each do not
+  // fit in 4 GiB, and the old constant said they did.
+  assert.equal(derivedRepositoryParallelism(4 * GiB), 1);
+  // Never zero, whatever the arithmetic says: the stores serialise to one
+  // absent a value, and a zero would stop the repository entirely.
+  assert.equal(derivedRepositoryParallelism(1 * GiB), 1);
+  // A big box is still held to what has been observed completing. The ceiling
+  // is an evidence statement, not a capacity one — the only live run above it
+  // livelocked.
+  assert.equal(derivedRepositoryParallelism(512 * GiB), 4);
+  // And it rises with room in between, so the derivation is doing work rather
+  // than dressing up a constant.
+  assert.equal(derivedRepositoryParallelism(9 * GiB), 3);
 });
