@@ -90,12 +90,17 @@ jobs:
 
       # The worker the app supervises, flattened to one file it can ship. Its
       # own build has to run first: this job only built @coord/desktop, and the
-      # bundler refuses rather than bundling a stale `dist`. esbuild is fetched
-      # by the script for the same reason Electron is installed --no-save below
-      # — nothing here belongs in a manifest the Docker build would read.
+      # bundler refuses rather than bundling a stale `dist`.
+      #
+      # esbuild is installed here, --no-save, for the reason Electron is below:
+      # it is a packaging tool and nothing in a manifest the control plane's
+      # Docker build would read. Installed rather than fetched by the script,
+      # because reaching it through `npx` meant spawning `npx.cmd` on Windows —
+      # which Node will not do without a shell — and the whole job died there.
       - name: Bundle the worker
         run: |
           npx turbo run build --filter=@coord/worker...
+          npm install --no-save --no-audit --no-fund esbuild@^0.25.0
           node scripts/bundle-worker.mjs
 
       # Electron and the packager are installed here and nowhere else. Putting
