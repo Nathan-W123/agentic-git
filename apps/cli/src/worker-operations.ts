@@ -2543,7 +2543,11 @@ export async function acceptWorkResult(
         })
       : { id: admitted.admission.runId };
   let runFinished = false;
-  let followUp: string | undefined;
+  // Both remainders, not one. A result can leave two different kinds of work
+  // behind — the scope admission deferred, and the hunks a conflict held back
+  // — and they are independent: neither implies the other, and a result that
+  // produces both must queue both.
+  const followUps: string[] = [];
   try {
     await store.saveTask(run.id, taskDefinition);
     await store.saveTaskStatus(run.id, task.id, "planning");
@@ -2886,7 +2890,7 @@ export async function acceptWorkResult(
       // Only now, with the granted half durably in canonical, is the deferred
       // half turned into work of its own. Queueing it earlier would leave a
       // task asking for the remainder of something that never landed.
-      followUp = await queueDeferredScope(
+      const deferredFollowUp = await queueDeferredScope(
         store,
         run.id,
         task,
@@ -2894,15 +2898,35 @@ export async function acceptWorkResult(
         split,
         changeSet,
       );
+      if (deferredFollowUp !== undefined) {
+        followUps.push(deferredFollowUp);
+      }
       // Same rule for the half a conflict held back: only once the rest is
       // durably in canonical is the remainder worth asking anyone for.
-      followUp ??= await queueSalvagedConflict(
+      //
+      // Asked unconditionally, which it was not. This read `followUp ??=`, so
+      // whenever admission had deferred anything the salvage call never ran at
+      // all — and it is the only place the salvaged hunks are requeued and the
+      // only emitter of their `changeset_withheld` audit event. The patches
+      // were dropped: the task was marked integrated, the handoff listed only
+      // the admission-deferred paths, `saveIntegration` has no column for the
+      // salvaged set, and the explanation still said how many were "requeued"
+      // when none had been.
+      //
+      // Both preconditions are contention-only, so at parallelism 1 this could
+      // not happen and the in-process coordinator — which queues both
+      // unconditionally, and whose comment asserts this path already did —
+      // never diverged visibly.
+      const salvagedFollowUp = await queueSalvagedConflict(
         store,
         run.id,
         task,
         integration.salvagedDeferred ?? [],
         changeSet,
       );
+      if (salvagedFollowUp !== undefined) {
+        followUps.push(salvagedFollowUp);
+      }
     } else if (
       (textualMergeAttempt || lostRace) &&
       ["conflict", "validation_failed"].includes(integration.status)
@@ -2972,7 +2996,7 @@ export async function acceptWorkResult(
         admission: admitted.admission,
         integration,
         changeSet: promoted,
-        followUpTaskIds: followUp === undefined ? [] : [followUp],
+        followUpTaskIds: [...followUps],
         withheldFiles: split.deferred.map((patch) => patch.path).sort(),
         reason:
           !successful
