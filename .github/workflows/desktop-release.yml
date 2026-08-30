@@ -88,6 +88,16 @@ jobs:
       - name: Build and test the app
         run: npx turbo run build test --filter=@coord/desktop
 
+      # The worker the app supervises, flattened to one file it can ship. Its
+      # own build has to run first: this job only built @coord/desktop, and the
+      # bundler refuses rather than bundling a stale `dist`. esbuild is fetched
+      # by the script for the same reason Electron is installed --no-save below
+      # — nothing here belongs in a manifest the Docker build would read.
+      - name: Bundle the worker
+        run: |
+          npx turbo run build --filter=@coord/worker...
+          node scripts/bundle-worker.mjs
+
       # Electron and the packager are installed here and nowhere else. Putting
       # either in a manifest would drop a hundred-megabyte browser download
       # into the control plane's Docker build, which has no use for it, so they

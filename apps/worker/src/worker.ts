@@ -51,6 +51,11 @@ import {
 } from "@coord/workspace-manager";
 
 import { LeaseLostError, WorkerClient, isTransportFailure } from "./client.js";
+import {
+  shouldClaimWork,
+  systemPowerSource,
+  type PowerSource,
+} from "./power.js";
 
 /**
  * The worker daemon.
@@ -97,6 +102,14 @@ export interface WorkerOptions {
   repositoryId?: string;
   /** Injected only by tests or embedded runtimes. */
   codexRunner?: CodexProcessRunner;
+  /**
+   * How this machine answers "am I plugged in".
+   *
+   * Injected for the same reason `codexRunner` is: the real one shells out to
+   * a platform tool, so a test that wants a worker on battery would otherwise
+   * have to be running on a laptop that was actually unplugged.
+   */
+  powerSource?: PowerSource;
   /**
    * Plans already paid for, reusable while the base they were written against
    * has not moved.
@@ -209,9 +222,12 @@ export class Worker {
   private cancellationRequested = false;
   private admissionWait: AbortController | undefined;
   private iterationInProgress = false;
+  /** See {@link WorkerOptions.powerSource}. */
+  private readonly power: PowerSource;
 
   public constructor(private readonly options: WorkerOptions) {
     this.plans = options.planCache ?? new Map<string, CachedPlan>();
+    this.power = options.powerSource ?? systemPowerSource();
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
     const planWaitBudget =
       options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
@@ -277,6 +293,13 @@ export class Worker {
 
   private async performIteration(): Promise<IterationResult> {
     const workerId = this.identity?.id ?? (await this.register());
+    // Asked before the lease and not after it, because the point is to never
+    // hold work this machine cannot promise to finish. A laptop that claims a
+    // task and then sleeps keeps it for the full lease expiry while its owner
+    // watches nothing happen; declining leaves it visibly queued instead.
+    if (!shouldClaimWork(await this.power.read())) {
+      return { worked: false };
+    }
     const assignment = await this.options.client.lease(
       workerId,
       this.options.projectId ?? DEFAULT_PROJECT_ID,

@@ -374,6 +374,49 @@ function adapterName(
 }
 
 /**
+ * How long after a worker was last heard from its owner's queue stays reserved.
+ *
+ * Three missed polls. The window can be generous because the cost of being
+ * wrong is asymmetric: hold a reservation too long and the owner's task waits
+ * for a machine that is coming back anyway; drop it too early and the control
+ * plane runs their work on the host account, which is the thing this exists to
+ * prevent. A worker refreshes this on every poll, not only while holding a
+ * lease — `touchWorker` is called at the top of the leases endpoint — so an
+ * idle desktop stays live without inventing a separate presence ping.
+ */
+const OWNER_RESERVATION_MS = 3 * HEARTBEAT_INTERVAL_MS;
+
+/**
+ * The users whose queued work belongs to a machine of their own.
+ *
+ * The in-process control plane can execute as anyone, so left alone it drains
+ * the queue the moment a task lands and a user's desktop never sees their own
+ * work. Passing this to {@link CoordinationStore.leaseNextTask} as
+ * `excludeSubmittedBy` makes it stand back for exactly as long as the owner's
+ * machine is answering.
+ *
+ * Empty whenever nobody has registered a worker, which is every deployment
+ * that runs the control plane alone — so this changes nothing for them.
+ */
+export async function reservedOwners(
+  store: CoordinationStore,
+  organizationId?: string,
+  now: Date = new Date(),
+): Promise<string[]> {
+  const cutoff = new Date(now.getTime() - OWNER_RESERVATION_MS).toISOString();
+  const workers = await store.listWorkers(
+    organizationId === undefined ? undefined : { organizationId },
+  );
+  const owners = new Set<string>();
+  for (const worker of workers) {
+    if (worker.lastSeenAt > cutoff) {
+      owners.add(worker.userId);
+    }
+  }
+  return [...owners];
+}
+
+/**
  * Atomically leases the next compatible task in one authorized project.
  *
  * A repository admits a bounded number of concurrent leases
@@ -501,6 +544,9 @@ export async function leaseWork(
       baseRevision: version.revision,
       ttlMs: WORK_LEASE_TTL_MS,
       repositoryParallelism,
+      // This machine has exactly one set of vendor logins to offer, so it may
+      // only take work belonging to the person who registered it.
+      claimableBy: worker.userId,
     });
     if (leased === undefined) {
       continue;

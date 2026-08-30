@@ -15,3 +15,9 @@ coverage/
 .env
 *.env
 !.env.example
+
+# Built by `npm run bundle:worker` for the desktop app to ship as an
+# extraResource. A build artifact, not source: `apps/desktop` declares no
+# dependencies, so the worker reaches it as a bundle rather than as an edge in
+# the dependency graph.
+apps/desktop/resources/

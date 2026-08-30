@@ -56,6 +56,7 @@ import {
   configuredBlanketClaims,
   configuredRepositoryParallelism,
   legacyAdmissionLoop,
+  reservedOwners,
   tasksWaitingOnActiveWork,
   WORK_LEASE_TTL_MS,
 } from "./worker-operations.js";
@@ -280,6 +281,13 @@ export async function leaseQueuedWork(
 ): Promise<Array<{ task: SubmittedTask; lease: WorkLease }>> {
   const leased: Array<{ task: SubmittedTask; lease: WorkLease }> = [];
   const parallelism = configuredRepositoryParallelism();
+  // Scoped to this project's organization, and deliberately so. A worker only
+  // ever accepts work from its own tenant, so an unscoped reservation would
+  // hold back a user's task in one organization on the strength of a machine
+  // they registered in another — reserved for a worker that is not allowed to
+  // claim it, which is starvation rather than routing.
+  const project = await store.getProject(input.projectId);
+  const reserved = await reservedOwners(store, project?.organizationId);
   const request = {
     workerId: input.workerId,
     repositoryId: input.repositoryId,
@@ -287,6 +295,7 @@ export async function leaseQueuedWork(
     baseRevision: input.baseRevision,
     ttlMs: WORK_LEASE_TTL_MS,
     repositoryParallelism: parallelism,
+    excludeSubmittedBy: reserved,
   };
 
   const pending = legacyAdmissionLoop()

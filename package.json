@@ -23,6 +23,7 @@
     "demo": "npm run build --silent && node apps/cli/dist/index.js demo",
     "benchmark": "npm run build --silent && node apps/cli/dist/index.js benchmark",
     "web": "npm run build --silent && node apps/web/dist/index.js",
+    "bundle:worker": "npm run build --silent && node scripts/bundle-worker.mjs",
     "verify:docker": "npm run build --silent && node scripts/verify-docker-sandbox.mjs",
     "verify:remote-docker": "npm run build --silent && node scripts/verify-remote-docker.mjs",
     "verify:egress": "npm run build --silent && node scripts/verify-egress-allowlist.mjs",

@@ -41,6 +41,7 @@ import {
   resolveServer,
   verifyServer,
 } from "../dist/server-address.js";
+import { startWorker, stopWorker, workerIsRunning } from "./worker.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -80,6 +81,10 @@ async function readSettings() {
       // Written by "Change Server" and cleared by choosing one. Without it, a
       // build with a baked-in address would fall straight back to it.
       askedToChange: saved.askedToChange === true,
+      // Off unless it was turned on. Running agents spends this person's own
+      // model quota on their own hardware, so it is volunteered rather than
+      // assumed by an app they installed to get a window.
+      runAgents: saved.runAgents === true,
       // Decrypted only here, and only on the machine that sealed it: OS-backed
       // keys, so copying the file to another laptop yields nothing readable.
       token:
@@ -88,11 +93,25 @@ async function readSettings() {
           : "",
     };
   } catch {
-    return { server: "", token: "", askedToChange: false };
+    return {
+      server: "",
+      token: "",
+      askedToChange: false,
+      runAgents: false,
+    };
   }
 }
 
-async function writeSettings(server, token, askedToChange = false) {
+// `runAgents` is threaded through every caller rather than defaulted, because
+// the two writes on the startup path would otherwise clear the preference on
+// each launch — the app would forget it had been volunteered as a worker every
+// time it was opened.
+async function writeSettings(
+  server,
+  token,
+  askedToChange = false,
+  runAgents = false,
+) {
   await mkdir(path.dirname(settingsPath()), { recursive: true });
   // An empty token is written as no token at all rather than as a sealed empty
   // string, so signing out leaves a file that plainly has nothing in it.
@@ -106,6 +125,7 @@ async function writeSettings(server, token, askedToChange = false) {
       server,
       ...(sealed === undefined ? {} : { token: sealed }),
       ...(askedToChange ? { askedToChange: true } : {}),
+      ...(runAgents ? { runAgents: true } : {}),
     }),
     "utf8",
   );
@@ -184,8 +204,10 @@ function relaunch() {
  * settings file from. Both of these forget exactly enough and start over.
  */
 async function signOutAndRestart() {
-  const { server } = await readSettings();
-  await writeSettings(server, "");
+  const { server, runAgents } = await readSettings();
+  // The machine keeps its role. Signing out replaces a credential; it does not
+  // mean this person stopped volunteering their hardware.
+  await writeSettings(server, "", false, runAgents);
   relaunch();
 }
 
@@ -214,6 +236,17 @@ function buildMenu() {
     { label: "Sign Out and Restart", click: () => void signOutAndRestart() },
     { label: "Change Server…", click: () => void changeServerAndRestart() },
   );
+  // Where a person volunteers this machine. Checkable rather than a dialog,
+  // because the honest state is binary and they should be able to see which
+  // one they are in without opening anything.
+  const agents = [
+    {
+      label: "Run Agents on This Machine",
+      type: "checkbox",
+      checked: workerIsRunning(),
+      click: (item) => void toggleWorker(item.checked),
+    },
+  ];
   return Menu.buildFromTemplate([
     ...(process.platform === "darwin"
       ? [{ role: "appMenu" }]
@@ -222,9 +255,40 @@ function buildMenu() {
     // without these there is no copy, no paste, and no way to reload it.
     { role: "editMenu" },
     { role: "viewMenu" },
+    { label: "Agents", submenu: agents },
     { role: "windowMenu" },
     { role: "help", submenu: help },
   ]);
+}
+
+/**
+ * Turns this machine into a worker, or stops it being one.
+ *
+ * The answer is written down before the worker is started, so a crash on the
+ * way up is still remembered as "yes" and retried next launch rather than
+ * silently reverting. Anything that stops it from running says so in a dialog
+ * — the failures are all actionable (no CLI installed, no organization, a
+ * credential that has been revoked) and none of them are visible anywhere else
+ * on a machine with no terminal open.
+ */
+async function toggleWorker(wanted) {
+  const saved = await readSettings();
+  await writeSettings(saved.server, saved.token, saved.askedToChange, wanted);
+  if (!wanted) {
+    stopWorker();
+    Menu.setApplicationMenu(buildMenu());
+    return;
+  }
+  if (session === undefined) {
+    return;
+  }
+  await startWorker(here, session, (event) => {
+    if (event.state === "stopped" && event.detail !== "Stopped.") {
+      dialog.showErrorBox("Kumi cannot run agents here", event.detail);
+    }
+    Menu.setApplicationMenu(buildMenu());
+  });
+  Menu.setApplicationMenu(buildMenu());
 }
 
 async function openDashboard() {
@@ -297,7 +361,7 @@ async function start() {
       return;
     }
     token = "";
-    await writeSettings(server, token);
+    await writeSettings(server, token, false, saved.runAgents);
   }
 
   if (token === "") {
@@ -318,11 +382,19 @@ async function start() {
       app.quit();
       return;
     }
-    await writeSettings(server, token);
+    await writeSettings(server, token, false, saved.runAgents);
   }
 
   session = { server, token };
   Menu.setApplicationMenu(buildMenu());
+  // Started before the window rather than after it: a machine that was
+  // volunteered should be answering for work as soon as it is running, not
+  // once somebody looks at it.
+  if (saved.runAgents) {
+    void startWorker(here, session, () =>
+      Menu.setApplicationMenu(buildMenu()),
+    );
+  }
   await openDashboard();
 }
 
@@ -336,6 +408,12 @@ ipcMain.on("kumi:token", (event) => {
 app.whenReady().then(start, (error) => {
   dialog.showErrorBox("Kumi could not start", describe(error));
   app.quit();
+});
+
+// A planned shutdown hands the lease back, so whatever this machine was
+// holding is picked up again immediately instead of waiting out its expiry.
+app.on("before-quit", () => {
+  stopWorker();
 });
 
 app.on("window-all-closed", () => {
