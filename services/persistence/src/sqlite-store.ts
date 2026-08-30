@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   createId,
+  CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
@@ -11,6 +12,7 @@ import {
   type AuditEvent,
   type CanonicalVersion,
   type ChangeSet,
+  type TouchedFileSample,
   type CommandResult,
   type ConflictAssessment,
   type ConflictDisposition,
@@ -2924,6 +2926,65 @@ export class SqliteCoordinationStore implements CoordinationStore {
       resolvedAt: optionalText(row, "resolved_at"),
       resolvedBy: optionalText(row, "resolved_by"),
     };
+  }
+
+  public async recentlyTouchedFiles(input: {
+    repositoryId: string;
+    conversationId?: string;
+    limit?: number;
+  }): Promise<TouchedFileSample[]> {
+    const limit = input.limit ?? 400;
+    const channelId =
+      input.conversationId === undefined
+        ? undefined
+        : (
+            this.db
+              .prepare(`SELECT channel_id FROM channel_messages WHERE id = ?`)
+              .get(input.conversationId) as { channel_id?: string } | undefined
+          )?.channel_id;
+    if (channelId !== undefined) {
+      const scoped = this.db
+        .prepare(
+          `SELECT file_patches.path AS path, changesets.created_at AS at
+             FROM file_patches
+             JOIN changesets ON changesets.id = file_patches.changeset_id
+             JOIN runs ON runs.id = changesets.run_id
+             JOIN integrations ON integrations.changeset_id = changesets.id
+              AND integrations.status = 'integrated'
+             JOIN submitted_tasks ON submitted_tasks.id = changesets.task_id
+             JOIN channel_messages
+               ON channel_messages.id = submitted_tasks.conversation_id
+            WHERE runs.repository_id = ? AND channel_messages.channel_id = ?
+            ORDER BY changesets.created_at DESC, file_patches.ordinal ASC
+            LIMIT ?`,
+        )
+        .all(input.repositoryId, channelId, Math.max(0, limit)) as {
+        path: string;
+        at: string;
+      }[];
+      if (scoped.length >= CHANNEL_TOUCH_FLOOR) {
+        return scoped.map((row) => ({ path: row.path, at: row.at }));
+      }
+    }
+    // Joined through `integrations` rather than reading every changeset: a
+    // changeset that never landed is often one that touched the wrong thing.
+    const rows = this.db
+      .prepare(
+        `SELECT file_patches.path AS path, changesets.created_at AS at
+           FROM file_patches
+           JOIN changesets ON changesets.id = file_patches.changeset_id
+           JOIN runs ON runs.id = changesets.run_id
+           JOIN integrations ON integrations.changeset_id = changesets.id
+            AND integrations.status = 'integrated'
+          WHERE runs.repository_id = ?
+          ORDER BY changesets.created_at DESC, file_patches.ordinal ASC
+          LIMIT ?`,
+      )
+      .all(input.repositoryId, Math.max(0, limit)) as {
+      path: string;
+      at: string;
+    }[];
+    return rows.map((row) => ({ path: row.path, at: row.at }));
   }
 
   public async saveIntegration(

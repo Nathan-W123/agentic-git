@@ -450,6 +450,13 @@ export class UserCredentialStore {
    * making that writer-preferring would deadlock: the first staged task could
    * only close after the later task had got past the queued writer.
    */
+  /**
+   * One write at a time per credential, so concurrent rotations queue rather
+   * than overwrite each other mid-write. Deliberately not the reader/writer
+   * lock above: a rotation happens while its own home still holds that lock.
+   */
+  private readonly credentialWrites = new Map<string, Promise<void>>();
+
   private async acquireCredentialUse(
     userId: string,
     vendor: VendorCliKind,
@@ -579,15 +586,43 @@ export class UserCredentialStore {
                 ).catch(() => undefined);
               }
               if (result.rotatedSecret !== undefined) {
-                await this.put(input.userId, input.vendor, {
-                  kind: credential.kind,
-                  secret: result.rotatedSecret,
-                  ...(credential.label === undefined
-                    ? {}
-                    : { label: credential.label }),
-                  origin: credential.origin,
-                  visibility: credential.visibility,
-                }).catch(() => undefined);
+                // Serialised against the other homes rotating the same
+                // credential, without touching the reader/writer hold this
+                // home is already inside.
+                //
+                // A `session_file` credential is handed to every concurrent
+                // task at once — the hold is shared and admits unlimited
+                // readers — and each rotates it and writes the result back as
+                // it closes. Those closes happen together, and each is a
+                // read-modify-write of the whole record, so they interleaved:
+                // the stored bytes were whichever landed last, in whatever
+                // order the filesystem settled. The store's own docblock
+                // assumes the case that breaks — "a single control plane holds
+                // the project lock, so there is no concurrent writer to lose".
+                //
+                // A separate queue rather than upgrading the hold: dropping
+                // the shared hold to take an exclusive one lets a waiting
+                // exclusive reader in *before* this write lands, which is the
+                // opposite of what it is waiting for. Three tests said so.
+                const rotated = result.rotatedSecret;
+                const key = `${input.userId}\u0000${input.vendor}`;
+                const queued = (
+                  this.credentialWrites.get(key) ?? Promise.resolve()
+                )
+                  .catch(() => undefined)
+                  .then(async () => {
+                    await this.put(input.userId, input.vendor, {
+                      kind: credential.kind,
+                      secret: rotated,
+                      ...(credential.label === undefined
+                        ? {}
+                        : { label: credential.label }),
+                      origin: credential.origin,
+                      visibility: credential.visibility,
+                    }).catch(() => undefined);
+                  });
+                this.credentialWrites.set(key, queued);
+                await queued;
               }
               return result;
             } finally {

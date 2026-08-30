@@ -1,5 +1,6 @@
 import {
   createId,
+  CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
@@ -7,6 +8,7 @@ import {
   type AuditEvent,
   type CanonicalVersion,
   type ChangeSet,
+  type TouchedFileSample,
   type ConflictAssessment,
   type CoordinatorDecision,
   type IntegrationResult,
@@ -1961,6 +1963,90 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       comment.resolvedBy = resolvedBy;
     }
     return copy(comment);
+  }
+
+  public async recentlyTouchedFiles(input: {
+    repositoryId: string;
+    conversationId?: string;
+    limit?: number;
+  }): Promise<TouchedFileSample[]> {
+    const limit = input.limit ?? 400;
+    const channelId =
+      input.conversationId === undefined
+        ? undefined
+        : this.channelMessages.get(input.conversationId)?.channelId;
+    // Which conversations belong to that channel, so a changeset can be
+    // attributed to it through the task that produced it.
+    const ofChannel =
+      channelId === undefined
+        ? undefined
+        : new Set(
+            [...this.submitted.values()]
+              .filter((task) => {
+                const conversation = task.conversationId;
+                return (
+                  conversation !== undefined &&
+                  this.channelMessages.get(conversation)?.channelId === channelId
+                );
+              })
+              .map((task) => task.id),
+          );
+    const gather = (only: ReadonlySet<string> | undefined): TouchedFileSample[] => {
+      const found: TouchedFileSample[] = [];
+      for (const state of this.runs.values()) {
+        if (state.run.repositoryId !== input.repositoryId) {
+          continue;
+        }
+        const landed = new Set(
+          state.integrations
+            .filter((entry) => entry.status === "integrated")
+            .map((entry) => entry.changeSetId),
+        );
+        for (const changeSet of state.changeSets) {
+          if (!landed.has(changeSet.id)) {
+            continue;
+          }
+          if (only !== undefined && !only.has(changeSet.taskId)) {
+            continue;
+          }
+          for (const patch of changeSet.patches) {
+            found.push({ path: patch.path, at: changeSet.createdAt });
+          }
+        }
+      }
+      return found.sort((left, right) => right.at.localeCompare(left.at));
+    };
+    if (ofChannel !== undefined) {
+      const scoped = gather(ofChannel);
+      if (scoped.length >= CHANNEL_TOUCH_FLOOR) {
+        return scoped.slice(0, Math.max(0, limit));
+      }
+    }
+    const samples: TouchedFileSample[] = [];
+    for (const state of this.runs.values()) {
+      if (state.run.repositoryId !== input.repositoryId) {
+        continue;
+      }
+      // Only what landed. A changeset that never integrated is often one that
+      // touched the wrong thing, and this points at where work goes rather
+      // than where it went wrong.
+      const landed = new Set(
+        state.integrations
+          .filter((entry) => entry.status === "integrated")
+          .map((entry) => entry.changeSetId),
+      );
+      for (const changeSet of state.changeSets) {
+        if (!landed.has(changeSet.id)) {
+          continue;
+        }
+        for (const patch of changeSet.patches) {
+          samples.push({ path: patch.path, at: changeSet.createdAt });
+        }
+      }
+    }
+    return samples
+      .sort((left, right) => right.at.localeCompare(left.at))
+      .slice(0, Math.max(0, limit));
   }
 
   public async saveIntegration(

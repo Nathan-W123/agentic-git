@@ -4,6 +4,7 @@ import pg from "pg";
 
 import {
   createId,
+  CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
@@ -11,6 +12,7 @@ import {
   type AuditEvent,
   type CanonicalVersion,
   type ChangeSet,
+  type TouchedFileSample,
   type CommandResult,
   type ConflictAssessment,
   type ConflictDisposition,
@@ -2920,6 +2922,61 @@ export class PostgresCoordinationStore implements CoordinationStore {
       resolvedAt: optionalText(row, "resolved_at"),
       resolvedBy: optionalText(row, "resolved_by"),
     };
+  }
+
+  public async recentlyTouchedFiles(input: {
+    repositoryId: string;
+    conversationId?: string;
+    limit?: number;
+  }): Promise<TouchedFileSample[]> {
+    const limit = input.limit ?? 400;
+    if (input.conversationId !== undefined) {
+      const scope: unknown[] = [];
+      const found = (await this.rows(
+        `SELECT channel_id FROM channel_messages
+          WHERE id = ${bind(scope, input.conversationId)}`,
+        scope,
+      )) as { channel_id?: string }[];
+      const channelId = found[0]?.channel_id;
+      if (channelId !== undefined) {
+        const scoped: unknown[] = [];
+        const rows = (await this.rows(
+          `SELECT file_patches.path AS path, changesets.created_at AS at
+             FROM file_patches
+             JOIN changesets ON changesets.id = file_patches.changeset_id
+             JOIN runs ON runs.id = changesets.run_id
+             JOIN integrations ON integrations.changeset_id = changesets.id
+              AND integrations.status = 'integrated'
+             JOIN submitted_tasks ON submitted_tasks.id = changesets.task_id
+             JOIN channel_messages
+               ON channel_messages.id = submitted_tasks.conversation_id
+            WHERE runs.repository_id = ${bind(scoped, input.repositoryId)}
+              AND channel_messages.channel_id = ${bind(scoped, channelId)}
+            ORDER BY changesets.created_at DESC, file_patches.ordinal ASC
+            LIMIT ${bind(scoped, Math.max(0, limit))}`,
+          scoped,
+        )) as { path: string; at: string }[];
+        if (rows.length >= CHANNEL_TOUCH_FLOOR) {
+          return rows.map((row) => ({ path: row.path, at: row.at }));
+        }
+      }
+    }
+    const values: unknown[] = [];
+    // Joined through `integrations` rather than reading every changeset: a
+    // changeset that never landed is often one that touched the wrong thing.
+    const rows = (await this.rows(
+      `SELECT file_patches.path AS path, changesets.created_at AS at
+         FROM file_patches
+         JOIN changesets ON changesets.id = file_patches.changeset_id
+         JOIN runs ON runs.id = changesets.run_id
+         JOIN integrations ON integrations.changeset_id = changesets.id
+          AND integrations.status = 'integrated'
+        WHERE runs.repository_id = ${bind(values, input.repositoryId)}
+        ORDER BY changesets.created_at DESC, file_patches.ordinal ASC
+        LIMIT ${bind(values, Math.max(0, limit))}`,
+      values,
+    )) as { path: string; at: string }[];
+    return rows.map((row) => ({ path: row.path, at: row.at }));
   }
 
   public async saveIntegration(

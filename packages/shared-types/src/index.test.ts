@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  rankTouchedFiles,
   arbitrationFiles,
   arbitrationSymbols,
   assertAgentPlan,
@@ -773,4 +774,75 @@ test("a declared claim is read back as one, and a malformed one is refused", () 
       claim: { kind: "declared", held: ["src/b.ts"] },
     }),
   );
+});
+
+test("recent edits outrank frequent old ones", () => {
+  // Frequency alone recommends the file every feature passes through, which is
+  // the one nobody needs told. Recency alone recommends whatever landed last,
+  // including a one-off. Each edit is worth a point decayed by its age, so the
+  // two are weighed against each other rather than one winning outright.
+  const now = Date.parse("2026-03-10T12:00:00.000Z");
+  const day = 24 * 60 * 60 * 1000;
+  const ranked = rankTouchedFiles(
+    [
+      // Edited twice in the last day.
+      { path: "src/checkout.js", at: new Date(now - day * 0.5).toISOString() },
+      { path: "src/checkout.js", at: new Date(now - day * 1).toISOString() },
+      // The barrel file: five edits, all a month old.
+      ...Array.from({ length: 5 }, (_unused, index) => ({
+        path: "src/index.js",
+        at: new Date(now - day * (30 + index)).toISOString(),
+      })),
+    ],
+    now,
+  );
+
+  assert.equal(ranked[0]?.path, "src/checkout.js");
+  assert.equal(ranked[0]?.changes, 2);
+  assert.ok(
+    (ranked[0]?.score ?? 0) > (ranked[1]?.score ?? 0),
+    "five stale edits outweighed two fresh ones",
+  );
+  // The count is still reported honestly even where it lost.
+  assert.equal(ranked[1]?.changes, 5);
+});
+
+test("ranking the same sample twice gives the same order", () => {
+  // Two files with identical evidence must not swap places between calls: this
+  // list is read by an agent, and a hint that reorders itself is a hint that
+  // cannot be trusted or tested.
+  const now = Date.parse("2026-03-10T12:00:00.000Z");
+  const at = new Date(now - 1000).toISOString();
+  const sample = [
+    { path: "src/b.js", at },
+    { path: "src/a.js", at },
+    { path: "src/c.js", at },
+  ];
+
+  assert.deepEqual(
+    rankTouchedFiles(sample, now).map((file) => file.path),
+    ["src/a.js", "src/b.js", "src/c.js"],
+  );
+  assert.deepEqual(
+    rankTouchedFiles(sample, now).map((file) => file.path),
+    rankTouchedFiles([...sample].reverse(), now).map((file) => file.path),
+  );
+});
+
+test("a malformed timestamp is counted but never ranked first", () => {
+  // The edit demonstrably happened; when it happened is unknown. Dropping it
+  // loses evidence, trusting it lets one bad row outrank real work.
+  const now = Date.parse("2026-03-10T12:00:00.000Z");
+  const ranked = rankTouchedFiles(
+    [
+      { path: "src/broken.js", at: "not a date" },
+      { path: "src/broken.js", at: "also not a date" },
+      { path: "src/real.js", at: new Date(now - 60_000).toISOString() },
+    ],
+    now,
+  );
+
+  assert.equal(ranked[0]?.path, "src/real.js");
+  assert.equal(ranked[1]?.path, "src/broken.js");
+  assert.equal(ranked[1]?.changes, 2, "the unplaceable edits were dropped");
 });

@@ -492,6 +492,102 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: only landed patches count as recently touched`, async () => {
+    // The hint an arriving agent is given points at where work goes, so it is
+    // read from integrated changesets alone. A changeset that never landed is
+    // often one that touched the wrong thing, and recommending it would teach
+    // the next agent the previous one's mistake.
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      // A second changeset in the same run that never integrates.
+      await store.saveChangeSet(runId, {
+        ...CHANGESET,
+        id: "cs_never_landed",
+        taskId: CHANGESET.taskId,
+        patches: [
+          {
+            path: "src/abandoned.js",
+            status: "modified",
+            patch: CHANGESET.patches[0]?.patch ?? "",
+          },
+        ],
+      });
+
+      const touched = await store.recentlyTouchedFiles({
+        repositoryId: REPOSITORY.id,
+      });
+      const paths = touched.map((sample) => sample.path);
+      assert.ok(
+        paths.includes("src/counter.js"),
+        `the landed patch is missing: ${JSON.stringify(paths)}`,
+      );
+      assert.ok(
+        !paths.includes("src/abandoned.js"),
+        `a changeset that never integrated was recommended: ${JSON.stringify(paths)}`,
+      );
+      // Every sample carries when it landed, which is what the ranking needs.
+      for (const sample of touched) {
+        assert.ok(
+          !Number.isNaN(Date.parse(sample.at)),
+          `sample has no usable timestamp: ${JSON.stringify(sample)}`,
+        );
+      }
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a thin channel falls back to the whole repository`, async () => {
+    // The narrowing turns itself on when there is something to narrow. Below
+    // the floor a channel is not a sharper view of the work, it is a smaller
+    // sample of it, and eight files drawn from one changeset is a worse
+    // starting point than eight drawn from the repository's whole history.
+    //
+    // Early on every channel is below the floor, so this is the path that runs
+    // on day one — and it must return the repository's work rather than
+    // nothing, or the hint is silent exactly when an agent knows least.
+    const { store, cleanup } = await backend.open();
+    try {
+      await populate(store);
+      const scoped = await store.recentlyTouchedFiles({
+        repositoryId: REPOSITORY.id,
+        // No such conversation, which is the same shape as a channel with no
+        // landed work: nothing resolves, so nothing narrows.
+        conversationId: "msg_does_not_exist",
+      });
+      const wide = await store.recentlyTouchedFiles({
+        repositoryId: REPOSITORY.id,
+      });
+      assert.deepEqual(
+        scoped.map((sample) => sample.path),
+        wide.map((sample) => sample.path),
+        "an unresolvable conversation narrowed the list instead of falling back",
+      );
+      assert.ok(wide.length > 0, "the fixture landed nothing to recommend");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: another repository's work is not recommended`, async () => {
+    // The rail is per repository and so is this: a hint that leaked paths from
+    // a repository the agent cannot see would be unverifiable by definition.
+    const { store, cleanup } = await backend.open();
+    try {
+      await populate(store);
+      const touched = await store.recentlyTouchedFiles({
+        repositoryId: "repo_does_not_exist",
+      });
+      assert.deepEqual(touched, []);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: saving a changeset twice is idempotent`, async () => {
     const { store, cleanup } = await backend.open();
     try {

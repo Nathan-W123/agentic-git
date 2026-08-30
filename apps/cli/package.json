@@ -41,7 +41,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/blanket-claim.test.js dist/blanket-holder-ask.test.js dist/chunk-admission-e2e.test.js dist/partial-admission-crossrun.test.js dist/cancel-tasks.test.js dist/queue-ordering.test.js dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js dist/project.test.js dist/recovery.test.js dist/real-repo.test.js dist/lease-referee.test.js dist/deferred-scope.test.js dist/conversational-run.test.js dist/worker-operations.test.js dist/rollback.test.js dist/repo-export.test.js dist/error-format.test.js dist/credential-routing.test.js dist/conflict-repair.test.js"
+    "test": "node --test dist/pause-tasks.test.js dist/blanket-claim.test.js dist/blanket-holder-ask.test.js dist/chunk-admission-e2e.test.js dist/partial-admission-crossrun.test.js dist/cancel-tasks.test.js dist/queue-ordering.test.js dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js dist/project.test.js dist/recovery.test.js dist/real-repo.test.js dist/lease-referee.test.js dist/deferred-scope.test.js dist/conversational-run.test.js dist/worker-operations.test.js dist/rollback.test.js dist/repo-export.test.js dist/error-format.test.js dist/credential-routing.test.js dist/conflict-repair.test.js"
   },
   "dependencies": {
     "@coord/adapter-codex": "*",

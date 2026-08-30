@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -104,7 +105,61 @@ const HEARTBEAT_INTERVAL_MS = 60 * 1000;
  * throughput without touching correctness. Operators tune it with
  * COORD_REPOSITORY_PARALLELISM; workers cannot choose it for themselves.
  */
-export const DEFAULT_REPOSITORY_PARALLELISM = 4;
+/**
+ * The fewest concurrent leases a repository is given, whatever the host.
+ *
+ * A floor rather than a ceiling, which is a deliberate reversal. Four was the
+ * most that had been observed completing — the one live run at five livelocked
+ * — but that run predates the three defects fixed in the two commits before
+ * this one, and all three scale with N: a result that both deferred scope and
+ * salvaged a conflict silently lost the salvaged half, an abandoned
+ * declaration ask failed the task it asked, and concurrent credential
+ * rotations overwrote each other. The evidence against five was evidence
+ * against five *with those bugs in it*.
+ *
+ * Below four the system also loses the thing it exists for. Partial admission
+ * is computed only against other executing plans, so at parallelism one it can
+ * never fire and chunk admission is dead code.
+ */
+const MINIMUM_REPOSITORY_PARALLELISM = 4;
+
+/** What one agent is priced at where this repository states a price. */
+const AGENT_MEMORY_BYTES = 2 * 1024 ** 3;
+/** The sidecar a sandboxed agent carries beside it. */
+const AGENT_SIDECAR_BYTES = 0.25 * 1024 ** 3;
+/** Left for the control plane, which on a single box is a CPU consumer too. */
+const HOST_RESERVE_BYTES = 2 * 1024 ** 3;
+
+/**
+ * How many concurrent leases this host can actually hold, derived rather than
+ * guessed.
+ *
+ * Memory is the term that binds. An agent is a vendor CLI waiting on model
+ * round trips far more than it is a CPU consumer, so cores are a poor divisor
+ * — a formula built on them lands at one agent on a four-core box and puts
+ * the system back where partial admission can never fire. What each agent
+ * genuinely holds is its own process, its own worktree and its share of the
+ * index caches, and that is measurable: this repository prices an agent at
+ * 2 GiB, plus a quarter for the egress sidecar when sandboxed.
+ *
+ * Clamped both ways. Never above what has actually been observed completing,
+ * because the ceiling is an evidence statement rather than a capacity one;
+ * never below one, because the stores serialise to one absent a value and a
+ * zero would stop the repository entirely.
+ */
+export function derivedRepositoryParallelism(
+  totalMemoryBytes: number = os.totalmem(),
+): number {
+  const usable = totalMemoryBytes - HOST_RESERVE_BYTES;
+  const fits = Math.floor(usable / (AGENT_MEMORY_BYTES + AGENT_SIDECAR_BYTES));
+  return Math.max(MINIMUM_REPOSITORY_PARALLELISM, fits);
+}
+
+/**
+ * @deprecated Read {@link derivedRepositoryParallelism} instead. Kept because
+ * it is exported and named in tests and documentation.
+ */
+export const DEFAULT_REPOSITORY_PARALLELISM = MINIMUM_REPOSITORY_PARALLELISM;
 
 export function configuredRepositoryParallelism(explicit?: number): number {
   if (explicit !== undefined) {
@@ -112,7 +167,7 @@ export function configuredRepositoryParallelism(explicit?: number): number {
   }
   const raw = process.env["COORD_REPOSITORY_PARALLELISM"]?.trim() ?? "";
   if (raw.length === 0) {
-    return DEFAULT_REPOSITORY_PARALLELISM;
+    return derivedRepositoryParallelism();
   }
   const value = Number.parseInt(raw, 10);
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -1034,8 +1089,24 @@ interface WorkPlanServices {
   admissions?: PlanAdmissionController;
 }
 
-/** How many times admission is recomputed when a rival admission lands first. */
-const MAX_ADMISSION_ATTEMPTS = 4;
+/**
+ * How many times admission is recomputed when a rival admission lands first.
+ *
+ * Scaled, because the thing it absorbs scales. The compare-and-set is over the
+ * whole set of approved lease ids in the repository, so it is invalidated by
+ * every admission *and* every lease finishing — with N concurrent workers a
+ * plan can lose the race up to N-1 times through no fault of its own. Held at
+ * a flat four, a synchronised burst exhausted the budget from about six and
+ * the plan was answered `sequenced` with no conflicts and a fifteen-second
+ * retry: a sleep on an unconflicted plan, while its worker kept heartbeating
+ * and holding the slot.
+ *
+ * One spare round above the worst case, floored at the old value so nothing
+ * gets fewer retries than it used to.
+ */
+export function maxAdmissionAttempts(parallelism: number): number {
+  return Math.max(4, parallelism + 1);
+}
 
 /**
  * Tasks whose most recent admission sequenced them behind work that is still
@@ -1595,7 +1666,10 @@ export async function admitWorkPlan(
       : 0,
   );
 
-  for (let attempt = 1; attempt <= MAX_ADMISSION_ATTEMPTS; attempt += 1) {
+  const attemptBudget = maxAdmissionAttempts(
+    configuredRepositoryParallelism(),
+  );
+  for (let attempt = 1; attempt <= attemptBudget; attempt += 1) {
     const executing = await executingPlans(store, lease);
     // A plan admitted through the solo fast path was stored as declared —
     // nothing existed to arbitrate it against, so nothing enriched it. This
@@ -2543,7 +2617,11 @@ export async function acceptWorkResult(
         })
       : { id: admitted.admission.runId };
   let runFinished = false;
-  let followUp: string | undefined;
+  // Both remainders, not one. A result can leave two different kinds of work
+  // behind — the scope admission deferred, and the hunks a conflict held back
+  // — and they are independent: neither implies the other, and a result that
+  // produces both must queue both.
+  const followUps: string[] = [];
   try {
     await store.saveTask(run.id, taskDefinition);
     await store.saveTaskStatus(run.id, task.id, "planning");
@@ -2886,7 +2964,7 @@ export async function acceptWorkResult(
       // Only now, with the granted half durably in canonical, is the deferred
       // half turned into work of its own. Queueing it earlier would leave a
       // task asking for the remainder of something that never landed.
-      followUp = await queueDeferredScope(
+      const deferredFollowUp = await queueDeferredScope(
         store,
         run.id,
         task,
@@ -2894,15 +2972,35 @@ export async function acceptWorkResult(
         split,
         changeSet,
       );
+      if (deferredFollowUp !== undefined) {
+        followUps.push(deferredFollowUp);
+      }
       // Same rule for the half a conflict held back: only once the rest is
       // durably in canonical is the remainder worth asking anyone for.
-      followUp ??= await queueSalvagedConflict(
+      //
+      // Asked unconditionally, which it was not. This read `followUp ??=`, so
+      // whenever admission had deferred anything the salvage call never ran at
+      // all — and it is the only place the salvaged hunks are requeued and the
+      // only emitter of their `changeset_withheld` audit event. The patches
+      // were dropped: the task was marked integrated, the handoff listed only
+      // the admission-deferred paths, `saveIntegration` has no column for the
+      // salvaged set, and the explanation still said how many were "requeued"
+      // when none had been.
+      //
+      // Both preconditions are contention-only, so at parallelism 1 this could
+      // not happen and the in-process coordinator — which queues both
+      // unconditionally, and whose comment asserts this path already did —
+      // never diverged visibly.
+      const salvagedFollowUp = await queueSalvagedConflict(
         store,
         run.id,
         task,
         integration.salvagedDeferred ?? [],
         changeSet,
       );
+      if (salvagedFollowUp !== undefined) {
+        followUps.push(salvagedFollowUp);
+      }
     } else if (
       (textualMergeAttempt || lostRace) &&
       ["conflict", "validation_failed"].includes(integration.status)
@@ -2972,7 +3070,7 @@ export async function acceptWorkResult(
         admission: admitted.admission,
         integration,
         changeSet: promoted,
-        followUpTaskIds: followUp === undefined ? [] : [followUp],
+        followUpTaskIds: [...followUps],
         withheldFiles: split.deferred.map((patch) => patch.path).sort(),
         reason:
           !successful
