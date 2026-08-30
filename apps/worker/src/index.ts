@@ -5,6 +5,7 @@ import path from "node:path";
 import { CoordinatorProject } from "@coord/cli/project";
 
 import { WorkerClient } from "./client.js";
+import { WorkNudge } from "./nudge.js";
 import { Worker } from "./worker.js";
 
 function required(name: string): string {
@@ -22,10 +23,16 @@ async function main(): Promise<void> {
     process.env["COORD_PROJECT_ROOT"] ?? process.cwd(),
   );
 
+  const organizationId = required("COORD_ORGANIZATION");
   const worker = new Worker({
     client: new WorkerClient({ serverUrl, token }),
     project,
-    organizationId: required("COORD_ORGANIZATION"),
+    organizationId,
+    // Built here because this is where the address and the token are. It only
+    // ever shortens the idle wait between polls, so a deployment where the
+    // socket cannot be established is a worker on its original five-second
+    // cadence rather than a worker that stopped working.
+    nudge: new WorkNudge({ serverUrl, token, organizationId }),
     workspaceRoot:
       process.env["COORD_WORKER_ROOT"] ??
       path.join(project.directory, "worker"),

@@ -141,6 +141,7 @@ import {
 } from "./slash.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { CollabWebSocketHub } from "./collab-websocket.js";
+import { WorkerEventHub } from "./worker-events.js";
 import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
 import {
   normalizeCodexRateLimits,
@@ -4624,6 +4625,13 @@ export class ApiGateway {
   public readonly server: Server;
   public readonly webSockets: AuditWebSocketHub;
   public readonly collaboration: CollabWebSocketHub;
+  /**
+   * Tells workers that work exists so they need not wait out a poll.
+   *
+   * Public for the same reason the others are: a test wants to assert on
+   * connections without reaching through the HTTP surface.
+   */
+  public readonly workerEvents: WorkerEventHub;
   private readonly auth: AuthService;
   private readonly limiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
@@ -5100,9 +5108,29 @@ export class ApiGateway {
       reauthorize: async (authorization) =>
         await reauthorizeSocket(authorization, "submit_task"),
     });
-    // One `upgrade` listener routes to both hubs: Node delivers every upgrade
+    // The nudge a worker listens on. Authorized against the organization
+    // rather than a project, and on the same permission the lease endpoint
+    // demands: this only ever says "ask again", so it must not be reachable by
+    // anyone who could not have asked in the first place.
+    this.workerEvents = new WorkerEventHub({
+      authorize: async (request, organizationId) => {
+        this.assertOrigin(request);
+        const ticketed = redeemTicket(request);
+        const principal =
+          ticketed ?? (await this.auth.authenticate(request.headers.cookie));
+        assertTokenScope(principal, "run_task");
+        await authorizeOrganization(
+          this.options.store,
+          principal,
+          organizationId,
+          "run_task",
+        );
+        return { organizationId };
+      },
+    });
+    // One `upgrade` listener routes to every hub: Node delivers every upgrade
     // to every listener, so a hub that rejected unknown paths on its own would
-    // tear down the other hub's freshly negotiated socket.
+    // tear down another hub's freshly negotiated socket.
     this.server.on("upgrade", (request, socket, head) => {
       void this.routeUpgrade(request, socket, head).catch(() => {
         if (!socket.destroyed) {
@@ -5229,12 +5257,36 @@ export class ApiGateway {
     }
   }
 
+  /**
+   * Wakes any worker in this project's organization.
+   *
+   * Best-effort and deliberately not awaited by its callers: a submit that
+   * succeeded must not fail, or even wait, because a socket write did. The
+   * worst case is a worker that hears nothing and picks the task up on its
+   * next poll, which is exactly what happened before this existed.
+   */
+  private notifyWorkers(projectId: string): void {
+    void (async () => {
+      try {
+        const project = await this.options.store.getProject(projectId);
+        if (project !== undefined) {
+          this.workerEvents.notify(project.organizationId);
+        }
+      } catch {
+        // See above: nothing here is load-bearing.
+      }
+    })();
+  }
+
   private async routeUpgrade(
     request: IncomingMessage,
     socket: Duplex,
     head: Buffer,
   ): Promise<void> {
     try {
+      if (await this.workerEvents.tryUpgrade(request, socket, head)) {
+        return;
+      }
       if (await this.collaboration.tryUpgrade(request, socket, head)) {
         return;
       }
@@ -8626,6 +8678,7 @@ export class ApiGateway {
               actorId: principal.user.id,
             }),
         );
+        this.notifyWorkers(projectId);
         await this.options.store.appendAudit(undefined, {
           type: "task_submitted",
           taskId: task.id,
@@ -15278,6 +15331,7 @@ export class ApiGateway {
           ? { queueAfterCurrent: true }
           : {}),
       });
+      this.notifyWorkers(projectId);
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
         taskId: task.id,

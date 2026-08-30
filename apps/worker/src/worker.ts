@@ -51,6 +51,7 @@ import {
 } from "@coord/workspace-manager";
 
 import { LeaseLostError, WorkerClient, isTransportFailure } from "./client.js";
+import type { WorkNudge } from "./nudge.js";
 import {
   shouldClaimWork,
   systemPowerSource,
@@ -110,6 +111,14 @@ export interface WorkerOptions {
    * have to be running on a laptop that was actually unplugged.
    */
   powerSource?: PowerSource;
+  /**
+   * An optional shortcut out of the idle wait.
+   *
+   * Supplied by the daemon entry point, which is where the server address and
+   * token live. Absent everywhere else — including every test — and the loop
+   * below is written so that absence is simply the old behaviour.
+   */
+  nudge?: WorkNudge;
   /**
    * Plans already paid for, reusable while the base they were written against
    * has not moved.
@@ -1115,6 +1124,9 @@ export class Worker {
   /** Polls until stopped. */
   public async run(): Promise<void> {
     await this.register();
+    // Connected after registering, so a nudge can never arrive for a worker
+    // the control plane does not yet know about.
+    this.options.nudge?.start();
     const idle = this.options.pollIntervalMs ?? DEFAULT_POLL_MS;
     while (!this.stopping) {
       let result: IterationResult;
@@ -1134,7 +1146,10 @@ export class Worker {
       // replan it into the same refusal, so back off as if the queue were
       // empty — which, for work this worker can do, it effectively is.
       if ((!result.worked || result.deferred === true) && !this.stopping) {
-        await new Promise((resolve) => setTimeout(resolve, idle));
+        // The nudge only ever shortens this. With none supplied, or one that
+        // never hears anything, it is the same fixed backoff it always was.
+        await (this.options.nudge?.wait(idle) ??
+          new Promise((resolve) => setTimeout(resolve, idle)));
       }
     }
   }
@@ -1147,6 +1162,9 @@ export class Worker {
    */
   public async stop(): Promise<void> {
     this.stopping = true;
+    // Released first: it holds a socket and may have a caller parked in
+    // `wait`, and neither should outlive the decision to shut down.
+    this.options.nudge?.stop();
     const lease = this.activeLease;
     await Promise.all([
       this.cancelActiveSession(),
