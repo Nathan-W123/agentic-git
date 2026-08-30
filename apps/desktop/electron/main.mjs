@@ -55,6 +55,19 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // copy sends people to for a newer one is baked into every copy, so there has
 // to be exactly one place it can be wrong.
 const manifest = createRequire(import.meta.url)("../package.json");
+
+// How the deployment tells this app apart from a browser on the same machine,
+// so it can send desktop browsers to the installer and let the app through.
+// Appended rather than replacing the User-Agent: the string still has to say
+// Chromium, because everything that sniffs it downstream — the dashboard
+// included — is entitled to know what it is actually talking to.
+//
+// A signpost and not a lock. Anybody can copy this marker out of their own
+// install; what protects the hosting bill is the control plane refusing to
+// execute agents, not this.
+app.userAgentFallback = `${app.userAgentFallback} KumiDesktop/${
+  manifest.version ?? "0"
+}`;
 const releasesUrl =
   typeof manifest.kumi?.releasesRepo === "string"
     ? `https://github.com/${manifest.kumi.releasesRepo}/releases`
