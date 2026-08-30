@@ -1980,6 +1980,23 @@ export interface CoordinationStore {
    */
   recentlyTouchedFiles(input: {
     repositoryId: string;
+    /**
+     * Narrow to the channel this conversation belongs to, when that channel
+     * has enough history to be worth narrowing to.
+     *
+     * A conversation id is a thread root message id, and a message knows its
+     * channel — so the task's channel resolves by join and needs no column of
+     * its own. Channels are named for areas of the work (`#backend`,
+     * `#frontend`), and in a monorepo the busiest area otherwise crowds out
+     * every other one: measured on this repository, nine of the twelve most
+     * recently worked files are `apps/web`, so a backend task read a list
+     * that was three-quarters frontend.
+     *
+     * Falls back to the repository when the channel is too thin to rank —
+     * early on that is every channel, and a short list from one corner is
+     * worse than a long one from the whole repository.
+     */
+    conversationId?: string;
     /** How many landed patches to read back. Defaults to a few hundred. */
     limit?: number;
   }): Promise<TouchedFileSample[]>;

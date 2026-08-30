@@ -2753,6 +2753,17 @@ export interface TouchedFileSample {
  * area moves. Shorter and a Monday forgets the previous Friday; longer and a
  * finished project keeps recommending itself after the team has left it.
  */
+/**
+ * Landed patches a channel needs before its own history beats the repository's.
+ *
+ * Below this a channel is not a narrower view of the work, it is a smaller
+ * sample of it — and eight files drawn from three changesets is a worse
+ * starting point than eight drawn from three hundred. Early on every channel
+ * is below it, which is the point: the narrowing turns itself on when there is
+ * something to narrow.
+ */
+export const CHANNEL_TOUCH_FLOOR = 24;
+
 const TOUCH_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**

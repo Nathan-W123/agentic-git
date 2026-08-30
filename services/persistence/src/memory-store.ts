@@ -1,5 +1,6 @@
 import {
   createId,
+  CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
@@ -1966,9 +1967,61 @@ export class InMemoryCoordinationStore implements CoordinationStore {
 
   public async recentlyTouchedFiles(input: {
     repositoryId: string;
+    conversationId?: string;
     limit?: number;
   }): Promise<TouchedFileSample[]> {
     const limit = input.limit ?? 400;
+    const channelId =
+      input.conversationId === undefined
+        ? undefined
+        : this.channelMessages.get(input.conversationId)?.channelId;
+    // Which conversations belong to that channel, so a changeset can be
+    // attributed to it through the task that produced it.
+    const ofChannel =
+      channelId === undefined
+        ? undefined
+        : new Set(
+            [...this.submitted.values()]
+              .filter((task) => {
+                const conversation = task.conversationId;
+                return (
+                  conversation !== undefined &&
+                  this.channelMessages.get(conversation)?.channelId === channelId
+                );
+              })
+              .map((task) => task.id),
+          );
+    const gather = (only: ReadonlySet<string> | undefined): TouchedFileSample[] => {
+      const found: TouchedFileSample[] = [];
+      for (const state of this.runs.values()) {
+        if (state.run.repositoryId !== input.repositoryId) {
+          continue;
+        }
+        const landed = new Set(
+          state.integrations
+            .filter((entry) => entry.status === "integrated")
+            .map((entry) => entry.changeSetId),
+        );
+        for (const changeSet of state.changeSets) {
+          if (!landed.has(changeSet.id)) {
+            continue;
+          }
+          if (only !== undefined && !only.has(changeSet.taskId)) {
+            continue;
+          }
+          for (const patch of changeSet.patches) {
+            found.push({ path: patch.path, at: changeSet.createdAt });
+          }
+        }
+      }
+      return found.sort((left, right) => right.at.localeCompare(left.at));
+    };
+    if (ofChannel !== undefined) {
+      const scoped = gather(ofChannel);
+      if (scoped.length >= CHANNEL_TOUCH_FLOOR) {
+        return scoped.slice(0, Math.max(0, limit));
+      }
+    }
     const samples: TouchedFileSample[] = [];
     for (const state of this.runs.values()) {
       if (state.run.repositoryId !== input.repositoryId) {

@@ -2105,7 +2105,15 @@ export class Coordinator {
             store === undefined
               ? []
               : await store
-                  .recentlyTouchedFiles({ repositoryId: input.repository.id })
+                  .recentlyTouchedFiles({
+                    repositoryId: input.repository.id,
+                    // Narrows to this task's channel where that channel has
+                    // enough history to be worth narrowing to, and falls back
+                    // to the repository where it has not.
+                    ...(entry.conversationId === undefined
+                      ? {}
+                      : { conversationId: entry.conversationId }),
+                  })
                   .then((samples) => rankTouchedFiles(samples, Date.now()))
                   .catch(() => []);
           const priorContext = [
