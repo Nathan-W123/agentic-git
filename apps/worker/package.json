@@ -26,11 +26,14 @@
     "@coord/adapter-prompt-cli": "*",
     "@coord/adapter-generic-cli": "*",
     "@coord/agent-protocol": "*",
-    "@coord/api-gateway": "*",
     "@coord/cli": "*",
     "@coord/persistence": "*",
     "@coord/repository-service": "*",
     "@coord/shared-types": "*",
     "@coord/workspace-manager": "*"
+  },
+  "//": "@coord/api-gateway is a test-only import (worker.test.ts builds an in-process gateway to run the protocol against). It is a devDependency and must stay one: as a runtime dependency it drags @coord/local-triage -> @huggingface/transformers -> onnxruntime-node, over 600 MB of native ML that a worker never loads, into anything that packages this worker for a desktop.",
+  "devDependencies": {
+    "@coord/api-gateway": "*"
   }
 }

@@ -991,6 +991,28 @@ export class PostgresCoordinationStore implements CoordinationStore {
         if (input.projectId !== undefined) {
           clauses.push(`project_id = ${bind(values, input.projectId)}`);
         }
+        // A NULL owner matches either way: nobody's account is at stake, so
+        // there is nothing to reserve and nothing to get wrong.
+        if (input.claimableBy !== undefined) {
+          clauses.push(
+            `(submitted_by IS NULL OR submitted_by = ${bind(values, input.claimableBy)})`,
+          );
+        }
+        if (
+          input.excludeSubmittedBy !== undefined &&
+          input.excludeSubmittedBy.length > 0
+        ) {
+          // Expanded rather than passed as an array parameter, to match the
+          // SQLite branch and to keep the generated SQL free of driver-level
+          // array serialisation. The list is one entry per user with a live
+          // worker, so it is bounded by the size of the organization's fleet.
+          const placeholders = input.excludeSubmittedBy
+            .map((owner) => bind(values, owner))
+            .join(", ");
+          clauses.push(
+            `(submitted_by IS NULL OR submitted_by NOT IN (${placeholders}))`,
+          );
+        }
         // The parallelism cap bounds concurrent leases per repository. It is
         // a throughput valve, not the safety mechanism: exact-base
         // integration and stale-requeue at acceptance hold at any setting.

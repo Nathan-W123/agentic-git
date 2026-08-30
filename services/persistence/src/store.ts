@@ -518,6 +518,34 @@ export interface LeaseTaskInput {
    * and stale-requeue at result acceptance, which this limit does not relax.
    */
   repositoryParallelism?: number;
+  /**
+   * Restricts the claim to work this caller is entitled to *execute*, which is
+   * not the same question as who may see it.
+   *
+   * A remote worker runs every task under the vendor logins sitting on its own
+   * machine — that is the point of a desktop worker, and why the control plane
+   * never needs the operator's Claude session. It therefore has exactly one
+   * identity to offer, so it may only take tasks belonging to the user who
+   * registered it. Without this, a second desktop in the same organization
+   * claims the first user's task and silently executes it on the wrong
+   * account: right answer, wrong person's subscription, wrong name on the
+   * work.
+   *
+   * Unowned tasks (`submittedBy` unset, e.g. submitted straight from the CLI)
+   * match every value, because there is no account to get wrong.
+   */
+  claimableBy?: UserId;
+  /**
+   * Owners whose queued work is spoken for, and must be left alone.
+   *
+   * The mirror of {@link claimableBy}, for the in-process control plane, which
+   * *can* run a task as anyone — it opens the submitter's credential home per
+   * task. Being able to run everything is precisely why it has to be told to
+   * stand back: without this it drains the queue the instant a task is
+   * submitted, and a user's own desktop never gets the chance to pick up their
+   * work.
+   */
+  excludeSubmittedBy?: readonly UserId[];
 }
 
 export interface LeasedWork {

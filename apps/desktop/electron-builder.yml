@@ -56,6 +56,17 @@ npmRebuild: false
 # found none — a permanent warning that would only ever hide a real one.
 publish: null
 
+# The remote worker, bundled to a single CJS file by `npm run bundle:worker`.
+#
+# A resource and not a dependency, for the reason given beside `npmRebuild`:
+# this package declares nothing, and shipping the worker as a build artifact
+# keeps it that way. It lands beside the app's other resources, so the main
+# process finds it through `process.resourcesPath` without knowing the install
+# layout of any particular platform.
+extraResources:
+  - from: resources/worker.cjs
+    to: worker.cjs
+
 # A source of truth for what the app is allowed to reach on macOS. Nothing
 # unusual: it opens a browser and talks to a server over the network.
 mac:

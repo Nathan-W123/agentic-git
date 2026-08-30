@@ -756,6 +756,98 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a claim is bounded by whose account can run it`, async () => {
+    // A remote worker executes under the vendor logins on its own machine, so
+    // it has exactly one identity to offer. Claiming another user's task there
+    // produces the right patch on the wrong subscription, under the wrong
+    // name — the failure is silent, which is why the bound belongs in the
+    // store rather than in each caller.
+    const { store, cleanup } = await backend.open();
+    try {
+      const priya = await store.createUser({
+        email: "priya@example.invalid",
+        displayName: "Priya",
+        passwordDigest: "unused",
+      });
+      const nathan = await store.createUser({
+        email: "nathan@example.invalid",
+        displayName: "Nathan",
+        passwordDigest: "unused",
+      });
+      const nathansDesktop = await store.registerWorker({
+        userId: nathan.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "nathan-desktop",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+
+      const hers = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "priya's work",
+        agentId: "codex",
+        validationCommands: [],
+        submittedBy: priya.id,
+      });
+      const claim = {
+        workerId: nathansDesktop.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      };
+
+      // Nathan's machine cannot take Priya's task, even though it is the only
+      // machine listening and the queue is otherwise empty. Waiting is the
+      // correct outcome: her desktop will come back.
+      assert.equal(
+        await store.leaseNextTask({ ...claim, claimableBy: nathan.id }),
+        undefined,
+      );
+
+      // An unowned task has no account to get wrong, so anyone may run it.
+      const unowned = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "nobody's work",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const tookUnowned = await store.leaseNextTask({
+        ...claim,
+        claimableBy: nathan.id,
+      });
+      assert.equal(tookUnowned?.task.id, unowned.id);
+      assert.ok(tookUnowned !== undefined);
+      // Settled rather than released: releasing requeues it, and it would then
+      // still be sitting there as the only claimable row below.
+      await store.completeSubmittedTask(unowned.id, "integrated");
+      await store.finishWorkLease(
+        tookUnowned.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+
+      // The control plane can run as anyone, so it is told to stand back
+      // instead: with Priya reserved, her task stays queued...
+      assert.equal(
+        await store.leaseNextTask({
+          ...claim,
+          excludeSubmittedBy: [priya.id],
+        }),
+        undefined,
+      );
+
+      // ...and is picked up the moment the reservation lapses, which is what
+      // stops a machine that never comes back from stranding the work.
+      const afterLapse = await store.leaseNextTask(claim);
+      assert.equal(afterLapse?.task.id, hers.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a task's context survives being claimed`, async () => {
     // The whole point of the column is that the agent reads it, and the agent
     // only ever sees a *claimed* task — a context that round-trips on submit

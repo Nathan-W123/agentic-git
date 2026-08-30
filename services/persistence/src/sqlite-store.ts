@@ -890,6 +890,25 @@ export class SqliteCoordinationStore implements CoordinationStore {
         clauses.push("project_id = ?");
         values.push(input.projectId);
       }
+      // A NULL owner matches either way: nobody's account is at stake, so
+      // there is nothing to reserve and nothing to get wrong.
+      if (input.claimableBy !== undefined) {
+        clauses.push("(submitted_by IS NULL OR submitted_by = ?)");
+        values.push(input.claimableBy);
+      }
+      if (
+        input.excludeSubmittedBy !== undefined &&
+        input.excludeSubmittedBy.length > 0
+      ) {
+        // SQLite has no array parameter, so the list is expanded. The caller
+        // supplies one entry per user with a live worker, which is bounded by
+        // the size of the organization's fleet.
+        const placeholders = input.excludeSubmittedBy.map(() => "?").join(", ");
+        clauses.push(
+          `(submitted_by IS NULL OR submitted_by NOT IN (${placeholders}))`,
+        );
+        values.push(...input.excludeSubmittedBy);
+      }
       // The parallelism cap bounds concurrent leases per repository. It is a
       // throughput valve, not the safety mechanism: exact-base integration
       // and stale-requeue at acceptance hold at any setting.

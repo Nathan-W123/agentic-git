@@ -41,6 +41,12 @@ import {
   resolveServer,
   verifyServer,
 } from "../dist/server-address.js";
+import {
+  setStayAwake,
+  startWorker,
+  stopWorker,
+  workerIsRunning,
+} from "./worker.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -64,6 +70,8 @@ const defaultServer = manifest.kumi?.defaultServer;
 let session;
 /** Whether a dashboard has been shown, which is what makes closing one a quit. */
 let running = false;
+/** Mirrors the stored `keepAwake` choice so the menu can show it. */
+let awakeForWork = false;
 
 /** Where the server address and the token live between launches. */
 function settingsPath() {
@@ -80,6 +88,14 @@ async function readSettings() {
       // Written by "Change Server" and cleared by choosing one. Without it, a
       // build with a baked-in address would fall straight back to it.
       askedToChange: saved.askedToChange === true,
+      // Off unless it was turned on. Running agents spends this person's own
+      // model quota on their own hardware, so it is volunteered rather than
+      // assumed by an app they installed to get a window.
+      runAgents: saved.runAgents === true,
+      // Separate from `runAgents` on purpose. Running agents is about what
+      // this machine will do; staying awake is about what it gives up to be
+      // available, and a person may well want the first without the second.
+      keepAwake: saved.keepAwake === true,
       // Decrypted only here, and only on the machine that sealed it: OS-backed
       // keys, so copying the file to another laptop yields nothing readable.
       token:
@@ -88,11 +104,27 @@ async function readSettings() {
           : "",
     };
   } catch {
-    return { server: "", token: "", askedToChange: false };
+    return {
+      server: "",
+      token: "",
+      askedToChange: false,
+      runAgents: false,
+      keepAwake: false,
+    };
   }
 }
 
-async function writeSettings(server, token, askedToChange = false) {
+// `runAgents` is threaded through every caller rather than defaulted, because
+// the two writes on the startup path would otherwise clear the preference on
+// each launch — the app would forget it had been volunteered as a worker every
+// time it was opened.
+async function writeSettings(
+  server,
+  token,
+  askedToChange = false,
+  runAgents = false,
+  keepAwake = false,
+) {
   await mkdir(path.dirname(settingsPath()), { recursive: true });
   // An empty token is written as no token at all rather than as a sealed empty
   // string, so signing out leaves a file that plainly has nothing in it.
@@ -106,6 +138,8 @@ async function writeSettings(server, token, askedToChange = false) {
       server,
       ...(sealed === undefined ? {} : { token: sealed }),
       ...(askedToChange ? { askedToChange: true } : {}),
+      ...(runAgents ? { runAgents: true } : {}),
+      ...(keepAwake ? { keepAwake: true } : {}),
     }),
     "utf8",
   );
@@ -184,8 +218,10 @@ function relaunch() {
  * settings file from. Both of these forget exactly enough and start over.
  */
 async function signOutAndRestart() {
-  const { server } = await readSettings();
-  await writeSettings(server, "");
+  const { server, runAgents, keepAwake } = await readSettings();
+  // The machine keeps its role. Signing out replaces a credential; it does not
+  // mean this person stopped volunteering their hardware.
+  await writeSettings(server, "", false, runAgents, keepAwake);
   relaunch();
 }
 
@@ -214,6 +250,30 @@ function buildMenu() {
     { label: "Sign Out and Restart", click: () => void signOutAndRestart() },
     { label: "Change Server…", click: () => void changeServerAndRestart() },
   );
+  // Where a person volunteers this machine. Checkable rather than a dialog,
+  // because the honest state is binary and they should be able to see which
+  // one they are in without opening anything.
+  const agents = [
+    {
+      label: "Run Agents on This Machine",
+      type: "checkbox",
+      checked: workerIsRunning(),
+      click: (item) => void toggleWorker(item.checked),
+    },
+    { type: "separator" },
+    {
+      // Named for what it actually does. The platform call underneath is
+      // `SetThreadExecutionState`, and Microsoft is explicit that it "cannot
+      // be used to prevent the user from putting the computer to sleep" — a
+      // closed lid, the power button and Start > Sleep all go straight past
+      // it. It stops the machine idling out, and nothing more, so the label
+      // says idle rather than implying a promise it cannot keep.
+      label: "Don't Sleep While Idle (plugged in, lid open)",
+      type: "checkbox",
+      checked: awakeForWork,
+      click: (item) => void toggleKeepAwake(item.checked),
+    },
+  ];
   return Menu.buildFromTemplate([
     ...(process.platform === "darwin"
       ? [{ role: "appMenu" }]
@@ -222,9 +282,79 @@ function buildMenu() {
     // without these there is no copy, no paste, and no way to reload it.
     { role: "editMenu" },
     { role: "viewMenu" },
+    { label: "Agents", submenu: agents },
     { role: "windowMenu" },
     { role: "help", submenu: help },
   ]);
+}
+
+/**
+ * Turns this machine into a worker, or stops it being one.
+ *
+ * The answer is written down before the worker is started, so a crash on the
+ * way up is still remembered as "yes" and retried next launch rather than
+ * silently reverting. Anything that stops it from running says so in a dialog
+ * — the failures are all actionable (no CLI installed, no organization, a
+ * credential that has been revoked) and none of them are visible anywhere else
+ * on a machine with no terminal open.
+ */
+/**
+ * Offers this machine as one that stays up, or stops offering.
+ *
+ * Kept apart from the worker toggle because the two are different promises:
+ * one is what the machine will do with its time, the other is what it will
+ * give up to be reachable. Somebody may reasonably want to run agents all day
+ * and still have their laptop sleep at night.
+ */
+async function toggleKeepAwake(wanted) {
+  awakeForWork = wanted === true;
+  // Said once, when the expectation is being formed. Somebody turning this on
+  // is picturing a laptop working overnight, and the lid is exactly how they
+  // would try it — better to be told now than to close it and find nothing
+  // ran. The remedy is a system setting, and deliberately theirs to make: an
+  // app that quietly rewrote what a person's lid does would be overstepping.
+  if (awakeForWork) {
+    await dialog.showMessageBox({
+      type: "info",
+      message: "This machine will stay awake while it is plugged in.",
+      detail:
+        "Closing the lid will still put it to sleep — no application can " +
+        "override that. To keep working with the lid closed, set your " +
+        "system's lid-close action to “Do nothing”.\n\nOn battery it " +
+        "sleeps as usual, and agents wait until it is plugged in again.",
+      buttons: ["OK"],
+    });
+  }
+  const saved = await readSettings();
+  await writeSettings(
+    saved.server,
+    saved.token,
+    saved.askedToChange,
+    saved.runAgents,
+    awakeForWork,
+  );
+  setStayAwake(awakeForWork);
+  Menu.setApplicationMenu(buildMenu());
+}
+
+async function toggleWorker(wanted) {
+  const saved = await readSettings();
+  await writeSettings(saved.server, saved.token, saved.askedToChange, wanted);
+  if (!wanted) {
+    stopWorker();
+    Menu.setApplicationMenu(buildMenu());
+    return;
+  }
+  if (session === undefined) {
+    return;
+  }
+  await startWorker(here, session, (event) => {
+    if (event.state === "stopped" && event.detail !== "Stopped.") {
+      dialog.showErrorBox("Kumi cannot run agents here", event.detail);
+    }
+    Menu.setApplicationMenu(buildMenu());
+  });
+  Menu.setApplicationMenu(buildMenu());
 }
 
 async function openDashboard() {
@@ -297,7 +427,7 @@ async function start() {
       return;
     }
     token = "";
-    await writeSettings(server, token);
+    await writeSettings(server, token, false, saved.runAgents, saved.keepAwake);
   }
 
   if (token === "") {
@@ -318,11 +448,21 @@ async function start() {
       app.quit();
       return;
     }
-    await writeSettings(server, token);
+    await writeSettings(server, token, false, saved.runAgents, saved.keepAwake);
   }
 
   session = { server, token };
   Menu.setApplicationMenu(buildMenu());
+  // Started before the window rather than after it: a machine that was
+  // volunteered should be answering for work as soon as it is running, not
+  // once somebody looks at it.
+  awakeForWork = saved.keepAwake === true;
+  setStayAwake(awakeForWork);
+  if (saved.runAgents) {
+    void startWorker(here, session, () =>
+      Menu.setApplicationMenu(buildMenu()),
+    );
+  }
   await openDashboard();
 }
 
@@ -336,6 +476,12 @@ ipcMain.on("kumi:token", (event) => {
 app.whenReady().then(start, (error) => {
   dialog.showErrorBox("Kumi could not start", describe(error));
   app.quit();
+});
+
+// A planned shutdown hands the lease back, so whatever this machine was
+// holding is picked up again immediately instead of waiting out its expiry.
+app.on("before-quit", () => {
+  stopWorker();
 });
 
 app.on("window-all-closed", () => {

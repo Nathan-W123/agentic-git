@@ -736,6 +736,14 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           (input.repositoryId === undefined ||
             task.repositoryId === input.repositoryId) &&
           (input.projectId === undefined || task.projectId === input.projectId) &&
+          // A NULL owner matches either way: nobody's account is at stake, so
+          // there is nothing to reserve and nothing to get wrong.
+          (input.claimableBy === undefined ||
+            task.submittedBy === undefined ||
+            task.submittedBy === input.claimableBy) &&
+          (input.excludeSubmittedBy === undefined ||
+            task.submittedBy === undefined ||
+            !input.excludeSubmittedBy.includes(task.submittedBy)) &&
           (task.afterTaskId === undefined ||
             !["submitted", "claimed", "planned", "paused"].includes(
               this.submitted.get(task.afterTaskId)?.status ?? "integrated",
