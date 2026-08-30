@@ -54,6 +54,7 @@ import {
   workerOperations,
   type WorkAssignment,
   derivedRepositoryParallelism,
+  maxAdmissionAttempts as maxAdmissionAttemptsForTest,
 } from "./worker-operations.js";
 import { CoordinatorProject } from "./project.js";
 
@@ -4474,19 +4475,28 @@ test("a hosting process shares one repository index across admissions", async ()
   }
 });
 
-test("repository parallelism is derived from the host and clamped both ways", () => {
+test("repository parallelism starts at four and rises with the host", () => {
   const GiB = 1024 ** 3;
-  // A small box gets one, not four. Four agents priced at 2 GiB each do not
-  // fit in 4 GiB, and the old constant said they did.
-  assert.equal(derivedRepositoryParallelism(4 * GiB), 1);
-  // Never zero, whatever the arithmetic says: the stores serialise to one
-  // absent a value, and a zero would stop the repository entirely.
-  assert.equal(derivedRepositoryParallelism(1 * GiB), 1);
-  // A big box is still held to what has been observed completing. The ceiling
-  // is an evidence statement, not a capacity one — the only live run above it
-  // livelocked.
-  assert.equal(derivedRepositoryParallelism(512 * GiB), 4);
-  // And it rises with room in between, so the derivation is doing work rather
-  // than dressing up a constant.
-  assert.equal(derivedRepositoryParallelism(9 * GiB), 3);
+  // Four is the floor, whatever the host. Below it partial admission cannot
+  // fire at all — it is computed only against other executing plans — so a
+  // smaller number would turn off the thing the coordinator exists for.
+  assert.equal(derivedRepositoryParallelism(4 * GiB), 4);
+  assert.equal(derivedRepositoryParallelism(1 * GiB), 4);
+  assert.equal(derivedRepositoryParallelism(16 * GiB), 6);
+  // And it keeps rising: no ceiling, so a big host is allowed to use itself.
+  assert.equal(derivedRepositoryParallelism(64 * GiB), 27);
+});
+
+test("the admission retry budget grows with the contention it absorbs", () => {
+  // The compare-and-set is over every approved lease in the repository, so it
+  // is invalidated by each admission AND each lease finishing: with N workers
+  // a plan can lose the race up to N-1 times through no fault of its own. Held
+  // flat at four, a synchronised burst exhausted it from about six and the
+  // plan was answered `sequenced` with no conflicts — a fifteen-second sleep
+  // on work nothing was contending for.
+  assert.equal(maxAdmissionAttemptsForTest(4), 5);
+  assert.equal(maxAdmissionAttemptsForTest(8), 9);
+  // Never fewer than it used to be, so nothing loses a retry it had.
+  assert.equal(maxAdmissionAttemptsForTest(1), 4);
+  assert.equal(maxAdmissionAttemptsForTest(2), 4);
 });

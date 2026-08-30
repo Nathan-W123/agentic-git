@@ -106,21 +106,22 @@ const HEARTBEAT_INTERVAL_MS = 60 * 1000;
  * COORD_REPOSITORY_PARALLELISM; workers cannot choose it for themselves.
  */
 /**
- * The most concurrent leases any evidence supports in one repository.
+ * The fewest concurrent leases a repository is given, whatever the host.
  *
- * Not a tuning knob. The only live run above it — five — livelocked, with
- * four of ten tasks never completing; the fixes that followed were verified
- * at four, and nothing in `docs/benchmarks/data/` has ever recorded a higher
- * setting completing. Two fixed budgets also stop paying above it:
- * `MAX_ADMISSION_ATTEMPTS` is 4 against a compare-and-set over every approved
- * lease in the repository, and `STALE_REASSESSMENT_BUDGET` is 1 while the
- * number of results racing to promote grows with N.
+ * A floor rather than a ceiling, which is a deliberate reversal. Four was the
+ * most that had been observed completing — the one live run at five livelocked
+ * — but that run predates the three defects fixed in the two commits before
+ * this one, and all three scale with N: a result that both deferred scope and
+ * salvaged a conflict silently lost the salvaged half, an abandoned
+ * declaration ask failed the task it asked, and concurrent credential
+ * rotations overwrote each other. The evidence against five was evidence
+ * against five *with those bugs in it*.
  *
- * Raising it wants a throughput-vs-N sweep that does not exist yet: the
- * benchmark harness drives the coordinator directly and never takes a lease,
- * so it cannot measure this at all.
+ * Below four the system also loses the thing it exists for. Partial admission
+ * is computed only against other executing plans, so at parallelism one it can
+ * never fire and chunk admission is dead code.
  */
-const VERIFIED_PARALLELISM_CEILING = 4;
+const MINIMUM_REPOSITORY_PARALLELISM = 4;
 
 /** What one agent is priced at where this repository states a price. */
 const AGENT_MEMORY_BYTES = 2 * 1024 ** 3;
@@ -151,14 +152,14 @@ export function derivedRepositoryParallelism(
 ): number {
   const usable = totalMemoryBytes - HOST_RESERVE_BYTES;
   const fits = Math.floor(usable / (AGENT_MEMORY_BYTES + AGENT_SIDECAR_BYTES));
-  return Math.max(1, Math.min(fits, VERIFIED_PARALLELISM_CEILING));
+  return Math.max(MINIMUM_REPOSITORY_PARALLELISM, fits);
 }
 
 /**
  * @deprecated Read {@link derivedRepositoryParallelism} instead. Kept because
  * it is exported and named in tests and documentation.
  */
-export const DEFAULT_REPOSITORY_PARALLELISM = VERIFIED_PARALLELISM_CEILING;
+export const DEFAULT_REPOSITORY_PARALLELISM = MINIMUM_REPOSITORY_PARALLELISM;
 
 export function configuredRepositoryParallelism(explicit?: number): number {
   if (explicit !== undefined) {
@@ -1088,8 +1089,24 @@ interface WorkPlanServices {
   admissions?: PlanAdmissionController;
 }
 
-/** How many times admission is recomputed when a rival admission lands first. */
-const MAX_ADMISSION_ATTEMPTS = 4;
+/**
+ * How many times admission is recomputed when a rival admission lands first.
+ *
+ * Scaled, because the thing it absorbs scales. The compare-and-set is over the
+ * whole set of approved lease ids in the repository, so it is invalidated by
+ * every admission *and* every lease finishing — with N concurrent workers a
+ * plan can lose the race up to N-1 times through no fault of its own. Held at
+ * a flat four, a synchronised burst exhausted the budget from about six and
+ * the plan was answered `sequenced` with no conflicts and a fifteen-second
+ * retry: a sleep on an unconflicted plan, while its worker kept heartbeating
+ * and holding the slot.
+ *
+ * One spare round above the worst case, floored at the old value so nothing
+ * gets fewer retries than it used to.
+ */
+export function maxAdmissionAttempts(parallelism: number): number {
+  return Math.max(4, parallelism + 1);
+}
 
 /**
  * Tasks whose most recent admission sequenced them behind work that is still
@@ -1649,7 +1666,10 @@ export async function admitWorkPlan(
       : 0,
   );
 
-  for (let attempt = 1; attempt <= MAX_ADMISSION_ATTEMPTS; attempt += 1) {
+  const attemptBudget = maxAdmissionAttempts(
+    configuredRepositoryParallelism(),
+  );
+  for (let attempt = 1; attempt <= attemptBudget; attempt += 1) {
     const executing = await executingPlans(store, lease);
     // A plan admitted through the solo fast path was stored as declared —
     // nothing existed to arbitrate it against, so nothing enriched it. This
