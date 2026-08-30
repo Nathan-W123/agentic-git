@@ -41,12 +41,7 @@ import {
   resolveServer,
   verifyServer,
 } from "../dist/server-address.js";
-import {
-  setStayAwake,
-  startWorker,
-  stopWorker,
-  workerIsRunning,
-} from "./worker.mjs";
+import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -85,6 +80,8 @@ let session;
 let running = false;
 /** Mirrors the stored `keepAwake` choice so the menu can show it. */
 let awakeForWork = false;
+/** What the menu says about the worker. Replaced as soon as one reports. */
+let workerStatus = "Starting agents on this machine…";
 
 /** Where the server address and the token live between launches. */
 function settingsPath() {
@@ -104,10 +101,11 @@ async function readSettings() {
       // Off unless it was turned on. Running agents spends this person's own
       // model quota on their own hardware, so it is volunteered rather than
       // assumed by an app they installed to get a window.
-      runAgents: saved.runAgents === true,
-      // Separate from `runAgents` on purpose. Running agents is about what
-      // this machine will do; staying awake is about what it gives up to be
-      // available, and a person may well want the first without the second.
+      // Staying awake is still a choice. Running agents is not: this app
+      // exists to be the machine that runs them, and the deployment it talks
+      // to may well refuse to run anything itself — an off switch there would
+      // only ever mean "nothing happens anywhere", which is not a state worth
+      // offering somebody a checkbox for.
       keepAwake: saved.keepAwake === true,
       // Decrypted only here, and only on the machine that sealed it: OS-backed
       // keys, so copying the file to another laptop yields nothing readable.
@@ -121,21 +119,18 @@ async function readSettings() {
       server: "",
       token: "",
       askedToChange: false,
-      runAgents: false,
       keepAwake: false,
     };
   }
 }
 
-// `runAgents` is threaded through every caller rather than defaulted, because
+// `keepAwake` is threaded through every caller rather than defaulted, because
 // the two writes on the startup path would otherwise clear the preference on
-// each launch — the app would forget it had been volunteered as a worker every
-// time it was opened.
+// each launch — the app would forget the choice every time it was opened.
 async function writeSettings(
   server,
   token,
   askedToChange = false,
-  runAgents = false,
   keepAwake = false,
 ) {
   await mkdir(path.dirname(settingsPath()), { recursive: true });
@@ -151,7 +146,6 @@ async function writeSettings(
       server,
       ...(sealed === undefined ? {} : { token: sealed }),
       ...(askedToChange ? { askedToChange: true } : {}),
-      ...(runAgents ? { runAgents: true } : {}),
       ...(keepAwake ? { keepAwake: true } : {}),
     }),
     "utf8",
@@ -231,10 +225,8 @@ function relaunch() {
  * settings file from. Both of these forget exactly enough and start over.
  */
 async function signOutAndRestart() {
-  const { server, runAgents, keepAwake } = await readSettings();
-  // The machine keeps its role. Signing out replaces a credential; it does not
-  // mean this person stopped volunteering their hardware.
-  await writeSettings(server, "", false, runAgents, keepAwake);
+  const { server, keepAwake } = await readSettings();
+  await writeSettings(server, "", false, keepAwake);
   relaunch();
 }
 
@@ -268,10 +260,12 @@ function buildMenu() {
   // one they are in without opening anything.
   const agents = [
     {
-      label: "Run Agents on This Machine",
-      type: "checkbox",
-      checked: workerIsRunning(),
-      click: (item) => void toggleWorker(item.checked),
+      // Shown, not offered. Whether agents run here is not a setting — but
+      // whether they *are* running is a fact somebody needs, because the
+      // reasons it can fail (no CLI signed in on this machine, an expired
+      // credential) are all things only they can fix.
+      label: workerStatus,
+      enabled: false,
     },
     { type: "separator" },
     {
@@ -343,30 +337,28 @@ async function toggleKeepAwake(wanted) {
     saved.server,
     saved.token,
     saved.askedToChange,
-    saved.runAgents,
     awakeForWork,
   );
   setStayAwake(awakeForWork);
   Menu.setApplicationMenu(buildMenu());
 }
 
-async function toggleWorker(wanted) {
-  const saved = await readSettings();
-  await writeSettings(saved.server, saved.token, saved.askedToChange, wanted);
-  if (!wanted) {
-    stopWorker();
-    Menu.setApplicationMenu(buildMenu());
-    return;
-  }
-  if (session === undefined) {
-    return;
-  }
-  await startWorker(here, session, (event) => {
-    if (event.state === "stopped" && event.detail !== "Stopped.") {
-      dialog.showErrorBox("Kumi cannot run agents here", event.detail);
-    }
-    Menu.setApplicationMenu(buildMenu());
-  });
+/**
+ * Keeps the menu's status line honest about what the worker is doing.
+ *
+ * Reported here rather than raised as a dialog, which is the difference
+ * between a fact and an interruption. Starting is now unconditional, so a
+ * machine with no agent CLI signed in would otherwise be told off by a modal
+ * every single launch — for a condition it may well be fine with, on the
+ * laptop it only uses to read threads from.
+ */
+function noteWorkerState(event) {
+  workerStatus =
+    event.state === "running"
+      ? "Running agents on this machine"
+      : event.state === "restarting"
+        ? "Reconnecting…"
+        : `Not running — ${event.detail}`;
   Menu.setApplicationMenu(buildMenu());
 }
 
@@ -440,7 +432,7 @@ async function start() {
       return;
     }
     token = "";
-    await writeSettings(server, token, false, saved.runAgents, saved.keepAwake);
+    await writeSettings(server, token, false, saved.keepAwake);
   }
 
   if (token === "") {
@@ -461,7 +453,7 @@ async function start() {
       app.quit();
       return;
     }
-    await writeSettings(server, token, false, saved.runAgents, saved.keepAwake);
+    await writeSettings(server, token, false, saved.keepAwake);
   }
 
   session = { server, token };
@@ -471,11 +463,9 @@ async function start() {
   // once somebody looks at it.
   awakeForWork = saved.keepAwake === true;
   setStayAwake(awakeForWork);
-  if (saved.runAgents) {
-    void startWorker(here, session, () =>
-      Menu.setApplicationMenu(buildMenu()),
-    );
-  }
+  // Unconditional. The app is the machine that runs the agents; there is no
+  // arrangement in which it has signed in and should be sitting idle.
+  void startWorker(here, session, noteWorkerState);
   await openDashboard();
 }
 
