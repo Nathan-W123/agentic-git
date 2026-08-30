@@ -25,7 +25,7 @@
  * quietly start spending someone's model quota, and the machine is theirs to
  * volunteer. The choice is remembered, so it is asked exactly once.
  */
-import { app, powerSaveBlocker, utilityProcess } from "electron";
+import { app, powerMonitor, powerSaveBlocker, utilityProcess } from "electron";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import os from "node:os";
@@ -51,8 +51,23 @@ const HEALTHY_RUN_MS = 60_000;
 
 let child;
 let stopping = false;
-/** The id of the sleep block held while a task is running, if any. */
+/** The id of the sleep block currently held, if any. */
 let awake;
+/** Whether a task is running right now. */
+let busy = false;
+/**
+ * Whether this machine has been offered as one that stays up for work.
+ *
+ * The honest answer to "run while asleep" on Windows. Microsoft's position is
+ * that "Windows prevents desktop applications from running during any part of
+ * modern standby", and the one approved alternative — a packaged app's
+ * background task — is capped at a few seconds of CPU every fifteen minutes on
+ * AC only, which is sized for redrawing a tile rather than running an agent.
+ * Since the machine cannot work while it sleeps, the only remaining lever is
+ * for it not to sleep, and that is a decision for its owner to make out loud
+ * rather than one to take on their behalf.
+ */
+let stayAwake = false;
 let failures = 0;
 let restartTimer;
 
@@ -261,14 +276,17 @@ export async function startWorker(here, session, onEvent) {
   // knows where that window starts and ends, so it says so.
   child.on("message", (message) => {
     if (message?.type === "busy") {
-      holdAwake();
+      busy = true;
+      reconsiderAwake();
     } else if (message?.type === "idle") {
-      releaseAwake();
+      busy = false;
+      reconsiderAwake();
     }
   });
 
   child.once("exit", (code) => {
-    releaseAwake();
+    busy = false;
+    reconsiderAwake();
     const ranForMs = Date.now() - startedAt;
     child = undefined;
     if (stopping) {
@@ -292,6 +310,29 @@ export async function startWorker(here, session, onEvent) {
  * SIGTERM by handing its lease back, so the task it was holding is picked up
  * again straight away instead of waiting out a five-minute expiry.
  */
+/**
+ * Holds the machine open while there is a reason to, and lets it go otherwise.
+ *
+ * Battery always wins. A laptop on its own power should sleep when it is idle
+ * no matter what has been asked for, both because the worker declines to claim
+ * on battery anyway and because silently flattening someone's battery is not a
+ * trade this is entitled to make for them.
+ */
+function reconsiderAwake() {
+  const onBattery = powerMonitor.isOnBatteryPower?.() === true;
+  if (!onBattery && (busy || stayAwake)) {
+    holdAwake();
+  } else {
+    releaseAwake();
+  }
+}
+
+/** Offers this machine as one that stays up for work, or stops offering. */
+export function setStayAwake(enabled) {
+  stayAwake = enabled === true;
+  reconsiderAwake();
+}
+
 function holdAwake() {
   if (awake !== undefined) {
     return;
@@ -315,6 +356,8 @@ function releaseAwake() {
 
 export function stopWorker() {
   stopping = true;
+  busy = false;
+  stayAwake = false;
   releaseAwake();
   if (restartTimer !== undefined) {
     clearTimeout(restartTimer);
@@ -325,6 +368,11 @@ export function stopWorker() {
     child = undefined;
   }
 }
+
+// Unplugging must take the block away, and plugging in must be able to bring
+// it back without waiting for the next task.
+powerMonitor.on?.("on-battery", () => reconsiderAwake());
+powerMonitor.on?.("on-ac", () => reconsiderAwake());
 
 export function workerIsRunning() {
   return child !== undefined;
