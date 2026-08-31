@@ -14,6 +14,7 @@ import type {
   ResourceLease,
   TaskDefinition,
 } from "@coord/shared-types";
+import { MAX_COMMAND_OUTPUT_CHARS } from "@coord/shared-types";
 
 import { InMemoryCoordinationStore } from "./memory-store.js";
 import { PostgresCoordinationStore } from "./postgres-store.js";
@@ -617,6 +618,77 @@ for (const backend of backends) {
         detail?.integrations.at(-1)?.cleanupWarnings,
         ["workspace cleanup failed"],
       );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a command's stored output is bounded, tail first`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      // What a real test runner does to a row: the control plane is handed
+      // this by a remote worker, so nothing here decides how much it is.
+      const noisy = `${"start-of-output ".repeat(2_000)}FAILED: the bit that matters`;
+      await store.saveIntegration(runId, {
+        ...INTEGRATION,
+        validation: [
+          {
+            command: { label: "tests", executable: "npm", args: ["test"] },
+            exitCode: 1,
+            stdout: noisy,
+            stderr: noisy,
+            startedAt: "2024-01-01T00:00:00.000Z",
+            durationMs: 12,
+          },
+        ],
+      });
+      const stored = (await store.getRun(runId))?.integrations.at(-1)
+        ?.validation[0];
+      assert.ok(stored !== undefined);
+      assert.ok(
+        stored.stdout.length < noisy.length,
+        "an unbounded row is the whole cost being fixed",
+      );
+      assert.ok(stored.stdout.length <= MAX_COMMAND_OUTPUT_CHARS + 200);
+      // The end, not the beginning. The one reader of this text quotes the
+      // last three hundred characters, because that is where a failing
+      // command says why — keeping the head would preserve the size limit and
+      // discard the only part anybody reads.
+      assert.match(stored.stdout, /FAILED: the bit that matters$/u);
+      assert.match(stored.stderr, /FAILED: the bit that matters$/u);
+      assert.match(stored.stdout, /earlier characters dropped/u);
+      // Untouched facts: every consumer of validation reads these two.
+      assert.equal(stored.exitCode, 1);
+      assert.equal(stored.command.label, "tests");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: output that already fits is stored verbatim`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      await store.saveIntegration(runId, {
+        ...INTEGRATION,
+        validation: [
+          {
+            command: { label: "lint", executable: "npm", args: ["run", "lint"] },
+            exitCode: 0,
+            stdout: "all good\n",
+            stderr: "",
+            startedAt: "2024-01-01T00:00:00.000Z",
+            durationMs: 3,
+          },
+        ],
+      });
+      const stored = (await store.getRun(runId))?.integrations.at(-1)
+        ?.validation[0];
+      assert.equal(stored?.stdout, "all good\n");
+      assert.equal(stored?.stderr, "");
     } finally {
       await store.close();
       await cleanup();

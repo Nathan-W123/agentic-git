@@ -1704,6 +1704,37 @@ const THREAD_RECONCILE_INTERVAL_MS = 60_000;
 const BILLING_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 
 /**
+ * How long the live audit log keeps an event before it is compacted away.
+ *
+ * The log is the one table that grows with every task forever: measured, a
+ * task writes about twenty-one events, so a deployment doing ten thousand
+ * tasks a day writes six million rows a month and has never deleted one. The
+ * machinery to bound it — archive, checkpoint, prune — has existed since the
+ * log did and had no caller outside a command an operator had to remember to
+ * run.
+ *
+ * Thirty days because that is this deployment's stated retention, and because
+ * the checkpoint survives the prune: what is lost is the ability to re-derive
+ * a segment's contents, never the attestation that it was there.
+ */
+const AUDIT_RETENTION_DAYS = 30;
+const AUDIT_RETENTION_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+
+/**
+ * The configured retention window, or the default when nothing sensible is
+ * set. Zero is honoured — it means keep everything — but a negative or
+ * unreadable value is not a request for anything, so it falls back rather
+ * than being treated as "off". Getting that backwards would silently disable
+ * the sweep on a typo, which is exactly the failure this exists to end.
+ */
+function auditRetentionDays(configured: string | undefined): number {
+  const parsed = Number.parseInt(configured ?? "", 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : AUDIT_RETENTION_DAYS;
+}
+
+/**
  * Whether a terminal event is itself the thing the reader asked for.
  *
  * The no-thread ending exists for work whose whole story is "started, done":
@@ -4222,6 +4253,17 @@ export interface ApiGatewayOptions {
    */
   billingReconcileIntervalMs?: number;
   /**
+   * How long the live audit log keeps an event, in days. Zero keeps
+   * everything, which is what a deployment under a legal hold wants. Defaults
+   * to `COORD_AUDIT_RETENTION_DAYS`, and failing that to thirty.
+   */
+  auditRetentionDays?: number;
+  /**
+   * How often the retention sweep runs. A test about the sweep cannot wait
+   * out six hours, for the same reason the billing one is settable.
+   */
+  auditRetentionSweepIntervalMs?: number;
+  /**
    * How long a held `/plan` waits for somebody to start it before it lapses.
    * Defaults to `COORD_PLAN_HOLD_TTL_MINUTES`, and failing that to
    * {@link PLAN_HOLD_TTL_MS}.
@@ -4944,6 +4986,8 @@ export class ApiGateway {
   private threadReconcileTimer: NodeJS.Timeout | undefined;
 
   private billingReconcileTimer: NodeJS.Timeout | undefined;
+
+  private auditRetentionTimer: NodeJS.Timeout | undefined;
   /**
    * The coordinator's temporary conflict lines currently standing in a room,
    * by message id.
@@ -5279,6 +5323,7 @@ export class ApiGateway {
     this.startAuditorWatch();
     this.startThreadReconcile();
     this.startBillingReconcile();
+    this.startAuditRetention();
   }
 
   /**
@@ -5308,6 +5353,81 @@ export class ApiGateway {
       void this.lapseStalePlanHolds().catch(() => undefined);
     }, this.options.threadReconcileIntervalMs ?? THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
+  }
+
+  /**
+   * Compacts the audit log so it stops being the one table that only grows.
+   *
+   * Every other cost in this system went flat when execution moved to the
+   * machines that do the work. This one did not: the log is written here
+   * whatever runs where, about twenty-one rows and up to a hundred and sixty
+   * kilobytes a task, and nothing has ever removed one. At ten thousand tasks
+   * a day that is tens of gigabytes a month, forever, on a deployment whose
+   * agents cost it nothing.
+   *
+   * Two steps, in the order the store demands. `archiveAuditEvents` moves the
+   * old segment out of the live log and writes a checkpoint over it, refusing
+   * outright if the chain does not verify — a checkpoint over a broken segment
+   * would launder the break into an attestation. `pruneArchivedAuditEvents`
+   * then drops the moved rows. The checkpoint stays either way, so the chain
+   * still verifies end to end; what a prune costs is the ability to read back
+   * what a sealed segment said.
+   *
+   * Six-hourly and unref'd, like the billing sweep it sits beside: this is
+   * housekeeping, not a deadline, and it must never be the reason a process
+   * refuses to exit. It is deliberately not hung off a request the way the
+   * in-memory prunes are — those touch a map, this takes the deployment-wide
+   * write lock, and making somebody's message the thing that pays for it is
+   * how a sweep becomes a latency incident.
+   */
+  private startAuditRetention(): void {
+    if (this.auditRetentionTimer !== undefined) {
+      return;
+    }
+    const days =
+      this.options.auditRetentionDays ??
+      auditRetentionDays(process.env["COORD_AUDIT_RETENTION_DAYS"]);
+    // Zero is off, and off is a real answer: a deployment under a legal hold
+    // wants every event kept, and would rather pay for the disk.
+    if (days <= 0) {
+      return;
+    }
+    void this.sweepAuditRetention(days).catch(() => undefined);
+    this.auditRetentionTimer = setInterval(() => {
+      void this.sweepAuditRetention(days).catch(() => undefined);
+    }, this.options.auditRetentionSweepIntervalMs ?? AUDIT_RETENTION_SWEEP_INTERVAL_MS);
+    this.auditRetentionTimer.unref?.();
+  }
+
+  private async sweepAuditRetention(days: number): Promise<void> {
+    const before = new Date(Date.now() - days * 24 * 60 * 60 * 1_000)
+      .toISOString();
+    // Failure here is loud in the log and fatal to nothing. A sweep that
+    // cannot run leaves the log exactly as it was — larger than it needs to
+    // be, and completely correct — so there is nothing to roll back and no
+    // reason to take a request path down with it.
+    const archived = await this.options.store
+      .archiveAuditEvents({ before })
+      .catch((error: unknown) => {
+        process.stderr.write(
+          `[audit] archiving events before ${before} failed: ` +
+            `${describeError(error)}\n`,
+        );
+        return undefined;
+      });
+    if (archived === undefined) {
+      return;
+    }
+    // Only ever through the checkpoint just written. Pruning further would
+    // reach rows whose segment has not been sealed, which the store's own
+    // guard refuses anyway — this is the same rule, said before it is hit.
+    await this.options.store
+      .pruneArchivedAuditEvents(archived.checkpoint.throughSequence)
+      .catch((error: unknown) => {
+        process.stderr.write(
+          `[audit] pruning archived events failed: ${describeError(error)}\n`,
+        );
+      });
   }
 
   /**
@@ -5455,6 +5575,10 @@ export class ApiGateway {
     if (this.billingReconcileTimer !== undefined) {
       clearInterval(this.billingReconcileTimer);
       this.billingReconcileTimer = undefined;
+    }
+    if (this.auditRetentionTimer !== undefined) {
+      clearInterval(this.auditRetentionTimer);
+      this.auditRetentionTimer = undefined;
     }
     if (this.threadReconcileTimer !== undefined) {
       clearInterval(this.threadReconcileTimer);
@@ -14035,6 +14159,36 @@ export class ApiGateway {
    * exactly like a task in progress, and the only symptom is that it never
    * finishes.
    */
+  /**
+   * Whether this agent's owner has a vendor credential of their own stored
+   * here, as opposed to nothing — in which case a completion runs on the
+   * deployment's own ambient login and the operator is the one billed.
+   *
+   * `listConnectionsFor` enumerates the credential store, so a provider
+   * present in its answer is a provider that account holds a secret for. The
+   * durable agent record is deliberately not consulted: an agent exists
+   * without a credential, which is the entire point of it, and the question
+   * here is only ever "whose account would this spend".
+   *
+   * False when the deployment cannot answer at all. A deployment with no
+   * provider chat has no per-user credentials to find, and guessing true
+   * would reopen exactly the hole this closes.
+   */
+  private async ownerHasOwnCredential(
+    candidate: ChannelMentionCandidate,
+  ): Promise<boolean> {
+    const chatOperations = this.options.operations.chatProviders;
+    if (chatOperations?.connectionsFor === undefined) {
+      return false;
+    }
+    const connections = await chatOperations
+      .connectionsFor([candidate.userId])
+      .catch(() => ({}) as Record<string, ReadonlyArray<{ provider: string }>>);
+    return (connections[candidate.userId] ?? []).some(
+      (connection) => connection.provider === candidate.provider,
+    );
+  }
+
   private async ownerHasLiveWorker(
     projectId: string,
     ownerId: string,
@@ -16534,6 +16688,42 @@ export class ApiGateway {
           : { answerTo: referencedMessageId }),
       });
       this.notifyWorkers(projectId);
+      return undefined;
+    }
+    // Nothing here answers on the house account.
+    //
+    // Falling through to `askAgent` with no credential of the owner's does
+    // exactly that: `withCompletionEnv` runs the vendor CLI with no credential
+    // environment, which lands on the container's own ambient login. The
+    // operator pays — for a full agent run with a repository checkout, posted
+    // under the agent's own name, indistinguishable in the channel from the
+    // same agent answering on its owner's machine. Invisible by construction,
+    // which is what makes it worth refusing rather than metering.
+    //
+    // It was a rare case while a vendor sign-in was the price of having an
+    // agent, because then every agent had a credential. It became the common
+    // one when that stopped being true: "no credential" is now the ordinary
+    // state of a perfectly healthy agent that runs locally. A deployment that
+    // has declared it will not spend agents on its own behalf cannot also be
+    // the thing that pays for this.
+    //
+    // Said rather than dropped. The person asked a question and is owed an
+    // answer about why there isn't one — and this is the rare failure whose
+    // remedy is entirely in the reader's hands.
+    if (localAgentsOnly() && !(await this.ownerHasOwnCredential(candidate))) {
+      await this.appendChannelEntry({
+        projectId,
+        repositoryId,
+        kind: "agent",
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content:
+          `I answer on ${candidate.userName}'s machine, and it is not ` +
+          "listening right now. Start the Kumi app there and ask me again — " +
+          "or, to have me answer here when the machine is away, " +
+          `${candidate.userName} can link a ${candidate.vendor} account from ` +
+          "Settings → Agents.",
+        ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
+      });
       return undefined;
     }
     const answer = await this.askAgent(

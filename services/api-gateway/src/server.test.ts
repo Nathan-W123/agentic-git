@@ -410,6 +410,10 @@ async function startRuntime(
     threadReconcileIntervalMs?: number;
     /** How long a held `/plan` waits before it lapses. */
     planHoldTtlMs?: number;
+    /** How long the audit log keeps an event. Zero keeps everything. */
+    auditRetentionDays?: number;
+    /** How often the retention sweep runs, so a test need not wait hours. */
+    auditRetentionSweepIntervalMs?: number;
     codexUsageReader?: CodexUsageReader;
     /**
      * Stands in for Stripe, so a test can watch what the seat count does to
@@ -1114,6 +1118,15 @@ async function startRuntime(
     ...(options.threadReconcileIntervalMs === undefined
       ? {}
       : { threadReconcileIntervalMs: options.threadReconcileIntervalMs }),
+    ...(options.auditRetentionDays === undefined
+      ? {}
+      : { auditRetentionDays: options.auditRetentionDays }),
+    ...(options.auditRetentionSweepIntervalMs === undefined
+      ? {}
+      : {
+          auditRetentionSweepIntervalMs:
+            options.auditRetentionSweepIntervalMs,
+        }),
     ...(options.planHoldTtlMs === undefined
       ? {}
       : { planHoldTtlMs: options.planHoldTtlMs }),
@@ -20000,6 +20013,153 @@ test("a stored credential alone makes an agent exist", async (t) => {
     .providers as Array<{ id: string; exists: boolean }>;
   assert.equal(listed.find((entry) => entry.id === "anthropic")?.exists, true);
   assert.equal(listed.find((entry) => entry.id === "openai")?.exists, false);
+});
+
+/**
+ * The audit log is the one table that only grew.
+ *
+ * Every other cost went flat when execution moved to the machines that do the
+ * work; this one is written here whatever runs where — measured, about
+ * twenty-one rows a task — and nothing had ever removed one. The archive,
+ * checkpoint and prune machinery existed from the start and had no caller
+ * outside a command an operator had to remember.
+ */
+test("the audit log is compacted on a retention window", async (t) => {
+  const runtime = await startRuntime(t, {
+    // Everything already written is older than "zero days ago", so the first
+    // sweep has something to find without the test faking a clock.
+    auditRetentionDays: 0.000_001,
+    auditRetentionSweepIntervalMs: 50,
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "compacted");
+
+  const before = (await runtime.store.listAuditEvents()).length;
+  assert.ok(before > 0, "bootstrapping writes events worth compacting");
+
+  await waitFor(
+    async () => (await runtime.store.listAuditCheckpoints()).length > 0,
+    "the retention sweep never archived anything",
+  );
+  // Archived and then dropped: the rows are gone from the live log, and gone
+  // from the archive too, which is what actually reclaims the space.
+  await waitFor(
+    async () => (await runtime.store.listArchivedAuditEvents()).length === 0,
+    "archived events were never pruned, so nothing was reclaimed",
+  );
+  assert.ok(
+    (await runtime.store.listAuditEvents()).length < before,
+    "the live log must actually shrink",
+  );
+  // The attestation survives the contents. That is the whole bargain.
+  const checkpoints = await runtime.store.listAuditCheckpoints();
+  assert.ok(
+    (checkpoints[0]?.throughSequence ?? 0) >= 1,
+    JSON.stringify(checkpoints),
+  );
+});
+
+/**
+ * Zero is a real answer, not a missing one. A deployment under a legal hold
+ * keeps every event and pays for the disk.
+ */
+test("a retention of zero keeps everything", async (t) => {
+  const runtime = await startRuntime(t, {
+    auditRetentionDays: 0,
+    auditRetentionSweepIntervalMs: 50,
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const before = (await runtime.store.listAuditEvents()).length;
+  assert.ok(before > 0);
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal((await runtime.store.listAuditCheckpoints()).length, 0);
+  assert.ok((await runtime.store.listAuditEvents()).length >= before);
+});
+
+/**
+ * The deployment does not answer on its own account.
+ *
+ * A question whose agent has no live machine used to be answered here, and
+ * with no credential of the owner's the vendor CLI ran on the container's
+ * ambient login — the operator's account, for a full agent run, posted under
+ * the agent's own name and indistinguishable from the real thing. Rare while a
+ * vendor sign-in was the price of an agent; the default once it was not.
+ */
+test("with local agents only, a question is refused rather than billed here", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "no-house-account");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // An agent with a name and no credential — the ordinary local agent — and
+  // no worker anywhere, so nothing of its owner's can answer.
+  await owner.request("/api/v1/chat/providers/anthropic/agent", {
+    method: "POST",
+    body: {},
+  });
+  await owner.request(`${base}/agents/anthropic/membership`, { method: "POST" });
+  const roster = (await owner.request(`${base}/agents`)).data.agents as Array<{
+    provider: string;
+    name: string;
+  }>;
+  const mention = roster.find((agent) => agent.provider === "anthropic")?.name;
+  assert.ok(mention !== undefined, JSON.stringify(roster));
+
+  const before = runtime.chatPrompts.length;
+  const asked = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@${mention} what does the coordinator do?` },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+
+  // The load-bearing assertion: no model was run here at all.
+  assert.equal(
+    runtime.chatPrompts.length,
+    before,
+    "answering with no credential of the owner's spends the deployment's own",
+  );
+
+  // And the person who asked is told why, with the two things that fix it.
+  const messages = (await owner.request(`${base}/messages`)).data
+    .messages as Array<{ kind: string; content: string }>;
+  const reply = messages.filter((message) => message.kind === "agent").at(-1);
+  assert.ok(reply !== undefined, JSON.stringify(messages));
+  assert.match(String(reply.content), /machine/u);
+  assert.match(String(reply.content), /Settings → Agents/u);
+});
+
+/**
+ * The other side of the same gate: an owner who *has* linked an account is
+ * spending their own, so answering here is exactly what they asked for.
+ */
+test("with local agents only, a linked account is still answered here", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "linked-account");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(account.user.id, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await owner.request(`${base}/agents/anthropic/membership`, { method: "POST" });
+
+  const before = runtime.chatPrompts.length;
+  const asked = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Athena what does the coordinator do?" },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+  assert.equal(
+    runtime.chatPrompts.length > before,
+    true,
+    "a credential of one's own is the thing that makes answering here fine",
+  );
 });
 
 /**

@@ -861,6 +861,93 @@ export interface CommandResult {
   durationMs: number;
 }
 
+/**
+ * The most of one command's output worth keeping on the record.
+ *
+ * A validation result stores the whole of what a command printed, and a test
+ * suite prints a great deal: measured, the integration row is one of the two
+ * things that make a task cost up to a hundred and sixty kilobytes of stored
+ * JSON. Nothing reads it. Every consumer of `validation` takes
+ * `command.label` and `exitCode` — the handoff, the overlay, the rollback,
+ * the worker's own audit line — and the single reader of the text takes
+ * `stderr.trim().slice(-300)` to quote why something failed.
+ *
+ * So this is thirteen times what anything actually reads, which leaves a tail
+ * a person can page through while bounding a row that was previously bounded
+ * only by how noisy somebody's test runner is.
+ */
+export const MAX_COMMAND_OUTPUT_CHARS = 4_000;
+
+/**
+ * Keeps the END of a command's output rather than the start.
+ *
+ * Deliberate and load-bearing: the one reader of this text quotes the last
+ * three hundred characters, because that is where a failing command says what
+ * went wrong. A cap that kept the head would preserve the size limit and
+ * throw away the only part anybody looks at — the build banner survives and
+ * the stack trace does not.
+ */
+export function boundCommandOutput(
+  text: string,
+  max = MAX_COMMAND_OUTPUT_CHARS,
+): string {
+  return text.length <= max
+    ? text
+    : `[…${text.length - max} earlier characters dropped]\n${text.slice(-max)}`;
+}
+
+/** One command's result with its output bounded — see {@link boundCommandOutput}. */
+export function boundValidation(
+  validation: readonly CommandResult[],
+): CommandResult[] {
+  return validation.map((entry) => ({
+    ...entry,
+    stdout: boundCommandOutput(entry.stdout),
+    stderr: boundCommandOutput(entry.stderr),
+  }));
+}
+
+/**
+ * What an `ownership_granted` audit event should carry instead of every lease.
+ *
+ * The full `ResourceLease[]` was measured as the single largest thing a task
+ * writes — it scales with how many symbols plan enrichment pulled out of the
+ * declared files, not with the size of the change, so an eight-file plan
+ * writes hundreds of entries for a change that touched eight files.
+ *
+ * Nothing reads it. The grants that are actually read back live in three
+ * durable places written in the same moment: the `resource_leases` rows, the
+ * plan JSON on `work_leases` (which is what a later admission reseeds
+ * ownership from), and the decision JSON on the task. The audit copy is the
+ * fourth, and the only one no code path consults.
+ *
+ * So it keeps what a person reading the log needs — how many, over what, and
+ * the files themselves — and drops the per-symbol tail that made it large.
+ * Files, because a file lease is the one kind anything downstream reads; the
+ * symbol leases enrichment adds are all `observe`, which by construction can
+ * neither block nor be blocked.
+ */
+export function summariseGrants(leases: readonly ResourceLease[]): {
+  count: number;
+  files: string[];
+  symbols: number;
+} {
+  const files = [
+    ...new Set(
+      leases
+        .filter((lease) => lease.resourceType === "file")
+        .map((lease) => lease.resourceId),
+    ),
+  ];
+  return {
+    count: leases.length,
+    // Bounded in its own right: a plan may touch more files than anybody will
+    // read in a log line, and this must not become the new unbounded field.
+    files: files.slice(0, 50),
+    symbols: leases.filter((lease) => lease.resourceType !== "file").length,
+  };
+}
+
 export interface TestResult {
   name: string;
   status: "passed" | "failed" | "skipped";

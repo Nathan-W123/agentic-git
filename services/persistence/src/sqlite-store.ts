@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  boundValidation,
   createId,
   CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
@@ -3037,6 +3038,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
     runId: string,
     result: IntegrationResult,
   ): Promise<void> {
+    // Bounded on the way in, not on the way out. The control plane is handed
+    // this by a remote worker, so the size of a row here is decided by how
+    // noisy somebody else's test runner is — and nothing reads the text
+    // anyway. See `boundValidation`.
+    const validation = boundValidation(result.validation);
     this.db
       .prepare(
         `INSERT INTO integrations
@@ -3060,7 +3066,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         result.canonicalVersion.branch,
         result.canonicalVersion.createdAt,
         result.candidateRevision ?? null,
-        JSON.stringify(result.validation),
+        JSON.stringify(validation),
         JSON.stringify(result.cleanupWarnings ?? []),
         result.explanation,
         new Date().toISOString(),
