@@ -971,7 +971,29 @@ async function serve(
   const resuming = new Set<string>();
   const resumeQueuedWork = async (): Promise<void> => {
     const sweptAt = new Date().toISOString();
-    await store.expireWorkLeases(sweptAt);
+    // The expired leases are read back, not discarded. Expiry settles the row
+    // and writes nothing, so a run whose worker died — a slept laptop, a
+    // closed app, a dropped network — was requeued in silence while its
+    // thread went on saying it was being worked on. Only leases this call
+    // actually settled come back, so the room is told once however many
+    // sweeps and opportunistic expiries race for the same row.
+    const expired = await store.expireWorkLeases(sweptAt);
+    for (const lease of expired) {
+      await store
+        .appendAudit(undefined, {
+          type: "lease_expired",
+          taskId: lease.taskId,
+          data: {
+            projectId: lease.projectId,
+            repositoryId: lease.repositoryId,
+            workerId: lease.workerId,
+            leaseId: lease.id,
+          },
+        })
+        // Recovery is the job here. A run that could not be narrated is still
+        // a run that has to be put back, so this never stops the sweep.
+        .catch(() => undefined);
+    }
     // Approvals go stale the same way leases do, and for the same reason:
     // nothing but the waiter was ever watching the deadline.
     //
