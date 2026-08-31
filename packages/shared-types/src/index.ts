@@ -2825,7 +2825,7 @@ export function rankTouchedFiles(
 }
 
 /**
- * Whether this deployment refuses to execute agents itself.
+ * Whether this deployment refuses to execute agents on its own behalf.
  *
  * The control plane can run an agent in process, and on a hosted deployment
  * that is the expensive half of the bill: an agent holds its memory for as
@@ -2833,12 +2833,21 @@ export function rankTouchedFiles(
  * whoever's machine the work is for, and a desktop worker puts them there —
  * but only if the control plane stops taking the work first.
  *
- * It lives here, in the one package both executors already depend on, because
- * there are two of them and a flag that guards one is not a fence. The queue
- * is refused in `leaseQueuedWork`; provider turns are refused in the
- * gateway's `performChat`. A second copy of this predicate in either place
- * would drift, and the shape of that drift is a deployment that believes it
- * has stopped executing and has not.
+ * It lives here, in the one package every executor already depends on,
+ * because there is more than one of them and a flag that guards a single
+ * executor is not a fence. Two things consult it:
+ *
+ *  - the queue, in `leaseQueuedWork`, so a task waits for its owner's machine
+ *    rather than running here; and
+ *  - the gateway's turns that nobody asked for — the opening intent line on
+ *    every dispatch, the classifier on every unaddressed message, the auditor
+ *    on every canonical promotion.
+ *
+ * Deliberately *not* the turns somebody is waiting on. A question asked in a
+ * channel is still answered here, because answering happens on the control
+ * plane and the worker protocol has no verb for it: refusing would not move
+ * that work to a desktop, it would delete it. That is a gap to close by
+ * teaching the worker to answer, not by turning answering off.
  *
  * Off by default, so a self-hosted deployment and the local `coord` CLI are
  * unchanged: a single-machine install where the control plane *is* the
@@ -2852,13 +2861,3 @@ export function rankTouchedFiles(
 export function localAgentsOnly(): boolean {
   return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
 }
-
-/**
- * What a provider turn reports when the deployment will not run it.
- *
- * A sentinel rather than prose, because the string is matched on to render
- * something a reader can act on. Anything the model or a vendor could also
- * emit would eventually collide; this cannot be produced by a failure.
- */
-export const LOCAL_AGENTS_ONLY_REFUSAL =
-  "coord:local-agents-only";

@@ -5988,22 +5988,7 @@ test("a question about repository files is answered in the channel, not turned i
   assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
 });
 
-/**
- * The second executor, refused.
- *
- * `COORD_LOCAL_AGENTS_ONLY` was written for the queue and checked in exactly
- * one place, `leaseQueuedWork`. That left the gateway's own provider turns
- * running: a deployment that set the variable stopped draining the queue and
- * went on spending an agent on every mention, every thread reply, every
- * opening line and every audit — on the mentioned agent's owner's credential,
- * in the control plane's own memory. It looked like the flag did nothing,
- * which is the worst way for a cost control to fail.
- *
- * Asserted on the provider never being reached rather than on the reply text
- * alone. A refusal that still made the call would read identically in the
- * channel and cost exactly as much as no refusal at all.
- */
-test("with local agents only, a channel question is refused rather than answered here", async (t) => {
+function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {
   const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
   process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
   t.after(() => {
@@ -6013,19 +5998,31 @@ test("with local agents only, a channel question is refused rather than answered
       process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
     }
   });
+}
+
+/**
+ * The half of the flag that must keep working.
+ *
+ * Refusing questions was tried and reverted, and this test is why it should
+ * stay reverted. Answering happens on the control plane and the worker
+ * protocol has no verb for it — `register`, `leases`, and the lease's own
+ * sub-routes, and nothing else — so refusing a question does not move it to
+ * a desktop, it deletes the feature. The flag exists to relocate spend, not
+ * to remove the product.
+ */
+test("with local agents only, a channel question is still answered", async (t) => {
+  withLocalAgentsOnly(t);
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "local-agents-only");
+  const repositoryId = await invitableRepository(owner, "local-only-question");
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
-  // Set so that reaching the provider would be visible in the channel rather
-  // than merely in a counter.
   runtime.chatAnswer.text =
-    "This deployment must never produce this.\nANSWER_TASK: NONE";
+    "The API gateway handles channel questions.\nANSWER_TASK: NONE";
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -6035,34 +6032,60 @@ test("with local agents only, a channel question is refused rather than answered
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
-  // The assertion the flag exists for: nothing was spent.
-  assert.deepEqual(
-    runtime.chatPrompts,
-    [],
-    "a refused deployment must not reach the provider at all",
-  );
-  // And it did not quietly become a task instead, which would move the spend
-  // rather than stop it.
-  assert.equal(
-    runtime.submittedTasks.length,
-    0,
-    JSON.stringify(runtime.submittedTasks),
-  );
-
   const after = await owner.request(`${base}/messages`);
   const agentMessages = (after.data.messages as any[]).filter(
     (message) => message.kind === "agent",
   );
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
-  // Said in the agent's own voice, and never the raw sentinel.
-  assert.match(
-    String(agentMessages[0]?.content),
-    /only runs agents on their owner's own machine/u,
+  assert.equal(
+    agentMessages[0]?.content,
+    "The API gateway handles channel questions.",
   );
-  assert.doesNotMatch(String(agentMessages[0]?.content), /coord:local-agents-only/u);
+});
+
+/**
+ * What the room is told when nothing is going to pick the work up.
+ *
+ * "I've taken this task and I'm working on it" is a sentence in the present
+ * tense, and on a deployment that executes nothing itself it is false
+ * whenever the owner's machine is not listening. The task is still filed and
+ * a worker arriving later still runs it — nothing is lost — but a task
+ * waiting on somebody who is asleep looked exactly like a task in progress,
+ * and the only symptom was that it never finished.
+ */
+test("with local agents only and no machine listening, the room is told the truth", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-only-waiting");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Work, not a question, so it takes the queue path and is acknowledged.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the login bug" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Filed either way: the queue is the durable thing, and a worker that
+  // registers in ten minutes still picks this up.
+  assert.equal(runtime.submittedTasks.length, 1);
+
+  const after = await owner.request(`${base}/messages`);
+  const [acknowledgement] = agentSpeech(after.data.messages);
+  assert.match(
+    String(acknowledgement?.content),
+    /nothing is running it yet/u,
+    JSON.stringify(after.data.messages),
+  );
   assert.doesNotMatch(
-    String(agentMessages[0]?.content),
-    /This deployment must never produce this/u,
+    String(acknowledgement?.content),
+    /I'm working on it/u,
   );
 });
 
