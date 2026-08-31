@@ -73,6 +73,7 @@ import {
   DO_NOT_CODE_DIRECTIVE,
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
+  localAgentsOnly,
   projectBudgets,
   readsAsReportRequest,
   requestFromObjective,
@@ -1179,6 +1180,15 @@ const AUDITOR_EVENT_BATCH = 25;
  * nothing downstream is blocked on it.
  */
 const AUDIT_TIMEOUT_MS = 180_000;
+/**
+ * How stale a worker's last heartbeat may be and still count as listening.
+ *
+ * Three intervals of the worker's own 60s heartbeat, matching the reservation
+ * window the control plane's drain uses to decide whose work to stand back
+ * from. Two machines disagreeing about whether the same worker is alive is
+ * how a task ends up reserved for nobody.
+ */
+const WORKER_LIVE_MS = 3 * 60 * 1000;
 
 /**
  * Far shorter than an audit's, because somebody is watching a button.
@@ -13627,6 +13637,38 @@ export class ApiGateway {
    * Callers must have authorized `organizationId` first — this method filters,
    * it does not decide who may ask.
    */
+  /**
+   * Whether this owner has a machine currently listening for their work.
+   *
+   * Asked only to decide what to say. A task is filed either way — the queue
+   * is the durable thing and a worker that arrives ten minutes late still
+   * picks it up — but "I've taken this task and I'm working on it" is a
+   * sentence about the present tense, and on a deployment that executes
+   * nothing itself it is false whenever nobody is home. Being wrong in that
+   * direction is expensive: a task waiting for a machine that is asleep looks
+   * exactly like a task in progress, and the only symptom is that it never
+   * finishes.
+   */
+  private async ownerHasLiveWorker(
+    projectId: string,
+    ownerId: string,
+  ): Promise<boolean> {
+    const project = await this.options.store
+      .getProject(projectId)
+      .catch(() => undefined);
+    const workers = await this.options.store
+      .listWorkers(
+        project?.organizationId === undefined
+          ? undefined
+          : { organizationId: project.organizationId },
+      )
+      .catch((): [] => []);
+    const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
+    return workers.some(
+      (worker) => worker.userId === ownerId && worker.lastSeenAt > cutoff,
+    );
+  }
+
   private async organizationFleet(organizationId: string): Promise<{
     workers: WorkerRecord[];
     active: WorkLease[];
@@ -15397,13 +15439,22 @@ export class ApiGateway {
       // and composing it must not sit in front of the work itself. It remains
       // an ordinary agent reply (rather than folded progress) because it is
       // addressed to the person who assigned the task.
+      // Only asked on a deployment that executes nothing itself, because
+      // only there can the answer be no. Everywhere else the control plane
+      // takes the task the moment it lands and the present tense is true.
+      const waitingForAMachine =
+        localAgentsOnly() &&
+        !(await this.ownerHasLiveWorker(projectId, candidate.userId));
       const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
         messageId: threadRootId,
         authorId: `${candidate.userId}:${candidate.provider}`,
-        content:
-          input.planOnly === true
+        content: waitingForAMachine
+          ? "I've filed this, but nothing is running it yet — my agents run " +
+            "on my own machine and it isn't online. I'll start as soon as " +
+            "it is."
+          : input.planOnly === true
             ? "I've taken this task and I'm working on the plan."
             : task.afterTaskId === undefined
               ? "I've taken this task and I'm working on it."
@@ -15774,6 +15825,15 @@ export class ApiGateway {
      */
     context?: string,
   ): Promise<string[]> {
+    // Nobody is waiting on this line. It is courtesy in front of work that is
+    // already running, so a deployment that has decided not to spend agents
+    // on its own behalf spends none here: the thread simply opens with the
+    // acknowledgement instead. Refused rather than made cheaper, because the
+    // cheap version of a courtesy is still a paid call on somebody's account
+    // for every single dispatch.
+    if (localAgentsOnly()) {
+      return [];
+    }
     const answer = await this.askAgent(
       candidate,
       "You have just been asked to do the following in a software project.\n" +
@@ -18366,6 +18426,13 @@ export class ApiGateway {
     fromRevision: string;
     toRevision: string;
   }): Promise<void> {
+    // Fires on every canonical promotion, which is to say on every merge this
+    // project makes, and nobody asked for it. Refused before the diff is even
+    // read: a deployment that will not spend agents on its own initiative
+    // should not spend the repository work either.
+    if (localAgentsOnly()) {
+      return;
+    }
     const { projectId, repositoryId, auditor } = input;
     const diff = await this.options.operations.canonicalDiff?.({
       projectId,
@@ -21227,6 +21294,16 @@ export class ApiGateway {
     context?: string;
     referencedMessageId?: string;
   }): Promise<void> {
+    // The most expensive habit this server has: a provider turn for every
+    // message in a channel that has an agent in it, whether or not anybody
+    // addressed one. Gated here rather than inside the verdict so a refusal
+    // costs no loop at all — the understudy would only be asked to refuse a
+    // second time. Nothing is lost that a person cannot recover by
+    // @mentioning somebody, which is the same fallback an unreachable CLI
+    // already has.
+    if (localAgentsOnly()) {
+      return;
+    }
     const { projectId, repositoryId, content, senderId, context } = input;
     // The agent that would take it reads the message, on the cheap model —
     // see CEREMONIAL_MODELS — and says which of three things to do about it.

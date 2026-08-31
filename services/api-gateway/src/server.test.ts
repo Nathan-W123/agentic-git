@@ -5988,6 +5988,107 @@ test("a question about repository files is answered in the channel, not turned i
   assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
 });
 
+function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+    } else {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+  });
+}
+
+/**
+ * The half of the flag that must keep working.
+ *
+ * Refusing questions was tried and reverted, and this test is why it should
+ * stay reverted. Answering happens on the control plane and the worker
+ * protocol has no verb for it — `register`, `leases`, and the lease's own
+ * sub-routes, and nothing else — so refusing a question does not move it to
+ * a desktop, it deletes the feature. The flag exists to relocate spend, not
+ * to remove the product.
+ */
+test("with local agents only, a channel question is still answered", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-only-question");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text =
+    "The API gateway handles channel questions.\nANSWER_TASK: NONE";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Claude (Owner) which file contains channel question routing?",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.equal(
+    agentMessages[0]?.content,
+    "The API gateway handles channel questions.",
+  );
+});
+
+/**
+ * What the room is told when nothing is going to pick the work up.
+ *
+ * "I've taken this task and I'm working on it" is a sentence in the present
+ * tense, and on a deployment that executes nothing itself it is false
+ * whenever the owner's machine is not listening. The task is still filed and
+ * a worker arriving later still runs it — nothing is lost — but a task
+ * waiting on somebody who is asleep looked exactly like a task in progress,
+ * and the only symptom was that it never finished.
+ */
+test("with local agents only and no machine listening, the room is told the truth", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-only-waiting");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Work, not a question, so it takes the queue path and is acknowledged.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the login bug" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Filed either way: the queue is the durable thing, and a worker that
+  // registers in ten minutes still picks this up.
+  assert.equal(runtime.submittedTasks.length, 1);
+
+  const after = await owner.request(`${base}/messages`);
+  const [acknowledgement] = agentSpeech(after.data.messages);
+  assert.match(
+    String(acknowledgement?.content),
+    /nothing is running it yet/u,
+    JSON.stringify(after.data.messages),
+  );
+  assert.doesNotMatch(
+    String(acknowledgement?.content),
+    /I'm working on it/u,
+  );
+});
+
 test("a question answer that proposes a repository change starts one scoped task and announces the handoff", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

@@ -94,25 +94,16 @@ export function legacyAdmissionLoop(): boolean {
 /**
  * Whether this deployment refuses to execute agents itself.
  *
- * The control plane can run a task in process, and on the hosted deployment
- * that is the expensive half of the bill: an agent holds its memory for as
- * long as it runs and every prompt it sends leaves as egress. Both of those
- * belong to whoever's machine the work is for, and a desktop worker puts them
- * there — but only if the control plane stops taking the work first, because
- * it drains the queue the moment a task lands.
- *
- * Off by default, so a self-hosted deployment and the local `coord` CLI are
- * unchanged: a single-machine install where the control plane *is* the
- * executor stays exactly as it was. Turning it on is a hosting decision,
- * which is why it is an environment variable rather than a code path.
- *
- * With it on, a task whose owner has no machine listening waits rather than
- * running somewhere else. That is the point, and it is worth being plain
- * about: this trades "always runs" for "only ever runs where it should".
+ * Re-exported rather than defined here, and that move is the point. The queue
+ * is not the only executor: the gateway answers questions and runs its own
+ * ceremonial turns through a provider, on a path this file never sees. When
+ * the predicate lived here, only one of the two could reach it, and the
+ * deployment that set the variable stopped draining the queue while still
+ * running an agent for every mention. It now lives in `@coord/shared-types`,
+ * which both executors already depend on, so there is one answer rather than
+ * one answer and one blind spot.
  */
-export function localAgentsOnly(): boolean {
-  return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
-}
+export { localAgentsOnly } from "@coord/shared-types";
 
 /** A worker holds a task for this long before it must heartbeat again. */
 export const WORK_LEASE_TTL_MS = 5 * 60 * 1000;

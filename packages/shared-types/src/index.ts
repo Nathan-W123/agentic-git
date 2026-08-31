@@ -2823,3 +2823,41 @@ export function rankTouchedFiles(
       right.score - left.score || left.path.localeCompare(right.path))
     .slice(0, Math.max(0, limit));
 }
+
+/**
+ * Whether this deployment refuses to execute agents on its own behalf.
+ *
+ * The control plane can run an agent in process, and on a hosted deployment
+ * that is the expensive half of the bill: an agent holds its memory for as
+ * long as it runs and every prompt it sends leaves as egress. Both belong to
+ * whoever's machine the work is for, and a desktop worker puts them there —
+ * but only if the control plane stops taking the work first.
+ *
+ * It lives here, in the one package every executor already depends on,
+ * because there is more than one of them and a flag that guards a single
+ * executor is not a fence. Two things consult it:
+ *
+ *  - the queue, in `leaseQueuedWork`, so a task waits for its owner's machine
+ *    rather than running here; and
+ *  - the gateway's turns that nobody asked for — the opening intent line on
+ *    every dispatch, the classifier on every unaddressed message, the auditor
+ *    on every canonical promotion.
+ *
+ * Deliberately *not* the turns somebody is waiting on. A question asked in a
+ * channel is still answered here, because answering happens on the control
+ * plane and the worker protocol has no verb for it: refusing would not move
+ * that work to a desktop, it would delete it. That is a gap to close by
+ * teaching the worker to answer, not by turning answering off.
+ *
+ * Off by default, so a self-hosted deployment and the local `coord` CLI are
+ * unchanged: a single-machine install where the control plane *is* the
+ * executor stays exactly as it was. Turning it on is a hosting decision,
+ * which is why it is an environment variable rather than a code path.
+ *
+ * Only the exact "1" arms it. A flag that stops a fleet executing should be
+ * turned on by the documented value or not at all, rather than by anything
+ * that merely looks affirmative.
+ */
+export function localAgentsOnly(): boolean {
+  return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
+}
