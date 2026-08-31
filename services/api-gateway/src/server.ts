@@ -14605,7 +14605,25 @@ export class ApiGateway {
         // `/dnc` stays on the direct, read-only answer path. `/ask` is
         // deliberately different: it is coordinated work whose first round
         // is forced to open the question demand before implementation.
-        if (parsed?.command.name === "dnc") {
+        //
+        // The visibility half is not decoration. Taking the direct path also
+        // skips `dispatchOneMention`, which is the only place the
+        // personal-agent refusal lives — so `/dnc @somebody-elses-personal-
+        // agent` used to spend that person's credential on a full provider
+        // turn, from anyone who could post in the room. The condition here is
+        // the exact negation of that refusal, so a stranger's mention of a
+        // personal agent falls through to the ordinary path and is told why
+        // rather than being silently served.
+        //
+        // Deliberately not solved by filtering `mentioned` the way the
+        // `@agents` branch filters its candidates: that would silence the
+        // ordinary mention path too, turning an actionable refusal into
+        // nothing happening.
+        if (
+          parsed?.command.name === "dnc" &&
+          (candidate.visibility !== "personal" ||
+            candidate.userId === senderId)
+        ) {
           await this.answerInChannel(
             candidate,
             content,
