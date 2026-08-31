@@ -37,6 +37,7 @@ import {
   parseClaudeUsage,
   claudeResultEnvelope,
   readClaudeNarration,
+  failureFromStream,
 } from "./index.js";
 
 const TASK: TaskDefinition = {
@@ -2560,4 +2561,48 @@ test("claude: a round abandoned on a deadline does not fail the next one", async
   assert.deepEqual(plan.expectedFiles, PLAN.expectedFiles);
   assert.equal(calls, 2, "the second round never ran");
   await abandoned;
+});
+
+/**
+ * A failed streaming run's reason comes from the end of the stream.
+ *
+ * A CLI that dies mid-run writes nothing to stderr and everything to stdout,
+ * as newline-delimited JSON whose first line is an `init` banner naming the
+ * working directory. Handed back whole, that reason was clipped to its first
+ * two hundred characters upstream — always the banner — so three separate
+ * failures reached three channels reading
+ * `claude execution failed: {"type":"system","subtype":"init","cwd":"C:\\Users\\…`
+ * and saying nothing at all.
+ */
+test("a failed JSON stream reports its result envelope, not its banner", () => {
+  const stream = [
+    JSON.stringify({ type: "system", subtype: "init", cwd: "C:\\Users\\nward" }),
+    JSON.stringify({ type: "assistant", message: { content: "thinking" } }),
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "Credit balance is too low",
+    }),
+  ].join("\n");
+  assert.equal(failureFromStream(stream), "Credit balance is too low");
+});
+
+test("a stream that stops before its result falls back to its last word", () => {
+  // No envelope: the process died mid-stream. The last thing it managed to
+  // say is the closest thing to a reason there is, and it beats the banner.
+  const stream = [
+    JSON.stringify({ type: "system", subtype: "init", cwd: "C:\\Users\\nward" }),
+    JSON.stringify({ type: "assistant", message: { content: "reading" } }),
+  ].join("\n");
+  assert.match(failureFromStream(stream), /reading/u);
+  assert.doesNotMatch(failureFromStream(stream), /init/u);
+});
+
+test("prose output keeps its whole message", () => {
+  // A CLI that does not stream JSON usually says the error first, so taking
+  // the last line would throw the message away to fix a problem it does not
+  // have.
+  const said = "error: not logged in\n  run `claude login` to continue";
+  assert.equal(failureFromStream(said), said);
 });

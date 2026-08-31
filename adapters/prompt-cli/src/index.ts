@@ -1563,6 +1563,62 @@ export function resolveClaudeCommand(
  * Drives Claude Code or Gemini CLI through the coordinator's plan-first
  * lifecycle. See the profiles above for the exact invocations.
  */
+/**
+ * The part of a failed run's output that says what went wrong.
+ *
+ * A streaming CLI that dies writes nothing to stderr and everything to
+ * stdout, as newline-delimited JSON whose *first* line is an `init` banner
+ * naming the working directory. Handing that stdout back whole meant the
+ * reason was clipped to its first two hundred characters somewhere upstream,
+ * and those characters were always the banner — so a failure read as
+ * `claude execution failed: {"type":"system","subtype":"init","cwd":"C:\\Users\\…`
+ * and told the reader nothing at all. The error is at the other end.
+ *
+ * Only applied to output that actually parses as a JSON stream. A CLI that
+ * writes prose keeps its whole message: there the first line usually is the
+ * error, and taking the last one would throw the message away to fix a
+ * problem it does not have.
+ */
+export function failureFromStream(stdout: string): string {
+  const lines = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const parsed = lines.map((line) => {
+    try {
+      return JSON.parse(line) as unknown;
+    } catch {
+      return undefined;
+    }
+  });
+  if (!parsed.some((event) => typeof event === "object" && event !== null)) {
+    return stdout.trim();
+  }
+  // The result envelope first, wherever it sits: it is the one event that
+  // carries the run's own account of why it stopped.
+  for (let index = parsed.length - 1; index >= 0; index -= 1) {
+    const event = parsed[index] as
+      | { type?: unknown; result?: unknown; error?: unknown }
+      | undefined;
+    if (typeof event !== "object" || event === null) {
+      continue;
+    }
+    const said =
+      typeof event.error === "string"
+        ? event.error
+        : typeof event.result === "string"
+          ? event.result
+          : undefined;
+    if (event.type === "result" && said !== undefined && said.length > 0) {
+      return said;
+    }
+  }
+  // No envelope — the process died mid-stream. The last thing it managed to
+  // say is the closest thing to a reason there is, and it is a great deal
+  // closer than the banner it opened with.
+  return lines.at(-1) ?? stdout.trim();
+}
+
 export class PromptCliAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, PromptCliSession>();
   private readonly command: string;
@@ -2639,7 +2695,7 @@ export class PromptCliAdapter implements AgentAdapter {
     if (output.exitCode !== 0) {
       const reason =
         output.stderr.trim() ||
-        output.stdout.trim() ||
+        failureFromStream(output.stdout) ||
         `exit code ${output.exitCode}`;
       throw new Error(`${this.profile.name} execution failed: ${reason}`);
     }
