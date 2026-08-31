@@ -42,6 +42,7 @@ import {
   verifyServer,
 } from "../dist/server-address.js";
 import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
+import { installPlan, openSignIn, runInstall } from "./installers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -498,6 +499,36 @@ async function start() {
   void startWorker(here, session, noteWorkerState);
   await openDashboard();
 }
+
+// Installing a vendor CLI, asked for by name.
+//
+// The renderer is a remote document, so it names a vendor and this process
+// decides what that means — a command string never travels from the page to a
+// shell. `installers.mjs` holds the table, and the plan the page displays is
+// read back from it, so what somebody agrees to and what runs cannot differ.
+ipcMain.handle("kumi:install-plan", (_event, vendor) => installPlan(vendor));
+
+ipcMain.handle("kumi:install-run", async (event, vendor) => {
+  const result = await runInstall(vendor, (line) => {
+    // Relayed to the window that asked, as it arrives. These commands fail for
+    // ordinary legible reasons and the vendor's own words say which; a spinner
+    // that ends in "failed" would put the reader back where they began.
+    if (!event.sender.isDestroyed()) {
+      event.sender.send("kumi:install-output", line);
+    }
+  });
+  if (result.ok && here !== undefined && session !== undefined) {
+    // The scan deciding which agents this machine advertises runs at worker
+    // start, so a CLI installed afterwards stays invisible until the worker
+    // restarts. Doing it here is what lets an install take effect without
+    // asking somebody to quit the app they are in the middle of using.
+    stopWorker();
+    void startWorker(here, session, noteWorkerState);
+  }
+  return result;
+});
+
+ipcMain.handle("kumi:install-sign-in", (_event, vendor) => openSignIn(vendor));
 
 // The renderer asks for the token here instead of being handed it on its
 // command line. Only the top frame of a window running our preload can reach

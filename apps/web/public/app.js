@@ -280,6 +280,7 @@ import {
   showsChannelRail,
   chooseOfflineOption,
   dismissOfflinePrompt,
+  installVendorCli,
   sendOfflineChoice,
   setOfflineTarget,
 } from "./screen-chats.js";
@@ -9436,6 +9437,9 @@ document.addEventListener("click", (event) => {
       return;
     case "offline-dismiss":
       dismissOfflinePrompt(render);
+      return;
+    case "offline-install":
+      void installVendorCli(value, render);
       return;
     case "offline-copy":
       // The install command, onto the clipboard, because the alternative is

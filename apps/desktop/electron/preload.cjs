@@ -35,3 +35,29 @@ contextBridge.exposeInMainWorld("KUMI_SERVER", argument("kumi-server"));
 // `/proc/<pid>/cmdline` is world-readable on Linux — and a token legible to
 // every other program on the machine would make sealing it on disk pointless.
 contextBridge.exposeInMainWorld("KUMI_TOKEN", ipcRenderer.sendSync("kumi:token"));
+
+/**
+ * Installing a vendor CLI, and getting signed into it, from the dashboard.
+ *
+ * Deliberately narrow. `install` takes a vendor *name* and the main process
+ * decides what that means — this bridge cannot carry a command, so a remote
+ * document cannot ask this machine to run one. `plan` reads back what would
+ * run, so the confirmation the person sees is the thing that executes rather
+ * than a second copy of it written in the page.
+ *
+ * Absent in a browser, which is how the dashboard knows not to offer any of
+ * this: there, the command is shown to be copied and run by hand.
+ */
+contextBridge.exposeInMainWorld("KUMI_INSTALL", {
+  plan: async (vendor) => await ipcRenderer.invoke("kumi:install-plan", vendor),
+  run: async (vendor) => await ipcRenderer.invoke("kumi:install-run", vendor),
+  signIn: async (vendor) =>
+    await ipcRenderer.invoke("kumi:install-sign-in", vendor),
+  // One listener per call site, removed by the returned function, so a page
+  // that opens the dialog repeatedly does not accumulate them.
+  onOutput: (listener) => {
+    const relay = (_event, line) => listener(String(line));
+    ipcRenderer.on("kumi:install-output", relay);
+    return () => ipcRenderer.removeListener("kumi:install-output", relay);
+  },
+});
