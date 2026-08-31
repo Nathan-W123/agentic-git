@@ -281,6 +281,8 @@ async function signInAgent(providerId, mode, rerender) {
     // reach back into this one.
     tab.opener = null;
     tab.location.replace(flow.verificationUrl);
+  } else {
+    openSignInFallback(flow.verificationUrl);
   }
 
   const exchange = (flow.mode ?? mode) === "code_exchange";
@@ -579,6 +581,28 @@ export async function connectAgent(providerId, rerender) {
  * true when connected, false to fall back to the paste box, null when the
  * person walked away.
  */
+/**
+ * Send the browser to a sign-in URL when the claimed tab did not survive.
+ *
+ * The claim-during-the-click trick is a browser technique and the desktop app
+ * is not a browser: it intercepts every `window.open` and hands the URL to the
+ * operating system instead, so the claimed tab is always denied and `tab` is
+ * null there — the sign-in page would never open at all, and the person would
+ * be left to find the link in the dialog.
+ *
+ * Opening again with the real URL is what the desktop needs and what a browser
+ * ignores: this only runs when the first open was already blocked, so a
+ * browser that refused one popup refuses this one too, with nothing lost.
+ */
+function openSignInFallback(verificationUrl) {
+  try {
+    window.open(verificationUrl, "_blank", "noopener");
+  } catch {
+    // The link in the dialog is still there and still works. A failure to
+    // open a convenience must not take the flow down with it.
+  }
+}
+
 async function signInGitHub(rerender) {
   state.providerConnecting?.add("github");
   rerender();
@@ -600,6 +624,8 @@ async function signInGitHub(rerender) {
   if (tab !== null && tab !== undefined) {
     tab.opener = null;
     tab.location.replace(flow.verificationUrl);
+  } else {
+    openSignInFallback(flow.verificationUrl);
   }
 
   let finishedWhileOpen = false;

@@ -1695,9 +1695,19 @@ const THREAD_ENDED_RE = /^(?:Done\b|I could not finish|This was cancelled)/u;
  * only one who can carry out. Note that `claude auth status` reports a
  * *stored* session, not a working one, so this is the first place the
  * difference becomes visible.
+ *
+ * `401` is bounded on both sides, and by more than `\b`. A run's own text is
+ * full of numbers that are not status codes — lease ids, hashes, byte counts,
+ * ports, versions, file positions — and an unbounded `401` matched every one
+ * of them, reporting the failure as an expired sign-in. That is the most
+ * confidently wrong thing this function can say: it sends the reader off to
+ * reconnect an account that was never the problem, and the remedy cannot
+ * work no matter how carefully they follow it. `.` and `-` are excluded
+ * alongside word characters, so `1.401.0` and `x-401-y` are not status codes
+ * either. `unauthorized` is bounded for the same reason.
  */
 const IS_AUTH_FAILURE_RE =
-  /OAuth session expired|could not be refreshed|Failed to authenticate|Not logged in|invalid_api_key|unauthorized|401/iu;
+  /OAuth session expired|could not be refreshed|Failed to authenticate|Not logged in|invalid_api_key|\bunauthorized\b|(?<![\w.-])401(?![\w.-])/iu;
 
 /**
  * Whether an error is the agent's own vendor sign-in failing — as opposed
@@ -1708,6 +1718,27 @@ const IS_AUTH_FAILURE_RE =
  * and the push failure's own words already point there. Anything
  * naming GitHub keeps those words.
  */
+/**
+ * Where the sign-in that failed actually lives.
+ *
+ * "Reconnect me from Settings → Agents" reconnects the credential this server
+ * holds. When execution is local that credential is not on the path at all —
+ * the vendor CLI runs on somebody's own machine, under the login that machine
+ * is signed in with — so the instruction sends a reader to a page that cannot
+ * fix what broke. Following it and being told the agent is connected, while
+ * every run keeps failing for want of a sign-in, is worse than being told
+ * nothing.
+ *
+ * Which machine is not knowable from here. Naming the app is as far as this
+ * can honestly go, and it is far enough to get somebody to the right screen.
+ */
+function signInRemedy(): string {
+  return localAgentsOnly()
+    ? "Sign in to my CLI on the machine running the Kumi app — open a " +
+        "terminal there and run it once — then send this again."
+    : "Reconnect me from Settings → Agents and send this again.";
+}
+
 function isVendorSignInFailure(error: string): boolean {
   return IS_AUTH_FAILURE_RE.test(error) && !/github/iu.test(error);
 }
@@ -1739,10 +1770,7 @@ const INTEGRATION_FAILURE_REASONS: Record<string, string> = {
  */
 export function explainAnswerFailure(error?: string): string {
   if (isVendorSignInFailure(error ?? "")) {
-    return (
-      "I could not answer that — my sign-in has expired. Reconnect me from " +
-      "Settings → Agents."
-    );
+    return `I could not answer that — my sign-in has expired. ${signInRemedy()}`;
   }
   const cleaned = (error ?? "").replace(/\s+/gu, " ").trim();
   return cleaned.length === 0
@@ -1875,10 +1903,7 @@ function splitAgentAccount(detail: string): {
 
 function explainTaskFailure(error: string, status?: string): string {
   if (isVendorSignInFailure(error)) {
-    return (
-      "I could not finish this — my sign-in has expired. Reconnect me from " +
-      "Settings → Agents and send this again."
-    );
+    return `I could not finish this — my sign-in has expired. ${signInRemedy()}`;
   }
   // Split before collapsing whitespace: the alarm is one sentence and reads
   // the same flattened, while the account may be several paragraphs the agent
@@ -6800,7 +6825,7 @@ export class ApiGateway {
     const leaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|scope|result|release)$`,
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|scope|result|release|progress)$`,
         "u",
       ),
     );
@@ -6829,6 +6854,47 @@ export class ApiGateway {
         lease.projectId,
         "run_task",
       );
+
+      if (action === "progress" && method === "POST") {
+        // The agent's own words, from the machine running it.
+        //
+        // `agent_progress` was emitted in exactly one place — the in-process
+        // coordinator — so a run executing on somebody's desktop had nothing
+        // whatsoever to say between "I've taken this" and its ending. Every
+        // other line a run produces is either held as ceremonial or comes
+        // from the coordinator, and the courtesy opening is a paid server
+        // call that a deployment running its agents locally has switched off.
+        // The result was a thread that looked hung for the entire time the
+        // work was actually happening.
+        //
+        // Added as a new action rather than folded into the heartbeat: the
+        // protocol version is compared strictly, so an older worker that
+        // never calls this keeps working unchanged, and one that does needs
+        // no negotiation.
+        const body = objectBody(await this.readJson(request));
+        const message =
+          stringField(body["message"], "message", {
+            max: 2000,
+            optional: true,
+          }) ?? "";
+        if (message.trim().length > 0) {
+          await this.options.store.appendAudit(undefined, {
+            type: "agent_progress",
+            taskId: lease.taskId,
+            data: {
+              projectId: lease.projectId,
+              repositoryId: lease.repositoryId,
+              workerId: lease.workerId,
+              leaseId,
+              message: message.trim(),
+            },
+          });
+        }
+        // Nothing to say back. Progress is a courtesy the run must never wait
+        // on, and a worker that cannot post one keeps working.
+        this.sendJson(response, 202, { recorded: true });
+        return;
+      }
 
       if (action === "heartbeat" && method === "POST") {
         const now = new Date();

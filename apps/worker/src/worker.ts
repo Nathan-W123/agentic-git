@@ -918,6 +918,19 @@ export class Worker {
     await adapter.streamEvents(sessionId, (event) => {
       eventChain = eventChain
         .then(async () => {
+          if (event.event === "progress") {
+            // Forwarded so a run on somebody's own machine can say what it is
+            // doing. `agent_progress` was emitted only by the in-process
+            // coordinator, so a desktop run went from "I've taken this" to its
+            // ending with nothing in between — for the whole time the work was
+            // actually happening — and read as hung. The post cannot fail the
+            // run; see `WorkerClient.progress`.
+            await this.options.client.progress(
+              assignment.lease.id,
+              event.message,
+            );
+            return;
+          }
           if (event.event === "question_asked") {
             // A worker daemon has no channel and nobody watching, so an
             // answer cannot arrive. This event used to be dropped on the
