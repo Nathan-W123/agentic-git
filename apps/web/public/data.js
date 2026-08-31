@@ -1203,6 +1203,14 @@ export async function loadProviders() {
   const response = await apiOptional("/chat/providers", { providers: [] });
   state.providers = response.providers ?? [];
   state.providersLoaded = true;
+  // A channel's roster carries this too, but Settings can be opened without
+  // ever visiting a channel — and the agent rows read it to tell an agent
+  // waiting to be connected apart from one already connected. Assigned only
+  // when the field actually arrived, so a failed request (which falls back to
+  // an empty object) cannot quietly turn a true flag false.
+  if (response.localAgentsOnly !== undefined) {
+    state.localAgentsOnly = response.localAgentsOnly === true;
+  }
   if (!state.providers.some((entry) => entry.id === state.selectedAgent)) {
     state.selectedAgent =
       state.providers.find((entry) => entry.connected)?.id ??
@@ -3055,6 +3063,14 @@ export function myAgents() {
       // nothing, which is precisely the confusion the second card existed to
       // clear up. Both are carried here now, and one card says both.
       mine: provider.ownCredential !== undefined,
+      // Whether there is an agent here at all — which stopped being the same
+      // question as `mine` when an agent became a durable record rather than
+      // a side effect of storing a credential. Local execution runs the
+      // vendor's CLI under the machine's own login and never reads a stored
+      // secret, so an agent there has no credential and `mine` is false for
+      // it. The server answers this; the credential is the fallback for a
+      // deployment that has not shipped the field yet.
+      exists: provider.exists === true || provider.ownCredential !== undefined,
       hostAccount:
         provider.connected === true && provider.ownCredential === undefined,
       needsReconnect: expired !== undefined,
@@ -5892,6 +5908,28 @@ export function addChannelAgent(repositoryId, agentId) {
  * at connection time, instead of deriving membership on every read and
  * silently undoing a later removal.
  */
+/**
+ * Drops an agent out of every channel roster already loaded in this tab.
+ *
+ * The server has forgotten it, so any roster fetched from here on lists it
+ * nowhere — but a channel already on screen holds its own copy and would go
+ * on showing an agent that no longer exists until something else forced a
+ * reload. The mirror image of the patch {@link addAgentToAllRepositories}
+ * applies when an agent joins, and for the same reason.
+ *
+ * Scoped to this account's own agents. Somebody else's agent for the same
+ * vendor is a different agent, and removing mine must not take theirs off
+ * the screen.
+ */
+export function forgetAgentInLoadedRosters(agentId) {
+  const mine = currentUserId();
+  for (const [repositoryId, roster] of Object.entries(state.channelRoster)) {
+    state.channelRoster[repositoryId] = roster.filter(
+      (entry) => !(entry.userId === mine && entry.provider === agentId),
+    );
+  }
+}
+
 export async function addAgentToAllRepositories(agentId) {
   if (!agentId || !state.projectId) {
     return [];

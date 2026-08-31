@@ -4468,6 +4468,36 @@ export class ProviderChatService {
    * secret behind would mean a provider the user believes they detached still
    * holds a working key to their account.
    */
+  /**
+   * Removes an agent: its credential, its connection, and its record.
+   *
+   * Deleting the credential used to be the whole of disconnecting, because
+   * until agents got their own durable record the credential *was* the
+   * identity. It is not any more. The roster is a union of stored credentials
+   * and call-sign records, so an agent whose credential this deleted stayed in
+   * every channel, still mentionable, still answering to the name it was
+   * dealt — disconnected everywhere except where it mattered.
+   *
+   * It is also what makes this work for an agent that never had a credential.
+   * Local execution runs the vendor CLI under the machine's own login, so its
+   * agent has no secret here to delete; the two steps above are no-ops for it
+   * and the record is the only thing there is to remove. Without this there
+   * was no way to remove such an agent at all.
+   *
+   * Every step is safe to run against nothing — `delete` returns early on a
+   * vendor with no credential, the connections file is guarded, and
+   * `forgetCallSign` swallows its own failure — so disconnecting an agent
+   * that is already gone is a no-op rather than an error.
+   *
+   * Both of the last two steps are required, and neither is enough alone.
+   * `nameUnnamedConnections` reconciles the durable record against the
+   * connections file on the way through `list`, dealing a fresh name to any
+   * connection that has none — so removing only the record leaves a connection
+   * for the reconciler to rename, and the very next roster read brings the
+   * agent back under a name nobody chose. It skips a provider with no entry in
+   * that file, which is what makes removing the entry the other half of the
+   * job. Their order does not matter: nothing reads between them.
+   */
   public async disconnect(input: {
     userId: string;
     provider: ProviderId;
@@ -4481,6 +4511,7 @@ export class ProviderChatService {
       delete userConnections[input.provider];
       await this.writeConnections(file);
     }
+    await this.forgetCallSign(input.userId, input.provider);
   }
 
   /* ----------------------------------------------- settings/options ----- */

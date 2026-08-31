@@ -13,10 +13,12 @@ import {
   cancelProviderSignIn,
   createLocalAgent,
   connectGitHub,
+  forgetAgentInLoadedRosters,
   connectProviderCredential,
   gitHubSignInStatus,
   loadGitHub,
   loadProviders,
+  myAgents,
   providerSignInStatus,
   startGitHubSignIn,
   startProviderSignIn,
@@ -270,24 +272,18 @@ export async function installVendorCli(vendor, rerender) {
     return;
   }
 
-  // Output as it arrives. These fail for ordinary, legible reasons — no npm,
-  // a proxy, a policy blocking the script — and the vendor's own words say
-  // which. A spinner ending in "failed" would leave somebody exactly where
-  // they started.
+  // The output is collected, not displayed while it runs. A dialog somebody
+  // has to dismiss between agreeing to an install and being asked to sign in
+  // is a step that asks nothing — and the modal helper puts a confirm button
+  // on it, so it read as a decision when there was none to make. It is kept
+  // for the one case that needs it: a failure, where the vendor's own words
+  // say whether this was a missing npm, a proxy, or a blocked script, and a
+  // bare "it failed" would leave somebody exactly where they started.
   const lines = [];
   const stop = bridge.onOutput((line) => {
     lines.push(line);
-    const view = document.querySelector("#install-output");
-    if (view !== null) {
-      view.textContent = lines.join("").slice(-4000);
-      view.scrollTop = view.scrollHeight;
-    }
   });
-  const watching = showModal({
-    title: `Installing ${esc(vendor)}`,
-    body: `<pre class="install-output" id="install-output">Starting…</pre>`,
-    cancel: "Hide",
-  });
+  toast(`Installing ${vendor}…`);
   let result;
   try {
     result = await bridge.run(vendor);
@@ -295,8 +291,6 @@ export async function installVendorCli(vendor, rerender) {
     result = { ok: false, detail: error?.message ?? "The install failed." };
   } finally {
     stop?.();
-    document.querySelector("#modal")?.close();
-    await watching.catch(() => undefined);
   }
 
   if (result?.ok !== true) {
@@ -369,6 +363,76 @@ async function connectLocalAgent(providerId, rerender) {
   );
   rerender();
   await finishLocalSetup(providerId, rerender);
+  return true;
+}
+
+/**
+ * Removing an agent.
+ *
+ * "Disconnect" used to mean deleting a stored credential, because the
+ * credential was the agent. It is not any more, and the button had drifted
+ * away from what it says in two directions at once: on an agent with a
+ * credential it deleted the secret and left the agent itself in every
+ * channel, and on an agent without one — which is every agent on a
+ * deployment that runs them locally — it was not offered at all, so an agent
+ * could be created and never removed.
+ *
+ * It asks first. Removing an agent is not undoable in the way that matters:
+ * the call sign goes back in the pool and the next agent dealt may take it,
+ * so the name people have learned can end up belonging to somebody else.
+ *
+ * What it deliberately does not touch is the vendor CLI on this machine and
+ * the vendor account behind it. Kumi installed the one and never owned the
+ * other, and signing somebody out of Codex because they tidied up a Kumi
+ * roster would be a surprise of an entirely different order.
+ */
+export async function disconnectAgent(providerId, rerender) {
+  const label = agentLabelOf(providerId);
+  const agent = myAgents().find((entry) => entry.id === providerId);
+  // The call sign if it has one, because that is the name on the screen and
+  // in every channel — asking "disconnect Codex?" about an agent everybody
+  // calls Eris is asking about something else.
+  const name = agent?.hasName === true ? agent.name : label;
+  // Whether it is mid-run. `myAgents` already worked this out to draw the
+  // busy dot, so saying it here costs nothing — and it is the one thing about
+  // removing an agent that cannot be undone by connecting another. Work
+  // already claimed runs to completion on its own machine; what goes is the
+  // ability to address it. Mentions resolve through the roster on every read
+  // rather than being stored, so once the agent is gone `@${name}` matches
+  // nothing and neither does cancelling by name.
+  const busy = agent?.task !== undefined;
+  const confirmed = await showModal({
+    title: `Disconnect ${name}?`,
+    subtitle:
+      `${name} leaves every channel it is in, and its name goes back in the ` +
+      "pool for another agent to be dealt.",
+    body:
+      (busy
+        ? `<p class="modal-hint sr-warn">${esc(name)} is working right now.
+            That run will finish on its own, but once the agent is gone you
+            will not be able to cancel it or reply to it by name.</p>`
+        : "") +
+      `<p class="modal-hint">Nothing is uninstalled, and your
+      ${esc(label)} account is untouched — you can connect it again whenever
+      you like.</p>`,
+    confirm: "Disconnect",
+    cancel: "Keep it",
+  });
+  if (confirmed === undefined) {
+    return false;
+  }
+  try {
+    await api(`/chat/providers/${encodeURIComponent(providerId)}`, {
+      method: "DELETE",
+    });
+  } catch (error) {
+    toast(`Could not disconnect ${label} — ${error.message}`, "error");
+    return false;
+  }
+  forgetAgentInLoadedRosters(providerId);
+  await loadProviders();
+  toast(`${name} disconnected`, "ok");
+  rerender();
   return true;
 }
 

@@ -591,8 +591,28 @@ async function startRuntime(
   };
   const operations: ApiOperations = {
     chatProviders: {
-      async list() {
-        return [];
+      // Faithful in the one respect the gateway acts on: the route decides,
+      // per provider, whether an agent exists at all, and it reads
+      // `ownCredential` to do it. A stub that answered `[]` meant that
+      // decision was made over an empty list and never exercised.
+      async list(input) {
+        const connections = chatConnections.get(input.userId) ?? [];
+        return ["anthropic", "openai", "cursor"].map((id) => {
+          const connection = connections.find((entry) => entry.provider === id);
+          return {
+            id,
+            name: id,
+            connected: connection !== undefined,
+            ...(connection === undefined
+              ? {}
+              : {
+                  ownCredential: {
+                    kind: "oauth_token",
+                    visibility: connection.visibility ?? "personal",
+                  },
+                }),
+          };
+        });
       },
       async signIn() {
         return {};
@@ -600,7 +620,19 @@ async function startRuntime(
       async connect() {
         return {};
       },
-      async disconnect() {},
+      // Faithful to the two things the real service tears down, because a
+      // stub that did nothing meant every test of disconnecting was really a
+      // test that the route returned 200. It removes the connection *and* the
+      // durable record — the roster is a union of both, so forgetting either
+      // one leaves the agent listed.
+      async disconnect(input: { userId: string; provider: string }) {
+        const connections = chatConnections.get(input.userId) ?? [];
+        chatConnections.set(
+          input.userId,
+          connections.filter((entry) => entry.provider !== input.provider),
+        );
+        await store.clearAgentCallSign(input.userId, input.provider);
+      },
       async options() {
         return {};
       },
@@ -19904,6 +19936,189 @@ test("an agent created without a credential is in the roster", async (t) => {
   assert.equal(listed.length, 1, "exactly one, never doubled");
   assert.equal(listed[0].name, dealt);
   assert.equal(listed[0].userId, account.user.id);
+});
+
+/**
+ * The Settings screen asks a different question than the roster, and until
+ * this it got the old answer.
+ *
+ * A row there drew "Not connected" with a Connect button next to an agent
+ * somebody had just finished connecting — because both the status line and
+ * the button branched on whether a *credential* was stored, which stopped
+ * being what having an agent means. The browser cannot work the difference
+ * out on its own: the provider list it reads is built from the credential
+ * store, so an agent with no credential is simply absent from it. The two
+ * fields asserted here are what let it ask the right question.
+ */
+test("the provider list says an agent exists without a credential", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const before = await owner.request("/api/v1/chat/providers");
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+  // Deployment-wide, and carried here because Settings can be opened without
+  // ever visiting a channel — the roster response that also carries it may
+  // never have been fetched.
+  assert.equal(before.data.localAgentsOnly, true);
+  const listedBefore = (before.data.providers as Array<{ id: string; exists: boolean }>);
+  assert.equal(listedBefore.find((entry) => entry.id === "openai")?.exists, false);
+
+  const created = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+
+  const after = await owner.request("/api/v1/chat/providers");
+  const listed = after.data.providers as Array<{
+    id: string;
+    exists: boolean;
+    ownCredential?: unknown;
+  }>;
+  const openai = listed.find((entry) => entry.id === "openai");
+  assert.equal(openai?.exists, true, JSON.stringify(listed));
+  // And no credential was invented to say so — that is the whole point.
+  assert.equal(openai?.ownCredential, undefined);
+  // Untouched vendors stay untouched.
+  assert.equal(listed.find((entry) => entry.id === "cursor")?.exists, false);
+});
+
+/**
+ * A stored credential is still an agent. The field says so directly rather
+ * than leaving the browser to infer it, so a connection made before agents
+ * had their own record does not read as "connect this".
+ */
+test("a stored credential alone makes an agent exist", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  runtime.chatConnections.set(account.user.id, [{ provider: "anthropic" }]);
+
+  const listed = (await owner.request("/api/v1/chat/providers")).data
+    .providers as Array<{ id: string; exists: boolean }>;
+  assert.equal(listed.find((entry) => entry.id === "anthropic")?.exists, true);
+  assert.equal(listed.find((entry) => entry.id === "openai")?.exists, false);
+});
+
+/**
+ * An agent can be removed, including the kind that has no credential to
+ * remove.
+ *
+ * Disconnecting used to mean destroying a stored secret, which was the whole
+ * of it while the secret was the identity. Once an agent became a record of
+ * its own, that left two holes at once: an agent with a credential stayed in
+ * every channel after being "disconnected", and an agent without one could be
+ * created and never removed.
+ */
+test("disconnecting an agent with no credential removes it everywhere", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "removable");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  const created = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  await owner.request(`${roster}/openai/membership`, { method: "POST" });
+
+  const listed = (await owner.request(roster)).data.agents as Array<{
+    provider: string;
+  }>;
+  assert.equal(listed.some((agent) => agent.provider === "openai"), true);
+
+  const removed = await owner.request("/api/v1/chat/providers/openai", {
+    method: "DELETE",
+  });
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+
+  // Gone from the roster, so nothing can @mention it into work any more.
+  const after = (await owner.request(roster)).data.agents as Array<{
+    provider: string;
+  }>;
+  assert.equal(
+    after.some((agent) => agent.provider === "openai"),
+    false,
+    "a membership row must not keep a removed agent in the room",
+  );
+  // And gone from the Settings screen's own question.
+  const providers = (await owner.request("/api/v1/chat/providers")).data
+    .providers as Array<{ id: string; exists: boolean }>;
+  assert.equal(providers.find((entry) => entry.id === "openai")?.exists, false);
+});
+
+/**
+ * The same button, on the shape it was written for. Destroying the credential
+ * was never enough on its own: the record outlived it and went on naming an
+ * agent in every channel.
+ */
+test("disconnecting an agent with a credential removes its record too", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "credentialed-removal");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+  runtime.chatConnections.set(account.user.id, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await runtime.store.setAgentCallSign(account.user.id, "anthropic", "Athena");
+  await owner.request(`${roster}/anthropic/membership`, { method: "POST" });
+  assert.equal(
+    ((await owner.request(roster)).data.agents as Array<{ provider: string }>)
+      .some((agent) => agent.provider === "anthropic"),
+    true,
+  );
+
+  await owner.request("/api/v1/chat/providers/anthropic", { method: "DELETE" });
+
+  assert.equal(
+    ((await owner.request(roster)).data.agents as Array<{ provider: string }>)
+      .some((agent) => agent.provider === "anthropic"),
+    false,
+    "the record outliving the credential is what kept it listed",
+  );
+});
+
+/**
+ * A removed agent must not leave its name behind in a room.
+ *
+ * A per-channel override outranks the call sign there, and it is keyed
+ * `${userId}:${provider}` — which the next agent dealt for that account and
+ * vendor also is. Left standing, a brand-new agent inherits the removed one's
+ * name in every room the removed one had been named in. The rename path
+ * already clears these for the weaker version of the same reason.
+ */
+test("disconnecting clears the names an agent was given in rooms", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "named-in-a-room");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  await owner.request(`${roster}/openai/membership`, { method: "POST" });
+  // Named in this one room, and given a role, which is a different kind of
+  // fact and must survive.
+  await runtime.store.setChannelAgentOverride(repo, `${account.user.id}:openai`, {
+    name: "Eris",
+    role: "Lead Developer",
+  });
+
+  await owner.request("/api/v1/chat/providers/openai", { method: "DELETE" });
+
+  const overrides = await runtime.store.listChannelAgentOverrides(repo);
+  const mine = overrides[`${account.user.id}:openai`];
+  assert.equal(mine?.name, undefined, "the name must not outlive the agent");
+  assert.equal(mine?.role, "Lead Developer", "the seat's own decision stays");
 });
 
 /**

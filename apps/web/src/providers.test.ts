@@ -2239,6 +2239,107 @@ test("a connection made before call signs existed is named on the next read", as
   assert.equal(again, named);
 });
 
+/**
+ * Disconnecting has to remove the agent, not only its secret.
+ *
+ * The roster is a union of stored credentials and durable call-sign records,
+ * so an agent whose credential was destroyed went on being listed in every
+ * channel under the name it was dealt — disconnected everywhere except where
+ * it mattered. The credential was the identity once; forgetting the record is
+ * what makes the button mean what it says now.
+ */
+test("disconnecting forgets the agent's durable record too", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-named-then-removed",
+  });
+  // Connecting deals a name, which is the record this has to clear.
+  await service.list({ userId: "u1", systemAdmin: false });
+  assert.equal(callSigns.rows.size, 1, "connecting recorded the agent");
+
+  await service.disconnect({ userId: "u1", provider: "anthropic" });
+  assert.equal(callSigns.rows.size, 0, "and disconnecting removed it");
+});
+
+/**
+ * And it stays removed once the reconciler has had a look.
+ *
+ * `nameUnnamedConnections` runs on the way through `list` and deals a fresh
+ * name to any connection missing one, writing it back to the durable table. So
+ * removing the record alone does not remove the agent: it leaves a connection
+ * for the reconciler to rename, and the next roster read brings the agent back
+ * under a name nobody chose. Verified by mutation — this test fails when the
+ * connections-file removal is taken out of `disconnect`, and passes when the
+ * two removals are swapped, which is how it is known that both are needed and
+ * that their order is not what matters.
+ */
+test("a disconnected agent is not recreated by the next roster read", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-reconciled",
+  });
+  await service.list({ userId: "u1", systemAdmin: false });
+  assert.equal(callSigns.rows.size, 1);
+
+  await service.disconnect({ userId: "u1", provider: "anthropic" });
+
+  // The read that would resurrect it.
+  const after = await service.list({ userId: "u1", systemAdmin: false });
+  assert.deepEqual(
+    await callSigns.listAgentCallSigns(),
+    [],
+    "the reconciler must not deal a name to an agent that was removed",
+  );
+  assert.equal(
+    after.find((entry) => entry.id === "anthropic")?.callSign,
+    undefined,
+  );
+});
+
+/**
+ * The other half, and the reason this route exists at all: an agent that
+ * never had a credential. Local execution runs the vendor CLI under the
+ * machine's own login, so there is no secret here to destroy — the record is
+ * the only thing there is, and without this there was no way to remove such
+ * an agent at all.
+ */
+test("disconnecting removes an agent that never had a credential", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await callSigns.setAgentCallSign("u1", "openai", "Eris");
+
+  // No credential, no connection — every other step is a no-op, and this must
+  // not throw on the nothing it finds.
+  await service.disconnect({ userId: "u1", provider: "openai" });
+  assert.deepEqual(await callSigns.listAgentCallSigns(), []);
+
+  // And again, on an agent that is already gone.
+  await service.disconnect({ userId: "u1", provider: "openai" });
+});
+
 /** The two-method slice of the coordination store, kept in memory. */
 function fakeCallSignStore() {
   const rows = new Map<string, { userId: string; provider: string; callSign: string }>();

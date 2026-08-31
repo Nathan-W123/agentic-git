@@ -12152,12 +12152,23 @@ export class ApiGateway {
             .map((sign) => sign.provider),
         );
         this.sendJson(response, 200, {
+          // Deployment-wide, and sent here because this is the response the
+          // Settings screen loads. It also arrives on a channel's roster, but
+          // Settings can be opened without ever visiting a channel — and when
+          // it was, the screen fell back to "false" and drew the connect
+          // button for agents that already existed.
+          localAgentsOnly: localAgentsOnly(),
           providers: (Array.isArray(listed) ? listed : []).map((entry) => {
-            const provider = entry as { id?: unknown; mine?: unknown };
+            // `ownCredential`, not `mine`: `mine` is the browser's word for
+            // this, computed in `myAgents`, and testing for it here was
+            // testing a field the provider list has never carried. Harmless
+            // only because the call-sign lookup answers the same question for
+            // every connection made since agents got names.
+            const provider = entry as { id?: unknown; ownCredential?: unknown };
             return {
               ...provider,
               exists:
-                provider.mine === true ||
+                provider.ownCredential !== undefined ||
                 (typeof provider.id === "string" && owned.has(provider.id)),
             };
           }),
@@ -12534,6 +12545,18 @@ export class ApiGateway {
         if (method === "DELETE") {
           await performChat(() =>
             chatOperations.disconnect({ userId: identity.userId, provider }),
+          );
+          // The names this agent was given in particular rooms go with it,
+          // for a stronger version of the reason a rename clears them. An
+          // override naming this agent in one channel outranks its call sign
+          // there, and the key is `${userId}:${provider}` — which the *next*
+          // agent dealt for this account and this vendor will also be. Left
+          // standing, they would hand a brand-new agent the removed one's
+          // name in every room the removed one had been named in. Roles,
+          // models and efforts are that channel's decision about a seat
+          // rather than a name for this agent, and stay.
+          await this.options.store.clearChannelAgentNameOverrides(
+            `${identity.userId}:${provider}`,
           );
           this.sendJson(response, 200, { disconnected: true });
           return;

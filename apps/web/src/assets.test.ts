@@ -1893,6 +1893,91 @@ test("Settings Agents rows show the provider, then Connected as the call sign", 
   );
 });
 
+/**
+ * The row drew "Not connected" with a Connect button beside an agent somebody
+ * had just finished connecting, because every control on it asked whether a
+ * *credential* was stored — which stopped being what having an agent means
+ * once local execution started running the vendor CLI under the machine's own
+ * login. Three controls, one question, and they must keep sharing it: the
+ * regression was the status line and the button disagreeing.
+ */
+test("Settings Agents rows ask whether the agent exists, not whether a secret is stored", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // Computed once, so the status line and the buttons cannot drift.
+  assert.match(body, /const localAgent =\s*\n\s*state\.localAgentsOnly === true &&/u);
+  assert.equal(
+    (body.match(/localAgent/gu) ?? []).length >= 4,
+    true,
+    "the status line, the rename control and the connect control all read it",
+  );
+  // An agent that exists says so, and offers the sign-in as the extra it is.
+  assert.match(body, /runs on this machine/u);
+  assert.match(body, /data-act="agent-link-account"/u);
+
+  // Both halves of the signal reach the browser. `exists` is the server's
+  // answer, and the flag has to be readable from Settings — which can be
+  // opened without ever visiting the channel whose roster also carries it.
+  assert.match(data, /exists: provider\.exists === true/u);
+  assert.match(
+    data,
+    /if \(response\.localAgentsOnly !== undefined\) \{\s*\n\s*state\.localAgentsOnly = response\.localAgentsOnly === true;/u,
+  );
+});
+
+/**
+ * An agent can be removed, and is asked about before it is.
+ *
+ * The button said "Disconnect" and destroyed a credential, which was the
+ * whole of removing an agent while the credential was the identity. Once an
+ * agent got a record of its own the button drifted in two directions at once:
+ * on an agent with a credential it left the agent itself in every channel,
+ * and on one without — every agent on a deployment that runs them locally —
+ * it was not offered at all, so an agent could be created and never removed.
+ */
+test("an agent can be disconnected, including one with no credential", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // Offered on the local-agent row, beside the sign-in it does not require.
+  assert.match(body, /data-act="agent-link-account"/u);
+  assert.match(
+    body.slice(body.indexOf('data-act="agent-link-account"')),
+    /data-act="agent-disconnect"/u,
+    "the row that offers Link for usage must also offer Disconnect",
+  );
+
+  // The click goes through the flow, not straight at the route. The bare
+  // fetch it replaced asked nothing and removed only the secret.
+  assert.match(app, /void disconnectAgent\(value, render\)/u);
+  assert.doesNotMatch(
+    app,
+    /case "agent-disconnect":\s*\n\s*void api\(/u,
+    "disconnect must not fire straight off a click",
+  );
+
+  // And the menu asks the same question the row does.
+  assert.match(app, /const exists = mine \|\| provider\?\.exists === true/u);
+
+  // The flow confirms, names the agent rather than the vendor, and says what
+  // survives — nothing is uninstalled and the vendor account is untouched.
+  assert.match(agents, /export async function disconnectAgent/u);
+  assert.match(agents, /title: `Disconnect \$\{name\}\?`/u);
+  assert.match(agents, /Nothing is uninstalled/u);
+  assert.match(agents, /forgetAgentInLoadedRosters\(providerId\)/u);
+
+  // Removing an agent mid-run is the one part that connecting another cannot
+  // undo: the run finishes, but mentions resolve through the roster on every
+  // read, so nothing answers to the name afterwards. Said before, not after.
+  assert.match(agents, /const busy = agent\?\.task !== undefined/u);
+  assert.match(agents, /is working right now/u);
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may
