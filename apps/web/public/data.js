@@ -3607,6 +3607,13 @@ export function channelAgentsFor(repositoryId) {
         role: local?.role ?? server.role,
         model: local?.model ?? server.model ?? agent.model,
         effort: local?.effort ?? server.effort ?? agent.effort,
+        // Named explicitly, because this merge is a field list and not a
+        // spread of `server`: anything the roster learns has to be taken out
+        // here or it is silently dropped. It was, once — the field was added
+        // to the map above and never read here, so every agent looked online
+        // however long its owner's machine had been off, and the whole
+        // offline path was dead while appearing to be wired.
+        ownerOnline: server.ownerOnline,
       };
     }
     // Before the roster resolves — the "paint immediately" floor — and for an
