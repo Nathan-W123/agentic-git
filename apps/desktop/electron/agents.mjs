@@ -26,19 +26,19 @@ const KNOWN_AGENTS = [
   {
     id: "claude",
     adapter: "claude",
-    commands: ["claude", "claude.cmd", "claude.exe"],
+    commands: ["claude.exe", "claude.cmd", "claude"],
     pinPath: false,
   },
   {
     id: "codex",
     adapter: "codex",
-    commands: ["codex", "codex.cmd", "codex.exe"],
+    commands: ["codex.exe", "codex.cmd", "codex"],
     pinPath: true,
   },
   {
     id: "cursor",
     adapter: "cursor",
-    commands: ["cursor-agent", "cursor-agent.cmd", "cursor-agent.exe"],
+    commands: ["cursor-agent.exe", "cursor-agent.cmd", "cursor-agent"],
     pinPath: true,
   },
 ];
@@ -78,9 +78,11 @@ export async function detectAgents() {
 /**
  * The first of these names that exists in one of these directories.
  *
- * Candidates are tried in the order they are written rather than directory by
- * directory, so a `PATH` entry that holds both `codex` and `codex.cmd` yields
- * the same answer a shell would.
+ * Directories are walked in `PATH` order, and within one, the names are tried
+ * in the order they are written. That order matters: npm installs both an
+ * extensionless shell script and a `.cmd` into the same directory, and only
+ * one of them is a thing Windows can execute. Real executables are named
+ * first for that reason, which is also the order a default `PATHEXT` implies.
  */
 async function findOnPath(dirs, names) {
   for (const dir of dirs) {

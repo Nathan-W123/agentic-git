@@ -344,8 +344,11 @@ export function spawnInvocation(
   for (const token of tokens) {
     if (UNSAFE_WINDOWS_BATCH_TOKEN.test(token)) {
       throw new Error(
-        "Windows batch commands cannot contain quotes, expansion characters, " +
-          "line breaks, or shell control operators",
+        `${path.win32.basename(resolvedExecutable)} is a Windows batch shim, ` +
+          "so running it means running cmd.exe, and one of its arguments " +
+          "contains a quote, line break, or shell control operator that " +
+          "cannot safely go on a cmd.exe command line. Point this agent at " +
+          "the vendor's native executable instead, so no shim is involved.",
       );
     }
   }

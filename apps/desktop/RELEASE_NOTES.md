@@ -1,3 +1,33 @@
+### 0.4.5 — the agents actually run
+
+0.4.4 made the CLI findable. It turned out finding it was only the first of
+four things standing between a task and a vendor CLI on Windows, and the other
+three were each enough on their own.
+
+**Codex could not run through its npm shim at all.** A `.cmd` has to go through
+`cmd.exe`, and Kumi refuses to put a quote on a `cmd.exe` command line rather
+than attempt shell escaping — while every Windows Codex invocation carries
+`-c windows.sandbox="…"`, which contains one. So a found shim would have failed
+on the quoting guard instead of on ENOENT. Codex now resolves to its native
+`codex.exe`, the way Claude already did, using the path Codex's own launcher
+uses. No `cmd.exe`, no guard.
+
+**Cursor was being started by the wrong name.** Its default command was
+`agent` — not a program any vendor ships. That is the whole of
+"spawn agent ENOENT", on machines where Cursor was installed and working. It is
+`cursor-agent` now.
+
+**The worker offered to run agents this machine does not have.** The project
+config gets a default agent backfilled for every vendor it lacks, which is
+right for a deployment and wrong for a laptop, so a worker registered for
+Cursor and Kiro whether or not they were installed — was handed their work, and
+could only fail it. The app now tells the worker what it actually found, and
+registration is the intersection.
+
+And when a batch shim genuinely is the only thing available, the refusal says
+so, and says to point the agent at the native executable, instead of reporting
+an unexplained quoting error.
+
 ### 0.4.4 — the CLI is found once, not twice
 
 0.4.3 taught the launcher to resolve a bare `codex` the way a shell does, and

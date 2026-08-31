@@ -133,3 +133,33 @@ test("the saved config is reconciled with the machine, not frozen at first run",
     assert.deepEqual(written.agents, config.agents);
   });
 });
+
+/**
+ * npm writes two files, and only one of them is executable by Windows.
+ *
+ * A global install puts both an extensionless shell script and a `.cmd` into
+ * the same directory. Pinning the script would hand the worker a file Windows
+ * cannot start, so the real executables are searched for first — which is
+ * also the order a default `PATHEXT` implies.
+ */
+test("a real executable is pinned ahead of the extensionless npm script", async () => {
+  await withTemp(async (dir) => {
+    const bin = path.join(dir, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(path.join(bin, "codex"), "#!/bin/sh\n");
+    await writeFile(path.join(bin, "codex.cmd"), "@echo off\n");
+    const previous = process.env["PATH"];
+    process.env["PATH"] = bin;
+    try {
+      const { detectAgents } = await load();
+      const agents = await detectAgents();
+      assert.equal(agents["codex"]?.command, path.join(bin, "codex.cmd"));
+    } finally {
+      if (previous === undefined) {
+        delete process.env["PATH"];
+      } else {
+        process.env["PATH"] = previous;
+      }
+    }
+  });
+});

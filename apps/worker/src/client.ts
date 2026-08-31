@@ -197,9 +197,15 @@ export class WorkerClient {
         // sockets at the same moment when the server stalls, and retrying in
         // lockstep would reproduce the stall that closed them.
         const backoff = this.connectionBackoffMs * 2 ** (attempt - 1);
+        // Deliberately not `unref`'d. This timer is the only thing that will
+        // make progress: the request has failed, the retry is what resumes
+        // it, and there may be a lease already claimed on the other side.
+        // Unreffing it told Node the process was free to exit here, so a
+        // worker with nothing else pending would drop the retry on the floor
+        // and settle nothing — which is also why every test after the first
+        // one to reach this line was cancelled rather than run.
         await new Promise((resolve) => {
-          const timer = setTimeout(resolve, backoff + Math.random() * backoff);
-          timer.unref?.();
+          setTimeout(resolve, backoff + Math.random() * backoff);
         });
       }
     }
@@ -223,11 +229,14 @@ export class WorkerClient {
     }
 
     const controller = new AbortController();
+    // Cleared in the `finally` below, so it holds the process open only for
+    // as long as the request it is bounding. Unreffing it instead meant the
+    // deadline could be skipped entirely when nothing else kept the loop
+    // alive — which is the one case a deadline exists for.
     const timer = setTimeout(
       () => controller.abort(),
       init.timeoutMs ?? this.timeoutMs,
     );
-    timer.unref?.();
     try {
       const response = await this.fetchImpl(`${this.base}${path}`, {
         method: init.method ?? "GET",

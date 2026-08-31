@@ -103,6 +103,16 @@ export interface WorkerOptions {
   version?: string;
   projectId?: string;
   repositoryId?: string;
+  /**
+   * The adapters this host can actually drive, if it knows.
+   *
+   * Left undefined, the project config is taken at its word, which is what a
+   * server-side worker wants: it is the deployment, and its config is the
+   * truth. A desktop is not — it has just looked at the machine and knows
+   * which vendor CLIs are installed — and the config it reads has had absent
+   * vendors backfilled into it by design. This is where that host says so.
+   */
+  adapters?: readonly string[];
   /** Injected only by tests or embedded runtimes. */
   codexRunner?: CodexProcessRunner;
   /**
@@ -287,13 +297,25 @@ export class Worker {
   }
 
   public async register(): Promise<string> {
-    const adapters = [
-      ...new Set(
-        Object.values(this.options.project.config.agents).map((agent) =>
-          agent.adapter ?? "generic-cli",
-        ),
+    const configured = new Set(
+      Object.values(this.options.project.config.agents).map(
+        (agent) => agent.adapter ?? "generic-cli",
       ),
-    ];
+    );
+    // What the config lists is not what this machine can run. `CoordinatorProject`
+    // backfills a default agent for every vendor the config lacks — on purpose,
+    // so a deployment that predates a vendor still answers for it — and those
+    // entries carry no command. A worker that registered them would be offered
+    // work for a CLI that is not installed and could only fail it, which is the
+    // "spawn <vendor> ENOENT" a desktop kept reporting. So the host may say what
+    // it actually has, and registration is the intersection.
+    const advertised =
+      this.options.adapters === undefined
+        ? [...configured]
+        : [...configured].filter((adapter) =>
+            this.options.adapters?.includes(adapter),
+          );
+    const adapters = advertised;
     const identity = await this.options.client.register({
       organizationId: this.options.organizationId,
       name: this.options.name ?? `worker-${process.pid}`,
