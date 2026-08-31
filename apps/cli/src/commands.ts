@@ -30,6 +30,7 @@ import type {
   CoordinationStore,
   StoredRepository,
   SubmittedTask,
+  TaskKind,
   WorkLease,
 } from "@coord/persistence";
 import { DEFAULT_ORGANIZATION_ID, DEFAULT_PROJECT_ID } from "@coord/persistence";
@@ -846,6 +847,10 @@ export async function resolveRepository(
 
 export interface TaskSubmitOptions {
   objective: string;
+  /** Work, or a question to be answered on its owner's machine. */
+  kind?: TaskKind;
+  /** The channel message a routed answer belongs under. Questions only. */
+  answerTo?: string;
   repositoryId?: string;
   projectId?: string;
   agentId?: string;
@@ -923,6 +928,8 @@ export async function taskSubmit(
     ...(options.effort === undefined || options.effort.trim() === ""
       ? {}
       : { effort: options.effort.trim() }),
+    ...(options.kind === undefined ? {} : { kind: options.kind }),
+    ...(options.answerTo === undefined ? {} : { answerTo: options.answerTo }),
   });
 }
 

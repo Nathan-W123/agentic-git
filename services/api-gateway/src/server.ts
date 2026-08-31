@@ -3467,6 +3467,10 @@ export interface ApiOperations {
      */
     vendor?: AgentVendor;
     actorId: string;
+    /** Work, or a question to be answered on its owner's machine. */
+    kind?: "task" | "question";
+    /** The channel message a routed answer belongs under. Questions only. */
+    answerTo?: string;
     /**
      * What the request was asked inside, for the agent that will run it —
      * the thread a channel dispatch came from, so a follow-up like "now do
@@ -3709,6 +3713,8 @@ export interface ApiOperations {
     projectId: string;
     actorId: string;
     repositoryId?: string;
+    /** What this worker can execute. Absent means work alone. */
+    kinds?: readonly ("task" | "question")[];
   }): Promise<WorkAssignment | undefined>;
   leaseBundle?(leaseId: string): Promise<Buffer | undefined>;
   /**
@@ -3745,7 +3751,12 @@ export interface ApiOperations {
     plan: unknown;
     changeSet: unknown;
     detail?: string;
-  }): Promise<unknown>;
+    /** What the agent said, when the lease was on a question. */
+    answer?: string;
+    // Narrowed from `unknown` only as far as this route actually reads it:
+    // whether to post, and what. The body is still relayed whole to the
+    // worker, so an implementation may return more than this names.
+  }): Promise<{ accepted: boolean; answer?: string }>;
   /** Dashboard overlay workspaces; absent on deployments without them. */
   workspace?: WorkspaceOperations;
   /** Direct provider chat (Anthropic/OpenAI/Google); absent when unsupported. */
@@ -6727,6 +6738,15 @@ export class ApiGateway {
         max: 200,
         optional: true,
       });
+      // Read rather than trusted: an unknown value must not widen what a
+      // worker can be handed, and the store's own clause is written against
+      // this exact pair. Absent stays absent so the store applies its own
+      // default rather than this route inventing one.
+      const requested = Array.isArray(body["kinds"]) ? body["kinds"] : undefined;
+      const kinds = requested?.filter(
+        (kind): kind is "task" | "question" =>
+          kind === "task" || kind === "question",
+      );
       const leaseOperation = this.options.operations.leaseWork;
       if (leaseOperation === undefined) {
         throw new HttpError(
@@ -6740,6 +6760,7 @@ export class ApiGateway {
         projectId,
         actorId: principal.user.id,
         ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
       });
       if (assignment === undefined) {
         // 204 rather than an empty 200 so a polling worker can branch on the
@@ -7016,6 +7037,16 @@ export class ApiGateway {
           max: 2000,
           optional: true,
         });
+        // Its own field, and its own much larger bound. `detail` is a failure
+        // reason nobody reads outside a log; an answer is prose about to be
+        // posted in a channel. They cannot share a cap: `stringField` throws
+        // a 400 rather than clipping, and the worker turns any error inside a
+        // lease into a failed task — so an answer a few paragraphs long, sent
+        // as `detail`, would reach the room as "I could not answer that".
+        const answer = stringField(body["answer"], "answer", {
+          max: 8000,
+          optional: true,
+        });
         const resultOperation = this.options.operations.acceptWorkResult;
         if (resultOperation === undefined) {
           throw new HttpError(
@@ -7031,7 +7062,23 @@ export class ApiGateway {
           plan: body["plan"],
           changeSet: body["changeSet"],
           ...(detail === undefined ? {} : { detail }),
+          ...(answer === undefined ? {} : { answer }),
         });
+        // An accepted answer goes back where somebody asked. Fire-and-forget
+        // and after the response is decided: the worker's report has already
+        // succeeded by this point, and a channel write that fails must not
+        // turn a delivered answer into a retry.
+        if (accepted.accepted && accepted.answer !== undefined) {
+          void this.postRoutedAnswer(leaseId, accepted.answer).catch(
+            (error: unknown) => {
+              process.stderr.write(
+                `[channel] routed answer for ${leaseId} could not be posted: ${
+                  error instanceof Error ? error.message : String(error)
+                }\n`,
+              );
+            },
+          );
+        }
         this.sendJson(response, 200, accepted);
         return;
       }
@@ -11069,6 +11116,13 @@ export class ApiGateway {
       );
       const rosterOverrides =
         await this.options.store.listChannelAgentOverrides(repositoryId);
+      // Read once for the whole roster. See `liveWorkerOwners`.
+      const rosterProject = await this.options.store
+        .getProject(projectId)
+        .catch(() => undefined);
+      const liveOwners = await this.liveWorkerOwners(
+        rosterProject?.organizationId,
+      );
       const agents = connections.map((connection) => ({
         userId: connection.userId,
         // The display name only — never the email `publicUser` would also
@@ -11096,6 +11150,21 @@ export class ApiGateway {
         // see `CredentialVisibility`. Metadata, not a secret; safe for every
         // repository collaborator to see, same as the vendor name itself.
         visibility: connection.visibility,
+        /**
+         * Whether this agent's owner has a machine listening right now.
+         *
+         * Only meaningful where the deployment refuses to execute on its own
+         * behalf — hence `localAgentsOnly` beside it in the payload rather
+         * than the browser having to infer it. With the flag off the control
+         * plane answers regardless, and an offline owner is not a fact
+         * anybody needs.
+         *
+         * Advisory by construction: it is true as of this response, and the
+         * liveness window is three minutes wide. Treat it as what to draw and
+         * what to ask, never as permission — the server's own check at
+         * dispatch is the one that decides.
+         */
+        ownerOnline: liveOwners.has(connection.userId),
         connected: true as const,
       }));
       // Whether auditing is switched off here. Sent with the roster rather
@@ -11140,6 +11209,11 @@ export class ApiGateway {
         agents,
         people,
         auditorPaused: auditing?.paused === true,
+        // What makes `ownerOnline` worth drawing. Sent with the roster for
+        // the same reason `auditorPaused` is: the screen that reads one reads
+        // the other, and a second round trip to decide how to draw one dot is
+        // a second chance for the two to disagree.
+        localAgentsOnly: localAgentsOnly(),
       });
       return;
     }
@@ -13656,17 +13730,35 @@ export class ApiGateway {
     const project = await this.options.store
       .getProject(projectId)
       .catch(() => undefined);
+    return (await this.liveWorkerOwners(project?.organizationId)).has(ownerId);
+  }
+
+  /**
+   * Everyone in this organization with a machine currently listening.
+   *
+   * One query and a set, rather than a question asked per agent. The roster
+   * asks about every agent in a room at once, and the workers table is not a
+   * small one to scan repeatedly: `registerWorker` inserts a fresh row on
+   * every worker start with no upsert, and nothing anywhere deletes them, so
+   * it accumulates a dead row per desktop restart forever. Reading it once
+   * and answering from memory keeps that growth off the per-agent path.
+   */
+  private async liveWorkerOwners(
+    organizationId?: string,
+  ): Promise<Set<string>> {
     const workers = await this.options.store
       .listWorkers(
-        project?.organizationId === undefined
-          ? undefined
-          : { organizationId: project.organizationId },
+        organizationId === undefined ? undefined : { organizationId },
       )
       .catch((): [] => []);
     const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
-    return workers.some(
-      (worker) => worker.userId === ownerId && worker.lastSeenAt > cutoff,
-    );
+    const live = new Set<string>();
+    for (const worker of workers) {
+      if (worker.lastSeenAt > cutoff) {
+        live.add(worker.userId);
+      }
+    }
+    return live;
   }
 
   private async organizationFleet(organizationId: string): Promise<{
@@ -16013,6 +16105,45 @@ export class ApiGateway {
      */
     directive?: string,
   ): Promise<string | undefined> {
+    // Answered on its owner's machine, when there is one and when this
+    // deployment has said it will not answer here.
+    //
+    // Both halves are required. `localAgentsOnly()` alone would leave a
+    // question queued on a deployment that is perfectly willing to answer it,
+    // and `ownerHasLiveWorker` alone would change every existing install —
+    // including the local CLI, where the control plane *is* the executor and
+    // routing a question to a worker that is the same process is a long way
+    // round to the same answer.
+    //
+    // Filed and returned. Nothing is posted now: the acknowledgement for work
+    // is wrong here, because the thing being waited for is the answer itself
+    // and a second message in front of it is noise. If the machine never
+    // answers, the sweep says so.
+    if (
+      localAgentsOnly() &&
+      (await this.ownerHasLiveWorker(projectId, candidate.userId))
+    ) {
+      await this.options.operations.submitTask({
+        projectId,
+        repositoryId,
+        // The sender's words, and only those. Every directive the coding
+        // path prepends is about doing work; a question is not work, and the
+        // agent that reads this is going to be asked to answer it.
+        objective: question,
+        vendor: candidate.vendor,
+        // The mentioned agent's owner, never the sender — the same rule the
+        // coding dispatch follows, and here it is doubly load-bearing: it is
+        // also what pins the row to that owner's machine through
+        // `claimableBy`.
+        actorId: candidate.userId,
+        kind: "question",
+        ...(referencedMessageId === undefined
+          ? {}
+          : { answerTo: referencedMessageId }),
+      });
+      this.notifyWorkers(projectId);
+      return undefined;
+    }
     const answer = await this.askAgent(
       candidate,
       `${agentIdentity(candidate)}\n\n` +
@@ -20889,6 +21020,65 @@ export class ApiGateway {
    * the way every other agent-id lookup here does: an agent id is either
    * `owner:provider` or the bare provider.
    */
+  /**
+   * Puts a routed answer back where somebody asked for it.
+   *
+   * The reply arrives here from a worker's result rather than from a provider
+   * call this process made, so nothing about the asking is still in memory —
+   * the machine that answered may have taken minutes, and this process may
+   * not be the one that dispatched. Everything needed is on the row:
+   * `answerTo` is the message the thread hangs off, and the agent identity is
+   * resolved the same way every other late-arriving report resolves it.
+   *
+   * The same two filters an in-process answer passes, for the same reasons: a
+   * private routing directive must not reach the room, and the sender's own
+   * words handed back are not an answer however confidently worded. Running
+   * them here rather than trusting the worker keeps the rule in one place —
+   * a desktop is not where a content decision should be made.
+   */
+  private async postRoutedAnswer(
+    leaseId: string,
+    answer: string,
+  ): Promise<void> {
+    const lease = await this.options.store.getWorkLease(leaseId);
+    if (lease === undefined) {
+      return;
+    }
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: lease.repositoryId,
+        kind: "question",
+      })
+    ).find((candidate) => candidate.id === lease.taskId);
+    if (
+      task?.answerTo === undefined ||
+      task.projectId === undefined
+    ) {
+      return;
+    }
+    const agent = await this.watchedTaskAgent(task);
+    if (agent === undefined) {
+      return;
+    }
+    const parsed = parseAnswerTaskDirective(answer);
+    const said =
+      parsed.answer !== undefined &&
+      readsAsEchoOfRequest(task.objective, parsed.answer)
+        ? undefined
+        : parsed.answer;
+    if (said === undefined || said.trim().length === 0) {
+      return;
+    }
+    await this.appendChannelEntry({
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      kind: "agent",
+      authorId: `${agent.ownerId}:${agent.provider}`,
+      content: said,
+      referencedMessageId: task.answerTo,
+    });
+  }
+
   private async watchedTaskAgent(
     task: SubmittedTask,
   ): Promise<{ ownerId: string; provider: string } | undefined> {

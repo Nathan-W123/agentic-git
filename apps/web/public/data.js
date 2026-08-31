@@ -469,6 +469,15 @@ export const state = {
    * beside an auditor, which only appears once the roster is in.
    */
   auditorPaused: {},
+  /**
+   * Whether this deployment executes agents itself, from the channel roster.
+   *
+   * `false` — the default, and every deployment that has not moved execution
+   * onto people's machines — means an agent whose owner is offline is not a
+   * fact worth drawing or asking about: the control plane answers regardless.
+   * Only where this is true does `ownerOnline` mean anything on screen.
+   */
+  localAgentsOnly: false,
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
   /** Entitlement and seat count — see `ensureBilling`. */
@@ -3566,6 +3575,12 @@ export function channelAgentsFor(repositoryId) {
           // a concrete model and reasoning level.
           model: entry.model,
           effort: entry.effort,
+          // Carried here rather than on `others` above, because `others`
+          // covers teammates only: the viewer's own agents are built from
+          // `state.providers`, which has no idea a worker exists. This map is
+          // built from the whole roster and applied to every agent, so it is
+          // the one place a server fact reaches both.
+          ownerOnline: entry.ownerOnline,
         },
       ]),
   );
@@ -4410,7 +4425,30 @@ export function agentStatus(agent, repositoryId) {
   if (agentOutOfUsage(agent)) {
     return "exhausted";
   }
+  // Below working, because an agent that is visibly working is reachable by
+  // definition and a three-minute-old liveness read is the weaker fact. Above
+  // personal, because "there is nobody to run this" is what a reader needs
+  // first — whether they are *allowed* to mention it matters less than
+  // whether anything would happen if they did.
+  if (agentOwnerOffline(agent)) {
+    return "offline";
+  }
   return agent.visibility === "personal" ? "personal" : "idle";
+}
+
+/**
+ * Whether this agent has no machine to run on.
+ *
+ * Only ever true where the deployment has stopped executing agents itself:
+ * everywhere else the control plane answers, so an owner's laptop being shut
+ * is not something the room should be told about.
+ *
+ * `ownerOnline` absent is treated as online. An older control plane does not
+ * send the field, and a roster that has not loaded yet has no agents at all —
+ * in both cases the honest default is the one that changes nothing.
+ */
+export function agentOwnerOffline(agent) {
+  return state.localAgentsOnly === true && agent?.ownerOnline === false;
 }
 
 /** Progress for the task this agent has picked up, including the pre-task frame. */
@@ -4915,6 +4953,10 @@ async function loadChannelRoster(repositoryId) {
   // Sent with the roster because the switch it draws sits on the roster. See
   // the route's own comment for why it is not a separate request.
   state.auditorPaused[repositoryId] = response.auditorPaused === true;
+  // Deployment-wide rather than per repository, but it arrives on the roster
+  // because that is the response that also carries `ownerOnline`, and the two
+  // are read together or not at all.
+  state.localAgentsOnly = response.localAgentsOnly === true;
   return true;
 }
 
@@ -4989,6 +5031,49 @@ export async function ensureChannelRoster(repositoryId, rerender) {
     state.channelRosterLoadingId = undefined;
   }
   rerender();
+}
+
+/** When each repository's liveness was last re-read — see `refreshChannelLiveness`. */
+const livenessReadAt = new Map();
+
+/**
+ * How stale a liveness read may be before the composer asks again.
+ *
+ * Well under the server's own three-minute window, so a machine that went
+ * down is noticed inside it rather than at its edge, and far enough above a
+ * keystroke that focusing the composer repeatedly costs one request rather
+ * than one per focus.
+ */
+const LIVENESS_MAX_AGE_MS = 20_000;
+
+/**
+ * Re-reads who is listening, for a screen about to act on the answer.
+ *
+ * The roster is otherwise fetched once per repository per page load and never
+ * again, which is fine for a name and wrong for a liveness flag: the dot
+ * would be minutes stale, and the composer's "this agent is offline" prompt
+ * would be confidently wrong in both directions — offering to queue for a
+ * machine that came back, and staying silent about one that just left.
+ *
+ * Deliberately not a timer. Liveness only matters at the two moments somebody
+ * is about to rely on it, so it is re-read when the composer is focused and
+ * not once while nobody is typing.
+ */
+export async function refreshChannelLiveness(repositoryId, rerender) {
+  if (!repositoryId || state.localAgentsOnly !== true) {
+    return;
+  }
+  const last = livenessReadAt.get(repositoryId) ?? 0;
+  if (Date.now() - last < LIVENESS_MAX_AGE_MS) {
+    return;
+  }
+  // Stamped before the request, not after: two focuses in the same tick must
+  // produce one fetch, and a request that fails should still hold the others
+  // off rather than letting every focus retry a server that is down.
+  livenessReadAt.set(repositoryId, Date.now());
+  if (await loadChannelRoster(repositoryId)) {
+    rerender?.();
+  }
 }
 
 /**
@@ -5141,6 +5226,63 @@ export async function refreshChannelMessages(repositoryId) {
  * through the store directly — the HTTP route never lets a signed-in person
  * author a message as somebody else's agent.
  */
+/**
+ * Whether this text @mentions an agent by that exact name.
+ *
+ * A mirror of `textMentionsName` in the gateway, and the mirror is deliberate
+ * rather than lazy: the browser has to know what the server will do with a
+ * message *before* sending it — to draw the mention badge, and now to ask
+ * whether the agent being addressed is even switched on. A round trip to
+ * learn what the client can already work out would be a round trip in front
+ * of every keystroke-ended message.
+ *
+ * The two must stay byte-identical. A name that matches here and not there
+ * shows a badge for a mention that never dispatches; the other way round
+ * dispatches one nothing warned about.
+ */
+export function mentionsAgentName(text, name) {
+  const escaped = String(name ?? "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  if (escaped === "") {
+    return false;
+  }
+  return new RegExp(
+    `@${escaped}(?=$|[\\s,.:;!?()\\[\\]{}])`,
+    "iu",
+  ).test(String(text ?? ""));
+}
+
+/**
+ * The agents this draft addresses whose owner has no machine listening.
+ *
+ * Answered from state the browser already holds, so the composer can ask
+ * before it sends rather than after the room has already seen the message.
+ * Empty on every deployment that has not moved execution onto people's
+ * machines — see `agentOwnerOffline`.
+ */
+export function offlineAgentsMentionedIn(repositoryId, text) {
+  return channelAgentsFor(repositoryId).filter(
+    (agent) => agentOwnerOffline(agent) && mentionsAgentName(text, agent.name),
+  );
+}
+
+/**
+ * Agents in this room that could take the work instead, right now.
+ *
+ * Excludes the offline ones by definition, and excludes a personal agent
+ * belonging to somebody else, because offering it would produce a refusal
+ * rather than an answer — the gateway declines a stranger's mention of a
+ * personal agent, and a picker that offers one is a picker that lies.
+ */
+export function onlineAgentsIn(repositoryId, exclude = []) {
+  const skip = new Set(exclude.map((agent) => agent.id));
+  return channelAgentsFor(repositoryId).filter(
+    (agent) =>
+      !skip.has(agent.id) &&
+      !agentOwnerOffline(agent) &&
+      (agent.visibility !== "personal" || agent.mine === true),
+  );
+}
+
 export function sendChannelMessage(
   repositoryId,
   text,
@@ -5179,10 +5321,7 @@ export function sendChannelMessage(
       .filter(
         (participant) =>
           (everyone && participant.kind !== "agent") ||
-          new RegExp(
-            `@${String(participant.name ?? "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?=$|[\\s,.:;!?()\\[\\]{}])`,
-            "iu",
-          ).test(trimmed),
+          mentionsAgentName(trimmed, participant.name),
       )
       .map((participant) => ({
         kind: participant.kind === "agent" ? "agent" : "user",
