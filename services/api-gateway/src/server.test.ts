@@ -20003,6 +20003,89 @@ test("a stored credential alone makes an agent exist", async (t) => {
 });
 
 /**
+ * The deployment does not answer on its own account.
+ *
+ * A question whose agent has no live machine used to be answered here, and
+ * with no credential of the owner's the vendor CLI ran on the container's
+ * ambient login — the operator's account, for a full agent run, posted under
+ * the agent's own name and indistinguishable from the real thing. Rare while a
+ * vendor sign-in was the price of an agent; the default once it was not.
+ */
+test("with local agents only, a question is refused rather than billed here", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "no-house-account");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // An agent with a name and no credential — the ordinary local agent — and
+  // no worker anywhere, so nothing of its owner's can answer.
+  await owner.request("/api/v1/chat/providers/anthropic/agent", {
+    method: "POST",
+    body: {},
+  });
+  await owner.request(`${base}/agents/anthropic/membership`, { method: "POST" });
+  const roster = (await owner.request(`${base}/agents`)).data.agents as Array<{
+    provider: string;
+    name: string;
+  }>;
+  const mention = roster.find((agent) => agent.provider === "anthropic")?.name;
+  assert.ok(mention !== undefined, JSON.stringify(roster));
+
+  const before = runtime.chatPrompts.length;
+  const asked = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@${mention} what does the coordinator do?` },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+
+  // The load-bearing assertion: no model was run here at all.
+  assert.equal(
+    runtime.chatPrompts.length,
+    before,
+    "answering with no credential of the owner's spends the deployment's own",
+  );
+
+  // And the person who asked is told why, with the two things that fix it.
+  const messages = (await owner.request(`${base}/messages`)).data
+    .messages as Array<{ kind: string; content: string }>;
+  const reply = messages.filter((message) => message.kind === "agent").at(-1);
+  assert.ok(reply !== undefined, JSON.stringify(messages));
+  assert.match(String(reply.content), /machine/u);
+  assert.match(String(reply.content), /Settings → Agents/u);
+});
+
+/**
+ * The other side of the same gate: an owner who *has* linked an account is
+ * spending their own, so answering here is exactly what they asked for.
+ */
+test("with local agents only, a linked account is still answered here", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "linked-account");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(account.user.id, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await owner.request(`${base}/agents/anthropic/membership`, { method: "POST" });
+
+  const before = runtime.chatPrompts.length;
+  const asked = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Athena what does the coordinator do?" },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+  assert.equal(
+    runtime.chatPrompts.length > before,
+    true,
+    "a credential of one's own is the thing that makes answering here fine",
+  );
+});
+
+/**
  * An agent can be removed, including the kind that has no credential to
  * remove.
  *

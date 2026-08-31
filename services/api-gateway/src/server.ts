@@ -14035,6 +14035,36 @@ export class ApiGateway {
    * exactly like a task in progress, and the only symptom is that it never
    * finishes.
    */
+  /**
+   * Whether this agent's owner has a vendor credential of their own stored
+   * here, as opposed to nothing — in which case a completion runs on the
+   * deployment's own ambient login and the operator is the one billed.
+   *
+   * `listConnectionsFor` enumerates the credential store, so a provider
+   * present in its answer is a provider that account holds a secret for. The
+   * durable agent record is deliberately not consulted: an agent exists
+   * without a credential, which is the entire point of it, and the question
+   * here is only ever "whose account would this spend".
+   *
+   * False when the deployment cannot answer at all. A deployment with no
+   * provider chat has no per-user credentials to find, and guessing true
+   * would reopen exactly the hole this closes.
+   */
+  private async ownerHasOwnCredential(
+    candidate: ChannelMentionCandidate,
+  ): Promise<boolean> {
+    const chatOperations = this.options.operations.chatProviders;
+    if (chatOperations?.connectionsFor === undefined) {
+      return false;
+    }
+    const connections = await chatOperations
+      .connectionsFor([candidate.userId])
+      .catch(() => ({}) as Record<string, ReadonlyArray<{ provider: string }>>);
+    return (connections[candidate.userId] ?? []).some(
+      (connection) => connection.provider === candidate.provider,
+    );
+  }
+
   private async ownerHasLiveWorker(
     projectId: string,
     ownerId: string,
@@ -16534,6 +16564,42 @@ export class ApiGateway {
           : { answerTo: referencedMessageId }),
       });
       this.notifyWorkers(projectId);
+      return undefined;
+    }
+    // Nothing here answers on the house account.
+    //
+    // Falling through to `askAgent` with no credential of the owner's does
+    // exactly that: `withCompletionEnv` runs the vendor CLI with no credential
+    // environment, which lands on the container's own ambient login. The
+    // operator pays — for a full agent run with a repository checkout, posted
+    // under the agent's own name, indistinguishable in the channel from the
+    // same agent answering on its owner's machine. Invisible by construction,
+    // which is what makes it worth refusing rather than metering.
+    //
+    // It was a rare case while a vendor sign-in was the price of having an
+    // agent, because then every agent had a credential. It became the common
+    // one when that stopped being true: "no credential" is now the ordinary
+    // state of a perfectly healthy agent that runs locally. A deployment that
+    // has declared it will not spend agents on its own behalf cannot also be
+    // the thing that pays for this.
+    //
+    // Said rather than dropped. The person asked a question and is owed an
+    // answer about why there isn't one — and this is the rare failure whose
+    // remedy is entirely in the reader's hands.
+    if (localAgentsOnly() && !(await this.ownerHasOwnCredential(candidate))) {
+      await this.appendChannelEntry({
+        projectId,
+        repositoryId,
+        kind: "agent",
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content:
+          `I answer on ${candidate.userName}'s machine, and it is not ` +
+          "listening right now. Start the Kumi app there and ask me again — " +
+          "or, to have me answer here when the machine is away, " +
+          `${candidate.userName} can link a ${candidate.vendor} account from ` +
+          "Settings → Agents.",
+        ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
+      });
       return undefined;
     }
     const answer = await this.askAgent(
