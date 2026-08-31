@@ -40,6 +40,7 @@ import {
   uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
+  type TouchedFile,
   type ApprovalKind,
   type AuditEvent,
   type AuditEventType,
@@ -66,6 +67,7 @@ import {
   isBlanketClaim,
   planAdmissionApproved,
   planAdmissionPartial,
+  rankTouchedFiles,
 } from "@coord/shared-types";
 import {
   filesOutsideClaim,
@@ -1099,6 +1101,45 @@ function scopeStartingPoints(estimate: ScopeEstimate): string {
   ].join("\n");
 }
 
+/** How many recently-worked files an arriving agent is shown. */
+const RECENT_TOUCH_POINTS = 8;
+
+/**
+ * Where this repository has been working lately, as a line for the plan prompt.
+ *
+ * The estimate above it is lexical: it matches the objective's words against
+ * the index, and it goes quiet whenever the words people use are not the words
+ * in the paths — "the promo box rejects valid codes" shares nothing with
+ * `promoDiscount`. That silence is the common case for a request phrased the
+ * way a person would phrase it, and an agent given nothing invents paths:
+ * watched live, one planned `src/components/search-bar.tsx` in a repository
+ * whose search bar is in `app.js`, and a plan naming files that do not exist
+ * cannot be proven disjoint from anything, so it waits behind whatever shares
+ * its objective.
+ *
+ * This is the other half, and it fails in the opposite direction — it knows
+ * nothing about the task and everything about the repository. Offered in the
+ * same register as the estimate: a place to start reading, never a scope.
+ */
+export function recentTouchPoints(files: readonly TouchedFile[]): string {
+  const named = files.slice(0, RECENT_TOUCH_POINTS);
+  if (named.length === 0) {
+    return "";
+  }
+  return [
+    "Files this repository has been working in lately, most active first. " +
+      "Evidence about the repository, not about this task: read them to " +
+      "learn where things live, and plan whatever the work actually needs " +
+      "whether or not it is listed.",
+    ...named.map(
+      (file) =>
+        `- ${file.path} (${String(file.changes)} recent change${
+          file.changes === 1 ? "" : "s"
+        })`,
+    ),
+  ].join("\n");
+}
+
 const MAX_CONSECUTIVE_DEFERRED_WAVES = 240;
 
 /**
@@ -2055,11 +2096,32 @@ export class Coordinator {
               : scopeStartingPoints(
                   estimateScope(entry.task.objective, index),
                 );
+          // Read once per task, bounded, and only where a store is present:
+          // this is a nicety, and a planning round must not fail for want of
+          // one. A repository with no landed work yet returns nothing, which
+          // is the correct answer for its first task.
+          const store = this.store;
+          const recentlyTouched: TouchedFile[] =
+            store === undefined
+              ? []
+              : await store
+                  .recentlyTouchedFiles({
+                    repositoryId: input.repository.id,
+                    // Narrows to this task's channel where that channel has
+                    // enough history to be worth narrowing to, and falls back
+                    // to the repository where it has not.
+                    ...(entry.conversationId === undefined
+                      ? {}
+                      : { conversationId: entry.conversationId }),
+                  })
+                  .then((samples) => rankTouchedFiles(samples, Date.now()))
+                  .catch(() => []);
           const priorContext = [
             entry.task.context?.trim() ?? "",
             turnStart.note,
             leaseNote,
             likelyFiles,
+            recentTouchPoints(recentlyTouched),
             seeded,
           ]
             .filter((part) => part !== "")

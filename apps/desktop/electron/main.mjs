@@ -41,6 +41,7 @@ import {
   resolveServer,
   verifyServer,
 } from "../dist/server-address.js";
+import { setStayAwake, startWorker, stopWorker } from "./worker.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -49,6 +50,19 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // copy sends people to for a newer one is baked into every copy, so there has
 // to be exactly one place it can be wrong.
 const manifest = createRequire(import.meta.url)("../package.json");
+
+// How the deployment tells this app apart from a browser on the same machine,
+// so it can send desktop browsers to the installer and let the app through.
+// Appended rather than replacing the User-Agent: the string still has to say
+// Chromium, because everything that sniffs it downstream — the dashboard
+// included — is entitled to know what it is actually talking to.
+//
+// A signpost and not a lock. Anybody can copy this marker out of their own
+// install; what protects the hosting bill is the control plane refusing to
+// execute agents, not this.
+app.userAgentFallback = `${app.userAgentFallback} KumiDesktop/${
+  manifest.version ?? "0"
+}`;
 const releasesUrl =
   typeof manifest.kumi?.releasesRepo === "string"
     ? `https://github.com/${manifest.kumi.releasesRepo}/releases`
@@ -64,6 +78,10 @@ const defaultServer = manifest.kumi?.defaultServer;
 let session;
 /** Whether a dashboard has been shown, which is what makes closing one a quit. */
 let running = false;
+/** Mirrors the stored `keepAwake` choice so the menu can show it. */
+let awakeForWork = false;
+/** What the menu says about the worker. Replaced as soon as one reports. */
+let workerStatus = "Starting agents on this machine…";
 
 /** Where the server address and the token live between launches. */
 function settingsPath() {
@@ -80,6 +98,15 @@ async function readSettings() {
       // Written by "Change Server" and cleared by choosing one. Without it, a
       // build with a baked-in address would fall straight back to it.
       askedToChange: saved.askedToChange === true,
+      // Off unless it was turned on. Running agents spends this person's own
+      // model quota on their own hardware, so it is volunteered rather than
+      // assumed by an app they installed to get a window.
+      // Staying awake is still a choice. Running agents is not: this app
+      // exists to be the machine that runs them, and the deployment it talks
+      // to may well refuse to run anything itself — an off switch there would
+      // only ever mean "nothing happens anywhere", which is not a state worth
+      // offering somebody a checkbox for.
+      keepAwake: saved.keepAwake === true,
       // Decrypted only here, and only on the machine that sealed it: OS-backed
       // keys, so copying the file to another laptop yields nothing readable.
       token:
@@ -88,11 +115,24 @@ async function readSettings() {
           : "",
     };
   } catch {
-    return { server: "", token: "", askedToChange: false };
+    return {
+      server: "",
+      token: "",
+      askedToChange: false,
+      keepAwake: false,
+    };
   }
 }
 
-async function writeSettings(server, token, askedToChange = false) {
+// `keepAwake` is threaded through every caller rather than defaulted, because
+// the two writes on the startup path would otherwise clear the preference on
+// each launch — the app would forget the choice every time it was opened.
+async function writeSettings(
+  server,
+  token,
+  askedToChange = false,
+  keepAwake = false,
+) {
   await mkdir(path.dirname(settingsPath()), { recursive: true });
   // An empty token is written as no token at all rather than as a sealed empty
   // string, so signing out leaves a file that plainly has nothing in it.
@@ -106,6 +146,7 @@ async function writeSettings(server, token, askedToChange = false) {
       server,
       ...(sealed === undefined ? {} : { token: sealed }),
       ...(askedToChange ? { askedToChange: true } : {}),
+      ...(keepAwake ? { keepAwake: true } : {}),
     }),
     "utf8",
   );
@@ -166,6 +207,22 @@ async function askForServer() {
 }
 
 /** What this machine will be called in the person's list of app tokens. */
+/**
+ * Whether this is a URL a browser should be asked to open.
+ *
+ * Parsed rather than string-matched, so `HTTPS:`, a scheme with padding, or
+ * anything that merely begins with "http" is judged by what it resolves to.
+ * A string that is not a URL at all is not one either.
+ */
+function opensInABrowser(candidate) {
+  try {
+    const { protocol } = new URL(candidate);
+    return protocol === "https:" || protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 function deviceName() {
   const host = os.hostname().replace(/\.local$/u, "").trim();
   return `Kumi on ${host === "" ? "this machine" : host}`;
@@ -184,8 +241,8 @@ function relaunch() {
  * settings file from. Both of these forget exactly enough and start over.
  */
 async function signOutAndRestart() {
-  const { server } = await readSettings();
-  await writeSettings(server, "");
+  const { server, keepAwake } = await readSettings();
+  await writeSettings(server, "", false, keepAwake);
   relaunch();
 }
 
@@ -214,6 +271,32 @@ function buildMenu() {
     { label: "Sign Out and Restart", click: () => void signOutAndRestart() },
     { label: "Change Server…", click: () => void changeServerAndRestart() },
   );
+  // Where a person volunteers this machine. Checkable rather than a dialog,
+  // because the honest state is binary and they should be able to see which
+  // one they are in without opening anything.
+  const agents = [
+    {
+      // Shown, not offered. Whether agents run here is not a setting — but
+      // whether they *are* running is a fact somebody needs, because the
+      // reasons it can fail (no CLI signed in on this machine, an expired
+      // credential) are all things only they can fix.
+      label: workerStatus,
+      enabled: false,
+    },
+    { type: "separator" },
+    {
+      // Named for what it actually does. The platform call underneath is
+      // `SetThreadExecutionState`, and Microsoft is explicit that it "cannot
+      // be used to prevent the user from putting the computer to sleep" — a
+      // closed lid, the power button and Start > Sleep all go straight past
+      // it. It stops the machine idling out, and nothing more, so the label
+      // says idle rather than implying a promise it cannot keep.
+      label: "Don't Sleep While Idle (plugged in, lid open)",
+      type: "checkbox",
+      checked: awakeForWork,
+      click: (item) => void toggleKeepAwake(item.checked),
+    },
+  ];
   return Menu.buildFromTemplate([
     ...(process.platform === "darwin"
       ? [{ role: "appMenu" }]
@@ -222,9 +305,77 @@ function buildMenu() {
     // without these there is no copy, no paste, and no way to reload it.
     { role: "editMenu" },
     { role: "viewMenu" },
+    { label: "Agents", submenu: agents },
     { role: "windowMenu" },
     { role: "help", submenu: help },
   ]);
+}
+
+/**
+ * Turns this machine into a worker, or stops it being one.
+ *
+ * The answer is written down before the worker is started, so a crash on the
+ * way up is still remembered as "yes" and retried next launch rather than
+ * silently reverting. Anything that stops it from running says so in a dialog
+ * — the failures are all actionable (no CLI installed, no organization, a
+ * credential that has been revoked) and none of them are visible anywhere else
+ * on a machine with no terminal open.
+ */
+/**
+ * Offers this machine as one that stays up, or stops offering.
+ *
+ * Kept apart from the worker toggle because the two are different promises:
+ * one is what the machine will do with its time, the other is what it will
+ * give up to be reachable. Somebody may reasonably want to run agents all day
+ * and still have their laptop sleep at night.
+ */
+async function toggleKeepAwake(wanted) {
+  awakeForWork = wanted === true;
+  // Said once, when the expectation is being formed. Somebody turning this on
+  // is picturing a laptop working overnight, and the lid is exactly how they
+  // would try it — better to be told now than to close it and find nothing
+  // ran. The remedy is a system setting, and deliberately theirs to make: an
+  // app that quietly rewrote what a person's lid does would be overstepping.
+  if (awakeForWork) {
+    await dialog.showMessageBox({
+      type: "info",
+      message: "This machine will stay awake while it is plugged in.",
+      detail:
+        "Closing the lid will still put it to sleep — no application can " +
+        "override that. To keep working with the lid closed, set your " +
+        "system's lid-close action to “Do nothing”.\n\nOn battery it " +
+        "sleeps as usual, and agents wait until it is plugged in again.",
+      buttons: ["OK"],
+    });
+  }
+  const saved = await readSettings();
+  await writeSettings(
+    saved.server,
+    saved.token,
+    saved.askedToChange,
+    awakeForWork,
+  );
+  setStayAwake(awakeForWork);
+  Menu.setApplicationMenu(buildMenu());
+}
+
+/**
+ * Keeps the menu's status line honest about what the worker is doing.
+ *
+ * Reported here rather than raised as a dialog, which is the difference
+ * between a fact and an interruption. Starting is now unconditional, so a
+ * machine with no agent CLI signed in would otherwise be told off by a modal
+ * every single launch — for a condition it may well be fine with, on the
+ * laptop it only uses to read threads from.
+ */
+function noteWorkerState(event) {
+  workerStatus =
+    event.state === "running"
+      ? "Running agents on this machine"
+      : event.state === "restarting"
+        ? "Reconnecting…"
+        : `Not running — ${event.detail}`;
+  Menu.setApplicationMenu(buildMenu());
 }
 
 async function openDashboard() {
@@ -244,8 +395,22 @@ async function openDashboard() {
   });
   // Anything the dashboard wants to open elsewhere opens in the real browser
   // rather than a second chromeless window nobody can read the address of.
+  //
+  // Only http(s) reaches the operating system, and the reason is not
+  // hypothetical. The sign-in flow claims a tab during the click that starts
+  // it — `window.open("", "_blank")`, because a tab opened after the await
+  // would be a blocked popup — and an empty URL arrives here as
+  // `about:blank`. Forwarding that made Windows ask which application opens
+  // `about:` links, on top of a sign-in the deny had already cancelled.
+  //
+  // The general form matters more than that one case: this handler takes a
+  // URL from a *remote* document and asks the OS to open it, and the OS
+  // launches whatever is registered for the scheme. An allowlist keeps that
+  // to the two schemes a browser is the right answer for.
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    if (opensInABrowser(url)) {
+      void shell.openExternal(url);
+    }
     return { action: "deny" };
   });
   running = true;
@@ -297,7 +462,7 @@ async function start() {
       return;
     }
     token = "";
-    await writeSettings(server, token);
+    await writeSettings(server, token, false, saved.keepAwake);
   }
 
   if (token === "") {
@@ -318,11 +483,19 @@ async function start() {
       app.quit();
       return;
     }
-    await writeSettings(server, token);
+    await writeSettings(server, token, false, saved.keepAwake);
   }
 
   session = { server, token };
   Menu.setApplicationMenu(buildMenu());
+  // Started before the window rather than after it: a machine that was
+  // volunteered should be answering for work as soon as it is running, not
+  // once somebody looks at it.
+  awakeForWork = saved.keepAwake === true;
+  setStayAwake(awakeForWork);
+  // Unconditional. The app is the machine that runs the agents; there is no
+  // arrangement in which it has signed in and should be sitting idle.
+  void startWorker(here, session, noteWorkerState);
   await openDashboard();
 }
 
@@ -336,6 +509,12 @@ ipcMain.on("kumi:token", (event) => {
 app.whenReady().then(start, (error) => {
   dialog.showErrorBox("Kumi could not start", describe(error));
   app.quit();
+});
+
+// A planned shutdown hands the lease back, so whatever this machine was
+// holding is picked up again immediately instead of waiting out its expiry.
+app.on("before-quit", () => {
+  stopWorker();
 });
 
 app.on("window-all-closed", () => {

@@ -492,6 +492,102 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: only landed patches count as recently touched`, async () => {
+    // The hint an arriving agent is given points at where work goes, so it is
+    // read from integrated changesets alone. A changeset that never landed is
+    // often one that touched the wrong thing, and recommending it would teach
+    // the next agent the previous one's mistake.
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      // A second changeset in the same run that never integrates.
+      await store.saveChangeSet(runId, {
+        ...CHANGESET,
+        id: "cs_never_landed",
+        taskId: CHANGESET.taskId,
+        patches: [
+          {
+            path: "src/abandoned.js",
+            status: "modified",
+            patch: CHANGESET.patches[0]?.patch ?? "",
+          },
+        ],
+      });
+
+      const touched = await store.recentlyTouchedFiles({
+        repositoryId: REPOSITORY.id,
+      });
+      const paths = touched.map((sample) => sample.path);
+      assert.ok(
+        paths.includes("src/counter.js"),
+        `the landed patch is missing: ${JSON.stringify(paths)}`,
+      );
+      assert.ok(
+        !paths.includes("src/abandoned.js"),
+        `a changeset that never integrated was recommended: ${JSON.stringify(paths)}`,
+      );
+      // Every sample carries when it landed, which is what the ranking needs.
+      for (const sample of touched) {
+        assert.ok(
+          !Number.isNaN(Date.parse(sample.at)),
+          `sample has no usable timestamp: ${JSON.stringify(sample)}`,
+        );
+      }
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a thin channel falls back to the whole repository`, async () => {
+    // The narrowing turns itself on when there is something to narrow. Below
+    // the floor a channel is not a sharper view of the work, it is a smaller
+    // sample of it, and eight files drawn from one changeset is a worse
+    // starting point than eight drawn from the repository's whole history.
+    //
+    // Early on every channel is below the floor, so this is the path that runs
+    // on day one — and it must return the repository's work rather than
+    // nothing, or the hint is silent exactly when an agent knows least.
+    const { store, cleanup } = await backend.open();
+    try {
+      await populate(store);
+      const scoped = await store.recentlyTouchedFiles({
+        repositoryId: REPOSITORY.id,
+        // No such conversation, which is the same shape as a channel with no
+        // landed work: nothing resolves, so nothing narrows.
+        conversationId: "msg_does_not_exist",
+      });
+      const wide = await store.recentlyTouchedFiles({
+        repositoryId: REPOSITORY.id,
+      });
+      assert.deepEqual(
+        scoped.map((sample) => sample.path),
+        wide.map((sample) => sample.path),
+        "an unresolvable conversation narrowed the list instead of falling back",
+      );
+      assert.ok(wide.length > 0, "the fixture landed nothing to recommend");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: another repository's work is not recommended`, async () => {
+    // The rail is per repository and so is this: a hint that leaked paths from
+    // a repository the agent cannot see would be unverifiable by definition.
+    const { store, cleanup } = await backend.open();
+    try {
+      await populate(store);
+      const touched = await store.recentlyTouchedFiles({
+        repositoryId: "repo_does_not_exist",
+      });
+      assert.deepEqual(touched, []);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: saving a changeset twice is idempotent`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -656,6 +752,235 @@ for (const backend of backends) {
       assert.equal(thirdLease?.task.id, third.id);
     } finally {
       await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a claim is bounded by whose account can run it`, async () => {
+    // A remote worker executes under the vendor logins on its own machine, so
+    // it has exactly one identity to offer. Claiming another user's task there
+    // produces the right patch on the wrong subscription, under the wrong
+    // name — the failure is silent, which is why the bound belongs in the
+    // store rather than in each caller.
+    const { store, cleanup } = await backend.open();
+    try {
+      const priya = await store.createUser({
+        email: "priya@example.invalid",
+        displayName: "Priya",
+        passwordDigest: "unused",
+      });
+      const nathan = await store.createUser({
+        email: "nathan@example.invalid",
+        displayName: "Nathan",
+        passwordDigest: "unused",
+      });
+      const nathansDesktop = await store.registerWorker({
+        userId: nathan.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "nathan-desktop",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+
+      const hers = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "priya's work",
+        agentId: "codex",
+        validationCommands: [],
+        submittedBy: priya.id,
+      });
+      const claim = {
+        workerId: nathansDesktop.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      };
+
+      // Nathan's machine cannot take Priya's task, even though it is the only
+      // machine listening and the queue is otherwise empty. Waiting is the
+      // correct outcome: her desktop will come back.
+      assert.equal(
+        await store.leaseNextTask({ ...claim, claimableBy: nathan.id }),
+        undefined,
+      );
+
+      // An unowned task has no account to get wrong, so anyone may run it.
+      const unowned = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "nobody's work",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const tookUnowned = await store.leaseNextTask({
+        ...claim,
+        claimableBy: nathan.id,
+      });
+      assert.equal(tookUnowned?.task.id, unowned.id);
+      assert.ok(tookUnowned !== undefined);
+      // Settled rather than released: releasing requeues it, and it would then
+      // still be sitting there as the only claimable row below.
+      await store.completeSubmittedTask(unowned.id, "integrated");
+      await store.finishWorkLease(
+        tookUnowned.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+
+      // The control plane can run as anyone, so it is told to stand back
+      // instead: with Priya reserved, her task stays queued...
+      assert.equal(
+        await store.leaseNextTask({
+          ...claim,
+          excludeSubmittedBy: [priya.id],
+        }),
+        undefined,
+      );
+
+      // ...and is picked up the moment the reservation lapses, which is what
+      // stops a machine that never comes back from stranding the work.
+      const afterLapse = await store.leaseNextTask(claim);
+      assert.equal(afterLapse?.task.id, hers.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a question is invisible to everything that runs work`, async () => {
+    // The whole safety argument for putting questions in the same queue.
+    //
+    // A question row carries a person's sentence where an objective would be,
+    // and every existing reader of this table feeds a coding path — the
+    // control plane's drain, the crash sweep, the queue view. If any of them
+    // picked one up it would be planned, admitted and integrated as though
+    // the question were work to do. So `kind` fails closed everywhere: a
+    // caller sees a question only by naming it.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+
+      const work = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "fix the retry loop",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const question = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "what does the retry loop do?",
+        agentId: "codex",
+        validationCommands: [],
+        kind: "question",
+        answerTo: "msg_root",
+      });
+
+      // Round-tripped, not merely accepted.
+      assert.equal(work.kind, "task");
+      assert.equal(question.kind, "question");
+      assert.equal(question.answerTo, "msg_root");
+
+      // The default listing is work only, and that default is what every
+      // existing caller gets without being changed.
+      const listed = await store.listSubmittedTasks({
+        repositoryId: REPOSITORY.id,
+      });
+      assert.deepEqual(
+        listed.map((task) => task.id),
+        [work.id],
+      );
+      assert.deepEqual(
+        (
+          await store.listSubmittedTasks({
+            repositoryId: REPOSITORY.id,
+            kind: "question",
+          })
+        ).map((task) => task.id),
+        [question.id],
+      );
+      assert.equal(
+        (
+          await store.listSubmittedTasks({
+            repositoryId: REPOSITORY.id,
+            kind: "any",
+          })
+        ).length,
+        2,
+      );
+
+      // The in-process claim path — the one that would execute it.
+      assert.deepEqual(
+        (await store.claimSubmittedTasks(REPOSITORY.id, DEFAULT_PROJECT_ID)).map(
+          (task) => task.id,
+        ),
+        [work.id],
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a worker that asks for questions is served the question first`, async () => {
+    // Ordering, and the reason for it: a question has somebody watching a
+    // channel for it, and nothing to integrate when it comes back. Behind
+    // three coding tasks it would wait for all three.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const owner = await store.createUser({
+        email: "asker@example.invalid",
+        displayName: "Asker",
+        passwordDigest: "unused",
+      });
+      const worker = await store.registerWorker({
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "desktop",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+
+      // Submitted first, so age alone would put it in front.
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "fix the retry loop",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const question = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "what does the retry loop do?",
+        agentId: "codex",
+        validationCommands: [],
+        kind: "question",
+      });
+
+      const claim = {
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      };
+
+      // A worker that has not been taught about questions cannot be handed
+      // one, whatever the ordering says.
+      const defaulted = await store.leaseNextTask(claim);
+      assert.equal(defaulted?.task.kind, "task");
+      await store.completeSubmittedTask(defaulted!.task.id, "integrated");
+      await store.finishWorkLease(
+        defaulted!.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+
+      const asked = await store.leaseNextTask({
+        ...claim,
+        kinds: ["task", "question"],
+      });
+      assert.equal(asked?.task.id, question.id);
+    } finally {
       await cleanup();
     }
   });

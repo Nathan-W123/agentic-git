@@ -17,6 +17,7 @@ import {
   type PlanAdmissionInput,
 } from "./plan-admission.js";
 import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
+import { recentTouchPoints as recentTouchPointsForTest } from "./coordinator.js";
 
 /**
  * Arbitration of a single plan against the work already running — the answer a
@@ -2352,4 +2353,26 @@ test("a refusal says why the split was not offered", () => {
     admission.explanation.includes("src/pricing.js"),
     `the refusal stopped naming the contested file: ${admission.explanation}`,
   );
+});
+
+test("recent work is offered to a planning agent as evidence, not as scope", () => {
+  // The renderer's contract, which is the half that decides whether the hint
+  // helps or harms. An agent that reads this as its scope plans the repository
+  // instead of the task, so the wording has to carry three things: that it is
+  // about the repository rather than this task, that it is somewhere to start
+  // reading, and that whatever the work needs is in scope whether listed or not.
+  const line = recentTouchPointsForTest([
+    { path: "src/checkout.js", changes: 4, lastTouchedAt: "2026-03-10T00:00:00.000Z", score: 3.2 },
+    { path: "src/order-pricing.js", changes: 1, lastTouchedAt: "2026-03-09T00:00:00.000Z", score: 0.8 },
+  ]);
+
+  assert.match(line, /not about this task/u);
+  assert.match(line, /whether or not it is listed/u);
+  assert.match(line, /- src\/checkout\.js \(4 recent changes\)/u);
+  // Singular reads as English, because a hint that says "1 recent changes"
+  // reads as generated and gets trusted less than it should be.
+  assert.match(line, /- src\/order-pricing\.js \(1 recent change\)/u);
+  // And nothing at all when there is nothing to say, so a repository's first
+  // task is not handed an empty heading.
+  assert.equal(recentTouchPointsForTest([]), "");
 });

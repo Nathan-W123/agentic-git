@@ -1265,6 +1265,11 @@ export type AuditEventType =
   | "ownership_granted"
   | "task_started"
   | "agent_progress"
+  // A lease settled by the clock rather than by its worker. Not a failure —
+  // the task returns to the queue — but the one ending that used to be
+  // written nowhere, so a run whose machine went away left its thread saying
+  // it was still being worked on, indefinitely.
+  | "lease_expired"
   /** An agent stopped on a choice that was not its to make. */
   | "question_asked"
   | "question_answered"
@@ -2724,4 +2729,142 @@ export function projectBudgets(
   }
   assertProjectPolicy(policy);
   return policy.budgets ?? {};
+}
+
+/* ------------------------------------------------- recently touched ---- */
+
+/** One repository-relative path, and how recent and how frequent its edits are. */
+export interface TouchedFile {
+  path: string;
+  /** Landed changesets in the sample that patched it. */
+  changes: number;
+  /** When it last landed, ISO 8601. */
+  lastTouchedAt: string;
+  /** Recency-weighted weight of evidence. Higher is a likelier next touch. */
+  score: number;
+}
+
+/** One landed patch, as the stores read them back. */
+export interface TouchedFileSample {
+  path: string;
+  /** The landing time of the changeset that carried it, ISO 8601. */
+  at: string;
+}
+
+/**
+ * How long a landed edit stays worth half of what it was worth when it landed.
+ *
+ * A week, because that is roughly the span over which a repository's active
+ * area moves. Shorter and a Monday forgets the previous Friday; longer and a
+ * finished project keeps recommending itself after the team has left it.
+ */
+/**
+ * Landed patches a channel needs before its own history beats the repository's.
+ *
+ * Below this a channel is not a narrower view of the work, it is a smaller
+ * sample of it — and eight files drawn from three changesets is a worse
+ * starting point than eight drawn from three hundred. Early on every channel
+ * is below it, which is the point: the narrowing turns itself on when there is
+ * something to narrow.
+ */
+export const CHANNEL_TOUCH_FLOOR = 24;
+
+const TOUCH_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The files a repository has been working in lately, likeliest first.
+ *
+ * Frequency alone recommends whatever is edited constantly — a barrel file, a
+ * lockfile, the one module every feature passes through — which is exactly
+ * what nobody needs pointing out. Recency alone recommends whatever happened
+ * to land last, including a one-off. Each edit is therefore worth one point
+ * decayed by its age, so a file edited twice yesterday outranks one edited
+ * five times last month, and both outrank the barrel file nobody has touched
+ * this week.
+ *
+ * Pure, and given `now` rather than reading a clock, so the same sample always
+ * ranks the same way and a test can place its own edits in time.
+ */
+export function rankTouchedFiles(
+  samples: readonly TouchedFileSample[],
+  now: number,
+  limit = 12,
+): TouchedFile[] {
+  const byPath = new Map<string, { changes: number; last: string; score: number }>();
+  for (const sample of samples) {
+    const at = Date.parse(sample.at);
+    // An unparseable timestamp is evidence the edit happened and no evidence
+    // of when. Counted, but at the floor, so a malformed row cannot outrank a
+    // real one.
+    const age = Number.isNaN(at) ? Number.POSITIVE_INFINITY : Math.max(0, now - at);
+    const weight = age === Number.POSITIVE_INFINITY
+      ? 0
+      : 2 ** (-age / TOUCH_HALF_LIFE_MS);
+    const path = normalizeRepositoryPath(sample.path);
+    if (path === "") {
+      continue;
+    }
+    const seen = byPath.get(path);
+    if (seen === undefined) {
+      byPath.set(path, { changes: 1, last: sample.at, score: weight });
+      continue;
+    }
+    seen.changes += 1;
+    seen.score += weight;
+    if (Number.isNaN(Date.parse(seen.last)) || at > Date.parse(seen.last)) {
+      seen.last = sample.at;
+    }
+  }
+  return [...byPath.entries()]
+    .map(([path, seen]) => ({
+      path,
+      changes: seen.changes,
+      lastTouchedAt: seen.last,
+      score: seen.score,
+    }))
+    // Ties broken by path so the order is total: two files with identical
+    // evidence must not swap places between calls.
+    .sort((left, right) =>
+      right.score - left.score || left.path.localeCompare(right.path))
+    .slice(0, Math.max(0, limit));
+}
+
+/**
+ * Whether this deployment refuses to execute agents on its own behalf.
+ *
+ * The control plane can run an agent in process, and on a hosted deployment
+ * that is the expensive half of the bill: an agent holds its memory for as
+ * long as it runs and every prompt it sends leaves as egress. Both belong to
+ * whoever's machine the work is for, and a desktop worker puts them there —
+ * but only if the control plane stops taking the work first.
+ *
+ * It lives here, in the one package every executor already depends on,
+ * because there is more than one of them and a flag that guards a single
+ * executor is not a fence. Two things consult it:
+ *
+ *  - the queue, in `leaseQueuedWork`, so a task waits for its owner's machine
+ *    rather than running here; and
+ *  - the gateway's turns that nobody asked for — the opening intent line on
+ *    every dispatch, the classifier on every unaddressed message, the auditor
+ *    on every canonical promotion.
+ *
+ * Questions are routed rather than refused, which is the difference between
+ * moving spend and deleting a feature. An `@mention` that reads as a question
+ * is filed as `kind: "question"` and leased by its owner's machine, and only
+ * when that machine is listening — with no live worker for that owner it is
+ * answered here, exactly as it was before any of this. Refusing was tried and
+ * reverted: it does not move the work to a desktop, it removes the ability to
+ * ask an agent anything.
+ *
+ * Off by default, so a self-hosted deployment and the local `coord` CLI are
+ * unchanged: a single-machine install where the control plane *is* the
+ * executor stays exactly as it was. Turning it on is a hosting decision,
+ * which is why it is an environment variable rather than a code path.
+ *
+ * Only the exact "1" arms it. A flag that stops a fleet executing should be
+ * turned on by the documented value or not at all, rather than by anything
+ * that merely looks affirmative.
+ */
+export function localAgentsOnly(): boolean {
+  return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
 }

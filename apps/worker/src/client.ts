@@ -197,9 +197,15 @@ export class WorkerClient {
         // sockets at the same moment when the server stalls, and retrying in
         // lockstep would reproduce the stall that closed them.
         const backoff = this.connectionBackoffMs * 2 ** (attempt - 1);
+        // Deliberately not `unref`'d. This timer is the only thing that will
+        // make progress: the request has failed, the retry is what resumes
+        // it, and there may be a lease already claimed on the other side.
+        // Unreffing it told Node the process was free to exit here, so a
+        // worker with nothing else pending would drop the retry on the floor
+        // and settle nothing — which is also why every test after the first
+        // one to reach this line was cancelled rather than run.
         await new Promise((resolve) => {
-          const timer = setTimeout(resolve, backoff + Math.random() * backoff);
-          timer.unref?.();
+          setTimeout(resolve, backoff + Math.random() * backoff);
         });
       }
     }
@@ -223,11 +229,14 @@ export class WorkerClient {
     }
 
     const controller = new AbortController();
+    // Cleared in the `finally` below, so it holds the process open only for
+    // as long as the request it is bounding. Unreffing it instead meant the
+    // deadline could be skipped entirely when nothing else kept the loop
+    // alive — which is the one case a deadline exists for.
     const timer = setTimeout(
       () => controller.abort(),
       init.timeoutMs ?? this.timeoutMs,
     );
-    timer.unref?.();
     try {
       const response = await this.fetchImpl(`${this.base}${path}`, {
         method: init.method ?? "GET",
@@ -335,6 +344,13 @@ export class WorkerClient {
     workerId: string,
     projectId: string,
     repositoryId?: string,
+    /**
+     * What this worker can execute. Absent means work alone, which is what
+     * every build before questions existed meant — and is the whole of the
+     * compatibility story, since an older control plane simply ignores a
+     * field it does not read while a newer one defaults to the same thing.
+     */
+    kinds?: readonly string[],
   ): Promise<WorkAssignment | undefined> {
     const { status, json } = await this.request("/api/v1/workers/leases", {
       method: "POST",
@@ -342,6 +358,7 @@ export class WorkerClient {
         workerId,
         projectId,
         ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(kinds === undefined ? {} : { kinds }),
       },
     });
     return status === 204 ? undefined : (json as WorkAssignment);
@@ -470,6 +487,16 @@ export class WorkerClient {
           plan: unknown;
           changeSet: unknown;
           detail?: string;
+          /**
+           * What the agent said, when the lease was on a question.
+           *
+           * Its own field rather than `detail`, which is a short failure
+           * reason the control plane caps at 2000 characters and *throws* on
+           * rather than clipping — and the worker turns any error inside a
+           * lease into a failed task, so a long answer sent as `detail` would
+           * reach the room as a failure.
+           */
+          answer?: string;
         }
       | { status: "failed"; detail: string },
     tokenUsage: readonly AgentTokenUsage[] = [],
@@ -494,5 +521,25 @@ export class WorkerClient {
     await this.request(`/api/v1/workers/leases/${leaseId}/release`, {
       method: "POST",
     });
+  }
+
+  /**
+   * The agent's own words, forwarded while the work is still happening.
+   *
+   * Never awaited by the run and never allowed to fail it: this is the line
+   * that makes a thread look alive, and a thread looking dead is better than
+   * a task dying because a courtesy could not be delivered. A control plane
+   * too old to know the route answers 404, which lands here as a swallowed
+   * error rather than as a broken worker.
+   */
+  public async progress(leaseId: string, message: string): Promise<void> {
+    try {
+      await this.request(`/api/v1/workers/leases/${leaseId}/progress`, {
+        method: "POST",
+        body: { message },
+      });
+    } catch {
+      // Deliberately silent. See above.
+    }
   }
 }

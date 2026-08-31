@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/audit-chain.test.js dist/sqlite-store.test.js dist/store-contract.test.js"
+    "test": "node --test dist/concurrent-lease.test.js dist/audit-chain.test.js dist/sqlite-store.test.js dist/store-contract.test.js"
   },
   "dependencies": {
     "@coord/shared-types": "*",

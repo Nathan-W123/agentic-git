@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   createId,
+  CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
@@ -11,6 +12,7 @@ import {
   type AuditEvent,
   type CanonicalVersion,
   type ChangeSet,
+  type TouchedFileSample,
   type CommandResult,
   type ConflictAssessment,
   type ConflictDisposition,
@@ -98,6 +100,7 @@ import type {
   StoredWorkspace,
   SubmitTaskInput,
   SubmittedTask,
+  TaskKind,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
   RecordTokenUsageInput,
@@ -888,6 +891,32 @@ export class SqliteCoordinationStore implements CoordinationStore {
         clauses.push("project_id = ?");
         values.push(input.projectId);
       }
+      // A NULL owner matches either way: nobody's account is at stake, so
+      // there is nothing to reserve and nothing to get wrong.
+      // Fail closed, and this is the clause the whole feature rests on. See
+      // the Postgres branch: the control plane's drain takes whatever is
+      // oldest with no taskId, so filtering the listings does not stop a
+      // question reaching the coding path. Absent means `task`.
+      const kinds = input.kinds ?? ["task"];
+      clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+      values.push(...kinds);
+      if (input.claimableBy !== undefined) {
+        clauses.push("(submitted_by IS NULL OR submitted_by = ?)");
+        values.push(input.claimableBy);
+      }
+      if (
+        input.excludeSubmittedBy !== undefined &&
+        input.excludeSubmittedBy.length > 0
+      ) {
+        // SQLite has no array parameter, so the list is expanded. The caller
+        // supplies one entry per user with a live worker, which is bounded by
+        // the size of the organization's fleet.
+        const placeholders = input.excludeSubmittedBy.map(() => "?").join(", ");
+        clauses.push(
+          `(submitted_by IS NULL OR submitted_by NOT IN (${placeholders}))`,
+        );
+        values.push(...input.excludeSubmittedBy);
+      }
       // The parallelism cap bounds concurrent leases per repository. It is a
       // throughput valve, not the safety mechanism: exact-base integration
       // and stale-requeue at acceptance hold at any setting.
@@ -901,7 +930,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       const row = this.db
         .prepare(
           `SELECT * FROM submitted_tasks WHERE ${clauses.join(" AND ")}
-           ORDER BY submitted_at, rowid LIMIT 1`,
+           ORDER BY CASE kind WHEN 'question' THEN 0 ELSE 1 END,
+                    submitted_at, rowid LIMIT 1`,
         )
         .get(...values) as Row | undefined;
       if (row === undefined) {
@@ -2010,6 +2040,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
     }
     const task: SubmittedTask = {
       id: createId("task"),
+      kind: input.kind ?? "task",
+      answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId,
       objective: input.objective,
@@ -2067,8 +2099,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
           `INSERT INTO submitted_tasks
              (id, repository_id, project_id, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
-              context, conversation_id, model, effort, after_task_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              context, conversation_id, model, effort, after_task_id,
+              kind, answer_to)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           task.id,
@@ -2085,6 +2118,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
           task.model ?? null,
           task.effort ?? null,
           task.afterTaskId ?? null,
+          task.kind,
+          task.answerTo ?? null,
         );
       this.commit(owned);
     } catch (error) {
@@ -2111,6 +2146,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
       clauses.push("status = ?");
       values.push(filter.status);
     }
+    // Defaults to work, so every caller that predates questions keeps seeing
+    // exactly what it saw. See the Postgres branch.
+    if ((filter.kind ?? "task") !== "any") {
+      clauses.push("kind = ?");
+      values.push(filter.kind ?? "task");
+    }
 
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     const rows = this.db
@@ -2131,6 +2172,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare(
           `SELECT * FROM submitted_tasks
            WHERE repository_id = ?${projectClause} AND status = 'submitted'
+             AND kind = 'task'
              AND NOT EXISTS (
                SELECT 1 FROM submitted_tasks predecessor
                WHERE predecessor.id = submitted_tasks.after_task_id
@@ -2361,6 +2403,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
   private toSubmittedTask(row: Row): SubmittedTask {
     return {
       id: text(row, "id"),
+      // Defaulted rather than required: the column arrived in migration 52 and
+      // every row written before it is work, which is what the column default
+      // says too. Read defensively so a store whose migration has not run yet
+      // still returns a valid task rather than one with an undefined kind.
+      kind: (optionalText(row, "kind") ?? "task") as TaskKind,
+      answerTo: optionalText(row, "answer_to"),
       repositoryId: text(row, "repository_id"),
       projectId: optionalText(row, "project_id"),
       objective: text(row, "objective"),
@@ -2924,6 +2972,65 @@ export class SqliteCoordinationStore implements CoordinationStore {
       resolvedAt: optionalText(row, "resolved_at"),
       resolvedBy: optionalText(row, "resolved_by"),
     };
+  }
+
+  public async recentlyTouchedFiles(input: {
+    repositoryId: string;
+    conversationId?: string;
+    limit?: number;
+  }): Promise<TouchedFileSample[]> {
+    const limit = input.limit ?? 400;
+    const channelId =
+      input.conversationId === undefined
+        ? undefined
+        : (
+            this.db
+              .prepare(`SELECT channel_id FROM channel_messages WHERE id = ?`)
+              .get(input.conversationId) as { channel_id?: string } | undefined
+          )?.channel_id;
+    if (channelId !== undefined) {
+      const scoped = this.db
+        .prepare(
+          `SELECT file_patches.path AS path, changesets.created_at AS at
+             FROM file_patches
+             JOIN changesets ON changesets.id = file_patches.changeset_id
+             JOIN runs ON runs.id = changesets.run_id
+             JOIN integrations ON integrations.changeset_id = changesets.id
+              AND integrations.status = 'integrated'
+             JOIN submitted_tasks ON submitted_tasks.id = changesets.task_id
+             JOIN channel_messages
+               ON channel_messages.id = submitted_tasks.conversation_id
+            WHERE runs.repository_id = ? AND channel_messages.channel_id = ?
+            ORDER BY changesets.created_at DESC, file_patches.ordinal ASC
+            LIMIT ?`,
+        )
+        .all(input.repositoryId, channelId, Math.max(0, limit)) as {
+        path: string;
+        at: string;
+      }[];
+      if (scoped.length >= CHANNEL_TOUCH_FLOOR) {
+        return scoped.map((row) => ({ path: row.path, at: row.at }));
+      }
+    }
+    // Joined through `integrations` rather than reading every changeset: a
+    // changeset that never landed is often one that touched the wrong thing.
+    const rows = this.db
+      .prepare(
+        `SELECT file_patches.path AS path, changesets.created_at AS at
+           FROM file_patches
+           JOIN changesets ON changesets.id = file_patches.changeset_id
+           JOIN runs ON runs.id = changesets.run_id
+           JOIN integrations ON integrations.changeset_id = changesets.id
+            AND integrations.status = 'integrated'
+          WHERE runs.repository_id = ?
+          ORDER BY changesets.created_at DESC, file_patches.ordinal ASC
+          LIMIT ?`,
+      )
+      .all(input.repositoryId, Math.max(0, limit)) as {
+      path: string;
+      at: string;
+    }[];
+    return rows.map((row) => ({ path: row.path, at: row.at }));
   }
 
   public async saveIntegration(

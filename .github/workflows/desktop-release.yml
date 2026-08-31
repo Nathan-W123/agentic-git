@@ -88,6 +88,21 @@ jobs:
       - name: Build and test the app
         run: npx turbo run build test --filter=@coord/desktop
 
+      # The worker the app supervises, flattened to one file it can ship. Its
+      # own build has to run first: this job only built @coord/desktop, and the
+      # bundler refuses rather than bundling a stale `dist`.
+      #
+      # esbuild is installed here, --no-save, for the reason Electron is below:
+      # it is a packaging tool and nothing in a manifest the control plane's
+      # Docker build would read. Installed rather than fetched by the script,
+      # because reaching it through `npx` meant spawning `npx.cmd` on Windows —
+      # which Node will not do without a shell — and the whole job died there.
+      - name: Bundle the worker
+        run: |
+          npx turbo run build --filter=@coord/worker...
+          npm install --no-save --no-audit --no-fund esbuild@^0.25.0
+          node scripts/bundle-worker.mjs
+
       # Electron and the packager are installed here and nowhere else. Putting
       # either in a manifest would drop a hundred-megabyte browser download
       # into the control plane's Docker build, which has no use for it, so they
@@ -131,7 +146,14 @@ jobs:
           set -euo pipefail
           missing=0
           checked=0
-          for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
+          # -h, and it is load-bearing. Given more than one file, grep prefixes
+          # every match with the filename it came from, so each entry arrived as
+          # `apps/web/public/download.js:Kumi-mac-arm64.dmg` — which matches no
+          # platform pattern, leaving `checked` at zero and this step announcing
+          # that the page offers nothing for any platform at all. It passed when
+          # the links lived in a single file and started failing silently the
+          # day a second one was added.
+          for file in $(grep -hoE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
               apps/web/public/download.html apps/web/public/download.js | sort -u); do
             case "$file" in
               "Kumi-$KEY-"*) ;;
@@ -187,7 +209,14 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for file in $(grep -oE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
+          # -h, and it is load-bearing. Given more than one file, grep prefixes
+          # every match with the filename it came from, so each entry arrived as
+          # `apps/web/public/download.js:Kumi-mac-arm64.dmg` — which matches no
+          # platform pattern, leaving `checked` at zero and this step announcing
+          # that the page offers nothing for any platform at all. It passed when
+          # the links lived in a single file and started failing silently the
+          # day a second one was added.
+          for file in $(grep -hoE 'Kumi-[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(dmg|zip|exe|AppImage|deb)' \
               apps/web/public/download.html apps/web/public/download.js | sort -u); do
             if [ -f "installers/$file" ]; then
               echo "  ok       $file"

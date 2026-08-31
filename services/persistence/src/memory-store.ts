@@ -1,5 +1,6 @@
 import {
   createId,
+  CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
@@ -7,6 +8,7 @@ import {
   type AuditEvent,
   type CanonicalVersion,
   type ChangeSet,
+  type TouchedFileSample,
   type ConflictAssessment,
   type CoordinatorDecision,
   type IntegrationResult,
@@ -734,13 +736,30 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           (input.repositoryId === undefined ||
             task.repositoryId === input.repositoryId) &&
           (input.projectId === undefined || task.projectId === input.projectId) &&
+          // Fail closed. See the Postgres branch: absent means `task`, so a
+          // caller written before questions existed cannot be handed one.
+          (input.kinds ?? ["task"]).includes(task.kind) &&
+          // A NULL owner matches either way: nobody's account is at stake, so
+          // there is nothing to reserve and nothing to get wrong.
+          (input.claimableBy === undefined ||
+            task.submittedBy === undefined ||
+            task.submittedBy === input.claimableBy) &&
+          (input.excludeSubmittedBy === undefined ||
+            task.submittedBy === undefined ||
+            !input.excludeSubmittedBy.includes(task.submittedBy)) &&
           (task.afterTaskId === undefined ||
             !["submitted", "claimed", "planned", "paused"].includes(
               this.submitted.get(task.afterTaskId)?.status ?? "integrated",
             )) &&
           activeLeases(task.repositoryId) < parallelism,
       )
-      .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt))[0];
+      // A question ahead of work of the same age: somebody is watching a
+      // channel for it, and it has no plan to admit or changeset to integrate.
+      .sort(
+        (left, right) =>
+          Number(left.kind !== "question") - Number(right.kind !== "question") ||
+          left.submittedAt.localeCompare(right.submittedAt),
+      )[0];
     if (candidate === undefined) {
       return undefined;
     }
@@ -1459,6 +1478,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         : undefined);
     const task: SubmittedTask = {
       id: createId("task"),
+      kind: input.kind ?? "task",
+      answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId: input.projectId ?? DEFAULT_PROJECT_ID,
       objective: input.objective,
@@ -1491,7 +1512,14 @@ export class InMemoryCoordinationStore implements CoordinationStore {
             task.repositoryId === filter.repositoryId) &&
           (filter.projectId === undefined ||
             task.projectId === filter.projectId) &&
-          (filter.status === undefined || task.status === filter.status),
+          (filter.status === undefined || task.status === filter.status) &&
+          // Defaults to work, so every caller that predates questions keeps seeing
+          // exactly what it saw. The readers of this list feed coding paths — the
+          // drain, the crash sweep, the queue view — and a question in any of them
+          // would be treated as an objective. `any` is for the two lease-bookkeeping
+          // callers that legitimately need both.
+          ((filter.kind ?? "task") === "any" ||
+            task.kind === (filter.kind ?? "task")),
       )
       .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt))
       .map((task) => copy(task));
@@ -1961,6 +1989,90 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       comment.resolvedBy = resolvedBy;
     }
     return copy(comment);
+  }
+
+  public async recentlyTouchedFiles(input: {
+    repositoryId: string;
+    conversationId?: string;
+    limit?: number;
+  }): Promise<TouchedFileSample[]> {
+    const limit = input.limit ?? 400;
+    const channelId =
+      input.conversationId === undefined
+        ? undefined
+        : this.channelMessages.get(input.conversationId)?.channelId;
+    // Which conversations belong to that channel, so a changeset can be
+    // attributed to it through the task that produced it.
+    const ofChannel =
+      channelId === undefined
+        ? undefined
+        : new Set(
+            [...this.submitted.values()]
+              .filter((task) => {
+                const conversation = task.conversationId;
+                return (
+                  conversation !== undefined &&
+                  this.channelMessages.get(conversation)?.channelId === channelId
+                );
+              })
+              .map((task) => task.id),
+          );
+    const gather = (only: ReadonlySet<string> | undefined): TouchedFileSample[] => {
+      const found: TouchedFileSample[] = [];
+      for (const state of this.runs.values()) {
+        if (state.run.repositoryId !== input.repositoryId) {
+          continue;
+        }
+        const landed = new Set(
+          state.integrations
+            .filter((entry) => entry.status === "integrated")
+            .map((entry) => entry.changeSetId),
+        );
+        for (const changeSet of state.changeSets) {
+          if (!landed.has(changeSet.id)) {
+            continue;
+          }
+          if (only !== undefined && !only.has(changeSet.taskId)) {
+            continue;
+          }
+          for (const patch of changeSet.patches) {
+            found.push({ path: patch.path, at: changeSet.createdAt });
+          }
+        }
+      }
+      return found.sort((left, right) => right.at.localeCompare(left.at));
+    };
+    if (ofChannel !== undefined) {
+      const scoped = gather(ofChannel);
+      if (scoped.length >= CHANNEL_TOUCH_FLOOR) {
+        return scoped.slice(0, Math.max(0, limit));
+      }
+    }
+    const samples: TouchedFileSample[] = [];
+    for (const state of this.runs.values()) {
+      if (state.run.repositoryId !== input.repositoryId) {
+        continue;
+      }
+      // Only what landed. A changeset that never integrated is often one that
+      // touched the wrong thing, and this points at where work goes rather
+      // than where it went wrong.
+      const landed = new Set(
+        state.integrations
+          .filter((entry) => entry.status === "integrated")
+          .map((entry) => entry.changeSetId),
+      );
+      for (const changeSet of state.changeSets) {
+        if (!landed.has(changeSet.id)) {
+          continue;
+        }
+        for (const patch of changeSet.patches) {
+          samples.push({ path: patch.path, at: changeSet.createdAt });
+        }
+      }
+    }
+    return samples
+      .sort((left, right) => right.at.localeCompare(left.at))
+      .slice(0, Math.max(0, limit));
   }
 
   public async saveIntegration(

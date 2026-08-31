@@ -17,6 +17,7 @@ import {
   assertAgentPlan,
   createId,
   planAdmissionApproved,
+  planAdmissionPartial,
   type AgentPlan,
   type CanonicalVersion,
   type CoordinatorDecision,
@@ -147,6 +148,33 @@ async function admitRollback(
     baseVersion: baseVersion.sequence,
     active,
   });
+  // A partial admission is a refusal here, whatever its status says.
+  //
+  // `approved_with_constraints` is the status a partial carries, so
+  // `planAdmissionApproved` alone reads it as a green light. That is right for
+  // a worker: it can execute the granted subset and leave the rest to a
+  // follow-up. It is wrong for a rollback, because restoring part of a tree is
+  // not a rollback — it is a new state that never existed, assembled from an
+  // old revision and whatever the deferred files happen to hold right now.
+  //
+  // And the deferred files are precisely the contested ones: a deferral means
+  // some agent holds an admitted plan over that path this moment, which is the
+  // collision this gate exists to refuse. They are recorded in
+  // `deferredResources` rather than `blockedBy`, so a check that reads only
+  // `blockedBy` sees an empty list and waves the rollback through.
+  if (planAdmissionPartial(admission)) {
+    return {
+      approved: false,
+      blockedBy: [
+        ...new Set(
+          (admission.deferredResources ?? []).flatMap(
+            (resource) => resource.heldBy,
+          ),
+        ),
+      ],
+      explanation: admission.explanation,
+    };
+  }
   return {
     approved: planAdmissionApproved(admission),
     blockedBy: [...admission.blockedBy],

@@ -1,3 +1,4 @@
+import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -339,6 +340,13 @@ export interface CodexAdapterOptions {
   windowsSandbox?: CodexWindowsSandbox;
   /** Native platform override used by embedders and cross-platform tests. */
   platform?: NodeJS.Platform;
+  /**
+   * The machine's architecture, which selects Codex's own target triple.
+   *
+   * A parameter for the reason `platform` is: the Windows binary layout can
+   * then be exercised from a test that is not running on Windows.
+   */
+  architecture?: string;
   /**
    * Sandbox Codex runs the edit phase under. Defaults to `workspace-write`,
    * which confines writes to the task workspace.
@@ -1036,6 +1044,144 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Codex's own target triples, from the launcher in `@openai/codex/bin/codex.js`. */
+const CODEX_WINDOWS_TARGETS: Partial<Record<string, string>> = {
+  x64: "x86_64-pc-windows-msvc",
+  arm64: "aarch64-pc-windows-msvc",
+};
+
+/** The `PATH` a child would get, however the caller happened to spell it. */
+function environmentPath(
+  environment: NodeJS.ProcessEnv | undefined,
+): string | undefined {
+  if (environment === undefined) {
+    return process.env["PATH"];
+  }
+  const entry = Object.entries(environment).find(
+    ([name]) => name.toLowerCase() === "path",
+  );
+  return entry?.[1] ?? process.env["PATH"];
+}
+
+/**
+ * The vendored `codex.exe` under a `node_modules` root, wherever npm put it.
+ *
+ * Not a fixed list of paths, because the layout is npm's to choose and it has
+ * more than one legal answer: the platform package is an optional dependency,
+ * so it may sit beside the main package or nested inside it, and its name
+ * carries an architecture this code should not have to enumerate. Guessing a
+ * path is what produced the failure this exists to fix — a shim resolved,
+ * a native binary missed, and a run that died on the cmd.exe quoting guard
+ * instead.
+ *
+ * So the directory is read and every `@openai/codex*` package under it is
+ * tried, one level of nesting included. Bounded and cheap: two directory
+ * listings and a handful of `existsSync` calls, once per session.
+ */
+function codexVendorBinary(
+  root: string,
+  triple: string,
+): string | undefined {
+  const scope = path.join(root, "@openai");
+  let entries: string[];
+  try {
+    entries = readdirSync(scope);
+  } catch {
+    return undefined;
+  }
+  const packages = entries.filter(
+    (entry) => entry === "codex" || entry.startsWith("codex-"),
+  );
+  for (const name of packages) {
+    const base = path.join(scope, name);
+    const candidate = path.join(base, "vendor", triple, "bin", "codex.exe");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    // npm may nest the platform package inside the one that depends on it
+    // rather than hoisting it beside it. One level is enough: that is the
+    // only shape npm produces here.
+    const nested = codexVendorBinary(path.join(base, "node_modules"), triple);
+    if (nested !== undefined) {
+      return nested;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The native Codex binary, rather than the npm shim that launches it.
+ *
+ * This is the same move {@link resolveClaudeCommand} makes in the prompt-CLI
+ * adapter, for the same reason and one worse. `codex` on Windows is a `.cmd`
+ * shim, so running it means running `cmd.exe`, and `process-runner` refuses to
+ * put a double quote on a `cmd.exe` command line rather than attempt shell
+ * escaping. Every Windows Codex invocation carries `-c windows.sandbox="…"`,
+ * which contains one. So the shim is not merely slower here — it cannot be
+ * used at all, and a task that got past `ENOENT` would fail on the quoting
+ * guard instead.
+ *
+ * The path comes from Codex's own launcher rather than from guesswork:
+ * `@openai/codex/bin/codex.js` resolves `@openai/codex-win32-<arch>`, then runs
+ * `vendor/<target triple>/bin/codex.exe` beneath it, falling back to a `vendor`
+ * directory inside the main package. Both are tried here, from the shim's own
+ * directory and from its parent, which is where a `node_modules/.bin` shim
+ * sits relative to its packages.
+ *
+ * A name that is already `codex.exe`, a non-Codex command, an unknown
+ * architecture, or a machine where none of this exists is returned untouched:
+ * failing as the caller asked is better than failing as a path nobody wrote.
+ */
+export function resolveCodexCommand(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+  architecture: string = process.arch,
+  pathValue = process.env["PATH"],
+): string {
+  if (platform !== "win32") {
+    return command;
+  }
+  const name = path.win32.basename(command).toLowerCase();
+  if (name !== "codex" && name !== "codex.cmd") {
+    return command;
+  }
+  const triple = CODEX_WINDOWS_TARGETS[architecture];
+  if (triple === undefined) {
+    return command;
+  }
+
+  const hasDirectory = command.includes("/") || command.includes("\\");
+  const wrapperNames = name === "codex.cmd" ? ["codex.cmd"] : ["codex.cmd", "codex"];
+  const wrappers = hasDirectory
+    ? [path.resolve(command)]
+    : (pathValue ?? "")
+        .split(path.delimiter)
+        .map((entry) => entry.trim().replace(/^"(.*)"$/u, "$1"))
+        .filter((entry) => entry.length > 0)
+        .flatMap((entry) => wrapperNames.map((each) => path.resolve(entry, each)));
+
+  for (const wrapper of wrappers) {
+    if (!existsSync(wrapper)) {
+      continue;
+    }
+    const directory = path.dirname(wrapper);
+    // Where a `node_modules` tree could start, relative to the shim: its own
+    // directory for a global install, and its parent when the shim is a
+    // `node_modules/.bin` entry.
+    const roots = [
+      path.join(directory, "node_modules"),
+      path.dirname(directory),
+    ];
+    for (const root of roots) {
+      const found = codexVendorBinary(root, triple);
+      if (found !== undefined) {
+        return found;
+      }
+    }
+  }
+  return command;
+}
+
 /**
  * Direct driver for the supported non-interactive Codex CLI surface.
  *
@@ -1057,7 +1203,14 @@ export class CodexAdapter implements AgentAdapter {
   private readonly runner: CodexProcessRunner;
 
   public constructor(private readonly options: CodexAdapterOptions) {
-    this.command = options.command?.trim() || "codex";
+    // Ahead of `command`, which is resolved against it.
+    this.platform = options.platform ?? process.platform;
+    this.command = resolveCodexCommand(
+      options.command?.trim() || "codex",
+      this.platform,
+      options.architecture ?? process.arch,
+      environmentPath(options.env),
+    );
     this.additionalArgs = safeAdditionalArgs(options.args ?? []);
     this.effort = safeEffort(options.effort);
     this.planningTimeoutMs = positiveInteger(
@@ -1077,7 +1230,6 @@ export class CodexAdapter implements AgentAdapter {
     );
     this.executionSandbox = options.executionSandbox ?? "workspace-write";
     this.windowsSandbox = options.windowsSandbox ?? "elevated";
-    this.platform = options.platform ?? process.platform;
     this.runner = options.runner ?? runProcess;
   }
 
@@ -2064,6 +2216,13 @@ export class CodexAdapter implements AgentAdapter {
     timeoutMs: number,
     phase: CodexPhase,
   ): Promise<string> {
+    // See the prompt-cli adapter's guard: an abandoned declaration ask leaves a
+    // vendor process running past the call that wanted it, and throwing here
+    // failed a task that had done nothing wrong. Wait for it — it ends on its
+    // own timeout — and throw only for a caller that is genuinely concurrent.
+    if (record.active !== undefined) {
+      await record.active.catch(() => undefined);
+    }
     if (record.active !== undefined) {
       throw new Error(`Session ${record.session.id} already has an active Codex process`);
     }

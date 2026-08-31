@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -32,6 +33,7 @@ import { IntegrationService } from "@coord/integration-service";
 import type {
   CoordinationStore,
   SubmittedTask,
+  TaskKind,
   WorkLease,
 } from "@coord/persistence";
 import {
@@ -90,6 +92,20 @@ export function legacyAdmissionLoop(): boolean {
   return process.env["COORD_LEGACY_ADMISSION_LOOP"] === "1";
 }
 
+/**
+ * Whether this deployment refuses to execute agents itself.
+ *
+ * Re-exported rather than defined here, and that move is the point. The queue
+ * is not the only executor: the gateway answers questions and runs its own
+ * ceremonial turns through a provider, on a path this file never sees. When
+ * the predicate lived here, only one of the two could reach it, and the
+ * deployment that set the variable stopped draining the queue while still
+ * running an agent for every mention. It now lives in `@coord/shared-types`,
+ * which both executors already depend on, so there is one answer rather than
+ * one answer and one blind spot.
+ */
+export { localAgentsOnly } from "@coord/shared-types";
+
 /** A worker holds a task for this long before it must heartbeat again. */
 export const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 60 * 1000;
@@ -104,7 +120,61 @@ const HEARTBEAT_INTERVAL_MS = 60 * 1000;
  * throughput without touching correctness. Operators tune it with
  * COORD_REPOSITORY_PARALLELISM; workers cannot choose it for themselves.
  */
-export const DEFAULT_REPOSITORY_PARALLELISM = 4;
+/**
+ * The fewest concurrent leases a repository is given, whatever the host.
+ *
+ * A floor rather than a ceiling, which is a deliberate reversal. Four was the
+ * most that had been observed completing — the one live run at five livelocked
+ * — but that run predates the three defects fixed in the two commits before
+ * this one, and all three scale with N: a result that both deferred scope and
+ * salvaged a conflict silently lost the salvaged half, an abandoned
+ * declaration ask failed the task it asked, and concurrent credential
+ * rotations overwrote each other. The evidence against five was evidence
+ * against five *with those bugs in it*.
+ *
+ * Below four the system also loses the thing it exists for. Partial admission
+ * is computed only against other executing plans, so at parallelism one it can
+ * never fire and chunk admission is dead code.
+ */
+const MINIMUM_REPOSITORY_PARALLELISM = 4;
+
+/** What one agent is priced at where this repository states a price. */
+const AGENT_MEMORY_BYTES = 2 * 1024 ** 3;
+/** The sidecar a sandboxed agent carries beside it. */
+const AGENT_SIDECAR_BYTES = 0.25 * 1024 ** 3;
+/** Left for the control plane, which on a single box is a CPU consumer too. */
+const HOST_RESERVE_BYTES = 2 * 1024 ** 3;
+
+/**
+ * How many concurrent leases this host can actually hold, derived rather than
+ * guessed.
+ *
+ * Memory is the term that binds. An agent is a vendor CLI waiting on model
+ * round trips far more than it is a CPU consumer, so cores are a poor divisor
+ * — a formula built on them lands at one agent on a four-core box and puts
+ * the system back where partial admission can never fire. What each agent
+ * genuinely holds is its own process, its own worktree and its share of the
+ * index caches, and that is measurable: this repository prices an agent at
+ * 2 GiB, plus a quarter for the egress sidecar when sandboxed.
+ *
+ * Clamped both ways. Never above what has actually been observed completing,
+ * because the ceiling is an evidence statement rather than a capacity one;
+ * never below one, because the stores serialise to one absent a value and a
+ * zero would stop the repository entirely.
+ */
+export function derivedRepositoryParallelism(
+  totalMemoryBytes: number = os.totalmem(),
+): number {
+  const usable = totalMemoryBytes - HOST_RESERVE_BYTES;
+  const fits = Math.floor(usable / (AGENT_MEMORY_BYTES + AGENT_SIDECAR_BYTES));
+  return Math.max(MINIMUM_REPOSITORY_PARALLELISM, fits);
+}
+
+/**
+ * @deprecated Read {@link derivedRepositoryParallelism} instead. Kept because
+ * it is exported and named in tests and documentation.
+ */
+export const DEFAULT_REPOSITORY_PARALLELISM = MINIMUM_REPOSITORY_PARALLELISM;
 
 export function configuredRepositoryParallelism(explicit?: number): number {
   if (explicit !== undefined) {
@@ -112,7 +182,7 @@ export function configuredRepositoryParallelism(explicit?: number): number {
   }
   const raw = process.env["COORD_REPOSITORY_PARALLELISM"]?.trim() ?? "";
   if (raw.length === 0) {
-    return DEFAULT_REPOSITORY_PARALLELISM;
+    return derivedRepositoryParallelism();
   }
   const value = Number.parseInt(raw, 10);
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -175,10 +245,21 @@ export interface WorkResultInput {
   plan: unknown;
   changeSet: unknown;
   detail?: string;
+  /**
+   * What the agent said, when the lease was on a question.
+   *
+   * Kept apart from `detail`, which is a failure reason with a short bound
+   * and no reader outside a log. An answer is prose somebody is about to read
+   * in a channel, and putting it in `detail` would have meant either
+   * truncating answers or loosening the bound on failure text.
+   */
+  answer?: string;
 }
 
 export interface WorkResultAcceptance {
   accepted: boolean;
+  /** The answer, when the lease was on a question. The gateway posts it. */
+  answer?: string;
   reason?: string;
   runId?: string;
   integrationStatus?: IntegrationResult["status"];
@@ -280,6 +361,13 @@ async function submittedTask(
     await store.listSubmittedTasks({
       repositoryId: lease.repositoryId,
       ...(lease.projectId === undefined ? {} : { projectId: lease.projectId }),
+      // Resolving a row from a lease that already exists, so the fail-closed
+      // default is the wrong question here: whatever this lease is on, this
+      // function's job is to find it. Without `any` a question lease resolves
+      // to nothing and `acceptWorkResult` rejects the answer with "The leased
+      // task is no longer claimed" — which reads as a lease bug and is not
+      // one.
+      kind: "any",
     })
   ).find((task) => task.id === lease.taskId);
 }
@@ -289,7 +377,7 @@ async function failClaimedTask(
   taskId: string,
   runId?: string,
 ): Promise<void> {
-  const current = (await store.listSubmittedTasks()).find(
+  const current = (await store.listSubmittedTasks({ kind: "any" })).find(
     (task) => task.id === taskId,
   );
   if (current?.status === "claimed") {
@@ -319,6 +407,49 @@ function adapterName(
 }
 
 /**
+ * How long after a worker was last heard from its owner's queue stays reserved.
+ *
+ * Three missed polls. The window can be generous because the cost of being
+ * wrong is asymmetric: hold a reservation too long and the owner's task waits
+ * for a machine that is coming back anyway; drop it too early and the control
+ * plane runs their work on the host account, which is the thing this exists to
+ * prevent. A worker refreshes this on every poll, not only while holding a
+ * lease — `touchWorker` is called at the top of the leases endpoint — so an
+ * idle desktop stays live without inventing a separate presence ping.
+ */
+const OWNER_RESERVATION_MS = 3 * HEARTBEAT_INTERVAL_MS;
+
+/**
+ * The users whose queued work belongs to a machine of their own.
+ *
+ * The in-process control plane can execute as anyone, so left alone it drains
+ * the queue the moment a task lands and a user's desktop never sees their own
+ * work. Passing this to {@link CoordinationStore.leaseNextTask} as
+ * `excludeSubmittedBy` makes it stand back for exactly as long as the owner's
+ * machine is answering.
+ *
+ * Empty whenever nobody has registered a worker, which is every deployment
+ * that runs the control plane alone — so this changes nothing for them.
+ */
+export async function reservedOwners(
+  store: CoordinationStore,
+  organizationId?: string,
+  now: Date = new Date(),
+): Promise<string[]> {
+  const cutoff = new Date(now.getTime() - OWNER_RESERVATION_MS).toISOString();
+  const workers = await store.listWorkers(
+    organizationId === undefined ? undefined : { organizationId },
+  );
+  const owners = new Set<string>();
+  for (const worker of workers) {
+    if (worker.lastSeenAt > cutoff) {
+      owners.add(worker.userId);
+    }
+  }
+  return [...owners];
+}
+
+/**
  * Atomically leases the next compatible task in one authorized project.
  *
  * A repository admits a bounded number of concurrent leases
@@ -335,6 +466,14 @@ export async function leaseWork(
     repositoryId?: string;
     /** Test override; deployments configure COORD_REPOSITORY_PARALLELISM. */
     repositoryParallelism?: number;
+    /**
+     * What this worker is able to execute. Defaults to work alone.
+     *
+     * A desktop built before questions existed sends nothing, so it is never
+     * offered one — that default is the entire compatibility story, and the
+     * reason no protocol version had to move.
+     */
+    kinds?: readonly TaskKind[];
   },
   repositories = new RepositoryService(),
   project?: CoordinatorProject,
@@ -395,13 +534,30 @@ export async function leaseWork(
     }
   }
 
-  const pending = await store.listSubmittedTasks({
-    projectId: input.projectId,
-    status: "submitted",
-    ...(input.repositoryId === undefined
-      ? {}
-      : { repositoryId: input.repositoryId }),
-  });
+  const kinds = input.kinds ?? ["task"];
+  // Listed per kind and concatenated rather than asked for with `any`,
+  // because `any` would also hand back kinds this worker did not ask for. The
+  // two-element case is the whole of it, and questions come first for the
+  // same reason the store orders them first: somebody is watching for one.
+  const pending = (
+    await Promise.all(
+      [...kinds]
+        .sort((left, right) =>
+          Number(left !== "question") - Number(right !== "question"),
+        )
+        .map(
+          async (kind) =>
+            await store.listSubmittedTasks({
+              projectId: input.projectId,
+              status: "submitted",
+              kind,
+              ...(input.repositoryId === undefined
+                ? {}
+                : { repositoryId: input.repositoryId }),
+            }),
+        ),
+    )
+  ).flat();
 
   // Tasks known to be waiting on someone else go to the back of the queue.
   //
@@ -446,6 +602,14 @@ export async function leaseWork(
       baseRevision: version.revision,
       ttlMs: WORK_LEASE_TTL_MS,
       repositoryParallelism,
+      // This machine has exactly one set of vendor logins to offer, so it may
+      // only take work belonging to the person who registered it.
+      claimableBy: worker.userId,
+      // Named again at the claim, not only in the listing above. The store's
+      // clause is the one that actually holds — the listing narrows what this
+      // loop considers, the clause is what stops any caller taking a kind it
+      // cannot execute.
+      kinds,
     });
     if (leased === undefined) {
       continue;
@@ -607,7 +771,7 @@ async function requeueForCanonicalChange(
         await store.expireWorkLeases(now);
       }
     } else {
-      const currentTask = (await store.listSubmittedTasks()).find(
+      const currentTask = (await store.listSubmittedTasks({ kind: "any" })).find(
         (task) => task.id === lease.taskId,
       );
       if (currentTask?.status === "claimed") {
@@ -1034,8 +1198,24 @@ interface WorkPlanServices {
   admissions?: PlanAdmissionController;
 }
 
-/** How many times admission is recomputed when a rival admission lands first. */
-const MAX_ADMISSION_ATTEMPTS = 4;
+/**
+ * How many times admission is recomputed when a rival admission lands first.
+ *
+ * Scaled, because the thing it absorbs scales. The compare-and-set is over the
+ * whole set of approved lease ids in the repository, so it is invalidated by
+ * every admission *and* every lease finishing — with N concurrent workers a
+ * plan can lose the race up to N-1 times through no fault of its own. Held at
+ * a flat four, a synchronised burst exhausted the budget from about six and
+ * the plan was answered `sequenced` with no conflicts and a fifteen-second
+ * retry: a sleep on an unconflicted plan, while its worker kept heartbeating
+ * and holding the slot.
+ *
+ * One spare round above the worst case, floored at the old value so nothing
+ * gets fewer retries than it used to.
+ */
+export function maxAdmissionAttempts(parallelism: number): number {
+  return Math.max(4, parallelism + 1);
+}
 
 /**
  * Tasks whose most recent admission sequenced them behind work that is still
@@ -1595,7 +1775,10 @@ export async function admitWorkPlan(
       : 0,
   );
 
-  for (let attempt = 1; attempt <= MAX_ADMISSION_ATTEMPTS; attempt += 1) {
+  const attemptBudget = maxAdmissionAttempts(
+    configuredRepositoryParallelism(),
+  );
+  for (let attempt = 1; attempt <= attemptBudget; attempt += 1) {
     const executing = await executingPlans(store, lease);
     // A plan admitted through the solo fast path was stored as declared —
     // nothing existed to arbitrate it against, so nothing enriched it. This
@@ -2326,6 +2509,61 @@ export async function acceptWorkResult(
     );
   }
 
+  // A question ends here, before everything below it.
+  //
+  // The whole apparatus that follows — plan admission, exact-base
+  // integration, the changeset, validation, canonical advance — exists to
+  // land an edit safely. A question produced no edit. There is nothing to
+  // admit, nothing to integrate, and no revision to pin, so a question that
+  // fell through would be rejected for having no admitted plan: an answer the
+  // agent really did compute, refused for missing paperwork it was never
+  // asked to file.
+  //
+  // Failures still take the ordinary path below, which is deliberate: "the
+  // model could not answer" and "the task failed" want the same lease
+  // bookkeeping, and the gateway is what turns either into a sentence.
+  if (task.kind === "question" && input.status === "completed") {
+    const answer = (input.answer ?? "").trim();
+    if (answer.length === 0) {
+      // Nothing to post, so this is a failure and not a silent success. The
+      // alternative is an empty message in a thread where somebody asked, and
+      // the adapters make it worse than empty: with no explanation they fall
+      // back to "<agent> completed <objective>", and a question's objective
+      // *is* the asker's own sentence handed back to them.
+      return await rejectWorkerResult(
+        store,
+        leaseAtStart,
+        "The agent answered with nothing",
+      );
+    }
+    const settled = await store.finishWorkLease(
+      input.leaseId,
+      "completed",
+      now,
+    );
+    if (!settled) {
+      await store.expireWorkLeases(now);
+      return { accepted: false, reason: "lease was lost before the answer" };
+    }
+    // `integrated` rather than a status of its own: the row is finished and
+    // every sweep that looks for unfinished work should stop seeing it. What
+    // landed was an answer rather than a commit, which is the gateway's
+    // business to post, not the queue's to model.
+    await store.completeSubmittedTask(task.id, "integrated");
+    // The event for work that succeeds by changing nothing, which is what its
+    // own documentation says it is for — an audit, a summary. An answer is
+    // the same shape: a real result with no patch behind it, and recording it
+    // as `task_failed` is exactly the mistake that event exists to prevent.
+    await trace(store, undefined, "task_reported", task.id, {
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      workerId: leaseAtStart.workerId,
+      leaseId: leaseAtStart.id,
+      kind: "question",
+    });
+    return { accepted: true, answer };
+  }
+
   if (input.status === "failed") {
     const settled = await store.finishWorkLease(
       input.leaseId,
@@ -2343,7 +2581,15 @@ export async function acceptWorkResult(
       repositoryId: task.repositoryId,
       workerId: leaseAtStart.workerId,
       leaseId: leaseAtStart.id,
-      detail: input.detail ?? "worker reported failure",
+      // `error`, not `detail`, and the difference was the whole bug. Every
+      // other emitter of this event records `error` or `explanation`, and the
+      // narration reads exactly those two — so a failure reported by a remote
+      // worker arrived with its reason under a key nothing looks at, and the
+      // room was told "I could not finish this." with nothing after it.
+      //
+      // That is every failure on a deployment which has moved execution onto
+      // people's machines, because there a worker reports all of them.
+      error: input.detail ?? "worker reported failure",
     });
     return { accepted: true };
   }
@@ -2543,7 +2789,11 @@ export async function acceptWorkResult(
         })
       : { id: admitted.admission.runId };
   let runFinished = false;
-  let followUp: string | undefined;
+  // Both remainders, not one. A result can leave two different kinds of work
+  // behind — the scope admission deferred, and the hunks a conflict held back
+  // — and they are independent: neither implies the other, and a result that
+  // produces both must queue both.
+  const followUps: string[] = [];
   try {
     await store.saveTask(run.id, taskDefinition);
     await store.saveTaskStatus(run.id, task.id, "planning");
@@ -2886,7 +3136,7 @@ export async function acceptWorkResult(
       // Only now, with the granted half durably in canonical, is the deferred
       // half turned into work of its own. Queueing it earlier would leave a
       // task asking for the remainder of something that never landed.
-      followUp = await queueDeferredScope(
+      const deferredFollowUp = await queueDeferredScope(
         store,
         run.id,
         task,
@@ -2894,15 +3144,35 @@ export async function acceptWorkResult(
         split,
         changeSet,
       );
+      if (deferredFollowUp !== undefined) {
+        followUps.push(deferredFollowUp);
+      }
       // Same rule for the half a conflict held back: only once the rest is
       // durably in canonical is the remainder worth asking anyone for.
-      followUp ??= await queueSalvagedConflict(
+      //
+      // Asked unconditionally, which it was not. This read `followUp ??=`, so
+      // whenever admission had deferred anything the salvage call never ran at
+      // all — and it is the only place the salvaged hunks are requeued and the
+      // only emitter of their `changeset_withheld` audit event. The patches
+      // were dropped: the task was marked integrated, the handoff listed only
+      // the admission-deferred paths, `saveIntegration` has no column for the
+      // salvaged set, and the explanation still said how many were "requeued"
+      // when none had been.
+      //
+      // Both preconditions are contention-only, so at parallelism 1 this could
+      // not happen and the in-process coordinator — which queues both
+      // unconditionally, and whose comment asserts this path already did —
+      // never diverged visibly.
+      const salvagedFollowUp = await queueSalvagedConflict(
         store,
         run.id,
         task,
         integration.salvagedDeferred ?? [],
         changeSet,
       );
+      if (salvagedFollowUp !== undefined) {
+        followUps.push(salvagedFollowUp);
+      }
     } else if (
       (textualMergeAttempt || lostRace) &&
       ["conflict", "validation_failed"].includes(integration.status)
@@ -2972,7 +3242,7 @@ export async function acceptWorkResult(
         admission: admitted.admission,
         integration,
         changeSet: promoted,
-        followUpTaskIds: followUp === undefined ? [] : [followUp],
+        followUpTaskIds: [...followUps],
         withheldFiles: split.deferred.map((patch) => patch.path).sort(),
         reason:
           !successful

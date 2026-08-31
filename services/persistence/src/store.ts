@@ -19,6 +19,7 @@ import type {
   ScopeChangeRequest,
   SequencedAuditEvent,
   TaskDefinition,
+  TouchedFileSample,
   TaskId,
   TaskStatus,
   UserId,
@@ -517,6 +518,51 @@ export interface LeaseTaskInput {
    * and stale-requeue at result acceptance, which this limit does not relax.
    */
   repositoryParallelism?: number;
+  /**
+   * Restricts the claim to work this caller is entitled to *execute*, which is
+   * not the same question as who may see it.
+   *
+   * A remote worker runs every task under the vendor logins sitting on its own
+   * machine — that is the point of a desktop worker, and why the control plane
+   * never needs the operator's Claude session. It therefore has exactly one
+   * identity to offer, so it may only take tasks belonging to the user who
+   * registered it. Without this, a second desktop in the same organization
+   * claims the first user's task and silently executes it on the wrong
+   * account: right answer, wrong person's subscription, wrong name on the
+   * work.
+   *
+   * Unowned tasks (`submittedBy` unset, e.g. submitted straight from the CLI)
+   * match every value, because there is no account to get wrong.
+   */
+  claimableBy?: UserId;
+  /**
+   * Owners whose queued work is spoken for, and must be left alone.
+   *
+   * The mirror of {@link claimableBy}, for the in-process control plane, which
+   * *can* run a task as anyone — it opens the submitter's credential home per
+   * task. Being able to run everything is precisely why it has to be told to
+   * stand back: without this it drains the queue the instant a task is
+   * submitted, and a user's own desktop never gets the chance to pick up their
+   * work.
+   */
+  excludeSubmittedBy?: readonly UserId[];
+  /**
+   * Which kinds of row this caller can actually execute.
+   *
+   * Defaults to `["task"]`, and that default is the compatibility gate for the
+   * whole feature. A worker built before questions existed sends nothing here
+   * and therefore cannot be handed one — no protocol version, no capability
+   * negotiation, no way for an old desktop to lease something it would not
+   * know how to answer. Sending `["question"]` is how a worker opts in.
+   *
+   * It is also the safety gate, and the more important half. The control
+   * plane's own drain calls `leaseNextTask` with no `taskId` at all
+   * (`leaseQueuedWork`, apps/cli/src/commands.ts), taking whatever is oldest —
+   * so filtering the *listing* elsewhere is not enough. Without this clause a
+   * question row would be claimed by the coding path within a minute of being
+   * filed and executed as though its text were an objective.
+   */
+  kinds?: readonly TaskKind[];
 }
 
 export interface LeasedWork {
@@ -588,7 +634,36 @@ export type SubmittedTaskCompletionStatus = Extract<
   "integrated" | "failed" | "cancelled"
 >;
 
+/**
+ * What a queued row is.
+ *
+ * Deliberately two values and not a boolean: the queries that must not confuse
+ * them read better naming what they want than negating what they do not, and a
+ * third kind is a plausible future (a review, a summary) that a boolean would
+ * have to be replaced to allow.
+ */
+export type TaskKind = "task" | "question";
+
 export interface SubmitTaskInput {
+  /**
+   * Work, or a question somebody is waiting on an answer to.
+   *
+   * Absent means `task`, which is what every caller that predates questions
+   * meant and still means. A question shares the queue so that it can share
+   * everything already written against it — owner pinning, the one-active-
+   * lease index, heartbeat, requeue on expiry, budgets — but it is not work:
+   * it has no plan, no changeset, and nothing to integrate. The two are kept
+   * apart by this field everywhere they could otherwise be confused.
+   */
+  kind?: TaskKind;
+  /**
+   * The channel message an answer belongs under.
+   *
+   * Only meaningful on a question. Carried on the row rather than held in the
+   * dispatching process, so an answer that comes back after a restart still
+   * knows where to be posted.
+   */
+  answerTo?: string;
   repositoryId: string;
   projectId?: ProjectId;
   objective: string;
@@ -655,6 +730,10 @@ export interface SubmitTaskInput {
 
 export interface SubmittedTask {
   id: TaskId;
+  /** See {@link SubmitTaskInput.kind}. `task` on every row written before questions existed. */
+  kind: TaskKind;
+  /** See {@link SubmitTaskInput.answerTo}. Absent on work. */
+  answerTo: string | undefined;
   repositoryId: string;
   projectId: ProjectId | undefined;
   objective: string;
@@ -683,6 +762,17 @@ export interface SubmittedTaskFilter {
   repositoryId?: string;
   projectId?: ProjectId;
   status?: SubmittedTaskStatus;
+  /**
+   * Which kinds to return. Defaults to `task`, and the default is the point.
+   *
+   * Every existing reader of this list feeds a coding path — the drain loop,
+   * the crash sweep, the queue view — and a question arriving in any of them
+   * would be planned and integrated as though its text were an objective. So
+   * the filter fails closed: a caller sees questions only by asking for them.
+   * `any` exists for the two places that legitimately need both, which are
+   * lease bookkeeping rather than execution.
+   */
+  kind?: TaskKind | "any";
 }
 
 export interface CreateRunInput {
@@ -1965,6 +2055,40 @@ export interface CoordinationStore {
     resolvedBy: UserId,
     at: string,
   ): Promise<ChangesetComment>;
+  /**
+   * Where work has actually been landing in this repository, most recent first.
+   *
+   * Read from integrated changesets rather than every changeset: a changeset
+   * that never landed is often one that touched the wrong thing, and this is
+   * meant to point an arriving agent at where the work is, not at where the
+   * last one went wrong.
+   *
+   * Returns raw samples — one row per landed patch — because the ranking is
+   * `rankTouchedFiles`, and writing its decay three times in three dialects of
+   * SQL is three chances to have it disagree with itself.
+   */
+  recentlyTouchedFiles(input: {
+    repositoryId: string;
+    /**
+     * Narrow to the channel this conversation belongs to, when that channel
+     * has enough history to be worth narrowing to.
+     *
+     * A conversation id is a thread root message id, and a message knows its
+     * channel — so the task's channel resolves by join and needs no column of
+     * its own. Channels are named for areas of the work (`#backend`,
+     * `#frontend`), and in a monorepo the busiest area otherwise crowds out
+     * every other one: measured on this repository, nine of the twelve most
+     * recently worked files are `apps/web`, so a backend task read a list
+     * that was three-quarters frontend.
+     *
+     * Falls back to the repository when the channel is too thin to rank —
+     * early on that is every channel, and a short list from one corner is
+     * worse than a long one from the whole repository.
+     */
+    conversationId?: string;
+    /** How many landed patches to read back. Defaults to a few hundred. */
+    limit?: number;
+  }): Promise<TouchedFileSample[]>;
   saveIntegration(runId: string, result: IntegrationResult): Promise<void>;
   saveCanonicalVersion(
     repositoryId: string,

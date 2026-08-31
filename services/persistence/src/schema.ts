@@ -1492,6 +1492,41 @@ export const MIGRATIONS: readonly Migration[] = [
       `UPDATE sub_channels SET visibility = 'public' WHERE slug = 'general'`,
     ],
   },
+  {
+    /**
+     * A question is a row in the queue, so it can run on its owner's machine.
+     *
+     * Answering used to happen only in the control plane's own process, which
+     * meant a deployment that had moved execution onto people's desktops still
+     * paid for every question anybody asked — and could not refuse them
+     * without deleting the feature, because the worker protocol had no way to
+     * carry one.
+     *
+     * `kind` is what lets the queue hold both without the two ever being
+     * mistaken for each other. It defaults to `task` so every existing row is
+     * exactly what it was, and every existing query that does not mention
+     * `kind` keeps meaning what it meant — the readers all filter to `task`
+     * explicitly, so a question is invisible to anything that has not been
+     * taught about it. That direction matters: the failure this guards is a
+     * question reaching the coding path, where it would be planned, admitted
+     * and integrated as though its text were an objective.
+     *
+     * `answer_to` is the channel message the answer belongs under. It is the
+     * only thing the gateway needs to put the reply back where somebody is
+     * waiting, and keeping it on the row means a worker that finishes after a
+     * restart still knows where to speak.
+     */
+    version: 52,
+    name: "local-question-routing",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'task'`,
+      `ALTER TABLE submitted_tasks ADD COLUMN answer_to TEXT`,
+      // The queue's hot read is "oldest submitted row of this kind", and it
+      // now has a kind in front of it.
+      `CREATE INDEX IF NOT EXISTS submitted_tasks_kind_status_idx
+         ON submitted_tasks (kind, status, submitted_at)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

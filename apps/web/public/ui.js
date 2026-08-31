@@ -1386,6 +1386,11 @@ const FACE_PRESENCE = {
   idle: "idle",
   personal: "personal",
   exhausted: "exhausted",
+  // Mapped explicitly even though the fall-through below already lands here.
+  // An owner with no machine listening and an unrecognised status are not the
+  // same thing, and a table that only works because of its own default is one
+  // edit away from not working.
+  offline: "offline",
 };
 
 /**

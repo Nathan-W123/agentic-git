@@ -53,6 +53,8 @@ import {
   leaseWork,
   workerOperations,
   type WorkAssignment,
+  derivedRepositoryParallelism,
+  maxAdmissionAttempts as maxAdmissionAttemptsForTest,
 } from "./worker-operations.js";
 import { CoordinatorProject } from "./project.js";
 
@@ -1199,7 +1201,13 @@ test("a failed result settles the task and is audited", async () => {
     const audit = await harness.store.listAudit();
     const failure = audit.find((event) => event.type === "task_failed");
     assert.equal(failure?.taskId, taskId);
-    assert.equal(failure?.data["detail"], "agent exited with code 3");
+    // `error`, which is the key every other emitter of this event uses and
+    // the only one the channel narration reads. Recorded as `detail`, the
+    // reason reached the audit log and no reader: the room was told "I could
+    // not finish this." with nothing after it, for every failure a remote
+    // worker reported — which on a deployment running agents on people's own
+    // machines is all of them.
+    assert.equal(failure?.data["error"], "agent exited with code 3");
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }
@@ -3554,6 +3562,132 @@ test("a conflict keeps the clean files and queues the contested one", async () =
   }
 });
 
+test("a result that both defers scope and salvages a conflict queues both", async () => {
+  // The combined case, and the one that lost work.
+  //
+  // A finished result can leave two different kinds of remainder behind: the
+  // scope admission withheld, and the hunks a conflict held back. They are
+  // independent — neither implies the other — and this path queued them with
+  // `followUp ??= await queueSalvagedConflict(...)`, so whenever admission had
+  // deferred anything the salvage call never ran. That call is the only place
+  // the salvaged hunks are requeued and the only emitter of their
+  // `changeset_withheld` audit event, so the patches were dropped while the
+  // task was marked integrated.
+  //
+  // Both preconditions need contention, which is why this was invisible: at
+  // parallelism 1 partial admission never fires. Making partial admission work
+  // is what made this reachable.
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+    "docs/notes.md": "Notes line 1.\n",
+  });
+  try {
+    const admitted = await admitGuideTask(harness, {
+      expectedFiles: ["docs/guide.md", "docs/notes.md"],
+    });
+    await landExternalAdvance(harness);
+    const { taskB, assignmentB } = admitted;
+
+    // Give the stored admission a deferred resource, which is what a partial
+    // admission leaves behind. A third path, so the split below is unchanged
+    // and the salvage is the only other remainder.
+    const lease = await harness.store.getWorkLease(assignmentB.lease.id);
+    assert.ok(lease?.plan);
+    await harness.store.saveWorkLeasePlan({
+      leaseId: assignmentB.lease.id,
+      submission: {
+        plan: lease.plan.plan,
+        admission: {
+          ...lease.plan.admission,
+          deferredResources: [
+            {
+              resourceType: "file",
+              resourceId: "docs/elsewhere.md",
+              heldBy: ["task_other"],
+              reason: "also declared by executing task task_other",
+            },
+          ],
+        },
+      },
+      observedApprovedLeaseIds: [],
+      replaceApproved: true,
+    });
+
+    const repository = await harness.store.getRepository("repo_worker");
+    assert.ok(repository);
+    const canonicalRepo = {
+      id: repository.id,
+      path: repository.path,
+      branch: repository.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: taskB.id,
+      rootPath: path.join(harness.root, "both-workspaces"),
+      repository: canonicalRepo,
+      baseVersion: assignmentB.canonicalVersion,
+    });
+    const guidePath = path.join(workspace.path, "docs", "guide.md");
+    await writeFile(
+      guidePath,
+      (await readFile(guidePath, "utf8")).replace(
+        "Guide line 1.",
+        "Guide line 1, redone.",
+      ),
+      "utf8",
+    );
+    await writeFile(
+      path.join(workspace.path, "docs", "notes.md"),
+      "Notes line 1, improved.\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "edited both",
+    });
+    await workspaces.destroy(workspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md", "docs/notes.md"],
+          expectedSymbols: [],
+        }),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+
+    const followUps = (await harness.store.listSubmittedTasks()).filter(
+      (entry) => entry.id !== taskB.id,
+    );
+    const objectives = followUps.map((entry) => entry.objective).join("\n");
+    assert.equal(
+      followUps.length,
+      2,
+      `both remainders should be somebody's job now: ${objectives}`,
+    );
+    // The scope admission withheld.
+    assert.match(objectives, /docs\/elsewhere\.md/u);
+    // And the hunks the conflict held back — the half that used to vanish.
+    assert.match(objectives, /docs\/guide\.md/u);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("a result its own validation rejects finishes the run as failed", async () => {
   const harness = await createHarness(new InMemoryCoordinationStore(), {
     "docs/guide.md": GUIDE,
@@ -4345,4 +4479,30 @@ test("a hosting process shares one repository index across admissions", async ()
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }
+});
+
+test("repository parallelism starts at four and rises with the host", () => {
+  const GiB = 1024 ** 3;
+  // Four is the floor, whatever the host. Below it partial admission cannot
+  // fire at all — it is computed only against other executing plans — so a
+  // smaller number would turn off the thing the coordinator exists for.
+  assert.equal(derivedRepositoryParallelism(4 * GiB), 4);
+  assert.equal(derivedRepositoryParallelism(1 * GiB), 4);
+  assert.equal(derivedRepositoryParallelism(16 * GiB), 6);
+  // And it keeps rising: no ceiling, so a big host is allowed to use itself.
+  assert.equal(derivedRepositoryParallelism(64 * GiB), 27);
+});
+
+test("the admission retry budget grows with the contention it absorbs", () => {
+  // The compare-and-set is over every approved lease in the repository, so it
+  // is invalidated by each admission AND each lease finishing: with N workers
+  // a plan can lose the race up to N-1 times through no fault of its own. Held
+  // flat at four, a synchronised burst exhausted it from about six and the
+  // plan was answered `sequenced` with no conflicts — a fifteen-second sleep
+  // on work nothing was contending for.
+  assert.equal(maxAdmissionAttemptsForTest(4), 5);
+  assert.equal(maxAdmissionAttemptsForTest(8), 9);
+  // Never fewer than it used to be, so nothing loses a retry it had.
+  assert.equal(maxAdmissionAttemptsForTest(1), 4);
+  assert.equal(maxAdmissionAttemptsForTest(2), 4);
 });

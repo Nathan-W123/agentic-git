@@ -146,3 +146,53 @@ test("nothing on the card is withheld because the agent is somebody else's", asy
   }
   assert.doesNotMatch(chats, /Usage is private to the agent's owner/u);
 });
+
+/**
+ * Every fact the roster resolves has to be taken back out of the map.
+ *
+ * `channelAgentsFor` merges the server's roster into the agents the browser
+ * already holds, and the merge is a field list rather than a spread of the
+ * resolved record — deliberately, because role, model and effort each honour
+ * a local override and a blind spread would wipe one mid-edit. The cost is
+ * that a field added to the map and not added to the list is dropped in
+ * silence.
+ *
+ * Which is exactly what happened to `ownerOnline`: it was put in the map,
+ * never read, and so every agent looked online however long its owner's
+ * machine had been off. Nothing failed — the grey dot simply never appeared
+ * and the offline prompt never fired, on a path that read as fully wired.
+ *
+ * So this asserts the invariant rather than the instance: whatever the map
+ * carries, the merge reads.
+ */
+test("the roster merge reads every field the resolved map carries", async () => {
+  const data = await publicFile("data.js");
+  const body = data.slice(
+    data.indexOf("  const resolved = new Map("),
+    data.indexOf("/** Agents and people who can be @mentioned in this channel. */"),
+  );
+  assert.notEqual(body, "", "channelAgentsFor's merge moved");
+
+  const mapEntry = body.slice(0, body.indexOf("  );"));
+  const merge = body.slice(body.indexOf("    if (server !== undefined) {"));
+  assert.notEqual(merge, "", "the merge branch moved");
+
+  // The keys the map is built with, minus the two structural ones a merge
+  // would never restate.
+  const carried = [...mapEntry.matchAll(/^\s{10}([a-zA-Z]+):/gmu)]
+    .map((match) => match[1])
+    .filter((key) => key !== undefined && key !== "name");
+
+  assert.ok(carried.length > 0, "no fields found in the resolved map");
+  for (const key of carried) {
+    assert.match(
+      merge,
+      new RegExp(`server\\.${key}\\b`, "u"),
+      `the resolved map carries \`${key}\` and the merge never reads it, so ` +
+        `every agent silently loses it`,
+    );
+  }
+  // And the one that was actually dropped, named outright so a rename cannot
+  // quietly satisfy the loop above with an empty list.
+  assert.match(merge, /ownerOnline: server\.ownerOnline/u);
+});

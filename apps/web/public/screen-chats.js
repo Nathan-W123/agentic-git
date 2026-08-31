@@ -93,6 +93,9 @@ api,
   threadTitleReply,
   typingOn,
   waitingTasks,
+  agentOwnerOffline,
+  offlineAgentsMentionedIn,
+  onlineAgentsIn,
 } from "./data.js";
 import {
   chatComposer,
@@ -1408,6 +1411,11 @@ const AGENT_STATUS_TITLE = {
   idle: "Idle",
   personal: "Private agent — only its owner can task it here",
   exhausted: "Out of usage — its account's limit is spent",
+  // Deliberately not the same sentence as `exhausted`, though they share a
+  // colour: one is an account that has spent its limit, the other is a
+  // machine nobody has switched on. The dot says "nothing will happen"; the
+  // tooltip is where the two reasons stop looking alike.
+  offline: "Offline — its owner's machine isn't running Kumi right now",
 };
 
 /**
@@ -2314,7 +2322,16 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
           ? agentFace(
               author.agent,
               20,
-              running ? { status: "working", progress } : {},
+              running
+                ? { status: "working", progress }
+                : // The face beside a message is the one people actually look
+                  // at, and it reads `agent.presence` — a value the roster
+                  // hardcodes — rather than `agentStatus`, so it stayed lit
+                  // for an agent with no machine to run on. Only the offline
+                  // case is passed: everything else keeps the presence it had.
+                  agentOwnerOffline(author.agent)
+                  ? { status: "offline" }
+                  : {},
             )
           : avatar(
               author.name,
@@ -5983,9 +6000,30 @@ function agentSpec(agent, repositoryId) {
   );
   // Prefer work in the room the panel was opened from, but do not call an
   // agent idle while it is visibly working in another channel.
+  // Split by what the task actually is, not by which one happens to be first.
+  //
+  // Work waits indefinitely for a machine that is offline — deliberately,
+  // because a deadline would throw away an answer somebody's laptop is still
+  // computing — so the only thing that makes an unbounded wait honest is
+  // being able to see it and end it. Filtering "everything except the first"
+  // did not do that: one queued task became the current-work headline, the
+  // queue list came out empty, and the single most likely case — one thing
+  // waiting for a machine nobody has switched on — showed no queue and no way
+  // to cancel it.
+  //
+  // A task is in exactly one of these. Nothing running is an honest headline;
+  // the zone already has those words.
+  const queuedTasks = agentTasks.filter((candidate) =>
+    QUEUED_TASK_STATUS.has(candidate.status),
+  );
+  const runningTasks = agentTasks.filter(
+    (candidate) => !QUEUED_TASK_STATUS.has(candidate.status),
+  );
   const task =
-    agentTasks.find((candidate) => candidate.repositoryId === repositoryId) ??
-    agentTasks[0];
+    runningTasks.find(
+      (candidate) => candidate.repositoryId === repositoryId,
+    ) ?? runningTasks[0];
+  const queued = queuedTasks;
   const taskRepositoryId = task?.repositoryId ?? repositoryId;
   const taskMessage =
     task === undefined
@@ -6019,6 +6057,7 @@ function agentSpec(agent, repositoryId) {
         canChatPrivately,
         statusText,
       })}
+      ${agentQueuedZone(agent, queued)}
       ${agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId })}
       ${agentContextZone(agent, repositoryId, { assignments, allChannelsLoaded })}
     </div>
@@ -6160,6 +6199,55 @@ function agentCurrentWorkZone(agent, repositoryId, { task, taskMessage, taskRepo
  * the assignment the caller has already resolved for this room, and the four
  * zones keep one signature so the profile reads as four of the same thing.
  */
+/**
+ * What this agent is holding but has not started.
+ *
+ * Drawn only when there is something, so an agent with a clear queue keeps
+ * the page it had. Each row can be cancelled through the same action the
+ * thread header uses — `task-cancel`, which already asks first, because
+ * ending queued work is not undoable and a row here is one press away from a
+ * mis-click.
+ */
+/**
+ * Statuses that mean "filed, and nothing has picked it up".
+ *
+ * `claimed` sits here beside `submitted` because a claim is a lease, not a
+ * start: a worker that claimed and then went offline leaves a row that reads
+ * as taken and is going nowhere, and that is precisely the row somebody needs
+ * to be able to cancel.
+ */
+const QUEUED_TASK_STATUS = new Set(["submitted", "claimed"]);
+
+function agentQueuedZone(agent, queued) {
+  if (queued.length === 0) {
+    return "";
+  }
+  return `<section class="aspec-zone aspec-queue" aria-label="Queued work">
+    <div class="aspec-cell-head">Queued · ${queued.length}</div>
+    ${queued
+      .map(
+        (entry) => `<div class="aspec-queue-row">
+        <div class="aspec-queue-copy">
+          <div class="aspec-work-title">${esc(
+            briefObjective(entry.objective) || "Untitled work",
+          )}</div>
+          <div class="aspec-work-phase">${esc(
+            [
+              String(entry.status ?? "queued").replaceAll("_", " "),
+              `#${repositoryLabel(entry.repositoryId)}`,
+              relativeTime(entry.submittedAt),
+            ].join(" · "),
+          )}</div>
+        </div>
+        <button class="aspec-action aspec-action-quiet" data-act="task-cancel"
+          data-value="${esc(entry.id)}"
+          aria-label="Cancel this queued work">Cancel</button>
+      </div>`,
+      )
+      .join("")}
+  </section>`;
+}
+
 function agentRuntimeZone(agent, repositoryId, { currentAssignment, providerId }) {
   const models = agent.mine === true ? providerModelOptions(providerId) : [];
   const efforts =
@@ -6730,6 +6818,7 @@ function mainChatConversation(repositoryId) {
   return `${messageList(repositoryId)}
     ${jumpToLatest()}
     ${agentQuestionPrompt(repositoryId)}
+    ${offlineAgentPrompt(repositoryId)}
     ${dismissedQuestionChip(repositoryId)}
     ${composer(repositoryId)}`;
 }
@@ -8589,9 +8678,33 @@ export function submitComposerMessage(rerender) {
     scrollChannel();
     return;
   }
+  // Asked before anything leaves the composer, which is the only moment it
+  // can honestly be asked. The server commits the message and *then* decides
+  // it contains a mention — deliberately, so a mention that fails to dispatch
+  // cannot un-send what somebody typed — so by the time the room knows an
+  // agent was addressed, the words are already in it. The browser resolves
+  // mentions with the same matcher the server uses, so it can know first.
+  const offline = offlineAgentsMentionedIn(repositoryId, state.chatDraft);
+  if (offline.length > 0) {
+    void askAboutOfflineAgents(repositoryId, offline, rerender);
+    return;
+  }
+  sendComposerDraft(repositoryId, rerender);
+}
+
+/**
+ * The send itself, once anything that wanted to interrupt it has finished.
+ *
+ * Split out so the offline prompt can reach it. Everything here used to be
+ * the tail of `submitComposerMessage`, and it stays synchronous for the same
+ * reason it always was — the composer clears on the return of
+ * `sendChannelMessage`, not on a round trip.
+ */
+function sendComposerDraft(repositoryId, rerender, draft) {
+  const text = draft ?? state.chatDraft;
   const sent = sendChannelMessage(
     repositoryId,
-    state.chatDraft,
+    text,
     "user",
     undefined,
     (response) =>
@@ -8607,6 +8720,156 @@ export function submitComposerMessage(rerender) {
   markChannelRead(repositoryId);
   rerender();
   scrollChannel();
+}
+
+/**
+ * What to do about a message addressed to an agent that has nowhere to run.
+ *
+ * Drawn where the agent-question prompt is drawn — just above the composer,
+ * in the room it belongs to — rather than as a centred dialog. That is not
+ * only a style match: a modal in the middle of the screen takes the
+ * conversation away in order to ask about it, and what is being decided here
+ * is one sentence of that conversation. The question card had this argument
+ * first and won it.
+ *
+ * Held in state rather than awaited, because the render loop owns the screen.
+ * The draft stays in the composer throughout: every outcome, including the
+ * one that sends nothing, leaves what was typed where it was.
+ */
+function askAboutOfflineAgents(repositoryId, offline, rerender) {
+  state.offlinePrompt = {
+    repositoryId,
+    names: offline.map((agent) => agent.name),
+    choice: "queue",
+    target: onlineAgentsIn(repositoryId, offline)[0]?.name,
+  };
+  rerender();
+}
+
+/**
+ * The prompt itself, in the agent-question card's own shape.
+ *
+ * Numbered rows, because the question card numbers its options and somebody
+ * who has answered one of those should not have to learn a second vocabulary
+ * to answer this.
+ */
+function offlineAgentPrompt(repositoryId) {
+  const pending = state.offlinePrompt;
+  if (pending === undefined || pending.repositoryId !== repositoryId) {
+    return "";
+  }
+  const named = pending.names.join(", ");
+  const alternatives = onlineAgentsIn(repositoryId).filter(
+    (agent) => !pending.names.includes(agent.name),
+  );
+  const plural = pending.names.length !== 1;
+  const send = `<button type="button" class="btn btn-primary btn-sm"
+    data-act="offline-send">Send</button>`;
+  return `<div class="ask-prompt" role="dialog"
+    aria-label="${esc(named)} ${plural ? "are" : "is"} offline">
+    <div class="ask-context">${esc(named)} — ${
+      plural ? "no machines are" : "no machine is"
+    } running Kumi</div>
+    <div class="ask-card">
+      <div class="ask-head">
+        <h4>Nothing will pick this up yet. Send it anyway?</h4>
+        <div class="ask-head-tools">
+          <button type="button" class="ask-step" data-act="offline-dismiss"
+            title="Cancel this task" aria-label="Cancel this task"
+            >${icon("close")}</button>
+        </div>
+      </div>
+      <div class="ask-options">
+        <button type="button" class="ask-option${
+          pending.choice === "queue" ? " is-picked" : ""
+        }" data-act="offline-choose" data-value="queue">
+          <span class="ask-num">1</span>
+          <span class="ask-label">Queue it anyway
+            <small>It waits, and runs as soon as ${
+              plural ? "the machines are" : "the machine is"
+            } back. You can cancel it from the agent's page.</small>
+          </span>
+        </button>
+        ${
+          alternatives.length === 0
+            ? ""
+            : `<button type="button" class="ask-option${
+                pending.choice === "reroute" ? " is-picked" : ""
+              }" data-act="offline-choose" data-value="reroute">
+          <span class="ask-num">2</span>
+          <span class="ask-label">Send it to someone online
+            <small>The mention is rewritten to whoever you pick.</small>
+          </span>
+        </button>`
+        }
+      </div>
+      <div class="ask-else${pending.choice === "reroute" ? " is-picked" : ""}">
+        ${
+          alternatives.length === 0
+            ? ""
+            : `<span class="ask-num">${icon("robot")}</span>
+        <select data-act="offline-target" aria-label="Send to">${alternatives
+          .map(
+            (agent) =>
+              `<option value="${esc(agent.name)}"${
+                agent.name === pending.target ? " selected" : ""
+              }>${esc(agent.name)}</option>`,
+          )
+          .join("")}</select>`
+        }
+        ${send}
+      </div>
+    </div>
+  </div>`;
+}
+
+/** Sends whatever the prompt was left set to, and closes it. */
+export function sendOfflineChoice(rerender) {
+  const pending = state.offlinePrompt;
+  state.offlinePrompt = undefined;
+  if (pending === undefined) {
+    rerender();
+    return;
+  }
+  const target = pending.choice === "reroute" ? pending.target : undefined;
+  if (target === undefined) {
+    sendComposerDraft(pending.repositoryId, rerender);
+    return;
+  }
+  // Only the names that were offline are rewritten, and only where they are
+  // mentions. A message that says an agent's name in passing keeps saying it.
+  let redirected = state.chatDraft;
+  for (const name of pending.names) {
+    const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    redirected = redirected.replace(
+      new RegExp(`@${escaped}(?=$|[\\s,.:;!?()\\[\\]{}])`, "giu"),
+      `@${target}`,
+    );
+  }
+  sendComposerDraft(pending.repositoryId, rerender, redirected);
+}
+
+/** Picking a row, without leaving the prompt. */
+export function chooseOfflineOption(value, rerender) {
+  if (state.offlinePrompt !== undefined) {
+    state.offlinePrompt.choice = value;
+    rerender();
+  }
+}
+
+/** Choosing a target also picks the row it belongs to — one gesture, not two. */
+export function setOfflineTarget(value, rerender) {
+  if (state.offlinePrompt !== undefined) {
+    state.offlinePrompt.target = value;
+    state.offlinePrompt.choice = "reroute";
+    rerender();
+  }
+}
+
+/** Cancelled. The draft stays put — cancel means do not send, not discard. */
+export function dismissOfflinePrompt(rerender) {
+  state.offlinePrompt = undefined;
+  rerender();
 }
 
 /**

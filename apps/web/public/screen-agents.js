@@ -247,7 +247,7 @@ async function signInAgent(providerId, mode, rerender) {
   // null, and a null handle cannot be navigated — the tab opens and sits on
   // about:blank forever. The opener reference is dropped below instead, which
   // gets the same protection while keeping the handle.
-  const tab = window.open("", "_blank");
+  const tab = claimSignInTab();
   if (tab !== null && tab !== undefined) {
     // Starting the CLI can take a few seconds. Leaving the claimed tab as
     // about:blank during that wait made a working sign-in look broken before
@@ -281,6 +281,8 @@ async function signInAgent(providerId, mode, rerender) {
     // reach back into this one.
     tab.opener = null;
     tab.location.replace(flow.verificationUrl);
+  } else {
+    openSignInFallback(flow.verificationUrl);
   }
 
   const exchange = (flow.mode ?? mode) === "code_exchange";
@@ -579,12 +581,65 @@ export async function connectAgent(providerId, rerender) {
  * true when connected, false to fall back to the paste box, null when the
  * person walked away.
  */
+/**
+ * Whether this page is running inside the desktop app rather than a browser.
+ *
+ * The preload sets `KUMI_SERVER`; `data.js` reads the same value to decide
+ * whether to address a configured server with a bearer token or to behave
+ * like an ordinary browser tab. It is the established signal for "not a
+ * browser", so this uses it rather than inventing a second one.
+ */
+function insideDesktopApp() {
+  return typeof window.KUMI_SERVER === "string" && window.KUMI_SERVER !== "";
+}
+
+/**
+ * Claim a tab now, to navigate once the sign-in URL is known.
+ *
+ * This is browser technique and it is load-bearing there: a tab opened after
+ * the `await` below is a popup as far as the browser is concerned, because
+ * the click that authorised it is long over, and it gets blocked.
+ *
+ * The desktop app is not a browser. Every `window.open` is intercepted and
+ * the URL handed to the operating system, so the claim is refused *and* the
+ * placeholder is forwarded — and an empty URL is `about:blank`, which is how
+ * pressing Connect came to ask Windows which application opens `about:`
+ * links, on top of a sign-in that then had no tab to open into. There is no
+ * popup blocker to outmanoeuvre there, so nothing is claimed and the real URL
+ * is opened when it arrives.
+ */
+function claimSignInTab() {
+  return insideDesktopApp() ? null : window.open("", "_blank");
+}
+
+/**
+ * Send the browser to a sign-in URL when the claimed tab did not survive.
+ *
+ * The claim-during-the-click trick is a browser technique and the desktop app
+ * is not a browser: it intercepts every `window.open` and hands the URL to the
+ * operating system instead, so the claimed tab is always denied and `tab` is
+ * null there — the sign-in page would never open at all, and the person would
+ * be left to find the link in the dialog.
+ *
+ * Opening again with the real URL is what the desktop needs and what a browser
+ * ignores: this only runs when the first open was already blocked, so a
+ * browser that refused one popup refuses this one too, with nothing lost.
+ */
+function openSignInFallback(verificationUrl) {
+  try {
+    window.open(verificationUrl, "_blank", "noopener");
+  } catch {
+    // The link in the dialog is still there and still works. A failure to
+    // open a convenience must not take the flow down with it.
+  }
+}
+
 async function signInGitHub(rerender) {
   state.providerConnecting?.add("github");
   rerender();
   // Claimed during the click, navigated once the URL is known — the same
   // popup-blocker reasoning as `signInAgent`.
-  const tab = window.open("", "_blank");
+  const tab = claimSignInTab();
   let flow;
   try {
     flow = await startGitHubSignIn();
@@ -600,6 +655,8 @@ async function signInGitHub(rerender) {
   if (tab !== null && tab !== undefined) {
     tab.opener = null;
     tab.location.replace(flow.verificationUrl);
+  } else {
+    openSignInFallback(flow.verificationUrl);
   }
 
   let finishedWhileOpen = false;

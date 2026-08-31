@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
+const { tmpdir } = os;
 import path from "node:path";
 import test from "node:test";
 
-import { runProcess, sanitizeChildEnv } from "./process-runner.js";
+import {
+  explainSpawnFailure,
+  resolveWindowsExecutable,
+  runProcess,
+  sanitizeChildEnv,
+  spawnInvocation,
+} from "./process-runner.js";
 
 test("the test-runner context is stripped from child environments", () => {
   const sanitized = sanitizeChildEnv({
@@ -420,4 +427,134 @@ test("a spawned child cannot read the credential-encryption key", async () => {
       process.env["COORD_CREDENTIAL_KEY"] = previous;
     }
   }
+});
+
+/**
+ * The lookup a shell does and `spawn` does not.
+ *
+ * Exercised directly rather than through `runProcess`, and deliberately not
+ * skipped off-Windows: this function contains no platform check — it is path
+ * and filesystem work — and the existing Windows cases in this file are
+ * skipped everywhere but Windows, which is to say skipped in CI. A bug that
+ * only manifests on the one platform nothing tests is how this one survived
+ * to be reported three times in an afternoon as three different vendors
+ * failing.
+ */
+test("a bare command name resolves through PATH and PATHEXT", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "pathext-"));
+  try {
+    await writeFile(path.join(directory, "codex.cmd"), "@echo off\n");
+    const env = { PATH: directory, PATHEXT: ".cmd;.exe" };
+
+    // The case that was failing: npm installs a `.cmd` shim, the adapter asks
+    // for `codex`, and `spawn` looked for a file of exactly that name.
+    assert.equal(
+      resolveWindowsExecutable("codex", undefined, env),
+      path.join(directory, "codex.cmd"),
+    );
+
+    // A name that already carries an extension said what it meant.
+    assert.equal(
+      resolveWindowsExecutable("codex.cmd", undefined, env),
+      "codex.cmd",
+    );
+
+    // Nothing to find is handed back untouched, so the failure stays ENOENT
+    // on the name the caller asked for rather than on a path nobody wrote.
+    assert.equal(
+      resolveWindowsExecutable("nowhere", undefined, env),
+      "nowhere",
+    );
+
+    // A relative path is resolved against the working directory, extension
+    // included — the same rule, applied to a name that names a place.
+    assert.equal(
+      resolveWindowsExecutable("./codex", directory, env),
+      path.join(directory, "codex.cmd"),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("PATHEXT defaults to what Windows itself ships", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "pathext-default-"));
+  try {
+    // No PATHEXT set: the default has to include the batch extensions, or
+    // every npm-installed CLI stays unreachable on a machine that never set
+    // the variable.
+    await writeFile(path.join(directory, "agent.CMD"), "@echo off\n");
+    assert.equal(
+      resolveWindowsExecutable("agent", undefined, { PATH: directory }),
+      path.join(directory, "agent.CMD"),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The whole Windows rule set, run on the machine that tests it.
+ *
+ * `spawnInvocation` takes its platform as an argument precisely so this case
+ * can exist off Windows. Both halves are asserted together because they are
+ * one decision from a caller's point of view — a bare npm-installed CLI name
+ * has to become a `cmd.exe` invocation, and getting either half right on its
+ * own still fails to launch anything.
+ */
+test("a bare npm CLI name becomes a cmd.exe invocation on Windows", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "invocation-"));
+  try {
+    await writeFile(path.join(directory, "codex.cmd"), "@echo off\n");
+    // Lower-case, matching what npm writes and what `PATHEXT` says here.
+    // Windows filesystems would not care; the machine running this test does.
+    const env = { PATH: directory, PATHEXT: ".cmd;.exe", ComSpec: "cmd.exe" };
+
+    const windows = spawnInvocation("codex", ["exec"], undefined, env, "win32");
+    assert.equal(windows.executable, "cmd.exe");
+    assert.equal(windows.windowsVerbatimArguments, true);
+    assert.deepEqual(windows.args, [
+      "/d",
+      "/s",
+      "/v:off",
+      "/c",
+      `""${path.join(directory, "codex.cmd")}" "exec""`,
+    ]);
+
+    // Everywhere else the name is passed through untouched: the shim, the
+    // extension search and the quoting are Windows answers to Windows
+    // problems, and a POSIX child must not inherit any of them.
+    const posix = spawnInvocation("codex", ["exec"], undefined, env, "linux");
+    assert.equal(posix.executable, "codex");
+    assert.deepEqual(posix.args, ["exec"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a Windows ENOENT says where it looked", () => {
+  const env = { PATH: ["/one", "/two"].join(path.delimiter), PATHEXT: ".CMD" };
+  const raw = Object.assign(new Error("spawn codex ENOENT"), {
+    code: "ENOENT",
+  });
+
+  const explained = explainSpawnFailure(raw, "codex", env, "win32");
+  assert.match(explained.message, /searched 2 PATH directories/u);
+  assert.match(explained.message, /codex, codex\.CMD/u);
+  assert.equal((explained as { cause?: unknown }).cause, raw);
+
+  // An empty PATH is the interesting reading, and the one the count exists
+  // for: the CLI being absent and the child being unable to see it are
+  // opposite problems, and only the number tells them apart.
+  const blind = explainSpawnFailure(raw, "codex", {}, "win32");
+  assert.match(blind.message, /searched 0 PATH directories/u);
+
+  // Anything else is passed through as it arrived. A failure that has been
+  // rewritten is a failure whose original text can no longer be searched for.
+  assert.equal(explainSpawnFailure(raw, "codex", env, "linux"), raw);
+  assert.equal(explainSpawnFailure(raw, "codex.cmd", env, "win32"), raw);
+  const other = Object.assign(new Error("spawn codex EACCES"), {
+    code: "EACCES",
+  });
+  assert.equal(explainSpawnFailure(other, "codex", env, "win32"), other);
 });

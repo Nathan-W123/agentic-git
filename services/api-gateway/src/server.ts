@@ -73,6 +73,7 @@ import {
   DO_NOT_CODE_DIRECTIVE,
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
+  localAgentsOnly,
   projectBudgets,
   readsAsReportRequest,
   requestFromObjective,
@@ -141,6 +142,8 @@ import {
 } from "./slash.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { CollabWebSocketHub } from "./collab-websocket.js";
+import { shouldRedirectToDownload } from "./desktop-app-only.js";
+import { WorkerEventHub } from "./worker-events.js";
 import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
 import {
   normalizeCodexRateLimits,
@@ -1177,6 +1180,15 @@ const AUDITOR_EVENT_BATCH = 25;
  * nothing downstream is blocked on it.
  */
 const AUDIT_TIMEOUT_MS = 180_000;
+/**
+ * How stale a worker's last heartbeat may be and still count as listening.
+ *
+ * Three intervals of the worker's own 60s heartbeat, matching the reservation
+ * window the control plane's drain uses to decide whose work to stand back
+ * from. Two machines disagreeing about whether the same worker is alive is
+ * how a task ends up reserved for nobody.
+ */
+const WORKER_LIVE_MS = 3 * 60 * 1000;
 
 /**
  * Far shorter than an audit's, because somebody is watching a button.
@@ -1683,9 +1695,19 @@ const THREAD_ENDED_RE = /^(?:Done\b|I could not finish|This was cancelled)/u;
  * only one who can carry out. Note that `claude auth status` reports a
  * *stored* session, not a working one, so this is the first place the
  * difference becomes visible.
+ *
+ * `401` is bounded on both sides, and by more than `\b`. A run's own text is
+ * full of numbers that are not status codes — lease ids, hashes, byte counts,
+ * ports, versions, file positions — and an unbounded `401` matched every one
+ * of them, reporting the failure as an expired sign-in. That is the most
+ * confidently wrong thing this function can say: it sends the reader off to
+ * reconnect an account that was never the problem, and the remedy cannot
+ * work no matter how carefully they follow it. `.` and `-` are excluded
+ * alongside word characters, so `1.401.0` and `x-401-y` are not status codes
+ * either. `unauthorized` is bounded for the same reason.
  */
 const IS_AUTH_FAILURE_RE =
-  /OAuth session expired|could not be refreshed|Failed to authenticate|Not logged in|invalid_api_key|unauthorized|401/iu;
+  /OAuth session expired|could not be refreshed|Failed to authenticate|Not logged in|invalid_api_key|\bunauthorized\b|(?<![\w.-])401(?![\w.-])/iu;
 
 /**
  * Whether an error is the agent's own vendor sign-in failing — as opposed
@@ -1696,6 +1718,27 @@ const IS_AUTH_FAILURE_RE =
  * and the push failure's own words already point there. Anything
  * naming GitHub keeps those words.
  */
+/**
+ * Where the sign-in that failed actually lives.
+ *
+ * "Reconnect me from Settings → Agents" reconnects the credential this server
+ * holds. When execution is local that credential is not on the path at all —
+ * the vendor CLI runs on somebody's own machine, under the login that machine
+ * is signed in with — so the instruction sends a reader to a page that cannot
+ * fix what broke. Following it and being told the agent is connected, while
+ * every run keeps failing for want of a sign-in, is worse than being told
+ * nothing.
+ *
+ * Which machine is not knowable from here. Naming the app is as far as this
+ * can honestly go, and it is far enough to get somebody to the right screen.
+ */
+function signInRemedy(): string {
+  return localAgentsOnly()
+    ? "Sign in to my CLI on the machine running the Kumi app — open a " +
+        "terminal there and run it once — then send this again."
+    : "Reconnect me from Settings → Agents and send this again.";
+}
+
 function isVendorSignInFailure(error: string): boolean {
   return IS_AUTH_FAILURE_RE.test(error) && !/github/iu.test(error);
 }
@@ -1727,9 +1770,13 @@ const INTEGRATION_FAILURE_REASONS: Record<string, string> = {
  */
 export function explainAnswerFailure(error?: string): string {
   if (isVendorSignInFailure(error ?? "")) {
+    // Carrying the evidence, for the reason `explainTaskFailure` does.
     return (
-      "I could not answer that — my sign-in has expired. Reconnect me from " +
-      "Settings → Agents."
+      `I could not answer that — my sign-in has expired. ${signInRemedy()}` +
+      `\n\nWhat I got back: ${clipToBoundary(
+        (error ?? "").replace(/\s+/gu, " ").trim(),
+        FAILURE_DETAIL_MAX,
+      )}`
     );
   }
   const cleaned = (error ?? "").replace(/\s+/gu, " ").trim();
@@ -1863,9 +1910,22 @@ function splitAgentAccount(detail: string): {
 
 function explainTaskFailure(error: string, status?: string): string {
   if (isVendorSignInFailure(error)) {
+    // The interpretation, and then the evidence for it.
+    //
+    // This used to return the sentence alone, which made the guess
+    // unfalsifiable: a reader told their sign-in had expired, who had just
+    // signed in, had no way to find out whether the diagnosis was wrong or
+    // their login really was broken — and neither did anyone helping them.
+    // The pattern behind this branch is a handful of substrings matched
+    // against whatever a vendor CLI happened to print, so it is wrong often
+    // enough that hiding what it read is the expensive choice. Keeping the
+    // agent's own words costs one line and settles the question.
     return (
-      "I could not finish this — my sign-in has expired. Reconnect me from " +
-      "Settings → Agents and send this again."
+      `I could not finish this — my sign-in has expired. ${signInRemedy()}` +
+      `\n\nWhat I got back: ${clipToBoundary(
+        error.replace(/\s+/gu, " ").trim(),
+        FAILURE_DETAIL_MAX,
+      )}`
     );
   }
   // Split before collapsing whitespace: the alarm is one sentence and reads
@@ -1991,6 +2051,18 @@ export function narrateTaskEvent(
     }
     case "replan_requested":
       return "Something moved underneath me; re-planning against the latest code.";
+    case "lease_expired":
+      // Not a failure: the task goes back in the queue and is picked up
+      // again. But it is the one ending that used to say nothing at all —
+      // expiry settles the lease in the store and writes no event — so a run
+      // whose machine slept, lost its network, or had the app closed under it
+      // left a thread reading "I've taken this task and I'm working on it"
+      // permanently. A person watching that has no way to tell it from work
+      // in progress, and waits for something that is never coming.
+      return (
+        "I lost contact with the machine running me, so I have put this back " +
+        "in the queue. It starts again when that machine is back."
+      );
     case "agent_progress":
       // Full message, never a char bound: a slice here cut mid-word with no
       // ellipsis and left answers looking like the model stopped mid-thought.
@@ -2077,9 +2149,18 @@ export function narrateTaskEvent(
       const detail =
         typeof data["error"] === "string" && data["error"].length > 0
           ? data["error"]
-          : typeof data["explanation"] === "string"
+          : typeof data["explanation"] === "string" &&
+              data["explanation"].length > 0
             ? data["explanation"]
-            : "";
+            : // Read last, and only for the rows already written. The remote
+              // worker path recorded its reason here rather than under
+              // `error` — the one emitter of six that did — so every failure
+              // it reported reached the room as a bare sentence. The emitter
+              // is fixed; this keeps the failures already on the record able
+              // to explain themselves rather than staying mute forever.
+              typeof data["detail"] === "string"
+              ? data["detail"]
+              : "";
       return explainTaskFailure(
         detail,
         typeof data["status"] === "string" ? data["status"] : undefined,
@@ -3455,6 +3536,10 @@ export interface ApiOperations {
      */
     vendor?: AgentVendor;
     actorId: string;
+    /** Work, or a question to be answered on its owner's machine. */
+    kind?: "task" | "question";
+    /** The channel message a routed answer belongs under. Questions only. */
+    answerTo?: string;
     /**
      * What the request was asked inside, for the agent that will run it —
      * the thread a channel dispatch came from, so a follow-up like "now do
@@ -3697,6 +3782,8 @@ export interface ApiOperations {
     projectId: string;
     actorId: string;
     repositoryId?: string;
+    /** What this worker can execute. Absent means work alone. */
+    kinds?: readonly ("task" | "question")[];
   }): Promise<WorkAssignment | undefined>;
   leaseBundle?(leaseId: string): Promise<Buffer | undefined>;
   /**
@@ -3733,7 +3820,12 @@ export interface ApiOperations {
     plan: unknown;
     changeSet: unknown;
     detail?: string;
-  }): Promise<unknown>;
+    /** What the agent said, when the lease was on a question. */
+    answer?: string;
+    // Narrowed from `unknown` only as far as this route actually reads it:
+    // whether to post, and what. The body is still relayed whole to the
+    // worker, so an implementation may return more than this names.
+  }): Promise<{ accepted: boolean; answer?: string }>;
   /** Dashboard overlay workspaces; absent on deployments without them. */
   workspace?: WorkspaceOperations;
   /** Direct provider chat (Anthropic/OpenAI/Google); absent when unsupported. */
@@ -4624,6 +4716,13 @@ export class ApiGateway {
   public readonly server: Server;
   public readonly webSockets: AuditWebSocketHub;
   public readonly collaboration: CollabWebSocketHub;
+  /**
+   * Tells workers that work exists so they need not wait out a poll.
+   *
+   * Public for the same reason the others are: a test wants to assert on
+   * connections without reaching through the HTTP surface.
+   */
+  public readonly workerEvents: WorkerEventHub;
   private readonly auth: AuthService;
   private readonly limiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
@@ -5100,9 +5199,29 @@ export class ApiGateway {
       reauthorize: async (authorization) =>
         await reauthorizeSocket(authorization, "submit_task"),
     });
-    // One `upgrade` listener routes to both hubs: Node delivers every upgrade
+    // The nudge a worker listens on. Authorized against the organization
+    // rather than a project, and on the same permission the lease endpoint
+    // demands: this only ever says "ask again", so it must not be reachable by
+    // anyone who could not have asked in the first place.
+    this.workerEvents = new WorkerEventHub({
+      authorize: async (request, organizationId) => {
+        this.assertOrigin(request);
+        const ticketed = redeemTicket(request);
+        const principal =
+          ticketed ?? (await this.auth.authenticate(request.headers.cookie));
+        assertTokenScope(principal, "run_task");
+        await authorizeOrganization(
+          this.options.store,
+          principal,
+          organizationId,
+          "run_task",
+        );
+        return { organizationId };
+      },
+    });
+    // One `upgrade` listener routes to every hub: Node delivers every upgrade
     // to every listener, so a hub that rejected unknown paths on its own would
-    // tear down the other hub's freshly negotiated socket.
+    // tear down another hub's freshly negotiated socket.
     this.server.on("upgrade", (request, socket, head) => {
       void this.routeUpgrade(request, socket, head).catch(() => {
         if (!socket.destroyed) {
@@ -5229,12 +5348,36 @@ export class ApiGateway {
     }
   }
 
+  /**
+   * Wakes any worker in this project's organization.
+   *
+   * Best-effort and deliberately not awaited by its callers: a submit that
+   * succeeded must not fail, or even wait, because a socket write did. The
+   * worst case is a worker that hears nothing and picks the task up on its
+   * next poll, which is exactly what happened before this existed.
+   */
+  private notifyWorkers(projectId: string): void {
+    void (async () => {
+      try {
+        const project = await this.options.store.getProject(projectId);
+        if (project !== undefined) {
+          this.workerEvents.notify(project.organizationId);
+        }
+      } catch {
+        // See above: nothing here is load-bearing.
+      }
+    })();
+  }
+
   private async routeUpgrade(
     request: IncomingMessage,
     socket: Duplex,
     head: Buffer,
   ): Promise<void> {
     try {
+      if (await this.workerEvents.tryUpgrade(request, socket, head)) {
+        return;
+      }
       if (await this.collaboration.tryUpgrade(request, socket, head)) {
         return;
       }
@@ -6664,6 +6807,15 @@ export class ApiGateway {
         max: 200,
         optional: true,
       });
+      // Read rather than trusted: an unknown value must not widen what a
+      // worker can be handed, and the store's own clause is written against
+      // this exact pair. Absent stays absent so the store applies its own
+      // default rather than this route inventing one.
+      const requested = Array.isArray(body["kinds"]) ? body["kinds"] : undefined;
+      const kinds = requested?.filter(
+        (kind): kind is "task" | "question" =>
+          kind === "task" || kind === "question",
+      );
       const leaseOperation = this.options.operations.leaseWork;
       if (leaseOperation === undefined) {
         throw new HttpError(
@@ -6677,6 +6829,7 @@ export class ApiGateway {
         projectId,
         actorId: principal.user.id,
         ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(kinds === undefined || kinds.length === 0 ? {} : { kinds }),
       });
       if (assignment === undefined) {
         // 204 rather than an empty 200 so a polling worker can branch on the
@@ -6707,7 +6860,7 @@ export class ApiGateway {
     const leaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|scope|result|release)$`,
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|scope|result|release|progress)$`,
         "u",
       ),
     );
@@ -6736,6 +6889,47 @@ export class ApiGateway {
         lease.projectId,
         "run_task",
       );
+
+      if (action === "progress" && method === "POST") {
+        // The agent's own words, from the machine running it.
+        //
+        // `agent_progress` was emitted in exactly one place — the in-process
+        // coordinator — so a run executing on somebody's desktop had nothing
+        // whatsoever to say between "I've taken this" and its ending. Every
+        // other line a run produces is either held as ceremonial or comes
+        // from the coordinator, and the courtesy opening is a paid server
+        // call that a deployment running its agents locally has switched off.
+        // The result was a thread that looked hung for the entire time the
+        // work was actually happening.
+        //
+        // Added as a new action rather than folded into the heartbeat: the
+        // protocol version is compared strictly, so an older worker that
+        // never calls this keeps working unchanged, and one that does needs
+        // no negotiation.
+        const body = objectBody(await this.readJson(request));
+        const message =
+          stringField(body["message"], "message", {
+            max: 2000,
+            optional: true,
+          }) ?? "";
+        if (message.trim().length > 0) {
+          await this.options.store.appendAudit(undefined, {
+            type: "agent_progress",
+            taskId: lease.taskId,
+            data: {
+              projectId: lease.projectId,
+              repositoryId: lease.repositoryId,
+              workerId: lease.workerId,
+              leaseId,
+              message: message.trim(),
+            },
+          });
+        }
+        // Nothing to say back. Progress is a courtesy the run must never wait
+        // on, and a worker that cannot post one keeps working.
+        this.sendJson(response, 202, { recorded: true });
+        return;
+      }
 
       if (action === "heartbeat" && method === "POST") {
         const now = new Date();
@@ -6953,6 +7147,16 @@ export class ApiGateway {
           max: 2000,
           optional: true,
         });
+        // Its own field, and its own much larger bound. `detail` is a failure
+        // reason nobody reads outside a log; an answer is prose about to be
+        // posted in a channel. They cannot share a cap: `stringField` throws
+        // a 400 rather than clipping, and the worker turns any error inside a
+        // lease into a failed task — so an answer a few paragraphs long, sent
+        // as `detail`, would reach the room as "I could not answer that".
+        const answer = stringField(body["answer"], "answer", {
+          max: 8000,
+          optional: true,
+        });
         const resultOperation = this.options.operations.acceptWorkResult;
         if (resultOperation === undefined) {
           throw new HttpError(
@@ -6968,7 +7172,23 @@ export class ApiGateway {
           plan: body["plan"],
           changeSet: body["changeSet"],
           ...(detail === undefined ? {} : { detail }),
+          ...(answer === undefined ? {} : { answer }),
         });
+        // An accepted answer goes back where somebody asked. Fire-and-forget
+        // and after the response is decided: the worker's report has already
+        // succeeded by this point, and a channel write that fails must not
+        // turn a delivered answer into a retry.
+        if (accepted.accepted && accepted.answer !== undefined) {
+          void this.postRoutedAnswer(leaseId, accepted.answer).catch(
+            (error: unknown) => {
+              process.stderr.write(
+                `[channel] routed answer for ${leaseId} could not be posted: ${
+                  error instanceof Error ? error.message : String(error)
+                }\n`,
+              );
+            },
+          );
+        }
         this.sendJson(response, 200, accepted);
         return;
       }
@@ -8626,6 +8846,7 @@ export class ApiGateway {
               actorId: principal.user.id,
             }),
         );
+        this.notifyWorkers(projectId);
         await this.options.store.appendAudit(undefined, {
           type: "task_submitted",
           taskId: task.id,
@@ -11005,6 +11226,13 @@ export class ApiGateway {
       );
       const rosterOverrides =
         await this.options.store.listChannelAgentOverrides(repositoryId);
+      // Read once for the whole roster. See `liveWorkerOwners`.
+      const rosterProject = await this.options.store
+        .getProject(projectId)
+        .catch(() => undefined);
+      const liveOwners = await this.liveWorkerOwners(
+        rosterProject?.organizationId,
+      );
       const agents = connections.map((connection) => ({
         userId: connection.userId,
         // The display name only — never the email `publicUser` would also
@@ -11032,6 +11260,25 @@ export class ApiGateway {
         // see `CredentialVisibility`. Metadata, not a secret; safe for every
         // repository collaborator to see, same as the vendor name itself.
         visibility: connection.visibility,
+        /**
+         * Whether this agent's owner has a machine listening right now.
+         *
+         * Only meaningful where the deployment refuses to execute on its own
+         * behalf — hence `localAgentsOnly` beside it in the payload rather
+         * than the browser having to infer it. With the flag off the control
+         * plane answers regardless, and an offline owner is not a fact
+         * anybody needs.
+         *
+         * Advisory by construction: it is true as of this response, and the
+         * liveness window is three minutes wide. Treat it as what to draw and
+         * what to ask, never as permission — the server's own check at
+         * dispatch is the one that decides.
+         */
+        ownerOnline: ApiGateway.agentIsLive(
+          liveOwners,
+          connection.userId,
+          connection.provider,
+        ),
         connected: true as const,
       }));
       // Whether auditing is switched off here. Sent with the roster rather
@@ -11076,6 +11323,11 @@ export class ApiGateway {
         agents,
         people,
         auditorPaused: auditing?.paused === true,
+        // What makes `ownerOnline` worth drawing. Sent with the roster for
+        // the same reason `auditorPaused` is: the screen that reads one reads
+        // the other, and a second round trip to decide how to draw one dot is
+        // a second chance for the two to disagree.
+        localAgentsOnly: localAgentsOnly(),
       });
       return;
     }
@@ -13573,6 +13825,95 @@ export class ApiGateway {
    * Callers must have authorized `organizationId` first — this method filters,
    * it does not decide who may ask.
    */
+  /**
+   * Whether this owner has a machine currently listening for their work.
+   *
+   * Asked only to decide what to say. A task is filed either way — the queue
+   * is the durable thing and a worker that arrives ten minutes late still
+   * picks it up — but "I've taken this task and I'm working on it" is a
+   * sentence about the present tense, and on a deployment that executes
+   * nothing itself it is false whenever nobody is home. Being wrong in that
+   * direction is expensive: a task waiting for a machine that is asleep looks
+   * exactly like a task in progress, and the only symptom is that it never
+   * finishes.
+   */
+  private async ownerHasLiveWorker(
+    projectId: string,
+    ownerId: string,
+  ): Promise<boolean> {
+    const project = await this.options.store
+      .getProject(projectId)
+      .catch(() => undefined);
+    return (await this.liveWorkerOwners(project?.organizationId)).has(ownerId);
+  }
+
+  /**
+   * Everyone in this organization with a machine currently listening.
+   *
+   * One query and a set, rather than a question asked per agent. The roster
+   * asks about every agent in a room at once, and the workers table is not a
+   * small one to scan repeatedly: `registerWorker` inserts a fresh row on
+   * every worker start with no upsert, and nothing anywhere deletes them, so
+   * it accumulates a dead row per desktop restart forever. Reading it once
+   * and answering from memory keeps that growth off the per-agent path.
+   */
+  private async liveWorkerOwners(
+    organizationId?: string,
+  ): Promise<Map<string, Set<string>>> {
+    const workers = await this.options.store
+      .listWorkers(
+        organizationId === undefined ? undefined : { organizationId },
+      )
+      .catch((): [] => []);
+    const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
+    const live = new Map<string, Set<string>>();
+    for (const worker of workers) {
+      if (worker.lastSeenAt <= cutoff) {
+        continue;
+      }
+      const advertised = live.get(worker.userId) ?? new Set<string>();
+      for (const adapter of worker.adapters) {
+        advertised.add(adapter);
+      }
+      live.set(worker.userId, advertised);
+    }
+    return live;
+  }
+
+  /**
+   * Whether an agent has a machine that can actually run it.
+   *
+   * A set of owners was not enough, and the gap was not academic. A worker
+   * registers the adapters its machine has — one with Claude installed and
+   * nothing else registers exactly `claude` — but liveness was answered per
+   * *person*, so every agent that person owned read as online the moment any
+   * machine of theirs was listening. An agent for a CLI that was never
+   * installed was therefore drawn as available, took a mention, posted "I've
+   * taken this task and I'm working on it", and left the task in a queue no
+   * worker would ever claim. Nothing was hung and nothing failed; the work
+   * simply waited forever behind a sentence saying it had begun.
+   *
+   * Answered per adapter now, which is the question the dispatch actually
+   * asks. An agent whose CLI is on nobody's machine reads as offline, which
+   * is what the offline prompt is for.
+   */
+  private static agentIsLive(
+    live: Map<string, Set<string>>,
+    userId: string,
+    provider: string,
+  ): boolean {
+    const advertised = live.get(userId);
+    if (advertised === undefined) {
+      return false;
+    }
+    const vendor = PROVIDER_TO_VENDOR[provider];
+    // A provider this build has no vendor CLI for cannot be checked against
+    // what a worker advertises. Falling back to "the owner is listening" keeps
+    // such an agent exactly as available as it was before adapters were
+    // consulted, rather than making it silently unmentionable.
+    return vendor === undefined ? true : advertised.has(vendor);
+  }
+
   private async organizationFleet(organizationId: string): Promise<{
     workers: WorkerRecord[];
     active: WorkLease[];
@@ -14509,7 +14850,25 @@ export class ApiGateway {
         // `/dnc` stays on the direct, read-only answer path. `/ask` is
         // deliberately different: it is coordinated work whose first round
         // is forced to open the question demand before implementation.
-        if (parsed?.command.name === "dnc") {
+        //
+        // The visibility half is not decoration. Taking the direct path also
+        // skips `dispatchOneMention`, which is the only place the
+        // personal-agent refusal lives — so `/dnc @somebody-elses-personal-
+        // agent` used to spend that person's credential on a full provider
+        // turn, from anyone who could post in the room. The condition here is
+        // the exact negation of that refusal, so a stranger's mention of a
+        // personal agent falls through to the ordinary path and is told why
+        // rather than being silently served.
+        //
+        // Deliberately not solved by filtering `mentioned` the way the
+        // `@agents` branch filters its candidates: that would silence the
+        // ordinary mention path too, turning an actionable refusal into
+        // nothing happening.
+        if (
+          parsed?.command.name === "dnc" &&
+          (candidate.visibility !== "personal" ||
+            candidate.userId === senderId)
+        ) {
           await this.answerInChannel(
             candidate,
             content,
@@ -15278,6 +15637,7 @@ export class ApiGateway {
           ? { queueAfterCurrent: true }
           : {}),
       });
+      this.notifyWorkers(projectId);
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
         taskId: task.id,
@@ -15342,13 +15702,22 @@ export class ApiGateway {
       // and composing it must not sit in front of the work itself. It remains
       // an ordinary agent reply (rather than folded progress) because it is
       // addressed to the person who assigned the task.
+      // Only asked on a deployment that executes nothing itself, because
+      // only there can the answer be no. Everywhere else the control plane
+      // takes the task the moment it lands and the present tense is true.
+      const waitingForAMachine =
+        localAgentsOnly() &&
+        !(await this.ownerHasLiveWorker(projectId, candidate.userId));
       const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
         messageId: threadRootId,
         authorId: `${candidate.userId}:${candidate.provider}`,
-        content:
-          input.planOnly === true
+        content: waitingForAMachine
+          ? "I've filed this, but nothing is running it yet — my agents run " +
+            "on my own machine and it isn't online. I'll start as soon as " +
+            "it is."
+          : input.planOnly === true
             ? "I've taken this task and I'm working on the plan."
             : task.afterTaskId === undefined
               ? "I've taken this task and I'm working on it."
@@ -15719,6 +16088,15 @@ export class ApiGateway {
      */
     context?: string,
   ): Promise<string[]> {
+    // Nobody is waiting on this line. It is courtesy in front of work that is
+    // already running, so a deployment that has decided not to spend agents
+    // on its own behalf spends none here: the thread simply opens with the
+    // acknowledgement instead. Refused rather than made cheaper, because the
+    // cheap version of a courtesy is still a paid call on somebody's account
+    // for every single dispatch.
+    if (localAgentsOnly()) {
+      return [];
+    }
     const answer = await this.askAgent(
       candidate,
       "You have just been asked to do the following in a software project.\n" +
@@ -15880,6 +16258,45 @@ export class ApiGateway {
      */
     directive?: string,
   ): Promise<string | undefined> {
+    // Answered on its owner's machine, when there is one and when this
+    // deployment has said it will not answer here.
+    //
+    // Both halves are required. `localAgentsOnly()` alone would leave a
+    // question queued on a deployment that is perfectly willing to answer it,
+    // and `ownerHasLiveWorker` alone would change every existing install —
+    // including the local CLI, where the control plane *is* the executor and
+    // routing a question to a worker that is the same process is a long way
+    // round to the same answer.
+    //
+    // Filed and returned. Nothing is posted now: the acknowledgement for work
+    // is wrong here, because the thing being waited for is the answer itself
+    // and a second message in front of it is noise. If the machine never
+    // answers, the sweep says so.
+    if (
+      localAgentsOnly() &&
+      (await this.ownerHasLiveWorker(projectId, candidate.userId))
+    ) {
+      await this.options.operations.submitTask({
+        projectId,
+        repositoryId,
+        // The sender's words, and only those. Every directive the coding
+        // path prepends is about doing work; a question is not work, and the
+        // agent that reads this is going to be asked to answer it.
+        objective: question,
+        vendor: candidate.vendor,
+        // The mentioned agent's owner, never the sender — the same rule the
+        // coding dispatch follows, and here it is doubly load-bearing: it is
+        // also what pins the row to that owner's machine through
+        // `claimableBy`.
+        actorId: candidate.userId,
+        kind: "question",
+        ...(referencedMessageId === undefined
+          ? {}
+          : { answerTo: referencedMessageId }),
+      });
+      this.notifyWorkers(projectId);
+      return undefined;
+    }
     const answer = await this.askAgent(
       candidate,
       `${agentIdentity(candidate)}\n\n` +
@@ -17261,6 +17678,18 @@ export class ApiGateway {
     messageId: string;
     failure: Record<string, unknown>;
   }): Promise<void> {
+    // The fourth turn nobody asked for, and the one that hid. Its three
+    // siblings fire on a rhythm — every dispatch, every message, every
+    // promotion — so they read as loops on sight. This one fires on failure,
+    // which looks like an event until a run of failures makes it a loop too,
+    // on somebody's account, with nobody waiting on the verdict.
+    //
+    // Refused with the others. Silence is already this method's answer when
+    // it has no investigator to ask, and the thread still carries the failure
+    // line itself; what is lost is the commentary, not the fact.
+    if (localAgentsOnly()) {
+      return;
+    }
     const investigator = await this.investigatorFor(
       input.projectId,
       input.repositoryId,
@@ -18311,6 +18740,13 @@ export class ApiGateway {
     fromRevision: string;
     toRevision: string;
   }): Promise<void> {
+    // Fires on every canonical promotion, which is to say on every merge this
+    // project makes, and nobody asked for it. Refused before the diff is even
+    // read: a deployment that will not spend agents on its own initiative
+    // should not spend the repository work either.
+    if (localAgentsOnly()) {
+      return;
+    }
     const { projectId, repositoryId, auditor } = input;
     const diff = await this.options.operations.canonicalDiff?.({
       projectId,
@@ -20737,6 +21173,65 @@ export class ApiGateway {
    * the way every other agent-id lookup here does: an agent id is either
    * `owner:provider` or the bare provider.
    */
+  /**
+   * Puts a routed answer back where somebody asked for it.
+   *
+   * The reply arrives here from a worker's result rather than from a provider
+   * call this process made, so nothing about the asking is still in memory —
+   * the machine that answered may have taken minutes, and this process may
+   * not be the one that dispatched. Everything needed is on the row:
+   * `answerTo` is the message the thread hangs off, and the agent identity is
+   * resolved the same way every other late-arriving report resolves it.
+   *
+   * The same two filters an in-process answer passes, for the same reasons: a
+   * private routing directive must not reach the room, and the sender's own
+   * words handed back are not an answer however confidently worded. Running
+   * them here rather than trusting the worker keeps the rule in one place —
+   * a desktop is not where a content decision should be made.
+   */
+  private async postRoutedAnswer(
+    leaseId: string,
+    answer: string,
+  ): Promise<void> {
+    const lease = await this.options.store.getWorkLease(leaseId);
+    if (lease === undefined) {
+      return;
+    }
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: lease.repositoryId,
+        kind: "question",
+      })
+    ).find((candidate) => candidate.id === lease.taskId);
+    if (
+      task?.answerTo === undefined ||
+      task.projectId === undefined
+    ) {
+      return;
+    }
+    const agent = await this.watchedTaskAgent(task);
+    if (agent === undefined) {
+      return;
+    }
+    const parsed = parseAnswerTaskDirective(answer);
+    const said =
+      parsed.answer !== undefined &&
+      readsAsEchoOfRequest(task.objective, parsed.answer)
+        ? undefined
+        : parsed.answer;
+    if (said === undefined || said.trim().length === 0) {
+      return;
+    }
+    await this.appendChannelEntry({
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      kind: "agent",
+      authorId: `${agent.ownerId}:${agent.provider}`,
+      content: said,
+      referencedMessageId: task.answerTo,
+    });
+  }
+
   private async watchedTaskAgent(
     task: SubmittedTask,
   ): Promise<{ ownerId: string; provider: string } | undefined> {
@@ -21172,6 +21667,16 @@ export class ApiGateway {
     context?: string;
     referencedMessageId?: string;
   }): Promise<void> {
+    // The most expensive habit this server has: a provider turn for every
+    // message in a channel that has an agent in it, whether or not anybody
+    // addressed one. Gated here rather than inside the verdict so a refusal
+    // costs no loop at all — the understudy would only be asked to refuse a
+    // second time. Nothing is lost that a person cannot recover by
+    // @mentioning somebody, which is the same fallback an unreachable CLI
+    // already has.
+    if (localAgentsOnly()) {
+      return;
+    }
     const { projectId, repositoryId, content, senderId, context } = input;
     // The agent that would take it reads the message, on the cheap model —
     // see CEREMONIAL_MODELS — and says which of three things to do about it.
@@ -22755,11 +23260,28 @@ export class ApiGateway {
     // separates "a client-side route" from "a file that does not exist":
     // /app and /some/client/route fall back to the document, /app.js and a
     // typoed /app.jss stay honest 404s.
+    const exact = this.options.staticAssets?.get(url.pathname);
+    const fallingBackToDashboard =
+      exact === undefined && !url.pathname.includes(".");
+    // Only the dashboard document, and only when it is being reached by a
+    // desktop browser on a deployment that distributes an app. Assets, the
+    // API and every other route are left alone: the app loads all of them
+    // from this same origin, so a gate that caught them would break the
+    // client it exists to favour. `/download` is an exact asset, so it is
+    // never the falling-back path and can always be reached.
+    if (
+      fallingBackToDashboard &&
+      shouldRedirectToDownload(request.headers["user-agent"])
+    ) {
+      response.writeHead(302, { location: "/download" });
+      response.end();
+      return;
+    }
     const asset =
-      this.options.staticAssets?.get(url.pathname) ??
-      (url.pathname.includes(".")
-        ? undefined
-        : this.options.staticAssets?.get("/index.html"));
+      exact ??
+      (fallingBackToDashboard
+        ? this.options.staticAssets?.get("/index.html")
+        : undefined);
     if (asset === undefined) {
       throw new HttpError(404, "not_found", "Asset was not found");
     }

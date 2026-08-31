@@ -58,6 +58,18 @@ services:
       COORD_SANDBOX_USER: ${COORD_SANDBOX_USER:-}
       COORD_GITHUB_CLIENT_ID: ${COORD_GITHUB_CLIENT_ID:-}
       COORD_REPOSITORY_PARALLELISM: ${COORD_REPOSITORY_PARALLELISM:-}
+      # "1" stops the control plane executing agents itself, leaving every
+      # task for a registered worker. The hosted deployment's memory and
+      # egress are almost entirely agents, and both belong on the machine the
+      # work is for. Off here, because a single-box install where this
+      # container *is* the executor must keep working.
+      COORD_LOCAL_AGENTS_ONLY: ${COORD_LOCAL_AGENTS_ONLY:-}
+      # "1" sends desktop browsers asking for the dashboard to /download
+      # instead. Phones are let through, because there is no phone build to
+      # send them to, and the app identifies itself so it is never redirected
+      # away from the page it exists to show. A signpost, not a control: the
+      # marker is client-supplied and anybody can copy it.
+      COORD_DESKTOP_APP_ONLY: ${COORD_DESKTOP_APP_ONLY:-}
     ports:
       - "${COORD_PORT:-4317}:4317"
     volumes:

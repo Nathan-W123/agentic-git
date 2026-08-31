@@ -34,6 +34,7 @@ import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { GitClient } from "@coord/repository-service";
 import {
   planAdmissionApproved,
+  requestFromObjective,
   type AgentPlan,
   type ChangeSet,
   type CoordinatorDecision,
@@ -51,6 +52,13 @@ import {
 } from "@coord/workspace-manager";
 
 import { LeaseLostError, WorkerClient, isTransportFailure } from "./client.js";
+import { signalHost } from "./host-signal.js";
+import type { WorkNudge } from "./nudge.js";
+import {
+  shouldClaimWork,
+  systemPowerSource,
+  type PowerSource,
+} from "./power.js";
 
 /**
  * The worker daemon.
@@ -95,8 +103,34 @@ export interface WorkerOptions {
   version?: string;
   projectId?: string;
   repositoryId?: string;
+  /**
+   * The adapters this host can actually drive, if it knows.
+   *
+   * Left undefined, the project config is taken at its word, which is what a
+   * server-side worker wants: it is the deployment, and its config is the
+   * truth. A desktop is not — it has just looked at the machine and knows
+   * which vendor CLIs are installed — and the config it reads has had absent
+   * vendors backfilled into it by design. This is where that host says so.
+   */
+  adapters?: readonly string[];
   /** Injected only by tests or embedded runtimes. */
   codexRunner?: CodexProcessRunner;
+  /**
+   * How this machine answers "am I plugged in".
+   *
+   * Injected for the same reason `codexRunner` is: the real one shells out to
+   * a platform tool, so a test that wants a worker on battery would otherwise
+   * have to be running on a laptop that was actually unplugged.
+   */
+  powerSource?: PowerSource;
+  /**
+   * An optional shortcut out of the idle wait.
+   *
+   * Supplied by the daemon entry point, which is where the server address and
+   * token live. Absent everywhere else — including every test — and the loop
+   * below is written so that absence is simply the old behaviour.
+   */
+  nudge?: WorkNudge;
   /**
    * Plans already paid for, reusable while the base they were written against
    * has not moved.
@@ -192,6 +226,29 @@ interface PlannedWork {
   workspacePath: string;
 }
 
+/**
+ * Whether this reads as an adapter's "nothing to say" fallback.
+ *
+ * All three build it the same way — `<agent name> completed <request>`, where
+ * the request is derived from the objective by `requestFromObjective`. The
+ * check is anchored on the tail rather than on the name, because names differ
+ * per adapter and per configured profile while the tail is computed from the
+ * objective this worker is already holding.
+ *
+ * A false positive costs one honest "I could not answer that just now" on an
+ * answer that genuinely ended with those exact words. A false negative posts
+ * somebody their own question back as though an agent had written it. That
+ * asymmetry is the whole reason the tail is matched exactly rather than
+ * loosely.
+ */
+function readsAsCompletionNotice(said: string, objective: string): boolean {
+  const request = requestFromObjective(objective).trim();
+  if (request.length === 0) {
+    return false;
+  }
+  return said.trim().endsWith(`completed ${request}`);
+}
+
 export class Worker {
   private identity: { id: string } | undefined;
   /** See {@link WorkerOptions.planCache}. Per-worker unless one is injected. */
@@ -209,9 +266,12 @@ export class Worker {
   private cancellationRequested = false;
   private admissionWait: AbortController | undefined;
   private iterationInProgress = false;
+  /** See {@link WorkerOptions.powerSource}. */
+  private readonly power: PowerSource;
 
   public constructor(private readonly options: WorkerOptions) {
     this.plans = options.planCache ?? new Map<string, CachedPlan>();
+    this.power = options.powerSource ?? systemPowerSource();
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
     const planWaitBudget =
       options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
@@ -237,13 +297,25 @@ export class Worker {
   }
 
   public async register(): Promise<string> {
-    const adapters = [
-      ...new Set(
-        Object.values(this.options.project.config.agents).map((agent) =>
-          agent.adapter ?? "generic-cli",
-        ),
+    const configured = new Set(
+      Object.values(this.options.project.config.agents).map(
+        (agent) => agent.adapter ?? "generic-cli",
       ),
-    ];
+    );
+    // What the config lists is not what this machine can run. `CoordinatorProject`
+    // backfills a default agent for every vendor the config lacks — on purpose,
+    // so a deployment that predates a vendor still answers for it — and those
+    // entries carry no command. A worker that registered them would be offered
+    // work for a CLI that is not installed and could only fail it, which is the
+    // "spawn <vendor> ENOENT" a desktop kept reporting. So the host may say what
+    // it actually has, and registration is the intersection.
+    const advertised =
+      this.options.adapters === undefined
+        ? [...configured]
+        : [...configured].filter((adapter) =>
+            this.options.adapters?.includes(adapter),
+          );
+    const adapters = advertised;
     const identity = await this.options.client.register({
       organizationId: this.options.organizationId,
       name: this.options.name ?? `worker-${process.pid}`,
@@ -277,10 +349,22 @@ export class Worker {
 
   private async performIteration(): Promise<IterationResult> {
     const workerId = this.identity?.id ?? (await this.register());
+    // Asked before the lease and not after it, because the point is to never
+    // hold work this machine cannot promise to finish. A laptop that claims a
+    // task and then sleeps keeps it for the full lease expiry while its owner
+    // watches nothing happen; declining leaves it visibly queued instead.
+    if (!shouldClaimWork(await this.power.read())) {
+      return { worked: false };
+    }
     const assignment = await this.options.client.lease(
       workerId,
       this.options.projectId ?? DEFAULT_PROJECT_ID,
       this.options.repositoryId,
+      // Opting in is what makes this worker able to receive a question at
+      // all. A build that does not send this is served work only, by an
+      // older control plane that ignores the field and by a newer one that
+      // defaults to the same thing — which is why no protocol version moved.
+      ["task", "question"],
     );
     if (assignment === undefined) {
       return { worked: false };
@@ -309,6 +393,10 @@ export class Worker {
     }
 
     this.activeLease = assignment.lease.id;
+    // The busy window is exactly the lease's lifetime. The desktop app holds
+    // the machine awake for this and nothing longer, so that volunteering a
+    // laptop does not mean it never sleeps again.
+    signalHost("busy");
     this.activeSession = undefined;
     this.activeCancellation = undefined;
     this.cancellationRequested = false;
@@ -350,6 +438,27 @@ export class Worker {
             `${assignment.protocolVersion ?? 1}, which has no plan admission ` +
             `step; this worker requires ${WORKER_PROTOCOL_VERSION}`,
         );
+      }
+
+      if (assignment.task.kind === "question") {
+        const answer = await this.answerQuestion(assignment, scratch);
+        if (leaseLost) {
+          throw new LeaseLostError(assignment.lease.id);
+        }
+        const said = await this.options.client.report(
+          assignment.lease.id,
+          // No plan and no changeset, because there was nothing to admit and
+          // nothing to integrate. The control plane's question branch returns
+          // before it looks for either.
+          { status: "completed", plan: null, changeSet: null, answer },
+          this.spentSoFar(),
+        );
+        return {
+          worked: true,
+          taskId: assignment.task.id,
+          accepted: said.accepted,
+          ...(said.reason === undefined ? {} : { reason: said.reason }),
+        };
       }
 
       const planned = await this.plan(assignment, scratch);
@@ -437,6 +546,7 @@ export class Worker {
       return { worked: true, taskId: assignment.task.id, accepted: false, reason: detail };
     } finally {
       clearInterval(beat);
+      signalHost("idle");
       await heartbeat?.catch(() => undefined);
       await this.cancelActiveSession();
       this.activeLease = undefined;
@@ -445,6 +555,54 @@ export class Worker {
       this.admissionWait = undefined;
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * Runs one question and returns what the agent actually said.
+   *
+   * The same session machinery as work, because a question is answered the
+   * same way work is done — a checkout, an agent, a turn — and the only real
+   * differences are at the ends: nothing is admitted going in, and nothing is
+   * integrated coming out. So the admission handed to `execute` is
+   * synthesised rather than requested. That is honest rather than a shortcut:
+   * admission exists to stop two agents editing the same files, a question
+   * declares no files and edits none, and asking the control plane to admit
+   * an empty plan would be asking a question whose answer is fixed.
+   *
+   * What comes back is the agent's own explanation, and the guard below is
+   * the point of the whole method.
+   */
+  private async answerQuestion(
+    assignment: WorkAssignment,
+    scratch: string,
+  ): Promise<string> {
+    const planned = await this.plan(assignment, scratch);
+    const result = await this.execute(assignment, planned, {
+      status: "approved",
+      taskId: assignment.task.id,
+      planRevision: 1,
+      baseRevision: assignment.lease.baseRevision,
+      ownershipGrants: [],
+      constraints: [],
+      blockedBy: [],
+      conflicts: [],
+      explanation: "A question declares no files, so there is nothing to admit.",
+      decidedAt: new Date().toISOString(),
+    });
+    const said = (result.changeSet.agentExplanation ?? "").trim();
+    // Every adapter falls back to "<name> completed <request>" when the model
+    // returns no explanation of its own. For work that is a reasonable status
+    // line. For a question it is a disaster: the request *is* the asker's own
+    // sentence, so the room would get its own question handed back to it,
+    // prefixed by the agent's name, indistinguishable from a real answer.
+    //
+    // Failing instead is not a worse outcome. A failed question becomes the
+    // control plane's "I could not answer that just now", which is true, says
+    // so, and cannot be mistaken for an answer.
+    if (said.length === 0 || readsAsCompletionNotice(said, assignment.task.objective)) {
+      throw new Error("The agent produced no answer of its own");
+    }
+    return said;
   }
 
   /**
@@ -661,6 +819,31 @@ export class Worker {
       ...(context === "" ? {} : { priorContext: context }),
     });
     this.activeSession = { adapter, sessionId: session.id };
+    // Listening starts here, not at execution.
+    //
+    // The full handler in `execute` is attached once a plan has been admitted,
+    // which is minutes later: `requestPlan` is allowed ten of them, and it is
+    // the phase an agent spends reading the repository and saying what it
+    // finds. Nobody was attached for any of it, so the whole planning phase
+    // went by in silence and a thread showed the acknowledgement and then
+    // nothing — indistinguishable from a hang, and the state most runs are
+    // actually in when somebody looks.
+    //
+    // Progress only. Questions, actions and scope belong to a run that has
+    // been admitted, and `execute` answers those with the session's own
+    // machinery; forwarding a line of narration needs none of it.
+    await adapter
+      .streamEvents(session.id, (event) => {
+        if (event.event === "progress") {
+          void this.options.client.progress(
+            assignment.lease.id,
+            event.message,
+          );
+        }
+      })
+      // An adapter that cannot stream still plans and still works. This is
+      // the room's view of the run, never the run itself.
+      .catch(() => undefined);
     if (this.cancellationRequested) {
       await this.cancelActiveSession();
       throw new LeaseLostError(assignment.lease.id);
@@ -760,6 +943,19 @@ export class Worker {
     await adapter.streamEvents(sessionId, (event) => {
       eventChain = eventChain
         .then(async () => {
+          if (event.event === "progress") {
+            // Forwarded so a run on somebody's own machine can say what it is
+            // doing. `agent_progress` was emitted only by the in-process
+            // coordinator, so a desktop run went from "I've taken this" to its
+            // ending with nothing in between — for the whole time the work was
+            // actually happening — and read as hung. The post cannot fail the
+            // run; see `WorkerClient.progress`.
+            await this.options.client.progress(
+              assignment.lease.id,
+              event.message,
+            );
+            return;
+          }
           if (event.event === "question_asked") {
             // A worker daemon has no channel and nobody watching, so an
             // answer cannot arrive. This event used to be dropped on the
@@ -1092,6 +1288,9 @@ export class Worker {
   /** Polls until stopped. */
   public async run(): Promise<void> {
     await this.register();
+    // Connected after registering, so a nudge can never arrive for a worker
+    // the control plane does not yet know about.
+    this.options.nudge?.start();
     const idle = this.options.pollIntervalMs ?? DEFAULT_POLL_MS;
     while (!this.stopping) {
       let result: IterationResult;
@@ -1111,7 +1310,10 @@ export class Worker {
       // replan it into the same refusal, so back off as if the queue were
       // empty — which, for work this worker can do, it effectively is.
       if ((!result.worked || result.deferred === true) && !this.stopping) {
-        await new Promise((resolve) => setTimeout(resolve, idle));
+        // The nudge only ever shortens this. With none supplied, or one that
+        // never hears anything, it is the same fixed backoff it always was.
+        await (this.options.nudge?.wait(idle) ??
+          new Promise((resolve) => setTimeout(resolve, idle)));
       }
     }
   }
@@ -1124,6 +1326,9 @@ export class Worker {
    */
   public async stop(): Promise<void> {
     this.stopping = true;
+    // Released first: it holds a socket and may have a caller parked in
+    // `wait`, and neither should outlive the decision to shut down.
+    this.options.nudge?.stop();
     const lease = this.activeLease;
     await Promise.all([
       this.cancelActiveSession(),

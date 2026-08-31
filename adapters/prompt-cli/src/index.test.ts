@@ -37,6 +37,7 @@ import {
   parseClaudeUsage,
   claudeResultEnvelope,
   readClaudeNarration,
+  failureFromStream,
 } from "./index.js";
 
 const TASK: TaskDefinition = {
@@ -2503,4 +2504,105 @@ test("claude: resume clears the pause even when it is called twice", async () =>
     /Unknown claude session/u,
   );
   await rm(fixture.root, { recursive: true, force: true });
+});
+
+test("claude: a round abandoned on a deadline does not fail the next one", async (t) => {
+  // The failure this prevents, and it kills a task that did nothing wrong.
+  //
+  // The coordinator asks a blanket holder to declare its remaining scope by
+  // racing the call against a deadline, and that deadline abandons the ask
+  // without cancelling it — there is no way to un-ask an agent. So a slow
+  // answer outlives the caller, and the vendor process is still running when
+  // the holder resumes. The next execution round hit the one-process guard and
+  // threw; nothing up the stack catches it, so the whole task failed because
+  // somebody else had arrived and asked it a question.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  let release = (): void => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner: async () => {
+      calls += 1;
+      // The first round hangs past its caller's patience, the way a slow
+      // model answer does.
+      if (calls === 1) {
+        await held;
+      }
+      return output(claudeEnvelope(JSON.stringify(PLAN)));
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+
+  // Abandoned, not cancelled — exactly what `withDeadline` does.
+  const abandoned = adapter.requestPlan(session.id);
+  abandoned.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  // The next round used to throw here. It should wait for the abandoned one
+  // and then do its work.
+  const next = adapter.requestPlan(session.id);
+  release();
+  const plan = await next;
+
+  assert.deepEqual(plan.expectedFiles, PLAN.expectedFiles);
+  assert.equal(calls, 2, "the second round never ran");
+  await abandoned;
+});
+
+/**
+ * A failed streaming run's reason comes from the end of the stream.
+ *
+ * A CLI that dies mid-run writes nothing to stderr and everything to stdout,
+ * as newline-delimited JSON whose first line is an `init` banner naming the
+ * working directory. Handed back whole, that reason was clipped to its first
+ * two hundred characters upstream — always the banner — so three separate
+ * failures reached three channels reading
+ * `claude execution failed: {"type":"system","subtype":"init","cwd":"C:\\Users\\…`
+ * and saying nothing at all.
+ */
+test("a failed JSON stream reports its result envelope, not its banner", () => {
+  const stream = [
+    JSON.stringify({ type: "system", subtype: "init", cwd: "C:\\Users\\nward" }),
+    JSON.stringify({ type: "assistant", message: { content: "thinking" } }),
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "Credit balance is too low",
+    }),
+  ].join("\n");
+  assert.equal(failureFromStream(stream), "Credit balance is too low");
+});
+
+test("a stream that stops before its result falls back to its last word", () => {
+  // No envelope: the process died mid-stream. The last thing it managed to
+  // say is the closest thing to a reason there is, and it beats the banner.
+  const stream = [
+    JSON.stringify({ type: "system", subtype: "init", cwd: "C:\\Users\\nward" }),
+    JSON.stringify({ type: "assistant", message: { content: "reading" } }),
+  ].join("\n");
+  assert.match(failureFromStream(stream), /reading/u);
+  assert.doesNotMatch(failureFromStream(stream), /init/u);
+});
+
+test("prose output keeps its whole message", () => {
+  // A CLI that does not stream JSON usually says the error first, so taking
+  // the last line would throw the message away to fix a problem it does not
+  // have.
+  const said = "error: not logged in\n  run `claude login` to continue";
+  assert.equal(failureFromStream(said), said);
 });

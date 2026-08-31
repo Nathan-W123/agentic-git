@@ -4835,6 +4835,94 @@ test("a personal agent refuses a stranger's @mention and dispatches nothing", as
   );
 });
 
+/**
+ * The same refusal, reached by the door that used to be open.
+ *
+ * `/dnc` takes a fast path in the mention loop: it calls `answerInChannel`
+ * directly and `continue`s, which also skips `dispatchOneMention` — the only
+ * place the personal-agent refusal above lives. So a stranger could spend
+ * somebody else's provider credential on a full turn, up to the question
+ * deadline, from any room they could post in. The mention path was tested and
+ * the slash-command path was not, which is the whole of how it survived.
+ *
+ * Asserted on `chatPrompts` being empty, not just on the refusal appearing: a
+ * refusal posted after the turn was made would read identically in the
+ * channel and cost exactly the same.
+ */
+test("/dnc cannot reach a stranger's personal agent either", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-personal-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "This turn must never be made.";
+
+  const colleague = await addColleague(runtime, "colleague-dnc@example.com");
+
+  const posted = await colleague.client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @Claude (Owner) what does the retry loop do?" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.deepEqual(
+    runtime.chatPrompts,
+    [],
+    "a refused /dnc must not reach the provider at all",
+  );
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "system",
+  );
+  assert.equal(systemMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.match(systemMessages[0].content, /personal to Owner/u);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.deepEqual(agentMessages, [], JSON.stringify(agentMessages));
+});
+
+/**
+ * The other half: `/dnc` must still work where it always did.
+ *
+ * The fix is a visibility condition on a fast path, and the way to get it
+ * wrong is to make it too broad — filtering the mention list rather than the
+ * one branch, and quietly disabling the command for everybody.
+ */
+test("/dnc still answers on an org-wide agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-org-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "It caps at five attempts.";
+
+  const colleague = await addColleague(runtime, "colleague-dnc-org@example.com");
+
+  const posted = await colleague.client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @Claude (Owner) what does the retry loop do?" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(`${base}/messages`);
+  const [answer] = agentSpeech(after.data.messages);
+  assert.match(String(answer?.content), /caps at five attempts/u);
+  assert.equal(runtime.submittedTasks.length, 0, "/dnc files no task");
+});
+
 test("an org-wide agent accepts a stranger's @mention and dispatches under the owner's credential", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -5988,6 +6076,107 @@ test("a question about repository files is answered in the channel, not turned i
   assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
 });
 
+function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+    } else {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+  });
+}
+
+/**
+ * The half of the flag that must keep working.
+ *
+ * Refusing questions was tried and reverted, and this test is why it should
+ * stay reverted. Answering happens on the control plane and the worker
+ * protocol has no verb for it — `register`, `leases`, and the lease's own
+ * sub-routes, and nothing else — so refusing a question does not move it to
+ * a desktop, it deletes the feature. The flag exists to relocate spend, not
+ * to remove the product.
+ */
+test("with local agents only, a channel question is still answered", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-only-question");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text =
+    "The API gateway handles channel questions.\nANSWER_TASK: NONE";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Claude (Owner) which file contains channel question routing?",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.equal(
+    agentMessages[0]?.content,
+    "The API gateway handles channel questions.",
+  );
+});
+
+/**
+ * What the room is told when nothing is going to pick the work up.
+ *
+ * "I've taken this task and I'm working on it" is a sentence in the present
+ * tense, and on a deployment that executes nothing itself it is false
+ * whenever the owner's machine is not listening. The task is still filed and
+ * a worker arriving later still runs it — nothing is lost — but a task
+ * waiting on somebody who is asleep looked exactly like a task in progress,
+ * and the only symptom was that it never finished.
+ */
+test("with local agents only and no machine listening, the room is told the truth", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-only-waiting");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Work, not a question, so it takes the queue path and is acknowledged.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the login bug" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Filed either way: the queue is the durable thing, and a worker that
+  // registers in ten minutes still picks this up.
+  assert.equal(runtime.submittedTasks.length, 1);
+
+  const after = await owner.request(`${base}/messages`);
+  const [acknowledgement] = agentSpeech(after.data.messages);
+  assert.match(
+    String(acknowledgement?.content),
+    /nothing is running it yet/u,
+    JSON.stringify(after.data.messages),
+  );
+  assert.doesNotMatch(
+    String(acknowledgement?.content),
+    /I'm working on it/u,
+  );
+});
+
 test("a question answer that proposes a repository change starts one scoped task and announces the handoff", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -6553,6 +6742,39 @@ test("a failed task says why, whichever shape the failure was recorded in", () =
     String(
       narrateTaskEvent("task_failed", {
         error: "OAuth session expired and could not be refreshed",
+      }),
+    ),
+    /sign-in has expired\. Reconnect me from Settings → Agents/u,
+  );
+
+  // The key a remote worker actually wrote, for as long as it wrote it.
+  //
+  // `acceptWorkResult` recorded its reason under `detail` — the one emitter of
+  // six that did not use `error` or `explanation` — so every failure reported
+  // by somebody's desktop reached the room as the bare sentence below, with
+  // the reason sitting in the audit record under a name nothing read. On a
+  // deployment that has moved execution onto people's machines that is every
+  // failure there is, which is exactly how three different vendors came to
+  // look equally broken.
+  //
+  // The emitter now writes `error`. This keeps the rows already on the record
+  // able to explain themselves.
+  assert.equal(
+    narrateTaskEvent("task_failed", { detail: "npm test exited 1" }),
+    "I could not finish this: npm test exited 1",
+  );
+  // And it stays last: a row carrying both is a row from the fixed emitter,
+  // where `error` is the one that was meant.
+  assert.equal(
+    narrateTaskEvent("task_failed", { error: "boom", detail: "stale" }),
+    "I could not finish this: boom",
+  );
+  // An expired sign-in reported by a worker still gets its remedy, which is
+  // the whole point: the reader is the only person who can carry it out.
+  assert.match(
+    String(
+      narrateTaskEvent("task_failed", {
+        detail: "OAuth session expired and could not be refreshed",
       }),
     ),
     /sign-in has expired\. Reconnect me from Settings → Agents/u,

@@ -23,7 +23,9 @@ import {
   type ScopeChangeDecision,
 } from "@coord/shared-types";
 import {
+  explainSpawnFailure,
   sanitizeChildEnv,
+  spawnInvocation,
   type CanonicalRepository,
 } from "@coord/repository-service";
 import type {
@@ -100,10 +102,23 @@ class AgentProcess {
     private readonly spec: SandboxLaunchSpec,
     private readonly onEvent: (event: AgentEvent) => void,
   ) {
-    this.child = spawn(spec.command, [...spec.args], {
+    // Not `spawn(spec.command, ...)` directly. This adapter owns its child
+    // rather than borrowing `runProcess`, and that is exactly why it has to
+    // ask for the same invocation: a bare `agent` on Windows is a `.cmd` shim
+    // that libuv will not find and Node will not execute, so spawning the
+    // name as written produced `spawn agent ENOENT` on every task.
+    const childEnv = sanitizeChildEnv(spec.env ?? process.env);
+    const invocation = spawnInvocation(
+      spec.command,
+      spec.args,
+      spec.cwd,
+      childEnv,
+    );
+    this.child = spawn(invocation.executable, invocation.args, {
       cwd: spec.cwd,
-      env: sanitizeChildEnv(spec.env ?? process.env),
+      env: childEnv,
       shell: false,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments ?? false,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -119,7 +134,7 @@ class AgentProcess {
     // A dead child turns further writes into EPIPE; the close handler reports it.
     this.child.stdin?.on("error", () => undefined);
     this.child.once("error", (error: Error) => {
-      this.fail(error);
+      this.fail(explainSpawnFailure(error, spec.command, childEnv));
     });
 
     this.closed = new Promise<void>((resolve) => {
