@@ -206,6 +206,7 @@ import {
   TERMINAL_TASK_STATUS,
   cancelTask,
   connectAgent,
+  disconnectAgent,
   linkAgentAccount,
   installVendorCli,
   connectGitHubAccount,
@@ -2354,7 +2355,10 @@ function agentsCard() {
                           data-act="agent-link-account"
                           data-value="${esc(agent.id)}"
                           title="Link your ${esc(agent.label ?? agent.id)} account so Kumi can show your remaining usage"
-                          >Link for usage</button>`
+                          >Link for usage</button>
+                          <button type="button" class="btn btn-sm"
+                          data-act="agent-disconnect"
+                          data-value="${esc(agent.id)}">Disconnect</button>`
                       : (() => {
                           const connecting =
                             state.providerConnecting?.has(agent.id) === true;
@@ -10316,28 +10320,30 @@ document.addEventListener("click", (event) => {
       void startAddAgentFlow(render);
       return;
     case "agent-disconnect":
-      void api(`/chat/providers/${encodeURIComponent(value)}`, {
-        method: "DELETE",
-      })
-        .then(() => loadProviders())
-        .then(() => {
-          toast("Disconnected", "ok");
-          render();
-        })
-        .catch((error) => toast(error.message, "error"));
+      // Asks before it destroys, and removes the agent rather than only its
+      // secret. Both are `disconnectAgent`'s job — this used to fire the
+      // DELETE straight off a click, on a button whose meaning had quietly
+      // changed underneath it.
+      void disconnectAgent(value, render);
       return;
     case "agent-switch": {
       const agent = myAgents().find((entry) => entry.id === value);
       const provider = state.providers.find((entry) => entry.id === value);
       const mine = provider?.ownCredential !== undefined;
+      // Whether there is an agent to remove, which is not the same as whether
+      // a secret is stored — the settings row learned that and this menu had
+      // not, so the one agent shape that cannot be removed anywhere else was
+      // missing its entry here too.
+      const exists = mine || provider?.exists === true;
       showMenu(node, [
-        ...(mine
+        ...(exists
           ? [
               {
                 act: "agent-disconnect",
                 value,
                 label: `Disconnect ${agentLabelOf(value)}`,
                 iconName: "logout",
+                danger: true,
               },
             ]
           : []),

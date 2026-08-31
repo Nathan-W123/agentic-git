@@ -12546,6 +12546,18 @@ export class ApiGateway {
           await performChat(() =>
             chatOperations.disconnect({ userId: identity.userId, provider }),
           );
+          // The names this agent was given in particular rooms go with it,
+          // for a stronger version of the reason a rename clears them. An
+          // override naming this agent in one channel outranks its call sign
+          // there, and the key is `${userId}:${provider}` — which the *next*
+          // agent dealt for this account and this vendor will also be. Left
+          // standing, they would hand a brand-new agent the removed one's
+          // name in every room the removed one had been named in. Roles,
+          // models and efforts are that channel's decision about a seat
+          // rather than a name for this agent, and stay.
+          await this.options.store.clearChannelAgentNameOverrides(
+            `${identity.userId}:${provider}`,
+          );
           this.sendJson(response, 200, { disconnected: true });
           return;
         }

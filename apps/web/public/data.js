@@ -5908,6 +5908,28 @@ export function addChannelAgent(repositoryId, agentId) {
  * at connection time, instead of deriving membership on every read and
  * silently undoing a later removal.
  */
+/**
+ * Drops an agent out of every channel roster already loaded in this tab.
+ *
+ * The server has forgotten it, so any roster fetched from here on lists it
+ * nowhere — but a channel already on screen holds its own copy and would go
+ * on showing an agent that no longer exists until something else forced a
+ * reload. The mirror image of the patch {@link addAgentToAllRepositories}
+ * applies when an agent joins, and for the same reason.
+ *
+ * Scoped to this account's own agents. Somebody else's agent for the same
+ * vendor is a different agent, and removing mine must not take theirs off
+ * the screen.
+ */
+export function forgetAgentInLoadedRosters(agentId) {
+  const mine = currentUserId();
+  for (const [repositoryId, roster] of Object.entries(state.channelRoster)) {
+    state.channelRoster[repositoryId] = roster.filter(
+      (entry) => !(entry.userId === mine && entry.provider === agentId),
+    );
+  }
+}
+
 export async function addAgentToAllRepositories(agentId) {
   if (!agentId || !state.projectId) {
     return [];

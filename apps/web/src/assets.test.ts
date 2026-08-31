@@ -1928,6 +1928,50 @@ test("Settings Agents rows ask whether the agent exists, not whether a secret is
   );
 });
 
+/**
+ * An agent can be removed, and is asked about before it is.
+ *
+ * The button said "Disconnect" and destroyed a credential, which was the
+ * whole of removing an agent while the credential was the identity. Once an
+ * agent got a record of its own the button drifted in two directions at once:
+ * on an agent with a credential it left the agent itself in every channel,
+ * and on one without — every agent on a deployment that runs them locally —
+ * it was not offered at all, so an agent could be created and never removed.
+ */
+test("an agent can be disconnected, including one with no credential", async () => {
+  const app = await publicFile("app.js");
+  const agents = await publicFile("screen-agents.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // Offered on the local-agent row, beside the sign-in it does not require.
+  assert.match(body, /data-act="agent-link-account"/u);
+  assert.match(
+    body.slice(body.indexOf('data-act="agent-link-account"')),
+    /data-act="agent-disconnect"/u,
+    "the row that offers Link for usage must also offer Disconnect",
+  );
+
+  // The click goes through the flow, not straight at the route. The bare
+  // fetch it replaced asked nothing and removed only the secret.
+  assert.match(app, /void disconnectAgent\(value, render\)/u);
+  assert.doesNotMatch(
+    app,
+    /case "agent-disconnect":\s*\n\s*void api\(/u,
+    "disconnect must not fire straight off a click",
+  );
+
+  // And the menu asks the same question the row does.
+  assert.match(app, /const exists = mine \|\| provider\?\.exists === true/u);
+
+  // The flow confirms, names the agent rather than the vendor, and says what
+  // survives — nothing is uninstalled and the vendor account is untouched.
+  assert.match(agents, /export async function disconnectAgent/u);
+  assert.match(agents, /title: `Disconnect \$\{name\}\?`/u);
+  assert.match(agents, /Nothing is uninstalled/u);
+  assert.match(agents, /forgetAgentInLoadedRosters\(providerId\)/u);
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may

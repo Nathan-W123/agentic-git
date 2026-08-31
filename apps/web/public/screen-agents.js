@@ -13,10 +13,12 @@ import {
   cancelProviderSignIn,
   createLocalAgent,
   connectGitHub,
+  forgetAgentInLoadedRosters,
   connectProviderCredential,
   gitHubSignInStatus,
   loadGitHub,
   loadProviders,
+  myAgents,
   providerSignInStatus,
   startGitHubSignIn,
   startProviderSignIn,
@@ -361,6 +363,62 @@ async function connectLocalAgent(providerId, rerender) {
   );
   rerender();
   await finishLocalSetup(providerId, rerender);
+  return true;
+}
+
+/**
+ * Removing an agent.
+ *
+ * "Disconnect" used to mean deleting a stored credential, because the
+ * credential was the agent. It is not any more, and the button had drifted
+ * away from what it says in two directions at once: on an agent with a
+ * credential it deleted the secret and left the agent itself in every
+ * channel, and on an agent without one — which is every agent on a
+ * deployment that runs them locally — it was not offered at all, so an agent
+ * could be created and never removed.
+ *
+ * It asks first. Removing an agent is not undoable in the way that matters:
+ * the call sign goes back in the pool and the next agent dealt may take it,
+ * so the name people have learned can end up belonging to somebody else.
+ *
+ * What it deliberately does not touch is the vendor CLI on this machine and
+ * the vendor account behind it. Kumi installed the one and never owned the
+ * other, and signing somebody out of Codex because they tidied up a Kumi
+ * roster would be a surprise of an entirely different order.
+ */
+export async function disconnectAgent(providerId, rerender) {
+  const label = agentLabelOf(providerId);
+  const agent = myAgents().find((entry) => entry.id === providerId);
+  // The call sign if it has one, because that is the name on the screen and
+  // in every channel — asking "disconnect Codex?" about an agent everybody
+  // calls Eris is asking about something else.
+  const name = agent?.hasName === true ? agent.name : label;
+  const confirmed = await showModal({
+    title: `Disconnect ${name}?`,
+    subtitle:
+      `${name} leaves every channel it is in, and its name goes back in the ` +
+      "pool for another agent to be dealt.",
+    body: `<p class="modal-hint">Nothing is uninstalled, and your
+      ${esc(label)} account is untouched — you can connect it again whenever
+      you like.</p>`,
+    confirm: "Disconnect",
+    cancel: "Keep it",
+  });
+  if (confirmed === undefined) {
+    return false;
+  }
+  try {
+    await api(`/chat/providers/${encodeURIComponent(providerId)}`, {
+      method: "DELETE",
+    });
+  } catch (error) {
+    toast(`Could not disconnect ${label} — ${error.message}`, "error");
+    return false;
+  }
+  forgetAgentInLoadedRosters(providerId);
+  await loadProviders();
+  toast(`${name} disconnected`, "ok");
+  rerender();
   return true;
 }
 
