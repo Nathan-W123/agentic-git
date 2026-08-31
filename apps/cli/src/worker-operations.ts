@@ -648,6 +648,8 @@ export async function leaseBundle(
   store: CoordinationStore,
   leaseId: string,
   repositories = new RepositoryService(),
+  /** What the worker says it already has, so only the delta is packed. */
+  have?: string,
 ): Promise<Buffer | undefined> {
   const now = new Date().toISOString();
   await store.expireWorkLeases(now);
@@ -663,6 +665,7 @@ export async function leaseBundle(
     canonical(repository),
     lease.baseRevision,
     bundleRefFor(lease.id),
+    have,
   );
 }
 
@@ -3360,8 +3363,8 @@ export function workerOperations(
       projectId: string;
       repositoryId?: string;
     }) => await leaseWork(store, input, repositories, project),
-    leaseBundle: async (leaseId: string) =>
-      await leaseBundle(store, leaseId, repositories),
+    leaseBundle: async (leaseId: string, have?: string) =>
+      await leaseBundle(store, leaseId, repositories, have),
     admitWorkPlan: async (input: WorkPlanInput) => {
       const lease = await store.getWorkLease(input.leaseId);
       const key = lease?.repositoryId ?? input.leaseId;

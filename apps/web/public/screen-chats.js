@@ -8753,6 +8753,58 @@ function askAboutOfflineAgents(repositoryId, offline, rerender) {
  * who has answered one of those should not have to learn a second vocabulary
  * to answer this.
  */
+/**
+ * The command that would make an offline agent runnable, for this machine.
+ *
+ * An agent goes grey for exactly one reason worth acting on: no machine that
+ * is listening can run its CLI. Saying so and stopping leaves the reader to
+ * work out that Kumi drives a vendor CLI at all, that it has to be installed
+ * where they are sitting, and which package that is — three facts nothing in
+ * the product tells them. The command closes all three.
+ *
+ * Chosen by the platform of the browser reading it, because that is the
+ * machine the person will type it on. `navigator.platform` is deprecated but
+ * still the most reliable signal available here, and getting it wrong costs a
+ * wrong shell for the same install rather than a broken one.
+ */
+function offlineAgentSetup(repositoryId, names) {
+  const roster = channelAgentsFor(repositoryId);
+  const missing = names
+    .map((name) => roster.find((agent) => agent.name === name))
+    .filter((agent) => agent?.setup !== undefined);
+  if (missing.length === 0) {
+    return "";
+  }
+  const windows = /win/iu.test(navigator.platform ?? "");
+  const seen = new Set();
+  const rows = [];
+  for (const agent of missing) {
+    const setup = agent.setup;
+    const command = windows ? setup.windows : setup.posix;
+    // One row per distinct command: two agents on the same vendor are one
+    // install, and printing it twice reads as two things to do.
+    const key = command ?? setup.docs;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    rows.push(
+      command === undefined
+        ? `<a class="link" href="${esc(setup.docs)}" target="_blank"
+             rel="noopener noreferrer">How to install ${esc(agent.name)}'s CLI</a>`
+        : `<code>${esc(command)}</code>
+           <button type="button" class="ask-step" data-act="offline-copy"
+             data-value="${esc(command)}" title="Copy" aria-label="Copy"
+             >${icon("copy")}</button>`,
+    );
+  }
+  return `<div class="ask-setup">
+    <small>Kumi runs agents on your own machine. Install the CLI here, then
+    sign in by running it once.</small>
+    ${rows.map((row) => `<div class="ask-setup-row">${row}</div>`).join("")}
+  </div>`;
+}
+
 function offlineAgentPrompt(repositoryId) {
   const pending = state.offlinePrompt;
   if (pending === undefined || pending.repositoryId !== repositoryId) {
@@ -8779,6 +8831,7 @@ function offlineAgentPrompt(repositoryId) {
             >${icon("close")}</button>
         </div>
       </div>
+      ${offlineAgentSetup(repositoryId, pending.names)}
       <div class="ask-options">
         <button type="button" class="ask-option${
           pending.choice === "queue" ? " is-picked" : ""

@@ -181,6 +181,46 @@ type AgentVendor =
   | "copilot"
   | "kiro";
 
+/**
+ * How a person installs the CLI an agent needs, on the machine that runs it.
+ *
+ * Local execution means the vendor's own CLI has to be on the machine, signed
+ * in, before an agent can do anything — and until this existed, nothing said
+ * so. An agent with no CLI looked exactly like one that was working: it took
+ * the mention, said it had started, and the task waited forever. Finding out
+ * why cost an afternoon of reading process lists.
+ *
+ * Only commands verified against the vendor's own published instructions are
+ * here. A wrong install command is worse than none: it sends somebody to a
+ * package that is not the CLI — npm has one called `cursor-agent` that is
+ * somebody else's project entirely — and the result looks like the agent
+ * being broken rather than the advice being wrong. A vendor missing from this
+ * table gets its documentation link and no command.
+ */
+const VENDOR_CLI_SETUP: Record<
+  string,
+  { windows?: string; posix?: string; docs: string; signIn: string }
+> = {
+  claude: {
+    windows: "npm install -g @anthropic-ai/claude-code",
+    posix: "npm install -g @anthropic-ai/claude-code",
+    docs: "https://docs.claude.com/en/docs/claude-code/overview",
+    signIn: "claude",
+  },
+  codex: {
+    windows: "npm install -g @openai/codex",
+    posix: "npm install -g @openai/codex",
+    docs: "https://developers.openai.com/codex",
+    signIn: "codex",
+  },
+  cursor: {
+    windows: "irm 'https://cursor.com/install?win32=true' | iex",
+    posix: "curl https://cursor.com/install -fsS | bash",
+    docs: "https://cursor.com/docs/cli/installation",
+    signIn: "agent",
+  },
+};
+
 const PROVIDER_TO_VENDOR: Record<string, AgentVendor> = {
   anthropic: "claude",
   openai: "codex",
@@ -3785,7 +3825,11 @@ export interface ApiOperations {
     /** What this worker can execute. Absent means work alone. */
     kinds?: readonly ("task" | "question")[];
   }): Promise<WorkAssignment | undefined>;
-  leaseBundle?(leaseId: string): Promise<Buffer | undefined>;
+  leaseBundle?(
+    leaseId: string,
+    /** A commit the worker already holds; only the delta above it is packed. */
+    have?: string,
+  ): Promise<Buffer | undefined>;
   /**
    * Arbitrates a worker's plan before it executes. A deployment that omits
    * this cannot run plan-first workers, and the endpoint says so.
@@ -7034,7 +7078,18 @@ export class ApiGateway {
             "This deployment cannot serve repository bundles",
           );
         }
-        const bundle = await bundleOperation(leaseId);
+        // What the worker already holds, so the control plane can pack only
+        // what is missing. Validated here as well as at the far end: this is
+        // a value from a remote worker on its way to a Git invocation, and a
+        // shape check at the boundary costs nothing. Anything else is simply
+        // dropped rather than refused — a worker asking for less than it
+        // could get is not an error, and the full bundle is always correct.
+        const requested = url.searchParams.get("have") ?? undefined;
+        const have =
+          requested !== undefined && /^[0-9a-f]{40}$/u.test(requested)
+            ? requested
+            : undefined;
+        const bundle = await bundleOperation(leaseId, have);
         if (bundle === undefined) {
           throw new HttpError(
             409,
@@ -11260,6 +11315,24 @@ export class ApiGateway {
         // see `CredentialVisibility`. Metadata, not a secret; safe for every
         // repository collaborator to see, same as the vendor name itself.
         visibility: connection.visibility,
+        // What to install, when nothing can run this agent.
+        //
+        // Sent only for an agent no live machine advertises, so a working
+        // roster carries none of it. The reader is a person whose agent just
+        // went grey and whose next question is "why" — the answer is almost
+        // always that the CLI is not on their machine, and the command is the
+        // shortest possible route from that question to a working agent.
+        ...(ApiGateway.agentIsLive(
+          liveOwners,
+          connection.userId,
+          connection.provider,
+        )
+          ? {}
+          : {
+              setup: VENDOR_CLI_SETUP[
+                PROVIDER_TO_VENDOR[connection.provider] ?? ""
+              ],
+            }),
         /**
          * Whether this agent's owner has a machine listening right now.
          *

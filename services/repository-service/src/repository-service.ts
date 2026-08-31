@@ -1557,6 +1557,8 @@ export class RepositoryService {
     repository: CanonicalRepository,
     revision: string,
     refName: string,
+    /** A commit the caller already holds, so only the difference is packed. */
+    have?: string,
   ): Promise<Buffer> {
     await this.assertRefName(refName);
     const key = `${repository.path}\0${refName}`;
@@ -1609,6 +1611,34 @@ export class RepositoryService {
           "",
         ]);
         createdReference = true;
+        // A worker that already holds an ancestor gets only what it lacks.
+        //
+        // Without this, every task on every machine transfers the repository's
+        // whole reachable history — 41 MB for a modest one — over the network,
+        // on every mention, for a change that is usually a handful of commits.
+        // Egress is billed and the wait belongs to the person who asked, so
+        // the same bytes were being paid for twice on each dispatch.
+        //
+        // `have` is a claim a remote worker makes about its own cache, so it
+        // is checked rather than trusted: the shape first, then whether this
+        // repository actually holds that commit. A bundle whose prerequisite
+        // the receiver cannot resolve is worse than a large one, because it
+        // fails to unbundle at all — so anything unverifiable falls back to
+        // full history, which is exactly the behaviour that came before.
+        const usable =
+          have !== undefined &&
+          /^[0-9a-f]{40}$/u.test(have) &&
+          (
+            await this.git.run(
+              [
+                `--git-dir=${repository.path}`,
+                "cat-file",
+                "-e",
+                `${have}^{commit}`,
+              ],
+              { allowFailure: true },
+            )
+          ).exitCode === 0;
         await this.git.run([
           `--git-dir=${repository.path}`,
           "bundle",
@@ -1616,6 +1646,7 @@ export class RepositoryService {
           bundlePath,
           "--end-of-options",
           refName,
+          ...(usable ? [`^${have}`] : []),
         ]);
         return await readFile(bundlePath);
       } finally {

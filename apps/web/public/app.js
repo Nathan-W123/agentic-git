@@ -9437,6 +9437,21 @@ document.addEventListener("click", (event) => {
     case "offline-dismiss":
       dismissOfflinePrompt(render);
       return;
+    case "offline-copy":
+      // The install command, onto the clipboard, because the alternative is
+      // retyping a URL piped into a shell by hand and getting it subtly
+      // wrong. `writeText` is refused outside a secure context and in a
+      // window that has lost focus, so the failure is caught and said out
+      // loud rather than leaving a button that looks like it worked.
+      void navigator.clipboard
+        ?.writeText(value)
+        .then(() => {
+          toast("Command copied — run it in a terminal on this machine.");
+        })
+        .catch(() => {
+          toast("Could not copy. Select the command and copy it.", "error");
+        });
+      return;
     case "thread-composer-focus":
       // The header's reply affordance belongs to the thread already on
       // screen; it must not close that thread and silently move the draft to

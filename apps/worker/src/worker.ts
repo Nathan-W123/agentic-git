@@ -716,17 +716,134 @@ export class Worker {
     };
   }
 
+  /**
+   * This machine's own copy of a repository, created once and kept.
+   *
+   * Keyed by repository id and held beside the worker's scratch space rather
+   * than inside a lease, because outliving the lease is the entire point. A
+   * bare repository: nothing is ever checked out here, it exists to hold
+   * objects so a workspace can be filled from local disk instead of from the
+   * network.
+   *
+   * `init` is safe to repeat — git leaves an existing repository alone — so
+   * this is also the repair path. A cache that was deleted, or was never
+   * there, is simply built again on the next task.
+   */
+  private async repositoryCache(
+    git: GitClient,
+    repositoryId: string,
+  ): Promise<string> {
+    // The id is a coordinator identifier rather than anything a person types,
+    // but it becomes a path here, so it is reduced to characters that cannot
+    // leave the directory they are meant to sit in.
+    const safe = repositoryId.replace(/[^A-Za-z0-9._-]/gu, "_");
+    const cache = path.join(this.options.workspaceRoot, "repositories", safe);
+    await mkdir(path.dirname(cache), { recursive: true });
+    await git.run(["init", "--bare", "--end-of-options", cache]);
+    return cache;
+  }
+
+  /**
+   * Brings the cache up to the revision this lease needs, and says where to
+   * fetch that revision from.
+   *
+   * The control plane is told what this machine already holds and answers
+   * with only what is missing — a few commits rather than a repository. On a
+   * first task there is nothing to name and the whole history arrives, which
+   * is what every task used to do.
+   *
+   * A cache that cannot absorb the bundle is not worth arguing with: it is
+   * abandoned and the lease is served straight from the bundle, which is
+   * exactly the behaviour that came before this existed. Slow is a far better
+   * failure than stuck, and a repository can be corrupted by things that are
+   * none of the worker's business — a full disk, a killed process, an
+   * antivirus quarantining a pack file.
+   */
+  private async updateCache(
+    git: GitClient,
+    cache: string,
+    assignment: WorkAssignment,
+    scratch: string,
+  ): Promise<string> {
+    const bundlePath = path.join(scratch, "revision.bundle");
+    // What this machine already has for this repository. Absent on the first
+    // task, and after any repair.
+    const held = await git
+      .run(["-C", cache, "rev-parse", "--verify", "--quiet", "HEAD"], {
+        allowFailure: true,
+      })
+      .then((result) =>
+        result.exitCode === 0 ? result.stdout.trim() : undefined,
+      )
+      .catch(() => undefined);
+    await writeFile(
+      bundlePath,
+      await this.options.client.bundle(
+        assignment.lease.id,
+        held !== undefined && /^[0-9a-f]{40}$/u.test(held) ? held : undefined,
+      ),
+    );
+    const absorbed = await git.run(
+      [
+        "-C",
+        cache,
+        "fetch",
+        "--no-tags",
+        "--end-of-options",
+        bundlePath,
+        `${assignment.bundleRef}:${assignment.bundleRef}`,
+      ],
+      { allowFailure: true },
+    );
+    if (absorbed.exitCode !== 0) {
+      // Serve this lease from the bundle and start the cache again next time.
+      await rm(cache, { recursive: true, force: true }).catch(() => undefined);
+      return bundlePath;
+    }
+    // `HEAD` is what the next task reads to say what it holds, and a bare
+    // repository's HEAD points at a branch that does not exist here. Pointing
+    // it at the revision just absorbed is what makes the delta possible at
+    // all — without it every task would report nothing and fetch everything.
+    await git
+      .run([
+        "-C",
+        cache,
+        "update-ref",
+        "--no-deref",
+        "HEAD",
+        assignment.bundleRef,
+      ])
+      .catch(() => undefined);
+    return cache;
+  }
+
   /** Materialises the workspace and gets the agent's plan — no editing yet. */
   private async plan(
     assignment: WorkAssignment,
     scratch: string,
   ): Promise<PlannedWork> {
     await mkdir(scratch, { recursive: true });
-    const bundlePath = path.join(scratch, "revision.bundle");
-    await writeFile(bundlePath, await this.options.client.bundle(assignment.lease.id));
+    const git = new GitClient();
+    // The repository is kept between tasks rather than fetched again for each.
+    //
+    // Every lease used to pull the whole reachable history from the control
+    // plane — 41 MB for a modest repository — write it, unpack it, and delete
+    // it when the task ended, so the next mention paid for all of it again.
+    // That is the cost a server-side run never had: the coordinator reads a
+    // canonical clone off its own disk. This puts the same thing on the
+    // machine that does the work.
+    const cache = await this.repositoryCache(
+      git,
+      assignment.repository.id,
+    );
+    const source = await this.updateCache(
+      git,
+      cache,
+      assignment,
+      scratch,
+    );
 
     const workspacePath = path.join(scratch, "workspace");
-    const git = new GitClient();
     // `clone --branch` cannot name a ref outside `refs/heads/`, and the lease
     // ref deliberately lives under `refs/coord/leases/` so an in-flight lease
     // is not a branch of the canonical repository. Fetching the ref by its
@@ -740,7 +857,7 @@ export class Worker {
       "fetch",
       "--no-tags",
       "--end-of-options",
-      bundlePath,
+      source,
       assignment.bundleRef,
     ]);
     await git.run([
