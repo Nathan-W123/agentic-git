@@ -907,6 +907,47 @@ export function boundValidation(
   }));
 }
 
+/**
+ * What an `ownership_granted` audit event should carry instead of every lease.
+ *
+ * The full `ResourceLease[]` was measured as the single largest thing a task
+ * writes — it scales with how many symbols plan enrichment pulled out of the
+ * declared files, not with the size of the change, so an eight-file plan
+ * writes hundreds of entries for a change that touched eight files.
+ *
+ * Nothing reads it. The grants that are actually read back live in three
+ * durable places written in the same moment: the `resource_leases` rows, the
+ * plan JSON on `work_leases` (which is what a later admission reseeds
+ * ownership from), and the decision JSON on the task. The audit copy is the
+ * fourth, and the only one no code path consults.
+ *
+ * So it keeps what a person reading the log needs — how many, over what, and
+ * the files themselves — and drops the per-symbol tail that made it large.
+ * Files, because a file lease is the one kind anything downstream reads; the
+ * symbol leases enrichment adds are all `observe`, which by construction can
+ * neither block nor be blocked.
+ */
+export function summariseGrants(leases: readonly ResourceLease[]): {
+  count: number;
+  files: string[];
+  symbols: number;
+} {
+  const files = [
+    ...new Set(
+      leases
+        .filter((lease) => lease.resourceType === "file")
+        .map((lease) => lease.resourceId),
+    ),
+  ];
+  return {
+    count: leases.length,
+    // Bounded in its own right: a plan may touch more files than anybody will
+    // read in a log line, and this must not become the new unbounded field.
+    files: files.slice(0, 50),
+    symbols: leases.filter((lease) => lease.resourceType !== "file").length,
+  };
+}
+
 export interface TestResult {
   name: string;
   status: "passed" | "failed" | "skipped";

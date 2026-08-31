@@ -69,6 +69,7 @@ import {
   type ScopeChangeRequest,
   type TaskDefinition,
   type TaskId,
+  summariseGrants,
 } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
@@ -1730,7 +1731,7 @@ export async function admitWorkPlan(
             projectId: task.projectId,
             repositoryId: task.repositoryId,
             leaseId: lease.id,
-            leases: grants,
+            grants: summariseGrants(grants),
           });
         }
         return { outcome: "admitted", admission };
@@ -1901,7 +1902,7 @@ export async function admitWorkPlan(
         projectId: task.projectId,
         repositoryId: task.repositoryId,
         leaseId: lease.id,
-        leases: admission.ownershipGrants,
+        grants: summariseGrants(admission.ownershipGrants),
       });
     }
     return { outcome: "admitted", admission };
@@ -2337,7 +2338,7 @@ export async function arbitrateScopeChange(
       projectId: task.projectId,
       repositoryId: task.repositoryId,
       leaseId: lease.id,
-      leases: admission.ownershipGrants,
+      grants: summariseGrants(admission.ownershipGrants),
       stage: "remote_scope_change",
     });
   }

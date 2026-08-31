@@ -32,6 +32,9 @@ import {
   withoutRoleContext,
   type AgentPlan,
   type PlanAdmission,
+  boundCommandOutput,
+  summariseGrants,
+  type ResourceLease,
 } from "./index.js";
 
 test("normalizes and deduplicates repository paths", () => {
@@ -845,4 +848,72 @@ test("a malformed timestamp is counted but never ranked first", () => {
   assert.equal(ranked[0]?.path, "src/real.js");
   assert.equal(ranked[1]?.path, "src/broken.js");
   assert.equal(ranked[1]?.changes, 2, "the unplaceable edits were dropped");
+});
+
+/**
+ * The largest thing a task used to write, and nothing read it.
+ *
+ * `ownership_granted` carried the whole `ResourceLease[]`, which scales with
+ * how many symbols plan enrichment pulled out of the declared files rather
+ * than with the size of the change — so an eight-file plan wrote hundreds of
+ * entries for a change that touched eight files. The grants that are actually
+ * read back have three other durable homes; this copy had none.
+ */
+test("a grant summary keeps the files and counts the rest", () => {
+  const lease = (resourceType: string, resourceId: string) =>
+    ({
+      leaseId: "lease_1",
+      resourceType,
+      resourceId,
+      principalId: "agent_1",
+      taskId: "task_1",
+      mode: "observe",
+      baseVersion: 1,
+      expiresAt: "2026-01-01T00:00:00.000Z",
+    }) as unknown as ResourceLease;
+
+  const summary = summariseGrants([
+    lease("file", "src/a.ts"),
+    lease("file", "src/b.ts"),
+    // The same file twice is one file, not two.
+    lease("file", "src/a.ts"),
+    ...Array.from({ length: 120 }, (_unused, index) =>
+      lease("symbol", `src/a.ts#sym${String(index)}`),
+    ),
+  ]);
+
+  assert.equal(summary.count, 123, "how many were granted is still on record");
+  assert.deepEqual(summary.files, ["src/a.ts", "src/b.ts"]);
+  assert.equal(summary.symbols, 120, "counted, not listed");
+});
+
+test("a grant summary cannot itself become the unbounded field", () => {
+  const summary = summariseGrants(
+    Array.from(
+      { length: 400 },
+      (_unused, index) =>
+        ({
+          leaseId: "lease_1",
+          resourceType: "file",
+          resourceId: `src/file${String(index)}.ts`,
+          principalId: "agent_1",
+          taskId: "task_1",
+          mode: "exclusive",
+          baseVersion: 1,
+          expiresAt: "2026-01-01T00:00:00.000Z",
+        }) as unknown as ResourceLease,
+    ),
+  );
+  assert.equal(summary.count, 400, "the true number survives the cap");
+  assert.equal(summary.files.length, 50);
+});
+
+test("bounded output keeps the end, which is where a failure says why", () => {
+  const text = `${"noise ".repeat(5_000)}Error: the actual reason`;
+  const bounded = boundCommandOutput(text);
+  assert.ok(bounded.length < text.length);
+  assert.match(bounded, /Error: the actual reason$/u);
+  assert.match(bounded, /earlier characters dropped/u);
+  // Short output is left exactly alone.
+  assert.equal(boundCommandOutput("fine"), "fine");
 });
