@@ -1978,6 +1978,39 @@ test("an agent can be disconnected, including one with no credential", async () 
   assert.match(agents, /is working right now/u);
 });
 
+/**
+ * The one button on a connected row that still leads to a vendor sign-in must
+ * say so first.
+ *
+ * A connected agent has no Connect button — it is connected — so the row reads
+ * Rename, Link for usage, Disconnect. Somebody who has just disconnected an
+ * agent and wants it back presses the only one of those that sounds like
+ * connecting, and lands on the vendor's sign-in page: exactly the second
+ * sign-in this release removed, reached by the one control that still goes
+ * there. It happened to the first person who tried it.
+ */
+test("linking a vendor account asks before it opens a sign-in", async () => {
+  const agents = await publicFile("screen-agents.js");
+  const start = agents.indexOf("export async function linkAgentAccount");
+  assert.notEqual(start, -1);
+  const body = agents.slice(start, agents.indexOf("\nexport async function connectAgent", start));
+
+  // Asked before anything opens, and a way out that does nothing.
+  const confirm = body.indexOf("await showModal(");
+  const signIn = body.indexOf("await signInAgent(");
+  assert.notEqual(confirm, -1, "there must be a confirmation");
+  assert.ok(confirm < signIn, "it must come before the sign-in, not after");
+  assert.match(body, /if \(proceed === undefined\) \{\s*\n\s*return;/u);
+
+  // It says the two things the button cannot fit: that this is optional, and
+  // that the agent already works without it.
+  assert.match(body, /This is optional/u);
+  assert.match(body, /already works/u);
+  // And names the agent, because the row is about somebody called Nyx rather
+  // than about a vendor.
+  assert.match(body, /agent\?\.hasName === true \? agent\.name/u);
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may

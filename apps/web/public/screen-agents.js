@@ -734,6 +734,42 @@ export async function linkAgentAccount(providerId, rerender) {
     );
     return;
   }
+  // Asked before a tab opens, because of what this row looks like to somebody
+  // who wants their agent back.
+  //
+  // A connected agent has no Connect button — it is connected — so the row
+  // reads Rename, Link for usage, Disconnect. Somebody who has just
+  // disconnected an agent and wants it working again presses the only one of
+  // those that sounds like connecting, and lands on the vendor's sign-in page:
+  // exactly the second sign-in this release exists to remove, reached by the
+  // one button on the row that still leads there. It happened to the first
+  // person who tried it.
+  //
+  // So the dialog says what the button cannot fit: that the agent already
+  // works, and what linking actually buys. The name, because the row is about
+  // an agent somebody knows by name rather than about a vendor.
+  const agent = myAgents().find((item) => item.id === providerId);
+  const name = agent?.hasName === true ? agent.name : agentLabelOf(providerId);
+  const label = agentLabelOf(providerId);
+  const proceed = await showModal({
+    title: `Link your ${esc(label)} account?`,
+    subtitle:
+      `This is optional. ${name} already works — it runs on this machine ` +
+      "under the login the CLI there already has.",
+    body: `<p class="modal-hint">Linking signs you in to ${esc(label)} in a new
+      tab and stores that account, which is what lets Kumi show how much of
+      your quota is left. It does not change how ${esc(name)} runs.</p>`,
+    confirm: "Sign in to link",
+    cancel: "Not now",
+  });
+  if (proceed === undefined) {
+    return;
+  }
+  // The browser may refuse the tab now that the original click is over — the
+  // sign-in flow already handles that, opening the address from the dialog it
+  // shows instead. A blocked tab on an optional extra is a far better trade
+  // than sending somebody to a vendor sign-in they never asked for.
+  //
   // `link-account` rather than the flow's own mode, so `signInAgent` knows not
   // to take the local shortcut it takes for an ordinary connect.
   await signInAgent(providerId, signInFlow, rerender, "link-account");
