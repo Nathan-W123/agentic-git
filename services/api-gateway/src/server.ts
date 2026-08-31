@@ -3785,7 +3785,11 @@ export interface ApiOperations {
     /** What this worker can execute. Absent means work alone. */
     kinds?: readonly ("task" | "question")[];
   }): Promise<WorkAssignment | undefined>;
-  leaseBundle?(leaseId: string): Promise<Buffer | undefined>;
+  leaseBundle?(
+    leaseId: string,
+    /** A commit the worker already holds; only the delta above it is packed. */
+    have?: string,
+  ): Promise<Buffer | undefined>;
   /**
    * Arbitrates a worker's plan before it executes. A deployment that omits
    * this cannot run plan-first workers, and the endpoint says so.
@@ -7034,7 +7038,18 @@ export class ApiGateway {
             "This deployment cannot serve repository bundles",
           );
         }
-        const bundle = await bundleOperation(leaseId);
+        // What the worker already holds, so the control plane can pack only
+        // what is missing. Validated here as well as at the far end: this is
+        // a value from a remote worker on its way to a Git invocation, and a
+        // shape check at the boundary costs nothing. Anything else is simply
+        // dropped rather than refused — a worker asking for less than it
+        // could get is not an error, and the full bundle is always correct.
+        const requested = url.searchParams.get("have") ?? undefined;
+        const have =
+          requested !== undefined && /^[0-9a-f]{40}$/u.test(requested)
+            ? requested
+            : undefined;
+        const bundle = await bundleOperation(leaseId, have);
         if (bundle === undefined) {
           throw new HttpError(
             409,
