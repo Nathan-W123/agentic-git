@@ -546,6 +546,23 @@ export interface LeaseTaskInput {
    * work.
    */
   excludeSubmittedBy?: readonly UserId[];
+  /**
+   * Which kinds of row this caller can actually execute.
+   *
+   * Defaults to `["task"]`, and that default is the compatibility gate for the
+   * whole feature. A worker built before questions existed sends nothing here
+   * and therefore cannot be handed one — no protocol version, no capability
+   * negotiation, no way for an old desktop to lease something it would not
+   * know how to answer. Sending `["question"]` is how a worker opts in.
+   *
+   * It is also the safety gate, and the more important half. The control
+   * plane's own drain calls `leaseNextTask` with no `taskId` at all
+   * (`leaseQueuedWork`, apps/cli/src/commands.ts), taking whatever is oldest —
+   * so filtering the *listing* elsewhere is not enough. Without this clause a
+   * question row would be claimed by the coding path within a minute of being
+   * filed and executed as though its text were an objective.
+   */
+  kinds?: readonly TaskKind[];
 }
 
 export interface LeasedWork {
@@ -617,7 +634,36 @@ export type SubmittedTaskCompletionStatus = Extract<
   "integrated" | "failed" | "cancelled"
 >;
 
+/**
+ * What a queued row is.
+ *
+ * Deliberately two values and not a boolean: the queries that must not confuse
+ * them read better naming what they want than negating what they do not, and a
+ * third kind is a plausible future (a review, a summary) that a boolean would
+ * have to be replaced to allow.
+ */
+export type TaskKind = "task" | "question";
+
 export interface SubmitTaskInput {
+  /**
+   * Work, or a question somebody is waiting on an answer to.
+   *
+   * Absent means `task`, which is what every caller that predates questions
+   * meant and still means. A question shares the queue so that it can share
+   * everything already written against it — owner pinning, the one-active-
+   * lease index, heartbeat, requeue on expiry, budgets — but it is not work:
+   * it has no plan, no changeset, and nothing to integrate. The two are kept
+   * apart by this field everywhere they could otherwise be confused.
+   */
+  kind?: TaskKind;
+  /**
+   * The channel message an answer belongs under.
+   *
+   * Only meaningful on a question. Carried on the row rather than held in the
+   * dispatching process, so an answer that comes back after a restart still
+   * knows where to be posted.
+   */
+  answerTo?: string;
   repositoryId: string;
   projectId?: ProjectId;
   objective: string;
@@ -684,6 +730,10 @@ export interface SubmitTaskInput {
 
 export interface SubmittedTask {
   id: TaskId;
+  /** See {@link SubmitTaskInput.kind}. `task` on every row written before questions existed. */
+  kind: TaskKind;
+  /** See {@link SubmitTaskInput.answerTo}. Absent on work. */
+  answerTo: string | undefined;
   repositoryId: string;
   projectId: ProjectId | undefined;
   objective: string;
@@ -712,6 +762,17 @@ export interface SubmittedTaskFilter {
   repositoryId?: string;
   projectId?: ProjectId;
   status?: SubmittedTaskStatus;
+  /**
+   * Which kinds to return. Defaults to `task`, and the default is the point.
+   *
+   * Every existing reader of this list feeds a coding path — the drain loop,
+   * the crash sweep, the queue view — and a question arriving in any of them
+   * would be planned and integrated as though its text were an objective. So
+   * the filter fails closed: a caller sees questions only by asking for them.
+   * `any` exists for the two places that legitimately need both, which are
+   * lease bookkeeping rather than execution.
+   */
+  kind?: TaskKind | "any";
 }
 
 export interface CreateRunInput {
