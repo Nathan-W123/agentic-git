@@ -17376,6 +17376,18 @@ export class ApiGateway {
     messageId: string;
     failure: Record<string, unknown>;
   }): Promise<void> {
+    // The fourth turn nobody asked for, and the one that hid. Its three
+    // siblings fire on a rhythm — every dispatch, every message, every
+    // promotion — so they read as loops on sight. This one fires on failure,
+    // which looks like an event until a run of failures makes it a loop too,
+    // on somebody's account, with nobody waiting on the verdict.
+    //
+    // Refused with the others. Silence is already this method's answer when
+    // it has no investigator to ask, and the thread still carries the failure
+    // line itself; what is lost is the commentary, not the fact.
+    if (localAgentsOnly()) {
+      return;
+    }
     const investigator = await this.investigatorFor(
       input.projectId,
       input.repositoryId,
