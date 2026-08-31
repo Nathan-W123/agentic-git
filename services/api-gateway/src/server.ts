@@ -1770,7 +1770,14 @@ const INTEGRATION_FAILURE_REASONS: Record<string, string> = {
  */
 export function explainAnswerFailure(error?: string): string {
   if (isVendorSignInFailure(error ?? "")) {
-    return `I could not answer that — my sign-in has expired. ${signInRemedy()}`;
+    // Carrying the evidence, for the reason `explainTaskFailure` does.
+    return (
+      `I could not answer that — my sign-in has expired. ${signInRemedy()}` +
+      `\n\nWhat I got back: ${clipToBoundary(
+        (error ?? "").replace(/\s+/gu, " ").trim(),
+        FAILURE_DETAIL_MAX,
+      )}`
+    );
   }
   const cleaned = (error ?? "").replace(/\s+/gu, " ").trim();
   return cleaned.length === 0
@@ -1903,7 +1910,23 @@ function splitAgentAccount(detail: string): {
 
 function explainTaskFailure(error: string, status?: string): string {
   if (isVendorSignInFailure(error)) {
-    return `I could not finish this — my sign-in has expired. ${signInRemedy()}`;
+    // The interpretation, and then the evidence for it.
+    //
+    // This used to return the sentence alone, which made the guess
+    // unfalsifiable: a reader told their sign-in had expired, who had just
+    // signed in, had no way to find out whether the diagnosis was wrong or
+    // their login really was broken — and neither did anyone helping them.
+    // The pattern behind this branch is a handful of substrings matched
+    // against whatever a vendor CLI happened to print, so it is wrong often
+    // enough that hiding what it read is the expensive choice. Keeping the
+    // agent's own words costs one line and settles the question.
+    return (
+      `I could not finish this — my sign-in has expired. ${signInRemedy()}` +
+      `\n\nWhat I got back: ${clipToBoundary(
+        error.replace(/\s+/gu, " ").trim(),
+        FAILURE_DETAIL_MAX,
+      )}`
+    );
   }
   // Split before collapsing whitespace: the alarm is one sentence and reads
   // the same flattened, while the account may be several paragraphs the agent
