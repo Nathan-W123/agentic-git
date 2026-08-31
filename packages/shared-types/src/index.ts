@@ -1265,6 +1265,11 @@ export type AuditEventType =
   | "ownership_granted"
   | "task_started"
   | "agent_progress"
+  // A lease settled by the clock rather than by its worker. Not a failure —
+  // the task returns to the queue — but the one ending that used to be
+  // written nowhere, so a run whose machine went away left its thread saying
+  // it was still being worked on, indefinitely.
+  | "lease_expired"
   /** An agent stopped on a choice that was not its to make. */
   | "question_asked"
   | "question_answered"

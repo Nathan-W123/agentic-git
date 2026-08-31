@@ -2028,6 +2028,18 @@ export function narrateTaskEvent(
     }
     case "replan_requested":
       return "Something moved underneath me; re-planning against the latest code.";
+    case "lease_expired":
+      // Not a failure: the task goes back in the queue and is picked up
+      // again. But it is the one ending that used to say nothing at all —
+      // expiry settles the lease in the store and writes no event — so a run
+      // whose machine slept, lost its network, or had the app closed under it
+      // left a thread reading "I've taken this task and I'm working on it"
+      // permanently. A person watching that has no way to tell it from work
+      // in progress, and waits for something that is never coming.
+      return (
+        "I lost contact with the machine running me, so I have put this back " +
+        "in the queue. It starts again when that machine is back."
+      );
     case "agent_progress":
       // Full message, never a char bound: a slice here cut mid-word with no
       // ellipsis and left answers looking like the model stopped mid-thought.
