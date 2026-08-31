@@ -410,6 +410,10 @@ async function startRuntime(
     threadReconcileIntervalMs?: number;
     /** How long a held `/plan` waits before it lapses. */
     planHoldTtlMs?: number;
+    /** How long the audit log keeps an event. Zero keeps everything. */
+    auditRetentionDays?: number;
+    /** How often the retention sweep runs, so a test need not wait hours. */
+    auditRetentionSweepIntervalMs?: number;
     codexUsageReader?: CodexUsageReader;
     /**
      * Stands in for Stripe, so a test can watch what the seat count does to
@@ -1114,6 +1118,15 @@ async function startRuntime(
     ...(options.threadReconcileIntervalMs === undefined
       ? {}
       : { threadReconcileIntervalMs: options.threadReconcileIntervalMs }),
+    ...(options.auditRetentionDays === undefined
+      ? {}
+      : { auditRetentionDays: options.auditRetentionDays }),
+    ...(options.auditRetentionSweepIntervalMs === undefined
+      ? {}
+      : {
+          auditRetentionSweepIntervalMs:
+            options.auditRetentionSweepIntervalMs,
+        }),
     ...(options.planHoldTtlMs === undefined
       ? {}
       : { planHoldTtlMs: options.planHoldTtlMs }),
@@ -20000,6 +20013,67 @@ test("a stored credential alone makes an agent exist", async (t) => {
     .providers as Array<{ id: string; exists: boolean }>;
   assert.equal(listed.find((entry) => entry.id === "anthropic")?.exists, true);
   assert.equal(listed.find((entry) => entry.id === "openai")?.exists, false);
+});
+
+/**
+ * The audit log is the one table that only grew.
+ *
+ * Every other cost went flat when execution moved to the machines that do the
+ * work; this one is written here whatever runs where — measured, about
+ * twenty-one rows a task — and nothing had ever removed one. The archive,
+ * checkpoint and prune machinery existed from the start and had no caller
+ * outside a command an operator had to remember.
+ */
+test("the audit log is compacted on a retention window", async (t) => {
+  const runtime = await startRuntime(t, {
+    // Everything already written is older than "zero days ago", so the first
+    // sweep has something to find without the test faking a clock.
+    auditRetentionDays: 0.000_001,
+    auditRetentionSweepIntervalMs: 50,
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "compacted");
+
+  const before = (await runtime.store.listAuditEvents()).length;
+  assert.ok(before > 0, "bootstrapping writes events worth compacting");
+
+  await waitFor(
+    async () => (await runtime.store.listAuditCheckpoints()).length > 0,
+    "the retention sweep never archived anything",
+  );
+  // Archived and then dropped: the rows are gone from the live log, and gone
+  // from the archive too, which is what actually reclaims the space.
+  await waitFor(
+    async () => (await runtime.store.listArchivedAuditEvents()).length === 0,
+    "archived events were never pruned, so nothing was reclaimed",
+  );
+  assert.ok(
+    (await runtime.store.listAuditEvents()).length < before,
+    "the live log must actually shrink",
+  );
+  // The attestation survives the contents. That is the whole bargain.
+  const checkpoints = await runtime.store.listAuditCheckpoints();
+  assert.ok(checkpoints[0]?.throughSequence >= 1, JSON.stringify(checkpoints));
+});
+
+/**
+ * Zero is a real answer, not a missing one. A deployment under a legal hold
+ * keeps every event and pays for the disk.
+ */
+test("a retention of zero keeps everything", async (t) => {
+  const runtime = await startRuntime(t, {
+    auditRetentionDays: 0,
+    auditRetentionSweepIntervalMs: 50,
+  });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const before = (await runtime.store.listAuditEvents()).length;
+  assert.ok(before > 0);
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal((await runtime.store.listAuditCheckpoints()).length, 0);
+  assert.ok((await runtime.store.listAuditEvents()).length >= before);
 });
 
 /**
