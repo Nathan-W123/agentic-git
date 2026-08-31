@@ -1,3 +1,36 @@
+### 0.4.7 — Codex runs, Cursor is called what Cursor calls it
+
+**Codex could not start, and said so precisely.** It resolved to `codex.cmd`,
+the npm shim, which has to run through `cmd.exe` — and Codex's own arguments
+contain a quote that cannot safely go on a `cmd.exe` command line. The native
+lookup added in 0.4.6 checked a fixed list of paths and a real install was not
+on it: npm nests the platform package inside `@openai/codex` rather than beside
+it. The directory is read now instead of guessed, so however npm arranges it,
+the native `codex.exe` is found.
+
+**Cursor's CLI is `agent`, not `cursor-agent`.** 0.4.5 renamed it on the
+strength of a "spawn agent ENOENT", reading that as the adapter naming a
+binary nobody ships. It was the opposite: the name was right and the CLI
+simply was not installed. Renaming it broke Cursor on every machine that had
+it. Reverted, and both spellings are now accepted when detecting.
+
+**A run says what it is doing while it plans.** Progress forwarding landed in
+0.4.6, but the listener was attached after a plan was admitted — so the ten
+minutes an agent spends reading the repository, which is exactly when somebody
+is watching, still reported nothing. It listens from the moment the session
+opens now.
+
+**An agent whose CLI is not installed no longer accepts work.** Availability
+was answered per person: once any machine of yours was listening, every agent
+you owned looked available — including ones for CLIs that were never
+installed. They took mentions and left the task in a queue nothing would ever
+claim, behind a message saying work had begun. Availability is per agent now.
+
+**And quitting no longer leaves agents running.** The app killed the worker but
+not the worker's children, and on Windows nothing inherits a kill. Every quit
+and every restart orphaned a running agent, still working and still spending
+its owner's quota. One machine was found with twelve of them.
+
 ### 0.4.6 — sign-in works, and a run says what it is doing
 
 **Connecting an agent failed on Windows with "Get an app to open this 'about'

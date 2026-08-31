@@ -26,6 +26,7 @@
  * volunteer. The choice is remembered, so it is asked exactly once.
  */
 import { app, powerMonitor, powerSaveBlocker, utilityProcess } from "electron";
+import { spawnSync } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -309,8 +310,44 @@ export function stopWorker() {
     restartTimer = undefined;
   }
   if (child !== undefined) {
+    // The whole tree, not just the worker.
+    //
+    // The worker is the parent of a vendor CLI that can run for an hour, and
+    // on Windows killing a parent leaves its children running — nothing
+    // inherits the kill. So every quit and every supervised restart orphaned
+    // whatever agent was mid-run: it kept working, kept spending its owner's
+    // quota, and kept holding the worktree it had checked out, with nothing
+    // left that knew it existed. They accumulate one per restart, and a dozen
+    // of them fighting over the same repository is indistinguishable from a
+    // machine that has simply stopped working.
+    terminateTree(child.pid);
     child.kill();
     child = undefined;
+  }
+}
+
+/**
+ * Ends a process and everything beneath it.
+ *
+ * `taskkill /t` is the only thing on Windows that walks the tree; POSIX gets
+ * the process group, which `kill` already reaches. Best effort throughout —
+ * this runs while the app is quitting, and a failure to clean up must not be
+ * able to stop it.
+ */
+function terminateTree(pid) {
+  if (pid === undefined || process.platform !== "win32") {
+    return;
+  }
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
+  try {
+    spawnSync(path.join(systemRoot, "System32", "taskkill.exe"), [
+      "/pid",
+      String(pid),
+      "/t",
+      "/f",
+    ], { windowsHide: true, stdio: "ignore" });
+  } catch {
+    // Nothing left to try, and nothing worth failing a quit over.
   }
 }
 

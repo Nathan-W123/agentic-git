@@ -38,7 +38,17 @@ const KNOWN_AGENTS = [
   {
     id: "cursor",
     adapter: "cursor",
-    commands: ["cursor-agent.exe", "cursor-agent.cmd", "cursor-agent"],
+    // Cursor's installer ships `agent`; `cursor-agent` is accepted too so an
+    // older or differently-packaged install is still found. Whichever exists
+    // is recorded by path, which is what stops the name mattering at all.
+    commands: [
+      "agent.exe",
+      "agent.cmd",
+      "agent",
+      "cursor-agent.exe",
+      "cursor-agent.cmd",
+      "cursor-agent",
+    ],
     pinPath: true,
   },
 ];
