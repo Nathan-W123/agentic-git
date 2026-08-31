@@ -6001,17 +6001,30 @@ function agentSpec(agent, repositoryId) {
   );
   // Prefer work in the room the panel was opened from, but do not call an
   // agent idle while it is visibly working in another channel.
+  // Split by what the task actually is, not by which one happens to be first.
+  //
+  // Work waits indefinitely for a machine that is offline — deliberately,
+  // because a deadline would throw away an answer somebody's laptop is still
+  // computing — so the only thing that makes an unbounded wait honest is
+  // being able to see it and end it. Filtering "everything except the first"
+  // did not do that: one queued task became the current-work headline, the
+  // queue list came out empty, and the single most likely case — one thing
+  // waiting for a machine nobody has switched on — showed no queue and no way
+  // to cancel it.
+  //
+  // A task is in exactly one of these. Nothing running is an honest headline;
+  // the zone already has those words.
+  const queuedTasks = agentTasks.filter((candidate) =>
+    QUEUED_TASK_STATUS.has(candidate.status),
+  );
+  const runningTasks = agentTasks.filter(
+    (candidate) => !QUEUED_TASK_STATUS.has(candidate.status),
+  );
   const task =
-    agentTasks.find((candidate) => candidate.repositoryId === repositoryId) ??
-    agentTasks[0];
-  // Everything else this agent is holding. Work waits indefinitely for a
-  // machine that is offline — deliberately, because a deadline would throw
-  // away an answer somebody's laptop is still computing — so the only thing
-  // that makes an unbounded wait honest is being able to see it and end it.
-  // Before this, a task queued for an agent nobody had switched on was
-  // invisible: no list, no count, and the only symptom was that it never
-  // finished.
-  const queued = agentTasks.filter((candidate) => candidate.id !== task?.id);
+    runningTasks.find(
+      (candidate) => candidate.repositoryId === repositoryId,
+    ) ?? runningTasks[0];
+  const queued = queuedTasks;
   const taskRepositoryId = task?.repositoryId ?? repositoryId;
   const taskMessage =
     task === undefined
@@ -6196,6 +6209,16 @@ function agentCurrentWorkZone(agent, repositoryId, { task, taskMessage, taskRepo
  * ending queued work is not undoable and a row here is one press away from a
  * mis-click.
  */
+/**
+ * Statuses that mean "filed, and nothing has picked it up".
+ *
+ * `claimed` sits here beside `submitted` because a claim is a lease, not a
+ * start: a worker that claimed and then went offline leaves a row that reads
+ * as taken and is going nowhere, and that is precisely the row somebody needs
+ * to be able to cancel.
+ */
+const QUEUED_TASK_STATUS = new Set(["submitted", "claimed"]);
+
 function agentQueuedZone(agent, queued) {
   if (queued.length === 0) {
     return "";
@@ -8727,40 +8750,49 @@ async function askAboutOfflineAgents(repositoryId, offline, rerender) {
         : "Their owners' machines aren't running Kumi, so nothing will pick " +
           "this up until they are. Queued work waits as long as it needs to " +
           "— you can see it and cancel it on each agent's page.",
-    // The radio-card shape both channel dialogs already use, so this reads
-    // as part of the app rather than as a dialog somebody bolted on. No new
-    // CSS: `.chan-visibility-choice` and `.field` are already written.
-    body: `<div class="chan-visibility-choices" role="radiogroup"
-      aria-label="What to do with this message">
-      <label class="chan-visibility-choice">
-        <input type="radio" name="offlineChoice" value="queue" checked>
-        <span class="chan-visibility-copy">
-          <strong>Queue it anyway</strong>
-          <small>It waits, and runs as soon as ${
-            offline.length === 1 ? "the machine is" : "the machines are"
-          } back. You can cancel it from the agent's page.</small>
-        </span>
-      </label>
-      ${
-        alternatives.length === 0
-          ? ""
-          : `<label class="chan-visibility-choice">
-        <input type="radio" name="offlineChoice" value="reroute">
-        <span class="chan-visibility-copy">
-          <strong>Send it to someone online</strong>
-          <small>The mention is rewritten to whoever you pick below.</small>
-        </span>
-      </label>
-      <label class="field">
-        <span>Send to</span>
-        <select class="input" name="offlineTarget">${alternatives
-          .map(
-            (agent) =>
-              `<option value="${esc(agent.name)}">${esc(agent.name)}</option>`,
-          )
-          .join("")}</select>
-      </label>`
-      }
+    // The agent-question card's own shape, because this is the same kind of
+    // moment: an agent cannot get on with something, and the room is being
+    // asked what to do instead. Reusing `.ask-card` and its rows means the
+    // two read as one mechanism rather than as a dialog that happens to
+    // resemble one.
+    //
+    // Rows are labels wrapping a hidden radio rather than the card's own
+    // buttons: inside `showModal`'s `<form method="dialog">` a button
+    // submits, and the whole point here is to pick before sending. The
+    // number badges keep their job as ordinals; they are not shortcuts here,
+    // because the modal has no key handler of its own.
+    body: `<div class="ask-card ask-card-choice">
+      <div class="ask-options">
+        <label class="ask-option">
+          <input type="radio" name="offlineChoice" value="queue" checked>
+          <span class="ask-num">1</span>
+          <span class="ask-label">Queue it anyway
+            <small>It waits, and runs as soon as ${
+              offline.length === 1 ? "the machine is" : "the machines are"
+            } back. You can cancel it from the agent's page.</small>
+          </span>
+        </label>
+        ${
+          alternatives.length === 0
+            ? ""
+            : `<label class="ask-option">
+          <input type="radio" name="offlineChoice" value="reroute">
+          <span class="ask-num">2</span>
+          <span class="ask-label">Send it to someone online
+            <small>The mention is rewritten to whoever you pick.</small>
+          </span>
+        </label>
+        <div class="ask-else">
+          <span class="ask-num">${icon("robot")}</span>
+          <select name="offlineTarget" aria-label="Send to">${alternatives
+            .map(
+              (agent) =>
+                `<option value="${esc(agent.name)}">${esc(agent.name)}</option>`,
+            )
+            .join("")}</select>
+        </div>`
+        }
+      </div>
     </div>`,
     confirm: "Send",
     cancel: "Cancel this task",
