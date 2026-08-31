@@ -195,6 +195,13 @@ export async function startWorker(here, session, onEvent) {
       COORD_ORGANIZATION: tenancy.organizationId,
       COORD_PROJECT_ROOT: root,
       COORD_WORKER_NAME: deviceName(),
+      // What this machine actually has. The project config the worker reads
+      // has a default agent backfilled for every vendor it lacks, so without
+      // this the worker would register for Cursor and Kiro on a machine that
+      // has neither, be offered their work, and fail it.
+      COORD_WORKER_ADAPTERS: [
+        ...new Set(Object.values(agents).map((agent) => agent.adapter)),
+      ].join(","),
       ...(tenancy.projectId === undefined
         ? {}
         : { COORD_PROJECT_ID: tenancy.projectId }),

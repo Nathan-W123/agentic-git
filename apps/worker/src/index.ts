@@ -24,6 +24,14 @@ async function main(): Promise<void> {
   );
 
   const organizationId = required("COORD_ORGANIZATION");
+  const declared = process.env["COORD_WORKER_ADAPTERS"]?.trim() ?? "";
+  const adapters =
+    declared.length === 0
+      ? undefined
+      : declared
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0);
   const worker = new Worker({
     client: new WorkerClient({ serverUrl, token }),
     project,
@@ -51,6 +59,10 @@ async function main(): Promise<void> {
     ...(process.env["COORD_REPOSITORY"] === undefined
       ? {}
       : { repositoryId: process.env["COORD_REPOSITORY"] }),
+    // Set by a host that has looked at the machine — the desktop app does, from
+    // the same scan that writes the project config. Absent, the config stands
+    // on its own, which is what a server deployment wants.
+    ...(adapters === undefined ? {} : { adapters }),
   });
 
   const id = await worker.register();

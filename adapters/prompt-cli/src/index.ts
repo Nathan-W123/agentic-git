@@ -557,7 +557,12 @@ function unwrapBrowserCli(stdout: string, name: string): string {
 /** Cursor Agent CLI in non-interactive print mode. */
 export const CURSOR_PROFILE: PromptCliProfile = {
   name: "cursor",
-  defaultCommand: "agent",
+  // `cursor-agent`, not `agent`. Cursor's installer puts `cursor-agent` on
+  // PATH; nothing is ever called `agent`. A cursor agent with no configured
+  // command therefore spawned a program that has never existed on any
+  // machine, and reported it as "spawn agent ENOENT" — which read as a
+  // missing install rather than as this adapter naming the wrong binary.
+  defaultCommand: "cursor-agent",
   // Cursor declares its prompt as the variadic `[prompt...]`. Keep large
   // prompts below Linux's per-argument MAX_ARG_STRLEN limit by sending them
   // as several positional words; Cursor joins those words before starting
