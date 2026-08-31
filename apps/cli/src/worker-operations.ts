@@ -33,6 +33,7 @@ import { IntegrationService } from "@coord/integration-service";
 import type {
   CoordinationStore,
   SubmittedTask,
+  TaskKind,
   WorkLease,
 } from "@coord/persistence";
 import {
@@ -244,10 +245,21 @@ export interface WorkResultInput {
   plan: unknown;
   changeSet: unknown;
   detail?: string;
+  /**
+   * What the agent said, when the lease was on a question.
+   *
+   * Kept apart from `detail`, which is a failure reason with a short bound
+   * and no reader outside a log. An answer is prose somebody is about to read
+   * in a channel, and putting it in `detail` would have meant either
+   * truncating answers or loosening the bound on failure text.
+   */
+  answer?: string;
 }
 
 export interface WorkResultAcceptance {
   accepted: boolean;
+  /** The answer, when the lease was on a question. The gateway posts it. */
+  answer?: string;
   reason?: string;
   runId?: string;
   integrationStatus?: IntegrationResult["status"];
@@ -349,6 +361,13 @@ async function submittedTask(
     await store.listSubmittedTasks({
       repositoryId: lease.repositoryId,
       ...(lease.projectId === undefined ? {} : { projectId: lease.projectId }),
+      // Resolving a row from a lease that already exists, so the fail-closed
+      // default is the wrong question here: whatever this lease is on, this
+      // function's job is to find it. Without `any` a question lease resolves
+      // to nothing and `acceptWorkResult` rejects the answer with "The leased
+      // task is no longer claimed" — which reads as a lease bug and is not
+      // one.
+      kind: "any",
     })
   ).find((task) => task.id === lease.taskId);
 }
@@ -358,7 +377,7 @@ async function failClaimedTask(
   taskId: string,
   runId?: string,
 ): Promise<void> {
-  const current = (await store.listSubmittedTasks()).find(
+  const current = (await store.listSubmittedTasks({ kind: "any" })).find(
     (task) => task.id === taskId,
   );
   if (current?.status === "claimed") {
@@ -447,6 +466,14 @@ export async function leaseWork(
     repositoryId?: string;
     /** Test override; deployments configure COORD_REPOSITORY_PARALLELISM. */
     repositoryParallelism?: number;
+    /**
+     * What this worker is able to execute. Defaults to work alone.
+     *
+     * A desktop built before questions existed sends nothing, so it is never
+     * offered one — that default is the entire compatibility story, and the
+     * reason no protocol version had to move.
+     */
+    kinds?: readonly TaskKind[];
   },
   repositories = new RepositoryService(),
   project?: CoordinatorProject,
@@ -507,13 +534,30 @@ export async function leaseWork(
     }
   }
 
-  const pending = await store.listSubmittedTasks({
-    projectId: input.projectId,
-    status: "submitted",
-    ...(input.repositoryId === undefined
-      ? {}
-      : { repositoryId: input.repositoryId }),
-  });
+  const kinds = input.kinds ?? ["task"];
+  // Listed per kind and concatenated rather than asked for with `any`,
+  // because `any` would also hand back kinds this worker did not ask for. The
+  // two-element case is the whole of it, and questions come first for the
+  // same reason the store orders them first: somebody is watching for one.
+  const pending = (
+    await Promise.all(
+      [...kinds]
+        .sort((left, right) =>
+          Number(left !== "question") - Number(right !== "question"),
+        )
+        .map(
+          async (kind) =>
+            await store.listSubmittedTasks({
+              projectId: input.projectId,
+              status: "submitted",
+              kind,
+              ...(input.repositoryId === undefined
+                ? {}
+                : { repositoryId: input.repositoryId }),
+            }),
+        ),
+    )
+  ).flat();
 
   // Tasks known to be waiting on someone else go to the back of the queue.
   //
@@ -561,6 +605,11 @@ export async function leaseWork(
       // This machine has exactly one set of vendor logins to offer, so it may
       // only take work belonging to the person who registered it.
       claimableBy: worker.userId,
+      // Named again at the claim, not only in the listing above. The store's
+      // clause is the one that actually holds — the listing narrows what this
+      // loop considers, the clause is what stops any caller taking a kind it
+      // cannot execute.
+      kinds,
     });
     if (leased === undefined) {
       continue;
@@ -722,7 +771,7 @@ async function requeueForCanonicalChange(
         await store.expireWorkLeases(now);
       }
     } else {
-      const currentTask = (await store.listSubmittedTasks()).find(
+      const currentTask = (await store.listSubmittedTasks({ kind: "any" })).find(
         (task) => task.id === lease.taskId,
       );
       if (currentTask?.status === "claimed") {
@@ -2458,6 +2507,61 @@ export async function acceptWorkResult(
       leaseAtStart,
       "The leased task is no longer claimed",
     );
+  }
+
+  // A question ends here, before everything below it.
+  //
+  // The whole apparatus that follows — plan admission, exact-base
+  // integration, the changeset, validation, canonical advance — exists to
+  // land an edit safely. A question produced no edit. There is nothing to
+  // admit, nothing to integrate, and no revision to pin, so a question that
+  // fell through would be rejected for having no admitted plan: an answer the
+  // agent really did compute, refused for missing paperwork it was never
+  // asked to file.
+  //
+  // Failures still take the ordinary path below, which is deliberate: "the
+  // model could not answer" and "the task failed" want the same lease
+  // bookkeeping, and the gateway is what turns either into a sentence.
+  if (task.kind === "question" && input.status === "completed") {
+    const answer = (input.answer ?? "").trim();
+    if (answer.length === 0) {
+      // Nothing to post, so this is a failure and not a silent success. The
+      // alternative is an empty message in a thread where somebody asked, and
+      // the adapters make it worse than empty: with no explanation they fall
+      // back to "<agent> completed <objective>", and a question's objective
+      // *is* the asker's own sentence handed back to them.
+      return await rejectWorkerResult(
+        store,
+        leaseAtStart,
+        "The agent answered with nothing",
+      );
+    }
+    const settled = await store.finishWorkLease(
+      input.leaseId,
+      "completed",
+      now,
+    );
+    if (!settled) {
+      await store.expireWorkLeases(now);
+      return { accepted: false, reason: "lease was lost before the answer" };
+    }
+    // `integrated` rather than a status of its own: the row is finished and
+    // every sweep that looks for unfinished work should stop seeing it. What
+    // landed was an answer rather than a commit, which is the gateway's
+    // business to post, not the queue's to model.
+    await store.completeSubmittedTask(task.id, "integrated");
+    // The event for work that succeeds by changing nothing, which is what its
+    // own documentation says it is for — an audit, a summary. An answer is
+    // the same shape: a real result with no patch behind it, and recording it
+    // as `task_failed` is exactly the mistake that event exists to prevent.
+    await trace(store, undefined, "task_reported", task.id, {
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      workerId: leaseAtStart.workerId,
+      leaseId: leaseAtStart.id,
+      kind: "question",
+    });
+    return { accepted: true, answer };
   }
 
   if (input.status === "failed") {
