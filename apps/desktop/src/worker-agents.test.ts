@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /* Imported by path rather than by specifier: `electron/agents.mjs` is shipped
    as plain JavaScript beside the app's own main process, with no build step
@@ -30,8 +30,13 @@ interface AgentsModule {
 }
 
 async function load(): Promise<AgentsModule> {
+  // A URL, not a path. On Windows an absolute path is not a valid import
+  // specifier — the ESM loader reads `C:\\...` as a URL whose scheme is `c`,
+  // and throws. This suite runs on the Windows runner during a release build,
+  // which is the one place these Windows rules can actually be exercised, so
+  // it has to load there.
   return (await import(
-    path.join(electronDir, "agents.mjs")
+    pathToFileURL(path.join(electronDir, "agents.mjs")).href
   )) as unknown as AgentsModule;
 }
 
