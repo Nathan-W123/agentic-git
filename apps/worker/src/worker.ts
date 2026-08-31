@@ -34,6 +34,7 @@ import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { GitClient } from "@coord/repository-service";
 import {
   planAdmissionApproved,
+  requestFromObjective,
   type AgentPlan,
   type ChangeSet,
   type CoordinatorDecision,
@@ -215,6 +216,29 @@ interface PlannedWork {
   workspacePath: string;
 }
 
+/**
+ * Whether this reads as an adapter's "nothing to say" fallback.
+ *
+ * All three build it the same way — `<agent name> completed <request>`, where
+ * the request is derived from the objective by `requestFromObjective`. The
+ * check is anchored on the tail rather than on the name, because names differ
+ * per adapter and per configured profile while the tail is computed from the
+ * objective this worker is already holding.
+ *
+ * A false positive costs one honest "I could not answer that just now" on an
+ * answer that genuinely ended with those exact words. A false negative posts
+ * somebody their own question back as though an agent had written it. That
+ * asymmetry is the whole reason the tail is matched exactly rather than
+ * loosely.
+ */
+function readsAsCompletionNotice(said: string, objective: string): boolean {
+  const request = requestFromObjective(objective).trim();
+  if (request.length === 0) {
+    return false;
+  }
+  return said.trim().endsWith(`completed ${request}`);
+}
+
 export class Worker {
   private identity: { id: string } | undefined;
   /** See {@link WorkerOptions.planCache}. Per-worker unless one is injected. */
@@ -314,6 +338,11 @@ export class Worker {
       workerId,
       this.options.projectId ?? DEFAULT_PROJECT_ID,
       this.options.repositoryId,
+      // Opting in is what makes this worker able to receive a question at
+      // all. A build that does not send this is served work only, by an
+      // older control plane that ignores the field and by a newer one that
+      // defaults to the same thing — which is why no protocol version moved.
+      ["task", "question"],
     );
     if (assignment === undefined) {
       return { worked: false };
@@ -387,6 +416,27 @@ export class Worker {
             `${assignment.protocolVersion ?? 1}, which has no plan admission ` +
             `step; this worker requires ${WORKER_PROTOCOL_VERSION}`,
         );
+      }
+
+      if (assignment.task.kind === "question") {
+        const answer = await this.answerQuestion(assignment, scratch);
+        if (leaseLost) {
+          throw new LeaseLostError(assignment.lease.id);
+        }
+        const said = await this.options.client.report(
+          assignment.lease.id,
+          // No plan and no changeset, because there was nothing to admit and
+          // nothing to integrate. The control plane's question branch returns
+          // before it looks for either.
+          { status: "completed", plan: null, changeSet: null, answer },
+          this.spentSoFar(),
+        );
+        return {
+          worked: true,
+          taskId: assignment.task.id,
+          accepted: said.accepted,
+          ...(said.reason === undefined ? {} : { reason: said.reason }),
+        };
       }
 
       const planned = await this.plan(assignment, scratch);
@@ -483,6 +533,54 @@ export class Worker {
       this.admissionWait = undefined;
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * Runs one question and returns what the agent actually said.
+   *
+   * The same session machinery as work, because a question is answered the
+   * same way work is done — a checkout, an agent, a turn — and the only real
+   * differences are at the ends: nothing is admitted going in, and nothing is
+   * integrated coming out. So the admission handed to `execute` is
+   * synthesised rather than requested. That is honest rather than a shortcut:
+   * admission exists to stop two agents editing the same files, a question
+   * declares no files and edits none, and asking the control plane to admit
+   * an empty plan would be asking a question whose answer is fixed.
+   *
+   * What comes back is the agent's own explanation, and the guard below is
+   * the point of the whole method.
+   */
+  private async answerQuestion(
+    assignment: WorkAssignment,
+    scratch: string,
+  ): Promise<string> {
+    const planned = await this.plan(assignment, scratch);
+    const result = await this.execute(assignment, planned, {
+      status: "approved",
+      taskId: assignment.task.id,
+      planRevision: 1,
+      baseRevision: assignment.lease.baseRevision,
+      ownershipGrants: [],
+      constraints: [],
+      blockedBy: [],
+      conflicts: [],
+      explanation: "A question declares no files, so there is nothing to admit.",
+      decidedAt: new Date().toISOString(),
+    });
+    const said = (result.changeSet.agentExplanation ?? "").trim();
+    // Every adapter falls back to "<name> completed <request>" when the model
+    // returns no explanation of its own. For work that is a reasonable status
+    // line. For a question it is a disaster: the request *is* the asker's own
+    // sentence, so the room would get its own question handed back to it,
+    // prefixed by the agent's name, indistinguishable from a real answer.
+    //
+    // Failing instead is not a worse outcome. A failed question becomes the
+    // control plane's "I could not answer that just now", which is true, says
+    // so, and cannot be mistaken for an answer.
+    if (said.length === 0 || readsAsCompletionNotice(said, assignment.task.objective)) {
+      throw new Error("The agent produced no answer of its own");
+    }
+    return said;
   }
 
   /**

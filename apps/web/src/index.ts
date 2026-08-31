@@ -551,6 +551,11 @@ async function serve(
         ...(input.planOnly === true ? { planOnly: true } : {}),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
+        // A question, and where its answer goes. Passed through rather than
+        // defaulted here so that the store's own default — work — is the only
+        // place the absent case is decided.
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
+        ...(input.answerTo === undefined ? {} : { answerTo: input.answerTo }),
       });
     },
     async cancelTasks(input) {

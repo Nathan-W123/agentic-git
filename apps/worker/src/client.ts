@@ -335,6 +335,13 @@ export class WorkerClient {
     workerId: string,
     projectId: string,
     repositoryId?: string,
+    /**
+     * What this worker can execute. Absent means work alone, which is what
+     * every build before questions existed meant — and is the whole of the
+     * compatibility story, since an older control plane simply ignores a
+     * field it does not read while a newer one defaults to the same thing.
+     */
+    kinds?: readonly string[],
   ): Promise<WorkAssignment | undefined> {
     const { status, json } = await this.request("/api/v1/workers/leases", {
       method: "POST",
@@ -342,6 +349,7 @@ export class WorkerClient {
         workerId,
         projectId,
         ...(repositoryId === undefined ? {} : { repositoryId }),
+        ...(kinds === undefined ? {} : { kinds }),
       },
     });
     return status === 204 ? undefined : (json as WorkAssignment);
@@ -470,6 +478,16 @@ export class WorkerClient {
           plan: unknown;
           changeSet: unknown;
           detail?: string;
+          /**
+           * What the agent said, when the lease was on a question.
+           *
+           * Its own field rather than `detail`, which is a short failure
+           * reason the control plane caps at 2000 characters and *throws* on
+           * rather than clipping — and the worker turns any error inside a
+           * lease into a failed task, so a long answer sent as `detail` would
+           * reach the room as a failure.
+           */
+          answer?: string;
         }
       | { status: "failed"; detail: string },
     tokenUsage: readonly AgentTokenUsage[] = [],

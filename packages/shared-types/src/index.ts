@@ -2843,11 +2843,13 @@ export function rankTouchedFiles(
  *    every dispatch, the classifier on every unaddressed message, the auditor
  *    on every canonical promotion.
  *
- * Deliberately *not* the turns somebody is waiting on. A question asked in a
- * channel is still answered here, because answering happens on the control
- * plane and the worker protocol has no verb for it: refusing would not move
- * that work to a desktop, it would delete it. That is a gap to close by
- * teaching the worker to answer, not by turning answering off.
+ * Questions are routed rather than refused, which is the difference between
+ * moving spend and deleting a feature. An `@mention` that reads as a question
+ * is filed as `kind: "question"` and leased by its owner's machine, and only
+ * when that machine is listening — with no live worker for that owner it is
+ * answered here, exactly as it was before any of this. Refusing was tried and
+ * reverted: it does not move the work to a desktop, it removes the ability to
+ * ask an agent anything.
  *
  * Off by default, so a self-hosted deployment and the local `coord` CLI are
  * unchanged: a single-machine install where the control plane *is* the
