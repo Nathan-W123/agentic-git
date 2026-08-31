@@ -93,6 +93,7 @@ api,
   threadTitleReply,
   typingOn,
   waitingTasks,
+  agentOwnerOffline,
   offlineAgentsMentionedIn,
   onlineAgentsIn,
 } from "./data.js";
@@ -2322,7 +2323,16 @@ function threadSummaryLink(entry, replies, repositoryId, progress) {
           ? agentFace(
               author.agent,
               20,
-              running ? { status: "working", progress } : {},
+              running
+                ? { status: "working", progress }
+                : // The face beside a message is the one people actually look
+                  // at, and it reads `agent.presence` — a value the roster
+                  // hardcodes — rather than `agentStatus`, so it stayed lit
+                  // for an agent with no machine to run on. Only the offline
+                  // case is passed: everything else keeps the presence it had.
+                  agentOwnerOffline(author.agent)
+                  ? { status: "offline" }
+                  : {},
             )
           : avatar(
               author.name,
