@@ -131,6 +131,7 @@ import {
   searchBox,
   segmented,
   showPopover,
+  showModal,
   toast,
 } from "./ui.js";
 
@@ -8793,6 +8794,16 @@ function offlineAgentSetup(repositoryId, names) {
         ? `<a class="link" href="${esc(setup.docs)}" target="_blank"
              rel="noopener noreferrer">How to install ${esc(agent.name)}'s CLI</a>`
         : `<code>${esc(command)}</code>
+           ${
+             // Only the desktop app can run it, and only it knows whether it
+             // can — the bridge is absent in a browser, where the command is
+             // there to be copied and run by hand instead.
+             window.KUMI_INSTALL === undefined
+               ? ""
+               : `<button type="button" class="btn btn-sm"
+                    data-act="offline-install"
+                    data-value="${esc(setup.vendor ?? "")}">Install</button>`
+           }
            <button type="button" class="ask-step" data-act="offline-copy"
              data-value="${esc(command)}" title="Copy" aria-label="Copy"
              >${icon("copy")}</button>`,
@@ -8920,6 +8931,111 @@ export function setOfflineTarget(value, rerender) {
 }
 
 /** Cancelled. The draft stays put — cancel means do not send, not discard. */
+/**
+ * Installs a vendor's CLI from inside the app, after showing what will run.
+ *
+ * The confirmation is the point. These are the vendors' own one-liners and two
+ * of them pipe a downloaded script into an interpreter — which is exactly what
+ * a person would paste by hand, and exactly why it should not happen because
+ * somebody pressed "Connect". So the command is displayed, agreed to, and only
+ * then run.
+ *
+ * The command shown is read back from the desktop rather than composed here.
+ * The page names a vendor and the app decides what that means, so a remote
+ * document cannot put a command on this machine's shell — and what is agreed
+ * to cannot differ from what executes, because they are the same value.
+ */
+export async function installVendorCli(vendor, rerender) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge === undefined || vendor === "") {
+    return;
+  }
+  const plan = await bridge.plan(vendor).catch(() => undefined);
+  if (plan === undefined) {
+    toast("This machine has no published installer for that agent.", "error");
+    return;
+  }
+  const agreed = await showModal({
+    title: `Install the ${vendor} CLI`,
+    subtitle:
+      "Kumi runs agents on this machine, so the vendor's own CLI has to be " +
+      "here. This is what will run:",
+    body: `<pre class="install-command">${esc(plan.command)}</pre>
+      <p class="modal-hint">It comes from ${esc(vendor)}'s own published
+      instructions. You can copy it and run it yourself instead.</p>`,
+    confirm: "Run it",
+    cancel: "Not now",
+  });
+  if (agreed === undefined) {
+    return;
+  }
+
+  // Output as it arrives. These fail for ordinary, legible reasons — no npm,
+  // a proxy, a policy blocking the script — and the vendor's own words say
+  // which. A spinner ending in "failed" would leave somebody exactly where
+  // they started.
+  const lines = [];
+  const stop = bridge.onOutput((line) => {
+    lines.push(line);
+    const view = document.querySelector("#install-output");
+    if (view !== null) {
+      view.textContent = lines.join("").slice(-4000);
+      view.scrollTop = view.scrollHeight;
+    }
+  });
+  const watching = showModal({
+    title: `Installing ${esc(vendor)}`,
+    body: `<pre class="install-output" id="install-output">Starting…</pre>`,
+    cancel: "Hide",
+  });
+  let result;
+  try {
+    result = await bridge.run(vendor);
+  } catch (error) {
+    result = { ok: false, detail: error?.message ?? "The install failed." };
+  } finally {
+    stop?.();
+    document.querySelector("#modal")?.close();
+    await watching.catch(() => undefined);
+  }
+
+  if (result?.ok !== true) {
+    await showModal({
+      title: `${esc(vendor)} was not installed`,
+      subtitle: result?.detail ?? "The installer did not finish.",
+      body: `<pre class="install-output">${esc(lines.join("").slice(-2000))}</pre>`,
+      confirm: "Close",
+    });
+    return;
+  }
+
+  // Installed, and still unusable until somebody signs in — the one step no
+  // app can take for them, because every vendor's login is an interactive
+  // flow it owns. The most this can do is put them in front of it with
+  // nothing left to type.
+  const now = await showModal({
+    title: `${esc(vendor)} is installed`,
+    subtitle:
+      `One thing left: sign in. Kumi uses this machine's own ${esc(vendor)} ` +
+      "login, so it has to be done here, once.",
+    body: `<p class="modal-hint">This opens a terminal already running
+      <code>${esc(plan.signIn)}</code>. Follow its sign-in, then come back —
+      Kumi picks it up on its own.</p>`,
+    confirm: "Open the sign-in",
+    cancel: "Later",
+  });
+  if (now !== undefined) {
+    const opened = await bridge.signIn(vendor).catch(() => false);
+    if (opened !== true) {
+      toast(
+        `Could not open a terminal. Run \`${plan.signIn}\` yourself to sign in.`,
+        "error",
+      );
+    }
+  }
+  rerender?.();
+}
+
 export function dismissOfflinePrompt(rerender) {
   state.offlinePrompt = undefined;
   rerender();

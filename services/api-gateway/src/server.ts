@@ -11329,9 +11329,15 @@ export class ApiGateway {
         )
           ? {}
           : {
-              setup: VENDOR_CLI_SETUP[
-                PROVIDER_TO_VENDOR[connection.provider] ?? ""
-              ],
+              setup: ((vendor) =>
+                vendor === undefined || VENDOR_CLI_SETUP[vendor] === undefined
+                  ? undefined
+                  : // The vendor travels with it: the desktop app installs by
+                    // name, never by command, so the page needs the name to
+                    // ask with and must not have to derive it from a label.
+                    { vendor, ...VENDOR_CLI_SETUP[vendor] })(
+                PROVIDER_TO_VENDOR[connection.provider],
+              ),
             }),
         /**
          * Whether this agent's owner has a machine listening right now.

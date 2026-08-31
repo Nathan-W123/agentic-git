@@ -1,3 +1,31 @@
+### 0.4.8 — Cursor runs, the repository stays, and setup explains itself
+
+**Cursor works.** It ships no CLI binary at all: `agent.cmd` runs PowerShell,
+which runs a script, which picks the newest version directory and runs that
+copy's own `node.exe`. Two shims and an interpreter — and the first is a batch
+file, which on Windows cannot carry an argument containing a quote or a
+newline. Cursor sends its whole prompt that way, so every task failed. The
+adapter now skips the shims and calls the interpreter directly.
+
+**The repository is kept between tasks.** Every task used to pull the whole
+repository from the deployment — 41 MB for a modest one — unpack it, and delete
+it when the task ended, so the next mention paid for all of it again. That is
+the entire reason a local agent felt slower than a server one: the server reads
+a clone off its own disk. Now so does your machine. The first task on a machine
+still transfers everything; every task after it transfers a few commits.
+
+**An agent that cannot run says what to install.** Kumi runs agents using the
+vendor's own CLI on your machine, and nothing in the product said so — an agent
+with no CLI looked exactly like one that worked, took the mention, and left the
+task waiting forever. When an agent goes grey it now shows the install command
+for its vendor, and in the app there is a button that runs it for you, after
+showing you exactly what will run. When it finishes, another opens a terminal
+already running the CLI so its sign-in starts.
+
+Only commands published by each vendor are offered. The app decides what a
+vendor name means; the page can only ask by name, so a command never travels
+from a web page to your shell.
+
 ### 0.4.7 — Codex runs, Cursor is called what Cursor calls it
 
 **Codex could not start, and said so precisely.** It resolved to `codex.cmd`,

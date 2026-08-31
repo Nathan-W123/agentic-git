@@ -14288,6 +14288,29 @@ dialog.modal[open]::backdrop {
   font-size: 12px;
 }
 
+/* The command somebody is agreeing to run, and what it says while it runs.
+   Selectable, because "copy it and run it yourself" has to stay available to
+   anyone who would rather not hand the decision over. */
+.install-command,
+.install-output {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-card-2);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.install-output {
+  max-height: 260px;
+  overflow-y: auto;
+  color: var(--text-3);
+}
+
 /* The way out of the options: say something they did not think of, or hand
    this one decision back. */
 .ask-else {
