@@ -20,13 +20,17 @@ import {
  */
 test("every vendor profile defaults to the binary that vendor installs", () => {
   assert.equal(CLAUDE_PROFILE.defaultCommand, "claude");
-  assert.equal(CURSOR_PROFILE.defaultCommand, "cursor-agent");
+  // `agent`, per Cursor's own docs, which verify with `agent --version`.
+  // Pinned because this was briefly changed to `cursor-agent` on the strength
+  // of an ENOENT that turned out to mean the CLI was simply not installed.
+  assert.equal(CURSOR_PROFILE.defaultCommand, "agent");
   assert.equal(GEMINI_PROFILE.defaultCommand, "gemini");
   assert.equal(COPILOT_PROFILE.defaultCommand, "copilot");
   assert.equal(KIRO_PROFILE.defaultCommand, "kiro-cli");
 
-  // None of them is a bare word that could plausibly be something else on a
-  // user's PATH. `agent` was, which is how it survived review.
+  // Every default is a name its vendor actually installs. That is the whole
+  // property worth pinning here — not whether a name looks generic, which is
+  // the reasoning that produced the wrong answer for Cursor.
   for (const profile of [
     CLAUDE_PROFILE,
     CURSOR_PROFILE,
@@ -34,7 +38,7 @@ test("every vendor profile defaults to the binary that vendor installs", () => {
     COPILOT_PROFILE,
     KIRO_PROFILE,
   ]) {
-    assert.notEqual(profile.defaultCommand, "agent");
+    assert.ok((profile.defaultCommand ?? "").length > 0);
   }
 });
 

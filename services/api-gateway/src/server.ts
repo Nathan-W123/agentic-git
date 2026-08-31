@@ -11274,7 +11274,11 @@ export class ApiGateway {
          * what to ask, never as permission — the server's own check at
          * dispatch is the one that decides.
          */
-        ownerOnline: liveOwners.has(connection.userId),
+        ownerOnline: ApiGateway.agentIsLive(
+          liveOwners,
+          connection.userId,
+          connection.provider,
+        ),
         connected: true as const,
       }));
       // Whether auditing is switched off here. Sent with the roster rather
@@ -13855,20 +13859,59 @@ export class ApiGateway {
    */
   private async liveWorkerOwners(
     organizationId?: string,
-  ): Promise<Set<string>> {
+  ): Promise<Map<string, Set<string>>> {
     const workers = await this.options.store
       .listWorkers(
         organizationId === undefined ? undefined : { organizationId },
       )
       .catch((): [] => []);
     const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
-    const live = new Set<string>();
+    const live = new Map<string, Set<string>>();
     for (const worker of workers) {
-      if (worker.lastSeenAt > cutoff) {
-        live.add(worker.userId);
+      if (worker.lastSeenAt <= cutoff) {
+        continue;
       }
+      const advertised = live.get(worker.userId) ?? new Set<string>();
+      for (const adapter of worker.adapters) {
+        advertised.add(adapter);
+      }
+      live.set(worker.userId, advertised);
     }
     return live;
+  }
+
+  /**
+   * Whether an agent has a machine that can actually run it.
+   *
+   * A set of owners was not enough, and the gap was not academic. A worker
+   * registers the adapters its machine has — one with Claude installed and
+   * nothing else registers exactly `claude` — but liveness was answered per
+   * *person*, so every agent that person owned read as online the moment any
+   * machine of theirs was listening. An agent for a CLI that was never
+   * installed was therefore drawn as available, took a mention, posted "I've
+   * taken this task and I'm working on it", and left the task in a queue no
+   * worker would ever claim. Nothing was hung and nothing failed; the work
+   * simply waited forever behind a sentence saying it had begun.
+   *
+   * Answered per adapter now, which is the question the dispatch actually
+   * asks. An agent whose CLI is on nobody's machine reads as offline, which
+   * is what the offline prompt is for.
+   */
+  private static agentIsLive(
+    live: Map<string, Set<string>>,
+    userId: string,
+    provider: string,
+  ): boolean {
+    const advertised = live.get(userId);
+    if (advertised === undefined) {
+      return false;
+    }
+    const vendor = PROVIDER_TO_VENDOR[provider];
+    // A provider this build has no vendor CLI for cannot be checked against
+    // what a worker advertises. Falling back to "the owner is listening" keeps
+    // such an agent exactly as available as it was before adapters were
+    // consulted, rather than making it silently unmentionable.
+    return vendor === undefined ? true : advertised.has(vendor);
   }
 
   private async organizationFleet(organizationId: string): Promise<{
