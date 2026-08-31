@@ -2271,6 +2271,50 @@ test("disconnecting forgets the agent's durable record too", async () => {
 });
 
 /**
+ * And it stays removed once the reconciler has had a look.
+ *
+ * `nameUnnamedConnections` runs on the way through `list` and deals a fresh
+ * name to any connection missing one, writing it back to the durable table. So
+ * removing the record alone does not remove the agent: it leaves a connection
+ * for the reconciler to rename, and the next roster read brings the agent back
+ * under a name nobody chose. Verified by mutation — this test fails when the
+ * connections-file removal is taken out of `disconnect`, and passes when the
+ * two removals are swapped, which is how it is known that both are needed and
+ * that their order is not what matters.
+ */
+test("a disconnected agent is not recreated by the next roster read", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-reconciled",
+  });
+  await service.list({ userId: "u1", systemAdmin: false });
+  assert.equal(callSigns.rows.size, 1);
+
+  await service.disconnect({ userId: "u1", provider: "anthropic" });
+
+  // The read that would resurrect it.
+  const after = await service.list({ userId: "u1", systemAdmin: false });
+  assert.deepEqual(
+    await callSigns.listAgentCallSigns(),
+    [],
+    "the reconciler must not deal a name to an agent that was removed",
+  );
+  assert.equal(
+    after.find((entry) => entry.id === "anthropic")?.callSign,
+    undefined,
+  );
+});
+
+/**
  * The other half, and the reason this route exists at all: an agent that
  * never had a credential. Local execution runs the vendor CLI under the
  * machine's own login, so there is no secret here to destroy — the record is

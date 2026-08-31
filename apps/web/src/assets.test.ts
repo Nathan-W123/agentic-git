@@ -1970,6 +1970,12 @@ test("an agent can be disconnected, including one with no credential", async () 
   assert.match(agents, /title: `Disconnect \$\{name\}\?`/u);
   assert.match(agents, /Nothing is uninstalled/u);
   assert.match(agents, /forgetAgentInLoadedRosters\(providerId\)/u);
+
+  // Removing an agent mid-run is the one part that connecting another cannot
+  // undo: the run finishes, but mentions resolve through the roster on every
+  // read, so nothing answers to the name afterwards. Said before, not after.
+  assert.match(agents, /const busy = agent\?\.task !== undefined/u);
+  assert.match(agents, /is working right now/u);
 });
 
 test("a conversation is scoped to one user's own provider connection", async () => {

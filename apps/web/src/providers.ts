@@ -4488,6 +4488,15 @@ export class ProviderChatService {
    * vendor with no credential, the connections file is guarded, and
    * `forgetCallSign` swallows its own failure — so disconnecting an agent
    * that is already gone is a no-op rather than an error.
+   *
+   * Both of the last two steps are required, and neither is enough alone.
+   * `nameUnnamedConnections` reconciles the durable record against the
+   * connections file on the way through `list`, dealing a fresh name to any
+   * connection that has none — so removing only the record leaves a connection
+   * for the reconciler to rename, and the very next roster read brings the
+   * agent back under a name nobody chose. It skips a provider with no entry in
+   * that file, which is what makes removing the entry the other half of the
+   * job. Their order does not matter: nothing reads between them.
    */
   public async disconnect(input: {
     userId: string;

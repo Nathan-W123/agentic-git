@@ -393,12 +393,26 @@ export async function disconnectAgent(providerId, rerender) {
   // in every channel — asking "disconnect Codex?" about an agent everybody
   // calls Eris is asking about something else.
   const name = agent?.hasName === true ? agent.name : label;
+  // Whether it is mid-run. `myAgents` already worked this out to draw the
+  // busy dot, so saying it here costs nothing — and it is the one thing about
+  // removing an agent that cannot be undone by connecting another. Work
+  // already claimed runs to completion on its own machine; what goes is the
+  // ability to address it. Mentions resolve through the roster on every read
+  // rather than being stored, so once the agent is gone `@${name}` matches
+  // nothing and neither does cancelling by name.
+  const busy = agent?.task !== undefined;
   const confirmed = await showModal({
     title: `Disconnect ${name}?`,
     subtitle:
       `${name} leaves every channel it is in, and its name goes back in the ` +
       "pool for another agent to be dealt.",
-    body: `<p class="modal-hint">Nothing is uninstalled, and your
+    body:
+      (busy
+        ? `<p class="modal-hint sr-warn">${esc(name)} is working right now.
+            That run will finish on its own, but once the agent is gone you
+            will not be able to cancel it or reply to it by name.</p>`
+        : "") +
+      `<p class="modal-hint">Nothing is uninstalled, and your
       ${esc(label)} account is untouched — you can connect it again whenever
       you like.</p>`,
     confirm: "Disconnect",
