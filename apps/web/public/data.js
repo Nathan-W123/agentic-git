@@ -4426,19 +4426,22 @@ export function agentOutOfUsage(agent) {
  * else on the row says it. Personal is visible in the role line regardless.
  */
 export function agentStatus(agent, repositoryId) {
+  // First, and it was second. "Working" is not always evidence of anything:
+  // `taskIsWorking` counts a merely *submitted* task for a grace window, so a
+  // task nobody has picked up lights the agent green and prints a percentage
+  // — which is exactly the state an offline agent is always in. Meanwhile
+  // `ownerOnline` is a server fact about whether any machine has heartbeated,
+  // and it is the same fact the control plane uses to decide whether to route
+  // work there at all. If nothing is listening, nothing is working, and the
+  // screen should not disagree with the router.
+  if (agentOwnerOffline(agent)) {
+    return "offline";
+  }
   if (agentIsWorking(agent, repositoryId)) {
     return "working";
   }
   if (agentOutOfUsage(agent)) {
     return "exhausted";
-  }
-  // Below working, because an agent that is visibly working is reachable by
-  // definition and a three-minute-old liveness read is the weaker fact. Above
-  // personal, because "there is nobody to run this" is what a reader needs
-  // first — whether they are *allowed* to mention it matters less than
-  // whether anything would happen if they did.
-  if (agentOwnerOffline(agent)) {
-    return "offline";
   }
   return agent.visibility === "personal" ? "personal" : "idle";
 }

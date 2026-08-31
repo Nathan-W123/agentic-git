@@ -14872,3 +14872,57 @@ dialog.modal[open]::backdrop {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The offline prompt borrows the agent-question card, because it is the same
+   kind of moment: an agent cannot get on with something and the room is being
+   asked what to do instead. Two differences, and only two.
+
+   It sits inside a modal that already draws a card, so it drops the shadow
+   rather than stacking two.
+
+   And its rows are labels wrapping a radio, not the card's buttons — inside
+   `<form method="dialog">` a button submits, and the whole point is to choose
+   before sending. The radio is hidden rather than removed so the group stays
+   keyboard-reachable and arrow keys still move between options. */
+.ask-card-choice {
+  box-shadow: none;
+}
+
+.ask-card-choice .ask-option {
+  position: relative;
+}
+
+/* Not `display: none`: that takes the input out of the tab order and out of
+   the radio group's arrow-key behaviour, which is most of what makes a radio
+   worth using over a button here. */
+.ask-card-choice .ask-option input[type="radio"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ask-card-choice .ask-option:has(input:checked) {
+  background: var(--accent-wash);
+}
+
+.ask-card-choice .ask-option:focus-within {
+  background: var(--bg-hover);
+}
+
+/* The second line of a choice: what picking it actually does. The card's own
+   options are one line each, so this is the one thing the shape did not
+   already have. */
+.ask-card-choice .ask-label small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.ask-card-choice .ask-else select {
+  flex: 1;
+  min-width: 0;
+}
