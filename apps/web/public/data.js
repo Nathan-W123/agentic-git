@@ -478,6 +478,15 @@ export const state = {
    * Only where this is true does `ownerOnline` mean anything on screen.
    */
   localAgentsOnly: false,
+  /**
+   * The offline-agent prompt currently on screen, if any.
+   *
+   * `{ repositoryId, names, choice, target }`. Held here rather than awaited
+   * inside the composer because the prompt is drawn by the render loop like
+   * the agent-question card beside it, not by a dialog that owns the screen
+   * while it is open.
+   */
+  offlinePrompt: undefined,
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
   /** Entitlement and seat count — see `ensureBilling`. */

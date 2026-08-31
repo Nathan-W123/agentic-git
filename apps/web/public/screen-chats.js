@@ -132,7 +132,6 @@ import {
   segmented,
   showPopover,
   toast,
-  showModal,
 } from "./ui.js";
 
 /* ------------------------------------------------------------- sidebar ---- */
@@ -6241,7 +6240,7 @@ function agentQueuedZone(agent, queued) {
           )}</div>
         </div>
         <button class="aspec-action aspec-action-quiet" data-act="task-cancel"
-          data-val="${esc(entry.id)}"
+          data-value="${esc(entry.id)}"
           aria-label="Cancel this queued work">Cancel</button>
       </div>`,
       )
@@ -6819,6 +6818,7 @@ function mainChatConversation(repositoryId) {
   return `${messageList(repositoryId)}
     ${jumpToLatest()}
     ${agentQuestionPrompt(repositoryId)}
+    ${offlineAgentPrompt(repositoryId)}
     ${dismissedQuestionChip(repositoryId)}
     ${composer(repositoryId)}`;
 }
@@ -8725,108 +8725,151 @@ function sendComposerDraft(repositoryId, rerender, draft) {
 /**
  * What to do about a message addressed to an agent that has nowhere to run.
  *
- * Three outcomes, because there are three reasonable things to want and the
- * old behaviour offered none of them: the message went, the agent replied
- * that nothing was running it, and the only way back was to notice.
+ * Drawn where the agent-question prompt is drawn — just above the composer,
+ * in the room it belongs to — rather than as a centred dialog. That is not
+ * only a style match: a modal in the middle of the screen takes the
+ * conversation away in order to ask about it, and what is being decided here
+ * is one sentence of that conversation. The question card had this argument
+ * first and won it.
  *
- * Cancel is the *default* action here, unlike every other dialog in this
- * file. Somebody who dismisses this without reading has almost certainly not
- * decided to wait an unbounded amount of time for a machine that is off, and
- * the draft survives either way — nothing typed is lost by choosing wrong.
+ * Held in state rather than awaited, because the render loop owns the screen.
+ * The draft stays in the composer throughout: every outcome, including the
+ * one that sends nothing, leaves what was typed where it was.
  */
-async function askAboutOfflineAgents(repositoryId, offline, rerender) {
-  const named = offline.map((agent) => agent.name).join(", ");
-  const alternatives = onlineAgentsIn(repositoryId, offline);
-  const choice = await showModal({
-    title:
-      offline.length === 1
-        ? `${named} is offline`
-        : `${named} are offline`,
-    subtitle:
-      offline.length === 1
-        ? "Its owner's machine isn't running Kumi, so nothing will pick this " +
-          "up until it is. Queued work waits as long as it needs to — you " +
-          "can see it and cancel it on the agent's page."
-        : "Their owners' machines aren't running Kumi, so nothing will pick " +
-          "this up until they are. Queued work waits as long as it needs to " +
-          "— you can see it and cancel it on each agent's page.",
-    // The agent-question card's own shape, because this is the same kind of
-    // moment: an agent cannot get on with something, and the room is being
-    // asked what to do instead. Reusing `.ask-card` and its rows means the
-    // two read as one mechanism rather than as a dialog that happens to
-    // resemble one.
-    //
-    // Rows are labels wrapping a hidden radio rather than the card's own
-    // buttons: inside `showModal`'s `<form method="dialog">` a button
-    // submits, and the whole point here is to pick before sending. The
-    // number badges keep their job as ordinals; they are not shortcuts here,
-    // because the modal has no key handler of its own.
-    body: `<div class="ask-card ask-card-choice">
+function askAboutOfflineAgents(repositoryId, offline, rerender) {
+  state.offlinePrompt = {
+    repositoryId,
+    names: offline.map((agent) => agent.name),
+    choice: "queue",
+    target: onlineAgentsIn(repositoryId, offline)[0]?.name,
+  };
+  rerender();
+}
+
+/**
+ * The prompt itself, in the agent-question card's own shape.
+ *
+ * Numbered rows, because the question card numbers its options and somebody
+ * who has answered one of those should not have to learn a second vocabulary
+ * to answer this.
+ */
+function offlineAgentPrompt(repositoryId) {
+  const pending = state.offlinePrompt;
+  if (pending === undefined || pending.repositoryId !== repositoryId) {
+    return "";
+  }
+  const named = pending.names.join(", ");
+  const alternatives = onlineAgentsIn(repositoryId).filter(
+    (agent) => !pending.names.includes(agent.name),
+  );
+  const plural = pending.names.length !== 1;
+  const send = `<button type="button" class="btn btn-primary btn-sm"
+    data-act="offline-send">Send</button>`;
+  return `<div class="ask-prompt" role="dialog"
+    aria-label="${esc(named)} ${plural ? "are" : "is"} offline">
+    <div class="ask-context">${esc(named)} — ${
+      plural ? "no machines are" : "no machine is"
+    } running Kumi</div>
+    <div class="ask-card">
+      <div class="ask-head">
+        <h4>Nothing will pick this up yet. Send it anyway?</h4>
+        <div class="ask-head-tools">
+          <button type="button" class="ask-step" data-act="offline-dismiss"
+            title="Cancel this task" aria-label="Cancel this task"
+            >${icon("close")}</button>
+        </div>
+      </div>
       <div class="ask-options">
-        <label class="ask-option">
-          <input type="radio" name="offlineChoice" value="queue" checked>
+        <button type="button" class="ask-option${
+          pending.choice === "queue" ? " is-picked" : ""
+        }" data-act="offline-choose" data-value="queue">
           <span class="ask-num">1</span>
           <span class="ask-label">Queue it anyway
             <small>It waits, and runs as soon as ${
-              offline.length === 1 ? "the machine is" : "the machines are"
+              plural ? "the machines are" : "the machine is"
             } back. You can cancel it from the agent's page.</small>
           </span>
-        </label>
+        </button>
         ${
           alternatives.length === 0
             ? ""
-            : `<label class="ask-option">
-          <input type="radio" name="offlineChoice" value="reroute">
+            : `<button type="button" class="ask-option${
+                pending.choice === "reroute" ? " is-picked" : ""
+              }" data-act="offline-choose" data-value="reroute">
           <span class="ask-num">2</span>
           <span class="ask-label">Send it to someone online
             <small>The mention is rewritten to whoever you pick.</small>
           </span>
-        </label>
-        <div class="ask-else">
-          <span class="ask-num">${icon("robot")}</span>
-          <select name="offlineTarget" aria-label="Send to">${alternatives
-            .map(
-              (agent) =>
-                `<option value="${esc(agent.name)}">${esc(agent.name)}</option>`,
-            )
-            .join("")}</select>
-        </div>`
+        </button>`
         }
       </div>
-    </div>`,
-    confirm: "Send",
-    cancel: "Cancel this task",
-  });
-  // Cancelled. The draft is deliberately left in the composer: "cancel this
-  // task" means do not send it, not throw away what was typed — and the most
-  // likely next move is to edit the mention rather than start again.
-  if (choice === undefined) {
-    // Nothing to redraw: the dialog closed itself and the draft is exactly
-    // where it was. A `rerender()` here would also be a third one in a
-    // function the composer's own test counts, and it counts them because
-    // every send path has to end the same way — one redraw, one scroll to
-    // the words just typed.
+      <div class="ask-else${pending.choice === "reroute" ? " is-picked" : ""}">
+        ${
+          alternatives.length === 0
+            ? ""
+            : `<span class="ask-num">${icon("robot")}</span>
+        <select data-act="offline-target" aria-label="Send to">${alternatives
+          .map(
+            (agent) =>
+              `<option value="${esc(agent.name)}"${
+                agent.name === pending.target ? " selected" : ""
+              }>${esc(agent.name)}</option>`,
+          )
+          .join("")}</select>`
+        }
+        ${send}
+      </div>
+    </div>
+  </div>`;
+}
+
+/** Sends whatever the prompt was left set to, and closes it. */
+export function sendOfflineChoice(rerender) {
+  const pending = state.offlinePrompt;
+  state.offlinePrompt = undefined;
+  if (pending === undefined) {
+    rerender();
     return;
   }
-  if (choice.offlineChoice === "reroute" && alternatives.length > 0) {
-    const target =
-      alternatives.find((agent) => agent.name === choice.offlineTarget) ??
-      alternatives[0];
-    // Only the names that were actually offline are rewritten, and only where
-    // they are mentions. A message that says an agent's name in passing keeps
-    // saying it.
-    let redirected = state.chatDraft;
-    for (const agent of offline) {
-      const escaped = String(agent.name).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-      redirected = redirected.replace(
-        new RegExp(`@${escaped}(?=$|[\\s,.:;!?()\\[\\]{}])`, "giu"),
-        `@${target.name}`,
-      );
-    }
-    sendComposerDraft(repositoryId, rerender, redirected);
+  const target = pending.choice === "reroute" ? pending.target : undefined;
+  if (target === undefined) {
+    sendComposerDraft(pending.repositoryId, rerender);
     return;
   }
-  sendComposerDraft(repositoryId, rerender);
+  // Only the names that were offline are rewritten, and only where they are
+  // mentions. A message that says an agent's name in passing keeps saying it.
+  let redirected = state.chatDraft;
+  for (const name of pending.names) {
+    const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    redirected = redirected.replace(
+      new RegExp(`@${escaped}(?=$|[\\s,.:;!?()\\[\\]{}])`, "giu"),
+      `@${target}`,
+    );
+  }
+  sendComposerDraft(pending.repositoryId, rerender, redirected);
+}
+
+/** Picking a row, without leaving the prompt. */
+export function chooseOfflineOption(value, rerender) {
+  if (state.offlinePrompt !== undefined) {
+    state.offlinePrompt.choice = value;
+    rerender();
+  }
+}
+
+/** Choosing a target also picks the row it belongs to — one gesture, not two. */
+export function setOfflineTarget(value, rerender) {
+  if (state.offlinePrompt !== undefined) {
+    state.offlinePrompt.target = value;
+    state.offlinePrompt.choice = "reroute";
+    rerender();
+  }
+}
+
+/** Cancelled. The draft stays put — cancel means do not send, not discard. */
+export function dismissOfflinePrompt(rerender) {
+  state.offlinePrompt = undefined;
+  rerender();
 }
 
 /**
