@@ -181,7 +181,8 @@ function inheritableChildEnv(name: string): boolean {
 const WINDOWS_BATCH_FILE = /\.(?:bat|cmd)$/iu;
 const UNSAFE_WINDOWS_BATCH_TOKEN = /[\0\r\n"&|<>^%!]/u;
 
-interface ProcessInvocation {
+/** What to hand `spawn`, once the platform's own rules have been applied. */
+export interface SpawnInvocation {
   executable: string;
   args: string[];
   windowsVerbatimArguments?: boolean;
@@ -213,11 +214,6 @@ function terminateProcessTree(child: ChildProcess): void {
   child.kill("SIGKILL");
 }
 
-/**
- * Windows cannot execute `.cmd` or `.bat` files directly. Launch them through
- * `cmd.exe`, but reject expansion and control characters instead of enabling
- * Node's argument-interpolating `shell` option.
- */
 /**
  * The extensions Windows itself would try for a name given without one.
  *
@@ -290,13 +286,34 @@ export function resolveWindowsExecutable(
   return executable;
 }
 
-function processInvocation(
+/**
+ * The invocation Windows actually accepts for a command a human would type.
+ *
+ * Two rules live here, and both are invisible until they bite. A bare name
+ * has to be resolved through `PATH` and `PATHEXT`, because libuv tries only
+ * `.com` and `.exe` and every npm-installed CLI is a `.cmd`. A `.cmd` or
+ * `.bat` then cannot be executed directly at all since the 2024
+ * argument-injection fix, so it goes through `cmd.exe` with its arguments
+ * passed verbatim rather than through Node's interpolating `shell` option.
+ *
+ * Exported because {@link runProcess} is not the only spawner in the system —
+ * the generic CLI adapter drives a long-lived stdio conversation and owns its
+ * own child — and a second copy of these rules is a second place for them to
+ * be wrong.
+ *
+ * `platform` is a parameter rather than a read of `process.platform` for the
+ * reason `CodexAdapter` takes one: rules that only run on Windows are rules
+ * that only CI-run nowhere, and this particular set went three releases while
+ * being wrong.
+ */
+export function spawnInvocation(
   executable: string,
   args: readonly string[],
   cwd: string | undefined,
   env: NodeJS.ProcessEnv,
-): ProcessInvocation {
-  if (process.platform !== "win32") {
+  platform: NodeJS.Platform = process.platform,
+): SpawnInvocation {
+  if (platform !== "win32") {
     return { executable, args: [...args] };
   }
   const named = resolveWindowsExecutable(executable, cwd, env);
@@ -370,6 +387,50 @@ export function sanitizeChildEnv(
   return sanitized;
 }
 
+/**
+ * What `spawn <name> ENOENT` leaves out, and what it costs to leave it out.
+ *
+ * Node reports the name it was given and nothing else — not where it looked,
+ * not what it would have accepted. On Windows that is the difference between
+ * "the CLI is not installed" and "the CLI is installed and this process
+ * cannot see it", which are opposite problems with opposite fixes, and
+ * telling them apart currently costs a release and a reinstall each time.
+ *
+ * So the message carries the search: how many directories were on `PATH`, and
+ * which suffixes were tried. A reader who installed the CLI five minutes ago
+ * and sees zero directories has their answer immediately, and so does one who
+ * sees forty.
+ */
+export function explainSpawnFailure(
+  error: Error,
+  executable: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): Error {
+  if (
+    platform !== "win32" ||
+    (error as { code?: unknown }).code !== "ENOENT" ||
+    path.extname(executable) !== "" ||
+    executable.includes("\\") ||
+    executable.includes("/")
+  ) {
+    return error;
+  }
+  const searchPath =
+    Object.entries(env).find(([name]) => name.toUpperCase() === "PATH")?.[1] ??
+    "";
+  const directories = searchPath.split(path.delimiter).filter(Boolean);
+  const extensions = windowsExtensions(env);
+  const enriched = new Error(
+    `spawn ${executable} ENOENT — searched ${String(directories.length)} ` +
+      `PATH ${directories.length === 1 ? "directory" : "directories"} for ` +
+      `${[executable, ...extensions.map((ext) => executable + ext)].join(", ")}`,
+  );
+  (enriched as { code?: string }).code = "ENOENT";
+  (enriched as { cause?: unknown }).cause = error;
+  return enriched;
+}
+
 export async function runProcess(
   executable: string,
   args: readonly string[],
@@ -393,12 +454,7 @@ export async function runProcess(
 
   const startedAt = performance.now();
   const childEnv = sanitizeChildEnv(options.env ?? process.env);
-  const invocation = processInvocation(
-    executable,
-    args,
-    options.cwd,
-    childEnv,
-  );
+  const invocation = spawnInvocation(executable, args, options.cwd, childEnv);
 
   return await new Promise<ProcessOutput>((resolve, reject) => {
     let settled = false;
@@ -560,7 +616,7 @@ export async function runProcess(
       }
       settled = true;
       cleanUp();
-      reject(error);
+      reject(explainSpawnFailure(error, executable, childEnv));
     });
     child.once("close", (exitCode) => {
       if (settled) {

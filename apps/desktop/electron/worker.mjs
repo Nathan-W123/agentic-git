@@ -26,17 +26,11 @@
  * volunteer. The choice is remembered, so it is asked exactly once.
  */
 import { app, powerMonitor, powerSaveBlocker, utilityProcess } from "electron";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-/** Vendor CLIs a worker can drive, and what they are called on each platform. */
-const KNOWN_AGENTS = [
-  { id: "claude", adapter: "claude", commands: ["claude", "claude.cmd", "claude.exe"] },
-  { id: "codex", adapter: "codex", commands: ["codex", "codex.cmd", "codex.exe"] },
-  { id: "cursor", adapter: "cursor", commands: ["cursor-agent", "cursor-agent.cmd", "cursor-agent.exe"] },
-];
+import { detectAgents, ensureProject, exists } from "./agents.mjs";
 
 /**
  * Backoff between restarts, and the point at which restarting is pointless.
@@ -87,62 +81,6 @@ function bundlePath(here) {
   return app.isPackaged
     ? path.join(process.resourcesPath, "worker.cjs")
     : path.join(here, "..", "resources", "worker.cjs");
-}
-
-async function exists(candidate) {
-  try {
-    await access(candidate, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Which agents this machine can actually drive.
- *
- * Only what is installed is advertised, because the adapter list a worker
- * registers with is what the control plane filters work by. Claiming an agent
- * that is not here means leasing a task and then failing it, which is strictly
- * worse than never being offered it.
- */
-async function detectAgents() {
-  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  const agents = {};
-  for (const agent of KNOWN_AGENTS) {
-    for (const dir of dirs) {
-      const found = await Promise.all(
-        agent.commands.map((name) => exists(path.join(dir, name))),
-      );
-      if (found.includes(true)) {
-        // No `command`: the adapters resolve their own executables, and on
-        // Windows the Claude npm shim in particular cannot be spawned
-        // directly — the adapter knows to find the native binary instead.
-        agents[agent.id] = { adapter: agent.adapter };
-        break;
-      }
-    }
-  }
-  return agents;
-}
-
-/** Writes the worker's own project config, leaving an existing one alone. */
-async function ensureProject(root, agents) {
-  const configPath = path.join(root, ".coordinator", "config.json");
-  await mkdir(path.dirname(configPath), { recursive: true });
-  try {
-    const raw = await readFile(configPath, "utf8");
-    const saved = JSON.parse(raw);
-    if (saved && typeof saved === "object" && saved.agents !== undefined) {
-      return saved;
-    }
-  } catch {
-    // No config, or one this build cannot read. Either way it is written
-    // fresh below rather than half-repaired.
-  }
-  const config = { version: 1, validationCommands: [], agents };
-  await writeFile(configPath, `${JSON.stringify(config, undefined, 2)}\n`, "utf8");
-  return config;
 }
 
 async function getJson(server, token, route) {
