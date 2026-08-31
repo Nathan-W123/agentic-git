@@ -1201,7 +1201,13 @@ test("a failed result settles the task and is audited", async () => {
     const audit = await harness.store.listAudit();
     const failure = audit.find((event) => event.type === "task_failed");
     assert.equal(failure?.taskId, taskId);
-    assert.equal(failure?.data["detail"], "agent exited with code 3");
+    // `error`, which is the key every other emitter of this event uses and
+    // the only one the channel narration reads. Recorded as `detail`, the
+    // reason reached the audit log and no reader: the room was told "I could
+    // not finish this." with nothing after it, for every failure a remote
+    // worker reported — which on a deployment running agents on people's own
+    // machines is all of them.
+    assert.equal(failure?.data["error"], "agent exited with code 3");
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

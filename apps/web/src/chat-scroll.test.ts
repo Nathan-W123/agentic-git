@@ -110,9 +110,14 @@ test("sending in every composer lands on the latest message", async () => {
     publicFile("screen-chats.js"),
     publicFile("chat.js"),
   ]);
+  // Bounded at the offline prompt rather than at `pinnedBanner`. What this
+  // pins is that every path which *sends* ends the same way — one redraw,
+  // then a scroll to the words just typed — and the prompt that now sits
+  // between the two sends is not one: choosing a row or dismissing it redraws
+  // and scrolls nothing, which a wider slice would count as a violation.
   const channelSubmit = chats.slice(
     chats.indexOf("export function submitComposerMessage("),
-    chats.indexOf("function pinnedBanner("),
+    chats.indexOf("function askAboutOfflineAgents("),
   );
   const threadSubmit = chats.slice(
     chats.indexOf("export function submitThreadReply("),

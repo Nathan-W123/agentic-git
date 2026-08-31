@@ -296,7 +296,7 @@ test("a half-written message stays in the channel it was meant for", async () =>
   const submit = slice(
     chats,
     "export function submitComposerMessage",
-    "async function askAboutOfflineAgents",
+    "function askAboutOfflineAgents",
   );
   assert.equal(
     [...submit.matchAll(/saveChannelDraft\(repositoryId, ""\)/gu)].length,

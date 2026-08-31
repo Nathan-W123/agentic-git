@@ -278,6 +278,10 @@ import {
   usageOwner,
   usageProviderId,
   showsChannelRail,
+  chooseOfflineOption,
+  dismissOfflinePrompt,
+  sendOfflineChoice,
+  setOfflineTarget,
 } from "./screen-chats.js";
 
 // A socket callback cannot unlock browser audio by itself. The first genuine
@@ -9423,6 +9427,16 @@ document.addEventListener("click", (event) => {
       // `focusThreadSource` for what the render would otherwise cost.
       focusThreadSource(value);
       return;
+    // The offline prompt, in the room rather than over it.
+    case "offline-choose":
+      chooseOfflineOption(value, render);
+      return;
+    case "offline-send":
+      sendOfflineChoice(render);
+      return;
+    case "offline-dismiss":
+      dismissOfflinePrompt(render);
+      return;
     case "thread-composer-focus":
       // The header's reply affordance belongs to the thread already on
       // screen; it must not close that thread and silently move the draft to
@@ -11101,6 +11115,12 @@ async function pickChannelPictureFile(repositoryId, file) {
 
 document.addEventListener("change", (event) => {
   const picker = event.target;
+  // A select answers `change`, never the delegated click above — picking with
+  // the keyboard fires no click at all.
+  if (picker?.dataset?.act === "offline-target") {
+    setOfflineTarget(picker.value, render);
+    return;
+  }
   if (picker?.dataset?.act === "channel-picture-pick") {
     void pickChannelPictureFile(picker.dataset.repository, picker.files?.[0]);
     return;
