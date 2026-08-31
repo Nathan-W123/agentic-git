@@ -218,30 +218,104 @@ function terminateProcessTree(child: ChildProcess): void {
  * `cmd.exe`, but reject expansion and control characters instead of enabling
  * Node's argument-interpolating `shell` option.
  */
+/**
+ * The extensions Windows itself would try for a name given without one.
+ *
+ * `PATHEXT` is the operating system's own answer and is respected where it is
+ * set; the fallback is the default Windows ships. `.cmd` and `.bat` matter
+ * most here — every CLI installed by npm is a `.cmd` shim, which is why a
+ * bare name that works in a terminal fails from `spawn`.
+ */
+function windowsExtensions(env: NodeJS.ProcessEnv): string[] {
+  const configured = Object.entries(env).find(
+    ([name]) => name.toUpperCase() === "PATHEXT",
+  )?.[1];
+  return (configured ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith("."));
+}
+
+/**
+ * What a bare command name means on Windows.
+ *
+ * A shell resolves `codex` by walking `PATH` and trying every `PATHEXT`
+ * suffix; `spawn` does neither, so it looks for a file literally called
+ * `codex`, does not find one, and fails with `ENOENT`. Every vendor CLI
+ * installed by npm is a `.cmd` shim, so on Windows that is *every* agent —
+ * which is how a desktop worker came to report "spawn codex ENOENT", "spawn
+ * agent ENOENT" and a claude failure in the same afternoon, and why it looked
+ * like three vendors breaking at once rather than one missing lookup.
+ *
+ * Only names given without an extension are resolved. A caller that named
+ * `foo.cmd`, or gave a path, has already said what it means and keeps the
+ * behaviour it had.
+ */
+export function resolveWindowsExecutable(
+  executable: string,
+  cwd: string | undefined,
+  env: NodeJS.ProcessEnv,
+): string {
+  if (path.extname(executable) !== "") {
+    return executable;
+  }
+  const hasPathSegment =
+    path.isAbsolute(executable) ||
+    executable.includes("\\") ||
+    executable.includes("/");
+  if (hasPathSegment) {
+    const absolute = path.resolve(cwd ?? process.cwd(), executable);
+    for (const extension of windowsExtensions(env)) {
+      if (existsSync(absolute + extension)) {
+        return absolute + extension;
+      }
+    }
+    return executable;
+  }
+  const searchPath = Object.entries(env).find(
+    ([name]) => name.toUpperCase() === "PATH",
+  )?.[1];
+  for (const directory of searchPath?.split(path.delimiter) ?? []) {
+    const unquoted = directory.replace(/^"(.*)"$/u, "$1");
+    for (const extension of windowsExtensions(env)) {
+      const candidate = path.resolve(unquoted, executable + extension);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  // Unresolved names are handed back untouched, so the failure stays the
+  // operating system's own `ENOENT` on the name the caller asked for rather
+  // than becoming an error about a path nobody wrote.
+  return executable;
+}
+
 function processInvocation(
   executable: string,
   args: readonly string[],
   cwd: string | undefined,
   env: NodeJS.ProcessEnv,
 ): ProcessInvocation {
-  if (process.platform !== "win32" || !WINDOWS_BATCH_FILE.test(executable)) {
+  if (process.platform !== "win32") {
     return { executable, args: [...args] };
+  }
+  const named = resolveWindowsExecutable(executable, cwd, env);
+  if (!WINDOWS_BATCH_FILE.test(named)) {
+    return { executable: named, args: [...args] };
   }
 
   const hasPathSegment =
-    path.isAbsolute(executable) ||
-    executable.includes("\\") ||
-    executable.includes("/");
+    path.isAbsolute(named) || named.includes("\\") || named.includes("/");
   let resolvedExecutable = hasPathSegment
-    ? path.resolve(cwd ?? process.cwd(), executable)
-    : executable;
+    ? path.resolve(cwd ?? process.cwd(), named)
+    : named;
   if (!hasPathSegment) {
     const searchPath = Object.entries(env).find(
       ([name]) => name.toUpperCase() === "PATH",
     )?.[1];
     for (const directory of searchPath?.split(path.delimiter) ?? []) {
       const unquoted = directory.replace(/^"(.*)"$/u, "$1");
-      const candidate = path.resolve(unquoted, executable);
+      const candidate = path.resolve(unquoted, named);
       if (existsSync(candidate)) {
         resolvedExecutable = candidate;
         break;

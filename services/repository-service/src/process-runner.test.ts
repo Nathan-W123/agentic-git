@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
+const { tmpdir } = os;
 import path from "node:path";
 import test from "node:test";
 
-import { runProcess, sanitizeChildEnv } from "./process-runner.js";
+import {
+  resolveWindowsExecutable,
+  runProcess,
+  sanitizeChildEnv,
+} from "./process-runner.js";
 
 test("the test-runner context is stripped from child environments", () => {
   const sanitized = sanitizeChildEnv({
@@ -419,5 +424,69 @@ test("a spawned child cannot read the credential-encryption key", async () => {
     } else {
       process.env["COORD_CREDENTIAL_KEY"] = previous;
     }
+  }
+});
+
+/**
+ * The lookup a shell does and `spawn` does not.
+ *
+ * Exercised directly rather than through `runProcess`, and deliberately not
+ * skipped off-Windows: this function contains no platform check — it is path
+ * and filesystem work — and the existing Windows cases in this file are
+ * skipped everywhere but Windows, which is to say skipped in CI. A bug that
+ * only manifests on the one platform nothing tests is how this one survived
+ * to be reported three times in an afternoon as three different vendors
+ * failing.
+ */
+test("a bare command name resolves through PATH and PATHEXT", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "pathext-"));
+  try {
+    await writeFile(path.join(directory, "codex.cmd"), "@echo off\n");
+    const env = { PATH: directory, PATHEXT: ".cmd;.exe" };
+
+    // The case that was failing: npm installs a `.cmd` shim, the adapter asks
+    // for `codex`, and `spawn` looked for a file of exactly that name.
+    assert.equal(
+      resolveWindowsExecutable("codex", undefined, env),
+      path.join(directory, "codex.cmd"),
+    );
+
+    // A name that already carries an extension said what it meant.
+    assert.equal(
+      resolveWindowsExecutable("codex.cmd", undefined, env),
+      "codex.cmd",
+    );
+
+    // Nothing to find is handed back untouched, so the failure stays ENOENT
+    // on the name the caller asked for rather than on a path nobody wrote.
+    assert.equal(
+      resolveWindowsExecutable("nowhere", undefined, env),
+      "nowhere",
+    );
+
+    // A relative path is resolved against the working directory, extension
+    // included — the same rule, applied to a name that names a place.
+    assert.equal(
+      resolveWindowsExecutable("./codex", directory, env),
+      path.join(directory, "codex.cmd"),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("PATHEXT defaults to what Windows itself ships", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "pathext-default-"));
+  try {
+    // No PATHEXT set: the default has to include the batch extensions, or
+    // every npm-installed CLI stays unreachable on a machine that never set
+    // the variable.
+    await writeFile(path.join(directory, "agent.CMD"), "@echo off\n");
+    assert.equal(
+      resolveWindowsExecutable("agent", undefined, { PATH: directory }),
+      path.join(directory, "agent.CMD"),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
