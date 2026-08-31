@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1064,6 +1064,52 @@ function environmentPath(
 }
 
 /**
+ * The vendored `codex.exe` under a `node_modules` root, wherever npm put it.
+ *
+ * Not a fixed list of paths, because the layout is npm's to choose and it has
+ * more than one legal answer: the platform package is an optional dependency,
+ * so it may sit beside the main package or nested inside it, and its name
+ * carries an architecture this code should not have to enumerate. Guessing a
+ * path is what produced the failure this exists to fix — a shim resolved,
+ * a native binary missed, and a run that died on the cmd.exe quoting guard
+ * instead.
+ *
+ * So the directory is read and every `@openai/codex*` package under it is
+ * tried, one level of nesting included. Bounded and cheap: two directory
+ * listings and a handful of `existsSync` calls, once per session.
+ */
+function codexVendorBinary(
+  root: string,
+  triple: string,
+): string | undefined {
+  const scope = path.join(root, "@openai");
+  let entries: string[];
+  try {
+    entries = readdirSync(scope);
+  } catch {
+    return undefined;
+  }
+  const packages = entries.filter(
+    (entry) => entry === "codex" || entry.startsWith("codex-"),
+  );
+  for (const name of packages) {
+    const base = path.join(scope, name);
+    const candidate = path.join(base, "vendor", triple, "bin", "codex.exe");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    // npm may nest the platform package inside the one that depends on it
+    // rather than hoisting it beside it. One level is enough: that is the
+    // only shape npm produces here.
+    const nested = codexVendorBinary(path.join(base, "node_modules"), triple);
+    if (nested !== undefined) {
+      return nested;
+    }
+  }
+  return undefined;
+}
+
+/**
  * The native Codex binary, rather than the npm shim that launches it.
  *
  * This is the same move {@link resolveClaudeCommand} makes in the prompt-CLI
@@ -1114,29 +1160,22 @@ export function resolveCodexCommand(
         .filter((entry) => entry.length > 0)
         .flatMap((entry) => wrapperNames.map((each) => path.resolve(entry, each)));
 
-  const packages = [`@openai/codex-win32-${architecture}`, "@openai/codex"];
   for (const wrapper of wrappers) {
     if (!existsSync(wrapper)) {
       continue;
     }
     const directory = path.dirname(wrapper);
-    // Two roots: the shim's own directory holds `node_modules` for a global
-    // install, and its parent *is* `node_modules` when the shim is a
+    // Where a `node_modules` tree could start, relative to the shim: its own
+    // directory for a global install, and its parent when the shim is a
     // `node_modules/.bin` entry.
-    const roots = [path.join(directory, "node_modules"), path.dirname(directory)];
+    const roots = [
+      path.join(directory, "node_modules"),
+      path.dirname(directory),
+    ];
     for (const root of roots) {
-      for (const packageName of packages) {
-        const candidate = path.join(
-          root,
-          ...packageName.split("/"),
-          "vendor",
-          triple,
-          "bin",
-          "codex.exe",
-        );
-        if (existsSync(candidate)) {
-          return candidate;
-        }
+      const found = codexVendorBinary(root, triple);
+      if (found !== undefined) {
+        return found;
       }
     }
   }

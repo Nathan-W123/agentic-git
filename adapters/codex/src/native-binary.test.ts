@@ -135,3 +135,66 @@ test("codex is left exactly as asked for when there is nothing better", async ()
     );
   });
 });
+
+/**
+ * The layout is npm's to choose, and it has more than one legal answer.
+ *
+ * The platform package is an optional dependency, so npm may hoist it beside
+ * the package that needs it or nest it inside. A fixed list of paths got the
+ * hoisted case and missed the nested one, which is how a real install
+ * resolved to `codex.cmd` and died on the cmd.exe quoting guard — the exact
+ * failure the native lookup exists to prevent.
+ */
+test("the native binary is found however npm arranged node_modules", async () => {
+  await withTemp(async (dir) => {
+    const bin = path.join(dir, "npm");
+    await mkdir(bin, { recursive: true });
+    await writeFile(path.join(bin, "codex.cmd"), "@echo off\n");
+
+    // Nested inside the package that depends on it.
+    const nested = path.join(
+      bin,
+      "node_modules",
+      "@openai",
+      "codex",
+      "node_modules",
+      "@openai",
+      "codex-win32-x64",
+      "vendor",
+      "x86_64-pc-windows-msvc",
+      "bin",
+      "codex.exe",
+    );
+    await mkdir(path.dirname(nested), { recursive: true });
+    await writeFile(nested, "");
+
+    assert.equal(resolveCodexCommand("codex", "win32", "x64", bin), nested);
+  });
+});
+
+test("an architecture this code never enumerated is still found", async () => {
+  await withTemp(async (dir) => {
+    const bin = path.join(dir, "npm");
+    await mkdir(bin, { recursive: true });
+    await writeFile(path.join(bin, "codex.cmd"), "@echo off\n");
+    // The package name carries the architecture. Reading the directory rather
+    // than composing the name is what keeps this working when the vendor adds
+    // one — the triple is still checked, so a mismatched build is not picked.
+    const arm = path.join(
+      bin,
+      "node_modules",
+      "@openai",
+      "codex-win32-arm64",
+      "vendor",
+      "aarch64-pc-windows-msvc",
+      "bin",
+      "codex.exe",
+    );
+    await mkdir(path.dirname(arm), { recursive: true });
+    await writeFile(arm, "");
+
+    assert.equal(resolveCodexCommand("codex", "win32", "arm64", bin), arm);
+    // And an x64 machine does not take the arm64 build.
+    assert.equal(resolveCodexCommand("codex", "win32", "x64", bin), "codex");
+  });
+});
