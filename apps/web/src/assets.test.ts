@@ -1893,6 +1893,41 @@ test("Settings Agents rows show the provider, then Connected as the call sign", 
   );
 });
 
+/**
+ * The row drew "Not connected" with a Connect button beside an agent somebody
+ * had just finished connecting, because every control on it asked whether a
+ * *credential* was stored — which stopped being what having an agent means
+ * once local execution started running the vendor CLI under the machine's own
+ * login. Three controls, one question, and they must keep sharing it: the
+ * regression was the status line and the button disagreeing.
+ */
+test("Settings Agents rows ask whether the agent exists, not whether a secret is stored", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
+  const start = app.indexOf("function agentsCard()");
+  const body = app.slice(start, app.indexOf("\nfunction commitAgentRename", start));
+
+  // Computed once, so the status line and the buttons cannot drift.
+  assert.match(body, /const localAgent =\s*\n\s*state\.localAgentsOnly === true &&/u);
+  assert.equal(
+    (body.match(/localAgent/gu) ?? []).length >= 4,
+    true,
+    "the status line, the rename control and the connect control all read it",
+  );
+  // An agent that exists says so, and offers the sign-in as the extra it is.
+  assert.match(body, /runs on this machine/u);
+  assert.match(body, /data-act="agent-link-account"/u);
+
+  // Both halves of the signal reach the browser. `exists` is the server's
+  // answer, and the flag has to be readable from Settings — which can be
+  // opened without ever visiting the channel whose roster also carries it.
+  assert.match(data, /exists: provider\.exists === true/u);
+  assert.match(
+    data,
+    /if \(response\.localAgentsOnly !== undefined\) \{\s*\n\s*state\.localAgentsOnly = response\.localAgentsOnly === true;/u,
+  );
+});
+
 test("a conversation is scoped to one user's own provider connection", async () => {
   const source = await publicFile("chat.js");
   // Both chat endpoints are per-principal on the gateway; nothing here may

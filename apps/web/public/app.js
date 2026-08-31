@@ -2262,6 +2262,20 @@ function agentsCard() {
               // stopped authenticating. Saying "connected" about the second or
               // the fourth is what let every task an agent was given fail
               // without the screen ever admitting anything was wrong.
+              // The one question the whole row turns on, asked once so the
+              // status line and the buttons cannot answer it differently.
+              // An agent used to *be* a stored credential, so "is a
+              // credential stored" and "is there an agent" were one question
+              // with one answer. Local execution split them: the CLI runs
+              // under this machine's own vendor login, so the agent it runs
+              // has no credential here and never will. Every control below
+              // was still asking the credential question — which is why an
+              // agent somebody had just finished connecting read "Not
+              // connected" and offered to connect it again.
+              const localAgent =
+                state.localAgentsOnly === true &&
+                agent.exists === true &&
+                !agent.mine;
               const state_ = agent.needsReconnect
                 ? { text: "Sign-in expired", cls: " sr-warn" }
                 : agent.mine
@@ -2272,12 +2286,20 @@ function agentsCard() {
                           : "Connected as you",
                       cls: "",
                     }
-                  : agent.hostAccount
+                  : localAgent
                     ? {
-                        text: "Available on this deployment — using this machine's account",
+                        // Named, because the name is the thing that just
+                        // happened: the sign was dealt when the agent was
+                        // created, and this row is where somebody reads it.
+                        text: `Connected as ${callSign} — runs on this machine`,
                         cls: "",
                       }
-                    : { text: "Not connected", cls: "" };
+                    : agent.hostAccount
+                      ? {
+                          text: "Available on this deployment — using this machine's account",
+                          cls: "",
+                        }
+                      : { text: "Not connected", cls: "" };
               return `<div class="set-row">
                 <span class="sr-body">
                   ${
@@ -2301,7 +2323,10 @@ function agentsCard() {
                     // rename on a vendor this account has never connected,
                     // and the server says so rather than guessing. An expired
                     // sign-in still has one, so it can still be renamed.
-                    renaming || !(agent.mine || agent.needsReconnect)
+                    // A local agent has a call sign in the same durable
+                    // table a connected one does, so it renames the same way.
+                    renaming ||
+                    !(agent.mine || agent.needsReconnect || localAgent)
                       ? ""
                       : `<button type="button" class="btn btn-sm"
                           data-act="agent-rename-toggle"
@@ -2318,7 +2343,7 @@ function agentsCard() {
                       ? `<button type="button" class="btn btn-sm"
                           data-act="agent-disconnect"
                           data-value="${esc(agent.id)}">Disconnect</button>`
-                      : state.localAgentsOnly === true && agent.exists === true
+                      : localAgent
                         ? // The agent already exists — it was created without a
                           // credential, which is all a local deployment needs.
                           // The vendor sign-in is still on offer, demoted to

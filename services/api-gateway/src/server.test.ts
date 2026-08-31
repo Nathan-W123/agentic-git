@@ -591,8 +591,28 @@ async function startRuntime(
   };
   const operations: ApiOperations = {
     chatProviders: {
-      async list() {
-        return [];
+      // Faithful in the one respect the gateway acts on: the route decides,
+      // per provider, whether an agent exists at all, and it reads
+      // `ownCredential` to do it. A stub that answered `[]` meant that
+      // decision was made over an empty list and never exercised.
+      async list(input) {
+        const connections = chatConnections.get(input.userId) ?? [];
+        return ["anthropic", "openai", "cursor"].map((id) => {
+          const connection = connections.find((entry) => entry.provider === id);
+          return {
+            id,
+            name: id,
+            connected: connection !== undefined,
+            ...(connection === undefined
+              ? {}
+              : {
+                  ownCredential: {
+                    kind: "oauth_token",
+                    visibility: connection.visibility ?? "personal",
+                  },
+                }),
+          };
+        });
       },
       async signIn() {
         return {};
@@ -19904,6 +19924,70 @@ test("an agent created without a credential is in the roster", async (t) => {
   assert.equal(listed.length, 1, "exactly one, never doubled");
   assert.equal(listed[0].name, dealt);
   assert.equal(listed[0].userId, account.user.id);
+});
+
+/**
+ * The Settings screen asks a different question than the roster, and until
+ * this it got the old answer.
+ *
+ * A row there drew "Not connected" with a Connect button next to an agent
+ * somebody had just finished connecting — because both the status line and
+ * the button branched on whether a *credential* was stored, which stopped
+ * being what having an agent means. The browser cannot work the difference
+ * out on its own: the provider list it reads is built from the credential
+ * store, so an agent with no credential is simply absent from it. The two
+ * fields asserted here are what let it ask the right question.
+ */
+test("the provider list says an agent exists without a credential", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const before = await owner.request("/api/v1/chat/providers");
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+  // Deployment-wide, and carried here because Settings can be opened without
+  // ever visiting a channel — the roster response that also carries it may
+  // never have been fetched.
+  assert.equal(before.data.localAgentsOnly, true);
+  const listedBefore = (before.data.providers as Array<{ id: string; exists: boolean }>);
+  assert.equal(listedBefore.find((entry) => entry.id === "openai")?.exists, false);
+
+  const created = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+
+  const after = await owner.request("/api/v1/chat/providers");
+  const listed = after.data.providers as Array<{
+    id: string;
+    exists: boolean;
+    ownCredential?: unknown;
+  }>;
+  const openai = listed.find((entry) => entry.id === "openai");
+  assert.equal(openai?.exists, true, JSON.stringify(listed));
+  // And no credential was invented to say so — that is the whole point.
+  assert.equal(openai?.ownCredential, undefined);
+  // Untouched vendors stay untouched.
+  assert.equal(listed.find((entry) => entry.id === "cursor")?.exists, false);
+});
+
+/**
+ * A stored credential is still an agent. The field says so directly rather
+ * than leaving the browser to infer it, so a connection made before agents
+ * had their own record does not read as "connect this".
+ */
+test("a stored credential alone makes an agent exist", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  runtime.chatConnections.set(account.user.id, [{ provider: "anthropic" }]);
+
+  const listed = (await owner.request("/api/v1/chat/providers")).data
+    .providers as Array<{ id: string; exists: boolean }>;
+  assert.equal(listed.find((entry) => entry.id === "anthropic")?.exists, true);
+  assert.equal(listed.find((entry) => entry.id === "openai")?.exists, false);
 });
 
 /**

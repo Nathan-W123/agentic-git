@@ -1203,6 +1203,14 @@ export async function loadProviders() {
   const response = await apiOptional("/chat/providers", { providers: [] });
   state.providers = response.providers ?? [];
   state.providersLoaded = true;
+  // A channel's roster carries this too, but Settings can be opened without
+  // ever visiting a channel — and the agent rows read it to tell an agent
+  // waiting to be connected apart from one already connected. Assigned only
+  // when the field actually arrived, so a failed request (which falls back to
+  // an empty object) cannot quietly turn a true flag false.
+  if (response.localAgentsOnly !== undefined) {
+    state.localAgentsOnly = response.localAgentsOnly === true;
+  }
   if (!state.providers.some((entry) => entry.id === state.selectedAgent)) {
     state.selectedAgent =
       state.providers.find((entry) => entry.connected)?.id ??
@@ -3055,6 +3063,14 @@ export function myAgents() {
       // nothing, which is precisely the confusion the second card existed to
       // clear up. Both are carried here now, and one card says both.
       mine: provider.ownCredential !== undefined,
+      // Whether there is an agent here at all — which stopped being the same
+      // question as `mine` when an agent became a durable record rather than
+      // a side effect of storing a credential. Local execution runs the
+      // vendor's CLI under the machine's own login and never reads a stored
+      // secret, so an agent there has no credential and `mine` is false for
+      // it. The server answers this; the credential is the fallback for a
+      // deployment that has not shipped the field yet.
+      exists: provider.exists === true || provider.ownCredential !== undefined,
       hostAccount:
         provider.connected === true && provider.ownCredential === undefined,
       needsReconnect: expired !== undefined,
