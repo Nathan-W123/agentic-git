@@ -1,3 +1,22 @@
+### 0.4.4 — the CLI is found once, not twice
+
+0.4.3 taught the launcher to resolve a bare `codex` the way a shell does, and
+Windows still answered `spawn codex ENOENT`. The lookup was the wrong thing to
+fix twice: the app had *already* walked `PATH` and found the file — that is how
+it knew to advertise Codex at all — and then threw that answer away and asked a
+child process, under a stripped environment, to find it again.
+
+Now the path it found is what gets written down, so nothing has to be looked up
+a second time. The config that records it is also reconciled on every start
+rather than frozen at first run, so installing a CLI later is enough, and one
+that moves or is removed no longer leaves an entry behind.
+
+Two things that were spawning without those rules now use them: the generic CLI
+adapter, which owns its own child and was the source of `spawn agent ENOENT`;
+and every remaining Windows `ENOENT`, which now says how many `PATH` directories
+were searched and for which suffixes — the difference between a CLI that is not
+installed and one this process cannot see.
+
 ### 0.4.3 — agents can actually start on Windows
 
 Every agent failed on Windows, and it was one missing lookup rather than three
