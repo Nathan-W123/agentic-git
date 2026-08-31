@@ -14840,3 +14840,35 @@ dialog.modal[open]::backdrop {
 .scm-menu .btn-quiet.btn-danger {
   margin-top: 0;
 }
+
+/* Queued work on an agent's page. Only drawn when there is some, so the zone
+   below it keeps its position on an agent with a clear queue.
+
+   It exists because waiting is now unbounded: work for an agent whose owner
+   has no machine listening waits as long as it takes, rather than being
+   thrown away on a deadline that could discard an answer still being
+   computed. An unbounded wait is only honest if it is visible, so this is the
+   list that makes it so — and the button beside each row is how it ends. */
+.agent-spec .aspec-queue {
+  display: grid;
+  gap: 8px;
+}
+
+.aspec-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.aspec-queue-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+/* The title is one line and the reason it was queued is not worth a second:
+   the phase line under it already says where and how long. */
+.aspec-queue-row .aspec-work-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

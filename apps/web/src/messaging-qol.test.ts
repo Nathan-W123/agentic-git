@@ -288,7 +288,16 @@ test("a half-written message stays in the channel it was meant for", async () =>
 
   // Sending empties the parked copy too, or the next visit restores a message
   // that has already gone.
-  const submit = slice(chats, "export function submitComposerMessage", "\n/**");
+  // Sliced across both functions rather than to the next doc comment. The two
+  // paths used to be one function; the new-message half is now
+  // `sendComposerDraft`, split out so the offline-agent prompt can reach the
+  // send after asking. The claim is unchanged — every path that sends clears
+  // the parked copy — but it no longer all lives under one heading.
+  const submit = slice(
+    chats,
+    "export function submitComposerMessage",
+    "async function askAboutOfflineAgents",
+  );
   assert.equal(
     [...submit.matchAll(/saveChannelDraft\(repositoryId, ""\)/gu)].length,
     2,

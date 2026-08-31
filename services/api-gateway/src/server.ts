@@ -11116,6 +11116,13 @@ export class ApiGateway {
       );
       const rosterOverrides =
         await this.options.store.listChannelAgentOverrides(repositoryId);
+      // Read once for the whole roster. See `liveWorkerOwners`.
+      const rosterProject = await this.options.store
+        .getProject(projectId)
+        .catch(() => undefined);
+      const liveOwners = await this.liveWorkerOwners(
+        rosterProject?.organizationId,
+      );
       const agents = connections.map((connection) => ({
         userId: connection.userId,
         // The display name only — never the email `publicUser` would also
@@ -11143,6 +11150,21 @@ export class ApiGateway {
         // see `CredentialVisibility`. Metadata, not a secret; safe for every
         // repository collaborator to see, same as the vendor name itself.
         visibility: connection.visibility,
+        /**
+         * Whether this agent's owner has a machine listening right now.
+         *
+         * Only meaningful where the deployment refuses to execute on its own
+         * behalf — hence `localAgentsOnly` beside it in the payload rather
+         * than the browser having to infer it. With the flag off the control
+         * plane answers regardless, and an offline owner is not a fact
+         * anybody needs.
+         *
+         * Advisory by construction: it is true as of this response, and the
+         * liveness window is three minutes wide. Treat it as what to draw and
+         * what to ask, never as permission — the server's own check at
+         * dispatch is the one that decides.
+         */
+        ownerOnline: liveOwners.has(connection.userId),
         connected: true as const,
       }));
       // Whether auditing is switched off here. Sent with the roster rather
@@ -11187,6 +11209,11 @@ export class ApiGateway {
         agents,
         people,
         auditorPaused: auditing?.paused === true,
+        // What makes `ownerOnline` worth drawing. Sent with the roster for
+        // the same reason `auditorPaused` is: the screen that reads one reads
+        // the other, and a second round trip to decide how to draw one dot is
+        // a second chance for the two to disagree.
+        localAgentsOnly: localAgentsOnly(),
       });
       return;
     }
@@ -13703,17 +13730,35 @@ export class ApiGateway {
     const project = await this.options.store
       .getProject(projectId)
       .catch(() => undefined);
+    return (await this.liveWorkerOwners(project?.organizationId)).has(ownerId);
+  }
+
+  /**
+   * Everyone in this organization with a machine currently listening.
+   *
+   * One query and a set, rather than a question asked per agent. The roster
+   * asks about every agent in a room at once, and the workers table is not a
+   * small one to scan repeatedly: `registerWorker` inserts a fresh row on
+   * every worker start with no upsert, and nothing anywhere deletes them, so
+   * it accumulates a dead row per desktop restart forever. Reading it once
+   * and answering from memory keeps that growth off the per-agent path.
+   */
+  private async liveWorkerOwners(
+    organizationId?: string,
+  ): Promise<Set<string>> {
     const workers = await this.options.store
       .listWorkers(
-        project?.organizationId === undefined
-          ? undefined
-          : { organizationId: project.organizationId },
+        organizationId === undefined ? undefined : { organizationId },
       )
       .catch((): [] => []);
     const cutoff = new Date(Date.now() - WORKER_LIVE_MS).toISOString();
-    return workers.some(
-      (worker) => worker.userId === ownerId && worker.lastSeenAt > cutoff,
-    );
+    const live = new Set<string>();
+    for (const worker of workers) {
+      if (worker.lastSeenAt > cutoff) {
+        live.add(worker.userId);
+      }
+    }
+    return live;
   }
 
   private async organizationFleet(organizationId: string): Promise<{
