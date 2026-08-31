@@ -5152,8 +5152,21 @@ function openSwitcher({ keyboard = false } = {}) {
   }
 }
 
+function positionShortcutSheet(layer) {
+  const trigger = document.querySelector("[data-act='shortcuts-open']");
+  const card = layer.querySelector(".qs-card");
+  if (trigger === null || card === null) {
+    return;
+  }
+  const box = trigger.getBoundingClientRect();
+  const margin = 10;
+  const width = card.getBoundingClientRect().width;
+  card.style.left = `${Math.max(margin, Math.min(box.right - width, window.innerWidth - width - margin))}px`;
+  card.style.top = `${box.bottom + 6}px`;
+}
+
 /** What the keys do, said in one place rather than learned by accident. */
-function openShortcutSheet() {
+function openShortcutSheet({ keyboard = false } = {}) {
   const pairs = [
     ["Ctrl / ⌘ + K", "Go to a workspace, conversation, screen, or message"],
     ["?", "This list"],
@@ -5164,7 +5177,7 @@ function openShortcutSheet() {
   closeSwitcher();
   const layer = document.createElement("div");
   layer.id = "qs-layer";
-  layer.className = "qs-layer";
+  layer.className = `qs-layer qs-layer-shortcuts${keyboard ? " qs-layer-keyboard" : ""}`;
   layer.innerHTML = `<div class="pop-scrim" data-act="switch-close"></div>
     <div class="qs-card" role="dialog" aria-label="Keyboard shortcuts">
       <div class="qs-head">Keyboard shortcuts</div>
@@ -5176,6 +5189,9 @@ function openShortcutSheet() {
         .join("")}</div>
     </div>`;
   document.querySelector("#layer-root").append(layer);
+  if (!keyboard) {
+    positionShortcutSheet(layer);
+  }
 }
 
 /** Whether the keyboard currently belongs to something being typed in. */
@@ -5240,7 +5256,7 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "?") {
     event.preventDefault();
-    openShortcutSheet();
+    openShortcutSheet({ keyboard: true });
     return;
   }
 });

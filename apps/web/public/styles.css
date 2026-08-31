@@ -14403,6 +14403,36 @@ dialog.modal[open]::backdrop {
   background: rgba(4, 5, 9, 0.08);
 }
 
+/* Pointer-opened help belongs to its mark in the top-right corner. Keyboard
+   access remains a centred sheet, where it does not depend on a visible
+   trigger. */
+.qs-layer-shortcuts {
+  display: block;
+  padding: 0;
+}
+
+.qs-layer-shortcuts .qs-card {
+  position: absolute;
+}
+
+.qs-layer-shortcuts .pop-scrim {
+  background: transparent;
+  animation: none;
+}
+
+.qs-layer-shortcuts.qs-layer-keyboard {
+  display: grid;
+  padding-top: 12vh;
+}
+
+.qs-layer-shortcuts.qs-layer-keyboard .qs-card {
+  position: relative;
+}
+
+.qs-layer-shortcuts.qs-layer-keyboard .pop-scrim {
+  background: rgba(4, 5, 9, 0.08);
+}
+
 .qs-card {
   position: relative;
   width: min(520px, calc(100vw - 20px));
