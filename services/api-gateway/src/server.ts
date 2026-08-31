@@ -2089,9 +2089,18 @@ export function narrateTaskEvent(
       const detail =
         typeof data["error"] === "string" && data["error"].length > 0
           ? data["error"]
-          : typeof data["explanation"] === "string"
+          : typeof data["explanation"] === "string" &&
+              data["explanation"].length > 0
             ? data["explanation"]
-            : "";
+            : // Read last, and only for the rows already written. The remote
+              // worker path recorded its reason here rather than under
+              // `error` — the one emitter of six that did — so every failure
+              // it reported reached the room as a bare sentence. The emitter
+              // is fixed; this keeps the failures already on the record able
+              // to explain themselves rather than staying mute forever.
+              typeof data["detail"] === "string"
+              ? data["detail"]
+              : "";
       return explainTaskFailure(
         detail,
         typeof data["status"] === "string" ? data["status"] : undefined,

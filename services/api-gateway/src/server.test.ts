@@ -6747,6 +6747,39 @@ test("a failed task says why, whichever shape the failure was recorded in", () =
     /sign-in has expired\. Reconnect me from Settings → Agents/u,
   );
 
+  // The key a remote worker actually wrote, for as long as it wrote it.
+  //
+  // `acceptWorkResult` recorded its reason under `detail` — the one emitter of
+  // six that did not use `error` or `explanation` — so every failure reported
+  // by somebody's desktop reached the room as the bare sentence below, with
+  // the reason sitting in the audit record under a name nothing read. On a
+  // deployment that has moved execution onto people's machines that is every
+  // failure there is, which is exactly how three different vendors came to
+  // look equally broken.
+  //
+  // The emitter now writes `error`. This keeps the rows already on the record
+  // able to explain themselves.
+  assert.equal(
+    narrateTaskEvent("task_failed", { detail: "npm test exited 1" }),
+    "I could not finish this: npm test exited 1",
+  );
+  // And it stays last: a row carrying both is a row from the fixed emitter,
+  // where `error` is the one that was meant.
+  assert.equal(
+    narrateTaskEvent("task_failed", { error: "boom", detail: "stale" }),
+    "I could not finish this: boom",
+  );
+  // An expired sign-in reported by a worker still gets its remedy, which is
+  // the whole point: the reader is the only person who can carry it out.
+  assert.match(
+    String(
+      narrateTaskEvent("task_failed", {
+        detail: "OAuth session expired and could not be refreshed",
+      }),
+    ),
+    /sign-in has expired\. Reconnect me from Settings → Agents/u,
+  );
+
   // Nothing to say at all is still the honest fallback.
   assert.equal(
     narrateTaskEvent("task_failed", {}),

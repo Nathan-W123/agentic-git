@@ -2581,7 +2581,15 @@ export async function acceptWorkResult(
       repositoryId: task.repositoryId,
       workerId: leaseAtStart.workerId,
       leaseId: leaseAtStart.id,
-      detail: input.detail ?? "worker reported failure",
+      // `error`, not `detail`, and the difference was the whole bug. Every
+      // other emitter of this event records `error` or `explanation`, and the
+      // narration reads exactly those two — so a failure reported by a remote
+      // worker arrived with its reason under a key nothing looks at, and the
+      // room was told "I could not finish this." with nothing after it.
+      //
+      // That is every failure on a deployment which has moved execution onto
+      // people's machines, because there a worker reports all of them.
+      error: input.detail ?? "worker reported failure",
     });
     return { accepted: true };
   }
