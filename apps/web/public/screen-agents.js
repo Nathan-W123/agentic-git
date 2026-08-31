@@ -270,24 +270,18 @@ export async function installVendorCli(vendor, rerender) {
     return;
   }
 
-  // Output as it arrives. These fail for ordinary, legible reasons — no npm,
-  // a proxy, a policy blocking the script — and the vendor's own words say
-  // which. A spinner ending in "failed" would leave somebody exactly where
-  // they started.
+  // The output is collected, not displayed while it runs. A dialog somebody
+  // has to dismiss between agreeing to an install and being asked to sign in
+  // is a step that asks nothing — and the modal helper puts a confirm button
+  // on it, so it read as a decision when there was none to make. It is kept
+  // for the one case that needs it: a failure, where the vendor's own words
+  // say whether this was a missing npm, a proxy, or a blocked script, and a
+  // bare "it failed" would leave somebody exactly where they started.
   const lines = [];
   const stop = bridge.onOutput((line) => {
     lines.push(line);
-    const view = document.querySelector("#install-output");
-    if (view !== null) {
-      view.textContent = lines.join("").slice(-4000);
-      view.scrollTop = view.scrollHeight;
-    }
   });
-  const watching = showModal({
-    title: `Installing ${esc(vendor)}`,
-    body: `<pre class="install-output" id="install-output">Starting…</pre>`,
-    cancel: "Hide",
-  });
+  toast(`Installing ${vendor}…`);
   let result;
   try {
     result = await bridge.run(vendor);
@@ -295,8 +289,6 @@ export async function installVendorCli(vendor, rerender) {
     result = { ok: false, detail: error?.message ?? "The install failed." };
   } finally {
     stop?.();
-    document.querySelector("#modal")?.close();
-    await watching.catch(() => undefined);
   }
 
   if (result?.ok !== true) {
