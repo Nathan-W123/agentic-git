@@ -1196,4 +1196,16 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON submitted_tasks (kind, status, submitted_at)`,
     ],
   },
+  {
+    /**
+     * An agent that exists because somebody said so, not because a credential
+     * is stored. See the same migration in `schema.ts` for why.
+     */
+    version: 53,
+    name: "agents-without-credentials",
+    statements: [
+      `ALTER TABLE agent_call_signs
+         ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'`,
+    ],
+  },
 ];

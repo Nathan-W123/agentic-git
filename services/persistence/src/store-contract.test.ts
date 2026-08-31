@@ -5149,9 +5149,38 @@ for (const backend of backends) {
       assert.equal(dealt.callSign, "Athena");
       assert.equal(dealt.userId, alice.id);
       assert.equal(dealt.provider, "anthropic");
-      await store.setAgentCallSign(bob.id, "openai", "Vesta");
+      // Visibility lives on the record now, because an agent exists whether or
+      // not a credential does — under local execution the vendor CLI runs on
+      // somebody's own machine and nothing here is read. `personal` is the
+      // default, which is what every row written before the column meant.
+      assert.equal(dealt.visibility, "personal");
+      await store.setAgentCallSign(bob.id, "openai", "Vesta", "org");
+      assert.equal(
+        (await store.listAgentCallSigns()).find(
+          (sign) => sign.userId === bob.id,
+        )?.visibility,
+        "org",
+      );
       // Keyed by (user, provider): renaming replaces rather than duplicates.
+      await store.setAgentCallSign(alice.id, "anthropic", "Icarus", "org");
+      // And the upsert carries visibility with it — a widened agent that
+      // narrowed itself on every rename would be a permission bug, not a
+      // naming one.
+      assert.equal(
+        (await store.listAgentCallSigns()).find(
+          (sign) => sign.userId === alice.id,
+        )?.visibility,
+        "org",
+      );
       await store.setAgentCallSign(alice.id, "anthropic", "Icarus");
+      assert.equal(
+        (await store.listAgentCallSigns()).find(
+          (sign) => sign.userId === alice.id,
+        )?.visibility,
+        "personal",
+        "an omitted visibility narrows rather than keeping what was there",
+      );
+      await store.setAgentCallSign(alice.id, "anthropic", "Icarus", "org");
       const signs = await store.listAgentCallSigns();
       assert.equal(signs.length, 2);
       assert.equal(

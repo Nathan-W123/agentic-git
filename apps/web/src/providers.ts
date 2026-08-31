@@ -16,7 +16,7 @@ import {
   type CanonicalRepository,
   type ProcessOutput,
 } from "@coord/repository-service";
-import type { CanonicalVersion } from "@coord/shared-types";
+import { AGENT_CALL_SIGNS, type CanonicalVersion } from "@coord/shared-types";
 import {
   GitWorktreeWorkspaceManager,
   supportedCredentialKinds,
@@ -214,24 +214,10 @@ export interface ProviderSettings {
  * Order carries no meaning: assignment picks uniformly from whatever is still
  * free, so this reads as sections of a pantheon rather than as a queue.
  */
-export const AGENT_CALL_SIGNS = [
-  // Olympians and kin
-  "Zeus", "Hera", "Poseidon", "Demeter", "Athena", "Apollo", "Artemis",
-  "Ares", "Aphrodite", "Hephaestus", "Hermes", "Hestia", "Dionysus",
-  "Hades", "Persephone",
-  // Titans and primordials
-  "Cronus", "Rhea", "Oceanus", "Tethys", "Hyperion", "Theia", "Themis",
-  "Mnemosyne", "Atlas", "Prometheus", "Epimetheus", "Gaia", "Uranus",
-  "Nyx", "Erebus", "Eos", "Helios", "Selene", "Iris",
-  // Winds and lesser gods
-  "Boreas", "Zephyrus", "Notus", "Eurus", "Pan", "Morpheus", "Nemesis",
-  "Nike", "Tyche", "Eris", "Hebe", "Janus",
-  // Roman counterparts and originals
-  "Jupiter", "Juno", "Neptune", "Ceres", "Minerva", "Mars", "Venus",
-  "Vulcan", "Mercury", "Vesta", "Bacchus", "Pluto", "Proserpina",
-  "Saturn", "Ops", "Sol", "Luna", "Aurora", "Victoria", "Fortuna",
-  "Bellona", "Faunus", "Flora", "Pomona", "Terminus", "Quirinus",
-] as const;
+// Re-exported from where it now lives, so every existing importer of this
+// module is untouched. The gateway needs the same list — it assigns a name to
+// an agent created without a credential — and two copies would drift.
+export { AGENT_CALL_SIGNS };
 
 export interface ProviderCliState {
   detected: boolean;

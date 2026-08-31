@@ -19,9 +19,14 @@ test("a newly connected agent defaults into every current repository", async () 
 
   // Browser sign-in can finish while the dialog is open or after its confirm
   // button; the pasted-credential path is the third successful connection.
+  // The fourth is the credential-less one a local deployment uses, where the
+  // agent exists because somebody asked rather than because a secret was
+  // stored — it has to join the same rooms as the other three, and counting
+  // them is what makes a fifth path arriving without membership a failure
+  // here rather than an agent nobody can @mention.
   assert.equal(
     agents.match(/await addAgentToAllRepositories\(providerId\)/gu)?.length,
-    3,
+    4,
   );
 });
 

@@ -1,3 +1,27 @@
+### 0.5.0 — one sign-in
+
+Connecting an agent used to sign you into the vendor twice. Once to give this
+deployment a credential, and once more to the CLI on your own machine — and on
+a deployment that runs agents locally, only the second one ever mattered. The
+first stored a secret the worker never reads, because the CLI runs under your
+machine's own login.
+
+It was also, accidentally, what made an agent exist: the roster was built by
+walking the credential store. That is why a failing agent was told to
+"reconnect from Settings → Agents", a remedy that could not possibly have
+helped a CLI that was not signed in.
+
+An agent is now a record of its own. Connecting creates it, then finishes on
+your machine — installing the CLI if it is missing, and opening its sign-in.
+One sign-in, the one that decides whether anything works.
+
+The vendor sign-in is still there, as what it actually buys: your remaining
+usage on the agent card, and server-side execution for a deployment that wants
+it. It is a "Link for usage" button on an agent you already have, rather than a
+gate you pass before finding out whether your CLI is installed.
+
+Deployments that run agents on the server are unchanged.
+
 ### 0.4.9 — connecting an agent finishes the job
 
 Connecting an agent used to do half of what its name promised. It signed you

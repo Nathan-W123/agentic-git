@@ -1527,6 +1527,36 @@ export const MIGRATIONS: readonly Migration[] = [
          ON submitted_tasks (kind, status, submitted_at)`,
     ],
   },
+  {
+    /**
+     * An agent that exists because somebody said so, not because a credential
+     * is stored.
+     *
+     * The roster was built by walking the credential store: an agent existed
+     * if and only if a vendor credential was saved for that user and provider.
+     * That made the credential the identity, which is why connecting an agent
+     * required a vendor sign-in that — under local execution — is then used
+     * for nothing. The worker runs the CLI under the machine's own login and
+     * never reads the stored credential at all, so somebody signed in twice
+     * and only the second one made the agent work.
+     *
+     * This table already held the durable half of that identity, keyed exactly
+     * the way an agent is identified account-wide. It needs one more column to
+     * stand on its own: who may @mention the agent, which until now travelled
+     * with the credential.
+     *
+     * `personal` is the default because it is the safe reading of an
+     * unanswered question — an agent nobody has widened is the owner's alone,
+     * which is what every existing row meant when its visibility lived
+     * somewhere else.
+     */
+    version: 53,
+    name: "agents-without-credentials",
+    statements: [
+      `ALTER TABLE agent_call_signs
+         ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

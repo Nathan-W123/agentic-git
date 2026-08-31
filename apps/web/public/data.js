@@ -1477,6 +1477,23 @@ export async function connectProviderCredential(providerId, kind, secret, label,
  * abandon it if they close the dialog. The flow id is opaque and scoped to
  * the caller server-side, so it travels in the query string.
  */
+/**
+ * Creates an agent for a vendor without handing the server a credential.
+ *
+ * The roster used to be built by walking the credential store, so having an
+ * agent meant a vendor sign-in whose credential local execution never reads —
+ * the CLI runs under the machine's own login. This is the other half: the
+ * agent exists because somebody asked for it, and a credential is an optional
+ * extra that buys the usage figures and server-side execution.
+ */
+export async function createLocalAgent(providerId) {
+  const response = await api(
+    `/chat/providers/${encodeURIComponent(providerId)}/agent`,
+    { method: "POST", body: {} },
+  );
+  return response.agent;
+}
+
 export async function startProviderSignIn(providerId) {
   const response = await api(
     `/chat/providers/${encodeURIComponent(providerId)}/device-auth`,

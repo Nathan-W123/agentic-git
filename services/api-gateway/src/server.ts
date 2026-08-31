@@ -65,6 +65,7 @@ import {
   type AuditFinding,
 } from "./auditor.js";
 import {
+  AGENT_CALL_SIGNS,
   AGENT_ACCOUNT_PREFIX,
   ANSWER_NOT_STATUS_DIRECTIVE,
   assertProjectPolicy,
@@ -12140,8 +12141,26 @@ export class ApiGateway {
       };
 
       if (path === `${API_PREFIX}/chat/providers` && method === "GET") {
+        const listed = await performChat(() => chatOperations.list(identity));
+        // Whether an agent for this vendor exists at all, which is no longer
+        // the same question as whether a credential is stored. The settings
+        // screen needs both: one decides "Connect" from "Link for usage", and
+        // the credential alone can no longer answer it.
+        const owned = new Set(
+          (await this.options.store.listAgentCallSigns().catch((): [] => []))
+            .filter((sign) => sign.userId === principal.user.id)
+            .map((sign) => sign.provider),
+        );
         this.sendJson(response, 200, {
-          providers: await performChat(() => chatOperations.list(identity)),
+          providers: (Array.isArray(listed) ? listed : []).map((entry) => {
+            const provider = entry as { id?: unknown; mine?: unknown };
+            return {
+              ...provider,
+              exists:
+                provider.mine === true ||
+                (typeof provider.id === "string" && owned.has(provider.id)),
+            };
+          }),
         });
         return;
       }
@@ -12156,7 +12175,7 @@ export class ApiGateway {
         path,
         new RegExp(
           `^${API_PREFIX}/chat/providers/(anthropic|openai|google|cursor|copilot|kiro)` +
-            `/(signin|options|settings|usage|credential|device-auth)$`,
+            `/(signin|options|settings|usage|credential|device-auth|agent)$`,
           "u",
         ),
       );
@@ -12171,6 +12190,83 @@ export class ApiGateway {
               }),
             ),
           });
+          return;
+        }
+        if (action === "agent" && method === "POST") {
+          // Creating an agent without handing this server a vendor credential.
+          //
+          // The roster used to be built by walking the credential store, so
+          // connecting an agent meant a vendor sign-in whose credential local
+          // execution then never reads — the CLI runs under the machine's own
+          // login. Two sign-ins, one of them for nothing, and a stored secret
+          // this deployment is responsible for and does not use.
+          //
+          // The durable record keyed by (user, provider) is what an agent
+          // actually is. This writes one. A credential may still be linked
+          // afterwards, and is what server-side execution and the usage
+          // figures need — but it is no longer the price of having an agent.
+          const agentBody = objectBody(await this.readJson(request));
+          const visibilityField = stringField(
+            agentBody["visibility"],
+            "visibility",
+            { max: 20, optional: true },
+          );
+          if (
+            visibilityField !== undefined &&
+            visibilityField !== "personal" &&
+            visibilityField !== "org"
+          ) {
+            throw new HttpError(
+              400,
+              "invalid_request",
+              'visibility must be "personal" or "org"',
+            );
+          }
+          const owner = await this.options.store.getUser(identity.userId);
+          if (owner === undefined) {
+            throw new HttpError(404, "not_found", "User was not found");
+          }
+          const existing = (
+            await this.options.store.listAgentCallSigns().catch((): [] => [])
+          ).find(
+            (sign) =>
+              sign.userId === identity.userId && sign.provider === provider,
+          );
+          // A name is only ever assigned once. Re-running this must not rename
+          // an agent people have learned, which is the same rule
+          // `assignCallSign` follows on the credential path.
+          // A name is dealt, not derived. `defaultChannelAgentName` returns
+          // "Claude (Nathan)" when there is no call sign — a *label*, and
+          // storing it here would freeze the placeholder as the agent's
+          // permanent name, which is the exact complaint the durable table
+          // was added to fix. So a free sign is drawn, and the label is only
+          // the fallback for a deployment that has exhausted the pantheon.
+          const taken = new Set(
+            (await this.options.store.listAgentCallSigns().catch((): [] => []))
+              .map((sign) => sign.callSign),
+          );
+          const free = AGENT_CALL_SIGNS.filter((sign) => !taken.has(sign));
+          const callSign =
+            existing?.callSign ??
+            stringField(agentBody["callSign"], "callSign", {
+              max: 40,
+              optional: true,
+            }) ??
+            // Uniformly, not in order: walking the list made every deployment
+            // produce Zeus, then Hera, then Poseidon, so the name said which
+            // account connected first and nothing else.
+            free[Math.floor(Math.random() * free.length)] ??
+            defaultChannelAgentName({
+              provider,
+              userName: owner.displayName,
+            });
+          const agent = await this.options.store.setAgentCallSign(
+            identity.userId,
+            provider,
+            callSign,
+            visibilityField ?? existing?.visibility ?? "personal",
+          );
+          this.sendJson(response, 200, { agent });
           return;
         }
         if (action === "credential" && method === "POST") {
@@ -14273,6 +14369,47 @@ export class ApiGateway {
         };
       });
     });
+    // Agents that exist without a stored credential.
+    //
+    // `connectionsFor` walks the credential store, so until now an agent
+    // existed if and only if a vendor credential was saved for that user —
+    // which made the credential the identity and forced a vendor sign-in that
+    // local execution then never uses. The durable record keyed the same way
+    // is what an agent actually is; a credential is one thing that may hang
+    // off it.
+    //
+    // Unioned rather than replacing, and the credential's answer wins on a
+    // collision: it is the record being edited when somebody changes their
+    // settings, and both halves describe the same agent. Only rows whose
+    // (user, provider) is not already present are added, so nobody is listed
+    // twice and no agent stops being mentionable.
+    const already = new Set(
+      reachable.map((connection) => `${connection.userId}\0${connection.provider}`),
+    );
+    const known = new Set(userIds);
+    for (const sign of await this.options.store
+      .listAgentCallSigns()
+      .catch((): [] => [])) {
+      const key = `${sign.userId}\0${sign.provider}`;
+      // Scoped to this repository's own people. The call-sign table is
+      // account-wide and has no idea which organization is asking, so without
+      // this a roster would list agents belonging to strangers.
+      if (already.has(key) || !known.has(sign.userId)) {
+        continue;
+      }
+      const user = users[userIds.indexOf(sign.userId)];
+      if (user === undefined) {
+        continue;
+      }
+      already.add(key);
+      reachable.push({
+        userId: sign.userId,
+        userName: user.displayName,
+        provider: sign.provider,
+        visibility: sign.visibility,
+        callSign: sign.callSign,
+      });
+    }
     if (!(await this.options.store.hasBackfilledChannelMembership(repositoryId))) {
       // The grandfather backfill lands in `#general`, which is where the
       // migration put everything that predates sub-channels. A room created

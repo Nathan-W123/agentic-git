@@ -11,6 +11,7 @@ import {
   api,
   cancelGitHubSignIn,
   cancelProviderSignIn,
+  createLocalAgent,
   connectGitHub,
   connectProviderCredential,
   gitHubSignInStatus,
@@ -336,6 +337,42 @@ export async function installVendorCli(vendor, rerender) {
 }
 
 /**
+ * Connecting an agent where the machine, not the server, will run it.
+ *
+ * One sign-in: the CLI's own, which is the one that decides whether anything
+ * works. The agent record is created first so it exists even if somebody
+ * closes the installer — an agent that is there and grey is honest, and the
+ * prompt on its first mention will offer the same setup again.
+ */
+async function connectLocalAgent(providerId, rerender) {
+  state.providerConnecting?.add(providerId);
+  rerender();
+  let agent;
+  try {
+    agent = await createLocalAgent(providerId);
+  } catch (error) {
+    toast(
+      `Could not create the ${agentLabelOf(providerId)} agent — ${error.message}`,
+      "error",
+    );
+    return false;
+  } finally {
+    state.providerConnecting?.delete(providerId);
+  }
+  await loadProviders();
+  const failedRepositories = await addAgentToAllRepositories(providerId);
+  toast(
+    failedRepositories.length === 0
+      ? `${agent?.callSign ?? agentLabelOf(providerId)} is yours`
+      : `${agentLabelOf(providerId)} connected, but could not be added to every repository`,
+    failedRepositories.length === 0 ? "ok" : "error",
+  );
+  rerender();
+  await finishLocalSetup(providerId, rerender);
+  return true;
+}
+
+/**
  * The vendor CLI behind each provider account.
  *
  * A provider is the account somebody signs into; a vendor is the program that
@@ -407,7 +444,21 @@ async function finishLocalSetup(providerId, rerender) {
   }
 }
 
-async function signInAgent(providerId, mode, rerender) {
+async function signInAgent(providerId, mode, rerender, intent) {
+  // On a deployment that runs agents locally, the vendor sign-in below buys
+  // nothing the agent needs. It stores a credential this server then never
+  // reads — the CLI runs under the machine's own login — so somebody signed in
+  // twice and only the second one made anything work. Worse, the first was
+  // what created the agent at all, which is why "reconnect from Settings →
+  // Agents" was offered as the fix for a CLI that was not signed in, and could
+  // never have helped.
+  //
+  // So the agent is created outright and setup finishes on the machine. The
+  // credential becomes an optional extra, for the usage figures and for a
+  // deployment that has server-side execution switched on.
+  if (state.localAgentsOnly === true && intent !== "link-account") {
+    return await connectLocalAgent(providerId, rerender);
+  }
   state.providerConnecting?.add(providerId);
   rerender();
   // Opened now, empty, and pointed at the vendor once the URL is known.
@@ -598,6 +649,30 @@ async function signInAgent(providerId, mode, rerender) {
     toast(error.message, "error");
     return false;
   }
+}
+
+/**
+ * Attaches a vendor account to an agent that already exists.
+ *
+ * The credential is no longer what makes an agent — that is the record the
+ * connect flow writes — but it is still what the usage figures on the agent
+ * card read, and what a deployment with server-side execution switched on
+ * needs. So it stays available, as the extra it actually is rather than as
+ * the gate somebody has to pass before finding out whether their CLI works.
+ */
+export async function linkAgentAccount(providerId, rerender) {
+  const entry = (state.providers ?? []).find((item) => item.id === providerId);
+  const signInFlow = entry?.signInFlow;
+  if (signInFlow === undefined) {
+    toast(
+      `${agentLabelOf(providerId)} has no browser sign-in to link.`,
+      "error",
+    );
+    return;
+  }
+  // `link-account` rather than the flow's own mode, so `signInAgent` knows not
+  // to take the local shortcut it takes for an ordinary connect.
+  await signInAgent(providerId, signInFlow, rerender, "link-account");
 }
 
 export async function connectAgent(providerId, rerender) {

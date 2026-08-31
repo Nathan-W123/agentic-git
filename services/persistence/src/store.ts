@@ -1468,6 +1468,16 @@ export interface AgentCallSign {
   provider: string;
   callSign: string;
   assignedAt: string;
+  /**
+   * Who may @mention this agent.
+   *
+   * Here rather than only on the credential, because an agent exists whether
+   * or not a credential does: under local execution the vendor CLI runs under
+   * the machine's own login and nothing on the control plane is read. A row
+   * written before this column existed reads `personal`, which is what an
+   * agent nobody has widened has always meant.
+   */
+  visibility: "personal" | "org";
 }
 
 /**
@@ -2493,6 +2503,8 @@ export interface CoordinationStore {
     userId: string,
     provider: string,
     callSign: string,
+    /** Defaults to `personal`, which is what an unwidened agent has meant. */
+    visibility?: "personal" | "org",
   ): Promise<AgentCallSign>;
   /**
    * Forgets a name, so the agent falls back to its vendor label again. This
