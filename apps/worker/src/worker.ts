@@ -819,6 +819,31 @@ export class Worker {
       ...(context === "" ? {} : { priorContext: context }),
     });
     this.activeSession = { adapter, sessionId: session.id };
+    // Listening starts here, not at execution.
+    //
+    // The full handler in `execute` is attached once a plan has been admitted,
+    // which is minutes later: `requestPlan` is allowed ten of them, and it is
+    // the phase an agent spends reading the repository and saying what it
+    // finds. Nobody was attached for any of it, so the whole planning phase
+    // went by in silence and a thread showed the acknowledgement and then
+    // nothing — indistinguishable from a hang, and the state most runs are
+    // actually in when somebody looks.
+    //
+    // Progress only. Questions, actions and scope belong to a run that has
+    // been admitted, and `execute` answers those with the session's own
+    // machinery; forwarding a line of narration needs none of it.
+    await adapter
+      .streamEvents(session.id, (event) => {
+        if (event.event === "progress") {
+          void this.options.client.progress(
+            assignment.lease.id,
+            event.message,
+          );
+        }
+      })
+      // An adapter that cannot stream still plans and still works. This is
+      // the room's view of the run, never the run itself.
+      .catch(() => undefined);
     if (this.cancellationRequested) {
       await this.cancelActiveSession();
       throw new LeaseLostError(assignment.lease.id);
