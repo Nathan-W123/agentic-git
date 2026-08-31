@@ -2823,3 +2823,42 @@ export function rankTouchedFiles(
       right.score - left.score || left.path.localeCompare(right.path))
     .slice(0, Math.max(0, limit));
 }
+
+/**
+ * Whether this deployment refuses to execute agents itself.
+ *
+ * The control plane can run an agent in process, and on a hosted deployment
+ * that is the expensive half of the bill: an agent holds its memory for as
+ * long as it runs and every prompt it sends leaves as egress. Both belong to
+ * whoever's machine the work is for, and a desktop worker puts them there —
+ * but only if the control plane stops taking the work first.
+ *
+ * It lives here, in the one package both executors already depend on, because
+ * there are two of them and a flag that guards one is not a fence. The queue
+ * is refused in `leaseQueuedWork`; provider turns are refused in the
+ * gateway's `performChat`. A second copy of this predicate in either place
+ * would drift, and the shape of that drift is a deployment that believes it
+ * has stopped executing and has not.
+ *
+ * Off by default, so a self-hosted deployment and the local `coord` CLI are
+ * unchanged: a single-machine install where the control plane *is* the
+ * executor stays exactly as it was. Turning it on is a hosting decision,
+ * which is why it is an environment variable rather than a code path.
+ *
+ * Only the exact "1" arms it. A flag that stops a fleet executing should be
+ * turned on by the documented value or not at all, rather than by anything
+ * that merely looks affirmative.
+ */
+export function localAgentsOnly(): boolean {
+  return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
+}
+
+/**
+ * What a provider turn reports when the deployment will not run it.
+ *
+ * A sentinel rather than prose, because the string is matched on to render
+ * something a reader can act on. Anything the model or a vendor could also
+ * emit would eventually collide; this cannot be produced by a failure.
+ */
+export const LOCAL_AGENTS_ONLY_REFUSAL =
+  "coord:local-agents-only";

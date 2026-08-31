@@ -73,6 +73,8 @@ import {
   DO_NOT_CODE_DIRECTIVE,
   FORCE_QUESTION_MARKER,
   KEEP_IT_SIMPLE_DIRECTIVE,
+  LOCAL_AGENTS_ONLY_REFUSAL,
+  localAgentsOnly,
   projectBudgets,
   readsAsReportRequest,
   requestFromObjective,
@@ -1727,7 +1729,31 @@ const INTEGRATION_FAILURE_REASONS: Record<string, string> = {
  * not "fail to finish" — nothing was started. Borrowing the task wording made
  * a momentary model error read as abandoned work.
  */
+/**
+ * Whether a turn came back refused rather than failed.
+ *
+ * Every caller of {@link ApiServer.askAgent} has somewhere it puts an error,
+ * and most of those places are read by a person. A refusal is not an error —
+ * nothing broke and retrying will not help — so the callers that would
+ * otherwise print a reason ask this first and say something true instead.
+ */
+export function refusedForLocalAgents(error?: string): boolean {
+  return error === LOCAL_AGENTS_ONLY_REFUSAL;
+}
+
 export function explainAnswerFailure(error?: string): string {
+  // Said plainly, because it is not a failure and reading it as one sends
+  // somebody hunting for a broken sign-in. Answering happens on the server;
+  // a deployment that only runs agents on their owners' machines has nowhere
+  // to put a question, and the honest reply says so and points at the thing
+  // that does still work.
+  if (refusedForLocalAgents(error)) {
+    return (
+      "I can't answer questions on this deployment — answering runs here, " +
+      "and this one only runs agents on their owner's own machine. Give me " +
+      "the work as a task and I'll do it there."
+    );
+  }
   if (isVendorSignInFailure(error ?? "")) {
     return (
       "I could not answer that — my sign-in has expired. Reconnect me from " +
@@ -9048,6 +9074,17 @@ export class ApiGateway {
         SIMPLIFY_TIMEOUT_MS,
       );
       if (answer.text === undefined) {
+        // A deployment that will not run agents has not failed to rewrite
+        // this; it declined to. 502 would send the reader looking for an
+        // outage, and the sentinel itself is not English.
+        if (refusedForLocalAgents(answer.error)) {
+          throw new HttpError(
+            503,
+            "local_agents_only",
+            "This deployment runs agents on their owner's own machine, so " +
+              "there is nothing here to rewrite this.",
+          );
+        }
         throw new HttpError(
           502,
           "simplify_failed",
@@ -15875,6 +15912,17 @@ export class ApiGateway {
     );
     const fallbackTitle = summariseObjective(input.objective);
     if (answer.text === undefined) {
+      // Retrying is the one thing that will not help here, so the refusal
+      // does not offer it.
+      if (refusedForLocalAgents(answer.error)) {
+        return {
+          title: fallbackTitle,
+          plan:
+            "I can't plan this here — planning runs on the control plane, " +
+            "and this deployment only runs agents on their owner's own " +
+            "machine. The work itself will still run there once it is filed.",
+        };
+      }
       return {
         title: fallbackTitle,
         plan:
@@ -16895,6 +16943,18 @@ export class ApiGateway {
     ceremonial = false,
     repositoryId?: string,
   ): Promise<{ reply?: unknown; error?: string }> {
+    // The second executor, refused in the one place all of them meet.
+    //
+    // Every provider turn this server makes arrives here — a mention, a
+    // thread reply, the opening intent line, the triage classifier, the
+    // auditor — so this is the only line that has to exist for the flag to
+    // mean what its name says. Placed above the capability check because it
+    // is a decision about what this deployment will do, not about what it
+    // can: a deployment that refuses to execute should say so identically
+    // whether or not a provider happens to be configured.
+    if (localAgentsOnly()) {
+      return { error: LOCAL_AGENTS_ONLY_REFUSAL };
+    }
     const providers = this.options.operations.chatProviders;
     if (providers === undefined) {
       return { error: "this deployment has no provider chat configured" };
@@ -18397,6 +18457,13 @@ export class ApiGateway {
       AUDIT_TIMEOUT_MS,
     );
     if (answer.text === undefined) {
+      // Quietly, and only for a refusal. Every canonical promotion reaches
+      // here, so throwing would turn a deliberate setting into an exception
+      // per merge — noise that says nothing the operator did not already
+      // decide. A real failure still raises.
+      if (refusedForLocalAgents(answer.error)) {
+        return;
+      }
       throw new Error(answer.error ?? "the auditor did not answer");
     }
     const findings = parseAuditFindings(answer.text);

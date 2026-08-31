@@ -5988,6 +5988,84 @@ test("a question about repository files is answered in the channel, not turned i
   assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
 });
 
+/**
+ * The second executor, refused.
+ *
+ * `COORD_LOCAL_AGENTS_ONLY` was written for the queue and checked in exactly
+ * one place, `leaseQueuedWork`. That left the gateway's own provider turns
+ * running: a deployment that set the variable stopped draining the queue and
+ * went on spending an agent on every mention, every thread reply, every
+ * opening line and every audit — on the mentioned agent's owner's credential,
+ * in the control plane's own memory. It looked like the flag did nothing,
+ * which is the worst way for a cost control to fail.
+ *
+ * Asserted on the provider never being reached rather than on the reply text
+ * alone. A refusal that still made the call would read identically in the
+ * channel and cost exactly as much as no refusal at all.
+ */
+test("with local agents only, a channel question is refused rather than answered here", async (t) => {
+  const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
+  process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env["COORD_LOCAL_AGENTS_ONLY"];
+    } else {
+      process.env["COORD_LOCAL_AGENTS_ONLY"] = previous;
+    }
+  });
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-agents-only");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  // Set so that reaching the provider would be visible in the channel rather
+  // than merely in a counter.
+  runtime.chatAnswer.text =
+    "This deployment must never produce this.\nANSWER_TASK: NONE";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Claude (Owner) which file contains channel question routing?",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // The assertion the flag exists for: nothing was spent.
+  assert.deepEqual(
+    runtime.chatPrompts,
+    [],
+    "a refused deployment must not reach the provider at all",
+  );
+  // And it did not quietly become a task instead, which would move the spend
+  // rather than stop it.
+  assert.equal(
+    runtime.submittedTasks.length,
+    0,
+    JSON.stringify(runtime.submittedTasks),
+  );
+
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  // Said in the agent's own voice, and never the raw sentinel.
+  assert.match(
+    String(agentMessages[0]?.content),
+    /only runs agents on their owner's own machine/u,
+  );
+  assert.doesNotMatch(String(agentMessages[0]?.content), /coord:local-agents-only/u);
+  assert.doesNotMatch(
+    String(agentMessages[0]?.content),
+    /This deployment must never produce this/u,
+  );
+});
+
 test("a question answer that proposes a repository change starts one scoped task and announces the handoff", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
