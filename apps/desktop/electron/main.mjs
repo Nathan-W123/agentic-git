@@ -207,6 +207,22 @@ async function askForServer() {
 }
 
 /** What this machine will be called in the person's list of app tokens. */
+/**
+ * Whether this is a URL a browser should be asked to open.
+ *
+ * Parsed rather than string-matched, so `HTTPS:`, a scheme with padding, or
+ * anything that merely begins with "http" is judged by what it resolves to.
+ * A string that is not a URL at all is not one either.
+ */
+function opensInABrowser(candidate) {
+  try {
+    const { protocol } = new URL(candidate);
+    return protocol === "https:" || protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 function deviceName() {
   const host = os.hostname().replace(/\.local$/u, "").trim();
   return `Kumi on ${host === "" ? "this machine" : host}`;
@@ -379,8 +395,22 @@ async function openDashboard() {
   });
   // Anything the dashboard wants to open elsewhere opens in the real browser
   // rather than a second chromeless window nobody can read the address of.
+  //
+  // Only http(s) reaches the operating system, and the reason is not
+  // hypothetical. The sign-in flow claims a tab during the click that starts
+  // it — `window.open("", "_blank")`, because a tab opened after the await
+  // would be a blocked popup — and an empty URL arrives here as
+  // `about:blank`. Forwarding that made Windows ask which application opens
+  // `about:` links, on top of a sign-in the deny had already cancelled.
+  //
+  // The general form matters more than that one case: this handler takes a
+  // URL from a *remote* document and asks the OS to open it, and the OS
+  // launches whatever is registered for the scheme. An allowlist keeps that
+  // to the two schemes a browser is the right answer for.
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    if (opensInABrowser(url)) {
+      void shell.openExternal(url);
+    }
     return { action: "deny" };
   });
   running = true;

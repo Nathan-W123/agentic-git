@@ -1,3 +1,29 @@
+### 0.4.6 — sign-in works, and a run says what it is doing
+
+**Connecting an agent failed on Windows with "Get an app to open this 'about'
+link".** The sign-in flow claims a browser tab during the click that starts it —
+a tab opened after the wait would be a blocked popup — and an empty URL is
+`about:blank`. The app forwarded every `window.open` straight to the operating
+system, so Windows was asked to find an application for `about:` links, and the
+cancelled tab meant the real sign-in page never opened either. Only `http` and
+`https` reach the OS now, and when the claimed tab does not survive, the sign-in
+page is opened directly once its URL is known.
+
+**A run on your own machine now says what it is doing.** The agent's progress —
+its own words, as it works — was only ever emitted by the server-side runner. A
+task executing on your desktop went from "I've taken this task" to its ending
+with nothing in between, for the entire time the work was happening, and read as
+hung. The worker forwards it now, so the liveness comes from the machine doing
+the work and costs nothing on the server.
+
+**And a failure no longer blames your sign-in for someone else's problem.** The
+test for an expired session matched a bare `401` anywhere in the text — a lease
+id, a byte count, a version, a line number — and reported it as an expired
+sign-in. That is a confidently wrong answer with a remedy that takes minutes and
+cannot work. It is bounded now. When the sign-in really has expired and agents
+run locally, the message points at the CLI on this machine rather than at a
+Settings page that does not hold that credential.
+
 ### 0.4.5 — the agents actually run
 
 0.4.4 made the CLI findable. It turned out finding it was only the first of

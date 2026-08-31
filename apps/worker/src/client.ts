@@ -522,4 +522,24 @@ export class WorkerClient {
       method: "POST",
     });
   }
+
+  /**
+   * The agent's own words, forwarded while the work is still happening.
+   *
+   * Never awaited by the run and never allowed to fail it: this is the line
+   * that makes a thread look alive, and a thread looking dead is better than
+   * a task dying because a courtesy could not be delivered. A control plane
+   * too old to know the route answers 404, which lands here as a swallowed
+   * error rather than as a broken worker.
+   */
+  public async progress(leaseId: string, message: string): Promise<void> {
+    try {
+      await this.request(`/api/v1/workers/leases/${leaseId}/progress`, {
+        method: "POST",
+        body: { message },
+      });
+    } catch {
+      // Deliberately silent. See above.
+    }
+  }
 }
