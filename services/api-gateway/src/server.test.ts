@@ -20054,7 +20054,10 @@ test("the audit log is compacted on a retention window", async (t) => {
   );
   // The attestation survives the contents. That is the whole bargain.
   const checkpoints = await runtime.store.listAuditCheckpoints();
-  assert.ok(checkpoints[0]?.throughSequence >= 1, JSON.stringify(checkpoints));
+  assert.ok(
+    (checkpoints[0]?.throughSequence ?? 0) >= 1,
+    JSON.stringify(checkpoints),
+  );
 });
 
 /**

@@ -1,4 +1,5 @@
 import {
+  boundValidation,
   createId,
   CHANNEL_TOUCH_FLOOR,
   planAdmissionApproved,
@@ -2079,7 +2080,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     runId: string,
     result: IntegrationResult,
   ): Promise<void> {
-    this.requireRun(runId).integrations.push(copy(result));
+    // Bounded here too, so a test against the memory store sees the same row
+    // the real one would store rather than a larger, kinder version of it.
+    this.requireRun(runId).integrations.push(
+      copy({ ...result, validation: boundValidation(result.validation) }),
+    );
   }
 
   public async saveCanonicalVersion(

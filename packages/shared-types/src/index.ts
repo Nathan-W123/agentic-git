@@ -861,6 +861,52 @@ export interface CommandResult {
   durationMs: number;
 }
 
+/**
+ * The most of one command's output worth keeping on the record.
+ *
+ * A validation result stores the whole of what a command printed, and a test
+ * suite prints a great deal: measured, the integration row is one of the two
+ * things that make a task cost up to a hundred and sixty kilobytes of stored
+ * JSON. Nothing reads it. Every consumer of `validation` takes
+ * `command.label` and `exitCode` — the handoff, the overlay, the rollback,
+ * the worker's own audit line — and the single reader of the text takes
+ * `stderr.trim().slice(-300)` to quote why something failed.
+ *
+ * So this is thirteen times what anything actually reads, which leaves a tail
+ * a person can page through while bounding a row that was previously bounded
+ * only by how noisy somebody's test runner is.
+ */
+export const MAX_COMMAND_OUTPUT_CHARS = 4_000;
+
+/**
+ * Keeps the END of a command's output rather than the start.
+ *
+ * Deliberate and load-bearing: the one reader of this text quotes the last
+ * three hundred characters, because that is where a failing command says what
+ * went wrong. A cap that kept the head would preserve the size limit and
+ * throw away the only part anybody looks at — the build banner survives and
+ * the stack trace does not.
+ */
+export function boundCommandOutput(
+  text: string,
+  max = MAX_COMMAND_OUTPUT_CHARS,
+): string {
+  return text.length <= max
+    ? text
+    : `[…${text.length - max} earlier characters dropped]\n${text.slice(-max)}`;
+}
+
+/** One command's result with its output bounded — see {@link boundCommandOutput}. */
+export function boundValidation(
+  validation: readonly CommandResult[],
+): CommandResult[] {
+  return validation.map((entry) => ({
+    ...entry,
+    stdout: boundCommandOutput(entry.stdout),
+    stderr: boundCommandOutput(entry.stderr),
+  }));
+}
+
 export interface TestResult {
   name: string;
   status: "passed" | "failed" | "skipped";
