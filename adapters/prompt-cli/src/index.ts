@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { copyFile, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -1512,6 +1512,97 @@ function environmentPath(
  * Official Windows installs place a native executable beside the shim's
  * package, which also gives timeout handling a process it can terminate.
  */
+/**
+ * How Cursor's CLI is actually started, when a shim is all that is on PATH.
+ *
+ * Cursor ships no native CLI binary. `agent.cmd` runs PowerShell, which runs
+ * `cursor-agent.ps1`, which picks the newest directory under `versions\` and
+ * runs that copy's own `node.exe` against its `index.js`. Two shims and an
+ * interpreter, and the first of them is a batch file — so an argument
+ * carrying a quote or a newline, which every Cursor prompt does, cannot be
+ * passed at all: `processInvocation` refuses to put it on a `cmd.exe`
+ * command line.
+ *
+ * Rather than teach that path to quote, this skips it. `node.exe` is a real
+ * executable and takes its arguments through the ordinary Windows escaping
+ * that Node already does correctly.
+ *
+ * The version rule is the `.ps1`'s own: directory names of `YYYY.M.D-hash`,
+ * optionally with a build time between, ordered by that date. Read from the
+ * filesystem rather than assumed, because the newest install wins and this
+ * has no way to know which that is until it looks.
+ */
+export function resolveCursorLauncher(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): { executable: string; args: string[] } | undefined {
+  if (platform !== "win32") {
+    return undefined;
+  }
+  const name = path.win32.basename(command).toLowerCase();
+  if (!["agent", "agent.cmd", "cursor-agent", "cursor-agent.cmd"].includes(name)) {
+    return undefined;
+  }
+  const directory = command.includes("\\") || command.includes("/")
+    ? path.dirname(path.resolve(command))
+    : undefined;
+  if (directory === undefined) {
+    // Only a bare name, so there is no install directory to read. The caller
+    // keeps what it had; `resolveWindowsExecutable` will still find the shim.
+    return undefined;
+  }
+  // "Are we somehow in the same dir as the script? Just run it." — the
+  // launcher's own first case, kept first here for the same reason.
+  const beside = launcherIn(directory);
+  if (beside !== undefined) {
+    return beside;
+  }
+  const versions = path.join(directory, "versions");
+  let entries: string[];
+  try {
+    entries = readdirSync(versions);
+  } catch {
+    return undefined;
+  }
+  const dated = entries
+    .map((entry) => ({
+      entry,
+      match: /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/u.exec(
+        entry,
+      ),
+    }))
+    .filter((candidate) => candidate.match !== null)
+    .map((candidate) => ({
+      entry: candidate.entry,
+      // Compared as one number, exactly as the launcher's own
+      // `Parse-VersionString` does, so month and day need padding.
+      on: Number(
+        `${candidate.match?.[1] ?? ""}` +
+          `${(candidate.match?.[2] ?? "").padStart(2, "0")}` +
+          `${(candidate.match?.[3] ?? "").padStart(2, "0")}`,
+      ),
+    }))
+    .sort((left, right) => right.on - left.on);
+  for (const candidate of dated) {
+    const found = launcherIn(path.join(versions, candidate.entry));
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+/** The interpreter and script pair in one directory, if both are there. */
+function launcherIn(
+  directory: string,
+): { executable: string; args: string[] } | undefined {
+  const node = path.join(directory, "node.exe");
+  const script = path.join(directory, "index.js");
+  return existsSync(node) && existsSync(script)
+    ? { executable: node, args: [script] }
+    : undefined;
+}
+
 export function resolveClaudeCommand(
   command: string,
   pathValue = process.env.PATH,
@@ -1630,6 +1721,8 @@ export function failureFromStream(stdout: string): string {
 export class PromptCliAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, PromptCliSession>();
   private readonly command: string;
+  /** Leading arguments the command needs before the profile's own. */
+  private readonly commandArgs: readonly string[];
   private readonly effort: PromptCliEffort | undefined;
   private readonly model: string | undefined;
   private readonly planningTimeoutMs: number;
@@ -1642,10 +1735,19 @@ export class PromptCliAdapter implements AgentAdapter {
     this.profile = options.profile;
     const configuredCommand =
       options.command?.trim() || this.profile.defaultCommand;
+    // Cursor is started through its own interpreter when one can be found —
+    // see `resolveCursorLauncher`. That is the only case where the command is
+    // not the whole invocation, so the extra arguments live beside it rather
+    // than being folded into `args`, which belongs to the caller.
+    const cursor =
+      this.profile.name === "cursor"
+        ? resolveCursorLauncher(configuredCommand)
+        : undefined;
     this.command =
       this.profile.name === "claude"
         ? resolveClaudeCommand(configuredCommand, environmentPath(options.env))
-        : configuredCommand;
+        : (cursor?.executable ?? configuredCommand);
+    this.commandArgs = cursor?.args ?? [];
     this.model = safeAdditionalArgs(options.args ?? []);
     this.effort = options.effort;
     if (
@@ -2809,7 +2911,12 @@ export class PromptCliAdapter implements AgentAdapter {
           : [];
     const active = this.runner(
       this.command,
-      promptArguments.length === 0 ? argv : [...argv, ...promptArguments],
+      [
+        ...this.commandArgs,
+        ...(promptArguments.length === 0
+          ? argv
+          : [...argv, ...promptArguments]),
+      ],
       {
         cwd: workingDirectory,
         ...(promptArguments.length === 0 ? { input: prompt } : {}),
