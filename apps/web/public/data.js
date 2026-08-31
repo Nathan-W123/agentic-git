@@ -3590,6 +3590,10 @@ export function channelAgentsFor(repositoryId) {
           // built from the whole roster and applied to every agent, so it is
           // the one place a server fact reaches both.
           ownerOnline: entry.ownerOnline,
+          // Sent only for an agent no live machine can run — the vendor CLI
+          // to install, and where. Reaches both halves of the roster for the
+          // same reason `ownerOnline` does.
+          setup: entry.setup,
         },
       ]),
   );
@@ -3623,6 +3627,9 @@ export function channelAgentsFor(repositoryId) {
         // however long its owner's machine had been off, and the whole
         // offline path was dead while appearing to be wired.
         ownerOnline: server.ownerOnline,
+        // Same rule, same reason: sent only for an agent nothing can run, and
+        // dropped here if it is not named.
+        setup: server.setup,
       };
     }
     // Before the roster resolves — the "paint immediately" floor — and for an
