@@ -230,6 +230,183 @@ function pause(ms) {
  * Returns `true` when connected, `false` when retry should be offered, and
  * `null` when the user walked away.
  */
+/**
+ * Installs a vendor's CLI from inside the app, after showing what will run.
+ *
+ * The confirmation is the point. These are the vendors' own one-liners and two
+ * of them pipe a downloaded script into an interpreter — which is exactly what
+ * a person would paste by hand, and exactly why it should not happen because
+ * somebody pressed "Connect". So the command is displayed, agreed to, and only
+ * then run.
+ *
+ * The command shown is read back from the desktop rather than composed here.
+ * The page names a vendor and the app decides what that means, so a remote
+ * document cannot put a command on this machine's shell — and what is agreed
+ * to cannot differ from what executes, because they are the same value.
+ */
+export async function installVendorCli(vendor, rerender) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge === undefined || vendor === "") {
+    return;
+  }
+  const plan = await bridge.plan(vendor).catch(() => undefined);
+  if (plan === undefined) {
+    toast("This machine has no published installer for that agent.", "error");
+    return;
+  }
+  const agreed = await showModal({
+    title: `Install the ${vendor} CLI`,
+    subtitle:
+      "Kumi runs agents on this machine, so the vendor's own CLI has to be " +
+      "here. This is what will run:",
+    body: `<pre class="install-command">${esc(plan.command)}</pre>
+      <p class="modal-hint">It comes from ${esc(vendor)}'s own published
+      instructions. You can copy it and run it yourself instead.</p>`,
+    confirm: "Run it",
+    cancel: "Not now",
+  });
+  if (agreed === undefined) {
+    return;
+  }
+
+  // Output as it arrives. These fail for ordinary, legible reasons — no npm,
+  // a proxy, a policy blocking the script — and the vendor's own words say
+  // which. A spinner ending in "failed" would leave somebody exactly where
+  // they started.
+  const lines = [];
+  const stop = bridge.onOutput((line) => {
+    lines.push(line);
+    const view = document.querySelector("#install-output");
+    if (view !== null) {
+      view.textContent = lines.join("").slice(-4000);
+      view.scrollTop = view.scrollHeight;
+    }
+  });
+  const watching = showModal({
+    title: `Installing ${esc(vendor)}`,
+    body: `<pre class="install-output" id="install-output">Starting…</pre>`,
+    cancel: "Hide",
+  });
+  let result;
+  try {
+    result = await bridge.run(vendor);
+  } catch (error) {
+    result = { ok: false, detail: error?.message ?? "The install failed." };
+  } finally {
+    stop?.();
+    document.querySelector("#modal")?.close();
+    await watching.catch(() => undefined);
+  }
+
+  if (result?.ok !== true) {
+    await showModal({
+      title: `${esc(vendor)} was not installed`,
+      subtitle: result?.detail ?? "The installer did not finish.",
+      body: `<pre class="install-output">${esc(lines.join("").slice(-2000))}</pre>`,
+      confirm: "Close",
+    });
+    return;
+  }
+
+  // Installed, and still unusable until somebody signs in — the one step no
+  // app can take for them, because every vendor's login is an interactive
+  // flow it owns. The most this can do is put them in front of it with
+  // nothing left to type.
+  const now = await showModal({
+    title: `${esc(vendor)} is installed`,
+    subtitle:
+      `One thing left: sign in. Kumi uses this machine's own ${esc(vendor)} ` +
+      "login, so it has to be done here, once.",
+    body: `<p class="modal-hint">This opens a terminal already running
+      <code>${esc(plan.signIn)}</code>. Follow its sign-in, then come back —
+      Kumi picks it up on its own.</p>`,
+    confirm: "Open the sign-in",
+    cancel: "Later",
+  });
+  if (now !== undefined) {
+    const opened = await bridge.signIn(vendor).catch(() => false);
+    if (opened !== true) {
+      toast(
+        `Could not open a terminal. Run \`${plan.signIn}\` yourself to sign in.`,
+        "error",
+      );
+    }
+  }
+  rerender?.();
+}
+
+/**
+ * The vendor CLI behind each provider account.
+ *
+ * A provider is the account somebody signs into; a vendor is the program that
+ * runs on their machine. They are named differently by their own owners —
+ * "anthropic" issues the credential, `claude` does the work — and the desktop
+ * installs by the second. Mirrors `PROVIDER_TO_VENDOR` on the server, which is
+ * what the roster's own setup hints are keyed by.
+ */
+const PROVIDER_VENDOR = {
+  anthropic: "claude",
+  openai: "codex",
+  google: "gemini",
+  cursor: "cursor",
+  copilot: "copilot",
+  kiro: "kiro",
+};
+
+/**
+ * The half of connecting that happens on this machine.
+ *
+ * A vendor sign-in gives Kumi an agent. It does not give the machine anything
+ * — the CLI that agent runs as still has to be installed here and logged into
+ * separately. Splitting those apart is how somebody could finish "Connect",
+ * see a green agent, @mention it, and only then be told nothing on their
+ * machine could run it. The gap was found the hard way: three agents
+ * connected, none of them runnable, and a morning spent reading process lists
+ * to work out why.
+ *
+ * So connecting finishes here instead. Only in the desktop app, which is the
+ * only thing that can see the machine; a browser has no business being asked
+ * and is left exactly as it was.
+ */
+async function finishLocalSetup(providerId, rerender) {
+  const bridge = window.KUMI_INSTALL;
+  if (bridge === undefined) {
+    return;
+  }
+  const vendor = PROVIDER_VENDOR[providerId];
+  if (vendor === undefined) {
+    return;
+  }
+  const detected = await bridge.detected().catch(() => undefined);
+  if (detected === undefined) {
+    return;
+  }
+  if (!detected.includes(vendor)) {
+    // Nothing here can run it. `installVendorCli` shows what it will run,
+    // runs it, and opens the sign-in afterwards — the whole remaining setup,
+    // in the place somebody is already standing.
+    await installVendorCli(vendor, rerender);
+    return;
+  }
+  // Installed, but nothing here can tell whether it is signed in — that lives
+  // inside the vendor's own config and reading it would be guessing at a
+  // format none of them promise. So it is offered rather than assumed, which
+  // is honest and costs one dismissed dialog for somebody already set up.
+  const now = await showModal({
+    title: `${agentLabelOf(providerId)} is installed on this machine`,
+    subtitle:
+      "One last thing: Kumi runs it under this machine's own login, so it " +
+      "has to be signed in here too.",
+    body: `<p class="modal-hint">Opens a terminal running the CLI. If it is
+      already signed in, close the window — nothing else to do.</p>`,
+    confirm: "Check the sign-in",
+    cancel: "Already done",
+  });
+  if (now !== undefined) {
+    await bridge.signIn(vendor).catch(() => false);
+  }
+}
+
 async function signInAgent(providerId, mode, rerender) {
   state.providerConnecting?.add(providerId);
   rerender();
@@ -369,6 +546,7 @@ async function signInAgent(providerId, mode, rerender) {
       failedRepositories.length === 0 ? "ok" : "error",
     );
     rerender();
+    await finishLocalSetup(providerId, rerender);
     return true;
   }
 
@@ -404,6 +582,7 @@ async function signInAgent(providerId, mode, rerender) {
           failedRepositories.length === 0 ? "ok" : "error",
         );
         rerender();
+        await finishLocalSetup(providerId, rerender);
         return true;
       }
       if (state_.status !== "pending") {

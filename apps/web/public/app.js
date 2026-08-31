@@ -206,6 +206,7 @@ import {
   TERMINAL_TASK_STATUS,
   cancelTask,
   connectAgent,
+  installVendorCli,
   connectGitHubAccount,
   pauseTask,
   resumeTask,
@@ -280,7 +281,6 @@ import {
   showsChannelRail,
   chooseOfflineOption,
   dismissOfflinePrompt,
-  installVendorCli,
   sendOfflineChoice,
   setOfflineTarget,
 } from "./screen-chats.js";

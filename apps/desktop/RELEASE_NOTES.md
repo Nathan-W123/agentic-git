@@ -1,3 +1,17 @@
+### 0.4.9 — connecting an agent finishes the job
+
+Connecting an agent used to do half of what its name promised. It signed you
+into the vendor, which gives Kumi an agent — and stopped, without ever
+mentioning that the CLI that agent actually runs as was not on your machine.
+You found out later, when you @mentioned it and nothing happened.
+
+Connecting now checks this machine as its last step. If the CLI is missing it
+offers to install it, shows exactly what it will run, runs it, and opens a
+terminal for the sign-in. If it is already here it offers to check that
+sign-in, because nothing can tell from outside whether a CLI is logged in.
+
+Either way you finish where you started, with an agent that works.
+
 ### 0.4.8 — Cursor runs, the repository stays, and setup explains itself
 
 **Cursor works.** It ships no CLI binary at all: `agent.cmd` runs PowerShell,
