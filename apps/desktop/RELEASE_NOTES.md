@@ -1,3 +1,19 @@
+### 0.4.3 — agents can actually start on Windows
+
+Every agent failed on Windows, and it was one missing lookup rather than three
+broken vendors. A shell finds `codex` by walking `PATH` and trying each
+`PATHEXT` suffix; `spawn` does neither, and every vendor CLI installed by npm
+is a `.cmd` shim — so there was no file of that name to start. Detection found
+the shim and said "Running agents on this machine" while every task came back
+`spawn codex ENOENT`.
+
+Failures also say why now. One of the six places that record a failed task
+wrote its reason under a key the channel never read, which happened to be the
+one a desktop worker uses — so every failure it reported arrived as "I could
+not finish this." with nothing after it. And a streaming CLI that dies writes
+its error at the end of its output while the first line is a banner naming a
+temp directory; that banner was what got shown.
+
 Kumi as a desktop app: the machine that runs your agents.
 
 This is the release where that changes. Earlier builds were a window onto your
