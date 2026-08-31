@@ -1,3 +1,41 @@
+### 0.5.0 — one sign-in
+
+Connecting an agent used to sign you into the vendor twice. Once to give this
+deployment a credential, and once more to the CLI on your own machine — and on
+a deployment that runs agents locally, only the second one ever mattered. The
+first stored a secret the worker never reads, because the CLI runs under your
+machine's own login.
+
+It was also, accidentally, what made an agent exist: the roster was built by
+walking the credential store. That is why a failing agent was told to
+"reconnect from Settings → Agents", a remedy that could not possibly have
+helped a CLI that was not signed in.
+
+An agent is now a record of its own. Connecting creates it, then finishes on
+your machine — installing the CLI if it is missing, and opening its sign-in.
+One sign-in, the one that decides whether anything works.
+
+The vendor sign-in is still there, as what it actually buys: your remaining
+usage on the agent card, and server-side execution for a deployment that wants
+it. It is a "Link for usage" button on an agent you already have, rather than a
+gate you pass before finding out whether your CLI is installed.
+
+Deployments that run agents on the server are unchanged.
+
+### 0.4.9 — connecting an agent finishes the job
+
+Connecting an agent used to do half of what its name promised. It signed you
+into the vendor, which gives Kumi an agent — and stopped, without ever
+mentioning that the CLI that agent actually runs as was not on your machine.
+You found out later, when you @mentioned it and nothing happened.
+
+Connecting now checks this machine as its last step. If the CLI is missing it
+offers to install it, shows exactly what it will run, runs it, and opens a
+terminal for the sign-in. If it is already here it offers to check that
+sign-in, because nothing can tell from outside whether a CLI is logged in.
+
+Either way you finish where you started, with an agent that works.
+
 ### 0.4.8 — Cursor runs, the repository stays, and setup explains itself
 
 **Cursor works.** It ships no CLI binary at all: `agent.cmd` runs PowerShell,

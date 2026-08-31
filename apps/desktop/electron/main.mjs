@@ -530,6 +530,16 @@ ipcMain.handle("kumi:install-run", async (event, vendor) => {
 
 ipcMain.handle("kumi:install-sign-in", (_event, vendor) => openSignIn(vendor));
 
+// What this machine actually has, asked for by the connect screen.
+//
+// The same scan the worker registers from, so the page and the worker cannot
+// disagree about whether an agent can run here. Adapter ids, not paths: the
+// page needs to know whether to offer an install, and has no business knowing
+// where anything lives.
+ipcMain.handle("kumi:machine-agents", async () =>
+  Object.values(await detectAgents()).map((agent) => agent.adapter),
+);
+
 // The renderer asks for the token here instead of being handed it on its
 // command line. Only the top frame of a window running our preload can reach
 // this channel, which is the same set of pages that get the token anyway.

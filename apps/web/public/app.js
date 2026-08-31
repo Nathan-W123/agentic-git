@@ -206,6 +206,8 @@ import {
   TERMINAL_TASK_STATUS,
   cancelTask,
   connectAgent,
+  linkAgentAccount,
+  installVendorCli,
   connectGitHubAccount,
   pauseTask,
   resumeTask,
@@ -280,7 +282,6 @@ import {
   showsChannelRail,
   chooseOfflineOption,
   dismissOfflinePrompt,
-  installVendorCli,
   sendOfflineChoice,
   setOfflineTarget,
 } from "./screen-chats.js";
@@ -2317,6 +2318,18 @@ function agentsCard() {
                       ? `<button type="button" class="btn btn-sm"
                           data-act="agent-disconnect"
                           data-value="${esc(agent.id)}">Disconnect</button>`
+                      : state.localAgentsOnly === true && agent.exists === true
+                        ? // The agent already exists — it was created without a
+                          // credential, which is all a local deployment needs.
+                          // The vendor sign-in is still on offer, demoted to
+                          // what it actually buys here: the usage figures on
+                          // this card. Making it the price of having an agent
+                          // is what had somebody signing in twice.
+                          `<button type="button" class="btn btn-sm"
+                          data-act="agent-link-account"
+                          data-value="${esc(agent.id)}"
+                          title="Link your ${esc(agent.label ?? agent.id)} account so Kumi can show your remaining usage"
+                          >Link for usage</button>`
                       : (() => {
                           const connecting =
                             state.providerConnecting?.has(agent.id) === true;
@@ -10256,6 +10269,11 @@ document.addEventListener("click", (event) => {
     /* Agent connections */
     case "agent-connect":
       void connectAgent(value, render);
+      return;
+    case "agent-link-account":
+      // The vendor sign-in on its own terms: the agent already exists, and
+      // this attaches the credential that the usage figures read.
+      void linkAgentAccount(value, render);
       return;
     case "github-connect":
       void connectGitHubAccount(render);

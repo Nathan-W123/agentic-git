@@ -19846,3 +19846,137 @@ test("an @mention only reaches agents assigned to the room it was said in", asyn
     "asking an agent that is in this room never became work",
   );
 });
+
+/**
+ * An agent exists because somebody asked for it, not because a secret is
+ * stored.
+ *
+ * The roster used to be built by walking the credential store, so having an
+ * agent required a vendor sign-in whose credential local execution then never
+ * reads — the CLI runs under the machine's own login. Two sign-ins, one of
+ * them for nothing, and a vendor secret this deployment was responsible for
+ * and never used. Worse, it made "reconnect from Settings → Agents" the
+ * offered remedy for a CLI that was not signed in, which it could not fix.
+ */
+test("an agent created without a credential is in the roster", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "credentialless");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  // Nothing connected: the credential store is empty and so is the roster.
+  const before = await owner.request(roster);
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+  assert.equal(
+    (before.data.agents ?? []).some(
+      (agent: { provider: string }) => agent.provider === "anthropic",
+    ),
+    false,
+  );
+
+  const created = await owner.request("/api/v1/chat/providers/anthropic/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  // Dealt a name rather than handed the vendor label. Storing
+  // "Claude (Nathan)" would freeze the placeholder as the agent's permanent
+  // name, which is the complaint the durable table exists to answer.
+  const dealt = String(created.data.agent.callSign);
+  assert.ok(dealt.length > 0);
+  assert.doesNotMatch(dealt, /\(/u);
+  assert.equal(created.data.agent.visibility, "personal");
+
+  // Membership is a separate opt-in, exactly as it is on the credential path —
+  // `addAgentToAllRepositories` is what the connect flow calls next. Being
+  // reachable makes an agent eligible for a room; it does not put it in one.
+  const joined = await owner.request(`${roster}/anthropic/membership`, {
+    method: "POST",
+  });
+  assert.equal(joined.status, 200, JSON.stringify(joined.data));
+
+  const after = await owner.request(roster);
+  assert.equal(after.status, 200, JSON.stringify(after.data));
+  const listed = (after.data.agents ?? []).filter(
+    (agent: { provider: string }) => agent.provider === "anthropic",
+  );
+  assert.equal(listed.length, 1, "exactly one, never doubled");
+  assert.equal(listed[0].name, dealt);
+  assert.equal(listed[0].userId, account.user.id);
+});
+
+/**
+ * Both halves describe the same agent, so the roster must not list it twice.
+ *
+ * This is the load-bearing risk of the union: the same set feeds @mention
+ * dispatch, and a duplicate there means two agents answering one mention while
+ * a miss means an agent nobody can reach.
+ */
+test("a credential and a record for one agent are one row", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const account = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "both-halves");
+  const roster = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  // A credential exists, as it would for anyone who connected before this.
+  runtime.chatConnections.set(account.user.id, [
+    { provider: "anthropic", visibility: "org", callSign: "Athena" },
+  ]);
+  await owner.request("/api/v1/chat/providers/anthropic/agent", {
+    method: "POST",
+    body: {},
+  });
+  await owner.request(`${roster}/anthropic/membership`, { method: "POST" });
+
+  const after = await owner.request(roster);
+  const listed = (after.data.agents ?? []).filter(
+    (agent: { provider: string }) => agent.provider === "anthropic",
+  );
+  assert.equal(listed.length, 1, "the union deduplicates by (user, provider)");
+  // The credential's answer wins: it is the record being edited when somebody
+  // changes their settings, and both halves describe the same agent.
+  assert.equal(listed[0].name, "Athena");
+  assert.equal(listed[0].visibility, "org");
+});
+
+/**
+ * The call-sign table is account-wide and knows nothing about organizations.
+ * Reading it into a roster unscoped would list agents belonging to strangers.
+ */
+test("a record for somebody outside the repository is not listed", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "scoped");
+
+  await runtime.store.setAgentCallSign("user_stranger", "openai", "Vesta");
+
+  const after = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(
+    (after.data.agents ?? []).some(
+      (agent: { name: string }) => agent.name === "Vesta",
+    ),
+    false,
+  );
+});
+
+/** Re-running connect must not rename an agent people have learned. */
+test("creating an agent twice keeps the name it was dealt", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const first = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  const again = await owner.request("/api/v1/chat/providers/openai/agent", {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(again.data.agent.callSign, first.data.agent.callSign);
+});

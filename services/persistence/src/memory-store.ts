@@ -3129,12 +3129,14 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     userId: string,
     provider: string,
     callSign: string,
+    visibility: "personal" | "org" = "personal",
   ): Promise<AgentCallSign> {
     const record: AgentCallSign = {
       userId,
       provider,
       callSign,
       assignedAt: new Date().toISOString(),
+      visibility,
     };
     this.agentCallSigns.set(`${userId}\0${provider}`, record);
     return copy(record);

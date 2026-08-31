@@ -53,6 +53,10 @@ contextBridge.exposeInMainWorld("KUMI_INSTALL", {
   run: async (vendor) => await ipcRenderer.invoke("kumi:install-run", vendor),
   signIn: async (vendor) =>
     await ipcRenderer.invoke("kumi:install-sign-in", vendor),
+  // Which agents this machine can actually drive, so the connect screen can
+  // finish the job rather than leaving somebody to discover the gap when they
+  // first @mention the agent they just connected.
+  detected: async () => await ipcRenderer.invoke("kumi:machine-agents"),
   // One listener per call site, removed by the returned function, so a page
   // that opens the dialog repeatedly does not accumulate them.
   onOutput: (listener) => {

@@ -2868,3 +2868,31 @@ export function rankTouchedFiles(
 export function localAgentsOnly(): boolean {
   return process.env["COORD_LOCAL_AGENTS_ONLY"] === "1";
 }
+
+/**
+ * Names an agent can be dealt, so it is somebody rather than a vendor label.
+ *
+ * Here rather than in the web app because both ends assign one now: the app
+ * when a credential is connected, and the gateway when an agent is created
+ * without a credential at all. A second copy would drift, and the one thing
+ * this list has to guarantee is that no two agents on a deployment are both
+ * Hermes.
+ */
+export const AGENT_CALL_SIGNS = [
+  // Olympians and kin
+  "Zeus", "Hera", "Poseidon", "Demeter", "Athena", "Apollo", "Artemis",
+  "Ares", "Aphrodite", "Hephaestus", "Hermes", "Hestia", "Dionysus",
+  "Hades", "Persephone",
+  // Titans and primordials
+  "Cronus", "Rhea", "Oceanus", "Tethys", "Hyperion", "Theia", "Themis",
+  "Mnemosyne", "Atlas", "Prometheus", "Epimetheus", "Gaia", "Uranus",
+  "Nyx", "Erebus", "Eos", "Helios", "Selene", "Iris",
+  // Winds and lesser gods
+  "Boreas", "Zephyrus", "Notus", "Eurus", "Pan", "Morpheus", "Nemesis",
+  "Nike", "Tyche", "Eris", "Hebe", "Janus",
+  // Roman counterparts and originals
+  "Jupiter", "Juno", "Neptune", "Ceres", "Minerva", "Mars", "Venus",
+  "Vulcan", "Mercury", "Vesta", "Bacchus", "Pluto", "Proserpina",
+  "Saturn", "Ops", "Sol", "Luna", "Aurora", "Victoria", "Fortuna",
+  "Bellona", "Faunus", "Flora", "Pomona", "Terminus", "Quirinus",
+] as const;
