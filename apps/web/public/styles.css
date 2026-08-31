@@ -4822,16 +4822,9 @@ button.chip.lg:hover {
 .chan-sidebar {
   width: var(--chan-sidebar-w);
   flex: none;
-  display: grid;
-  /* Quick links, everything else in one scroller, then the account footer.
-     Three rows rather than four: the crown that used to open this panel is
-     drawn once at the head of the banner now, where it stands in this
-     column's own width. The panel before that was four rows with two
-     scrollbars in it — a capped channel list above an independently scrolling
-     roster — which is two things to drag inside 256 pixels and a band of dead
-     panel whenever neither list was long enough to fill its share.
-     `.chan-scroll` is the one that moves. */
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* The panel owns its scrollbar, so its workspace identity, destinations,
+     lists, and account controls travel as one uninterrupted surface. */
+  display: block;
   min-height: 0;
   background: var(--bg-panel);
   /* The middle of the group, so it has no edge of its own on the left: the
@@ -4848,6 +4841,7 @@ button.chip.lg:hover {
   border-left: 0;
   border-radius: 0;
   overflow-x: hidden;
+  overflow-y: auto;
   transition: width var(--motion-content) var(--ease-motion);
 }
 
@@ -4917,12 +4911,10 @@ button.chip.lg:hover {
   color: var(--salmon);
 }
 
-/* The one thing that scrolls in this column. Horizontal overflow is clipped
-   so WebKit never reserves a dual-axis corner above the account foot. */
+/* The sidebar is the only vertical scroller. This wrapper remains in normal
+   flow so it moves together with the controls above and below it. */
 .chan-scroll {
-  overflow-x: hidden;
-  overflow-y: auto;
-  min-height: 0;
+  overflow: visible;
   padding: 4px 0 14px;
 }
 
@@ -4930,15 +4922,10 @@ button.chip.lg:hover {
   height: 0;
 }
 
-/* A section heading, and the "+" that adds to the list under it — the single
-   shape that replaced three different ones (a filled accent square by the
-   search box, and two full-width "add" rows pinned under the people and agent
-   lists). Sticky, so the heading of the list being scrolled through stays
-   named. */
+/* A section heading, and the "+" that adds to the list under it. It stays
+   with its list while the complete sidebar scrolls. */
 .chan-sec {
-  position: sticky;
-  top: 0;
-  z-index: 1;
+  position: static;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -5320,9 +5307,8 @@ button.chip.lg:hover {
   flex: none;
 }
 
-/* No scrollbar and no rule above it: `.chan-scroll` carries the scrolling for
-   the whole column now, and the sticky heading is what separates one list
-   from the next. */
+/* The sidebar carries the scrolling for the whole column, so this list stays
+   in normal flow with the heading above it. */
 /* A clipping box around one block, so the desktop collapse can fold it away
    instead of switching it off. `1fr` -> `0fr` on the row animates a height
    that nothing had to measure — the inner block keeps whatever height its
@@ -5390,19 +5376,19 @@ button.chip.lg:hover {
 }
 
 /* The roster itself also carries a transform (fold animation), so the card's
-   stacking context stops at the list. Without lifting that list, the sticky
-   heading and roster below — Agents under People, or the other way about —
+   stacking context stops at the list. Without lifting that list, the heading
+   and roster below — Agents under People, or the other way about —
    paint straight through a person card that opened downward, which is the
    mash of names and status dots a hover over a user used to be. Above the
-   sticky `.chan-sec` (z-index 1) is enough; the closed state never hosts a
-   card, so it never needs the lift. */
+   following section is enough; the closed state never hosts a card, so it
+   never needs the lift. */
 .chan-roster:has(.pcard-anchor:is(:hover, :focus-within)) {
   position: relative;
   z-index: 2;
 }
 
 /* A profile card opens *below* the row and inside the roster's own width.
-   `.chan-scroll` scrolls, and a scroll container clips any absolutely
+   `.chan-sidebar` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways
    out of the sidebar is not merely off-panel, it is invisible. Anchored to
    the avatar rather than the row for the same reason on the other axis: a
@@ -13273,7 +13259,6 @@ dialog.modal[open]::backdrop {
    corner, and square at both corners along the bottom — the rounding is the
    start of the boundary, not decoration applied to a column. */
 .chan-sidebar {
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
   border: 0;
   border-top: 1px solid var(--border-soft);
   border-left: 1px solid var(--border-soft);

@@ -1153,14 +1153,15 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
   assert.match(app, /value: "settings", label: "Settings"/u);
   assert.match(userMenu, /\{ width: 184 \}/u);
   assert.match(css, /\.chats-shell\.chan-collapsed \.chan-sidebar-foot \{[\s\S]{0,120}grid-template-columns: 40px;/u);
-  // The roster scroller must not paint WebKit's dual-axis corner above the
-  // account row — a bright square and hairline that sat on the dark panel.
+  // The whole sidebar is one scroller: its crown, destinations, lists, and
+  // account control travel together instead of leaving fixed fragments.
   assert.match(css, /::-webkit-scrollbar-corner \{\s*background: transparent;/u);
   assert.match(
     css,
-    /\.chan-scroll \{\s*overflow-x: hidden;\s*overflow-y: auto;/u,
+    /\.chan-sidebar \{\s*width: var\(--chan-sidebar-w\);[\s\S]{0,500}display: block;[\s\S]{0,900}overflow-y: auto;/u,
   );
-  assert.match(css, /\.chan-scroll::-webkit-scrollbar \{\s*height: 0;/u);
+  assert.match(css, /\.chan-scroll \{\s*overflow: visible;/u);
+  assert.match(css, /\.chan-sec \{\s*position: static;/u);
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
     sidebar,
@@ -1223,11 +1224,10 @@ test("the workspace rail stays visible when workspace navigation collapses", asy
     sidebarRule ?? "",
     /transition: width var\(--motion-content\) var\(--ease-motion\);/u,
   );
-  // Four owned rows: workspace identity, destinations, the one roster
-  // scroller, and the account footer.
-  assert.match(
+  assert.doesNotMatch(
     css,
-    /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
+    /\.chan-sec \{\s*position: sticky;/u,
+    "section headings should not remain behind when their lists scroll away",
   );
 
   // Changing the class on the existing shell gives the width transition an
