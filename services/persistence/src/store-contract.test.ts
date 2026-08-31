@@ -848,6 +848,143 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a question is invisible to everything that runs work`, async () => {
+    // The whole safety argument for putting questions in the same queue.
+    //
+    // A question row carries a person's sentence where an objective would be,
+    // and every existing reader of this table feeds a coding path — the
+    // control plane's drain, the crash sweep, the queue view. If any of them
+    // picked one up it would be planned, admitted and integrated as though
+    // the question were work to do. So `kind` fails closed everywhere: a
+    // caller sees a question only by naming it.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+
+      const work = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "fix the retry loop",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const question = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "what does the retry loop do?",
+        agentId: "codex",
+        validationCommands: [],
+        kind: "question",
+        answerTo: "msg_root",
+      });
+
+      // Round-tripped, not merely accepted.
+      assert.equal(work.kind, "task");
+      assert.equal(question.kind, "question");
+      assert.equal(question.answerTo, "msg_root");
+
+      // The default listing is work only, and that default is what every
+      // existing caller gets without being changed.
+      const listed = await store.listSubmittedTasks({
+        repositoryId: REPOSITORY.id,
+      });
+      assert.deepEqual(
+        listed.map((task) => task.id),
+        [work.id],
+      );
+      assert.deepEqual(
+        (
+          await store.listSubmittedTasks({
+            repositoryId: REPOSITORY.id,
+            kind: "question",
+          })
+        ).map((task) => task.id),
+        [question.id],
+      );
+      assert.equal(
+        (
+          await store.listSubmittedTasks({
+            repositoryId: REPOSITORY.id,
+            kind: "any",
+          })
+        ).length,
+        2,
+      );
+
+      // The in-process claim path — the one that would execute it.
+      assert.deepEqual(
+        (await store.claimSubmittedTasks(REPOSITORY.id, DEFAULT_PROJECT_ID)).map(
+          (task) => task.id,
+        ),
+        [work.id],
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a worker that asks for questions is served the question first`, async () => {
+    // Ordering, and the reason for it: a question has somebody watching a
+    // channel for it, and nothing to integrate when it comes back. Behind
+    // three coding tasks it would wait for all three.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const owner = await store.createUser({
+        email: "asker@example.invalid",
+        displayName: "Asker",
+        passwordDigest: "unused",
+      });
+      const worker = await store.registerWorker({
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "desktop",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+
+      // Submitted first, so age alone would put it in front.
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "fix the retry loop",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const question = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "what does the retry loop do?",
+        agentId: "codex",
+        validationCommands: [],
+        kind: "question",
+      });
+
+      const claim = {
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      };
+
+      // A worker that has not been taught about questions cannot be handed
+      // one, whatever the ordering says.
+      const defaulted = await store.leaseNextTask(claim);
+      assert.equal(defaulted?.task.kind, "task");
+      await store.completeSubmittedTask(defaulted!.task.id, "integrated");
+      await store.finishWorkLease(
+        defaulted!.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+
+      const asked = await store.leaseNextTask({
+        ...claim,
+        kinds: ["task", "question"],
+      });
+      assert.equal(asked?.task.id, question.id);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a task's context survives being claimed`, async () => {
     // The whole point of the column is that the agent reads it, and the agent
     // only ever sees a *claimed* task — a context that round-trips on submit

@@ -100,6 +100,7 @@ import type {
   StoredWorkspace,
   SubmitTaskInput,
   SubmittedTask,
+  TaskKind,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
   RecordTokenUsageInput,
@@ -892,6 +893,13 @@ export class SqliteCoordinationStore implements CoordinationStore {
       }
       // A NULL owner matches either way: nobody's account is at stake, so
       // there is nothing to reserve and nothing to get wrong.
+      // Fail closed, and this is the clause the whole feature rests on. See
+      // the Postgres branch: the control plane's drain takes whatever is
+      // oldest with no taskId, so filtering the listings does not stop a
+      // question reaching the coding path. Absent means `task`.
+      const kinds = input.kinds ?? ["task"];
+      clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+      values.push(...kinds);
       if (input.claimableBy !== undefined) {
         clauses.push("(submitted_by IS NULL OR submitted_by = ?)");
         values.push(input.claimableBy);
@@ -922,7 +930,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       const row = this.db
         .prepare(
           `SELECT * FROM submitted_tasks WHERE ${clauses.join(" AND ")}
-           ORDER BY submitted_at, rowid LIMIT 1`,
+           ORDER BY CASE kind WHEN 'question' THEN 0 ELSE 1 END,
+                    submitted_at, rowid LIMIT 1`,
         )
         .get(...values) as Row | undefined;
       if (row === undefined) {
@@ -2031,6 +2040,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
     }
     const task: SubmittedTask = {
       id: createId("task"),
+      kind: input.kind ?? "task",
+      answerTo: input.answerTo,
       repositoryId: input.repositoryId,
       projectId,
       objective: input.objective,
@@ -2088,8 +2099,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
           `INSERT INTO submitted_tasks
              (id, repository_id, project_id, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
-              context, conversation_id, model, effort, after_task_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              context, conversation_id, model, effort, after_task_id,
+              kind, answer_to)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           task.id,
@@ -2106,6 +2118,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
           task.model ?? null,
           task.effort ?? null,
           task.afterTaskId ?? null,
+          task.kind,
+          task.answerTo ?? null,
         );
       this.commit(owned);
     } catch (error) {
@@ -2132,6 +2146,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
       clauses.push("status = ?");
       values.push(filter.status);
     }
+    // Defaults to work, so every caller that predates questions keeps seeing
+    // exactly what it saw. See the Postgres branch.
+    if ((filter.kind ?? "task") !== "any") {
+      clauses.push("kind = ?");
+      values.push(filter.kind ?? "task");
+    }
 
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     const rows = this.db
@@ -2152,6 +2172,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare(
           `SELECT * FROM submitted_tasks
            WHERE repository_id = ?${projectClause} AND status = 'submitted'
+             AND kind = 'task'
              AND NOT EXISTS (
                SELECT 1 FROM submitted_tasks predecessor
                WHERE predecessor.id = submitted_tasks.after_task_id
@@ -2382,6 +2403,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
   private toSubmittedTask(row: Row): SubmittedTask {
     return {
       id: text(row, "id"),
+      // Defaulted rather than required: the column arrived in migration 52 and
+      // every row written before it is work, which is what the column default
+      // says too. Read defensively so a store whose migration has not run yet
+      // still returns a valid task rather than one with an undefined kind.
+      kind: (optionalText(row, "kind") ?? "task") as TaskKind,
+      answerTo: optionalText(row, "answer_to"),
       repositoryId: text(row, "repository_id"),
       projectId: optionalText(row, "project_id"),
       objective: text(row, "objective"),

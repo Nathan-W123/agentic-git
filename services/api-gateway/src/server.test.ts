@@ -4835,6 +4835,94 @@ test("a personal agent refuses a stranger's @mention and dispatches nothing", as
   );
 });
 
+/**
+ * The same refusal, reached by the door that used to be open.
+ *
+ * `/dnc` takes a fast path in the mention loop: it calls `answerInChannel`
+ * directly and `continue`s, which also skips `dispatchOneMention` — the only
+ * place the personal-agent refusal above lives. So a stranger could spend
+ * somebody else's provider credential on a full turn, up to the question
+ * deadline, from any room they could post in. The mention path was tested and
+ * the slash-command path was not, which is the whole of how it survived.
+ *
+ * Asserted on `chatPrompts` being empty, not just on the refusal appearing: a
+ * refusal posted after the turn was made would read identically in the
+ * channel and cost exactly the same.
+ */
+test("/dnc cannot reach a stranger's personal agent either", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-personal-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "This turn must never be made.";
+
+  const colleague = await addColleague(runtime, "colleague-dnc@example.com");
+
+  const posted = await colleague.client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @Claude (Owner) what does the retry loop do?" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.deepEqual(
+    runtime.chatPrompts,
+    [],
+    "a refused /dnc must not reach the provider at all",
+  );
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "system",
+  );
+  assert.equal(systemMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.match(systemMessages[0].content, /personal to Owner/u);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.deepEqual(agentMessages, [], JSON.stringify(agentMessages));
+});
+
+/**
+ * The other half: `/dnc` must still work where it always did.
+ *
+ * The fix is a visibility condition on a fast path, and the way to get it
+ * wrong is to make it too broad — filtering the mention list rather than the
+ * one branch, and quietly disabling the command for everybody.
+ */
+test("/dnc still answers on an org-wide agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-org-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "It caps at five attempts.";
+
+  const colleague = await addColleague(runtime, "colleague-dnc-org@example.com");
+
+  const posted = await colleague.client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @Claude (Owner) what does the retry loop do?" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(`${base}/messages`);
+  const [answer] = agentSpeech(after.data.messages);
+  assert.match(String(answer?.content), /caps at five attempts/u);
+  assert.equal(runtime.submittedTasks.length, 0, "/dnc files no task");
+});
+
 test("an org-wide agent accepts a stranger's @mention and dispatches under the owner's credential", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

@@ -14605,7 +14605,25 @@ export class ApiGateway {
         // `/dnc` stays on the direct, read-only answer path. `/ask` is
         // deliberately different: it is coordinated work whose first round
         // is forced to open the question demand before implementation.
-        if (parsed?.command.name === "dnc") {
+        //
+        // The visibility half is not decoration. Taking the direct path also
+        // skips `dispatchOneMention`, which is the only place the
+        // personal-agent refusal lives — so `/dnc @somebody-elses-personal-
+        // agent` used to spend that person's credential on a full provider
+        // turn, from anyone who could post in the room. The condition here is
+        // the exact negation of that refusal, so a stranger's mention of a
+        // personal agent falls through to the ordinary path and is told why
+        // rather than being silently served.
+        //
+        // Deliberately not solved by filtering `mentioned` the way the
+        // `@agents` branch filters its candidates: that would silence the
+        // ordinary mention path too, turning an actionable refusal into
+        // nothing happening.
+        if (
+          parsed?.command.name === "dnc" &&
+          (candidate.visibility !== "personal" ||
+            candidate.userId === senderId)
+        ) {
           await this.answerInChannel(
             candidate,
             content,
@@ -17376,6 +17394,18 @@ export class ApiGateway {
     messageId: string;
     failure: Record<string, unknown>;
   }): Promise<void> {
+    // The fourth turn nobody asked for, and the one that hid. Its three
+    // siblings fire on a rhythm — every dispatch, every message, every
+    // promotion — so they read as loops on sight. This one fires on failure,
+    // which looks like an event until a run of failures makes it a loop too,
+    // on somebody's account, with nobody waiting on the verdict.
+    //
+    // Refused with the others. Silence is already this method's answer when
+    // it has no investigator to ask, and the thread still carries the failure
+    // line itself; what is lost is the commentary, not the fact.
+    if (localAgentsOnly()) {
+      return;
+    }
     const investigator = await this.investigatorFor(
       input.projectId,
       input.repositoryId,
