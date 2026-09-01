@@ -7715,6 +7715,7 @@ body:has(.pcard-anchor:is(:hover, :focus-within))
  * back beside the plus at the far left. */
 .thread-composer-wrap .composer.composer-lite .composer-bar .composer-run-btn {
   order: 2;
+  margin-right: -4px;
   visibility: visible;
 }
 
