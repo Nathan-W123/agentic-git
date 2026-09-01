@@ -242,3 +242,60 @@ test("each preload global is exposed independently of the others", async () => {
   // A failure is said somewhere a person can find it, not swallowed.
   assert.match(preload, /could not expose \$\{name\}/u);
 });
+
+/**
+ * Everything main.mjs calls from a sibling module has to be imported from it.
+ *
+ * `detectAgents` was not. It was called by the handler the dashboard asks
+ * "what is installed here", and by the menu that reports the same, and was
+ * never brought into the module — so both threw ReferenceError on every call,
+ * on every launch, from the day the handler was written.
+ *
+ * Nothing said so, because the renderer catches that rejection and treats it
+ * as "no answer". The setup that answer gates — the CLI check, the install
+ * offer, the sign-in — was skipped in silence, so agents connected, looked
+ * connected, and could run nothing. It took reading a live main process to
+ * see it.
+ *
+ * Checked generically rather than by name: the same mistake in any other
+ * sibling call would be just as quiet.
+ */
+test("main.mjs imports every sibling function it calls", async () => {
+  const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
+  const siblings = ["agents.mjs", "installers.mjs", "worker.mjs", "usage.mjs"];
+
+  // What each sibling offers.
+  const exported = new Map<string, string>();
+  for (const file of siblings) {
+    const source = await readFile(path.join(electronDir, file), "utf8");
+    for (const m of source.matchAll(
+      /^export (?:async )?function ([A-Za-z_$][\w$]*)/gmu,
+    )) {
+      exported.set(String(m[1]), file);
+    }
+  }
+  assert.ok(exported.size > 5, "the siblings should export a good few things");
+
+  // What main.mjs has actually imported, from anywhere.
+  const imported = new Set<string>();
+  for (const m of main.matchAll(/import \{([^}]*)\} from/gu)) {
+    for (const name of String(m[1]).split(",")) {
+      const clean = name.trim().split(/\s+as\s+/u)[0]?.trim();
+      if (clean) imported.add(clean);
+    }
+  }
+
+  // Anything it calls that a sibling exports must be one of those.
+  const missing: string[] = [];
+  for (const [name, file] of exported) {
+    const called = new RegExp(`(?<![\\w$.])${name}\\s*\\(`, "u").test(main);
+    if (called && !imported.has(name)) {
+      missing.push(`${name} (exported by ${file})`);
+    }
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    `main.mjs calls these without importing them: ${missing.join(", ")}`,
+  );
+});
