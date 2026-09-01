@@ -70,6 +70,24 @@ export interface ChatterFilter {
    * existed.
    */
   readsAsChatter(text: string): Promise<boolean>;
+  /**
+   * Whether this message is confidently a piece of work.
+   *
+   * The mirror of the above, against the same prototypes and the same margin,
+   * and it is deliberately not the negation of it. Three answers come out of
+   * one embedding: confidently conversation, confidently work, and the wide
+   * middle that is neither — where "false" from *both* means the local model
+   * has no opinion worth acting on.
+   *
+   * That middle is the whole reason this is a separate question. A deployment
+   * that cannot spend a provider turn on classification (see
+   * `COORD_LOCAL_AGENTS_ONLY`) needs a decision it can make for free, and the
+   * only honest free decision is one that acts on what it is sure about and
+   * stays out of the way otherwise. False is the safe answer here too: every
+   * failure produces it, and it means "do nothing", which is what a
+   * deployment with no verdict available did before.
+   */
+  readsAsWork(text: string): Promise<boolean>;
   /** Whether the model is loaded and usable. For diagnostics and tests. */
   available(): Promise<boolean>;
 }
@@ -222,40 +240,55 @@ export function createChatterFilter(
     return await loading;
   };
 
+  /**
+   * How far this message leans, on one embedding.
+   *
+   * Positive means nearer the work prototypes, negative nearer conversation.
+   * Both questions read the same number, so they can never disagree about the
+   * same message — which they could if each embedded it separately and one
+   * timed out.
+   */
+  const lean = async (text: string): Promise<number | undefined> => {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+    // Starts the load if it has not started, but does not stand in the
+    // message's way while it runs.
+    const loaded = await within(ready(), warmupBudgetMs);
+    if (loaded === undefined) {
+      return undefined;
+    }
+    try {
+      const embedded = await within(
+        loaded.embedder([trimmed]),
+        decisionBudgetMs,
+      );
+      const vector = embedded?.[0];
+      if (vector === undefined) {
+        return undefined;
+      }
+      return nearest(vector, loaded.work) - nearest(vector, loaded.chatter);
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
     // Diagnostics wait for the real answer: "is this deployment able to
     // filter at all" is a different question from "can it filter this
     // message right now", and only the second one has somebody waiting on it.
     available: async () => (await ready()) !== undefined,
     readsAsChatter: async (text) => {
-      const trimmed = text.trim();
-      if (trimmed.length === 0) {
-        return false;
-      }
-      // Starts the load if it has not started, but does not stand in the
-      // message's way while it runs.
-      const loaded = await within(ready(), warmupBudgetMs);
-      if (loaded === undefined) {
-        return false;
-      }
-      try {
-        const embedded = await within(
-          loaded.embedder([trimmed]),
-          decisionBudgetMs,
-        );
-        const vector = embedded?.[0];
-        if (vector === undefined) {
-          return false;
-        }
-        const chatter = nearest(vector, loaded.chatter);
-        const work = nearest(vector, loaded.work);
-        // Strictly greater by the whole margin. A message that is merely
-        // closer to chatter is not confidently chatter, and the agent is the
-        // one qualified to say which.
-        return chatter - work >= margin;
-      } catch {
-        return false;
-      }
+      const leaning = await lean(text);
+      // Strictly greater by the whole margin. A message that is merely
+      // closer to chatter is not confidently chatter, and the agent is the
+      // one qualified to say which.
+      return leaning === undefined ? false : -leaning >= margin;
+    },
+    readsAsWork: async (text) => {
+      const leaning = await lean(text);
+      return leaning === undefined ? false : leaning >= margin;
     },
   };
 }

@@ -206,6 +206,7 @@ interface TestRuntime {
    * there was a local pass. A test about the filter says otherwise.
    */
   setLocalChatter: (reads: (text: string) => boolean) => void;
+  setLocalWork: (reads: (text: string) => boolean) => void;
   /**
    * Holds every classify call open until the test releases it — a stand-in
    * for the case this fixture cannot otherwise reach: a real CLI spin-up
@@ -491,6 +492,10 @@ async function startRuntime(
   // filter gets one that decides nothing, which is also the honest default:
   // "unsure" is what it answers for anything it is not certain about.
   let localChatter: (text: string) => boolean = () => false;
+  // The mirror the local-agents auto-claim path reads. Undefined means
+  // "whatever is not conversation is work", which is the shape an
+  // embedding model with a margin actually has minus its uncertain middle.
+  let localWork: ((text: string) => boolean) | undefined;
   // A gate a test can hold shut, so a classify call takes real, controllable
   // time rather than always resolving on the same tick every other test
   // relies on.
@@ -1092,6 +1097,11 @@ async function startRuntime(
     bootstrapToken: BOOTSTRAP_TOKEN,
     chatterFilter: {
       readsAsChatter: async (text: string) => localChatter(text),
+      // The mirror the local-agents path reads. Anything the stub does not
+      // call conversation is work here, which is what makes the free verdict
+      // testable without standing up an embedding model.
+      readsAsWork: async (text: string) =>
+        localWork === undefined ? !localChatter(text) : localWork(text),
       available: async () => true,
     },
     catchUpSummariser: options.catchUpSummariser ?? (async () => undefined),
@@ -1189,6 +1199,9 @@ async function startRuntime(
     },
     setLocalChatter: (reads) => {
       localChatter = reads;
+    },
+    setLocalWork: (reads: (text: string) => boolean) => {
+      localWork = reads;
     },
     setClassifyGate: () => {
       let release: () => void = () => undefined;
@@ -6119,6 +6132,95 @@ test("a question about repository files is answered in the channel, not turned i
   assert.doesNotMatch(String(agentMessages[0]?.content), /ANSWER_TASK/u);
   assert.deepEqual(agentMessages[0].replies ?? [], []);
   assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
+});
+
+/**
+ * A deployment that executes nothing itself still picks up unaddressed work.
+ *
+ * The paid verdict — a provider turn per message in a populated channel — is
+ * the operator's turn on a local-agents deployment, since there is no
+ * credential of the asker's here. So it was refused outright and unaddressed
+ * messages did nothing at all, which switched the feature off for exactly the
+ * people whose agents run on their own accounts.
+ *
+ * The local classifier already embeds both prototype sets to answer "is this
+ * confidently conversation". The mirror question costs nothing beyond the
+ * embedding it just did, and only its confident half acts.
+ */
+test("unaddressed work is picked up locally, without spending a provider turn", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-autoclaim");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Conversation to the local model; work to its mirror. The uncertain middle
+  // is everything neither answers true for.
+  runtime.setLocalChatter((text) => text.startsWith("hi "));
+  runtime.setLocalWork((text) => text.includes("retry loop"));
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "the retry loop keeps failing on timeouts" },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "an unaddressed message the local model read as work was never picked up",
+  );
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /retry loop/u,
+  );
+  // And the point of the whole exercise: no provider turn was spent deciding.
+  assert.deepEqual(
+    runtime.chatPrompts.slice(before),
+    [],
+    "the verdict must cost nothing on a deployment that executes nothing",
+  );
+});
+
+/**
+ * And the uncertain middle still does nothing, which is what the path did
+ * before. This can only add dispatches the local model is sure about.
+ */
+test("a message the local model is unsure about is left alone", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "local-autoclaim-middle");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Neither confidently conversation nor confidently work.
+  runtime.setLocalChatter(() => false);
+  runtime.setLocalWork(() => false);
+  const before = runtime.chatPrompts.length;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "wonder if that thing from yesterday matters" },
+    })).status,
+    201,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(runtime.submittedTasks.length, 0, "the middle must not act");
+  assert.deepEqual(runtime.chatPrompts.slice(before), []);
 });
 
 function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {

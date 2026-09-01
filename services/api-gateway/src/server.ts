@@ -2791,6 +2791,7 @@ function defaultChatterFilter(): ChatterFilter {
   if (["0", "false", "off", "no"].includes(raw)) {
     return {
       readsAsChatter: async () => false,
+      readsAsWork: async () => false,
       available: async () => false,
     };
   }
@@ -22298,17 +22299,60 @@ export class ApiGateway {
     context?: string;
     referencedMessageId?: string;
   }): Promise<void> {
-    // The most expensive habit this server has: a provider turn for every
-    // message in a channel that has an agent in it, whether or not anybody
-    // addressed one. Gated here rather than inside the verdict so a refusal
-    // costs no loop at all — the understudy would only be asked to refuse a
-    // second time. Nothing is lost that a person cannot recover by
-    // @mentioning somebody, which is the same fallback an unreachable CLI
-    // already has.
+    const { projectId, repositoryId, content, senderId, context } = input;
+    // A deployment that executes nothing itself cannot pay for the verdict.
+    //
+    // The paid reader below is the most expensive habit this server has: a
+    // provider turn for every message in a channel that has an agent in it,
+    // whether or not anybody addressed one. On a local-agents deployment it is
+    // also the *operator's* turn — there is no credential of the asker's here
+    // — so it used to be refused outright, and unaddressed messages simply did
+    // nothing. Correct about the cost, and it left the feature switched off
+    // for exactly the people whose agents run on their own accounts.
+    //
+    // The local classifier already embeds both prototype sets to answer "is
+    // this confidently conversation". Asking the mirror question costs nothing
+    // beyond the embedding it just did, and gives three outcomes rather than
+    // two: confidently conversation, confidently work, and the wide middle.
+    // Only the second acts. The middle does what the whole path used to do —
+    // nothing — so this can only ever add dispatches to messages the local
+    // model is sure about, never take one away.
+    //
+    // The run it starts is on the owner's machine and the owner's account,
+    // like every other dispatch here. Nothing is spent on the control plane.
     if (localAgentsOnly()) {
+      const [candidate] = input.ranked;
+      if (candidate === undefined) {
+        return;
+      }
+      if (!(await this.chatterFilter.readsAsWork(content))) {
+        this.traceAutoClaim(
+          repositoryId,
+          content,
+          "dropped: no paid verdict on this deployment, and the local model " +
+            "did not read it as work",
+        );
+        return;
+      }
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        `acted on by ${candidate.name} on the local model's reading`,
+      );
+      await this.dispatchOneMention({
+        projectId,
+        repositoryId,
+        content,
+        senderId,
+        candidate,
+        trigger: "auto_claim",
+        ...(input.referencedMessageId === undefined
+          ? {}
+          : { referencedMessageId: input.referencedMessageId }),
+        ...(context === undefined ? {} : { context }),
+      });
       return;
     }
-    const { projectId, repositoryId, content, senderId, context } = input;
     // The agent that would take it reads the message, on the cheap model —
     // see CEREMONIAL_MODELS — and says which of three things to do about it.
     //
