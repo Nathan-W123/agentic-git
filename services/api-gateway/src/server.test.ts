@@ -6402,6 +6402,75 @@ test("a message that is only a screenshot is not treated as a request", async (t
   assert.equal(runtime.submittedTasks.length, 0);
 });
 
+/**
+ * A second unaddressed request goes to an agent that is free.
+ *
+ * Activity was keyed by the *configured agent id*, and by the person alone
+ * when a deployment exposed no configured-agent list. That fallback made a
+ * person's agents share one key: one of them working marked all of them busy,
+ * so the "sender's own, free first" tier found nobody free, and the last
+ * resort — the first candidate — handed the work straight back to the agent
+ * already running. Somebody with three connected agents watched one take two
+ * tasks while the other two sat idle.
+ *
+ * Keyed by vendor now, which needs no configuration to compute and is the
+ * honest granularity: an agent is an account's CLI for one vendor.
+ */
+test("a second request goes to a free agent, not the one already working", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "autoclaim-spread");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  // Three agents, all this person's, on three vendors.
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+    { provider: "cursor", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.setLocalChatter(() => false);
+  runtime.setLocalWork(() => true);
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "please add a way to unpin a message" },
+    })).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length >= 1,
+    "the first request was never picked up",
+  );
+  // The vendor, not `agentId`: a dispatch that names a vendor leaves the
+  // configured-agent id to be resolved further down, so the fixture records
+  // only the former — and asserting on the latter compares undefined with
+  // undefined and fails whatever the code does.
+  const first = runtime.submittedTasks[0]?.vendor;
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "please add a way to reorder the sidebar" },
+    })).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length >= 2,
+    "the second request was never picked up",
+  );
+
+  assert.notEqual(
+    runtime.submittedTasks[1]?.vendor,
+    first,
+    `the second request must not go to the agent already working: ${JSON.stringify(
+      runtime.submittedTasks.map((task) => task.vendor),
+    )}`,
+  );
+});
+
 function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {
   const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
   process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";
