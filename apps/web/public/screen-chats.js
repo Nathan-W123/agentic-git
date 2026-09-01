@@ -8346,7 +8346,11 @@ export function captureChannelScroll() {
         selector,
         // Panels share `.thread-body` — a thread, a direct message, the file
         // editor. Restoring one panel's offset into the next would be a
-        // position the reader never had, so the shape has to match too.
+        // position the reader never had, so the key below is what the restore
+        // pairs on: it names the conversation, and it is the same string
+        // before and after a render. The class list is kept only as the
+        // tie-breaker for a panel that carries no key, because a surface can
+        // change class without changing what it is showing.
         shape: scroller.className,
         key: scroller.dataset.scrollKey,
         top: scroller.scrollTop,
@@ -8383,10 +8387,19 @@ export function restoreChannelAnchor(saved) {
     // Its own panel, wherever the column has since put it: the same kind of
     // surface showing the same conversation. Anything else is a position the
     // reader never had.
+    //
+    // Paired on the key, which names the conversation and nothing else. The
+    // class list is only the tie-breaker for a surface that carries no key,
+    // because it is not stable across a render: the transcript wears
+    // `chan-messages-loading` until its first page resolves, and a file panel
+    // changes class between its diff, its editor and its error. Requiring it
+    // to match meant the restore was skipped on precisely the renders that
+    // swap one of those for the other — so the reader was dropped at the top
+    // of the history exactly when the room finished loading under them.
     for (const scroller of scrollSurfaceNodes(entry.selector)) {
       if (
-        scroller.className !== entry.shape ||
-        scroller.dataset.scrollKey !== entry.key
+        scroller.dataset.scrollKey !== entry.key ||
+        (entry.key === undefined && scroller.className !== entry.shape)
       ) {
         continue;
       }

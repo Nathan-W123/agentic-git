@@ -46,6 +46,31 @@ import {
 /* -------------------------------------------------------------- data ---- */
 
 /**
+ * Everything the screen draws from this data, as one short string.
+ *
+ * Compared across a re-read so that a re-read which finds the same changeset
+ * and the same files repaints nothing. The repaint is a whole-document swap,
+ * and one that says nothing new is the flicker a reader reports as the page
+ * reloading. Ids, statuses and sizes rather than file bodies, so asking the
+ * question stays cheap enough to ask on every read.
+ */
+function codeSignature() {
+  return [
+    state.changeSet?.id ?? "",
+    state.runDetail?.id ?? "",
+    state.runDetail?.status ?? "",
+    state.workspace?.exists === true ? "1" : "0",
+    (state.files ?? []).map((file) => file.path).join(","),
+    (state.changeSet?.patches ?? [])
+      .map(
+        (patch) =>
+          `${patch.path}:${patch.status ?? ""}:${patch.patch?.length ?? 0}`,
+      )
+      .join(","),
+  ].join("|");
+}
+
+/**
  * Loads what the Code screen needs, tolerating a deployment without overlay
  * workspaces: the changeset alone is enough to review, and the workspace only
  * adds the untouched files around it.
@@ -55,9 +80,21 @@ export async function ensureCodeData(rerender) {
   if (repository === undefined || state.codeLoading) {
     return;
   }
-  if (state.codeRepo === repository.id && state.codeLoaded) {
+  // What the screen is already drawing for this repository, as opposed to
+  // what it has merely been told to go and check.
+  const drawn = state.codeRepo === repository.id && state.codeLoaded === true;
+  if (drawn && state.codeStale !== true) {
     return;
   }
+  if (!drawn) {
+    // Another room's changeset is not this one's, so arriving somewhere new
+    // does start from nothing. A re-read of the room already on screen keeps
+    // drawing what it has while the read runs — blanking it to ask a question
+    // whose answer is usually the same one is a flash for nothing.
+    state.codeLoaded = false;
+  }
+  const before = codeSignature();
+  state.codeStale = false;
   state.codeLoading = true;
   state.codeRepo = repository.id;
   try {
@@ -110,7 +147,14 @@ export async function ensureCodeData(rerender) {
     toast(error.message, "error");
   } finally {
     state.codeLoading = false;
-    rerender();
+    // Only when this read changed something. A first load has to be drawn —
+    // until it lands the panel is showing its loading state — but a re-read
+    // that comes back with the same files, and a read that failed and changed
+    // nothing at all, have no reason to rebuild the document underneath
+    // somebody who is reading it.
+    if (!drawn || codeSignature() !== before) {
+      rerender();
+    }
   }
 }
 
@@ -128,9 +172,18 @@ function rank(path) {
   return 0;
 }
 
+/**
+ * Says the changeset on screen may have moved on, without taking it away.
+ *
+ * Stale, not gone. Clearing the two flags outright made the next render draw
+ * the Files panel's loading state for every re-read — including the ones that
+ * came back with exactly what was already there — so a room where an agent
+ * was working blinked its files away and back for news that was not news.
+ * `ensureCodeData` re-reads on the next render and only repaints if the
+ * answer actually changed.
+ */
 export function invalidateCode() {
-  state.codeLoaded = false;
-  state.codeRepo = undefined;
+  state.codeStale = true;
 }
 
 function patchFor(path) {
