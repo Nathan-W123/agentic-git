@@ -19892,7 +19892,35 @@ export class ApiGateway {
         agentIdByAdapter.set(agent.adapter, agent.id);
       }
     }
-    const perAgent = agentIdByAdapter.size > 0;
+    // Which *agent* a task belonged to, as a vendor rather than as a config
+    // key.
+    //
+    // This used to key on `task.agentId` and fall back to keying on the
+    // person alone when the deployment exposed no configured-agent list. That
+    // fallback is the bug: a person's agents then shared one key, so one of
+    // them working marked all of them busy, tier two found nobody free, and
+    // tier three's last resort — the first candidate — handed the work to the
+    // same agent again. Somebody with three agents watched one take two tasks
+    // while the other two sat idle.
+    //
+    // The vendor is the honest granularity and needs no config to compute: an
+    // agent is an account's CLI for one vendor, and two tasks on the same
+    // vendor really do queue behind each other. `agentId` is matched against
+    // the configured adapter where there is one and against the vendor names
+    // otherwise, which is how `channelTaskAuthorId` already reads it.
+    const adapterById = new Map(
+      (configured ?? []).map((agent) => [agent.id, agent.adapter]),
+    );
+    const vendorOfTask = (agentId: string): string | undefined => {
+      const adapter = adapterById.get(agentId);
+      if (adapter !== undefined) {
+        return adapter;
+      }
+      const lowered = agentId.toLowerCase();
+      return Object.values(PROVIDER_TO_VENDOR).find((vendor) =>
+        lowered.includes(vendor),
+      );
+    };
     const recent = new Map<string, string[]>();
     // Anything not yet finished — with two exclusions that both answer the
     // actual question, which is "would handing it this mean waiting".
@@ -19921,9 +19949,14 @@ export class ApiGateway {
       if (task.submittedBy === undefined) {
         continue;
       }
-      const key = perAgent
-        ? `${task.submittedBy}\0${task.agentId}`
-        : task.submittedBy;
+      // A task whose vendor cannot be read names no agent anybody can be
+      // compared against, so it contributes to nobody's queue rather than to
+      // everybody's.
+      const vendor = vendorOfTask(task.agentId);
+      if (vendor === undefined) {
+        continue;
+      }
+      const key = `${task.submittedBy}\0${vendor}`;
       const list = recent.get(key) ?? [];
       if (list.length < RECENT_ACTIVITY_LOOKBACK) {
         list.push(task.objective);
@@ -19942,30 +19975,12 @@ export class ApiGateway {
         }
       }
     }
-    const keyFor = (candidate: ChannelMentionCandidate): string | undefined => {
-      if (!perAgent) {
-        return candidate.userId;
-      }
-      // A vendor this deployment has no agent for has never run anything
-      // here — a submission naming it fails before a task exists.
-      const agentId = agentIdByAdapter.get(candidate.vendor);
-      return agentId === undefined
-        ? undefined
-        : `${candidate.userId}\0${agentId}`;
-    };
+    const keyFor = (candidate: ChannelMentionCandidate): string =>
+      `${candidate.userId}\0${candidate.vendor}`;
     return {
-      recentObjectives: (candidate) => {
-        const key = keyFor(candidate);
-        return key === undefined ? [] : (recent.get(key) ?? []);
-      },
-      busy: (candidate) => {
-        const key = keyFor(candidate);
-        return key !== undefined && working.has(key);
-      },
-      running: (candidate) => {
-        const key = keyFor(candidate);
-        return key !== undefined && claimed.has(key);
-      },
+      recentObjectives: (candidate) => recent.get(keyFor(candidate)) ?? [],
+      busy: (candidate) => working.has(keyFor(candidate)),
+      running: (candidate) => claimed.has(keyFor(candidate)),
     };
   }
 
