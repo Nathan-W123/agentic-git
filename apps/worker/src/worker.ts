@@ -201,6 +201,30 @@ export interface IterationResult {
 
 const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_PLAN_WAIT_BUDGET_MS = 60_000;
+/**
+ * How long any one git command may take before the task is failed.
+ *
+ * Every git call here used to run with no deadline at all, and that is the
+ * shape of a task that is claimed and then simply never heard from again. The
+ * heartbeat runs on its own timer, so it goes on renewing the lease every
+ * sixty seconds for as long as the process is alive — which means a git
+ * command blocked on stalled I/O, a half-open connection, an antivirus
+ * holding a pack file, or a network-backed directory is not a slow task, it
+ * is a permanent one. Nothing on the control plane can rescue it either:
+ * lease expiry is clock-based against that heartbeat, and the stranded-work
+ * sweep explicitly skips anything whose lease is still active. So the task
+ * sits claimed forever, with no failure, because nothing anywhere is capable
+ * of deciding that it has gone wrong.
+ *
+ * Generous on purpose. A first cold fetch of a large repository over a poor
+ * connection is legitimately minutes, and failing that would be worse than
+ * the bug. Twenty minutes is far past anything healthy and far short of
+ * forever, and a task that ends here ends *loudly*: `runProcess` reports a
+ * timeout as exit 124, `GitClient.run` throws on it, and the worker's catch
+ * reports a failure the room can read.
+ */
+const GIT_COMMAND_TIMEOUT_MS = 20 * 60 * 1_000;
+
 /** A working day, so a review request raised in the morning is still live. */
 const DEFAULT_PLAN_APPROVAL_WAIT_MS = 8 * 60 * 60 * 1000;
 const MIN_PLAN_RETRY_MS = 1_000;
@@ -739,7 +763,9 @@ export class Worker {
     const safe = repositoryId.replace(/[^A-Za-z0-9._-]/gu, "_");
     const cache = path.join(this.options.workspaceRoot, "repositories", safe);
     await mkdir(path.dirname(cache), { recursive: true });
-    await git.run(["init", "--bare", "--end-of-options", cache]);
+    await git.run(["init", "--bare", "--end-of-options", cache], {
+      timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+    });
     return cache;
   }
 
@@ -850,23 +876,25 @@ export class Worker {
     // full name and checking out detached reaches the same state and is
     // tidier about it: the workspace ends up carrying no refs at all, where a
     // clone left the lease ref and a remote-tracking copy of it behind.
-    await git.run(["init", "--end-of-options", workspacePath]);
-    await git.run([
-      "-C",
-      workspacePath,
-      "fetch",
-      "--no-tags",
-      "--end-of-options",
-      source,
-      assignment.bundleRef,
-    ]);
-    await git.run([
-      "-C",
-      workspacePath,
-      "checkout",
-      "--detach",
-      "FETCH_HEAD",
-    ]);
+    await git.run(["init", "--end-of-options", workspacePath], {
+      timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+    });
+    await git.run(
+      [
+        "-C",
+        workspacePath,
+        "fetch",
+        "--no-tags",
+        "--end-of-options",
+        source,
+        assignment.bundleRef,
+      ],
+      { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
+    );
+    await git.run(
+      ["-C", workspacePath, "checkout", "--detach", "FETCH_HEAD"],
+      { timeoutMs: GIT_COMMAND_TIMEOUT_MS },
+    );
 
     const workspace: TaskWorkspace = {
       id: assignment.lease.id,
