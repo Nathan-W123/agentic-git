@@ -1,4 +1,7 @@
-import type { WorkAssignment } from "@coord/cli/worker-operations";
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkAssignment,
+} from "@coord/cli/worker-operations";
 import type { AgentTokenUsage } from "@coord/agent-protocol";
 import type {
   AgentPlan,
@@ -422,6 +425,40 @@ export class WorkerClient {
    * The answer is the coordinator's, not an acknowledgement: only an approved
    * status licenses the worker to spend agent execution time.
    */
+  /**
+   * Asks for the whole repository before paying to plan it.
+   *
+   * The one call in the protocol whose ordinary answer is "no". A control
+   * plane that says nothing — 204, a route it does not have, a version too
+   * old, blanket claims switched off, somebody else already in the repository
+   * — leaves the worker planning exactly as it did before this existed, so
+   * every failure here is a fall-through rather than an error.
+   *
+   * The protocol version travels in the body because the grant depends on it:
+   * a claim can be narrowed while it is held, and a worker that could not be
+   * told about that must never be given one.
+   */
+  public async claimRepository(
+    leaseId: string,
+  ): Promise<AgentPlan | undefined> {
+    try {
+      const { json, status } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/claim`,
+        {
+          method: "POST",
+          body: { protocolVersion: WORKER_PROTOCOL_VERSION },
+        },
+      );
+      if (status === 204) {
+        return undefined;
+      }
+      const plan = (json as { plan?: AgentPlan } | undefined)?.plan;
+      return plan === undefined ? undefined : plan;
+    } catch {
+      return undefined;
+    }
+  }
+
   public async submitPlan(
     leaseId: string,
     plan: AgentPlan,

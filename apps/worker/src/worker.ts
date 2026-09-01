@@ -1152,6 +1152,44 @@ export class Worker {
     const leaseBase = assignment.canonicalVersion.revision;
     const remembered = this.plans.get(taskId);
     let plan: AgentPlan;
+    // The whole repository, asked for before it is described.
+    //
+    // A task alone in its repository is handed all of it and never asked to
+    // plan: the plan an agent would write here exists so a second task can
+    // arbitrate against it, and where there is no second task the round trip
+    // buys nothing. It is the single largest fixed cost before the first edit
+    // — an agent round trip, minutes rather than seconds.
+    //
+    // The in-process coordinator has done this since blanket claims existed.
+    // A worker never could: its vocabulary had no claim step, so moving
+    // execution onto people's own machines quietly put every desktop task
+    // back through planning. This is that step, and the answer is usually no
+    // — which costs one cheap call and changes nothing.
+    //
+    // Asked only where the adapter can be *told* its scope. An agent that can
+    // only be asked for a plan has nothing to accept, and granting it a claim
+    // it cannot hear about would hold the repository for nobody.
+    const acceptClaim = adapter.acceptBlanketClaim?.bind(adapter);
+    const claimed =
+      acceptClaim === undefined
+        ? undefined
+        : await this.options.client.claimRepository(assignment.lease.id);
+    if (claimed !== undefined && acceptClaim !== undefined) {
+      await acceptClaim(session.id, claimed);
+      this.laps?.mark("claim");
+      // Not remembered in `this.plans`. That cache exists so a task deferred
+      // at admission can amend the plan it already paid for rather than buy a
+      // second one, and a claim was never bought — a task that comes back
+      // here simply asks for the claim again, and is refused if the
+      // repository is no longer free.
+      return {
+        adapter,
+        sessionId: session.id,
+        plan: claimed,
+        workspaceId: workspace.id,
+        workspacePath,
+      };
+    }
     if (remembered !== undefined && remembered.baseRevision === leaseBase) {
       // Same task, same tree: the plan is still exactly what the model would
       // write, so nothing needs asking.

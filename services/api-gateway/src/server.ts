@@ -3913,6 +3913,19 @@ export interface ApiOperations {
     have?: string,
   ): Promise<Buffer | undefined>;
   /**
+   * Hands a solo remote task the whole repository, so it can skip the planning
+   * round trip the way an in-process one always has.
+   *
+   * Optional, and answering `undefined` is the ordinary case rather than a
+   * fault: it means the conditions were not met and the worker plans exactly
+   * as it does today. A deployment that omits this behaves the same way.
+   */
+  claimWorkRepository?(input: {
+    leaseId: string;
+    actorId: string;
+    protocolVersion: number;
+  }): Promise<unknown | undefined>;
+  /**
    * Arbitrates a worker's plan before it executes. A deployment that omits
    * this cannot run plan-first workers, and the endpoint says so.
    */
@@ -7092,7 +7105,7 @@ export class ApiGateway {
     const leaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|scope|result|release|progress)$`,
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|claim|plan|scope|result|release|progress)$`,
         "u",
       ),
     );
@@ -7291,6 +7304,39 @@ export class ApiGateway {
             "Content-Length": bundle.byteLength,
           })
           .end(bundle);
+        return;
+      }
+
+      if (action === "claim" && method === "POST") {
+        // Asked once, between the bundle and the plan, and cheap to refuse.
+        //
+        // A worker that gets nothing back plans exactly as it did before this
+        // route existed, so every reason to say no — blanket claims switched
+        // off, somebody else in the repository, an objective the estimator
+        // could not anchor, a control plane too old to have the operation —
+        // is the same answer: 204, carry on.
+        const claimOperation = this.options.operations.claimWorkRepository;
+        const body = objectBody(await this.readJson(request));
+        const plan =
+          claimOperation === undefined
+            ? undefined
+            : await claimOperation({
+                leaseId,
+                actorId: principal.user.id,
+                // Absent reads as 0, which is below the version a claim
+                // requires — so a worker that does not say cannot be granted
+                // one by accident.
+                protocolVersion:
+                  typeof body["protocolVersion"] === "number" &&
+                  Number.isFinite(body["protocolVersion"])
+                    ? Math.trunc(body["protocolVersion"])
+                    : 0,
+              });
+        if (plan === undefined) {
+          response.writeHead(204).end();
+          return;
+        }
+        this.sendJson(response, 200, { plan });
         return;
       }
 
