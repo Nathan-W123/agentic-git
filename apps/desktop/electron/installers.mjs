@@ -27,16 +27,48 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 
+/** Where Windows keeps the interpreters, resolved rather than trusted to PATH. */
+function windowsSystem32(...parts) {
+  const root = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
+  return path.join(root, "System32", ...parts);
+}
+
 /** Where the interpreter for a shell one-liner lives on this machine. */
 function powershell() {
-  const root = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
-  return path.join(
-    root,
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
-  );
+  return windowsSystem32("WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+/**
+ * `npm install -g <package>`, run in a way Windows will actually start.
+ *
+ * On Windows npm is not a program. It is `npm.cmd`, a batch shim — and since
+ * the CVE-2024-27980 fix (Node 18.20.2, 20.12.2, 21.7.3, and everything
+ * since) `child_process.spawn` refuses to execute a `.bat` or `.cmd` at all
+ * unless it is told to go through a shell. It does not fail with a message
+ * about batch files; it fails with `spawn EINVAL`, which reads like a bug in
+ * this app rather than a rule about the platform. Electron 38 carries Node
+ * 22, so every Windows install this app offered — Claude Code and Codex both
+ * — died there, on the first machine that ever tried it.
+ *
+ * The remedy is to stop handing a batch file to `spawn` and start a real
+ * program that knows how to run one. `cmd.exe` is that program, and it is
+ * resolved from `SystemRoot` for the same reason `powershell.exe` is: a
+ * machine whose PATH is broken is exactly the machine somebody is trying to
+ * set up. `/d` skips any AutoRun command the registry has, so the install
+ * runs in a shell nobody else has furnished.
+ *
+ * `shell: true` would also work and is one word shorter. It is not used
+ * because it would build the command line by string concatenation out of
+ * values this module owns today and might not tomorrow — and this is the one
+ * module a remote document chooses an input for.
+ */
+function npmInstall(packageName, platform) {
+  return platform === "win32"
+    ? {
+        command: windowsSystem32("cmd.exe"),
+        args: ["/d", "/c", "npm", "install", "-g", packageName],
+      }
+    : { command: "npm", args: ["install", "-g", packageName] };
 }
 
 /**
@@ -59,18 +91,12 @@ const INSTALLERS = {
   claude: {
     display: "npm install -g @anthropic-ai/claude-code",
     signIn: "claude",
-    argv: () => ({
-      command: process.platform === "win32" ? "npm.cmd" : "npm",
-      args: ["install", "-g", "@anthropic-ai/claude-code"],
-    }),
+    argv: (platform) => npmInstall("@anthropic-ai/claude-code", platform),
   },
   codex: {
     display: "npm install -g @openai/codex",
     signIn: "codex",
-    argv: () => ({
-      command: process.platform === "win32" ? "npm.cmd" : "npm",
-      args: ["install", "-g", "@openai/codex"],
-    }),
+    argv: (platform) => npmInstall("@openai/codex", platform),
   },
   cursor: {
     display:
@@ -78,8 +104,8 @@ const INSTALLERS = {
         ? "irm 'https://cursor.com/install?win32=true' | iex"
         : "curl https://cursor.com/install -fsS | bash",
     signIn: "agent",
-    argv: () =>
-      process.platform === "win32"
+    argv: (platform) =>
+      platform === "win32"
         ? {
             command: powershell(),
             args: [
@@ -145,6 +171,23 @@ export function installPlan(vendor) {
 }
 
 /**
+ * Exactly what would be spawned for a vendor on a given platform.
+ *
+ * Takes the platform rather than reading it, so the Windows branch can be
+ * exercised from a suite that is not running on Windows — the same shape
+ * `CodexAdapter` uses for the same reason. It is a release build's Windows
+ * runner that would otherwise be the only place this was ever checked, and
+ * that is one machine, late.
+ *
+ * Exported for tests. Nothing in the app calls it: `runInstall` reads the
+ * table directly, because a second caller is a second chance for the argv the
+ * person agreed to and the argv that runs to be different things.
+ */
+export function installArgv(vendor, platform = process.platform) {
+  return installerFor(vendor)?.argv(platform);
+}
+
+/**
  * Runs a vendor's install, reporting its output as it arrives.
  *
  * The output is relayed rather than summarised: these commands fail for
@@ -160,7 +203,12 @@ export async function runInstall(vendor, onOutput) {
       detail: `No install is published here for ${String(vendor)}.`,
     };
   }
-  const { command, args } = installer.argv();
+  const { command, args } = installer.argv(process.platform);
+  // Whether this vendor's install needs Node on the machine, which decides
+  // what "it did not start" means. Read off the published command rather than
+  // off the argv, because the argv is now an interpreter on Windows and the
+  // interpreter is always there.
+  const needsNpm = installer.display.startsWith("npm ");
   return await new Promise((resolve) => {
     let child;
     try {
@@ -172,30 +220,73 @@ export async function runInstall(vendor, onOutput) {
       resolve({ ok: false, detail: describe(error) });
       return;
     }
+    // Kept as well as relayed. The exit code alone was the whole of what a
+    // failure used to say, and "exited with code 1" is not something anybody
+    // can act on — the reason was in the output, being streamed past.
+    let tail = "";
+    const heard = (chunk) => {
+      const text = String(chunk);
+      tail = `${tail}${text}`.slice(-OUTPUT_TAIL);
+      onOutput(text);
+    };
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => onOutput(String(chunk)));
-    child.stderr?.on("data", (chunk) => onOutput(String(chunk)));
+    child.stdout?.on("data", heard);
+    child.stderr?.on("data", heard);
     child.once("error", (error) => {
-      // The usual one is npm missing entirely, which reads as ENOENT on a
-      // name the person never typed. Said plainly instead.
+      const said = describe(error);
+      resolve({ ok: false, detail: missingNode(needsNpm, said) ?? said });
+    });
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve({ ok: true });
+        return;
+      }
+      // Through an interpreter, a missing npm is not an `error` event at all:
+      // the interpreter starts perfectly well and then reports that it could
+      // not find the command. So the same sentence has to be reachable from
+      // the output as well as from the errno.
       resolve({
         ok: false,
         detail:
-          command.startsWith("npm") && /ENOENT/u.test(describe(error))
-            ? "npm is not installed on this machine. Install Node.js first, " +
-              "then try again."
-            : describe(error),
+          missingNode(needsNpm, tail) ??
+          lastLines(tail) ??
+          `The installer exited with code ${String(code)}.`,
       });
     });
-    child.once("close", (code) => {
-      resolve(
-        code === 0
-          ? { ok: true }
-          : { ok: false, detail: `The installer exited with code ${String(code)}.` },
-      );
-    });
   });
+}
+
+/** The most recent output worth quoting back; an installer says a lot. */
+const OUTPUT_TAIL = 8_000;
+
+/**
+ * The one failure worth naming rather than quoting: no Node on the machine.
+ *
+ * Recognised from either half of the evidence — the errno when nothing
+ * started, or the interpreter's own complaint when it did — because which one
+ * arrives depends on the platform rather than on what went wrong. Returns
+ * nothing for every other failure, which is then handed back as the vendor
+ * wrote it: these commands fail for ordinary, legible reasons and the
+ * vendor's own message says which.
+ */
+function missingNode(needsNpm, text) {
+  return needsNpm &&
+    /ENOENT|is not recognized as an internal or external command|command not found/iu.test(
+      text,
+    )
+    ? "npm is not installed on this machine. Install Node.js from " +
+      "nodejs.org first, then try again."
+    : undefined;
+}
+
+/** The last few lines that said something, for a failure with no name. */
+function lastLines(text) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  return lines.length === 0 ? undefined : lines.slice(-4).join("\n");
 }
 
 /**
@@ -215,12 +306,11 @@ export function openSignIn(vendor) {
   const { signIn } = installer;
   try {
     if (process.platform === "win32") {
-      const root = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
       // `start` is a `cmd` builtin rather than a program, so `cmd /c` is what
       // reaches it. `/k` keeps the new window open after the CLI exits, which
       // is where the vendor prints whatever it wants read.
       spawn(
-        path.join(root, "System32", "cmd.exe"),
+        windowsSystem32("cmd.exe"),
         ["/c", "start", "", "cmd", "/k", signIn],
         { detached: true, stdio: "ignore", windowsHide: false },
       ).unref();

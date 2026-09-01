@@ -20,6 +20,10 @@ interface Plan {
 
 interface InstallersModule {
   installPlan: (vendor: unknown) => Plan | undefined;
+  installArgv: (
+    vendor: unknown,
+    platform: string,
+  ) => { command: string; args: string[] } | undefined;
   openSignIn: (vendor: unknown) => boolean;
 }
 
@@ -142,4 +146,66 @@ test("every offerable vendor is one this app can actually install", async () => 
     "codex",
     "cursor",
   ]);
+});
+
+/**
+ * The bug that made this app impossible to set up on Windows.
+ *
+ * On Windows npm is `npm.cmd`, a batch shim — and since the CVE-2024-27980
+ * fix (Node 18.20.2, 20.12.2, 21.7.3 and everything after) `spawn` refuses to
+ * execute a `.bat` or `.cmd` unless it is told to use a shell. It does not
+ * say so: it fails with `spawn EINVAL`, which reads like a fault in Kumi. The
+ * app shipped `spawn("npm.cmd", ...)`, so both npm-based installs — Claude
+ * Code and Codex — died on the first Windows machine that tried them, at the
+ * exact moment somebody was being onboarded.
+ *
+ * Asserted per platform rather than per runner, because the alternative is
+ * finding out on a release build's Windows job, which is one machine and
+ * late.
+ */
+test("no install hands a batch file to spawn", async () => {
+  const { installArgv } = await load();
+
+  for (const vendor of ["claude", "codex", "cursor"]) {
+    for (const platform of ["win32", "darwin", "linux"]) {
+      const plan = installArgv(vendor, platform);
+      assert.ok(plan !== undefined, `${vendor} has no argv on ${platform}`);
+      assert.doesNotMatch(
+        plan.command.toLowerCase(),
+        /\.(?:bat|cmd)$/u,
+        `${vendor} on ${platform} spawns a batch file, which is EINVAL`,
+      );
+    }
+  }
+
+  // And what the npm ones run instead: a real program, resolved rather than
+  // trusted to PATH, with the batch file as its argument.
+  for (const vendor of ["claude", "codex"]) {
+    const plan = installArgv(vendor, "win32");
+    assert.match(String(plan?.command), /System32.cmd\.exe$/u);
+    assert.deepEqual(plan?.args.slice(0, 3), ["/d", "/c", "npm"]);
+    // Off Windows it is still plain npm — nothing about this fix reaches the
+    // platforms that never had the problem.
+    assert.equal(installArgv(vendor, "darwin")?.command, "npm");
+  }
+});
+
+/**
+ * The package names are the vendors' own, and a typo in one is not a typo —
+ * npm carries a `cursor-agent` that is somebody else's project entirely, and
+ * a person who installed it would see Kumi fail and conclude Kumi was broken.
+ */
+test("the argv installs the package the plan says it installs", async () => {
+  const { installArgv, installPlan } = await load();
+
+  for (const vendor of ["claude", "codex"]) {
+    const shown = String(installPlan(vendor)?.command);
+    const packageName = shown.split(" ").at(-1);
+    for (const platform of ["win32", "linux"]) {
+      assert.ok(
+        installArgv(vendor, platform)?.args.includes(String(packageName)),
+        `${vendor} on ${platform} does not install ${String(packageName)}`,
+      );
+    }
+  }
 });

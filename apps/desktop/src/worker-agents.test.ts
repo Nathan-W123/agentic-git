@@ -207,8 +207,19 @@ test("no CLI on the machine is a named stop the app offers to fix", async () => 
   // happen, and the machine has to start advertising what it just got.
   assert.match(main, /startWorker\(here, session, noteWorkerState\)/u);
   assert.match(main, /openSignIn\(vendor\)/u);
-  // A failed install is said out loud rather than swallowed.
-  assert.match(main, /Could not install \$\{VENDOR_LABELS/u);
+  // A failed install is said out loud rather than swallowed — and said with
+  // whatever the installer printed, which is where the reason always is.
+  assert.match(main, /Could not install \$\{label\}/u);
+  assert.match(main, /runInstall\(vendor, \(chunk\) => conversation\.log\(chunk\)\)/u);
+  // In Kumi's own window rather than the operating system's. The native
+  // message box was the first thing a new person saw of this product, and it
+  // did not look like this product — a white Win32 error box with a red
+  // circle in it, asking them to choose a vendor.
+  assert.doesNotMatch(main, /dialog\.showMessageBox/u);
+  assert.match(main, /openDialog\(\{/u);
+  // And it is one window for the whole exchange: the offer becomes the run
+  // becomes the result, instead of a modal each and nothing in between.
+  assert.match(main, /conversation\.update\(\{[\s\S]*?kind: "progress"/u);
 });
 
 /**
@@ -262,7 +273,13 @@ test("each preload global is exposed independently of the others", async () => {
  */
 test("main.mjs imports every sibling function it calls", async () => {
   const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
-  const siblings = ["agents.mjs", "installers.mjs", "worker.mjs", "usage.mjs"];
+  const siblings = [
+    "agents.mjs",
+    "dialog.mjs",
+    "installers.mjs",
+    "worker.mjs",
+    "usage.mjs",
+  ];
 
   // What each sibling offers.
   const exported = new Map<string, string>();
@@ -404,6 +421,50 @@ test("the app-server reader returns as soon as it has the answer", async () => {
       assert.ok(
         Date.now() - started < 5_000,
         "it must not sit out the deadline after answering",
+      );
+    },
+  );
+});
+
+/**
+ * Claude is asked in the format that publishes the windows, and let go the
+ * moment it has.
+ *
+ * `claude -p "/usage"` sends the slash command as a prompt — the interactive
+ * usage view is never opened — so the reply is a session summary with no
+ * percentage in it, which is why the card had been empty since agents moved
+ * off the control plane. `--output-format stream-json` is what carries the
+ * numbers: a `rate_limit_event` whose `unifiedWindows` holds the five-hour
+ * and seven-day figures. Killing the run there is not just tidiness — it ends
+ * the turn the question started, so asking costs less than it did before.
+ */
+test("the claude reader asks in stream-json and stops at the rate limit event", async () => {
+  await withFakeClis(
+    {
+      claude: [
+        "#!/usr/bin/env node",
+        "const args = process.argv.slice(2);",
+        "if (!args.includes('stream-json')) {",
+        "  process.stdout.write(JSON.stringify({ result: 'Total cost: $0.01' }));",
+        "  return;",
+        "}",
+        "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init' }) + '\\n');",
+        "process.stdout.write(JSON.stringify({ type: 'rate_limit_event',",
+        "  rate_limit_info: { unifiedWindows: { five_hour: { utilization: 36 },",
+        "    seven_day: { utilization: 71 } } } }) + '\\n');",
+        // The real CLI carries on with the turn it started; this must not.
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+    },
+    async (usage) => {
+      const started = Date.now();
+      const reading = await usage.readVendorUsage("claude");
+      assert.equal(reading.ok, true, JSON.stringify(reading));
+      assert.match(String(reading.raw), /rate_limit_event/u);
+      assert.match(String(reading.raw), /seven_day/u);
+      assert.ok(
+        Date.now() - started < 10_000,
+        "it must not sit out the deadline once the windows have arrived",
       );
     },
   );

@@ -2971,6 +2971,103 @@ test("a session summary is reported as the CLI not publishing a figure, not as a
   assert.match(String(odd.unavailableReason), /It said: Not logged in\./u);
 });
 
+/**
+ * The weekly and five-hour windows, read from the event rather than the reply.
+ *
+ * This is the fix for a card that had been empty since agents moved off the
+ * control plane. `claude -p "/usage"` sends the slash command as a *prompt* —
+ * the interactive usage view is never opened — so the reply is an ordinary
+ * session summary and no percentage was ever going to be in it. The numbers
+ * ride alongside instead: with `--output-format stream-json` the CLI publishes
+ * a `rate_limit_event` whose `unifiedWindows` carries the same `utilization`
+ * and `resetsAt` its own `/usage` bars are drawn from.
+ *
+ * The fixture is the shape the CLI emits, interleaved with the other events of
+ * a real run, because that is the only form this parser will ever be handed.
+ */
+test("claude usage reads the five-hour and weekly windows off the stream", () => {
+  const resetsSession = 1_785_902_966;
+  const resetsWeek = 1_786_412_400;
+  const stream = [
+    JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }),
+    JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed",
+        unifiedWindows: {
+          five_hour: { utilization: 36, resetsAt: resetsSession },
+          seven_day: { utilization: 71, resetsAt: resetsWeek },
+        },
+      },
+      uuid: "u1",
+      session_id: "s1",
+    }),
+    JSON.stringify({ type: "result", subtype: "success", result: "Total cost: $0.01" }),
+  ].join("\n");
+
+  const report = parseClaudeUsage(stream);
+  assert.deepEqual(
+    report.windows.map((window) => [window.label, window.percentUsed]),
+    [
+      ["session", 36],
+      ["week (all models)", 71],
+    ],
+  );
+  // The session window first, whatever order the object arrived in — the same
+  // order the CLI's own view lists them in.
+  assert.equal(report.windows[0]?.windowDurationMins, 300);
+  assert.equal(report.windows[1]?.windowDurationMins, 10_080);
+  // Both halves of the reset moment: words for the card, epoch for the browser
+  // to turn into "in 42 minutes".
+  assert.equal(report.windows[0]?.resetsAtEpoch, resetsSession);
+  assert.notEqual(report.windows[0]?.resetsAt, undefined);
+  // And no unavailable line, because the windows are the answer. Before this
+  // the same run reported "no subscription window to report" while the numbers
+  // were sitting in its own output.
+  assert.equal(report.unavailableReason, undefined);
+});
+
+test("the freshest rate limit event wins, and a stream with none still explains itself", () => {
+  const stale = JSON.stringify({
+    type: "rate_limit_event",
+    rate_limit_info: { unifiedWindows: { five_hour: { utilization: 10 } } },
+  });
+  const fresh = JSON.stringify({
+    type: "rate_limit_event",
+    rate_limit_info: { unifiedWindows: { five_hour: { utilization: 44 } } },
+  });
+  assert.deepEqual(
+    parseClaudeUsage([stale, fresh].join("\n")).windows.map((w) => w.percentUsed),
+    [44],
+  );
+
+  // A stream that carries no such event falls back to reading the reply, and
+  // the reply is a session summary — so the reader is told where usage is
+  // read from rather than shown a wall of JSON.
+  const noEvent = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "result", result: "Total cost: $0.02" }),
+  ].join("\n");
+  const report = parseClaudeUsage(noEvent);
+  assert.deepEqual(report.windows, []);
+  assert.match(String(report.unavailableReason), /no subscription window to report/u);
+});
+
+test("an account with one limit rather than a set is still named by its window", () => {
+  // `rate_limit_info` can carry a single utilization with the window named
+  // beside it, in the same vocabulary `unifiedWindows` is keyed by.
+  const report = parseClaudeUsage(
+    JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "allowed", rateLimitType: "seven_day", utilization: 88 },
+    }),
+  );
+  assert.deepEqual(
+    report.windows.map((window) => [window.label, window.percentUsed]),
+    [["week (all models)", 88]],
+  );
+});
+
 test("cursor usage reports that Cursor usage is not reported without running the CLI", async () => {
   // Cursor's `status` answers with an account, a plan and a version, and no
   // subscription figure — so the card was filled with facts nobody asked a

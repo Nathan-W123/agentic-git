@@ -680,17 +680,7 @@ function codexAppServerWindow(
     ...(minutes === undefined || minutes <= 0
       ? {}
       : { windowDurationMins: minutes }),
-    ...(resetsAt === undefined || resetsAt < 0
-      ? {}
-      : {
-          resetsAt: new Date(resetsAt * 1000).toLocaleString(undefined, {
-            month: "short",
-            day: "numeric",
-            hour: "numeric",
-            minute: "2-digit",
-          }),
-          resetsAtEpoch: resetsAt,
-        }),
+    ...resetMoment(resetsAt),
   };
 }
 
@@ -1010,13 +1000,198 @@ function findRateLimits(value: unknown): unknown {
  * Only lines matching that shape become windows; anything else is ignored
  * rather than guessed at.
  */
+/**
+ * A reset moment as both the words a person reads and the number a browser
+ * can do arithmetic on.
+ *
+ * Every vendor that publishes one publishes seconds since the epoch, and the
+ * card wants both halves: the string is formatted here, in the server's zone,
+ * and the epoch is what lets the browser say "in 42 minutes" instead.
+ */
+function resetMoment(
+  epochSeconds: number | undefined,
+): Pick<ProviderUsageWindow, "resetsAt" | "resetsAtEpoch"> {
+  if (epochSeconds === undefined || !Number.isFinite(epochSeconds) || epochSeconds < 0) {
+    return {};
+  }
+  return {
+    resetsAt: new Date(epochSeconds * 1000).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+    resetsAtEpoch: epochSeconds,
+  };
+}
+
+/**
+ * The subscription windows Claude Code names, and how long each one is.
+ *
+ * The keys are the CLI's own and so is the wording: `five_hour` is the window
+ * its usage view calls "Current session" and `seven_day` the one it calls
+ * "Current week (all models)". The leading "Current" is dropped for the same
+ * reason the text parser drops it and Codex's windows never had one — the
+ * card's heading already says these are the account's current windows, and a
+ * column of labels that all begin with the same word is a column that says
+ * nothing until the second word.
+ */
+const CLAUDE_WINDOWS: Readonly<
+  Record<string, { readonly label: string; readonly minutes: number }>
+> = {
+  five_hour: { label: "session", minutes: 300 },
+  seven_day: { label: "week (all models)", minutes: 10_080 },
+  seven_day_opus: { label: "week (Opus only)", minutes: 10_080 },
+  seven_day_sonnet: { label: "week (Sonnet only)", minutes: 10_080 },
+  seven_day_overage_included: {
+    label: "week (extra usage included)",
+    minutes: 10_080,
+  },
+};
+
+/** One window out of a `rate_limit_info` entry, if it carries a percentage. */
+function claudeWindow(
+  key: string,
+  value: unknown,
+): ProviderUsageWindow | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const utilization = record["utilization"];
+  if (typeof utilization !== "number" || !Number.isFinite(utilization)) {
+    return undefined;
+  }
+  const named = CLAUDE_WINDOWS[key];
+  const resets = record["resetsAt"] ?? record["resets_at"];
+  return {
+    label: named?.label ?? key,
+    percentUsed: Math.max(0, Math.min(100, utilization)),
+    ...(named === undefined ? {} : { windowDurationMins: named.minutes }),
+    ...resetMoment(typeof resets === "number" ? resets : undefined),
+  };
+}
+
+/**
+ * The windows Claude Code publishes *beside* its reply, rather than in it.
+ *
+ * `claude -p "/usage"` is a prompt that happens to begin with a slash, not the
+ * interactive usage view, so the reply itself never carries a percentage — the
+ * whole reason this card was empty. The numbers travel on their own event: in
+ * `--output-format stream-json` the CLI emits
+ *
+ *     {"type":"rate_limit_event","rate_limit_info":{...},...}
+ *
+ * whenever what it knows about the account's limits changes, and
+ * `rate_limit_info.unifiedWindows` holds the five-hour and seven-day windows
+ * as `{utilization, resetsAt}`. That is the same figure `/usage` draws its
+ * bars from, so reading it here is reading the vendor's own answer rather than
+ * inferring one.
+ *
+ * The last event wins: the CLI emits one as soon as it has an answer and
+ * again if the answer moves during the run, and the freshest is the one worth
+ * showing. Lines that are not JSON, and JSON that is not this event, are
+ * skipped rather than treated as an error — the stream gains event types
+ * between releases and a reader that threw on an unfamiliar one would turn a
+ * cosmetic upstream change into a broken card.
+ */
+export function parseClaudeRateLimitEvent(stdout: string): ProviderUsageWindow[] {
+  let latest: Record<string, unknown> | undefined;
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "" || !trimmed.startsWith("{")) {
+      continue;
+    }
+    let event: unknown;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof event !== "object" || event === null) {
+      continue;
+    }
+    const record = event as Record<string, unknown>;
+    if (record["type"] !== "rate_limit_event") {
+      continue;
+    }
+    const info = record["rate_limit_info"];
+    if (typeof info === "object" && info !== null && !Array.isArray(info)) {
+      latest = info as Record<string, unknown>;
+    }
+  }
+  if (latest === undefined) {
+    return [];
+  }
+  const unified = latest["unifiedWindows"];
+  if (typeof unified === "object" && unified !== null && !Array.isArray(unified)) {
+    const windows = Object.entries(unified as Record<string, unknown>)
+      .map(([key, value]) => claudeWindow(key, value))
+      .filter((window): window is ProviderUsageWindow => window !== undefined);
+    if (windows.length > 0) {
+      // The order the CLI's own view lists them in — session first, then the
+      // week — rather than whatever order the object happened to be built in.
+      const rank = Object.keys(CLAUDE_WINDOWS);
+      return windows.sort(
+        (left, right) =>
+          rank.indexOf(labelKey(left.label)) - rank.indexOf(labelKey(right.label)),
+      );
+    }
+  }
+  // An account whose limits the CLI knows as one number rather than a set. The
+  // window it belongs to is named by `rateLimitType`, which is the same
+  // vocabulary `unifiedWindows` is keyed by.
+  const type = latest["rateLimitType"];
+  const single = claudeWindow(typeof type === "string" ? type : "five_hour", latest);
+  return single === undefined ? [] : [single];
+}
+
+/** The `CLAUDE_WINDOWS` key a label came from, for ordering. */
+function labelKey(label: string): string {
+  return (
+    Object.entries(CLAUDE_WINDOWS).find(([, named]) => named.label === label)?.[0] ??
+    label
+  );
+}
+
+/** The reply out of a `stream-json` run, which ends with a `result` event. */
+function claudeStreamResult(stdout: string): string | undefined {
+  let reply: string | undefined;
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+      if (event["type"] === "result" && typeof event["result"] === "string") {
+        reply = event["result"];
+      }
+    } catch {
+      continue;
+    }
+  }
+  return reply;
+}
+
 export function parseClaudeUsage(stdout: string): ProviderUsageReport {
+  // The event first, because it is the only place the subscription windows
+  // actually appear; everything below reads the reply, which carries them
+  // only on a CLI old enough to have answered `/usage` as a command.
+  const published = parseClaudeRateLimitEvent(stdout);
+  if (published.length > 0) {
+    return { windows: published };
+  }
   let text: string;
   try {
     const envelope = JSON.parse(stdout) as { result?: unknown };
     text = typeof envelope.result === "string" ? envelope.result : stdout;
   } catch {
-    text = stdout;
+    // Not one envelope, so either a stream of them or plain text. A stream
+    // ends with the same `result` the single envelope carries, and reading it
+    // out is what keeps the sentences below about the CLI's answer rather
+    // than about a wall of JSON it was wrapped in.
+    text = claudeStreamResult(stdout) ?? stdout;
   }
   const windows: ProviderUsageWindow[] = [];
   const line =
@@ -2890,7 +3065,12 @@ export class ProviderChatService {
         async (env) =>
           await this.runner(
             resolveClaudeCommand("claude"),
-            ["-p", "/usage", "--output-format", "json"],
+            // `stream-json` for the same reason the desktop asks for it: the
+            // percentages are not in the reply. `/usage` here is a prompt,
+            // not the interactive view, so the reply is a session summary —
+            // the windows arrive alongside it on a `rate_limit_event`, which
+            // only this format publishes. `--verbose` is required with it.
+            ["-p", "/usage", "--output-format", "stream-json", "--verbose"],
             {
               timeoutMs: 60_000,
               maxOutputBytes: 262_144,

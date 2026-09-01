@@ -35,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { askDialog, openDialog, tellDialog } from "./dialog.mjs";
 import { signIn } from "../dist/sign-in.js";
 import {
   normalizeServer,
@@ -355,15 +356,16 @@ async function toggleKeepAwake(wanted) {
   // ran. The remedy is a system setting, and deliberately theirs to make: an
   // app that quietly rewrote what a person's lid does would be overstepping.
   if (awakeForWork) {
-    await dialog.showMessageBox({
-      type: "info",
-      message: "This machine will stay awake while it is plugged in.",
-      detail:
+    await tellDialog({
+      kind: "info",
+      title: "Kumi",
+      heading: "This machine will stay awake while it is plugged in.",
+      body:
         "Closing the lid will still put it to sleep — no application can " +
         "override that. To keep working with the lid closed, set your " +
-        "system's lid-close action to “Do nothing”.\n\nOn battery it " +
-        "sleeps as usual, and agents wait until it is plugged in again.",
-      buttons: ["OK"],
+        "system's lid-close action to “Do nothing”. On battery it sleeps as " +
+        "usual, and agents wait until it is plugged in again.",
+      buttons: ["Got it"],
     });
   }
   const saved = await readSettings();
@@ -434,45 +436,79 @@ async function offerToInstallACli() {
   const labels = INSTALLABLE_VENDORS.map(
     (vendor) => VENDOR_LABELS[vendor] ?? vendor,
   );
-  const choice = await dialog.showMessageBox({
-    type: "question",
+  // One window for the whole exchange — the offer, the run it starts, and how
+  // it went. It used to be two native message boxes with nothing between them:
+  // the install ran with no window watching it, so a failure could only ever
+  // be reported as its exit code, after a wait with no sign anything was
+  // happening.
+  const conversation = openDialog({
+    kind: "question",
     title: "Kumi needs an agent on this machine",
-    message: "No agent CLI is installed here yet",
-    detail:
+    heading: "No agent CLI is installed here yet",
+    body:
       "Kumi runs agents on your own machine, under your own vendor login, so " +
       "one of these has to be installed before an agent can do any work. " +
       "Kumi can install it for you now — you will still sign in to the " +
       "vendor yourself afterwards.",
     buttons: [...labels, "Not now"],
-    defaultId: 0,
     cancelId: labels.length,
-    noLink: true,
   });
-  const vendor = INSTALLABLE_VENDORS[choice.response];
+  const vendor = INSTALLABLE_VENDORS[await conversation.chosen];
   if (vendor === undefined) {
+    conversation.close();
     return;
   }
+  const label = VENDOR_LABELS[vendor] ?? vendor;
+  conversation.update({
+    kind: "progress",
+    title: "Kumi",
+    heading: `Installing ${label}…`,
+    body: installPlan(vendor)?.command ?? "",
+    buttons: [],
+    log: "",
+  });
   // The same path the dashboard uses, so there is one installer and one set of
-  // commands rather than a second copy that drifts. Output is not relayed
-  // anywhere here — there is no window asking — so a failure is reported as
-  // its own message rather than as silence.
-  const result = await runInstall(vendor, () => undefined);
+  // commands rather than a second copy that drifts — but relayed now, into the
+  // window that asked. These commands fail for ordinary, legible reasons, and
+  // the vendor's own words are what say which.
+  const result = await runInstall(vendor, (chunk) => conversation.log(chunk));
   if (!result.ok) {
-    dialog.showErrorBox(
-      `Could not install ${VENDOR_LABELS[vendor] ?? vendor}`,
-      `${result.detail ?? "The installer did not finish."}\n\n` +
+    conversation.update({
+      kind: "error",
+      title: `Could not install ${label}`,
+      heading: `Could not install ${label}`,
+      body:
+        `${result.detail ?? "The installer did not finish."}\n\n` +
         "You can install it yourself and restart Kumi, or try again from " +
         "Settings → Agents in the dashboard.",
-    );
+      buttons: ["Close"],
+    });
+    await conversation.chosen;
+    conversation.close();
     return;
   }
   // Installed, and the worker is already restarting behind this. The sign-in
   // is the one step nobody can do for somebody else: every vendor's login is
   // an interactive flow it owns, and the most this can do is put them in
-  // front of it with nothing left to type.
+  // front of it with nothing left to type — which is what the button does.
+  conversation.update({
+    kind: "info",
+    title: "Kumi",
+    heading: `${label} is installed`,
+    body:
+      `One step left, and it is ${label}'s rather than Kumi's: sign in to it ` +
+      "so this machine can run work under your own account. Kumi will open a " +
+      "terminal already running the sign-in.",
+    buttons: ["Sign in now", "Later"],
+    cancelId: 1,
+  });
+  const signInNow = (await conversation.chosen) === 0;
+  conversation.close();
   stopWorker();
   void startWorker(here, session, noteWorkerState);
-  openSignIn(vendor);
+  if (signInNow) {
+    openSignIn(vendor);
+  }
 }
 
 async function openDashboard() {
@@ -523,11 +559,13 @@ async function openDashboard() {
     // The window is left open on purpose. It is blank, but its menu is how
     // somebody points the app somewhere else or reloads once the server is
     // back — quitting here would take that away.
-    dialog.showErrorBox(
-      "Could not open Kumi",
-      `${session.server} did not answer.\n\n${describe(error)}\n\n` +
-        "Try View → Reload, or Help → Change Server.",
-    );
+    await tellDialog({
+      kind: "error",
+      title: "Could not open Kumi",
+      heading: `${session.server} did not answer`,
+      body: `${describe(error)}\n\nTry View → Reload, or Help → Change Server.`,
+      buttons: ["Close"],
+    });
   }
   return window;
 }
@@ -573,10 +611,13 @@ async function start() {
       });
       token = result.token;
     } catch (error) {
-      dialog.showErrorBox(
-        "Could not sign in",
-        `${describe(error)}\n\nStart Kumi again to try once more.`,
-      );
+      await tellDialog({
+        kind: "error",
+        title: "Could not sign in",
+        heading: "Could not sign in",
+        body: `${describe(error)}\n\nStart Kumi again to try once more.`,
+        buttons: ["Close"],
+      });
       app.quit();
       return;
     }

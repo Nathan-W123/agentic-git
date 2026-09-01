@@ -55,7 +55,30 @@ const CODEX_HANDSHAKE = [
 const USAGE_COMMANDS = {
   // Claude answers by starting a session, which is why this one is given the
   // long deadline and the other two are not.
-  claude: [{ args: ["-p", "/usage", "--output-format", "json"], timeoutMs: 60_000 }],
+  //
+  // `stream-json` rather than `json`, because the windows are not in the
+  // reply. `claude -p "/usage"` sends the slash command as a *prompt* — it
+  // never opens the interactive usage view — so the reply is an ordinary
+  // session summary with no percentage in it, which is exactly the empty card
+  // this was producing. The percentages travel beside the reply instead: the
+  // CLI emits a `rate_limit_event` carrying `unifiedWindows.five_hour` and
+  // `.seven_day` as soon as it knows them, and `stream-json` is the format
+  // that publishes it. `--verbose` is not optional; `stream-json` is refused
+  // without it.
+  //
+  // Stopped the moment that event lands, which is what makes this cheaper
+  // than what it replaces rather than merely better: the run is killed
+  // before the turn it started can finish.
+  claude: [
+    {
+      args: ["-p", "/usage", "--output-format", "stream-json", "--verbose"],
+      timeoutMs: 60_000,
+      done: (text) => text.includes('"rate_limit_event"'),
+    },
+    // A CLI too old to publish the event still answers the prompt, and the
+    // server still has the parser that reads percentages out of the reply.
+    { args: ["-p", "/usage", "--output-format", "json"], timeoutMs: 60_000 },
+  ],
   codex: [
     {
       args: ["app-server", "--stdio"],
