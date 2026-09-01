@@ -3932,7 +3932,7 @@ export interface ApiOperations {
     leaseId: string;
     actorId: string;
     protocolVersion: number;
-  }): Promise<unknown | undefined>;
+  }): Promise<{ plan?: unknown; planningContext?: string }>;
   /**
    * Arbitrates a worker's plan before it executes. A deployment that omits
    * this cannot run plan-first workers, and the endpoint says so.
@@ -7329,9 +7329,9 @@ export class ApiGateway {
         // is the same answer: 204, carry on.
         const claimOperation = this.options.operations.claimWorkRepository;
         const body = objectBody(await this.readJson(request));
-        const plan =
+        const prepared =
           claimOperation === undefined
-            ? undefined
+            ? {}
             : await claimOperation({
                 leaseId,
                 actorId: principal.user.id,
@@ -7344,11 +7344,19 @@ export class ApiGateway {
                     ? Math.trunc(body["protocolVersion"])
                     : 0,
               });
-        if (plan === undefined) {
+        if (
+          prepared.plan === undefined &&
+          (prepared.planningContext ?? "") === ""
+        ) {
           response.writeHead(204).end();
           return;
         }
-        this.sendJson(response, 200, { plan });
+        this.sendJson(response, 200, {
+          ...(prepared.plan === undefined ? {} : { plan: prepared.plan }),
+          ...(prepared.planningContext === undefined
+            ? {}
+            : { planningContext: prepared.planningContext }),
+        });
         return;
       }
 

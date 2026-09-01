@@ -13,6 +13,8 @@ import {
   PlanAdmissionController,
   blanketPlan,
   estimateScope,
+  recentTouchPoints,
+  scopeStartingPoints,
   BLOCKED_ADMISSION_LIFETIME_CAP,
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   ScopeExpansionError,
@@ -58,6 +60,7 @@ import {
   projectBudgets,
   reducePlanScope,
   summariseChangedFiles,
+  rankTouchedFiles,
   uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
@@ -1203,6 +1206,23 @@ async function gateRemotePlan(
  */
 export const BLANKET_CLAIM_DEADLINE_MS = 20_000;
 
+/**
+ * What the control plane already knows, handed down before a worker plans.
+ *
+ * Either the repository itself — in which case there is nothing to plan — or,
+ * failing that, where to start reading. The second is the cheaper half of the
+ * same idea and applies to the tasks the first cannot help: planning is an
+ * agent reading its way into a repository a tool call at a time, and most of
+ * that reading is a search for something the control plane has already
+ * computed. In-process both have been handed to the planning prompt for as
+ * long as they have existed; a remote worker was told neither, and started
+ * every plan from nothing.
+ */
+export interface WorkClaimOutcome {
+  plan?: AgentPlan;
+  planningContext?: string;
+}
+
 export interface WorkClaimInput {
   leaseId: string;
   /** The protocol the caller speaks; below 3 there is no claim to grant. */
@@ -1256,41 +1276,20 @@ export async function claimWorkRepository(
   store: CoordinationStore,
   input: WorkClaimInput,
   services: WorkClaimServices = {},
-): Promise<AgentPlan | undefined> {
-  if (!configuredBlanketClaims(services.blanketClaims)) {
-    return undefined;
-  }
-  if (input.protocolVersion < 3) {
-    // A worker that cannot be told its claim was narrowed must never be given
-    // one. It would hold the repository until its task ended, and every
-    // arrival would wait that out.
-    return undefined;
-  }
+): Promise<WorkClaimOutcome> {
   const now = new Date().toISOString();
   await store.expireWorkLeases(now);
   const lease = await store.getWorkLease(input.leaseId);
   if (lease === undefined || lease.status !== "active" || lease.expiresAt <= now) {
-    return undefined;
-  }
-  if (lease.plan !== undefined) {
-    return undefined;
+    return {};
   }
   const task = await submittedTask(store, lease);
   if (task === undefined || task.status !== "claimed") {
-    return undefined;
-  }
-  const others = (
-    await store.listWorkLeases({
-      status: "active",
-      repositoryId: lease.repositoryId,
-    })
-  ).filter((candidate) => candidate.id !== lease.id);
-  if (others.length > 0) {
-    return undefined;
+    return {};
   }
   const storedRepository = await store.getRepository(lease.repositoryId);
   if (storedRepository === undefined) {
-    return undefined;
+    return {};
   }
   const repositories = services.repositories ?? new RepositoryService();
   const intelligence =
@@ -1304,25 +1303,108 @@ export async function claimWorkRepository(
       lease.baseRevision,
     );
   } catch {
-    return undefined;
+    return {};
   }
+
   // The expensive step, and the one with a stopwatch on it. Everything above
   // is a read of durable state; this builds a symbol index at the lease's
-  // revision so the claim carries somewhere to be narrowed to.
-  const estimatedFiles = await withDeadline(
+  // revision, and it pays for itself twice — once as the ground a claim can
+  // later be narrowed to, and once as the note that stops an agent reading
+  // its way into a repository to find a file the objective already named.
+  const estimate = await withDeadline(
     intelligence
       .index(repository, lease.baseRevision)
       .then((built) => estimateScope(task.objective, built))
-      .then((estimate) =>
-        estimate.confidence === "anchored"
-          ? estimate.files.map((file) => file.path)
-          : [],
-      )
-      .catch(() => [] as string[]),
+      .catch(() => undefined),
     services.deadlineMs ?? BLANKET_CLAIM_DEADLINE_MS,
-    [] as string[],
+    undefined,
   );
-  if (estimatedFiles.length === 0) {
+  // Where this repository has been working lately. Cheap, durable, and the
+  // other half of the same problem: the estimate is silent whenever the words
+  // a person used are not the words in the paths, which is most of the time.
+  const recentlyTouched = await store
+    .recentlyTouchedFiles({ repositoryId: lease.repositoryId })
+    .then((samples) => rankTouchedFiles(samples, Date.now()))
+    .catch(() => []);
+  const planningContext = [
+    estimate === undefined ? "" : scopeStartingPoints(estimate),
+    recentTouchPoints(recentlyTouched),
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
+
+  const estimatedFiles =
+    estimate?.confidence === "anchored"
+      ? estimate.files.map((file) => file.path)
+      : [];
+  const claim = await grantBlanketClaim({
+    store,
+    admissions,
+    lease,
+    task,
+    baseVersion,
+    estimatedFiles,
+    protocolVersion: input.protocolVersion,
+    ...(services.blanketClaims === undefined
+      ? {}
+      : { blanketClaims: services.blanketClaims }),
+  });
+  return {
+    ...(claim === undefined ? {} : { plan: claim }),
+    // Carried even when a claim was granted is *not* what happens: a claimed
+    // task never plans, so a note about where to start reading is a paragraph
+    // nobody reads. This is the consolation prize, and the tasks that get it
+    // are exactly the contended ones — the slow ones.
+    ...(claim !== undefined || planningContext === "" ? {} : { planningContext }),
+  };
+}
+
+/**
+ * The claim itself, once everything it needs has been gathered.
+ *
+ * Split from the gathering because the two have different failure modes: the
+ * reads above are worth doing whatever happens, and every refusal here means
+ * "plan as you always did" rather than "something went wrong".
+ */
+async function grantBlanketClaim(input: {
+  store: CoordinationStore;
+  admissions: PlanAdmissionController;
+  lease: WorkLease;
+  task: SubmittedTask;
+  baseVersion: CanonicalVersion;
+  estimatedFiles: readonly string[];
+  protocolVersion: number;
+  blanketClaims?: boolean;
+}): Promise<AgentPlan | undefined> {
+  const { store, lease, task } = input;
+  if (!configuredBlanketClaims(input.blanketClaims)) {
+    return undefined;
+  }
+  if (input.protocolVersion < 3) {
+    // A worker that cannot be told its claim was narrowed must never be given
+    // one. It would hold the repository until its task ended, and every
+    // arrival would wait that out.
+    return undefined;
+  }
+  if (lease.plan !== undefined) {
+    // A contract already exists — a resumed turn, or a retry after a deferral.
+    // Replacing it with a wider one is what the immutability rule on approved
+    // admissions forbids.
+    return undefined;
+  }
+  if (input.estimatedFiles.length === 0) {
+    // An objective that anchored nothing cannot be narrowed by declaration
+    // either, and a claim that can never be given back early is not worth the
+    // planning round it saves.
+    return undefined;
+  }
+  const others = (
+    await store.listWorkLeases({
+      status: "active",
+      repositoryId: lease.repositoryId,
+    })
+  ).filter((candidate) => candidate.id !== lease.id);
+  if (others.length > 0) {
     return undefined;
   }
   const plan = blanketPlan(
@@ -1333,13 +1415,13 @@ export async function claimWorkRepository(
       validationCommands: task.validationCommands,
     },
     undefined,
-    estimatedFiles,
+    input.estimatedFiles,
   );
-  const admission = admissions.admit({
+  const admission = input.admissions.admit({
     plan,
     agentId: task.agentId,
-    baseRevision: baseVersion.revision,
-    baseVersion: baseVersion.sequence,
+    baseRevision: input.baseVersion.revision,
+    baseVersion: input.baseVersion.sequence,
     active: [],
     planRevision: 1,
   });
@@ -1358,9 +1440,7 @@ export async function claimWorkRepository(
     return undefined;
   }
   // Published the moment the claim is, so an arrival can reach the holder
-  // through exactly the registry a local one is reached through. Without this
-  // a remote claim is one nobody can take back, which is the thing the
-  // one-worker condition above exists to make impossible.
+  // through exactly the registry a local one is reached through.
   registerRemoteHolder({
     task: {
       id: task.id,

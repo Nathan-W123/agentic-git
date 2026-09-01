@@ -118,6 +118,20 @@ export interface WorkerClientOptions {
   connectionBackoffMs?: number;
 }
 
+/**
+ * What the control plane already knew, before this worker planned anything.
+ *
+ * `plan` is the repository itself — a claim, after which there is nothing to
+ * plan. `planningContext` is the cheaper half: where the objective's words
+ * appear in the index and where the repository has been working lately, which
+ * is what stops an agent searching for something already computed. Both empty
+ * is the ordinary answer and means "plan exactly as before".
+ */
+export interface PreparedWork {
+  plan?: AgentPlan;
+  planningContext?: string;
+}
+
 /** One dirty path in a holder's workspace, as the control plane reads it. */
 export interface WorkingChange {
   path: string;
@@ -514,10 +528,13 @@ export class WorkerClient {
    * The protocol version travels in the body because the grant depends on it:
    * a claim can be narrowed while it is held, and a worker that could not be
    * told about that must never be given one.
+   *
+   * Asked even by an agent that cannot accept a claim, because the answer has
+   * a second half. Where the control plane cannot hand over the repository it
+   * can still say where to start reading, and that is worth having precisely
+   * on the tasks a claim cannot help — the contended ones, the slow ones.
    */
-  public async claimRepository(
-    leaseId: string,
-  ): Promise<AgentPlan | undefined> {
+  public async claimRepository(leaseId: string): Promise<PreparedWork> {
     try {
       const { json, status } = await this.request(
         `/api/v1/workers/leases/${leaseId}/claim`,
@@ -527,12 +544,11 @@ export class WorkerClient {
         },
       );
       if (status === 204) {
-        return undefined;
+        return {};
       }
-      const plan = (json as { plan?: AgentPlan } | undefined)?.plan;
-      return plan === undefined ? undefined : plan;
+      return (json ?? {}) as PreparedWork;
     } catch {
-      return undefined;
+      return {};
     }
   }
 

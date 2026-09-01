@@ -1045,7 +1045,7 @@ test("a remote holder pauses, declares, and keeps files and symbols rather than 
       "rename holderOne in src/shared.ts",
       real.version,
     );
-    const claim = await claimWorkRepository(
+    const { plan: claim } = await claimWorkRepository(
       store,
       { leaseId: held.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
       { blanketClaims: true },
@@ -1142,7 +1142,7 @@ test("a remote holder that has not answered leaves its claim whole", async () =>
       "rename holderOne in src/shared.ts",
       real.version,
     );
-    const claim = await claimWorkRepository(
+    const { plan: claim } = await claimWorkRepository(
       store,
       { leaseId: held.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
       { blanketClaims: true },
@@ -1181,6 +1181,61 @@ test("a remote holder that has not answered leaves its claim whole", async () =>
       "admitted",
       "and the arrival waits rather than being let into files nobody asked about",
     );
+  } finally {
+    await real.cleanup();
+  }
+});
+
+/**
+ * A task that cannot have the repository is still told where to start.
+ *
+ * Planning is not one inference: it is an agent reading its way into a
+ * repository a tool call at a time, and most of that reading is a search for
+ * something already computed — which files declare the names the objective
+ * used, and where the repository has been working lately. The in-process
+ * planner has been handed both for as long as they have existed. A remote
+ * worker was handed neither and started every plan from nothing, which is the
+ * same shape of gap as the missing claim, one layer down.
+ *
+ * Asserted on the contended case on purpose. That is the one a claim can never
+ * help, and it is also the slow one.
+ */
+test("a contended remote task is told where the objective already lives", async () => {
+  const real = await sharedRepository();
+  const { store, worker } = await seed(real.repository);
+  try {
+    // Somebody is already executing here, so no claim is possible.
+    const holder = await leaseFor(store, worker, "work on quiet", real.version);
+    assert.ok(holder.leaseId);
+    const second = await leaseFor(
+      store,
+      worker,
+      "add a prefix to candidateOne",
+      real.version,
+    );
+    const prepared = await claimWorkRepository(
+      store,
+      { leaseId: second.leaseId, protocolVersion: WORKER_PROTOCOL_VERSION },
+      { blanketClaims: true },
+    );
+
+    assert.equal(
+      prepared.plan,
+      undefined,
+      "a repository with somebody in it cannot be claimed",
+    );
+    assert.ok(
+      prepared.planningContext,
+      "but the agent should still be told where to look",
+    );
+    assert.match(
+      String(prepared.planningContext),
+      /src\/shared\.ts/u,
+      "the file that declares candidateOne",
+    );
+    // Offered as a starting point, never as a scope: an agent that adopted it
+    // wholesale would plan the estimate instead of the task.
+    assert.match(String(prepared.planningContext), /starting point|not a scope/iu);
   } finally {
     await real.cleanup();
   }

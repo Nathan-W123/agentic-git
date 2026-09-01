@@ -1292,7 +1292,26 @@ export class Worker {
     // that says "now do the same for the other file" is unanswerable without
     // the messages before it. Handoff seeding is the coordinator's, and the
     // worker does not run one; this is the part the assignment carries.
-    const context = assignment.task.context?.trim() ?? "";
+    // Asked before the session opens, because half of what it answers belongs
+    // in the prompt that opens it.
+    //
+    // Planning is not one inference. It is an agent reading its way into a
+    // repository a tool call at a time, and most of that reading is a search
+    // for something the control plane has already computed: which files
+    // declare the names the objective uses, and where this repository has
+    // been working lately. The in-process planner has been handed both for as
+    // long as they have existed. A worker was handed neither and started every
+    // plan from nothing — the same shape of gap as the missing claim, one
+    // layer down.
+    const prepared = await this.options.client.claimRepository(
+      assignment.lease.id,
+    );
+    const context = [
+      assignment.task.context?.trim() ?? "",
+      prepared.planningContext ?? "",
+    ]
+      .filter((part) => part !== "")
+      .join("\n\n");
     const session = await adapter.startTask({
       task: {
         id: assignment.task.id,
@@ -1366,10 +1385,7 @@ export class Worker {
     // only be asked for a plan has nothing to accept, and granting it a claim
     // it cannot hear about would hold the repository for nobody.
     const acceptClaim = adapter.acceptBlanketClaim?.bind(adapter);
-    const claimed =
-      acceptClaim === undefined
-        ? undefined
-        : await this.options.client.claimRepository(assignment.lease.id);
+    const claimed = prepared.plan;
     if (claimed !== undefined && acceptClaim !== undefined) {
       await acceptClaim(session.id, claimed);
       this.laps?.mark("claim");
