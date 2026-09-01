@@ -13,7 +13,7 @@
  * keep in step with vendors who change their output without warning.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 import { detectAgents, findAgentCommand } from "./agents.mjs";
 import { runnable } from "./installers.mjs";
@@ -184,11 +184,7 @@ function runOnce(executable, attempt) {
         clearTimeout(timer);
         // The app-server does not exit on its own; it is killed here, after
         // it has already answered.
-        try {
-          child.kill();
-        } catch {
-          // It exited between the state check and the signal.
-        }
+        stop(child);
         resolve(value);
       }
     };
@@ -238,6 +234,37 @@ function runOnce(executable, attempt) {
     }
     child.stdin?.end();
   });
+}
+
+/**
+ * Ends a reader, and everything it started.
+ *
+ * `kill` signals one process. On Windows the process it signals is `cmd.exe`,
+ * because a batch shim is not a program and has to be run through an
+ * interpreter — and killing the interpreter leaves the vendor CLI it launched
+ * running. That is not a tidiness problem. The orphan inherits this process's
+ * stdout pipe, so the pipe never closes, the read never ends, and whoever is
+ * waiting on it waits forever: a `codex app-server` asked for a usage figure
+ * would be left running on somebody's machine after every reading, and the
+ * suite that exercises it hangs rather than fails, which is how this arrived —
+ * as twenty-two minutes of a Windows job sitting on a four-second step.
+ *
+ * `taskkill /T` ends the tree. Everywhere else a signal reaches the program
+ * directly, because there is no interpreter in front of it.
+ */
+function stop(child) {
+  try {
+    if (process.platform === "win32" && child.pid !== undefined) {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      return;
+    }
+    child.kill();
+  } catch {
+    // It exited between the state check and the signal.
+  }
 }
 
 function describe(error) {
