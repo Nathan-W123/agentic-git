@@ -2013,6 +2013,32 @@ test("a connected local row offers no second vendor sign-in", async () => {
 });
 
 /**
+ * A loader that takes an optional rerender must treat it as optional.
+ *
+ * `ensureChannelRoster` called `rerender()` unconditionally while one caller
+ * preloads every repository's roster in a loop and renders once at the end —
+ * so it threw on the first iteration, the loop never reached the rest, and it
+ * never reached its own `render()`. Opening an agent's details left every
+ * roster unloaded, with a TypeError in the console as the only evidence.
+ */
+test("roster and usage loaders survive a caller that renders once at the end", async () => {
+  const data = await publicFile("data.js");
+  const app = await publicFile("app.js");
+
+  // The call that has no rerender to give, and the guard that lets it work.
+  assert.match(app, /await ensureChannelRoster\(repository\.id\);/u);
+  const start = data.indexOf("export async function ensureChannelRoster");
+  assert.notEqual(start, -1);
+  const body = data.slice(start, data.indexOf("\n/**", start));
+  assert.match(body, /rerender\?\.\(\)/u);
+  assert.doesNotMatch(
+    body,
+    /(?<!\?\.)\brerender\(\)/u,
+    "an optional callback must never be called unguarded",
+  );
+});
+
+/**
  * The usage figure surfaces itself.
  *
  * It used to need a credential stored on the control plane, and the only way

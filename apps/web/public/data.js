@@ -5159,7 +5159,14 @@ export async function ensureChannelRoster(repositoryId, rerender) {
   } finally {
     state.channelRosterLoadingId = undefined;
   }
-  rerender();
+  // Optional, like every other loader here. One caller preloads every
+  // repository's roster in a loop and renders once at the end — deliberately,
+  // rather than repainting per repository — so it passes nothing, and this
+  // threw `rerender is not a function` on the *first* iteration. The loop then
+  // never reached the rest, and never reached its own `render()`, so opening
+  // an agent's details left every roster unloaded and the console carrying the
+  // only evidence.
+  rerender?.();
 }
 
 /** When each repository's liveness was last re-read — see `refreshChannelLiveness`. */
