@@ -241,3 +241,67 @@ test("the model separates conversation from requests", async (t) => {
     );
   }
 });
+
+/**
+ * The real model, on messages a real deployment got wrong.
+ *
+ * Both prototype lists are the model's entire definition of what a channel
+ * sounds like, so a gap in them is a gap in the product — and the gaps are not
+ * guessable. These are the messages that found them, with the leans that were
+ * measured before the prototypes were added:
+ *
+ *   "my name also appears right under the agent tab, that
+ *    should be all the way at the bottom"                     -0.052  (live)
+ *   "the agent tab shows the wrong thing at the bottom"       -0.029
+ *   "people should be listed at the bottom, not under agents" -0.037
+ *   "that was my fault, sorry"                                +0.111
+ *
+ * Appearance and behaviour were already covered — "the send button is the
+ * wrong colour" scored +0.246 — so the list knew what a bug looks like and
+ * what a bug does, and nothing about where a bug is. The apology is the mirror
+ * gap: it names a fault, and every other way of naming a fault was work.
+ *
+ * Skipped where the model cannot be fetched or run, like its neighbour above:
+ * the filter is optional by design and a test for it must not be the thing
+ * that fails.
+ */
+test("the model reads placement complaints as work and apologies as conversation", async (t) => {
+  const filter = createChatterFilter();
+  if (!(await filter.available())) {
+    t.skip("the embedding model is not available in this environment");
+    return;
+  }
+
+  for (const work of [
+    // The live message, verbatim.
+    "my name also appears right under the agent tab, that should be all the way at the bottom with the other person",
+    "the agent tab shows the wrong thing at the bottom",
+    "people should be listed at the bottom, not under agents",
+    "the pinned tab is above the channels, it should be below",
+    // And the shapes that already worked, which must not regress.
+    "the send button is the wrong colour",
+    "the dropdown closes when you click inside it",
+    "there is no way to unpin a message from the pinned sidetab",
+  ]) {
+    assert.equal(
+      await filter.readsAsWork(work),
+      true,
+      `should read as work: ${work}`,
+    );
+  }
+
+  for (const chatter of [
+    "that was my fault, sorry",
+    "my mistake, ignore that",
+    "thanks, that helps",
+    "good morning everyone",
+    "congrats on shipping that",
+    "i'm heading out, back in an hour",
+  ]) {
+    assert.equal(
+      await filter.readsAsWork(chatter),
+      false,
+      `should not read as work: ${chatter}`,
+    );
+  }
+});
