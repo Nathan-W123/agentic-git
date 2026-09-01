@@ -2818,7 +2818,17 @@ function defaultChatterFilter(): ChatterFilter {
       available: async () => false,
     };
   }
-  return createChatterFilter();
+  // Tunable without a code change, because the right value is a property of a
+  // channel's own phrasing rather than of this repository: the bar starts at
+  // "leans to work at all", and the lean is written to the log every time a
+  // message is passed over, so raising it is a decision somebody can make from
+  // their own numbers.
+  const configured = Number.parseFloat(
+    process.env["COORD_TRIAGE_WORK_MARGIN"]?.trim() ?? "",
+  );
+  return createChatterFilter(
+    Number.isFinite(configured) ? { workMargin: configured } : {},
+  );
 }
 
 /**
@@ -22390,6 +22400,15 @@ export class ApiGateway {
     // words rather than the raw text, so a bare screenshot — whose markup is
     // full of letters — is still nothing to read.
     if (!/\p{L}/u.test(withoutAttachments(content))) {
+      // Traced like every other way this path can end. It was the one gate
+      // that dropped a message without a word, and an evening spent asking
+      // "why did nothing happen" is exactly what a silent gate costs — the
+      // others were given lines for that reason and this one was missed.
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: nothing to read once images and punctuation are set aside",
+      );
       return;
     }
     // Then the local pass, before anything is read from the store and long
