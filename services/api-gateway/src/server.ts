@@ -6978,8 +6978,11 @@ export class ApiGateway {
       }
 
       const nowIso = new Date().toISOString();
-      // Reclaim anything a dead worker was holding before handing out new work.
-      await this.options.store.expireWorkLeases(nowIso);
+      // Reclaim anything a dead worker was holding before handing out new
+      // work — and say so. This route runs every five seconds per worker, so
+      // it is the caller that almost always settles the row, and it used to
+      // discard it.
+      await this.expireLeasesAndSay(nowIso);
       await this.options.store.touchWorker(workerId, nowIso);
 
       const repositoryId = stringField(body["repositoryId"], "repositoryId", {
@@ -7192,7 +7195,7 @@ export class ApiGateway {
           new Date(now.getTime() + WORK_LEASE_TTL_MS).toISOString(),
         );
         if (extended === undefined) {
-          await this.options.store.expireWorkLeases(now.toISOString());
+          await this.expireLeasesAndSay(now.toISOString());
           throw new HttpError(
             409,
             "lease_lost",
@@ -7301,7 +7304,7 @@ export class ApiGateway {
           "released by worker",
         );
         if (!released) {
-          await this.options.store.expireWorkLeases(new Date().toISOString());
+          await this.expireLeasesAndSay(new Date().toISOString());
           throw new HttpError(
             409,
             "lease_lost",
@@ -8986,9 +8989,7 @@ export class ApiGateway {
         // always happens while somebody is looking at that dot, so the sweep
         // happens here too. It is the same idempotent call the worker routes
         // make, and it must never be able to fail a read.
-        await this.options.store
-          .expireWorkLeases(new Date().toISOString())
-          .catch(() => undefined);
+        await this.expireLeasesAndSay(new Date().toISOString());
         const tasks = await this.options.store.listSubmittedTasks({
           projectId,
           ...(status === undefined ? {} : { status }),
@@ -21747,6 +21748,51 @@ export class ApiGateway {
       content: said,
       referencedMessageId: task.answerTo,
     });
+  }
+
+  /**
+   * Expires stale leases and says so, which is the half that went missing.
+   *
+   * The store hands each expired row to exactly one caller — that is what
+   * makes "the room is told once" true however many sweeps race for it. The
+   * corollary is that whoever consumes a row owes the room the sentence, and
+   * this process consumed rows in four places and wrote nothing in any of
+   * them.
+   *
+   * It was not a rare race, it was the normal outcome. A polling worker calls
+   * `POST /workers/leases` every five seconds and that route expires leases
+   * before handing out work; the only caller that narrated ran on a sixty
+   * second timer. So the poll won roughly twelve times out of thirteen, the
+   * row was settled silently, and `lease_expired` — a message that exists,
+   * and says exactly the right thing — was almost never written.
+   *
+   * What that looked like: a machine that lost contact for five minutes (a
+   * redeploy, a sleep, a dropped connection) had its lease expired and its
+   * task requeued, while the thread went on reading "I've taken this task and
+   * I'm working on it" forever. Which is the same symptom as a hang, and is
+   * why it was diagnosed as one.
+   *
+   * Narration never blocks recovery: putting the work back is the job, and a
+   * run that could not be narrated is still a run that has to be requeued.
+   */
+  private async expireLeasesAndSay(nowIso: string): Promise<void> {
+    const expired = await this.options.store
+      .expireWorkLeases(nowIso)
+      .catch((): [] => []);
+    for (const lease of expired) {
+      await this.options.store
+        .appendAudit(undefined, {
+          type: "lease_expired",
+          taskId: lease.taskId,
+          data: {
+            projectId: lease.projectId,
+            repositoryId: lease.repositoryId,
+            workerId: lease.workerId,
+            leaseId: lease.id,
+          },
+        })
+        .catch(() => undefined);
+    }
   }
 
   /**
