@@ -210,3 +210,35 @@ test("no CLI on the machine is a named stop the app offers to fix", async () => 
   // A failed install is said out loud rather than swallowed.
   assert.match(main, /Could not install \$\{VENDOR_LABELS/u);
 });
+
+/**
+ * One preload, three globals, and no shared fate between them.
+ *
+ * A preload is a single script: an exception part-way through stops everything
+ * after it, silently, and the page comes up with whichever globals were
+ * exposed before the throw. The token is fetched with a synchronous IPC call,
+ * so the value most likely to fail sat between the other two — and when it
+ * did, the page kept `KUMI_SERVER` and lost `KUMI_INSTALL`, which looks exactly
+ * like an app too old to have the bridge. Every agent connected from such a
+ * window looks connected and can run nothing.
+ */
+test("each preload global is exposed independently of the others", async () => {
+  const preload = await readFile(path.join(electronDir, "preload.cjs"), "utf8");
+
+  // Every exposure goes through the guard, so none can be fatal to the rest.
+  assert.equal(
+    (preload.match(/^expose\(/gmu) ?? []).length,
+    3,
+    "all three globals must be exposed through the guard",
+  );
+  assert.doesNotMatch(
+    preload,
+    /^contextBridge\.exposeInMainWorld/mu,
+    "a bare exposure is one that can take the others down with it",
+  );
+  // The one that can genuinely fail, and the one whose loss is invisible.
+  assert.match(preload, /expose\("KUMI_TOKEN", \(\) => ipcRenderer\.sendSync/u);
+  assert.match(preload, /expose\("KUMI_INSTALL", \(\) => \(\{/u);
+  // A failure is said somewhere a person can find it, not swallowed.
+  assert.match(preload, /could not expose \$\{name\}/u);
+});
