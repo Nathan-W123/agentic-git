@@ -10744,8 +10744,13 @@ document.addEventListener("click", (event) => {
               .map((agent) => agent.id)
           : [],
       );
+      // Every agent this account has, not only the ones with a secret stored
+      // here. `mine && connected` was the same question the settings row and
+      // the agent menu were asking, and the same wrong answer: an agent that
+      // runs on this machine has no credential and is never `connected`, so
+      // the one menu for putting an agent into a channel offered none of them.
       const connected = myAgents().filter(
-        (agent) => agent.mine === true && agent.connected === true,
+        (agent) => agent.exists === true && agent.needsReconnect !== true,
       );
       const canConnectAnother = state.providers.some(
         (provider) =>

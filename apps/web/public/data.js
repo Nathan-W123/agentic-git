@@ -3560,7 +3560,16 @@ export function channelAgentsFor(repositoryId) {
   const mine = myAgents()
     .filter(
       (agent) =>
-        agent.connected &&
+        // Exists, rather than connected. `connected` means a credential is
+        // stored here — and since an agent stopped requiring a vendor sign-in
+        // that is false for every agent that runs on somebody's own machine,
+        // which is all of them on a local deployment. Asking the old question
+        // kept those agents out of every channel roster: not listed, not
+        // offered by the picker, and impossible to put back into a repository
+        // after being disconnected. An expired sign-in is still excluded,
+        // because that one genuinely cannot work.
+        (agent.exists === true || agent.connected === true) &&
+        agent.needsReconnect !== true &&
         (myMemberProviders === undefined || myMemberProviders.has(agent.provider)),
     )
     .map((agent) => ({ ...agent, mine: true, userId: myId }));
