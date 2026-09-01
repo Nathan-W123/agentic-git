@@ -14229,14 +14229,37 @@ export class ApiGateway {
     );
   }
 
-  private async ownerHasLiveWorker(
+  /**
+   * Whether this agent has a machine that can actually run *it*.
+   *
+   * Per adapter, not per person. `agentIsLive` has answered this correctly for
+   * the roster since it was written, and its own comment says why the weaker
+   * question is not good enough — but the dispatch went on asking the weaker
+   * one, so the two disagreed about the same agent at the same moment. The
+   * dot said Poseidon could not work; the dispatch handed it a task anyway
+   * and posted that it had begun.
+   *
+   * That is the whole of "queued forever with no message". A machine with
+   * Claude and no Codex registers `claude` alone. The owner is listening, so
+   * the per-person check says yes, the task is filed and pinned to that
+   * owner, and `leaseWork` then skips it on every five-second poll because
+   * the adapter it needs is not advertised — silently, since a skipped
+   * candidate is not an error. Nothing hangs and nothing fails; the work
+   * waits forever behind a sentence saying it had started.
+   */
+  private async agentHasLiveMachine(
     projectId: string,
     ownerId: string,
+    provider: string,
   ): Promise<boolean> {
     const project = await this.options.store
       .getProject(projectId)
       .catch(() => undefined);
-    return (await this.liveWorkerOwners(project?.organizationId)).has(ownerId);
+    return ApiGateway.agentIsLive(
+      await this.liveWorkerOwners(project?.organizationId),
+      ownerId,
+      provider,
+    );
   }
 
   /**
@@ -16140,7 +16163,11 @@ export class ApiGateway {
       // takes the task the moment it lands and the present tense is true.
       const waitingForAMachine =
         localAgentsOnly() &&
-        !(await this.ownerHasLiveWorker(projectId, candidate.userId));
+        !(await this.agentHasLiveMachine(
+          projectId,
+          candidate.userId,
+          candidate.provider,
+        ));
       const acknowledgement = await this.appendChannelThreadReply({
         projectId,
         repositoryId,
@@ -16696,7 +16723,7 @@ export class ApiGateway {
     //
     // Both halves are required. `localAgentsOnly()` alone would leave a
     // question queued on a deployment that is perfectly willing to answer it,
-    // and `ownerHasLiveWorker` alone would change every existing install —
+    // and `agentHasLiveMachine` alone would change every existing install —
     // including the local CLI, where the control plane *is* the executor and
     // routing a question to a worker that is the same process is a long way
     // round to the same answer.
@@ -16707,7 +16734,11 @@ export class ApiGateway {
     // answers, the sweep says so.
     if (
       localAgentsOnly() &&
-      (await this.ownerHasLiveWorker(projectId, candidate.userId))
+      (await this.agentHasLiveMachine(
+        projectId,
+        candidate.userId,
+        candidate.provider,
+      ))
     ) {
       await this.options.operations.submitTask({
         projectId,
