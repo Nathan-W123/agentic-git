@@ -57,6 +57,10 @@ contextBridge.exposeInMainWorld("KUMI_INSTALL", {
   // finish the job rather than leaving somebody to discover the gap when they
   // first @mention the agent they just connected.
   detected: async () => await ipcRenderer.invoke("kumi:machine-agents"),
+  // How much of the vendor's quota is left, asked of the CLI that holds the
+  // login rather than of a credential copied to a server. This is what makes
+  // the second sign-in unnecessary: the account is already signed in here.
+  usage: async (vendor) => await ipcRenderer.invoke("kumi:agent-usage", vendor),
   // One listener per call site, removed by the returned function, so a page
   // that opens the dialog repeatedly does not accumulate them.
   onOutput: (listener) => {

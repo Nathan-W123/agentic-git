@@ -3946,6 +3946,16 @@ export interface GitHubCredentialOperations {
  */
 export interface ChatProviderOperations {
   list(input: { userId: string; systemAdmin: boolean }): Promise<unknown>;
+  /**
+   * Takes a usage reading from the machine an agent runs on, rather than
+   * reading it here. Optional, because a deployment that executes agents
+   * itself has no machine to hear from.
+   */
+  reportUsage?(input: {
+    userId: string;
+    provider: string;
+    raw: string;
+  }): Promise<unknown>;
   /** Launches the provider's own browser sign-in flow on the host. */
   signIn(input: {
     systemAdmin: boolean;
@@ -12580,6 +12590,35 @@ export class ApiGateway {
           }
           this.sendJson(response, 200, {
             usage,
+          });
+          return;
+        }
+        if (action === "usage" && method === "POST") {
+          // Reported by the machine that holds the vendor login, which is the
+          // only place the number is about the right account. This is what
+          // makes the second sign-in unnecessary: nothing has to be stored
+          // here for the figure to be readable.
+          const reportOperation = chatOperations.reportUsage;
+          if (reportOperation === undefined) {
+            throw new HttpError(
+              501,
+              "not_supported",
+              "This deployment does not take usage readings from machines",
+            );
+          }
+          const body = objectBody(await this.readJson(request));
+          // Only ever about the caller's own agent. A reading is a claim about
+          // an account, and the only account somebody may make claims about is
+          // their own.
+          const raw = stringField(body["raw"], "raw", { max: 64_000 }) ?? "";
+          this.sendJson(response, 200, {
+            usage: await performChat(() =>
+              reportOperation({
+                userId: identity.userId,
+                provider,
+                raw,
+              }),
+            ),
           });
           return;
         }

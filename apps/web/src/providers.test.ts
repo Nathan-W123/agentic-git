@@ -3369,3 +3369,69 @@ test("an account with no models reads as no list rather than a bad one", () => {
   // The tip alone, with no header, is not a model list either.
   assert.deepEqual(parseCursorModelList("Tip: use --model <id> to switch."), []);
 });
+
+/**
+ * The quota figure comes from the machine that holds the login.
+ *
+ * Reading it here needed a vendor credential stored here, and that credential
+ * was the whole reason connecting an agent asked for a second sign-in —
+ * nothing else wanted it, since the agent runs on somebody's own machine under
+ * the login its CLI already has. Worse, with no credential the question was
+ * put to the container's own login, so the card answered a question about one
+ * account with another account's numbers.
+ */
+test("a usage reading from the machine is preferred over asking here", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+  });
+
+  const parsed = await service.reportUsage({
+    userId: "u1",
+    provider: "anthropic",
+    raw: JSON.stringify({
+      result:
+        "Current session: 36% used · resets Jul 29, 10:59am (America/Los_Angeles)",
+    }),
+  });
+  assert.equal(parsed.windows.length, 1);
+  assert.equal(parsed.windows[0]?.percentUsed, 36);
+
+  const shown = await service.usage({ userId: "u1", provider: "anthropic" });
+  assert.equal(shown.windows[0]?.percentUsed, 36);
+  // Stamped, because a machine that has been asleep for a day is not
+  // reporting today's quota and the card has to be able to say so.
+  assert.ok(shown.asOf !== undefined, JSON.stringify(shown));
+  assert.doesNotThrow(() => new Date(String(shown.asOf)).toISOString());
+});
+
+/**
+ * And it stands while the machine is off. That is the point of keeping it: an
+ * agent asleep is exactly when somebody looks at the card wondering where
+ * their quota went, and an empty card answers nothing.
+ */
+test("the last reading survives the machine going away", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    // A runner that fails every call, standing in for a machine that is gone
+    // and a control plane with no credential to fall back on.
+    runner: async () => {
+      throw new Error("no CLI here");
+    },
+  });
+  await service.reportUsage({
+    userId: "u1",
+    provider: "anthropic",
+    raw: JSON.stringify({ result: "Current week (all models): 19% used · resets Jul 31, 9:59am (x)" }),
+  });
+
+  const shown = await service.usage({ userId: "u1", provider: "anthropic" });
+  assert.equal(shown.windows[0]?.percentUsed, 19);
+  assert.equal(shown.unavailableReason, undefined, "a kept figure is not a failure");
+
+  // One person's figure is never handed to the next person who asks.
+  const other = await service.usage({ userId: "u2", provider: "anthropic" });
+  assert.notEqual(other.windows[0]?.percentUsed, 19);
+});
