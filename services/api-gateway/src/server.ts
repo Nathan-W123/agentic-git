@@ -1139,6 +1139,28 @@ const CHANNEL_COMPLETED_WORK_PREFIX = "Already handled —";
 const ATTACHMENT_REFERENCE =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
+/**
+ * A message as the local classifier should read it: the words, without the
+ * plumbing.
+ *
+ * A pasted screenshot arrives inside the text as
+ * `![shot.png](attachment:<32 hex>.png)`. The reader is a sentence-embedding
+ * model, so that blob is not neutral — it is thirty characters of hex and
+ * punctuation pulling a short sentence away from anything resembling a
+ * request. A message that was picked up perfectly well without an image
+ * stopped being picked up with one, which is a strange rule for a product
+ * where "here is a screenshot of the bug" is the most natural way to ask for
+ * something.
+ *
+ * The alt text goes with it. It reads like the part somebody wrote, and for a
+ * pasted screenshot it is not — the browser fills it with the file name, so
+ * keeping it left "shot.png" behind, which is letters enough to make a message
+ * containing nothing but an image look like a request.
+ */
+function withoutAttachments(content: string): string {
+  return content.replace(ATTACHMENT_REFERENCE, " ").replace(/\s+/gu, " ").trim();
+}
+
 const CHANNEL_ANSWER_CONTEXT = 8;
 
 /**
@@ -2796,7 +2818,17 @@ function defaultChatterFilter(): ChatterFilter {
       available: async () => false,
     };
   }
-  return createChatterFilter();
+  // Tunable without a code change, because the right value is a property of a
+  // channel's own phrasing rather than of this repository: the bar starts at
+  // "leans to work at all", and the lean is written to the log every time a
+  // message is passed over, so raising it is a decision somebody can make from
+  // their own numbers.
+  const configured = Number.parseFloat(
+    process.env["COORD_TRIAGE_WORK_MARGIN"]?.trim() ?? "",
+  );
+  return createChatterFilter(
+    Number.isFinite(configured) ? { workMargin: configured } : {},
+  );
 }
 
 /**
@@ -22364,8 +22396,19 @@ export class ApiGateway {
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
     // One structural guard, and no vocabulary. A message with no letters in
-    // it is an emoji or punctuation and there is nothing to read.
-    if (!/\p{L}/u.test(content)) {
+    // it is an emoji or punctuation and there is nothing to read. Asked of the
+    // words rather than the raw text, so a bare screenshot — whose markup is
+    // full of letters — is still nothing to read.
+    if (!/\p{L}/u.test(withoutAttachments(content))) {
+      // Traced like every other way this path can end. It was the one gate
+      // that dropped a message without a word, and an evening spent asking
+      // "why did nothing happen" is exactly what a silent gate costs — the
+      // others were given lines for that reason and this one was missed.
+      this.traceAutoClaim(
+        repositoryId,
+        content,
+        "dropped: nothing to read once images and punctuation are set aside",
+      );
       return;
     }
     // Then the local pass, before anything is read from the store and long
@@ -22374,7 +22417,8 @@ export class ApiGateway {
     // about goes on to the agent, which is what decides. Most of a working
     // channel is conversation, and paying a vendor to be told so was the
     // cost of reading every message rather than matching it.
-    if (await this.chatterFilter.readsAsChatter(content)) {
+    const readable = withoutAttachments(content);
+    if (await this.chatterFilter.readsAsChatter(readable)) {
       // Traced, because this is the one refusal decided by a local model
       // nobody can interrogate afterwards. Every way an unaddressed message
       // can end now leaves one line saying which gate ended it — silence
@@ -22509,7 +22553,7 @@ export class ApiGateway {
         return;
       }
       const read = await this.chatterFilter
-        .classify(content)
+        .classify(withoutAttachments(content))
         .catch(() => ({ chatter: false, work: false, lean: undefined }));
       if (!read.work) {
         // The number, not just the verdict. "The local model did not read it
@@ -23214,9 +23258,28 @@ export class ApiGateway {
         if (clearWinner) {
           return best.candidate;
         }
+        // Among equals, the one that can start now.
+        //
+        // The tier above deliberately ignores `busy`, because being the right
+        // agent to ask outranks being the free one — that still holds for a
+        // clear winner. It does not hold for a tie: when two agents are
+        // equally apt there is no rightness left to outrank anything, and
+        // handing the work to the one already running it means a queue behind
+        // a busy agent while an identical idle one watches. Somebody with
+        // three connected agents saw every unaddressed message go to the same
+        // one, because the tie-break below is stable by design and their
+        // agents are all their own, so the sender-owned rule never
+        // discriminated either.
         const tied = matched.filter((entry) => entry.score === best.score);
+        const free = tied.filter((entry) => !busy(entry.candidate));
+        // The sender's own agent first within whichever set survived — a
+        // person spending their own account needs no protecting from
+        // themselves — and otherwise the earliest, which keeps identical
+        // messages landing in the same place rather than at random.
+        const preferred = free.length > 0 ? free : tied;
         return (
-          tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]
+          preferred.find((entry) => entry.candidate.userId === senderId) ??
+          preferred[0]
         )?.candidate;
       }
 

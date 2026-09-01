@@ -6326,6 +6326,82 @@ test("changing a setting leaves every agent still on the tab", async (t) => {
   assert.equal(bootstrapped.user.id.length > 0, true);
 });
 
+/**
+ * A screenshot must not stop a request being read as one.
+ *
+ * A pasted image arrives inside the message text as
+ * `![shot.png](attachment:<32 hex>.png)`. The unaddressed-message reader is a
+ * sentence-embedding model, so that blob is not neutral — it is thirty
+ * characters of hex and punctuation pulling a short sentence away from
+ * anything resembling a request. The same words were picked up without an
+ * image and passed over with one, which is a strange rule for a product where
+ * "here is a screenshot of the bug" is the most natural way to ask.
+ */
+test("an image in the message does not hide the request inside it", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "autoclaim-image");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The classifier is asked about the words. If the markup reached it, this
+  // stub would see the hex and answer false.
+  runtime.setLocalChatter(() => false);
+  runtime.setLocalWork((text) => !/attachment:/u.test(text) && text.includes("unpin"));
+
+  const shot = `${"a1b2c3d4".repeat(4)}.png`;
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: {
+        content: `there is no way to unpin a message, please add one\n![shot.png](attachment:${shot})`,
+      },
+    })).status,
+    201,
+  );
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "a request carrying a screenshot was never picked up",
+  );
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /unpin/u);
+});
+
+/**
+ * And a bare screenshot is still nothing to read: its markup is full of
+ * letters, so the structural guard has to be asked about the words too.
+ */
+test("a message that is only a screenshot is not treated as a request", async (t) => {
+  withLocalAgentsOnly(t);
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "autoclaim-bare-image");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.setLocalChatter(() => false);
+  runtime.setLocalWork(() => true);
+
+  const shot = `${"b1c2d3e4".repeat(4)}.png`;
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: `![shot.png](attachment:${shot})` },
+    })).status,
+    201,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(runtime.submittedTasks.length, 0);
+});
+
 function withLocalAgentsOnly(t: { after: (fn: () => void) => void }): void {
   const previous = process.env["COORD_LOCAL_AGENTS_ONLY"];
   process.env["COORD_LOCAL_AGENTS_ONLY"] = "1";

@@ -41,21 +41,30 @@ export const DEFAULT_CHATTER_MARGIN = 0.2;
 /**
  * How far onto the work side a message must fall to be *acted on* locally.
  *
- * Deliberately not the same number, and the first cut of this got that wrong.
- * `DEFAULT_CHATTER_MARGIN` is a safety threshold on *dropping* — how sure the
- * model must be before it silently discards something somebody typed — and
- * reusing it in the other direction imports a strictness that was chosen for a
- * different decision. The two sides are not symmetric: the confident-chatter
- * gate has already run by the time this one is asked, so the question here is
- * not "is this definitely not conversation" but "does this lean to work at
- * all, having survived that".
+ * Zero, meaning it must lean to work at all rather than by some amount, and
+ * that is a measurement rather than a preference. A first cut used
+ * `DEFAULT_CHATTER_MARGIN` — a safety threshold on *dropping*, how sure the
+ * model must be before discarding something somebody typed — and reusing it
+ * here imported a strictness chosen for a different decision. A second cut
+ * guessed 0.05. Then a real message went through a real deployment:
  *
- * Smaller for that reason, and configurable, and — the part that matters —
- * traced with the real lean beside it every time it says no. This number is a
- * starting point rather than a finding: nobody has yet watched a channel's
- * actual messages land against it, and the log is what will move it.
+ *   "please add a way t unpin a message from the pinned sidetab"  →  +0.012
+ *
+ * An unmistakable request, correctly on the work side of the line, and four
+ * times under the bar. Anything above zero would have kept dropping it.
+ *
+ * The scale is a difference of nearest-prototype similarities, so its useful
+ * signal is the sign, not the size. The confident-chatter gate has already run
+ * by the time this is asked — a message that leans hard to conversation is
+ * long gone — so the question left is only which side of the middle the
+ * remainder falls on, and demanding a *margin* on top of that was asking the
+ * same question twice.
+ *
+ * Raise it with `COORD_TRIAGE_WORK_MARGIN` if a channel starts picking up
+ * things it should not. The lean is written to the log on every message that
+ * is passed over, so that number can be chosen from evidence too.
  */
-export const DEFAULT_WORK_MARGIN = 0.05;
+export const DEFAULT_WORK_MARGIN = 0;
 
 /**
  * How long a message will wait for a model that is still loading.
@@ -323,7 +332,8 @@ export function createChatterFilter(
     },
     readsAsWork: async (text) => {
       const leaning = await lean(text);
-      return leaning === undefined ? false : leaning >= workMargin;
+      // Strictly, so a message dead on the line is not work.
+      return leaning === undefined ? false : leaning > workMargin;
     },
     // One embedding, every answer, and the number they were derived from.
     // A caller that has to explain itself — the auto-claim trace — cannot do
@@ -338,7 +348,7 @@ export function createChatterFilter(
       }
       return {
         chatter: -leaning >= margin,
-        work: leaning >= workMargin,
+        work: leaning > workMargin,
         lean: leaning,
       };
     },
