@@ -207,8 +207,19 @@ test("no CLI on the machine is a named stop the app offers to fix", async () => 
   // happen, and the machine has to start advertising what it just got.
   assert.match(main, /startWorker\(here, session, noteWorkerState\)/u);
   assert.match(main, /openSignIn\(vendor\)/u);
-  // A failed install is said out loud rather than swallowed.
-  assert.match(main, /Could not install \$\{VENDOR_LABELS/u);
+  // A failed install is said out loud rather than swallowed — and said with
+  // whatever the installer printed, which is where the reason always is.
+  assert.match(main, /Could not install \$\{label\}/u);
+  assert.match(main, /runInstall\(vendor, \(chunk\) => conversation\.log\(chunk\)\)/u);
+  // In Kumi's own window rather than the operating system's. The native
+  // message box was the first thing a new person saw of this product, and it
+  // did not look like this product — a white Win32 error box with a red
+  // circle in it, asking them to choose a vendor.
+  assert.doesNotMatch(main, /dialog\.showMessageBox/u);
+  assert.match(main, /openDialog\(\{/u);
+  // And it is one window for the whole exchange: the offer becomes the run
+  // becomes the result, instead of a modal each and nothing in between.
+  assert.match(main, /conversation\.update\(\{[\s\S]*?kind: "progress"/u);
 });
 
 /**
@@ -262,7 +273,13 @@ test("each preload global is exposed independently of the others", async () => {
  */
 test("main.mjs imports every sibling function it calls", async () => {
   const main = await readFile(path.join(electronDir, "main.mjs"), "utf8");
-  const siblings = ["agents.mjs", "installers.mjs", "worker.mjs", "usage.mjs"];
+  const siblings = [
+    "agents.mjs",
+    "dialog.mjs",
+    "installers.mjs",
+    "worker.mjs",
+    "usage.mjs",
+  ];
 
   // What each sibling offers.
   const exported = new Map<string, string>();

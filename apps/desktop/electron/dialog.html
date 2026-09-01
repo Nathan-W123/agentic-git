@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>Kumi</title>
+    <style>
+      /* The dashboard's own eight tokens, copied rather than imported: this
+         window opens before any server is known — sometimes because the
+         server could not be reached at all — so the only palette it can rely
+         on is one it already holds. Kept to the names they have in
+         `styles.css` so a change there has an obvious counterpart here. */
+      :root {
+        color-scheme: dark;
+        --bg: #121110;
+        --surface-1: #1a1817;
+        --surface-2: #24211f;
+        --text: #f3efe8;
+        --muted: #b5aea5;
+        --salmon: #d88973;
+        --red: #f87171;
+        --border: #34302d;
+        --radius-xl: 16px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font: 13.5px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: var(--text);
+        background: var(--bg);
+        /* The window is frameless, so the page owns the boundary. One hairline
+           and one radius, the same pair the dashboard draws around itself. */
+        border: 1px solid var(--border);
+        border-radius: var(--radius-xl);
+        overflow: hidden;
+      }
+      /* The one row that can be dragged, because a frameless window has no
+         title bar to take hold of. The close control is deliberately outside
+         the drag region — a button inside one cannot be clicked. */
+      header {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 11px 10px 11px 14px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface-1);
+        -webkit-app-region: drag;
+      }
+      .mark {
+        width: 17px;
+        height: 17px;
+        flex: none;
+        color: var(--salmon);
+      }
+      header b {
+        flex: 1;
+        min-width: 0;
+        font-size: 12.5px;
+        font-weight: 550;
+        letter-spacing: 0.01em;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .close {
+        -webkit-app-region: no-drag;
+        flex: none;
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-size: 15px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .close:hover {
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      main {
+        display: grid;
+        gap: 9px;
+        padding: 16px 18px 6px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+        text-wrap: balance;
+      }
+      /* The heading carries the state, so it is the one place colour is spent.
+         Everything else stays on the neutral ramp; a dialog that is red all
+         over reads as louder than the thing it is reporting. */
+      h1.error {
+        color: var(--red);
+      }
+      h1.progress {
+        color: var(--salmon);
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+        max-width: 56ch;
+        /* The sentences arrive with their own paragraph breaks in them — an
+           error says what happened and then what to do about it, and running
+           those together loses the seam between the two. */
+        white-space: pre-wrap;
+      }
+      /* What the installer actually said. The reason a setup fails is almost
+         always in here — no npm, a proxy, a policy — and a modal that reported
+         only "it exited with code 1" put the reader back where they started. */
+      pre {
+        margin: 2px 0 0;
+        padding: 9px 11px;
+        max-height: 168px;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: var(--surface-1);
+        color: var(--muted);
+        font: 11.5px/1.5 ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      pre:empty {
+        display: none;
+      }
+      footer {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 14px 18px 16px;
+      }
+      footer:empty {
+        padding-bottom: 18px;
+      }
+      button.choice {
+        padding: 8px 14px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: var(--surface-2);
+        color: var(--text);
+        font: inherit;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      button.choice:hover {
+        border-color: var(--salmon);
+      }
+      /* One primary, and it is the first — the order the buttons are given in
+         is the order they are worth pressing in. */
+      button.choice.primary {
+        border-color: transparent;
+        background: var(--salmon);
+        color: #17130f;
+        font-weight: 600;
+      }
+      /* The first button is focused the moment the dialog opens, so this is
+         drawn on almost every dialog — a hard ring standing off a filled
+         salmon button read as an alarm around the safe choice. A soft halo in
+         the same hue says "this is where the keyboard is" without shouting. */
+      button.choice:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--salmon) 34%, transparent);
+      }
+      /* A run in progress: an indeterminate line rather than a spinner, so it
+         sits on the same axis as the text it belongs to. */
+      .bar {
+        height: 3px;
+        margin-top: 2px;
+        border-radius: 999px;
+        background: var(--surface-2);
+        overflow: hidden;
+      }
+      .bar i {
+        display: block;
+        width: 34%;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--salmon);
+        animation: slide 1.25s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% {
+          transform: translateX(-105%);
+        }
+        100% {
+          transform: translateX(305%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .bar i {
+          width: 100%;
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <svg class="mark" viewBox="0 0 64 64" fill="none" stroke="currentColor"
+        stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"
+        aria-hidden="true">
+        <path d="M29.92 9.08A4.16 4.16 0 0 1 34.08 9.08L50.92 18.8A4.16 4.16 0 0 1 53 22.4L53 41.6A4.16 4.16 0 0 1 50.92 45.2L34.08 54.92A4.16 4.16 0 0 1 29.92 54.92L13.08 45.2A4.16 4.16 0 0 1 11 41.6L11 22.4A4.16 4.16 0 0 1 13.08 18.8Z"/>
+        <path d="M12.25 20.72L32 32.12L51.75 20.72"/>
+        <path d="M32 32.12L32 54.68"/>
+      </svg>
+      <b id="title">Kumi</b>
+      <button class="close" id="close" type="button" aria-label="Close">✕</button>
+    </header>
+    <main>
+      <h1 id="heading"></h1>
+      <p id="body"></p>
+      <div class="bar" id="bar" hidden><i></i></div>
+      <pre id="log"></pre>
+    </main>
+    <footer id="buttons"></footer>
+    <script>
+      /**
+       * One window, several states.
+       *
+       * An offer becomes a run becomes a result without a second window
+       * opening, because they are the same conversation: a person who agreed
+       * to install something wants to watch that install and then be told how
+       * it went, and three modals in a row for one answer is three modals to
+       * dismiss.
+       */
+      const title = document.getElementById("title");
+      const heading = document.getElementById("heading");
+      const body = document.getElementById("body");
+      const bar = document.getElementById("bar");
+      const log = document.getElementById("log");
+      const buttons = document.getElementById("buttons");
+
+      /** Which index means "closed without answering", for Escape and the ✕. */
+      let cancelId = -1;
+
+      function draw(content) {
+        cancelId = typeof content.cancelId === "number" ? content.cancelId : -1;
+        title.textContent = content.title ?? "Kumi";
+        document.title = content.title ?? "Kumi";
+        heading.textContent = content.heading ?? "";
+        heading.className = content.kind ?? "";
+        body.textContent = content.body ?? "";
+        body.hidden = (content.body ?? "") === "";
+        bar.hidden = content.kind !== "progress";
+        if (content.log !== undefined) {
+          log.textContent = content.log;
+        }
+        buttons.textContent = "";
+        for (const [index, label] of (content.buttons ?? []).entries()) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = index === 0 ? "choice primary" : "choice";
+          button.textContent = label;
+          button.addEventListener("click", () => window.kumiDialog.choose(index));
+          buttons.append(button);
+        }
+        // Focused so Enter answers, and so a keyboard reaches the dialog at
+        // all — a window whose only controls are unfocused is a window that
+        // has to be clicked before it can be used.
+        buttons.firstElementChild?.focus();
+        // Measured after paint, so the window is the height of what is in it
+        // rather than a guess that leaves a band of empty panel under the
+        // buttons or clips the last line of an error.
+        requestAnimationFrame(() => {
+          window.kumiDialog.measured(
+            Math.ceil(document.documentElement.scrollHeight),
+          );
+        });
+      }
+
+      function dismiss() {
+        window.kumiDialog.choose(cancelId);
+      }
+
+      document.getElementById("close").addEventListener("click", dismiss);
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          dismiss();
+        }
+      });
+
+      window.kumiDialog.onContent(draw);
+      window.kumiDialog.onLog((text) => {
+        // Bounded, and pinned to the end: an npm install prints a great deal,
+        // and the useful part is always the last of it.
+        const following =
+          log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
+        log.textContent = `${log.textContent}${text}`.slice(-6000);
+        if (following) {
+          log.scrollTop = log.scrollHeight;
+        }
+      });
+      draw(window.kumiDialog.content());
+    </script>
+  </body>
+</html>
