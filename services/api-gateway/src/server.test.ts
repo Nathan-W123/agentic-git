@@ -1102,6 +1102,11 @@ async function startRuntime(
       // testable without standing up an embedding model.
       readsAsWork: async (text: string) =>
         localWork === undefined ? !localChatter(text) : localWork(text),
+      classify: async (text: string) => ({
+        chatter: localChatter(text),
+        work: localWork === undefined ? !localChatter(text) : localWork(text),
+        lean: 0.5,
+      }),
       available: async () => true,
     },
     catchUpSummariser: options.catchUpSummariser ?? (async () => undefined),

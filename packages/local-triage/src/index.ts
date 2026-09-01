@@ -39,6 +39,25 @@ export { CHATTER_PROTOTYPES, WORK_PROTOTYPES } from "./prototypes.js";
 export const DEFAULT_CHATTER_MARGIN = 0.2;
 
 /**
+ * How far onto the work side a message must fall to be *acted on* locally.
+ *
+ * Deliberately not the same number, and the first cut of this got that wrong.
+ * `DEFAULT_CHATTER_MARGIN` is a safety threshold on *dropping* — how sure the
+ * model must be before it silently discards something somebody typed — and
+ * reusing it in the other direction imports a strictness that was chosen for a
+ * different decision. The two sides are not symmetric: the confident-chatter
+ * gate has already run by the time this one is asked, so the question here is
+ * not "is this definitely not conversation" but "does this lean to work at
+ * all, having survived that".
+ *
+ * Smaller for that reason, and configurable, and — the part that matters —
+ * traced with the real lean beside it every time it says no. This number is a
+ * starting point rather than a finding: nobody has yet watched a channel's
+ * actual messages land against it, and the log is what will move it.
+ */
+export const DEFAULT_WORK_MARGIN = 0.05;
+
+/**
  * How long a message will wait for a model that is still loading.
  *
  * Short on purpose. A message that gives up here is not mis-classified, it is
@@ -88,6 +107,19 @@ export interface ChatterFilter {
    * deployment with no verdict available did before.
    */
   readsAsWork(text: string): Promise<boolean>;
+  /**
+   * Both answers and the number behind them, from one embedding.
+   *
+   * `lean` is absent when the model could not answer at all — not loaded, not
+   * available, timed out — which is a different fact from a message that
+   * landed in the middle, and the only one of the two that is worth an
+   * operator's attention.
+   */
+  classify(text: string): Promise<{
+    chatter: boolean;
+    work: boolean;
+    lean?: number;
+  }>;
   /** Whether the model is loaded and usable. For diagnostics and tests. */
   available(): Promise<boolean>;
 }
@@ -104,6 +136,8 @@ export interface ChatterFilterOptions {
   embedder?: Embedder;
   /** How decisive the answer has to be. Higher keeps more messages. */
   margin?: number;
+  /** How decisive acting has to be. See {@link DEFAULT_WORK_MARGIN}. */
+  workMargin?: number;
   /**
    * How long a message waits for a model that is still loading. Anything
    * but a finite, positive number means "wait as long as it takes".
@@ -201,6 +235,7 @@ export function createChatterFilter(
   options: ChatterFilterOptions = {},
 ): ChatterFilter {
   const margin = options.margin ?? DEFAULT_CHATTER_MARGIN;
+  const workMargin = options.workMargin ?? DEFAULT_WORK_MARGIN;
   const model = options.model ?? DEFAULT_TRIAGE_MODEL;
   const warmupBudgetMs = options.warmupBudgetMs ?? DEFAULT_WARMUP_BUDGET_MS;
   const decisionBudgetMs =
@@ -288,7 +323,24 @@ export function createChatterFilter(
     },
     readsAsWork: async (text) => {
       const leaning = await lean(text);
-      return leaning === undefined ? false : leaning >= margin;
+      return leaning === undefined ? false : leaning >= workMargin;
+    },
+    // One embedding, every answer, and the number they were derived from.
+    // A caller that has to explain itself — the auto-claim trace — cannot do
+    // that from a boolean: "the local model did not read it as work" is the
+    // same sentence whether the model was absent, timed out, or answered
+    // 0.04 against a threshold of 0.05, and only the last of those is a
+    // threshold worth moving.
+    classify: async (text) => {
+      const leaning = await lean(text);
+      if (leaning === undefined) {
+        return { chatter: false, work: false };
+      }
+      return {
+        chatter: -leaning >= margin,
+        work: leaning >= workMargin,
+        lean: leaning,
+      };
     },
   };
 }

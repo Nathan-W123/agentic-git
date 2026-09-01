@@ -2971,6 +2971,86 @@ test("a session summary is reported as the CLI not publishing a figure, not as a
   assert.match(String(odd.unavailableReason), /It said: Not logged in\./u);
 });
 
+/**
+ * An agent that exists without a credential can still be configured.
+ *
+ * `setSettings` asked the old question — is a secret stored — and refused
+ * every change to an agent created by the local flow: its model, its
+ * reasoning level, its name, and the visibility that decides whether
+ * teammates may task it. Somebody watching that agent do work was told to
+ * connect the account it was plainly already using.
+ */
+test("settings can be changed on an agent that has no stored credential", async () => {
+  const harness = await createHarness();
+  const signs = new Map<string, string>();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns: {
+      listAgentCallSigns: async () =>
+        [...signs.entries()].map(([key, callSign]) => {
+          const [userId = "", provider = ""] = key.split("\u0000");
+          return { userId, provider, callSign };
+        }),
+      setAgentCallSign: async (userId, provider, callSign) => {
+        signs.set(`${userId}\u0000${provider}`, callSign);
+      },
+      clearAgentCallSign: async (userId, provider) => {
+        signs.delete(`${userId}\u0000${provider}`);
+      },
+    },
+  });
+
+  // No credential and no connection entry — but the agent record exists,
+  // which is what having an agent means since local execution.
+  signs.set("u1\u0000anthropic", "Nyx");
+  await assert.doesNotReject(
+    service.setSettings({ userId: "u1", provider: "anthropic", effort: "high" }),
+  );
+
+  // And an account with no agent at all is still told to connect one.
+  await assert.rejects(
+    service.setSettings({ userId: "u2", provider: "anthropic", effort: "high" }),
+    /Connect Anthropic/u,
+  );
+});
+
+/**
+ * And visibility in particular, which had a second refusal behind the first:
+ * it is written to the credential store, so with no credential it threw and
+ * "only me" was permanent for every locally-run agent.
+ */
+test("visibility can be widened on an agent that has no stored credential", async () => {
+  const harness = await createHarness();
+  const signs = new Map<string, string>();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns: {
+      listAgentCallSigns: async () =>
+        [...signs.entries()].map(([key, callSign]) => {
+          const [userId = "", provider = ""] = key.split("\u0000");
+          return { userId, provider, callSign };
+        }),
+      setAgentCallSign: async (userId, provider, callSign) => {
+        signs.set(`${userId}\u0000${provider}`, callSign);
+      },
+      clearAgentCallSign: async (userId, provider) => {
+        signs.delete(`${userId}\u0000${provider}`);
+      },
+    },
+  });
+  signs.set("u1\u0000anthropic", "Nyx");
+
+  await assert.doesNotReject(
+    service.setSettings({
+      userId: "u1",
+      provider: "anthropic",
+      visibility: "org",
+    }),
+  );
+});
+
 test("cursor usage reports that Cursor usage is not reported without running the CLI", async () => {
   // Cursor's `status` answers with an account, a plan and a version, and no
   // subscription figure — so the card was filled with facts nobody asked a
